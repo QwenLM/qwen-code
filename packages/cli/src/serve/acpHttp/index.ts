@@ -10,12 +10,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { AcpDispatcher } from './dispatch.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { SseStream } from './sseStream.js';
-import {
-  RPC,
-  error as rpcError,
-  isRequest,
-  parseInbound,
-} from './jsonRpc.js';
+import { RPC, error as rpcError, isRequest, parseInbound } from './jsonRpc.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
 export const ACP_SESSION_HEADER = 'acp-session-id';
@@ -60,8 +55,7 @@ export function mountAcpHttp(
   bridge: HttpAcpBridge,
   opts: MountAcpHttpOptions,
 ): AcpHttpHandle | undefined {
-  const enabled =
-    opts.enabled ?? process.env['QWEN_SERVE_ACP_HTTP'] !== '0';
+  const enabled = opts.enabled ?? process.env['QWEN_SERVE_ACP_HTTP'] !== '0';
   if (!enabled) return undefined;
 
   const path = opts.path ?? '/acp';
@@ -159,7 +153,12 @@ export function mountAcpHttp(
     // swallow+log any late rejection rather than let it escape as an
     // unhandled rejection (which could take the daemon down).
     await dispatcher
-      .handle(conn, message, headerOf(req, ACP_SESSION_HEADER), isLoopbackReq(req))
+      .handle(
+        conn,
+        message,
+        headerOf(req, ACP_SESSION_HEADER),
+        isLoopbackReq(req),
+      )
       .catch((err: unknown) => {
         writeStderrLine(
           `qwen serve: /acp handle error: ${
@@ -317,5 +316,7 @@ function isLoopbackReq(req: Request): boolean {
   // Match the REST surface's `detectFromLoopback`: the full 127.0.0.0/8
   // range + the IPv4-mapped block, not just three exact literals (a
   // container peer on 127.0.0.2 is legal loopback).
-  return addr === '::1' || addr.startsWith('127.') || addr.startsWith('::ffff:127.');
+  return (
+    addr === '::1' || addr.startsWith('127.') || addr.startsWith('::ffff:127.')
+  );
 }

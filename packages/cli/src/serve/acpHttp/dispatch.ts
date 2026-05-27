@@ -34,7 +34,6 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-
 /**
  * Method names whose responses ride the CONNECTION-scoped stream (the
  * session stream may not exist yet / ownership not granted on failure).
@@ -83,7 +82,9 @@ function parseOptionalWorkspaceCwd(
   if (!('cwd' in params) || params['cwd'] === undefined) return boundWorkspace;
   const cwd = params['cwd'];
   if (typeof cwd !== 'string') {
-    throw new AcpParamError('`cwd` must be a string absolute path when provided');
+    throw new AcpParamError(
+      '`cwd` must be a string absolute path when provided',
+    );
   }
   if (cwd.length > MAX_WORKSPACE_PATH_LENGTH) {
     throw new AcpParamError(
@@ -353,7 +354,9 @@ export class AcpDispatcher {
       try {
         this.resolveClientResponse(conn, msg, loopback);
       } catch (err) {
-        writeStderrLine(`qwen serve: /acp response handling error: ${logSafe(errMsg(err))}`);
+        writeStderrLine(
+          `qwen serve: /acp response handling error: ${logSafe(errMsg(err))}`,
+        );
       }
       return;
     }
@@ -625,7 +628,11 @@ export class AcpDispatcher {
                 sessionId,
                 id,
                 undefined,
-                error(id, RPC.INVALID_PARAMS, '`value` must be a non-empty string'),
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`value` must be a non-empty string',
+                ),
               );
             }
             return;
@@ -736,7 +743,11 @@ export class AcpDispatcher {
           this.replyConn(conn, id, await this.bridge.getWorkspaceMcpStatus());
           return;
         case `${QWEN_METHOD_NS}workspace/skills`:
-          this.replyConn(conn, id, await this.bridge.getWorkspaceSkillsStatus());
+          this.replyConn(
+            conn,
+            id,
+            await this.bridge.getWorkspaceSkillsStatus(),
+          );
           return;
         case `${QWEN_METHOD_NS}workspace/providers`:
           this.replyConn(
@@ -854,7 +865,9 @@ export class AcpDispatcher {
     } catch (err) {
       // Full detail to stderr for the operator; a coded, client-safe shape
       // on the wire (raw bridge messages may carry internal paths/details).
-      writeStderrLine(`qwen serve: /acp dispatch error (${logSafe(method)}): ${logSafe(errMsg(err))}`);
+      writeStderrLine(
+        `qwen serve: /acp dispatch error (${logSafe(method)}): ${logSafe(errMsg(err))}`,
+      );
       if (id !== undefined) {
         const { code, message } = toRpcError(err);
         const frame = error(id, code, message);
@@ -922,10 +935,7 @@ export class AcpDispatcher {
     switch (event.type) {
       case 'session_update': {
         // `event.data` is the ACP `SessionNotification` (params shape).
-        conn.sendSession(
-          sessionId,
-          notification('session/update', event.data),
-        );
+        conn.sendSession(sessionId, notification('session/update', event.data));
         return;
       }
       case 'permission_request': {

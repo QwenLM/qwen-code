@@ -973,12 +973,3 @@ export function clearSessionTracingForTesting(): void {
 export function runTTLSweepForTesting(now: number): void {
   sweepStaleSpans(now);
 }
-
-/**
- * Test-only: invoke the TTL sweep with a synthetic `now`. Lets tests
- * exercise the stale-span path without waiting 30 minutes or stubbing
- * setInterval globally.
- */
-export function runTTLSweepForTesting(now: number): void {
-  sweepStaleSpans(now);
-}

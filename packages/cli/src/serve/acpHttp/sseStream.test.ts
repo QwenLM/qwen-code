@@ -58,7 +58,9 @@ describe('SseStream', () => {
     await s.send({ jsonrpc: '2.0', id: 1, result: { ok: true } });
     const joined = (res as unknown as { chunks: string[] }).chunks.join('');
     expect(joined).toContain('retry: 3000');
-    expect(joined).toContain('data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n');
+    expect(joined).toContain(
+      'data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n',
+    );
   });
 
   it('close() ends the response once and is idempotent', () => {

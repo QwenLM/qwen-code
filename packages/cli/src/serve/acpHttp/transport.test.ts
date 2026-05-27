@@ -133,7 +133,8 @@ class FakeBridge {
 
   async sendPrompt(sessionId: string, _req: unknown, signal?: AbortSignal) {
     const q = this.queues.get(sessionId);
-    if (this.promptBehavior && q) return this.promptBehavior(sessionId, q, signal);
+    if (this.promptBehavior && q)
+      return this.promptBehavior(sessionId, q, signal);
     return { stopReason: 'end_turn' };
   }
 
@@ -160,7 +161,14 @@ class FakeBridge {
       workspaceCwd: '/ws',
       state: {
         configOptions: [
-          { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'qwen-max', options: [] },
+          {
+            id: 'model',
+            name: 'Model',
+            category: 'model',
+            type: 'select',
+            currentValue: 'qwen-max',
+            options: [],
+          },
         ],
       },
     };
@@ -237,9 +245,7 @@ async function* readSse(
     while ((idx = buf.indexOf('\n\n')) !== -1) {
       const frame = buf.slice(0, idx);
       buf = buf.slice(idx + 2);
-      const dataLine = frame
-        .split('\n')
-        .find((l) => l.startsWith('data: '));
+      const dataLine = frame.split('\n').find((l) => l.startsWith('data: '));
       if (dataLine) yield JSON.parse(dataLine.slice('data: '.length));
     }
   }
@@ -330,13 +336,22 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   // Establish ownership of the fake bridge's session ('sess-1') so the
   // ownership-gated session stream + per-session POSTs are allowed.
   async function newSession(connId: string, id = 99): Promise<void> {
-    await post(connId, { jsonrpc: '2.0', id, method: 'session/new', params: {} });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id,
+      method: 'session/new',
+      params: {},
+    });
     await new Promise((r) => setTimeout(r, 30)); // let handle() register ownership
   }
 
   it('initialize → 200 + Acp-Connection-Id; unknown conn → 400', async () => {
     await initialize();
-    const bad = await post('nope', { jsonrpc: '2.0', id: 2, method: 'session/new' });
+    const bad = await post('nope', {
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'session/new',
+    });
     expect(bad.status).toBe(400);
   });
 
@@ -353,14 +368,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       params: { cwd: '/ws' },
     });
     expect(ack.status).toBe(202);
-    const [frame] = (await got) as Array<{ id: number; result: { sessionId: string } }>;
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { sessionId: string };
+    }>;
     expect(frame.id).toBe(2);
     expect(frame.result.sessionId).toBe('sess-1');
   });
 
   it('prompt streams session/update then the final result', async () => {
     bridge.promptBehavior = async (_s, q) => {
-      q.push({ type: 'session_update', data: { sessionId: 'sess-1', update: { sessionUpdate: 'agent_message_chunk' } } });
+      q.push({
+        type: 'session_update',
+        data: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk' },
+        },
+      });
       await new Promise((r) => setTimeout(r, 20));
       return { stopReason: 'end_turn' };
     };
@@ -378,13 +402,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(ack.status).toBe(202);
     const frames = (await got) as Array<Record<string, unknown>>;
     expect(frames[0]['method']).toBe('session/update');
-    expect((frames[1] as { id: number; result: { stopReason: string } }).id).toBe(5);
-    expect((frames[1] as { result: { stopReason: string } }).result.stopReason).toBe('end_turn');
+    expect(
+      (frames[1] as { id: number; result: { stopReason: string } }).id,
+    ).toBe(5);
+    expect(
+      (frames[1] as { result: { stopReason: string } }).result.stopReason,
+    ).toBe('end_turn');
   });
 
   it('permission request round-trips agent→client→agent', async () => {
     let resolvedWith: unknown;
-    bridge.respondToSessionPermission = ((_s: string, _r: string, resp: unknown) => {
+    bridge.respondToSessionPermission = ((
+      _s: string,
+      _r: string,
+      resp: unknown,
+    ) => {
       resolvedWith = resp;
       return true;
     }) as never;
@@ -412,7 +444,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/prompt',
       params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
     });
-    const [reqFrame] = (await got) as Array<{ id: number; method: string; params: { _meta: Record<string, { requestId: string }> } }>;
+    const [reqFrame] = (await got) as Array<{
+      id: number;
+      method: string;
+      params: { _meta: Record<string, { requestId: string }> };
+    }>;
     expect(reqFrame.method).toBe('session/request_permission');
     expect(reqFrame.params._meta['qwen'].requestId).toBe('perm-1');
     // Client answers with a JSON-RPC response echoing the issued id.
@@ -422,7 +458,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       result: { outcome: { outcome: 'selected', optionId: 'allow' } },
     });
     await new Promise((r) => setTimeout(r, 50));
-    expect(resolvedWith).toEqual({ outcome: { outcome: 'selected', optionId: 'allow' } });
+    expect(resolvedWith).toEqual({
+      outcome: { outcome: 'selected', optionId: 'allow' },
+    });
   });
 
   it('standard session/set_config_option (model) routes to the bridge', async () => {
@@ -437,7 +475,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/set_config_option',
       params: { sessionId: 'sess-1', configId: 'model', value: 'qwen-max' },
     });
-    const [frame] = (await got) as Array<{ id: number; result: { configOptions: unknown } }>;
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { configOptions: unknown };
+    }>;
     expect(frame.id).toBe(9);
     expect(bridge.lastSetModel).toMatchObject({ modelId: 'qwen-max' });
   });
@@ -463,8 +504,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connStream = await openStream(connId);
     const got = takeFrames(connStream, 1);
     await new Promise((r) => setTimeout(r, 50));
-    await post(connId, { jsonrpc: '2.0', id: 12, method: '_qwen/workspace/mcp' });
-    const [frame] = (await got) as Array<{ id: number; result: { ok: boolean } }>;
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 12,
+      method: '_qwen/workspace/mcp',
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { ok: boolean };
+    }>;
     expect(frame.id).toBe(12);
     expect(frame.result.ok).toBe(true);
   });
@@ -475,7 +523,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const got = takeFrames(connStream, 1);
     await new Promise((r) => setTimeout(r, 50));
     await post(connId, { jsonrpc: '2.0', id: 11, method: 'bogus/method' });
-    const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number };
+    }>;
     expect(frame.error.code).toBe(-32601);
   });
 
@@ -497,7 +548,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/prompt',
       params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
     });
-    const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number };
+    }>;
     expect(frame.error.code).toBe(-32602);
   });
 
@@ -522,7 +576,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         params: { sessionId: 'OTHER', prompt: [{ type: 'text', text: 'x' }] },
       }),
     });
-    const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number };
+    }>;
     expect(frame.error.code).toBe(-32602);
   });
 
@@ -537,7 +594,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/load',
       params: { sessionId: 'loaded-1' },
     });
-    const [frame] = (await got) as Array<{ id: number; result: { replayed: boolean } }>;
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { replayed: boolean };
+    }>;
     expect(frame.id).toBe(20);
     expect(frame.result.replayed).toBe(true);
     // Ownership was granted, so the session stream is now allowed.
@@ -557,7 +617,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/resume',
       params: { sessionId: 'resumed-1' },
     });
-    const [frame] = (await got) as Array<{ id: number; result: { resumed: boolean } }>;
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { resumed: boolean };
+    }>;
     expect(frame.id).toBe(21);
     expect(frame.result.resumed).toBe(true);
   });
@@ -568,7 +631,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // 2 frames: the session/new reply (establishes ownership), then close.
     const got = takeFrames(connStream, 2);
     await new Promise((r) => setTimeout(r, 50));
-    await post(connId, { jsonrpc: '2.0', id: 99, method: 'session/new', params: {} });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 99,
+      method: 'session/new',
+      params: {},
+    });
     await new Promise((r) => setTimeout(r, 30));
     await post(connId, {
       jsonrpc: '2.0',
@@ -598,7 +666,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           params: { protocolVersion: requested },
         }),
       });
-      const body = (await res.json()) as { result: { protocolVersion: number } };
+      const body = (await res.json()) as {
+        result: { protocolVersion: number };
+      };
       expect(body.result.protocolVersion).toBe(expected);
     }
   });
@@ -615,7 +685,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/load',
       params: { sessionId: 'x' },
     });
-    const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number };
+    }>;
     expect(frame.id).toBe(30);
     expect(frame.error.code).toBe(-32603);
   });
@@ -634,7 +707,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   it('malformed permission response still releases the bridge (cancel fallback)', async () => {
     const votes: Array<{ outcome?: { outcome?: string } }> = [];
     // Emulate the real bridge: throw on a vote with no `outcome`.
-    bridge.respondToSessionPermission = ((_s: string, _r: string, resp: unknown) => {
+    bridge.respondToSessionPermission = ((
+      _s: string,
+      _r: string,
+      resp: unknown,
+    ) => {
       const r = resp as { outcome?: { outcome?: string } };
       if (!r?.outcome?.outcome) throw new Error('invalid permission response');
       votes.push(r);
@@ -733,8 +810,18 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connId = await initialize();
     await newSession(connId);
     await Promise.all([
-      post(connId, { jsonrpc: '2.0', id: 70, method: 'session/close', params: { sessionId: 'sess-1' } }),
-      post(connId, { jsonrpc: '2.0', id: 71, method: 'session/close', params: { sessionId: 'sess-1' } }),
+      post(connId, {
+        jsonrpc: '2.0',
+        id: 70,
+        method: 'session/close',
+        params: { sessionId: 'sess-1' },
+      }),
+      post(connId, {
+        jsonrpc: '2.0',
+        id: 71,
+        method: 'session/close',
+        params: { sessionId: 'sess-1' },
+      }),
     ]);
     await new Promise((r) => setTimeout(r, 50));
     expect(bridge.closedSessions.filter((s) => s === 'sess-1')).toHaveLength(1);
@@ -765,7 +852,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     let promptSignal: AbortSignal | undefined;
     bridge.promptBehavior = async (_s, q, signal) => {
       promptSignal = signal;
-      q.push({ type: 'session_update', data: { sessionId: 'sess-1', update: {} } });
+      q.push({
+        type: 'session_update',
+        data: { sessionId: 'sess-1', update: {} },
+      });
       await new Promise((r) => setTimeout(r, 200));
       return { stopReason: 'end_turn' };
     };
@@ -819,7 +909,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
     await new Promise((r) => setTimeout(r, 30));
     // Close the session while the prompt is still in flight, then let it resolve.
-    await post(connId, { jsonrpc: '2.0', id: 91, method: 'session/close', params: { sessionId: 'sess-1' } });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 91,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
     await new Promise((r) => setTimeout(r, 30));
     release();
     const frames = (await connFrames) as Array<{ id: number }>;
@@ -841,7 +936,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/set_config_option',
       params: { sessionId: 'sess-1', configId: 'model', value: '' },
     });
-    const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number };
+    }>;
     expect(frame.error.code).toBe(-32602);
   });
 
@@ -857,7 +955,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/set_config_option',
       params: { sessionId: 'sess-1', configId: 'mode', value: 'bogus-mode' },
     });
-    const [frame] = (await got) as Array<{ id: number; error: { code: number } }>;
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number };
+    }>;
     expect(frame.error.code).toBe(-32602);
     expect(bridge.lastApprovalMode).toBeUndefined();
   });
@@ -909,7 +1010,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connId = await initialize();
     await newSession(connId); // creates + owns sess-1
     await new Promise((r) => setTimeout(r, 30));
-    await post(connId, { jsonrpc: '2.0', id: 46, method: 'session/close', params: { sessionId: 'sess-1' } });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 46,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
     await new Promise((r) => setTimeout(r, 50));
     expect(bridge.closedSessions).toContain('sess-1'); // bridge was called (then threw)
     // Local teardown ran in `finally` despite the throw → session unowned now.
@@ -962,7 +1068,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
     });
     await new Promise((r) => setTimeout(r, 40));
-    await post(connId, { jsonrpc: '2.0', id: 51, method: 'session/cancel', params: { sessionId: 'sess-1' } });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 51,
+      method: 'session/cancel',
+      params: { sessionId: 'sess-1' },
+    });
     await new Promise((r) => setTimeout(r, 40));
     expect(promptSignal?.aborted).toBe(true);
     expect(bridge.cancelled).toContain('sess-1');
@@ -974,9 +1085,22 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connStream = await openStream(connId);
     const got = takeFrames(connStream, 2);
     await new Promise((r) => setTimeout(r, 50));
-    await post(connId, { jsonrpc: '2.0', id: 60, method: 'session/new', params: { cwd: 123 } });
-    await post(connId, { jsonrpc: '2.0', id: 61, method: 'session/new', params: { cwd: 'rel/path' } });
-    const frames = (await got) as Array<{ id: number; error?: { code: number } }>;
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 60,
+      method: 'session/new',
+      params: { cwd: 123 },
+    });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 61,
+      method: 'session/new',
+      params: { cwd: 'rel/path' },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number };
+    }>;
     for (const f of frames) expect(f.error?.code).toBe(-32602);
   });
 
@@ -984,9 +1108,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     let release: () => void = () => {};
     bridge.gate = new Promise<void>((r) => (release = r));
     const connId = await initialize();
-    await post(connId, { jsonrpc: '2.0', id: 70, method: 'session/new', params: {} });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 70,
+      method: 'session/new',
+      params: {},
+    });
     await new Promise((r) => setTimeout(r, 30)); // spawnOrAttach now awaiting the gate
-    await fetch(`${base}/acp`, { method: 'DELETE', headers: { 'acp-connection-id': connId } });
+    await fetch(`${base}/acp`, {
+      method: 'DELETE',
+      headers: { 'acp-connection-id': connId },
+    });
     release(); // spawn resolves AFTER destroy
     await new Promise((r) => setTimeout(r, 40));
     expect(bridge.killed).toContain('sess-1');
@@ -997,9 +1129,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     bridge.gate = new Promise<void>((r) => (release = r));
     bridge.loadAttached = false; // restore SPAWNED from disk → must be killed
     const connId = await initialize();
-    await post(connId, { jsonrpc: '2.0', id: 80, method: 'session/load', params: { sessionId: 'sess-1' } });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 80,
+      method: 'session/load',
+      params: { sessionId: 'sess-1' },
+    });
     await new Promise((r) => setTimeout(r, 30));
-    await fetch(`${base}/acp`, { method: 'DELETE', headers: { 'acp-connection-id': connId } });
+    await fetch(`${base}/acp`, {
+      method: 'DELETE',
+      headers: { 'acp-connection-id': connId },
+    });
     release();
     await new Promise((r) => setTimeout(r, 40));
     expect(bridge.killed).toContain('sess-1');
@@ -1013,9 +1153,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // 4 frames: buffered session/new reply (id 99) + the 3 below.
     const got = takeFrames(connStream, 4);
     await new Promise((r) => setTimeout(r, 50));
-    await post(connId, { jsonrpc: '2.0', id: 200, method: '_qwen/session/context', params: { sessionId: 'sess-1' } });
-    await post(connId, { jsonrpc: '2.0', id: 201, method: '_qwen/session/heartbeat', params: { sessionId: 'sess-1' } });
-    await post(connId, { jsonrpc: '2.0', id: 202, method: '_qwen/workspace/skills' });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 200,
+      method: '_qwen/session/context',
+      params: { sessionId: 'sess-1' },
+    });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 201,
+      method: '_qwen/session/heartbeat',
+      params: { sessionId: 'sess-1' },
+    });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 202,
+      method: '_qwen/workspace/skills',
+    });
     const ids = ((await got) as Array<{ id?: number }>).map((f) => f.id);
     expect(ids).toEqual(expect.arrayContaining([200, 201, 202]));
   });
@@ -1025,10 +1179,29 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const connStream = await openStream(connId);
     const got = takeFrames(connStream, 3);
     await new Promise((r) => setTimeout(r, 50));
-    await post(connId, { jsonrpc: '2.0', id: 210, method: '_qwen/workspace/set_tool_enabled', params: { toolName: '', enabled: true } });
-    await post(connId, { jsonrpc: '2.0', id: 211, method: '_qwen/workspace/restart_mcp_server', params: { serverName: '' } });
-    await post(connId, { jsonrpc: '2.0', id: 212, method: '_qwen/workspace/set_tool_enabled', params: { toolName: 'shell', enabled: false } });
-    const frames = (await got) as Array<{ id: number; error?: { code: number }; result?: unknown }>;
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 210,
+      method: '_qwen/workspace/set_tool_enabled',
+      params: { toolName: '', enabled: true },
+    });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 211,
+      method: '_qwen/workspace/restart_mcp_server',
+      params: { serverName: '' },
+    });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 212,
+      method: '_qwen/workspace/set_tool_enabled',
+      params: { toolName: 'shell', enabled: false },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number };
+      result?: unknown;
+    }>;
     const byId = Object.fromEntries(frames.map((f) => [f.id, f]));
     expect(byId[210].error?.code).toBe(-32602);
     expect(byId[211].error?.code).toBe(-32602);
@@ -1044,10 +1217,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const q = bridge.queues.get('sess-1');
     q?.push({ type: 'stream_error', data: { error: 'boom' } });
     q?.push({ type: 'client_evicted', data: { reason: 'slow' } });
-    const frames = (await got) as Array<{ method: string; params: { kind: string } }>;
+    const frames = (await got) as Array<{
+      method: string;
+      params: { kind: string };
+    }>;
     expect(frames.every((f) => f.method === '_qwen/notify')).toBe(true);
     const kinds = frames.map((f) => f.params.kind);
-    expect(kinds).toEqual(expect.arrayContaining(['stream_error', 'client_evicted']));
+    expect(kinds).toEqual(
+      expect.arrayContaining(['stream_error', 'client_evicted']),
+    );
     // (takeFrames already locked + aborted `sess`; afterEach force-closes.)
   });
 
@@ -1060,10 +1238,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const got = takeFrames(connStream, 2); // session/new reply + load reject
     await new Promise((r) => setTimeout(r, 50));
     // close is now in flight (awaiting closeGate) → sess-1 is "closing".
-    void post(connId, { jsonrpc: '2.0', id: 300, method: 'session/close', params: { sessionId: 'sess-1' } });
+    void post(connId, {
+      jsonrpc: '2.0',
+      id: 300,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
     await new Promise((r) => setTimeout(r, 30));
-    await post(connId, { jsonrpc: '2.0', id: 301, method: 'session/load', params: { sessionId: 'sess-1' } });
-    const frames = (await got) as Array<{ id: number; error?: { code: number; message: string } }>;
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 301,
+      method: 'session/load',
+      params: { sessionId: 'sess-1' },
+    });
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; message: string };
+    }>;
     const loadReply = frames.find((f) => f.id === 301);
     // Transient server-side race → INTERNAL_ERROR (-32603), not INVALID_PARAMS.
     expect(loadReply?.error?.code).toBe(-32603); // "being closed; retry"
@@ -1089,13 +1280,26 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const got = takeFrames(connStream, 2); // buffered session/new reply + load reject
     await new Promise((r) => setTimeout(r, 50));
     // Load goes in-flight (awaits bridge.gate); pre-await closingSessions empty.
-    void post(connId, { jsonrpc: '2.0', id: 340, method: 'session/load', params: { sessionId: 'sess-1' } });
+    void post(connId, {
+      jsonrpc: '2.0',
+      id: 340,
+      method: 'session/load',
+      params: { sessionId: 'sess-1' },
+    });
     await new Promise((r) => setTimeout(r, 20));
     // Close starts DURING the load → marks sess-1 closing (awaits closeGate).
-    void post(connId, { jsonrpc: '2.0', id: 341, method: 'session/close', params: { sessionId: 'sess-1' } });
+    void post(connId, {
+      jsonrpc: '2.0',
+      id: 341,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
     await new Promise((r) => setTimeout(r, 20));
     releaseLoad(); // loadSession resolves → post-await sees closeRaced
-    const frames = (await got) as Array<{ id: number; error?: { code: number; message: string } }>;
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; message: string };
+    }>;
     const loadReply = frames.find((f) => f.id === 340);
     expect(loadReply?.error?.code).toBe(-32603);
     expect(loadReply?.error?.message).toContain('closed during load');
@@ -1112,14 +1316,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // cancel (otherwise the bridge mediator is stuck forever). Retention is
     // observable as a SECOND cancel attempt during teardown.
     const calls: unknown[] = [];
-    bridge.respondToSessionPermission = ((_s: string, _r: string, resp: unknown) => {
+    bridge.respondToSessionPermission = ((
+      _s: string,
+      _r: string,
+      resp: unknown,
+    ) => {
       calls.push(resp);
       throw new Error('mediator unavailable'); // vote AND every cancel fail
     }) as never;
     bridge.promptBehavior = async (_s, q) => {
       q.push({
         type: 'permission_request',
-        data: { requestId: 'perm-d', sessionId: 'sess-1', toolCall: {}, options: [{ optionId: 'allow' }] },
+        data: {
+          requestId: 'perm-d',
+          sessionId: 'sess-1',
+          toolCall: {},
+          options: [{ optionId: 'allow' }],
+        },
       });
       await new Promise((r) => setTimeout(r, 100));
       return { stopReason: 'end_turn' };
@@ -1129,17 +1342,31 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sess = await openStream(connId, 'sess-1');
     const got = takeFrames(sess, 1);
     await new Promise((r) => setTimeout(r, 50));
-    await post(connId, { jsonrpc: '2.0', id: 350, method: 'session/prompt', params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] } });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 350,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] },
+    });
     const [reqFrame] = (await got) as Array<{ id: string }>;
     // Vote → respondToSessionPermission throws → immediate cancel ALSO throws.
-    await post(connId, { jsonrpc: '2.0', id: reqFrame.id, result: { outcome: { outcome: 'selected', optionId: 'allow' } } });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: reqFrame.id,
+      result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+    });
     await new Promise((r) => setTimeout(r, 40));
     // Teardown retries the cancel — whether triggered by the session stream
     // closing or the explicit DELETE below. Either way it only happens if the
     // entry was RETAINED after the immediate cancel failed.
-    await fetch(`${base}/acp`, { method: 'DELETE', headers: { 'acp-connection-id': connId } });
+    await fetch(`${base}/acp`, {
+      method: 'DELETE',
+      headers: { 'acp-connection-id': connId },
+    });
     await new Promise((r) => setTimeout(r, 40));
-    const cancels = calls.filter((c) => JSON.stringify(c).includes('cancelled'));
+    const cancels = calls.filter((c) =>
+      JSON.stringify(c).includes('cancelled'),
+    );
     // 1 vote + ≥2 cancels (immediate fail + teardown retry). If the entry were
     // dropped unconditionally after the failed immediate cancel, there would be
     // exactly ONE cancel — so ≥2 is the retention invariant.
@@ -1149,14 +1376,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
   it('client error response to a permission request → cancellation', async () => {
     let resolvedWith: unknown;
-    bridge.respondToSessionPermission = ((_s: string, _r: string, resp: unknown) => {
+    bridge.respondToSessionPermission = ((
+      _s: string,
+      _r: string,
+      resp: unknown,
+    ) => {
       resolvedWith = resp;
       return true;
     }) as never;
     bridge.promptBehavior = async (_s, q) => {
       q.push({
         type: 'permission_request',
-        data: { requestId: 'perm-e', sessionId: 'sess-1', toolCall: {}, options: [{ optionId: 'allow' }] },
+        data: {
+          requestId: 'perm-e',
+          sessionId: 'sess-1',
+          toolCall: {},
+          options: [{ optionId: 'allow' }],
+        },
       });
       await new Promise((r) => setTimeout(r, 40));
       return { stopReason: 'end_turn' };
@@ -1166,10 +1402,19 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sess = await openStream(connId, 'sess-1');
     const got = takeFrames(sess, 1);
     await new Promise((r) => setTimeout(r, 50));
-    await post(connId, { jsonrpc: '2.0', id: 310, method: 'session/prompt', params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] } });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 310,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] },
+    });
     const [reqFrame] = (await got) as Array<{ id: string }>;
     // Client answers with a JSON-RPC ERROR (not result) → treated as cancel.
-    await post(connId, { jsonrpc: '2.0', id: reqFrame.id, error: { code: -32000, message: 'user declined' } });
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: reqFrame.id,
+      error: { code: -32000, message: 'user declined' },
+    });
     await new Promise((r) => setTimeout(r, 50));
     expect(resolvedWith).toEqual({ outcome: { outcome: 'cancelled' } });
   });
@@ -1186,7 +1431,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       headers: { 'acp-connection-id': connId },
     });
     expect(del.status).toBe(202);
-    const after = await post(connId, { jsonrpc: '2.0', id: 12, method: 'session/new' });
+    const after = await post(connId, {
+      jsonrpc: '2.0',
+      id: 12,
+      method: 'session/new',
+    });
     expect(after.status).toBe(400);
   });
 });

@@ -87,7 +87,7 @@ export function isRequest(m: unknown): m is JsonRpcRequest {
     isObject(m) &&
     m['jsonrpc'] === '2.0' &&
     typeof m['method'] === 'string' &&
-    ('id' in m) &&
+    'id' in m &&
     m['id'] !== null &&
     (typeof m['id'] === 'number' || typeof m['id'] === 'string')
   );
@@ -127,7 +127,7 @@ export function isResponse(m: unknown): m is JsonRpcResponse {
  */
 export function logSafe(s: string): string {
   // eslint-disable-next-line no-control-regex
-  return s.replace(/[\u0000-\u001f\u007f]/g, " ");
+  return s.replace(/[\u0000-\u001f\u007f]/g, ' ');
 }
 
 export function success(id: JsonRpcId, result: unknown): JsonRpcSuccess {
@@ -170,9 +170,7 @@ export function request(
  */
 export function parseInbound(
   raw: unknown,
-):
-  | { ok: true; message: JsonRpcInbound }
-  | { ok: false; error: JsonRpcError } {
+): { ok: true; message: JsonRpcInbound } | { ok: false; error: JsonRpcError } {
   if (Array.isArray(raw)) {
     return {
       ok: false,

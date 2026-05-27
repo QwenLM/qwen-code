@@ -40,7 +40,12 @@ describe('jsonRpc helpers', () => {
   });
 
   it('rejects a response with BOTH result and error (XOR); parseInbound → 400-shape', () => {
-    const m = { jsonrpc: '2.0', id: 3, result: {}, error: { code: -1, message: 'x' } };
+    const m = {
+      jsonrpc: '2.0',
+      id: 3,
+      result: {},
+      error: { code: -1, message: 'x' },
+    };
     expect(isResponse(m)).toBe(false);
     const r = parseInbound(m);
     expect(r.ok).toBe(false);

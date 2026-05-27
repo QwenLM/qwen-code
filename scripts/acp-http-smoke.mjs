@@ -68,11 +68,14 @@ async function main() {
     headers: { 'content-type': 'application/json', ...authHeaders },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }),
   });
-  if (initRes.status !== 200) die(`initialize expected 200, got ${initRes.status}`);
+  if (initRes.status !== 200)
+    die(`initialize expected 200, got ${initRes.status}`);
   const connId = initRes.headers.get('acp-connection-id');
   if (!connId) die('missing Acp-Connection-Id header');
   const initBody = await initRes.json();
-  log(`✓ initialize: connectionId=${connId} protocolVersion=${initBody.result?.protocolVersion}`);
+  log(
+    `✓ initialize: connectionId=${connId} protocolVersion=${initBody.result?.protocolVersion}`,
+  );
 
   const connHeaders = { ...authHeaders, 'acp-connection-id': connId };
 
@@ -106,7 +109,9 @@ async function main() {
   if (ack.status !== 202) die(`session/new expected 202, got ${ack.status}`);
   const reply = await Promise.race([
     newReply,
-    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10_000)),
+    new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('timeout')), 10_000),
+    ),
   ]).catch((e) => die(`session/new reply: ${e.message}`));
   const sessionId = reply.result?.sessionId;
   if (!sessionId) die('session/new returned no sessionId');
@@ -164,21 +169,28 @@ async function main() {
       params: { sessionId, prompt: [{ type: 'text', text: PROMPT }] },
     }),
   });
-  if (pAck.status !== 202) die(`session/prompt expected 202, got ${pAck.status}`);
+  if (pAck.status !== 202)
+    die(`session/prompt expected 202, got ${pAck.status}`);
 
   const done = await Promise.race([
     promptDone,
-    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 60_000)),
+    new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('timeout')), 60_000),
+    ),
   ]).catch((e) => die(`prompt: ${e.message}`));
 
   log('');
   if (done.error) die(`prompt error: ${JSON.stringify(done.error)}`);
-  log(`✓ prompt complete: ${done.updates} session/update frames, stopReason=${done.result?.stopReason}`);
+  log(
+    `✓ prompt complete: ${done.updates} session/update frames, stopReason=${done.result?.stopReason}`,
+  );
 
   // 6. teardown
   connAbort.abort();
   sessAbort.abort();
-  await fetch(`${BASE}/acp`, { method: 'DELETE', headers: connHeaders }).catch(() => {});
+  await fetch(`${BASE}/acp`, { method: 'DELETE', headers: connHeaders }).catch(
+    () => {},
+  );
   log('✓ DELETE /acp — connection closed');
   log('\nALL CHECKS PASSED ✅');
   process.exit(0);
