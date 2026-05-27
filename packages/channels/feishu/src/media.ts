@@ -47,6 +47,7 @@ export async function downloadMedia(
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
+      signal: AbortSignal.timeout(30_000),
     });
 
     if (!resp.ok) {
