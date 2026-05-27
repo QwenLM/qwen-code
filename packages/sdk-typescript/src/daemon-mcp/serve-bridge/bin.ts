@@ -33,7 +33,11 @@ const transport = new StdioServerTransport();
 
 // Graceful shutdown on signals
 async function shutdown() {
-  try { await server.instance.close(); } catch { /* ignore */ }
+  try {
+    await server.instance.close();
+  } catch (e) {
+    process.stderr.write(`[qwen-serve-bridge] close error: ${e}\n`);
+  }
   process.exit(0);
 }
 

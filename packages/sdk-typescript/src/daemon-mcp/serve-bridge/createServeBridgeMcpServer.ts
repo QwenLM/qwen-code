@@ -12,7 +12,7 @@ import { DaemonClient } from '../../daemon/DaemonClient.js';
 import { createSdkMcpServer } from '../createSdkMcpServer.js';
 import type { McpSdkServerConfigWithInstance } from '../createSdkMcpServer.js';
 import type { ServeBridgeMcpServerOptions, BridgeState } from './types.js';
-import { startSessionCleanup, stopEventStream } from './types.js';
+import { startSessionCleanup, stopEventStream } from './sse.js';
 import { allTools } from './tools/index.js';
 
 /** Strip trailing slashes without regex (avoids CodeQL ReDoS flag). */

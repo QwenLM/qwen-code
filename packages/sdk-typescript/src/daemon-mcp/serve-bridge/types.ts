@@ -7,24 +7,15 @@
 /**
  * Type definitions for serve-bridge MCP server.
  *
- * Implementation is split across:
+ * Runtime implementations are in:
  * - ./sse.ts — SSE stream lifecycle (startEventStream, stopEventStream, createPromptCollector)
  * - ./helpers.ts — Utility functions (handler, resolveSessionId)
+ *
+ * Tool modules should import runtime functions directly from their source files,
+ * not from this module, to avoid circular dependency risks.
  */
 
 import type { DaemonClient } from '../../daemon/DaemonClient.js';
-
-// Re-export implementations for backward compatibility
-export {
-  createPromptCollector,
-  startEventStream,
-  stopEventStream,
-  startSessionCleanup,
-} from './sse.js';
-export {
-  resolveSessionId,
-  handler,
-} from './helpers.js';
 
 /**
  * Options for creating a serve-bridge MCP server.

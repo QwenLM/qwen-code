@@ -8,12 +8,8 @@ import { z } from 'zod';
 import { tool } from '../../tool.js';
 import { formatJsonResult } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
-import {
-  handler,
-  resolveSessionId,
-  startEventStream,
-  stopEventStream,
-} from '../types.js';
+import { startEventStream, stopEventStream } from '../sse.js';
+import { handler, resolveSessionId } from '../helpers.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function sessionTools(state: BridgeState): any[] {

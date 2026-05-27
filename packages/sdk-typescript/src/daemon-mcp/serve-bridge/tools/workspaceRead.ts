@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { tool } from '../../tool.js';
 import { formatJsonResult } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
-import { handler } from '../types.js';
+import { handler } from '../helpers.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function workspaceReadTools(state: BridgeState): any[] {

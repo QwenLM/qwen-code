@@ -13,10 +13,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { createServeBridgeMcpServer } from '../../src/daemon-mcp/serve-bridge/createServeBridgeMcpServer.js';
-import {
-  resolveSessionId,
-  handler,
-} from '../../src/daemon-mcp/serve-bridge/types.js';
+import { resolveSessionId, handler } from '../../src/daemon-mcp/serve-bridge/helpers.js';
 import type {
   BridgeState,
   SessionEventStream,

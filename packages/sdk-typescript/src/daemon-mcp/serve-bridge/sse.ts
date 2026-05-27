@@ -93,6 +93,10 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
           }
         } else if (
           typeof update['sessionUpdate'] === 'string' &&
+          // Best-effort error detection: daemon does not yet define a formal
+          // error event enum, so we match common patterns. This may produce
+          // false positives (e.g. "default_fallback") or miss events like
+          // "quota_exceeded". Update once daemon publishes an error event spec.
           /error|fail/i.test(update['sessionUpdate'] as string)
         ) {
           process.stderr.write(

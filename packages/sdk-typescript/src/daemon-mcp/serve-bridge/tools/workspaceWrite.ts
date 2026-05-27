@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { tool } from '../../tool.js';
 import { formatJsonResult, formatToolError } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
-import { handler, resolveSessionId } from '../types.js';
+import { handler, resolveSessionId } from '../helpers.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function workspaceWriteTools(state: BridgeState): any[] {
@@ -77,13 +77,18 @@ export function workspaceWriteTools(state: BridgeState): any[] {
       },
       handler(async (args) => {
         // Block dangerous modes and persistent changes without explicit opt-in
-        if (
-          (args.persist || ['yolo', 'auto', 'auto-edit'].includes(args.mode)) &&
-          !state.allowGlobalScope
-        ) {
-          return formatToolError(
-            `Approval mode '${args.mode}'${args.persist ? ' with persist' : ''} is restricted for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.`,
-          );
+        if (!state.allowGlobalScope) {
+          const dangerousModes = ['yolo', 'auto', 'auto-edit'];
+          if (dangerousModes.includes(args.mode)) {
+            return formatToolError(
+              `Approval modes '${dangerousModes.join("', '")}' are restricted for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.`,
+            );
+          }
+          if (args.persist) {
+            return formatToolError(
+              'Persisting approval mode changes is restricted for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.',
+            );
+          }
         }
         const sessionId = resolveSessionId(state, args.session_id);
         return formatJsonResult(
@@ -181,7 +186,7 @@ export function workspaceWriteTools(state: BridgeState): any[] {
       {
         action: z.enum(['list', 'get', 'create', 'update', 'delete']).describe('CRUD action to perform.'),
         agent_type: z.string().optional().describe('Agent type name (required for get/update/delete).'),
-        name: z.string().optional().describe('Agent name (required for create).'),
+        name: z.string().optional().describe('Agent name (create only, required for create).'),
         description: z.string().optional().describe('Agent description (required for create).'),
         system_prompt: z.string().optional().describe('System prompt (required for create).'),
         scope: z.enum(['workspace', 'global']).optional().describe('Agent scope (required for create).'),
