@@ -5348,8 +5348,13 @@ describe('daemon assist push: followup_suggestion', () => {
       normalizeDaemonEvent({
         id: 2,
         v: 1,
-        type: 'user_message_chunk',
-        data: { sessionId: 's-1', text: 'next question' },
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'next question' },
+          },
+        },
       } as never),
       { now: 3 },
     );

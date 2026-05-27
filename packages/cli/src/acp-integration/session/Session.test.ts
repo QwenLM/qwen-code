@@ -39,17 +39,15 @@ vi.mock('../../nonInteractiveCliCommands.js', () => ({
 // existing tests still get the real `CompressionStatus`, `ApprovalMode`,
 // `AuthType`, etc. via the spread.
 vi.mock('@qwen-code/qwen-code-core', async () => {
-  const actual =
-    await vi.importActual<typeof import('@qwen-code/qwen-code-core')>(
-      '@qwen-code/qwen-code-core',
-    );
+  const actual = await vi.importActual<
+    typeof import('@qwen-code/qwen-code-core')
+  >('@qwen-code/qwen-code-core');
   return {
     ...actual,
     generatePromptSuggestion: vi.fn(),
     logPromptSuggestion: vi.fn(),
   };
 });
-
 
 function chatRecord(overrides: Record<string, unknown>): ChatRecord {
   return {
@@ -3028,6 +3026,10 @@ describe('Session', () => {
       (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {
         enableFollowupSuggestions: true,
       };
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'hi back' }] },
+      ]);
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
@@ -3077,16 +3079,16 @@ describe('Session', () => {
       await new Promise((r) => setTimeout(r, 10));
       expect(generateMock).not.toHaveBeenCalled();
       expect(
-        (mockClient.extNotification as ReturnType<typeof vi.fn>).mock.calls.find(
+        (
+          mockClient.extNotification as ReturnType<typeof vi.fn>
+        ).mock.calls.find(
           ([method]) => method === 'qwen/notify/session/prompt-suggestion',
         ),
       ).toBeUndefined();
     });
 
     it('does not emit in PLAN approval mode', async () => {
-      mockConfig.getApprovalMode = vi
-        .fn()
-        .mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       generateMock.mockResolvedValue({ suggestion: 'something' });
 
       await session.prompt({
@@ -3117,7 +3119,9 @@ describe('Session', () => {
       });
       // No extNotification when suggestion is filtered.
       expect(
-        (mockClient.extNotification as ReturnType<typeof vi.fn>).mock.calls.find(
+        (
+          mockClient.extNotification as ReturnType<typeof vi.fn>
+        ).mock.calls.find(
           ([method]) => method === 'qwen/notify/session/prompt-suggestion',
         ),
       ).toBeUndefined();
@@ -3190,9 +3194,8 @@ describe('Session', () => {
       // followupAbort cleanup now runs unconditionally before the
       // prompt/cron guard — inject a fake pendingPrompt so the call
       // doesn't throw, but the real assertion is the signal abort.
-      (
-        session as unknown as { pendingPrompt: AbortController }
-      ).pendingPrompt = new AbortController();
+      (session as unknown as { pendingPrompt: AbortController }).pendingPrompt =
+        new AbortController();
 
       await session.cancelPendingPrompt();
       expect(capturedSignal!.aborted).toBe(true);
