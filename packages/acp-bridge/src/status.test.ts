@@ -20,9 +20,12 @@ describe('SERVE_ERROR_KINDS', () => {
     // kinds; PR 14 added `'budget_exhausted'` for MCP guardrail
     // refusals (see #4175 PR 14); PR 16 added `'stat_failed'` for
     // non-ENOENT stat failures on workspace memory discovery (see
-    // #4175 PR 16). Future additions append to this list — the
-    // order is part of the contract so SDK consumers can pattern-
-    // match without per-kind lookups.
+    // #4175 PR 16). Issue #4514 T2.9 appended
+    // `'prompt_deadline_exceeded'` (POST /session/:id/prompt 504) and
+    // `'writer_idle_timeout'` (terminal SSE client_evicted frame).
+    // Future additions append to this list — the order is part of the
+    // contract so SDK consumers can pattern-match without per-kind
+    // lookups.
     expect(SERVE_ERROR_KINDS).toEqual([
       'missing_binary',
       'blocked_egress',
@@ -33,6 +36,8 @@ describe('SERVE_ERROR_KINDS', () => {
       'parse_error',
       'stat_failed',
       'budget_exhausted',
+      'prompt_deadline_exceeded',
+      'writer_idle_timeout',
     ]);
   });
 });

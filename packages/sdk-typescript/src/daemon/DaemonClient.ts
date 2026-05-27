@@ -229,6 +229,20 @@ export interface PromptRequest {
   prompt: PromptContentBlock[];
   /** Optional ACP _meta passthrough. */
   _meta?: Record<string, unknown> | null;
+  /**
+   * Issue #4514 T2.9. Per-prompt wallclock cap (positive integer ms).
+   * The effective deadline is `min(server flag, this)` — the request
+   * can shorten, never extend. When omitted, the server's
+   * `--prompt-deadline-ms` flag governs alone (unlimited when both
+   * are unset). On expiry the daemon returns 504 +
+   * `errorKind: 'prompt_deadline_exceeded'`.
+   *
+   * Daemons without T2.9 (no `prompt_absolute_deadline` capability
+   * tag) silently ignore the field — pre-flight
+   * `caps.features.includes('prompt_absolute_deadline')` before
+   * relying on it.
+   */
+  deadlineMs?: number;
   [key: string]: unknown;
 }
 

@@ -5,12 +5,18 @@
  */
 
 import { realpathSync, promises as fsp } from 'node:fs';
+import type { ServerResponse } from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import request from 'supertest';
-import { createServeApp, detectFromLoopback } from './server.js';
+import {
+  createServeApp,
+  detectFromLoopback,
+  PromptDeadlineExceededError,
+  resolvePromptDeadlineMs,
+} from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
 import {
   CONDITIONAL_SERVE_FEATURES,
@@ -166,12 +172,7 @@ const EXPECTED_STAGE1_FEATURES = [
 // and PR 21 (`auth_device_flow`); reflect that here so the assertion
 // matches the real ordering.
 //
-// F2 (#4175 commit 5): `mcp_workspace_pool` + `mcp_pool_restart` are
-// also conditional (gated on `mcpPoolActive` toggle, default-true at
-// call site in server.ts but default-OFF at the predicate so a
-// no-toggle invocation matches the established `require_auth`
-// pattern). Both insert AFTER `workspace_mcp_restart` and BEFORE
-// `require_auth` so the registry order matches `capabilities.ts`.
+// Conditional tags registered in capabilities.ts registry order.
 const EXPECTED_REGISTERED_FEATURES = [
   // Same order as `SERVE_CAPABILITY_REGISTRY` declaration:
   // ...always-on PR16/17/19/20/21 features, then F2's conditional
@@ -187,8 +188,14 @@ const EXPECTED_REGISTERED_FEATURES = [
   'mcp_workspace_pool',
   'mcp_pool_restart',
   'require_auth',
+  // T2.4 (#4514). Conditional — advertised only when
+  // `--allow-origin <pattern>` is configured. Registry-declaration
+  // order puts it after `require_auth` (latest conditional tag added).
+  'allow_origin',
   'auth_device_flow',
   'permission_mediation',
+  'prompt_absolute_deadline',
+  'writer_idle_timeout',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -848,12 +855,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
 }
 
 /**
- * Wenshao review #4335 / 3272581557 — supertest in the rest of this
- * suite always connects from `127.0.0.1`, leaving the prefix-match
- * branches in `detectFromLoopback` (the security gate for
- * `local-only` permission policy) without direct coverage. Exercise
- * the helper synchronously over the address shapes the Round-5 fix
- * widened, plus the fail-closed branches.
+ * Wenshao review #4335 / 3272581557 — detectFromLoopback tests.
  */
 describe('detectFromLoopback (#4335 / 3272581557)', () => {
   function fakeReq(addr: string | undefined): {
@@ -876,14 +878,7 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
     ['1.2.3.4', false],
     ['::', false],
     ['fe80::1', false],
-    // RFC 1918 private addrs that LOOK loopback-adjacent but aren't.
     ['127', false],
-    // Note: `'127.'` is structurally `127.`-prefix so the helper
-    // accepts it (fail-OPEN for that malformed shape). Real
-    // `req.socket.remoteAddress` values come from the kernel as
-    // well-formed dotted-decimal IPs, so this only matters for
-    // pathological synthetic inputs. Documented for transparency.
-    // Empty / malformed.
     ['', false],
   ])('detectFromLoopback(%s) === %s', (addr, expected) => {
     expect(detectFromLoopback(fakeReq(addr))).toBe(expected);
@@ -895,9 +890,6 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
   });
 
   it('does NOT consult X-Forwarded-For or any HTTP header (security)', () => {
-    // The function takes only the socket-shaped input — even if the
-    // express request would carry forwarded headers, this helper
-    // can't see them. Pin the contract.
     const reqWithForwardedHeader = {
       socket: { remoteAddress: '10.0.0.1' },
       get: (name: string) =>
@@ -906,6 +898,15 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
     expect(detectFromLoopback(reqWithForwardedHeader)).toBe(false);
   });
 });
+
+function abortableBridgePromptImpl(): FakeBridgeOpts['promptImpl'] {
+  return (_sid, _req, signal) =>
+    new Promise((resolve) => {
+      const onAbort = () => resolve({ stopReason: 'cancelled' });
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener('abort', onAbort, { once: true });
+    });
+}
 
 describe('createServeApp', () => {
   describe('serve capability registry', () => {
@@ -976,17 +977,49 @@ describe('createServeApp', () => {
           feature === 'mcp_workspace_pool' ||
           feature === 'mcp_pool_restart'
         ) {
-          // F2 (#4175 commit 5): both pool tags share the
-          // `mcpPoolActive` predicate and advertise in lockstep.
-          // Default-OFF at the predicate (matches `require_auth`'s
-          // pattern); the server.ts call site flips to default-ON via
-          // `opts.mcpPoolActive !== false`, so a daemon booted without
-          // the kill switch advertises both tags by default.
           expect(predicate({ mcpPoolActive: true })).toBe(true);
           expect(predicate({ mcpPoolActive: false })).toBe(false);
           expect(predicate({})).toBe(false);
           expect(
             getAdvertisedServeFeatures(undefined, { mcpPoolActive: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'allow_origin') {
+          expect(predicate({ allowOriginActive: true })).toBe(true);
+          expect(predicate({ allowOriginActive: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { allowOriginActive: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'prompt_absolute_deadline') {
+          expect(predicate({ promptDeadlineMs: 5_000 })).toBe(true);
+          expect(predicate({ promptDeadlineMs: 0 })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { promptDeadlineMs: 5_000 }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'writer_idle_timeout') {
+          expect(predicate({ writerIdleTimeoutMs: 60_000 })).toBe(true);
+          expect(predicate({ writerIdleTimeoutMs: 0 })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              writerIdleTimeoutMs: 60_000,
+            }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
@@ -1572,6 +1605,7 @@ describe('createServeApp', () => {
         .set('Origin', 'https://evil.example.com');
       expect(res.status).toBe(403);
       expect(res.body).toEqual({ error: 'Request denied by CORS policy' });
+      expect(res.headers['vary']).toBe('Origin');
     });
 
     it('accepts requests with no Origin header (CLI/SDK clients)', async () => {
@@ -4071,7 +4105,11 @@ describe('runQwenServe', () => {
       await handle.close();
       handle = undefined;
     }
+    // Scrub any env vars individual tests may have set so leftover
+    // state can't leak into the next test in this worker.
     delete process.env['QWEN_SERVER_TOKEN'];
+    delete process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'];
+    delete process.env['QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS'];
   });
 
   it('refuses to bind 0.0.0.0 without a token', async () => {
@@ -4095,6 +4133,38 @@ describe('runQwenServe', () => {
         requireAuth: true,
       }),
     ).rejects.toThrow(/--require-auth/);
+  });
+
+  it("refuses to start with --allow-origin '*' on loopback when no token is configured", async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        allowOrigins: ['*'],
+      }),
+    ).rejects.toThrow(/--allow-origin '\*'/);
+  });
+
+  it("starts with --allow-origin '*' when a token is configured", async () => {
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      token: 'secret',
+      allowOrigins: ['*'],
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Origin: 'https://anywhere.example.com' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe(
+      'https://anywhere.example.com',
+    );
+    expect(res.headers.get('access-control-expose-headers')).toBe(
+      'Retry-After',
+    );
   });
 
   // PR 14 fix (review #4247): runQwenServe is the documented embedded
@@ -4130,6 +4200,169 @@ describe('runQwenServe', () => {
         mcpBudgetMode: 'enforce',
       }),
     ).rejects.toThrow(/enforce.*requires.*mcpClientBudget/);
+  });
+
+  // Issue #4514 T2.9: same boot-validation contract as mcpClientBudget
+  // — embedded callers must hit the same fail-loud TypeError as the
+  // CLI handler, not a silent uncapped daemon.
+  it.each([
+    ['zero', 0],
+    ['negative', -5],
+    ['float', 1.5],
+    ['NaN', Number.NaN],
+  ])(
+    'rejects invalid promptDeadlineMs (%s) at boot (#4514 T2.9)',
+    async (_label, value) => {
+      await expect(
+        runQwenServe({
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          promptDeadlineMs: value,
+        }),
+      ).rejects.toThrow(/promptDeadlineMs/);
+    },
+  );
+
+  it.each([
+    ['zero', 0],
+    ['negative', -5],
+    ['float', 1.5],
+    ['NaN', Number.NaN],
+  ])(
+    'rejects invalid writerIdleTimeoutMs (%s) at boot (#4514 T2.9)',
+    async (_label, value) => {
+      await expect(
+        runQwenServe({
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          writerIdleTimeoutMs: value,
+        }),
+      ).rejects.toThrow(/writerIdleTimeoutMs/);
+    },
+  );
+
+  it('rejects promptDeadlineMs that exceeds the JS timer cap (#4514 T2.9 wenshao review)', async () => {
+    // Node silently compresses setTimeout delays > 2^31-1 ms to 1ms
+    // with a TimeoutOverflowWarning — an operator setting 30 days
+    // expecting "effectively no cap" would otherwise see every prompt
+    // 504 instantly. Boot-loud rejection with a clear error pointing
+    // at the cap prevents the footwound.
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        promptDeadlineMs: 2_147_483_648, // one over 2^31 - 1
+      }),
+    ).rejects.toThrow(/Exceeds maximum JS timer delay/);
+  });
+
+  it('accepts writerIdleTimeoutMs above the JS timer cap (#4530 review)', async () => {
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      writerIdleTimeoutMs: 2_147_483_648,
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    const caps = (await res.json()) as { features: string[] };
+    expect(caps.features).toContain('writer_idle_timeout');
+  });
+
+  // Env-var scrub for these tests is handled by `afterEach` above —
+  // no `try/finally` per test needed.
+  it.each([
+    ['empty string', ''],
+    ['whitespace only', '   '],
+    ['NaN', 'abc'],
+    ['float', '1.5'],
+    ['negative', '-5'],
+    ['zero', '0'],
+  ])(
+    'rejects invalid QWEN_SERVE_PROMPT_DEADLINE_MS env var (%s) at boot (#4514 T2.9)',
+    async (_label, value) => {
+      process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'] = value;
+      await expect(
+        runQwenServe({
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+        }),
+      ).rejects.toThrow(/QWEN_SERVE_PROMPT_DEADLINE_MS/);
+    },
+  );
+
+  it('rejects QWEN_SERVE_PROMPT_DEADLINE_MS that exceeds JS timer cap (#4514 T2.9)', async () => {
+    process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'] = '2147483648';
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+      }),
+    ).rejects.toThrow(/Exceeds maximum JS timer delay/);
+  });
+
+  it('accepts a valid QWEN_SERVE_PROMPT_DEADLINE_MS env var (#4514 T2.9 happy path)', async () => {
+    // Pin the env-fallback shape end-to-end: env var → ServeOptions
+    // field → /capabilities advertises the conditional tag. Closes
+    // the "no tests at all" gap wenshao flagged on `parseDeadlineEnv`.
+    process.env['QWEN_SERVE_PROMPT_DEADLINE_MS'] = '30000';
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    const caps = (await res.json()) as { features: string[] };
+    expect(caps.features).toContain('prompt_absolute_deadline');
+  });
+
+  // wenshao review #4530 inline #5: sibling env var
+  // `QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS` had zero dedicated coverage
+  // — a copy-paste error reading the wrong env-var name in
+  // `runQwenServe` would have passed all existing tests. Mirror the
+  // prompt-deadline env-var plumbing while preserving writer-idle's
+  // larger arithmetic-only budget range.
+  it('rejects invalid QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS env var at boot (#4514 T2.9)', async () => {
+    process.env['QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS'] = 'abc';
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+      }),
+    ).rejects.toThrow(/QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS/);
+  });
+
+  it('accepts QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS above JS timer cap (#4530 review)', async () => {
+    process.env['QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS'] = '2147483648';
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    const caps = (await res.json()) as { features: string[] };
+    expect(caps.features).toContain('writer_idle_timeout');
+  });
+
+  it('accepts a valid QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS env var (#4514 T2.9 happy path)', async () => {
+    process.env['QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS'] = '60000';
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    const caps = (await res.json()) as { features: string[] };
+    expect(caps.features).toContain('writer_idle_timeout');
   });
 
   // Round 6 (wenshao R5 line 216): replaced the R3 `process.env`
@@ -5523,6 +5756,172 @@ describe('same-origin Origin-stripping middleware', () => {
   });
 });
 
+describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
+  // When `--allow-origin` is unset, today's denyBrowserOriginCors wall
+  // stays installed and matched-Origin requests get 403. The existing
+  // tests above already cover that path; this block exercises the
+  // allowlist-installed path.
+  const allowedOpts = {
+    ...baseOpts,
+    allowOrigins: ['http://localhost:3000', 'http://localhost:5173'],
+  };
+
+  it('matched origin gets 200 + CORS response headers (GET /health)', async () => {
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:3000');
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://localhost:3000',
+    );
+    expect(res.headers['vary']).toBe('Origin');
+    expect(res.headers['access-control-allow-methods']).toMatch(/POST/);
+    expect(res.headers['access-control-allow-headers']).toMatch(
+      /Authorization/,
+    );
+    expect(res.headers['access-control-max-age']).toBe('86400');
+    expect(res.headers['access-control-expose-headers']).toBe('Retry-After');
+  });
+
+  it('OPTIONS preflight returns 204 + CORS headers with no body', async () => {
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .options('/session/foo/prompt')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:5173')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'authorization,content-type');
+    expect(res.status).toBe(204);
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://localhost:5173',
+    );
+    expect(res.headers['access-control-allow-methods']).toMatch(/POST/);
+    expect(res.headers['access-control-expose-headers']).toBe('Retry-After');
+    expect(res.text).toBe('');
+  });
+
+  it('mismatched origin still gets 403 with the same error envelope as denyBrowserOriginCors', async () => {
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'https://evil.example.com');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Request denied by CORS policy');
+    // Reject path must not leak CORS headers — browsers would ignore
+    // them anyway, but emitting them advertises the allowlist size
+    // indirectly via header presence.
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    expect(res.headers['vary']).toBe('Origin');
+  });
+
+  it('CLI/SDK callers with no Origin header pass through unchanged', async () => {
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    expect(res.headers['vary']).toBeUndefined();
+  });
+
+  it('advertises `allow_origin` capability tag when configured', async () => {
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body.features).toContain('allow_origin');
+  });
+
+  it('does NOT advertise `allow_origin` when `--allow-origin` is unset (regression anchor for the conditional tag)', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body.features).not.toContain('allow_origin');
+  });
+
+  it('rejects embedded `*` allowlist without a token', () => {
+    const wildOpts = { ...baseOpts, allowOrigins: ['*'] };
+    expect(() =>
+      createServeApp(wildOpts, () => 4170, {
+        bridge: fakeBridge(),
+      }),
+    ).toThrow(/--allow-origin '\*'/);
+  });
+
+  it('`*` pattern with a token admits any cross-origin request', async () => {
+    const wildOpts = { ...baseOpts, token: 'secret', allowOrigins: ['*'] };
+    const app = createServeApp(wildOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'https://anywhere.example.com');
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'https://anywhere.example.com',
+    );
+  });
+
+  it('demo self-origin shim still works when `--allow-origin` is set (loopback strip runs first)', async () => {
+    // Regression anchor: the loopback-self-origin shim that strips the
+    // Origin header for matching addresses must continue working even
+    // when the new allowlist middleware is installed. Without this,
+    // browsers hitting the daemon's own port from the same port would
+    // need to be explicitly added to `--allow-origin` despite being a
+    // same-origin hit.
+    const app = createServeApp(allowedOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', `http://127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    // Origin was stripped by the shim before reaching CORS, so no
+    // CORS response headers are set.
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  it('empty allowOrigins array behaves identically to undefined (install path unchanged)', async () => {
+    // Regression anchor for the `opts.allowOrigins && opts.allowOrigins.length > 0`
+    // gate. An empty array must NOT install the allowlist middleware —
+    // otherwise an embedded caller that passes `allowOrigins: []` would
+    // silently leave the daemon with no Origin protection.
+    const emptyOpts = { ...baseOpts, allowOrigins: [] };
+    const app = createServeApp(emptyOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const cap = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(cap.body.features).not.toContain('allow_origin');
+    const blocked = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:3000');
+    expect(blocked.status).toBe(403);
+  });
+});
+
 describe('runQwenServe SIGINT handler', () => {
   it('does not register signal handlers until the listener is up', () => {
     // Sanity: we register `once` so we don't leak across test runs.
@@ -6387,5 +6786,744 @@ describe('GET /capabilities — policy.permission', () => {
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('policy');
     expect(res.body.policy).toHaveProperty('permission');
+  });
+});
+
+// ===========================================================================
+// Issue #4514 T2.9: prompt absolute deadline + SSE writer idle timeout
+// ===========================================================================
+
+describe('T2.9 prompt absolute deadline (issue #4514)', () => {
+  describe('resolvePromptDeadlineMs', () => {
+    it('returns undefined when the server flag is unset', () => {
+      // Default off — preserves the legacy "client disconnect is the
+      // only auto-cancel" behavior bit-for-bit. A request body
+      // `deadlineMs` is ignored without the server opting in (we don't
+      // want a client to be able to force a deadline on an operator
+      // who hasn't asked for one).
+      expect(resolvePromptDeadlineMs(undefined, undefined)).toBeUndefined();
+      expect(resolvePromptDeadlineMs(undefined, 1_000)).toBeUndefined();
+      expect(resolvePromptDeadlineMs(0, 1_000)).toBeUndefined();
+    });
+
+    it('uses the server flag when no request override is present', () => {
+      expect(resolvePromptDeadlineMs(5_000, undefined)).toBe(5_000);
+    });
+
+    it('caps the request override at the server flag (request can shorten)', () => {
+      // Operator is the upper bound: request can lower the deadline
+      // but never raise it.
+      expect(resolvePromptDeadlineMs(5_000, 1_000)).toBe(1_000);
+    });
+
+    it('rejects request overrides that exceed the server flag', () => {
+      // The cap is `Math.min`, so an over-bound request never widens
+      // the effective deadline. This is the test that locks down the
+      // "cannot extend" contract called out in the issue.
+      expect(resolvePromptDeadlineMs(5_000, 10_000)).toBe(5_000);
+    });
+
+    it('ignores invalid request overrides without dropping the server cap', () => {
+      // Malformed request override should be caught at the route layer
+      // (returns 400), but defense-in-depth: the resolver still falls
+      // back to the server value rather than silently disabling.
+      expect(resolvePromptDeadlineMs(5_000, 0)).toBe(5_000);
+      expect(resolvePromptDeadlineMs(5_000, -100)).toBe(5_000);
+      expect(resolvePromptDeadlineMs(5_000, Number.NaN)).toBe(5_000);
+    });
+  });
+
+  describe('POST /session/:id/prompt', () => {
+    it.each([
+      ['negative', -5],
+      ['zero', 0],
+      ['float', 1.5],
+      ['string', 'abc'],
+      ['boolean', true],
+      ['object', { ms: 500 }],
+    ])(
+      // Note: `NaN` / `Infinity` aren't reachable here — JSON.stringify
+      // converts both to `null`, which the validator correctly treats
+      // as "absent" (same as `undefined`). The remaining cases exercise
+      // every reachable branch of the typeof / isFinite / isInteger /
+      // positive validator.
+      'rejects an invalid `deadlineMs` body field (%s) with 400',
+      async (_label, value) => {
+        // Symmetric with the `prompt` validator: malformed inputs fail
+        // loudly so the client doesn't silently lose their deadline
+        // request. Each branch of the validator (typeof / isFinite /
+        // isInteger / positive) gets covered.
+        const bridge = fakeBridge({
+          promptImpl: () => {
+            throw new Error('bridge must not be touched');
+          },
+        });
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({
+            prompt: [{ type: 'text', text: 'hi' }],
+            deadlineMs: value,
+          });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_deadline_ms');
+        expect(bridge.promptCalls).toHaveLength(0);
+      },
+    );
+
+    it('returns cleanly when client disconnects in the same tick the deadline fires (wenshao review #3)', async () => {
+      // Critical regression from wenshao's CHANGES_REQUESTED on #4530:
+      // when `res.writableEnded` was true at the moment the deadline
+      // rejection surfaced, the early code `if (err instanceof
+      // PromptDeadlineExceededError && !res.writableEnded) { ...
+      // return; }` would skip BOTH the body AND the return, fall
+      // through to `sendBridgeError`, and try to write 500 to an
+      // already-ended response → ERR_STREAM_WRITE_AFTER_END.
+      //
+      // We force the race by destroying the client socket
+      // immediately after the bridge starts the prompt, so by the
+      // time the 50ms deadline fires the response is already ended.
+      // The route MUST handle this without throwing — assertion is
+      // implicit: a thrown uncaughtException would fail the test.
+      let promptStarted: (() => void) | undefined;
+      const promptStartedPromise = new Promise<void>((r) => {
+        promptStarted = r;
+      });
+      const bridge = fakeBridge({
+        promptImpl: (_sid, _req, signal) =>
+          new Promise((resolve) => {
+            promptStarted!();
+            const onAbort = () => resolve({ stopReason: 'cancelled' });
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener('abort', onAbort, { once: true });
+          }),
+      });
+      const localHandle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          promptDeadlineMs: 50,
+        },
+        { bridge },
+      );
+      try {
+        const port = (localHandle.server.address() as { port: number }).port;
+        const http = await import('node:http');
+        const reqBody = JSON.stringify({
+          prompt: [{ type: 'text', text: 'slow' }],
+        });
+        const httpReq = http.request({
+          host: '127.0.0.1',
+          port,
+          method: 'POST',
+          path: '/session/sess-A/prompt',
+          headers: {
+            'content-type': 'application/json',
+            'content-length': Buffer.byteLength(reqBody),
+          },
+        });
+        httpReq.on('error', () => {});
+        httpReq.write(reqBody);
+        httpReq.end();
+        await promptStartedPromise;
+        // Destroy the client socket so `res.writableEnded` is true by
+        // the time the 50ms deadline fires.
+        httpReq.destroy();
+        // Give the deadline timer time to fire + the route's catch
+        // block to handle the race.
+        await new Promise((r) => setTimeout(r, 200));
+        expect(bridge.promptCalls).toHaveLength(1);
+        // The bridge's signal MUST still have been aborted with the
+        // typed reason — the cleanup path still runs even though the
+        // response was already ended.
+        expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
+      } finally {
+        await localHandle.close();
+      }
+    });
+
+    it('fires the server-side deadline and returns 504 with errorKind', async () => {
+      // 50ms server deadline + a prompt that resolves only on abort:
+      // the deadline timer must abort the AbortController, the catch
+      // block must detect the typed reason, and the response must
+      // carry the structured `errorKind: 'prompt_deadline_exceeded'`
+      // (not a generic 500 / silent close).
+      const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
+      const app = createServeApp(
+        { ...baseOpts, promptDeadlineMs: 50 },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: 'slow' }] });
+      expect(res.status).toBe(504);
+      expect(res.body).toMatchObject({
+        code: 'prompt_deadline_exceeded',
+        errorKind: 'prompt_deadline_exceeded',
+        deadlineMs: 50,
+      });
+      // The bridge MUST have received an aborted signal so the agent
+      // can wind down its FIFO slot — otherwise a buggy agent keeps
+      // the per-session lane blocked forever even though the HTTP
+      // client got its 504.
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
+      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
+        PromptDeadlineExceededError,
+      );
+    });
+
+    it('still returns typed 504 when deadline stderr logging fails', async () => {
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => {
+          throw new Error('stderr pipe closed');
+        });
+      try {
+        const bridge = fakeBridge({
+          promptImpl: () => new Promise(() => {}),
+        });
+        const app = createServeApp(
+          { ...baseOpts, promptDeadlineMs: 50 },
+          undefined,
+          { bridge },
+        );
+        const res = await request(app)
+          .post('/session/session-A/prompt')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ prompt: [{ type: 'text', text: 'slow' }] });
+        expect(res.status).toBe(504);
+        expect(res.body.errorKind).toBe('prompt_deadline_exceeded');
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('strips route-only deadlineMs before forwarding the prompt body', async () => {
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, promptDeadlineMs: 5_000 },
+        undefined,
+        { bridge },
+      );
+      const prompt = [{ type: 'text', text: 'hi' }];
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt,
+          deadlineMs: 1_000,
+          _meta: { trace: 'kept' },
+          extra: 'kept',
+        });
+      expect(res.status).toBe(200);
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty('deadlineMs');
+      expect(bridge.promptCalls[0]?.req).toMatchObject({
+        sessionId: 'session-A',
+        prompt,
+        _meta: { trace: 'kept' },
+        extra: 'kept',
+      });
+    });
+
+    it('caps a per-prompt `deadlineMs` override at the server flag', async () => {
+      // Server flag 50ms, request asks for 5000ms — the effective
+      // deadline must be the smaller 50ms. The way we observe it is
+      // the same 504-with-deadlineMs:50 response: if the cap was
+      // incorrectly the request's 5000ms, the test would time out
+      // long before completing.
+      const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
+      const app = createServeApp(
+        { ...baseOpts, promptDeadlineMs: 50 },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'slow' }],
+          deadlineMs: 5_000,
+        });
+      expect(res.status).toBe(504);
+      expect(res.body.deadlineMs).toBe(50);
+    });
+
+    it('uses the per-prompt override when shorter than the server flag', async () => {
+      // Server flag 10s, request 30ms — request wins as the tighter
+      // bound. Same observability path as above; if the cap was the
+      // server's 10s the test would hang past its own short timeout.
+      const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
+      const app = createServeApp(
+        { ...baseOpts, promptDeadlineMs: 10_000 },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'slow' }],
+          deadlineMs: 30,
+        });
+      expect(res.status).toBe(504);
+      expect(res.body.deadlineMs).toBe(30);
+    });
+
+    it('still emits 504 when the bridge IGNORES the abort signal (race contract)', async () => {
+      // The deadline must be a hard server-side guarantee, not contingent
+      // on the bridge / agent honoring AbortSignal. A buggy agent that
+      // never resolves its sendPrompt promise would, without the
+      // Promise.race in the prompt handler, keep the HTTP request open
+      // indefinitely and never emit the promised 504 — that was the
+      // Copilot finding on the initial T2.9 commit. This test exercises
+      // a non-cooperative bridge to lock the contract: deadline 50ms,
+      // bridge promise never settles, route still returns 504 within a
+      // reasonable budget.
+      const bridge = fakeBridge({
+        promptImpl: () => new Promise(() => {}),
+      });
+      const app = createServeApp(
+        { ...baseOpts, promptDeadlineMs: 50 },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: 'slow' }] });
+      expect(res.status).toBe(504);
+      expect(res.body).toMatchObject({
+        code: 'prompt_deadline_exceeded',
+        errorKind: 'prompt_deadline_exceeded',
+        deadlineMs: 50,
+      });
+      // The signal was still aborted with the typed reason as best-
+      // effort wind-down — the agent has every chance to clean up
+      // its FIFO slot even though we no longer wait for it.
+      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
+      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
+        PromptDeadlineExceededError,
+      );
+    });
+
+    it('does not interfere with normal prompt completion when the flag is unset', async () => {
+      // The deadline path must be 100% off by default. A 200 OK with
+      // the bridge's stopReason is the bit-for-bit pre-PR contract.
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+      expect(res.status).toBe(200);
+      expect(res.body.stopReason).toBe('end_turn');
+    });
+
+    it('does not fire the deadline when the prompt resolves promptly', async () => {
+      // 5s deadline + an immediate resolve: the timer must not fire
+      // and must not corrupt the 200 response. Guards against a
+      // future regression where the timer races the response.
+      const bridge = fakeBridge({
+        promptImpl: async () => ({ stopReason: 'end_turn' }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, promptDeadlineMs: 5_000 },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+      expect(res.status).toBe(200);
+      expect(res.body.stopReason).toBe('end_turn');
+    });
+  });
+
+  describe('GET /capabilities', () => {
+    it('omits `prompt_absolute_deadline` by default', async () => {
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('prompt_absolute_deadline');
+    });
+
+    it('advertises `prompt_absolute_deadline` when the flag is set', async () => {
+      const app = createServeApp({ ...baseOpts, promptDeadlineMs: 5_000 });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).toContain('prompt_absolute_deadline');
+    });
+
+    it('omits `writer_idle_timeout` by default', async () => {
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('writer_idle_timeout');
+    });
+
+    it('advertises `writer_idle_timeout` when the flag is set', async () => {
+      const app = createServeApp({
+        ...baseOpts,
+        writerIdleTimeoutMs: 60_000,
+      });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).toContain('writer_idle_timeout');
+    });
+  });
+});
+
+describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
+  let handle: RunHandle | undefined;
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+  });
+
+  it('evicts an idle SSE writer with a terminal client_evicted frame', async () => {
+    // Bridge yields nothing, ever — simulating an idle stream where
+    // the only writes the timer would observe are the SSE handshake
+    // (`retry: 3000`) and (eventually) the 15s heartbeat. With a
+    // 200ms idle deadline the timer must fire well before the
+    // heartbeat refreshes `lastWriteAt`. Expected terminal frame:
+    // `client_evicted` with the new `reason: 'writer_idle_timeout'`.
+    const bridge = fakeBridge({
+      // eslint-disable-next-line require-yield
+      async *subscribeImpl(_sessionId, _opts) {
+        // Park forever; the test triggers eviction via the timer.
+        // No yield: the test asserts that the daemon's idle-timeout
+        // path fires even when the bridge produces zero frames.
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        writerIdleTimeoutMs: 200,
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+
+    // Read until we see the eviction frame OR the stream closes. The
+    // 1500ms budget is well below the 15s heartbeat so a regression
+    // that disables the idle timer would still fail loudly here.
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let evictedData: unknown;
+    const deadline = Date.now() + 1_500;
+    while (Date.now() < deadline) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const raw = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
+        // Parse the frame; look for event: client_evicted.
+        let eventName = '';
+        let dataLine = '';
+        for (const line of raw.split('\n')) {
+          if (line.startsWith('event: ')) eventName = line.slice(7);
+          else if (line.startsWith('data: ')) dataLine = line.slice(6);
+        }
+        if (eventName === 'client_evicted') {
+          evictedData = JSON.parse(dataLine);
+          break;
+        }
+      }
+      if (evictedData !== undefined) break;
+    }
+    await reader.cancel().catch(() => undefined);
+
+    expect(evictedData).toBeDefined();
+    expect(evictedData).toMatchObject({
+      v: 1,
+      type: 'client_evicted',
+      data: {
+        reason: 'writer_idle_timeout',
+        errorKind: 'writer_idle_timeout',
+        timeoutMs: 200,
+      },
+    });
+  });
+
+  it('does not evict when the writer idle timeout is unset (legacy contract)', async () => {
+    // Without `writerIdleTimeoutMs`, the existing 15s-heartbeat-only
+    // behavior must be preserved bit-for-bit. We open a stream, read
+    // a real event, then wait ~600ms — no client_evicted frame may
+    // appear in that window.
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: { ok: true } };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let sawFirstEvent = false;
+    let sawEviction = false;
+    const deadline = Date.now() + 600;
+    while (Date.now() < deadline) {
+      const readPromise = reader.read();
+      const wakeup = new Promise<{ value: undefined; done: false }>((r) => {
+        setTimeout(
+          () => r({ value: undefined, done: false }),
+          deadline - Date.now() + 10,
+        );
+      });
+      const { value, done } = (await Promise.race([readPromise, wakeup])) as {
+        value: Uint8Array | undefined;
+        done: boolean;
+      };
+      if (done) break;
+      if (value === undefined) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const raw = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
+        let eventName = '';
+        for (const line of raw.split('\n')) {
+          if (line.startsWith('event: ')) eventName = line.slice(7);
+        }
+        if (eventName === 'session_update') sawFirstEvent = true;
+        if (eventName === 'client_evicted') sawEviction = true;
+      }
+    }
+    await reader.cancel().catch(() => undefined);
+
+    expect(sawFirstEvent).toBe(true);
+    expect(sawEviction).toBe(false);
+  });
+
+  it('does NOT evict when active writes keep refreshing lastWriteAt (#4514 T2.9 wenshao review)', async () => {
+    // wenshao flagged that the existing "fires when idle" + "doesn't
+    // fire when unset" tests don't cover the case where REAL writes
+    // (event yields, not just heartbeats) refresh `lastWriteAt`
+    // inside `doWrite`. With idle timeout = 300ms and an event every
+    // 100ms, the timer should keep deferring — the connection stays
+    // alive even past several timeout cycles.
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        // Yield 5 events at ~100ms intervals — well below the 300ms
+        // idle budget — then park forever. We expect no eviction in
+        // the read window.
+        for (let i = 1; i <= 5; i++) {
+          await new Promise<void>((r) => setTimeout(r, 100));
+          yield {
+            id: i,
+            v: 1,
+            type: 'session_update',
+            data: { tick: i },
+          };
+        }
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        writerIdleTimeoutMs: 300,
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+
+    // Read for ~700ms — long enough that an IDLE writer would have
+    // been evicted twice over (300ms timeout, polled every ~250ms),
+    // but the per-100ms event stream refreshes lastWriteAt before the
+    // check fires.
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let sawEviction = false;
+    let sessionUpdates = 0;
+    const deadline = Date.now() + 700;
+    while (Date.now() < deadline) {
+      const readPromise = reader.read();
+      const wakeup = new Promise<{ value: undefined; done: false }>((r) => {
+        setTimeout(
+          () => r({ value: undefined, done: false }),
+          Math.max(0, deadline - Date.now() + 10),
+        );
+      });
+      const { value, done } = (await Promise.race([readPromise, wakeup])) as {
+        value: Uint8Array | undefined;
+        done: boolean;
+      };
+      if (done) break;
+      if (value === undefined) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const raw = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
+        for (const line of raw.split('\n')) {
+          if (line.startsWith('event: session_update')) sessionUpdates += 1;
+          if (line.startsWith('event: client_evicted')) sawEviction = true;
+        }
+      }
+    }
+    await reader.cancel().catch(() => undefined);
+
+    expect(sessionUpdates).toBeGreaterThanOrEqual(3);
+    expect(sawEviction).toBe(false);
+  });
+
+  it('does NOT evict when a back-pressured write drains within the idle budget', async () => {
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedBackpressure = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const wrote =
+        typeof encodingOrCb === 'function'
+          ? originalWrite.call(this, chunk, encodingOrCb)
+          : originalWrite.call(this, chunk, encodingOrCb, cb);
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedBackpressure && text.includes('event: session_update')) {
+        forcedBackpressure = true;
+        setTimeout(() => this.emit('drain'), 150);
+        return false;
+      }
+      return wrote;
+    });
+
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            data: { tick: 1 },
+          };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          writerIdleTimeoutMs: 200,
+        },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+      expect(res.status).toBe(200);
+
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let sawSessionUpdate = false;
+      let sawEviction = false;
+      const deadline = Date.now() + 350;
+      while (Date.now() < deadline) {
+        const readPromise = reader.read();
+        const wakeup = new Promise<{ value: undefined; done: false }>((r) => {
+          setTimeout(
+            () => r({ value: undefined, done: false }),
+            Math.max(0, deadline - Date.now() + 10),
+          );
+        });
+        const { value, done } = (await Promise.race([readPromise, wakeup])) as {
+          value: Uint8Array | undefined;
+          done: boolean;
+        };
+        if (done) break;
+        if (value === undefined) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const raw = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
+          for (const line of raw.split('\n')) {
+            if (line.startsWith('event: session_update')) {
+              sawSessionUpdate = true;
+            }
+            if (line.startsWith('event: client_evicted')) sawEviction = true;
+          }
+        }
+      }
+      await reader.cancel().catch(() => undefined);
+
+      expect(forcedBackpressure).toBe(true);
+      expect(sawSessionUpdate).toBe(true);
+      expect(sawEviction).toBe(false);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+});
+
+describe('T2.9 serve-side errorKind taxonomy (issue #4514)', () => {
+  it('publishes the new error kinds in SERVE_ERROR_KINDS', async () => {
+    // Lock the serve-side taxonomy contains both T2.9 kinds. The
+    // mirrored SDK assertion lives in
+    // `packages/sdk-typescript/test/unit/daemon-public-surface.test.ts`
+    // (different package, no cross-package import). Together they
+    // guarantee a PR adding a kind on one side without the other
+    // fails CI.
+    const { SERVE_ERROR_KINDS } = await import('@qwen-code/acp-bridge/status');
+    expect(SERVE_ERROR_KINDS).toContain('prompt_deadline_exceeded');
+    expect(SERVE_ERROR_KINDS).toContain('writer_idle_timeout');
   });
 });

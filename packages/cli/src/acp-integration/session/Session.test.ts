@@ -469,6 +469,36 @@ describe('Session', () => {
       );
     });
 
+    it('emits a current_model_update extNotification after switching (A1)', async () => {
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `qwen3-coder-plus(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/model-update',
+        expect.objectContaining({
+          v: 1,
+          sessionId: 'test-session-id',
+          currentModelId: 'qwen3-coder-plus',
+        }),
+      );
+    });
+
+    it('does NOT emit the model-update notification when the switch fails (A1)', async () => {
+      switchModelSpy.mockRejectedValueOnce(new Error('switch boom'));
+      await expect(
+        session.setModel({
+          sessionId: 'test-session-id',
+          modelId: `qwen3-coder-plus(${AuthType.USE_OPENAI})`,
+        }),
+      ).rejects.toThrow();
+      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+        'qwen/notify/session/model-update',
+        expect.anything(),
+      );
+    });
+
     it('rejects empty/whitespace model IDs', async () => {
       await expect(
         session.setModel({

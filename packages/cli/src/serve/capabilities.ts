@@ -201,6 +201,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // defaults (no flag) omit the tag, preserving the bit-for-bit shape
   // older clients expect.
   require_auth: { since: 'v1' },
+  // T2.4 (issue #4514). Daemon was booted with `--allow-origin <pattern>`
+  // (at least one entry, including the `*` literal). Advertised
+  // CONDITIONALLY — only when the flag is set — so browser SDK clients
+  // can pre-flight whether the daemon will honor their cross-origin
+  // request before issuing it (and parsing a 403). The configured
+  // pattern list is intentionally NOT echoed in the capabilities
+  // envelope — browser webui knows its own origin, and surfacing the
+  // list would let an unauthenticated `/capabilities` reader
+  // enumerate every trusted origin, which is useful recon for a
+  // misconfigured deployment.
+  allow_origin: { since: 'v1' },
   // Issue #4175 PR 21. Daemon exposes the device-flow auth surface
   // (`POST /workspace/auth/device-flow`, GET/DELETE on `/:id`, and
   // `GET /workspace/auth/status`). Advertised UNCONDITIONALLY: the
@@ -210,17 +221,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // status route (extension data on `/capabilities` would inflate the
   // descriptor shape; we keep the registry uniform).
   auth_device_flow: { since: 'v1' },
-  // #4175 F3 (Commit 6). Daemon advertises which permission mediation
-  // policies it can run. Clients introspect `modes` to discover the
-  // closed set of strategies before relying on `permission_partial_vote`
-  // / `permission_forbidden` SSE events. The active policy for THIS
-  // daemon is exposed in the `/capabilities` envelope's
-  // `policy.permission` field — the mode list here is the
-  // build-supported set, distinct from runtime configuration.
   permission_mediation: {
     since: 'v1',
     modes: ['first-responder', 'designated', 'consensus', 'local-only'],
   },
+  prompt_absolute_deadline: { since: 'v1' },
+  writer_idle_timeout: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -228,17 +234,14 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
 /**
  * Per-deployment feature toggles surfaced through `/capabilities`.
  *
- * `requireAuth` controls whether the conditional `require_auth` tag is
- * advertised. `mcpPoolActive` (F2 #4175 commit 5) advertises
- * `mcp_workspace_pool` + `mcp_pool_restart` together when the daemon
- * runs with the pool enabled (default; off only with
- * `QWEN_SERVE_NO_MCP_POOL=1`). Other Wave 4 follow-ups can extend
- * this object as more deployment-shape capability tags appear (e.g.
- * `redact_errors`).
+ * advertised.
  */
 export interface AdvertiseFeatureToggles {
   requireAuth?: boolean;
   mcpPoolActive?: boolean;
+  allowOriginActive?: boolean;
+  promptDeadlineMs?: number;
+  writerIdleTimeoutMs?: number;
 }
 
 /**
@@ -278,13 +281,21 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['require_auth', (toggles) => toggles.requireAuth === true],
-  // F2 (#4175 commit 5): pool tags advertise as a unit. Both keys
-  // share the same predicate so SDK clients can rely on
-  // `mcp_workspace_pool ⇒ entryCount/entrySummary fields present`
-  // and `mcp_pool_restart ⇒ ?entryIndex= + entries[] response shape
-  // valid` without per-tag pre-flighting.
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],
   ['mcp_pool_restart', (toggles) => toggles.mcpPoolActive === true],
+  ['allow_origin', (toggles) => toggles.allowOriginActive === true],
+  [
+    'prompt_absolute_deadline',
+    (toggles) =>
+      typeof toggles.promptDeadlineMs === 'number' &&
+      toggles.promptDeadlineMs > 0,
+  ],
+  [
+    'writer_idle_timeout',
+    (toggles) =>
+      typeof toggles.writerIdleTimeoutMs === 'number' &&
+      toggles.writerIdleTimeoutMs > 0,
+  ],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(
