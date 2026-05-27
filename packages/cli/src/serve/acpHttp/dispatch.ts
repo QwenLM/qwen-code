@@ -564,7 +564,13 @@ export class AcpDispatcher {
             // Local teardown must run even if the bridge close throws —
             // otherwise the SSE stream, abort controller, buffered frames and
             // pending permissions leak until idle TTL.
-            conn.closeSessionStream(sessionId);
+            try {
+              conn.closeSessionStream(sessionId);
+            } catch (teardownErr) {
+              writeStderrLine(
+                `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(teardownErr instanceof Error ? teardownErr.message : String(teardownErr))}`,
+              );
+            }
             conn.closingSessions.delete(sessionId);
           }
           this.replyConn(conn, id, {});
@@ -751,7 +757,20 @@ export class AcpDispatcher {
           return;
 
         case `${QWEN_METHOD_NS}workspace/init`: {
-          const force = params['force'] === true;
+          const rawForce = params['force'];
+          if (rawForce !== undefined && typeof rawForce !== 'boolean') {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`force` must be a boolean when provided',
+                ),
+              );
+            }
+            return;
+          }
+          const force = rawForce === true;
           const result = await this.bridge.initWorkspace(
             { force },
             conn.clientId,
@@ -797,11 +816,28 @@ export class AcpDispatcher {
             }
             return;
           }
-          const entryIndex = params['entryIndex'];
+          const rawIdx = params['entryIndex'];
+          if (
+            rawIdx !== undefined &&
+            (typeof rawIdx !== 'number' ||
+              !Number.isInteger(rawIdx) ||
+              rawIdx < 0)
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`entryIndex` must be a non-negative integer',
+                ),
+              );
+            }
+            return;
+          }
           const result = await this.bridge.restartMcpServer(
             serverName,
             conn.clientId,
-            typeof entryIndex === 'number' ? { entryIndex } : undefined,
+            rawIdx !== undefined ? { entryIndex: rawIdx } : undefined,
           );
           this.replyConn(conn, id, result as unknown);
           return;
@@ -915,12 +951,15 @@ export class AcpDispatcher {
             // session is fully gone.
             binding?.clientId,
           );
-          // Mirror resolveClientResponse: a failed cancel (non-"not found")
-          // leaves the bridge mediator waiting for a vote that will never
-          // arrive until teardown, so surface it for the operator.
+          // Unlike resolveClientResponse (where the pending entry exists and
+          // teardown can retry), this path returns BEFORE `conn.pending.set` —
+          // so `abandonPendingForSession` will NOT find it. A failed cancel
+          // here means the mediator is stuck permanently, not just until
+          // teardown. Log clearly so the operator knows there is no automatic
+          // recovery; manual intervention (restart the agent session) is needed.
           if (!cancelled) {
             writeStderrLine(
-              `qwen serve: /acp permission cancel FAILED for ${logSafe(sessionId)} (mediator may be stuck until teardown)`,
+              `qwen serve: /acp permission cancel FAILED for ${logSafe(sessionId)} (mediator stuck; no automatic recovery)`,
             );
           }
           return;

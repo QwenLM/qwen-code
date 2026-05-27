@@ -26,6 +26,7 @@ export class SseStream {
   private writeChain: Promise<void> = Promise.resolve();
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private closed = false;
+  private cleanupFn: (() => void) | undefined;
 
   constructor(
     private readonly res: Response,
@@ -55,9 +56,9 @@ export class SseStream {
     }, 15_000);
     this.heartbeat.unref();
 
-    const cleanup = () => this.close();
-    this.res.req.on('close', cleanup);
-    this.res.on('error', cleanup);
+    this.cleanupFn = () => this.close();
+    this.res.req.on('close', this.cleanupFn);
+    this.res.on('error', this.cleanupFn);
   }
 
   /** Serialize a JSON-RPC message as one SSE frame. */
@@ -73,6 +74,11 @@ export class SseStream {
     if (this.closed) return;
     this.closed = true;
     if (this.heartbeat) clearInterval(this.heartbeat);
+    if (this.cleanupFn) {
+      this.res.req.off('close', this.cleanupFn);
+      this.res.off('error', this.cleanupFn);
+      this.cleanupFn = undefined;
+    }
     try {
       if (!this.res.writableEnded) this.res.end();
     } catch {

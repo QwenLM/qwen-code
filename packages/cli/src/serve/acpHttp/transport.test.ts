@@ -1063,7 +1063,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     void post(connId, { jsonrpc: '2.0', id: 300, method: 'session/close', params: { sessionId: 'sess-1' } });
     await new Promise((r) => setTimeout(r, 30));
     await post(connId, { jsonrpc: '2.0', id: 301, method: 'session/load', params: { sessionId: 'sess-1' } });
-    const frames = (await got) as Array<{ id: number; error?: { code: number } }>;
+    const frames = (await got) as Array<{ id: number; error?: { code: number; message: string } }>;
     const loadReply = frames.find((f) => f.id === 301);
     // Transient server-side race → INTERNAL_ERROR (-32603), not INVALID_PARAMS.
     expect(loadReply?.error?.code).toBe(-32603); // "being closed; retry"
