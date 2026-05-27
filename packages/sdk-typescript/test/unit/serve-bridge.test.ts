@@ -398,5 +398,132 @@ describe('serve-bridge', () => {
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('No SSE stream');
     });
+
+    it('should reject concurrent prompts on the same session', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: () => jsonResponse(200, { stopReason: 'end' }),
+      });
+
+      const { createPromptCollector } = await import(
+        '../../src/daemon-mcp/serve-bridge/sse.js'
+      );
+      const fakeStream: SessionEventStream = {
+        sessionId: 'test-session',
+        abortCtrl: new AbortController(),
+        activeCollector: createPromptCollector(), // already has an active collector
+        lastActivityMs: Date.now(),
+      };
+      state.eventStreams.set('test-session', fakeStream);
+
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const tools = agentTools(state);
+      const promptTool = tools.find(
+        (t: { name: string }) => t.name === 'prompt',
+      );
+
+      const result = await promptTool.handler({ prompt: 'test' }, {});
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('already in progress');
+    });
+
+    it('prompt_cancel should resolve active collector', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: () => jsonResponse(200, {}),
+      });
+
+      const { createPromptCollector } = await import(
+        '../../src/daemon-mcp/serve-bridge/sse.js'
+      );
+      const collector = createPromptCollector();
+      const fakeStream: SessionEventStream = {
+        sessionId: 'test-session',
+        abortCtrl: new AbortController(),
+        activeCollector: collector,
+        lastActivityMs: Date.now(),
+      };
+      state.eventStreams.set('test-session', fakeStream);
+
+      const { agentTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/agent.js'
+      );
+      const tools = agentTools(state);
+      const cancelTool = tools.find(
+        (t: { name: string }) => t.name === 'prompt_cancel',
+      );
+
+      await cancelTool.handler({}, {});
+      expect(collector.resolved).toBe(true);
+    });
+  });
+
+  describe('safety guards', () => {
+    it('should reject global scope in workspace_memory_write', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+      });
+      state.allowGlobalScope = false;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const memWriteTool = tools.find(
+        (t: { name: string }) => t.name === 'workspace_memory_write',
+      );
+
+      const result = await memWriteTool.handler(
+        { scope: 'global', content: 'test', mode: 'append' },
+        {},
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Global scope is disabled');
+    });
+
+    it('should reject global scope in workspace_agents_manage', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+      });
+      state.allowGlobalScope = false;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const agentsTool = tools.find(
+        (t: { name: string }) => t.name === 'workspace_agents_manage',
+      );
+
+      const result = await agentsTool.handler(
+        { action: 'create', scope: 'global', name: 'x', description: 'x', system_prompt: 'x' },
+        {},
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('Global scope is disabled');
+    });
+
+    it('should reject file_write replace mode without expected_hash', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+      });
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const writeFileTool = tools.find(
+        (t: { name: string }) => t.name === 'file_write',
+      );
+
+      const result = await writeFileTool.handler(
+        { path: 'test.txt', content: 'hello', mode: 'replace' },
+        {},
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('expected_hash is required');
+    });
   });
 });

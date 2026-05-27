@@ -60,12 +60,13 @@ export function sessionTools(state: BridgeState): any[] {
         workspace_cwd: z.string().optional().describe('Workspace path.'),
       },
       handler(async (args) => {
-        if (state.defaultSessionId) {
-          stopEventStream(state, state.defaultSessionId);
-        }
         const result = await state.client.loadSession(args.session_id, {
           workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
         });
+        // Stop old SSE only after load is confirmed
+        if (state.defaultSessionId && state.defaultSessionId !== result.sessionId) {
+          stopEventStream(state, state.defaultSessionId);
+        }
         state.defaultSessionId = result.sessionId;
         startEventStream(state, result.sessionId);
         return formatJsonResult(result);
@@ -80,12 +81,13 @@ export function sessionTools(state: BridgeState): any[] {
         workspace_cwd: z.string().optional().describe('Workspace path.'),
       },
       handler(async (args) => {
-        if (state.defaultSessionId) {
-          stopEventStream(state, state.defaultSessionId);
-        }
         const result = await state.client.resumeSession(args.session_id, {
           workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
         });
+        // Stop old SSE only after resume is confirmed
+        if (state.defaultSessionId && state.defaultSessionId !== result.sessionId) {
+          stopEventStream(state, state.defaultSessionId);
+        }
         state.defaultSessionId = result.sessionId;
         startEventStream(state, result.sessionId);
         return formatJsonResult(result);
@@ -103,11 +105,14 @@ export function sessionTools(state: BridgeState): any[] {
       },
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
-        // Close HTTP session first, then stop SSE
-        await state.client.closeSession(sessionId);
-        stopEventStream(state, sessionId);
-        if (state.defaultSessionId === sessionId) {
-          state.defaultSessionId = undefined;
+        try {
+          await state.client.closeSession(sessionId);
+        } finally {
+          // Always clean up SSE even if closeSession throws
+          stopEventStream(state, sessionId);
+          if (state.defaultSessionId === sessionId) {
+            state.defaultSessionId = undefined;
+          }
         }
         return formatJsonResult({ ok: true, sessionId });
       }),

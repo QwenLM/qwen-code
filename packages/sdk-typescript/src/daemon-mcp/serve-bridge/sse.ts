@@ -96,7 +96,14 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
     } finally {
       // Resolve any pending collector so prompt doesn't hang on disconnect
       stream.activeCollector?.resolve();
-      state.eventStreams.delete(sessionId);
+      // Only delete if this is still our stream (not replaced by startEventStream)
+      if (state.eventStreams.get(sessionId) === stream) {
+        state.eventStreams.delete(sessionId);
+        // Clear defaultSessionId so callers get a clear error
+        if (state.defaultSessionId === sessionId) {
+          state.defaultSessionId = undefined;
+        }
+      }
     }
   })();
 }

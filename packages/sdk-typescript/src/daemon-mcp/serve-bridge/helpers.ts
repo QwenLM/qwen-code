@@ -24,6 +24,11 @@ export function resolveSessionId(
       'No session active. Call session_create first, or pass an explicit session_id.',
     );
   }
+  // Bump activity timestamp so workspace operations reset the idle TTL
+  const stream = state.eventStreams.get(sessionId);
+  if (stream) {
+    stream.lastActivityMs = Date.now();
+  }
   return sessionId;
 }
 

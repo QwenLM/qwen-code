@@ -68,6 +68,9 @@ export function agentTools(state: BridgeState): any[] {
           clearTimeout(timeoutId!);
 
           if (timedOut) {
+            // Cancel daemon-side processing to prevent stale chunks
+            // from contaminating the next prompt's collector.
+            try { await state.client.cancel(sessionId); } catch { /* best-effort */ }
             const partialText = collector.texts.join('');
             return formatJsonResult({
               session_id: sessionId,
