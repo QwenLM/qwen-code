@@ -30,7 +30,7 @@ import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { safeJsonParse } from '../utils/safeJsonParse.js';
+import { jsonrepair } from 'jsonrepair';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
 
@@ -550,8 +550,9 @@ function parseJsonObjectFromText(
     withoutFence = withoutFence.replace(/\s*```$/i, '');
   }
 
-  for (const jsonSlice of findJsonObjectSlices(withoutFence)) {
-    const parseFailed = Symbol('parseFailed');
+  for (const jsonSlice of findJsonObjectSlices(withoutFence)
+    .slice()
+    .reverse()) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(jsonSlice);
@@ -559,10 +560,11 @@ function parseJsonObjectFromText(
       if (!shouldAttemptJsonRepair(jsonSlice)) {
         continue;
       }
-      parsed = safeJsonParse<unknown>(jsonSlice, parseFailed);
-    }
-    if (parsed === parseFailed) {
-      continue;
+      try {
+        parsed = JSON.parse(jsonrepair(jsonSlice));
+      } catch {
+        continue;
+      }
     }
     if (
       parsed !== null &&
@@ -577,10 +579,13 @@ function parseJsonObjectFromText(
 }
 
 function shouldAttemptJsonRepair(jsonSlice: string): boolean {
-  return (
-    /"[^"]+"\s*:/.test(jsonSlice) ||
-    /:\s*(?:"|[-\d[{]|\btrue\b|\bfalse\b|\bnull\b)/.test(jsonSlice)
-  );
+  if (/"[^"]+"\s*:/.test(jsonSlice)) {
+    return true;
+  }
+  if (/,\s*[}\]]/.test(jsonSlice)) {
+    return /:\s*(?:"|[-\d[{]|\btrue\b|\bfalse\b|\bnull\b)/.test(jsonSlice);
+  }
+  return /:\s*(?:[-\d[{]|\btrue\b|\bfalse\b|\bnull\b)/.test(jsonSlice);
 }
 
 function findJsonObjectSlices(text: string): string[] {

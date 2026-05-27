@@ -24,7 +24,8 @@ import { retryWithBackoff } from '../utils/retry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 
-const { mockDebugInfo, mockDebugWarn } = vi.hoisted(() => ({
+const { mockDebugError, mockDebugInfo, mockDebugWarn } = vi.hoisted(() => ({
+  mockDebugError: vi.fn(),
   mockDebugInfo: vi.fn(),
   mockDebugWarn: vi.fn(),
 }));
@@ -32,7 +33,7 @@ const { mockDebugInfo, mockDebugWarn } = vi.hoisted(() => ({
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => ({
     debug: vi.fn(),
-    error: vi.fn(),
+    error: mockDebugError,
     info: mockDebugInfo,
     warn: mockDebugWarn,
   }),
@@ -472,6 +473,30 @@ describe('BaseLlmClient', () => {
       expect(result).toEqual({ color: 'cyan' });
     });
 
+    it('should prefer the last valid JSON object candidate from explanatory text', async () => {
+      const mockResponse = createMockResponseWithText(
+        'Format example: {"example":"value"}\nResult: {"answer":"actual"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ answer: 'actual' });
+    });
+
+    it('should parse a JSON object containing arrays with nested objects', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{"data":[{"x":1}],"ok":true}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ data: [{ x: 1 }], ok: true });
+    });
+
     it('should parse a JSON object even when prose brackets appear first', async () => {
       const mockResponse = createMockResponseWithText(
         'Based on [your request], here is: {"status":"done"}',
@@ -555,6 +580,42 @@ describe('BaseLlmClient', () => {
       expect(warnMessages).toContain('Model: test-model');
       expect(warnMessages).toContain('promptId: test-prompt-id');
       expect(warnMessages).not.toContain('broken json');
+    });
+
+    it('should not repair prose fragments with quoted string values into fabricated JSON objects', async () => {
+      const mockResponse = createMockResponseWithText(
+        'Notes: {note: "see docs"}. No structured response.',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
+    });
+
+    it('should not log raw JSON text when repair fails', async () => {
+      const rawJson = '{"a":"\\uZZZZ"}';
+      const mockResponse = createMockResponseWithText(rawJson);
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugError).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          jsonString: expect.stringContaining(rawJson),
+        }),
+      );
+      const warnMessages = mockDebugWarn.mock.calls
+        .map(([message]) => String(message))
+        .join('\n');
+      expect(warnMessages).not.toContain(rawJson);
     });
 
     it('should ignore malformed fenced JSON text', async () => {
