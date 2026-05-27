@@ -766,6 +766,36 @@ describe('useTextBuffer', () => {
       expect(getBufferState(result).text).toBe('@/path/to/report\\,v2.txt ');
     });
 
+    it('should escape shell metacharacters like parentheses in paths', () => {
+      // Suggestion 4 (wenshao #4544): Test shell metacharacters in paths
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === '/Downloads/report(v2).txt' ||
+            p === '/data[2024].csv' ||
+            p === '/report;v2.txt',
+        }),
+      );
+      // Test parentheses
+      act(() =>
+        result.current.insert("'/Downloads/report(v2).txt'", { paste: true }),
+      );
+      expect(getBufferState(result).text).toBe(
+        '@/Downloads/report\\(v2\\).txt ',
+      );
+
+      // Reset buffer and test brackets
+      act(() => result.current.setText(''));
+      act(() => result.current.insert("'/data[2024].csv'", { paste: true }));
+      expect(getBufferState(result).text).toBe('@/data\\[2024\\].csv ');
+
+      // Reset buffer and test semicolon
+      act(() => result.current.setText(''));
+      act(() => result.current.insert("'/report;v2.txt'", { paste: true }));
+      expect(getBufferState(result).text).toBe('@/report\\;v2.txt ');
+    });
+
     it('should handle relative paths like ./src/index.ts', () => {
       // Suggestion 1 (wenshao #4544): looksLikePath should support relative paths
       const { result } = renderHook(() =>

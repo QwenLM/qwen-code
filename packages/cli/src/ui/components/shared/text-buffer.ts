@@ -1916,8 +1916,7 @@ function looksLikePath(str: string): boolean {
     unquoted.startsWith('../') ||
     unquoted.startsWith('~/') ||
     unquoted.startsWith('.') ||
-    /^[A-Za-z]:/.test(unquoted) ||
-    unquoted.includes('/')
+    /^[A-Za-z]:/.test(unquoted)
   );
 }
 
@@ -1944,6 +1943,9 @@ function tryExtractFilePaths(
   const hadNonPathToken = { value: false };
 
   for (const line of lines) {
+    // Short-circuit: once any token is flagged as non-path, the result will be null
+    if (hadNonPathToken.value) break;
+
     // Use a regex that only matches quoted content starting with path-like chars
     // to avoid false matches on English contractions (e.g., "don't").
     const quotedPathRegex = /'([~/.][^']*)'/g;
@@ -1963,7 +1965,7 @@ function tryExtractFilePaths(
       }
       const unescaped = unescapePath(match[1]);
       if (isValidPath(unescaped)) {
-        validPaths.push(`@${escapePathAndCommas(unescaped)}`);
+        validPaths.push(`@${escapePath(unescaped)}`);
       } else {
         // Quoted path found but not a valid path — mark as non-path
         hadNonPathToken.value = true;
@@ -2003,16 +2005,9 @@ function tryExtractFilePaths(
 }
 
 /**
- * Escape spaces and commas so that downstream @-path parsing doesn't truncate.
- * parseAllAtCommands terminates at unescaped whitespace and commas.
- */
-function escapePathAndCommas(path: string): string {
-  return escapePath(path);
-}
-
-/**
  * Extract file paths from a whitespace-separated segment.
- * Tries shortest possible path first to handle paths with spaces.
+ * Tries longest possible path first (greedy) so paths with spaces are matched
+ * before shorter prefixes.
  * Pre-filters tokens that don't look like paths to avoid O(n²) fs calls.
  * Sets `hadNonPathToken` to true if any token was skipped (not a valid path).
  */
@@ -2025,6 +2020,9 @@ function extractPathsFromSegment(
   const paths: string[] = [];
   let i = 0;
   while (i < tokens.length) {
+    // Short-circuit: once any token is flagged as non-path, the result will be null
+    if (hadNonPathToken.value) break;
+
     // Pre-filter: skip tokens that can't possibly be paths
     if (!looksLikePath(tokens[i])) {
       hadNonPathToken.value = true;
@@ -2043,7 +2041,7 @@ function extractPathsFromSegment(
       }
       const unescaped = unescapePath(unquoted);
       if (isValidPath(unescaped)) {
-        paths.push(`@${escapePathAndCommas(unescaped)}`);
+        paths.push(`@${escapePath(unescaped)}`);
         i = j;
         found = true;
         break;
