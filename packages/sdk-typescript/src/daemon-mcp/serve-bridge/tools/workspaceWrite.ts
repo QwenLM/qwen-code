@@ -130,11 +130,16 @@ export function workspaceWriteTools(state: BridgeState): any[] {
       {
         server_name: z.string().describe('Name of the MCP server to restart.'),
       },
-      handler(async (args) =>
-        formatJsonResult(
+      handler(async (args) => {
+        if (!state.allowGlobalScope) {
+          return formatToolError(
+            'MCP server restart is restricted for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.',
+          );
+        }
+        return formatJsonResult(
           await state.client.restartMcpServer(args.server_name),
-        ),
-      ),
+        );
+      }),
     ),
 
     tool(
@@ -260,11 +265,10 @@ async function handleAgentUpdate(state: BridgeState, args: any): Promise<any> {
     args.system_prompt !== undefined ||
     args.tools !== undefined ||
     args.disallowed_tools !== undefined ||
-    args.model !== undefined ||
-    args.scope !== undefined;
+    args.model !== undefined;
   if (!hasField) {
     return formatToolError(
-      'At least one field to update must be provided (description, system_prompt, tools, disallowed_tools, model, or scope).',
+      'At least one field to update must be provided (description, system_prompt, tools, disallowed_tools, or model).',
     );
   }
   return formatJsonResult(
