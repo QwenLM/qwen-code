@@ -37,6 +37,7 @@ import type {
   ExtensionInstallEvent,
   ExtensionUninstallEvent,
   ToolOutputTruncatedEvent,
+  ToolOutputTruncationFailedEvent,
   ExtensionEnableEvent,
   ModelSlashCommandEvent,
   ExtensionDisableEvent,
@@ -601,6 +602,30 @@ export class QwenLogger {
         output_file: path.basename(event.output_file),
       }),
     });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logToolOutputTruncationFailedEvent(
+    event: ToolOutputTruncationFailedEvent,
+  ): void {
+    const rumEvent = this.createActionEvent(
+      'tool',
+      'tool_output_truncation_failed',
+      {
+        properties: {
+          tool_name: event.tool_name,
+          prompt_id: event.prompt_id,
+          call_id: event.call_id,
+          error_type: event.error_type,
+        },
+        snapshots: JSON.stringify({
+          original_content_length: event.original_content_length,
+          error_message: event.error_message,
+        }),
+      },
+    );
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();

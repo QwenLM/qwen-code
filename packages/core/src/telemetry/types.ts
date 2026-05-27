@@ -726,6 +726,42 @@ export class ToolOutputTruncatedEvent implements BaseTelemetryEvent {
   }
 }
 
+export class ToolOutputTruncationFailedEvent implements BaseTelemetryEvent {
+  readonly eventName = 'tool_output_truncation_failed';
+  readonly 'event.timestamp' = new Date().toISOString();
+  'event.name': string;
+  tool_name: string;
+  prompt_id: string;
+  call_id: string;
+  original_content_length: number;
+  error_type: string;
+  error_message: string;
+
+  constructor(
+    prompt_id: string,
+    details: {
+      toolName: string;
+      callId: string;
+      originalContentLength: number;
+      error: unknown;
+    },
+  ) {
+    this['event.name'] = this.eventName;
+    this.prompt_id = prompt_id;
+    this.tool_name = details.toolName;
+    this.call_id = details.callId;
+    this.original_content_length = details.originalContentLength;
+    this.error_type =
+      details.error instanceof Error
+        ? details.error.name
+        : typeof details.error;
+    this.error_message =
+      details.error instanceof Error
+        ? details.error.message
+        : String(details.error);
+  }
+}
+
 export class ExtensionUninstallEvent implements BaseTelemetryEvent {
   'event.name': 'extension_uninstall';
   'event.timestamp': string;
@@ -969,6 +1005,7 @@ export type TelemetryEvent =
   | ExtensionInstallEvent
   | ExtensionUninstallEvent
   | ToolOutputTruncatedEvent
+  | ToolOutputTruncationFailedEvent
   | ModelSlashCommandEvent
   | AuthEvent
   | HookCallEvent

@@ -90,6 +90,7 @@ type ToolSpanRecord = {
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
 const shouldThrowToolSpanSetAttribute = vi.hoisted(() => ({ value: false }));
 const shouldThrowToolSpanSetStatus = vi.hoisted(() => ({ value: false }));
+const mockLogToolOutputTruncationFailed = vi.hoisted(() => vi.fn());
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
   info: vi.fn(),
@@ -103,6 +104,15 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => {
   return {
     ...actual,
     createDebugLogger: vi.fn(() => mockDebugLogger),
+  };
+});
+
+vi.mock('../telemetry/loggers.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../telemetry/loggers.js')>();
+  return {
+    ...actual,
+    logToolOutputTruncationFailed: mockLogToolOutputTruncationFailed,
   };
 });
 
@@ -7392,7 +7402,7 @@ describe('CoreToolScheduler tool output truncation', () => {
       onEditorClose: vi.fn(),
     });
 
-    return { scheduler, onAllToolCallsComplete };
+    return { scheduler, onAllToolCallsComplete, mockConfig };
   }
 
   function extractFunctionResponseOutput(responseParts: Part[]): string {
@@ -7407,6 +7417,7 @@ describe('CoreToolScheduler tool output truncation', () => {
     mockDebugLogger.info.mockReset();
     mockDebugLogger.warn.mockReset();
     mockDebugLogger.error.mockReset();
+    mockLogToolOutputTruncationFailed.mockReset();
     vi.mocked(fsPromises.chmod).mockReset();
     vi.mocked(fsPromises.mkdir).mockReset();
     vi.mocked(fsPromises.writeFile).mockReset();
@@ -7478,10 +7489,8 @@ describe('CoreToolScheduler tool output truncation', () => {
 
   it('does not fail a successful tool call when output truncation fails', async () => {
     const largeOutput = 'A'.repeat(5000);
-    const { scheduler, onAllToolCallsComplete } = createLargeOutputScheduler(
-      largeOutput,
-      { throwOnThresholdRead: true },
-    );
+    const { scheduler, onAllToolCallsComplete, mockConfig } =
+      createLargeOutputScheduler(largeOutput, { throwOnThresholdRead: true });
 
     await scheduler.schedule(
       [
@@ -7504,6 +7513,18 @@ describe('CoreToolScheduler tool output truncation', () => {
 
     expect(completedCalls[0].status).toBe('success');
     expect(output).toBe(largeOutput);
+    expect(mockLogToolOutputTruncationFailed).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({
+        'event.name': 'tool_output_truncation_failed',
+        tool_name: LargeOutputTool.Name,
+        prompt_id: 'prompt-truncate-failure-1',
+        call_id: 'truncate-failure-1',
+        original_content_length: largeOutput.length,
+        error_type: 'Error',
+        error_message: 'threshold read failed',
+      }),
+    );
   });
 
   it('reports contentLength after hook context is appended without truncation', async () => {

@@ -96,6 +96,7 @@ import type {
   ContentRetryFailureEvent,
   RipgrepFallbackEvent,
   ToolOutputTruncatedEvent,
+  ToolOutputTruncationFailedEvent,
   ExtensionDisableEvent,
   ExtensionEnableEvent,
   ExtensionUninstallEvent,
@@ -279,6 +280,29 @@ export function logToolOutputTruncated(
     body: `Tool output truncated for ${event.tool_name}.`,
     attributes,
   };
+  logger.emit(logRecord);
+}
+
+export function logToolOutputTruncationFailed(
+  config: Config,
+  event: ToolOutputTruncationFailedEvent,
+): void {
+  QwenLogger.getInstance(config)?.logToolOutputTruncationFailedEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': 'tool_output_truncation_failed',
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logRecord: LogRecord = {
+    body: `Tool output truncation failed for ${event.tool_name}.`,
+    attributes,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
   logger.emit(logRecord);
 }
 

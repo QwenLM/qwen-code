@@ -25,6 +25,7 @@ import {
   IdeConnectionType,
   HookCallEvent,
   ToolOutputTruncatedEvent,
+  ToolOutputTruncationFailedEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
@@ -418,6 +419,38 @@ describe('QwenLogger', () => {
             threshold: 500,
             lines: 10,
             output_file: 'test-tool.output',
+          }),
+        }),
+      );
+    });
+
+    it('should log tool output truncation failures', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new ToolOutputTruncationFailedEvent('prompt-id-1', {
+        toolName: 'test-tool',
+        callId: 'call-id-1',
+        originalContentLength: 1000,
+        error: new Error('disk full'),
+      });
+
+      logger.logToolOutputTruncationFailedEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'tool',
+          name: 'tool_output_truncation_failed',
+          properties: {
+            tool_name: 'test-tool',
+            prompt_id: 'prompt-id-1',
+            call_id: 'call-id-1',
+            error_type: 'Error',
+          },
+          snapshots: JSON.stringify({
+            original_content_length: 1000,
+            error_message: 'disk full',
           }),
         }),
       );

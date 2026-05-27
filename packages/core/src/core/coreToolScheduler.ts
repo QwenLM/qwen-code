@@ -36,8 +36,10 @@ import {
   ToolConfirmationOutcome,
   ApprovalMode,
   logToolCall,
+  logToolOutputTruncationFailed,
   ToolErrorType,
   ToolCallEvent,
+  ToolOutputTruncationFailedEvent,
   InputFormat,
   Kind,
 } from '../index.js';
@@ -2903,6 +2905,18 @@ export class CoreToolScheduler {
                 (truncationError instanceof Error
                   ? truncationError.message
                   : String(truncationError)),
+            );
+            logToolOutputTruncationFailed(
+              this.config,
+              new ToolOutputTruncationFailedEvent(
+                scheduledCall.request.prompt_id,
+                {
+                  toolName,
+                  callId: scheduledCall.request.callId,
+                  originalContentLength: content.length,
+                  error: truncationError,
+                },
+              ),
             );
           }
         } else if (typeof content !== 'string') {

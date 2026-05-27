@@ -254,6 +254,7 @@ export {
   logModelSlashCommand,
   logPromptSuggestion,
   logSpeculation,
+  logToolOutputTruncationFailed,
 } from './telemetry/loggers.js';
 export {
   AuthEvent,
@@ -267,6 +268,7 @@ export {
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
+  ToolOutputTruncationFailedEvent,
 } from './telemetry/types.js';
 
 // ============================================================================
