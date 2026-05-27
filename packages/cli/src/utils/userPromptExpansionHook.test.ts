@@ -18,42 +18,36 @@ describe('appendUserPromptExpansionAdditionalContext', () => {
     ).toBe('base prompt');
   });
 
-  it('truncates additional context before appending to string prompts', () => {
-    const longContext = 'x'.repeat(10_005);
-
+  it('appends additional context to string prompts', () => {
     const result = appendUserPromptExpansionAdditionalContext(
       'base prompt',
-      longContext,
+      'hook context',
     );
 
-    expect(result).toBe(`base prompt\n\n${'x'.repeat(10_000)}`);
+    expect(result).toBe('base prompt\n\nhook context');
   });
 
-  it('truncates additional context before appending to part arrays', () => {
-    const longContext = 'y'.repeat(10_005);
-
+  it('appends additional context to part arrays', () => {
     const result = appendUserPromptExpansionAdditionalContext(
       [{ text: 'base prompt' }],
-      longContext,
+      'hook context',
     );
 
     expect(result).toEqual([
       { text: 'base prompt' },
-      { text: `\n\n${'y'.repeat(10_000)}` },
+      { text: '\n\nhook context' },
     ]);
   });
 
-  it('truncates additional context before appending to a single part', () => {
-    const longContext = 'z'.repeat(10_005);
-
+  it('appends additional context to a single part', () => {
     const result = appendUserPromptExpansionAdditionalContext(
       { text: 'base prompt' },
-      longContext,
+      'hook context',
     );
 
     expect(result).toEqual([
       { text: 'base prompt' },
-      { text: `\n\n${'z'.repeat(10_000)}` },
+      { text: '\n\nhook context' },
     ]);
   });
 });
@@ -82,6 +76,14 @@ describe('formatUserPromptExpansionBlockedMessage', () => {
     );
 
     expect(result).toBe(`UserPromptExpansion blocked: ${'x'.repeat(9_999)}`);
+  });
+
+  it('does not leave a partial ampersand entity after truncation', () => {
+    const result = formatUserPromptExpansionBlockedMessage(
+      'x'.repeat(9_998) + '&',
+    );
+
+    expect(result).toBe(`UserPromptExpansion blocked: ${'x'.repeat(9_998)}`);
   });
 });
 

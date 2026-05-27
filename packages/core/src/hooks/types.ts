@@ -276,7 +276,7 @@ export function sanitizeUserPromptExpansionAdditionalContext(
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH)
-    .replace(/&(?:amp?|lt?|gt?)?$/, '');
+    .replace(/&(?:a(?:mp?)?|lt?|gt?)?$/, '');
 }
 
 /**

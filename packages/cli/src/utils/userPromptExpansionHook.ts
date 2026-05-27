@@ -6,7 +6,6 @@
 
 import type { PartListUnion } from '@google/genai';
 import {
-  MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
   partToString,
   sanitizeUserPromptExpansionAdditionalContext,
 } from '@qwen-code/qwen-code-core';
@@ -19,10 +18,7 @@ export function appendUserPromptExpansionAdditionalContext(
     return content;
   }
 
-  const suffix = `\n\n${additionalContext.slice(
-    0,
-    MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
-  )}`;
+  const suffix = `\n\n${additionalContext}`;
   if (typeof content === 'string') {
     return `${content}${suffix}`;
   }

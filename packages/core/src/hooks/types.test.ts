@@ -85,4 +85,20 @@ describe('UserPromptExpansionHookOutput.getAdditionalContext', () => {
       'x'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH - 1),
     );
   });
+
+  it('does not leave a partial ampersand entity after truncation', () => {
+    const output = new UserPromptExpansionHookOutput({
+      hookSpecificOutput: {
+        additionalContext:
+          'x'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH - 2) +
+          '&',
+      },
+    });
+
+    const result = output.getAdditionalContext();
+
+    expect(result).toBe(
+      'x'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH - 2),
+    );
+  });
 });
