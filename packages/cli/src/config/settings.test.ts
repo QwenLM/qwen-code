@@ -1998,6 +1998,64 @@ describe('Settings Loading and Merging', () => {
       vi.restoreAllMocks();
     });
 
+    describe('corruption env var propagation', () => {
+      it('should propagate corruptedPath/wasRecovered from env vars', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'] =
+          '/test/path.corrupted';
+        process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] = '1';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+        expect(result.wasRecovered).toBe(true);
+      });
+
+      it('should delete env vars after reading so subsequent calls do not re-trigger', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'] =
+          '/test/path.corrupted';
+        process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] = '0';
+
+        loadSettings(MOCK_WORKSPACE_DIR);
+        expect(
+          process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'],
+        ).toBeUndefined();
+        expect(process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED']).toBeUndefined();
+      });
+
+      it('should only consume env vars for SettingScope.User', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'] =
+          '/test/path.corrupted';
+        process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] = '1';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(result.corruptedPath).toBeUndefined();
+      });
+
+      it('should map wasRecovered="0" to false', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'] =
+          '/test/path.corrupted';
+        process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] = '0';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(result.wasRecovered).toBe(false);
+      });
+    });
+
     it('should resolve environment variables in user settings', () => {
       process.env['TEST_API_KEY'] = 'user_api_key_from_env';
       const userSettingsContent: TestSettings = {

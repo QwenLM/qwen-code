@@ -816,6 +816,10 @@ export async function main() {
         process.cwd(),
         initializationResult!,
       );
+      // Clean up corruption env vars so subsequent relaunch children
+      // and subprocesses don't inherit stale state.
+      delete process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'];
+      delete process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'];
       return;
     }
 

@@ -1017,7 +1017,10 @@ export function loadSettings(
             >;
             migrationWarnings = migrationResult.warnings;
             persistSettingsObject('Error migrating settings file on disk');
-          } else if (hasLegacyNumericVersion || hasInvalidVersion) {
+          } else if (
+            (hasLegacyNumericVersion || hasInvalidVersion) &&
+            !corruptedSaved
+          ) {
             // Migration was deemed needed but nothing executed. Normalize version metadata
             // to avoid repeated no-op checks on startup.
             settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
@@ -1027,12 +1030,14 @@ export function loadSettings(
             persistSettingsObject('Error normalizing settings version on disk');
           }
         } else if (
-          !hasVersionKey ||
-          hasInvalidVersion ||
-          hasLegacyNumericVersion
+          (!hasVersionKey || hasInvalidVersion || hasLegacyNumericVersion) &&
+          !corruptedSaved
         ) {
           // No migration needed/executable, but version metadata is missing or invalid.
           // Normalize it to current version to avoid repeated startup work.
+          // Skip if we just recovered from corruption — the next startup will
+          // handle normalization, avoiding an unnecessary writeWithBackupSync
+          // that would create a .orig file from the freshly reset settings.
           settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
           persistSettingsObject('Error normalizing settings version on disk');
         }
