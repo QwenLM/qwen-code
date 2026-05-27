@@ -155,23 +155,12 @@ export function normalizeDaemonEvent(
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
 
-    case 'prompt_cancelled': {
-      // Forward the optional `reason` (e.g. `'forward_failed'` from the
-      // bridge's C3 compensating broadcast) so consumers can distinguish a
-      // user cancel from a forward failure.
-      const reason = stringField(event.data, 'reason');
-      return [
-        { ...base, type: 'prompt.cancelled', ...(reason ? { reason } : {}) },
-      ];
-    }
+    case 'prompt_cancelled':
+      return [{ ...base, type: 'prompt.cancelled' }];
 
     case 'replay_complete': {
       const replayedCount = numberField(event.data, 'replayedCount') ?? 0;
-      // D4: prefer the canonical `lastReplayedEventId`; fall back to the
-      // deprecated `lastEventId` alias for daemons predating the rename.
-      const lastReplayedEventId =
-        numberField(event.data, 'lastReplayedEventId') ??
-        numberField(event.data, 'lastEventId');
+      const lastReplayedEventId = numberField(event.data, 'lastEventId');
       return [
         {
           ...base,
@@ -505,10 +494,14 @@ function normalizePlanUpdate(
 ): DaemonUiEvent {
   const entries = Array.isArray(update['entries']) ? update['entries'] : [];
   const contentText = capDetails(formatPlanEntries(entries));
+  const planCallId =
+    base.eventId !== undefined
+      ? `${DAEMON_PLAN_TOOL_CALL_ID}-${base.eventId}`
+      : DAEMON_PLAN_TOOL_CALL_ID;
   return {
     ...base,
     type: 'tool.update',
-    toolCallId: DAEMON_PLAN_TOOL_CALL_ID,
+    toolCallId: planCallId,
     title: 'Updated Plan',
     status: 'completed',
     toolName: 'TodoWrite',
@@ -650,12 +643,19 @@ function normalizePermissionResolved(
       },
     ];
   }
+  // A4: the canonical voter is `data.voterClientId`; fall back to the
+  // envelope `originatorClientId` (deprecated alias) for daemons predating
+  // the rename. Both may be absent for no-voter resolutions (timer /
+  // session-closed). `originatorClientId` stays on the base unchanged.
+  const voterClientId =
+    getString(event.data, 'voterClientId') ?? base.originatorClientId;
   return [
     {
       ...base,
       type: 'permission.resolved',
       requestId,
       outcome: describePermissionOutcome(event.data),
+      ...(voterClientId ? { voterClientId } : {}),
     },
   ];
 }
@@ -1187,10 +1187,4 @@ function numberField(value: unknown, key: string): number | undefined {
   if (!isRecord(value)) return undefined;
   const v = value[key];
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
-}
-
-function stringField(value: unknown, key: string): string | undefined {
-  if (!isRecord(value)) return undefined;
-  const v = value[key];
-  return typeof v === 'string' && v.length > 0 ? v : undefined;
 }

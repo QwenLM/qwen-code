@@ -10,6 +10,7 @@ import {
   AuthType,
   clearCachedCredentialFile,
   createDebugLogger,
+  generateSessionRecap,
   QwenOAuth2Event,
   qwenOAuth2Events,
   MCP_BUDGET_WARN_FRACTION,
@@ -25,6 +26,7 @@ import {
   POOLED_TRANSPORTS_DEFAULT,
   SessionEndReason,
   WorkspaceMcpBudget,
+  DiscoveredMCPTool,
   restoreWorktreeContext,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -105,6 +107,8 @@ import {
   type ServeMcpDiscoveryState,
   type ServeMcpServerRuntimeStatus,
   type ServeMcpTransport,
+  type ServeWorkspaceMcpToolStatus,
+  type ServeWorkspaceMcpToolsStatus,
   type ServePreflightCell,
   type ServePreflightKind,
   type ServeSessionContextStatus,
@@ -118,6 +122,8 @@ import {
   type ServeWorkspaceProvidersStatus,
   type ServeWorkspaceSkillStatus,
   type ServeWorkspaceSkillsStatus,
+  type ServeWorkspaceToolStatus,
+  type ServeWorkspaceToolsStatus,
 } from '../serve/status.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
@@ -1288,6 +1294,88 @@ class QwenAgent implements Agent {
     }
   }
 
+  private buildWorkspaceMcpToolsStatus(
+    config: Config,
+    serverName: string,
+  ): ServeWorkspaceMcpToolsStatus {
+    const workspaceCwd = this.safeWorkspaceCwd(config);
+    try {
+      const servers = config.getMcpServers() ?? {};
+      if (!Object.prototype.hasOwnProperty.call(servers, serverName)) {
+        return {
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd,
+          serverName,
+          initialized: true,
+          acpChannelLive: true,
+          tools: [],
+          errors: [
+            {
+              kind: 'mcp_tools',
+              status: 'error',
+              error: `MCP server not configured: ${serverName}`,
+            },
+          ],
+        };
+      }
+
+      const registry = config.getToolRegistry();
+      const allTools = registry?.getAllTools() ?? [];
+      const tools: ServeWorkspaceMcpToolStatus[] = allTools
+        .filter(
+          (tool): tool is DiscoveredMCPTool =>
+            tool instanceof DiscoveredMCPTool && tool.serverName === serverName,
+        )
+        .map((tool) => {
+          const invalidReasons: string[] = [];
+          if (!tool.name) invalidReasons.push('missing name');
+          if (!tool.description) invalidReasons.push('missing description');
+          const schema =
+            tool.parameterSchema &&
+            typeof tool.parameterSchema === 'object' &&
+            !Array.isArray(tool.parameterSchema)
+              ? (tool.parameterSchema as Record<string, unknown>)
+              : undefined;
+          const annotations =
+            tool.annotations &&
+            typeof tool.annotations === 'object' &&
+            !Array.isArray(tool.annotations)
+              ? (tool.annotations as Record<string, unknown>)
+              : undefined;
+          return {
+            name: tool.name || '(unnamed)',
+            serverToolName: tool.serverToolName,
+            description: tool.description,
+            ...(schema ? { schema } : {}),
+            ...(annotations ? { annotations } : {}),
+            isValid: invalidReasons.length === 0,
+            ...(invalidReasons.length > 0
+              ? { invalidReason: invalidReasons.join(', ') }
+              : {}),
+          };
+        });
+
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        serverName,
+        initialized: true,
+        acpChannelLive: true,
+        tools,
+      };
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        serverName,
+        initialized: true,
+        acpChannelLive: true,
+        tools: [],
+        errors: [this.errorCell('mcp_tools', error)],
+      };
+    }
+  }
+
   /**
    * Build the MCP budget status cells exposed on `GET /workspace/mcp`
    * (PR 14). v1 emits one cell with `scope: 'session'` — each ACP
@@ -1821,6 +1909,66 @@ class QwenAgent implements Agent {
     }
   }
 
+  private buildWorkspaceToolsStatus(config: Config): ServeWorkspaceToolsStatus {
+    const workspaceCwd = this.safeWorkspaceCwd(config);
+    try {
+      const registry = config.getToolRegistry();
+      if (!registry) {
+        return {
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd,
+          initialized: true,
+          acpChannelLive: true,
+          tools: [],
+          errors: [
+            {
+              kind: 'tools',
+              status: 'error',
+              errorKind: 'protocol_error',
+              error: 'Tool registry is not initialized.',
+            },
+          ],
+        };
+      }
+
+      const disabled = config.getDisabledTools();
+      const tools: ServeWorkspaceToolStatus[] = registry
+        .getAllTools()
+        .filter((tool) => !('serverName' in tool))
+        .map((tool) => ({
+          name: tool.name,
+          displayName: tool.displayName,
+          description: tool.description,
+          enabled: !disabled.has(tool.name),
+        }));
+
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        acpChannelLive: true,
+        tools,
+      };
+    } catch (err) {
+      const errorKind = mapDomainErrorToErrorKind(err) ?? 'protocol_error';
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        acpChannelLive: true,
+        tools: [],
+        errors: [
+          {
+            kind: 'tools',
+            status: 'error',
+            error: err instanceof Error ? err.message : String(err),
+            errorKind,
+          },
+        ],
+      };
+    }
+  }
+
   private sessionOrThrow(sessionId: string): Session {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -1876,10 +2024,28 @@ class QwenAgent implements Agent {
           string,
           unknown
         >;
+      case SERVE_STATUS_EXT_METHODS.workspaceMcpTools: {
+        const serverName = params['serverName'];
+        if (typeof serverName !== 'string' || serverName.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing serverName',
+          );
+        }
+        return this.buildWorkspaceMcpToolsStatus(
+          this.config,
+          serverName,
+        ) as unknown as Record<string, unknown>;
+      }
       case SERVE_STATUS_EXT_METHODS.workspaceSkills:
         return (await this.buildWorkspaceSkillsStatus(
           this.config,
         )) as unknown as Record<string, unknown>;
+      case SERVE_STATUS_EXT_METHODS.workspaceTools:
+        return this.buildWorkspaceToolsStatus(this.config) as unknown as Record<
+          string,
+          unknown
+        >;
       case SERVE_STATUS_EXT_METHODS.workspaceProviders:
         return this.buildWorkspaceProvidersStatus(
           this.config,
@@ -2242,6 +2408,38 @@ class QwenAgent implements Agent {
         }
         const current = config.getApprovalMode();
         return { previous, current };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionRecap: {
+        // #4175 follow-up. Generate a one-sentence "where did I leave
+        // off" summary by running `generateSessionRecap` against the
+        // session's GeminiClient history. Best-effort: the core helper
+        // is documented to return `null` on any failure (short history,
+        // transient model error, etc.) and never throws — we surface
+        // that null verbatim so the daemon route returns a 200 with
+        // `recap: null` rather than a 5xx.
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        // v1: no cross-process abort plumbing. The bridge does not listen
+        // for HTTP client disconnect and no AbortSignal is threaded through
+        // the ext-method, so the LLM call in this child always runs to
+        // completion. The only ceilings are the bridge's 60s
+        // `SESSION_RECAP_TIMEOUT_MS` backstop and the transport-closed race
+        // against ACP channel death. Acceptable because recap is short
+        // (single-attempt side-query, `maxOutputTokens: 300`). A future
+        // request-id-based cancel ext-method can plumb a real signal
+        // end-to-end if the bandwidth cost ever becomes an issue.
+        const recap = await generateSessionRecap(
+          config,
+          new AbortController().signal,
+        );
+        return { sessionId, recap };
       }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;

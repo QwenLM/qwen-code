@@ -41,6 +41,9 @@ interface ServeArgs {
   'http-bridge': boolean;
   'mcp-client-budget'?: number;
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
+  'allow-origin'?: string[];
+  'prompt-deadline-ms'?: number;
+  'writer-idle-timeout-ms'?: number;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -144,6 +147,24 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'refused (`disabledReason: "budget"`, deterministic by mcpServers ' +
           'declaration order). `off`: pure observability. Boot rejects ' +
           '`enforce` without a budget.',
+      })
+      .option('allow-origin', {
+        type: 'string',
+        array: true,
+        description:
+          'T2.4 (#4514). Cross-origin allowlist for browser webui clients.',
+      })
+      .option('prompt-deadline-ms', {
+        type: 'number',
+        description:
+          'T2.9 (#4514). Server-side wallclock cap on POST /session/:id/prompt (ms). ' +
+          'Falls back to QWEN_SERVE_PROMPT_DEADLINE_MS. Positive integer.',
+      })
+      .option('writer-idle-timeout-ms', {
+        type: 'number',
+        description:
+          'T2.9 (#4514). Per-SSE-connection idle deadline (ms). ' +
+          'Falls back to QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS. Positive integer.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
     if (!argv['http-bridge']) {
@@ -219,6 +240,15 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requireAuth: argv['require-auth'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
+        ...(argv['allow-origin'] && argv['allow-origin'].length > 0
+          ? { allowOrigins: argv['allow-origin'] }
+          : {}),
+        ...(argv['prompt-deadline-ms'] !== undefined
+          ? { promptDeadlineMs: argv['prompt-deadline-ms'] }
+          : {}),
+        ...(argv['writer-idle-timeout-ms'] !== undefined
+          ? { writerIdleTimeoutMs: argv['writer-idle-timeout-ms'] }
+          : {}),
       });
     } catch (err) {
       writeStderrLine(

@@ -53,6 +53,7 @@ interface CapturedRequest {
   method: string;
   headers: Record<string, string>;
   body: string | null;
+  signal?: AbortSignal | null;
 }
 
 function recordingFetch(
@@ -74,7 +75,13 @@ function recordingFetch(
         h.forEach((v, k) => (headers[k.toLowerCase()] = v));
       }
       const body = typeof init?.body === 'string' ? init.body : null;
-      const captured: CapturedRequest = { url, method, headers, body };
+      const captured: CapturedRequest = {
+        url,
+        method,
+        headers,
+        body,
+        signal: init?.signal ?? null,
+      };
       calls.push(captured);
       return reply(captured);
     },
@@ -429,6 +436,44 @@ describe('DaemonClient', () => {
       await expect(client.workspaceEnv()).resolves.toEqual(env);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/workspace/env'],
+      ]);
+    });
+
+    it('GETs /workspace/mcp/:server/tools with URL encoding', async () => {
+      const toolsStatus = {
+        v: 1,
+        serverName: 'my server',
+        tools: [{ name: 'tool-a', description: 'A tool' }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, toolsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceMcpTools('my server')).resolves.toEqual(
+        toolsStatus,
+      );
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/mcp/my%20server/tools'],
+      ]);
+    });
+
+    it('GETs /workspace/tools and returns the tools envelope', async () => {
+      const toolsStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        acpChannelLive: false,
+        tools: [{ name: 'Bash', enabled: true }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, toolsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceTools()).resolves.toEqual(toolsStatus);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/tools'],
       ]);
     });
 
@@ -1340,6 +1385,77 @@ describe('DaemonClient', () => {
       await expect(
         client.setSessionApprovalMode('s-1', 'yolo'),
       ).rejects.toMatchObject({ status: 403 });
+    });
+  });
+
+  describe('recapSession (#4175 follow-up)', () => {
+    it('POSTs an empty body and returns the typed recap', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          recap:
+            'Debugging the auth retry race. Next: add deterministic timing.',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.recapSession('s-1');
+      expect(result).toEqual({
+        sessionId: 's-1',
+        recap: 'Debugging the auth retry race. Next: add deterministic timing.',
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/recap');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.body).toBe('{}');
+    });
+
+    it('returns recap:null verbatim when the daemon reports best-effort failure', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's-1', recap: null }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.recapSession('s-1');
+      expect(result.recap).toBeNull();
+    });
+
+    it('URL-encodes the session id', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's/1', recap: 'x' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.recapSession('s/1');
+      expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/recap');
+    });
+
+    it('forwards X-Qwen-Client-Id when supplied', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's-1', recap: 'x' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.recapSession('s-1', { clientId: 'client-1' });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('forwards the AbortSignal so callers can cancel mid-flight', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessionId: 's-1', recap: 'x' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ctrl = new AbortController();
+      await client.recapSession('s-1', { signal: ctrl.signal });
+      expect(calls[0]?.signal).toBe(ctrl.signal);
+    });
+
+    it('throws on 404 when session is unknown', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, {
+          error: 'session not found',
+          code: 'session_not_found',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.recapSession('s-1')).rejects.toMatchObject({
+        status: 404,
+      });
     });
   });
 

@@ -10,6 +10,160 @@ import { ndJsonStream } from '@agentclientprotocol/sdk';
 import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
 import { MissingCliEntryError } from './status.js';
 
+// ──────────────────────────────────────────────────────────────────────
+// Stderr forwarder — extracted from the inline handler so it's testable
+// in isolation without spawning a real child process.
+// ──────────────────────────────────────────────────────────────────────
+
+export interface StderrForwarderOptions {
+  prefix: string;
+  onDiagnosticLine?: (line: string, level?: 'info' | 'warn' | 'error') => void;
+}
+
+/**
+ * Creates a stateful forwarder that buffers incoming chunks, splits on
+ * newlines, writes each complete line to `process.stderr` with a prefix,
+ * and optionally invokes `onDiagnosticLine` for external consumers (e.g.
+ * the daemon log file writer).
+ *
+ * Cap behavior: if the unterminated buffer exceeds 64 KiB the excess is
+ * force-flushed with a `[truncated]` marker — same memory-bounding
+ * behavior as before the extraction.
+ */
+export function createStderrForwarder(opts: StderrForwarderOptions): {
+  onData: (chunk: string) => void;
+  onEnd: () => void;
+} {
+  const { prefix, onDiagnosticLine } = opts;
+  const STDERR_LINE_CAP_CHARS = 64 * 1024;
+  let buf = '';
+
+  const flush = (line: string) => {
+    if (line.length > 0) {
+      process.stderr.write(prefix + line + '\n');
+      if (onDiagnosticLine) onDiagnosticLine(prefix + line, 'warn');
+    }
+  };
+
+  return {
+    onData(chunk: string) {
+      buf += chunk;
+      let nl = buf.indexOf('\n');
+      while (nl !== -1) {
+        flush(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        nl = buf.indexOf('\n');
+      }
+      // Force-flush the unterminated tail if it's grown past the cap
+      // — keeps memory bounded against a `\n`-less stderr storm.
+      while (buf.length > STDERR_LINE_CAP_CHARS) {
+        const truncated = buf.slice(0, STDERR_LINE_CAP_CHARS) + ' [truncated]';
+        process.stderr.write(prefix + truncated + '\n');
+        if (onDiagnosticLine) onDiagnosticLine(prefix + truncated, 'warn');
+        buf = buf.slice(STDERR_LINE_CAP_CHARS);
+      }
+    },
+    onEnd() {
+      if (buf.length > 0) flush(buf);
+    },
+  };
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// SpawnChannelFactory — configurable factory-of-factories
+// ──────────────────────────────────────────────────────────────────────
+
+export interface SpawnChannelFactoryOptions {
+  onDiagnosticLine?: (line: string, level?: 'info' | 'warn' | 'error') => void;
+}
+
+/**
+ * Creates a `ChannelFactory` that spawns `qwen --acp` child processes.
+ * Accepts an optional `onDiagnosticLine` callback that receives every
+ * child-stderr line (already prefixed) so callers can tee to a log file
+ * or structured logger without intercepting process.stderr globally.
+ *
+ * `defaultSpawnChannelFactory` below is `createSpawnChannelFactory()` —
+ * no options, same behavior as before this refactor.
+ */
+export function createSpawnChannelFactory(
+  options: SpawnChannelFactoryOptions = {},
+): ChannelFactory {
+  return async (workspaceCwd, childEnvOverrides) => {
+    const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1];
+    if (!cliEntry) {
+      throw new MissingCliEntryError();
+    }
+    const childEnv = scrubChildEnv(
+      process.env,
+      SCRUBBED_CHILD_ENV_KEYS,
+      childEnvOverrides,
+    );
+    const child = spawn(process.execPath, [cliEntry, '--acp'], {
+      cwd: workspaceCwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: childEnv,
+    });
+
+    // Forward child stderr to the daemon's stderr line-by-line, with a
+    // `[serve pid=… cwd=…]` prefix on each line so operators can
+    // correlate stack traces back to the spawning request.
+    if (child.stderr) {
+      const prefix = `[serve pid=${child.pid} cwd=${workspaceCwd}] `;
+      const forwarder = createStderrForwarder({
+        prefix,
+        onDiagnosticLine: options.onDiagnosticLine,
+      });
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk: string) => forwarder.onData(chunk));
+      child.stderr.on('end', () => forwarder.onEnd());
+      child.stderr.on('error', () => {
+        // Don't crash the daemon if the pipe breaks; the child is
+        // already gone or about to be.
+      });
+    }
+
+    const exited = new Promise<AcpChannelExitInfo | undefined>((resolve) => {
+      let resolved = false;
+      const finish = (info?: AcpChannelExitInfo) => {
+        if (resolved) return;
+        resolved = true;
+        resolve(info);
+      };
+      child.once('exit', (code, signal) =>
+        finish({ exitCode: code, signalCode: signal }),
+      );
+      child.once('error', () => finish(undefined));
+    });
+
+    if (!child.stdin || !child.stdout) {
+      child.kill('SIGKILL');
+      throw new Error(
+        'Spawned ACP child has no stdin/stdout — cannot establish NDJSON channel.',
+      );
+    }
+
+    const writable = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
+    const readable = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
+    const stream = ndJsonStream(writable, readable);
+
+    return {
+      stream,
+      kill: () => killChild(child),
+      killSync: () => {
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* already dead / pid recycled — ignore */
+          }
+        }
+      },
+      exited,
+    };
+  };
+}
+
 /**
  * Default channel factory: spawn the current Node executable running this
  * CLI's entry script in `--acp` mode. `process.argv[1]` resolves to the qwen
@@ -28,187 +182,13 @@ import { MissingCliEntryError } from './status.js';
  * companion can share one spawn implementation instead of each
  * reimplementing the child lifecycle (the current divergence noted in
  * `channel.ts`'s top-of-file comment).
+ *
+ * Preserved as `createSpawnChannelFactory()` (no options) for backward
+ * compat. Use `createSpawnChannelFactory({ onDiagnosticLine })` to also
+ * tee child stderr lines through an external callback.
  */
-export const defaultSpawnChannelFactory: ChannelFactory = async (
-  workspaceCwd,
-  childEnvOverrides,
-) => {
-  // Resolution order:
-  //   1. `QWEN_CLI_ENTRY` env override — escape hatch for non-standard
-  //      launch paths (bundled binaries, npx wrappers, `node -e`,
-  //      `tsx ./src/...`, custom shims, container images that
-  //      relocate the entry script). Anyone hitting "process.argv[1]
-  //      is empty" or "process.argv[1] points at the wrong file" can
-  //      set this without code changes.
-  //   2. `process.argv[1]` — works when launched via the `qwen` bin
-  //      shim, which is the common path.
-  // Fail loudly with an actionable error if neither resolves.
-  const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1];
-  if (!cliEntry) {
-    throw new MissingCliEntryError();
-  }
-  // Each session takes ~3 file descriptors (stdin/stdout/stderr) for the
-  // child plus a few sockets. Operators running many concurrent sessions
-  // should bump `ulimit -n` accordingly. Stage 1 doesn't pre-flight FD
-  // headroom — Stage 2 in-process drops the per-session FD cost entirely.
-  // Child stderr is piped (NOT `inherit`ed) so we can prefix each
-  // line with `[serve pid=… cwd=…]` before forwarding to the
-  // daemon's stderr — see the prefix-and-forward loop below the
-  // `spawn(...)` call. Sessions are still interleaved on the
-  // daemon's stderr stream but each line carries its own session
-  // identifier, so operators can `grep pid=12345` to pull one
-  // session's trace cleanly. Stage 4+ remote sandboxes will isolate
-  // stderr at the transport level.
-  //
-  // Note: spawning `process.execPath` only works when the entry script can
-  // be loaded by raw Node. In dev (e.g. `npm run dev` via `tsx`) the entry
-  // is a `.ts` file Node can't run; users should `npm run build` before
-  // `qwen serve` or set `process.execPath` to a tsx-aware shim. Stage 1
-  // accepts this — the daemon is meant for built deployments.
-  // Pass through the daemon's full environment to the child, scrubbing
-  // ONLY daemon-internal secrets (see SCRUBBED_CHILD_ENV_KEYS at module
-  // scope). An earlier version used an allowlist, but that broke the
-  // common deployment shape: users export `OPENAI_API_KEY` /
-  // `ANTHROPIC_API_KEY` / `QWEN_*` / `DASHSCOPE_API_KEY` / a custom
-  // `modelProviders[].envKey` to authenticate the agent's LLM calls,
-  // and core's model config resolves those from `process.env`. An
-  // exhaustive allowlist can't enumerate user-defined provider keys,
-  // so the agent ends up unable to authenticate.
-  //
-  // Threat-model rationale: the agent already runs as the same UID
-  // with shell-tool access — anything in `~/.bashrc`, `~/.npmrc`,
-  // `~/.aws/credentials`, etc. is reachable by prompt injection
-  // regardless of what we put in `env`. The env passthrough is not
-  // the security boundary; the user-as-trust-root is. The only thing
-  // we MUST scrub is `QWEN_SERVER_TOKEN` (daemon-only auth that
-  // would let a prompt-injected shell turn the agent into an
-  // authenticated client of its own daemon — escalation the agent
-  // doesn't otherwise have).
-  const childEnv = scrubChildEnv(
-    process.env,
-    SCRUBBED_CHILD_ENV_KEYS,
-    childEnvOverrides,
-  );
-  // CodeQL `js/path-injection` flags the `cwd: workspaceCwd` flow.
-  // Stage 1 trust model accepts this — see the function-level comment
-  // above for the design rationale. Defense-in-depth: the cwd is
-  // canonicalized via `path.resolve()` upstream in `spawnOrAttach`,
-  // and `spawn`'s `cwd` only changes the child's working directory,
-  // it doesn't pass through any shell.
-  //
-  // NOTE: GitHub Code Scanning does NOT honor inline `// lgtm` /
-  // `// codeql` annotations (LGTM.com retired in 2021). Suppressing
-  // this alert requires either (a) UI dismissal as "won't fix" with
-  // the rationale above, or (b) a repo-level
-  // `.github/codeql/codeql-config.yml` query exclusion. Both are
-  // out of scope for a code-only PR; flagging here for the human
-  // reviewer.
-  const child = spawn(process.execPath, [cliEntry, '--acp'], {
-    cwd: workspaceCwd,
-    // Pipe stderr (was: 'inherit') so we can prefix each line with
-    // the spawn's pid + workspace, making per-session crash output
-    // attributable. Bare 'inherit' sends every child's stderr to
-    // the daemon's stderr verbatim and unprefixed — under any
-    // multi-session load the operator's log becomes a salad of
-    // unattributed traces.
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: childEnv,
-  });
-
-  // Forward child stderr to the daemon's stderr line-by-line, with a
-  // `[serve pid=… cwd=…]` prefix on each line so operators can
-  // correlate stack traces back to the spawning request. Best-effort:
-  // a child that prints partial lines without a trailing newline is
-  // flushed when the stream emits `end`.
-  if (child.stderr) {
-    let buf = '';
-    const prefix = `[serve pid=${child.pid} cwd=${workspaceCwd}] `;
-    // BRAp3 cap: a buggy child that writes a huge stderr line, or
-    // never emits `\n`, would otherwise grow `buf` per spawn
-    // unboundedly. 64 KiB is generous for the longest legitimate
-    // stack trace line we'd expect from a Node child; anything
-    // past that gets force-flushed with a `[truncated]` marker so
-    // the operator still sees a prefix-attributed log line and
-    // memory stays bounded. We DON'T drop content — we flush
-    // chunks at the cap. (Picking 64 KiB matches our SSE per-frame
-    // write budget; anything above this already implies the child
-    // is misbehaving.)
-    const STDERR_LINE_CAP_CHARS = 64 * 1024;
-    const flush = (line: string) => {
-      if (line.length > 0) process.stderr.write(prefix + line + '\n');
-    };
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk: string) => {
-      buf += chunk;
-      let nl = buf.indexOf('\n');
-      while (nl !== -1) {
-        flush(buf.slice(0, nl));
-        buf = buf.slice(nl + 1);
-        nl = buf.indexOf('\n');
-      }
-      // Force-flush the unterminated tail if it's grown past the cap
-      // — keeps memory bounded against a `\n`-less stderr storm.
-      while (buf.length > STDERR_LINE_CAP_CHARS) {
-        flush(buf.slice(0, STDERR_LINE_CAP_CHARS) + ' [truncated]');
-        buf = buf.slice(STDERR_LINE_CAP_CHARS);
-      }
-    });
-    child.stderr.on('end', () => {
-      if (buf.length > 0) flush(buf);
-    });
-    child.stderr.on('error', () => {
-      // Don't crash the daemon if the pipe breaks; the child is
-      // already gone or about to be.
-    });
-  }
-
-  // Build the `exited` promise BEFORE checking stdin/stdout so the listener
-  // is in place before any error event can fire. We treat both `exit` and
-  // `error` as termination — without an `error` listener Node would treat
-  // an async spawn failure (ENOMEM, EACCES, …) as an unhandled error and
-  // crash the whole daemon.
-  const exited = new Promise<AcpChannelExitInfo | undefined>((resolve) => {
-    let resolved = false;
-    const finish = (info?: AcpChannelExitInfo) => {
-      if (resolved) return;
-      resolved = true;
-      resolve(info);
-    };
-    child.once('exit', (code, signal) =>
-      finish({ exitCode: code, signalCode: signal }),
-    );
-    child.once('error', () => finish(undefined));
-  });
-
-  if (!child.stdin || !child.stdout) {
-    child.kill('SIGKILL');
-    throw new Error(
-      'Spawned ACP child has no stdin/stdout — cannot establish NDJSON channel.',
-    );
-  }
-
-  const writable = Writable.toWeb(child.stdin) as WritableStream<Uint8Array>;
-  const readable = Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>;
-  const stream = ndJsonStream(writable, readable);
-
-  return {
-    stream,
-    kill: () => killChild(child),
-    killSync: () => {
-      // Bd1y6: synchronous SIGKILL for the double-signal force-exit
-      // path. Skip if child already exited (kill on a dead process
-      // raises an OS-level error that's noise here).
-      if (child.exitCode === null && child.signalCode === null) {
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          /* already dead / pid recycled — ignore */
-        }
-      }
-    },
-    exited,
-  };
-};
+export const defaultSpawnChannelFactory: ChannelFactory =
+  createSpawnChannelFactory();
 
 const KILL_HARD_DEADLINE_MS = 10_000;
 

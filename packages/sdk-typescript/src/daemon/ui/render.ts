@@ -143,7 +143,8 @@ function renderToolHeader(
   // `opts` is provided.
   const parts: string[] = [`### ${escapeMarkdownText(block.title, opts)}`];
   if (block.toolName) parts.push(inlineCode(block.toolName, opts));
-  if (block.toolKind) parts.push(`(${escapeMarkdownText(block.toolKind, opts)})`);
+  if (block.toolKind)
+    parts.push(`(${escapeMarkdownText(block.toolKind, opts)})`);
   return parts.join(' ');
 }
 
@@ -527,7 +528,9 @@ function daemonToolPreviewToPlainText(
     case 'subagent_delegation':
       return `delegate to ${cap(preview.agentName)}: ${cap(preview.task)}`;
     case 'key_value':
-      return preview.rows.map((r) => `${cap(r.label)}: ${cap(r.value)}`).join('\n');
+      return preview.rows
+        .map((r) => `${cap(r.label)}: ${cap(r.value)}`)
+        .join('\n');
     case 'generic':
       return preview.summary ? cap(preview.summary) : '';
     default:
@@ -702,8 +705,22 @@ function sanitizeUrl(url: string): string {
     // the credential; non-signed URLs typically don't include it as a
     // top-level query param so the false-positive risk is bounded.
     const AZURE_SAS_KEYS = new Set([
-      'sv', 'se', 'sr', 'sp', 'st', 'spr', 'sip', 'ss', 'srt', 'sig', 'skoid',
-      'sktid', 'skt', 'ske', 'sks', 'skv',
+      'sv',
+      'se',
+      'sr',
+      'sp',
+      'st',
+      'spr',
+      'sip',
+      'ss',
+      'srt',
+      'sig',
+      'skoid',
+      'sktid',
+      'skt',
+      'ske',
+      'sks',
+      'skv',
     ]);
     for (const key of Array.from(u.searchParams.keys())) {
       const k = key.toLowerCase();
@@ -773,7 +790,8 @@ function ensureSafeImageUrl(url: string): string {
       // `data:text/html,<script>` which (while not directly executed by
       // browsers as `<img>` content) shouldn't be normalized as a valid
       // image source.
-      const mediaType = parsed.pathname.split(',')[0]?.split(';')[0]?.toLowerCase() ?? '';
+      const mediaType =
+        parsed.pathname.split(',')[0]?.split(';')[0]?.toLowerCase() ?? '';
       if (mediaType.startsWith('image/')) {
         return url;
       }

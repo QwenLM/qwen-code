@@ -1,0 +1,138 @@
+.app {
+  --font-mono:
+    'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', monospace;
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --radius: 6px;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 12px 24px;
+  background: var(--app-bg);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+  overflow: hidden;
+}
+
+.app,
+.app * {
+  box-sizing: border-box;
+}
+
+.themeDark {
+  --app-bg: #111;
+  --bg-primary: #0d0d0d;
+  --bg-secondary: #161616;
+  --bg-tertiary: #1e1e1e;
+  --bg-surface: #1a1a1a;
+  --border-color: #2a2a2a;
+  --text-primary: #e4e4e4;
+  --text-secondary: #a0a0a0;
+  --text-dimmed: #666;
+  --accent-color: #4a9eff;
+  --accent-hover: #3a8eef;
+  --success-color: #48bb78;
+  --warning-color: #ecc94b;
+  --error-color: #fc8181;
+  --user-color: #48bb78;
+  --assist-color: #b794f4;
+  --welcome-logo-gradient: linear-gradient(
+    90deg,
+    #4796e4 0%,
+    #847ace 52%,
+    #c3677f 100%
+  );
+  --editor-bg: #0a0a0a;
+  --msg-body-color: #e3bcfe;
+  --thinking-pre-color: #9d9ec6;
+  --subtle-bg: rgba(255, 255, 255, 0.04);
+  --subtle-bg-strong: rgba(255, 255, 255, 0.06);
+  --info-bg: rgba(74, 158, 255, 0.08);
+  --info-border: rgba(74, 158, 255, 0.2);
+  --success-bg: rgba(72, 187, 120, 0.12);
+  --warning-bg: rgba(236, 201, 75, 0.08);
+  --warning-border: rgba(236, 201, 75, 0.2);
+  --error-bg: rgba(252, 129, 129, 0.08);
+  --error-border: rgba(252, 129, 129, 0.2);
+}
+
+.themeLight {
+  --app-bg: #fbfbf8;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f7f7f2;
+  --bg-tertiary: #efeee8;
+  --bg-surface: #f5f4ed;
+  --border-color: #d8d6cc;
+  --text-primary: #22231f;
+  --text-secondary: #5f6259;
+  --text-dimmed: #8b8d84;
+  --accent-color: #0b66c3;
+  --accent-hover: #0756a6;
+  --success-color: #1f7a3a;
+  --warning-color: #9a6a00;
+  --error-color: #c0362c;
+  --user-color: #0a7a3d;
+  --assist-color: #7b4ab8;
+  --welcome-logo-gradient: linear-gradient(
+    90deg,
+    #0b66c3 0%,
+    #7357b8 52%,
+    #bd4f67 100%
+  );
+  --editor-bg: #f7f7f2;
+  --msg-body-color: #0b6f3a;
+  --thinking-pre-color: #74788f;
+  --subtle-bg: rgba(32, 31, 25, 0.05);
+  --subtle-bg-strong: rgba(32, 31, 25, 0.08);
+  --info-bg: rgba(11, 102, 195, 0.08);
+  --info-border: rgba(11, 102, 195, 0.22);
+  --success-bg: rgba(31, 122, 58, 0.11);
+  --warning-bg: rgba(154, 106, 0, 0.1);
+  --warning-border: rgba(154, 106, 0, 0.24);
+  --error-bg: rgba(192, 54, 44, 0.1);
+  --error-border: rgba(192, 54, 44, 0.24);
+}
+
+.content {
+  flex: 0 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.contentHasMessages {
+  flex: 0 1 auto;
+}
+
+.footer {
+  margin: 0 -12px;
+  flex-shrink: 0;
+}
+
+.composer {
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.queuedPrompts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 12px 6px 36px;
+  color: var(--text-dimmed);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.queuedPrompt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queuedHint {
+  font-style: italic;
+}

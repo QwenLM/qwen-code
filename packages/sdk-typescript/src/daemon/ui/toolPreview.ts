@@ -155,8 +155,7 @@ function detectFileDiff(
   const writeIntent =
     /(?:^|[_-])(write|create|edit|replace|save|update|overwrite|modify|patch|generate)(?:$|[_-])/.test(
       toolNameLower,
-    ) ||
-    !!oldText;
+    ) || !!oldText;
   const contentField =
     explicitNewText === undefined && writeIntent
       ? getFirstString(input, ['content'])

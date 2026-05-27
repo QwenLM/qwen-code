@@ -30,8 +30,97 @@
  * Each branch listed below is now regression-guarded by an assertion.
  */
 
-import { describe, expect, it } from 'vitest';
-import { scrubChildEnv } from './spawnChannel.js';
+import { describe, expect, it, vi } from 'vitest';
+import { createStderrForwarder, scrubChildEnv } from './spawnChannel.js';
+
+describe('createStderrForwarder', () => {
+  it('calls onDiagnosticLine for each complete line', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[test] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    forwarder.onData('hello\nworld\n');
+    expect(captured).toEqual([
+      { line: '[test] hello', level: 'warn' },
+      { line: '[test] world', level: 'warn' },
+    ]);
+    // Also writes to process.stderr
+    expect(stderrSpy).toHaveBeenCalledWith('[test] hello\n');
+    expect(stderrSpy).toHaveBeenCalledWith('[test] world\n');
+    stderrSpy.mockRestore();
+  });
+
+  it('buffers partial lines until newline arrives', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[p] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    forwarder.onData('partial');
+    expect(captured).toHaveLength(0); // no newline yet
+    forwarder.onData(' more\n');
+    expect(captured).toEqual([{ line: '[p] partial more', level: 'warn' }]);
+    stderrSpy.mockRestore();
+  });
+
+  it('flushes buffered content on end', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[p] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    forwarder.onData('partial');
+    expect(captured).toHaveLength(0);
+    forwarder.onEnd();
+    expect(captured).toEqual([{ line: '[p] partial', level: 'warn' }]);
+    stderrSpy.mockRestore();
+  });
+
+  it('does not call onDiagnosticLine for empty lines', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[p] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    forwarder.onData('\n\n');
+    expect(captured).toHaveLength(0);
+    stderrSpy.mockRestore();
+  });
+
+  it('force-flushes with [truncated] when buffer exceeds 64 KiB cap', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[x] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    // Write 65 KiB without a newline — exceeds the 64 KiB cap
+    const bigChunk = 'A'.repeat(65 * 1024);
+    forwarder.onData(bigChunk);
+    // Should have force-flushed the first 64 KiB with [truncated]
+    expect(captured.length).toBeGreaterThanOrEqual(1);
+    expect(captured[0]!.line).toContain('[truncated]');
+    expect(captured[0]!.level).toBe('warn');
+    // The flushed line should have the prefix
+    expect(captured[0]!.line).toMatch(/^\[x\] /);
+    stderrSpy.mockRestore();
+  });
+
+  it('works without onDiagnosticLine (still writes to stderr)', () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[no-cb] ',
+    });
+    forwarder.onData('line1\n');
+    expect(stderrSpy).toHaveBeenCalledWith('[no-cb] line1\n');
+    stderrSpy.mockRestore();
+  });
+});
 
 // Decoupled canary: we deliberately hand-roll the test set instead of
 // importing `SCRUBBED_CHILD_ENV_KEYS` from `spawnChannel.ts` so the

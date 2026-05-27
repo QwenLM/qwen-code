@@ -1,0 +1,22 @@
+.status {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 14px;
+  color: var(--text-dimmed);
+}
+
+.spinner {
+  color: var(--text-primary);
+}
+
+.label {
+  color: var(--assist-color);
+}
+
+.meta {
+  color: var(--text-dimmed);
+  font-size: 13px;
+}

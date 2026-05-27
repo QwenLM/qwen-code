@@ -1,0 +1,124 @@
+import { useCallback, useRef } from 'react';
+
+const STORAGE_KEY = 'qwen-web-shell-history';
+const MAX_HISTORY = 100;
+
+function loadHistory(): string[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((v) => typeof v === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(history: string[]) {
+  try {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify(history.slice(-MAX_HISTORY)),
+    );
+  } catch {
+    // Ignore storage failures in private browsing or restricted contexts.
+  }
+}
+
+export function useInputHistory() {
+  const historyRef = useRef<string[]>(loadHistory());
+  const indexRef = useRef<number>(-1);
+  const draftRef = useRef<string>('');
+  const searchIndexRef = useRef<number>(-1);
+
+  const push = useCallback((text: string) => {
+    const h = historyRef.current;
+    if (h[h.length - 1] === text) return;
+    h.push(text);
+    if (h.length > MAX_HISTORY) h.shift();
+    saveHistory(h);
+    indexRef.current = -1;
+  }, []);
+
+  const navigateUp = useCallback((currentText: string): string | null => {
+    const h = historyRef.current;
+    if (h.length === 0) return null;
+
+    if (indexRef.current === -1) {
+      draftRef.current = currentText;
+      indexRef.current = h.length - 1;
+    } else if (indexRef.current > 0) {
+      indexRef.current--;
+    } else {
+      return null;
+    }
+
+    return h[indexRef.current];
+  }, []);
+
+  const navigateDown = useCallback((): string | null => {
+    const h = historyRef.current;
+    if (indexRef.current === -1) return null;
+
+    if (indexRef.current < h.length - 1) {
+      indexRef.current++;
+      return h[indexRef.current];
+    } else {
+      indexRef.current = -1;
+      return draftRef.current;
+    }
+  }, []);
+
+  const reset = useCallback(() => {
+    indexRef.current = -1;
+    searchIndexRef.current = -1;
+  }, []);
+
+  const searchReverse = useCallback((query: string): string | null => {
+    const h = historyRef.current;
+    if (h.length === 0 || !query) return null;
+
+    const startIdx =
+      searchIndexRef.current === -1 ? h.length - 1 : searchIndexRef.current - 1;
+
+    if (startIdx < 0) {
+      searchIndexRef.current = -1;
+      return null;
+    }
+
+    const lowerQuery = query.toLowerCase();
+    for (let i = startIdx; i >= 0; i--) {
+      if (h[i].toLowerCase().includes(lowerQuery)) {
+        searchIndexRef.current = i;
+        return h[i];
+      }
+    }
+
+    searchIndexRef.current = -1;
+    return null;
+  }, []);
+
+  const getReverseMatches = useCallback((query: string): string[] => {
+    const lowerQuery = query.trim().toLowerCase();
+    return historyRef.current
+      .slice()
+      .reverse()
+      .filter((item) => !lowerQuery || item.toLowerCase().includes(lowerQuery));
+  }, []);
+
+  const resetSearch = useCallback(() => {
+    searchIndexRef.current = -1;
+  }, []);
+
+  return {
+    push,
+    navigateUp,
+    navigateDown,
+    reset,
+    searchReverse,
+    getReverseMatches,
+    resetSearch,
+  };
+}

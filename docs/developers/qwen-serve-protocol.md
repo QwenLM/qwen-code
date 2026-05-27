@@ -18,6 +18,32 @@ Without a configured token (loopback dev default) the header is optional. Token 
 
 When the flag is on, the global `bearerAuth` middleware gates **every** route — including `/capabilities`. An **unauthenticated** client therefore cannot pre-flight `caps.features` to discover that auth is required: the discovery surface for that case is the **401 response body** itself (uniform across all routes per the [Authentication](#authentication) section). The `require_auth` capability tag is a **post-authentication confirmation** — once a client successfully authenticates and reads `/capabilities`, the tag's presence confirms the daemon was started with `--require-auth` (useful for audit / compliance UIs and for SDK clients to surface "this deployment is hardened" in a settings panel). Mutation routes that opt into per-route strict mode (Wave 4 follow-ups) refuse with `401 { code: "token_required", error: "…" }` when reached on a no-token loopback default — but with `--require-auth` enabled the global bearer middleware short-circuits the request before the per-route gate, so the legacy `Unauthorized` body is what unauthenticated callers actually see.
 
+**`--allow-origin <pattern>` (T2.4 [#4514](https://github.com/QwenLM/qwen-code/issues/4514)).** Browser webuis hitting the daemon cross-origin are blocked by default — any request carrying an `Origin` header returns `403 {"error":"Request denied by CORS policy"}` because CLI/SDK clients never send `Origin` and the daemon treats its presence as a sign the request came from a browser context the operator has not opted into. Pass `--allow-origin <pattern>` (repeatable) at boot to install an allowlist instead of the wall. Each pattern is either:
+
+- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token is set (any source: `--token`, `QWEN_SERVER_TOKEN`, or `--require-auth` which mandates a token at boot). The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` and `/demo` are also gated by the bearer — they're registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach `/health` without a token), and a `*` allowlist makes them reachable from any cross-origin browser. On non-loopback binds the bearer is already mandatory at boot, so the `*` exposure surface is just `/health` (status JSON) and `/demo` (a static page whose JS still calls token-gated routes) — the actual API surface is gated regardless.
+- A canonical URL origin — `<scheme>://<host>[:<port>]`. **No trailing slash, no path, no userinfo, no query.** Boot refuses with `InvalidAllowOriginPatternError` if the entry fails the round-trip `new URL(pattern).origin === pattern`; the error message names the bad pattern and the canonical form. Strict-by-intent: silent normalization (e.g. trimming a trailing `/`) would let typos slip through and accept ambiguous input.
+
+Matched origins receive the standard CORS response headers on every request:
+
+```
+Access-Control-Allow-Origin: <echoed origin>
+Vary: Origin
+Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: Authorization, Content-Type, X-Qwen-Client-Id, Last-Event-ID
+Access-Control-Max-Age: 86400
+Access-Control-Expose-Headers: Retry-After
+```
+
+`Access-Control-Allow-Origin` echoes the request's origin verbatim (lowercase / uppercase as the browser sent it) rather than the literal `*`, even under the `*` pattern — browser caches key responses on it paired with `Vary: Origin`, and echoing leaves room to add `Access-Control-Allow-Credentials` in a later release without a schema change. `Access-Control-Expose-Headers: Retry-After` lets browser webuis honor daemon retry hints from `429` / `503` responses. `Access-Control-Allow-Credentials` is **NOT** sent today: the daemon authenticates via bearer-in-`Authorization`, which works cross-origin without `credentials: 'include'`.
+
+OPTIONS preflight requests (OPTIONS with `Access-Control-Request-Method` or `Access-Control-Request-Headers`) short-circuit with `204 No Content` plus the headers above. This is the conventional CORS pattern and is safe — the preflight only confirms which methods/headers the daemon will accept; the actual subsequent request still runs the full chain (host allowlist → bearer auth → routes), so anti-DNS-rebinding and bearer enforcement still fire before any state is read or mutated. Plain OPTIONS requests from matched origins keep flowing downstream with CORS headers attached.
+
+Origins that don't match the allowlist still get `403 {"error":"Request denied by CORS policy"}` — same envelope as the default wall, so clients that already parsed the wall's response don't have to special-case allowlist-deployed daemons. The reject path **does not** emit any `Access-Control-*` headers (the browser would ignore them, and emitting would indirectly advertise the allowlist size through header presence).
+
+The configured pattern list is intentionally NOT echoed in `/capabilities` — browser webui already knows its own origin (it called the daemon, after all), and surfacing the list would let an unauthenticated reader of `/capabilities` enumerate every trusted origin (useful recon for a misconfigured deployment). SDK clients gate on the `caps.features.allow_origin` tag for "this daemon honors cross-origin browser hits" without needing to know which specific origins.
+
+Loopback self-origin requests (e.g. the `/demo` page calling the daemon at the same `127.0.0.1:port`) are handled by a **separate** Origin-strip shim that runs BEFORE the CORS middleware and removes the `Origin` header for `127.0.0.1:port` / `localhost:port` / `[::1]:port` / `host.docker.internal:port`. So they pass through regardless of `--allow-origin` configuration — operators don't need to list the daemon's own port to make the demo page work.
+
 ## Common error shape
 
 5xx responses carry the original error's `code` and `data` when present (JSON-RPC style — the ACP SDK forwards `{code, message, data}` from the agent):
@@ -144,9 +170,10 @@ routes and require a configured bearer token even on loopback.
 
 **Conditional tags.** A small number of feature tags are advertised only when the matching deployment toggle is on. Tag presence = behavior is on; absence = either an older daemon predating the tag, OR a current daemon where the operator did not opt in. Currently:
 
-| Tag            | Advertised when …                                                                                                                                                            |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `require_auth` | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every route, including `/health` on loopback binds. |
+| Tag            | Advertised when …                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `require_auth` | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every route, including `/health` on loopback binds.                                                                                                                                                                                                                                                                                                                                    |
+| `allow_origin` | T2.4 ([#4514](https://github.com/QwenLM/qwen-code/issues/4514)). The daemon was started with at least one `--allow-origin <pattern>` (or `allowOrigins: [...]` via the embedded API). Cross-origin requests from matched origins receive proper CORS response headers; unmatched origins still get the default 403. The configured pattern list is intentionally NOT echoed in `/capabilities` to avoid leaking the trusted-origin set to unauthenticated readers — browser webui already knows its own origin. |
 
 `mcp_guardrails` is **not** in this conditional table — it's an always-on tag, advertised whenever the binary supports the new `/workspace/mcp` budget fields, regardless of whether the operator configured a budget. Operators who haven't set `--mcp-client-budget` still get the new fields (with `budgetMode: 'off'`, `budgets: []`).
 
@@ -1106,6 +1133,36 @@ Response:
 ```
 
 On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler.
+
+### `POST /session/:id/recap`
+
+Capability tag: `session_recap`. Bridge → ACP extMethod `qwen/control/session/recap`.
+
+Generate a one-sentence "where did I leave off" summary of the session. Wraps core's `generateSessionRecap` (`packages/core/src/services/sessionRecap.ts`), which runs a side-query against the fast model with tools disabled, `maxOutputTokens: 300`, and a strict `<recap>...</recap>` output format. The side-query reads the session's existing GeminiClient chat history and does **not** add to it.
+
+Request body is ignored (send `{}` or empty). Non-strict mutation gate — posture mirrors `/session/:id/prompt` (the call costs tokens but mutates no state). No SSE event is published.
+
+Response (200):
+
+```json
+{
+  "sessionId": "sess:42",
+  "recap": "Debugging the auth retry race. Next: add deterministic timing to the integration test."
+}
+```
+
+`recap` is `null` (a normal 200, not an error) when:
+
+- the session has fewer than two dialog turns yet,
+- the side-query returned no extractable `<recap>...</recap>` payload,
+- or any underlying model error occurred (the core helper is best-effort and never throws).
+
+Errors:
+
+- `400 {code: 'invalid_client_id'}` — malformed `X-Qwen-Client-Id` header.
+- `404` — session unknown.
+
+Cancellation: **none in v1**. The route does not listen for HTTP client disconnect, no `AbortSignal` is plumbed into the bridge, and the ACP child runs the side-query to completion regardless of whether the caller has disconnected. The only ceilings are the bridge's 60s backstop timeout (`SESSION_RECAP_TIMEOUT_MS`) and the transport-closed race against ACP channel death. This is acceptable because recap is short (single-attempt, `maxOutputTokens: 300`, ~1–5s typical); a request-id-based cancel ext-method can plumb full end-to-end cancellation in a future release if the bandwidth cost ever justifies it.
 
 ### Mutation: approval, tools, init, MCP restart
 

@@ -21,10 +21,12 @@ import type {
   ServeSessionContextStatus,
   ServeSessionSupportedCommandsStatus,
   ServeWorkspaceEnvStatus,
+  ServeWorkspaceMcpToolsStatus,
   ServeWorkspaceMcpStatus,
   ServeWorkspacePreflightStatus,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceSkillsStatus,
+  ServeWorkspaceToolsStatus,
 } from './status.js';
 
 export interface BridgeSpawnRequest {
@@ -82,6 +84,8 @@ export interface BridgeSessionSummary {
   sessionId: string;
   workspaceCwd: string;
   createdAt: string;
+  updatedAt?: string;
+  title?: string;
   displayName?: string;
   clientCount: number;
   hasActivePrompt: boolean;
@@ -267,9 +271,21 @@ export interface HttpAcpBridge {
   getWorkspaceMcpStatus(): Promise<ServeWorkspaceMcpStatus>;
 
   /**
+   * Read discovered MCP tools for one server from the live ACP registry.
+   */
+  getWorkspaceMcpToolsStatus(
+    serverName: string,
+  ): Promise<ServeWorkspaceMcpToolsStatus>;
+
+  /**
    * Read daemon-runtime skill status for the bound workspace.
    */
   getWorkspaceSkillsStatus(): Promise<ServeWorkspaceSkillsStatus>;
+
+  /**
+   * Read the live built-in tool registry for the bound workspace.
+   */
+  getWorkspaceToolsStatus(): Promise<ServeWorkspaceToolsStatus>;
 
   /**
    * Read daemon-runtime model-provider status for the bound workspace.
@@ -325,6 +341,22 @@ export interface HttpAcpBridge {
     previous: ApprovalMode;
     persisted: boolean;
   }>;
+
+  /**
+   * Generate a one-sentence "where did I leave off" recap of a live
+   * session. Forwards through `qwen/control/session/recap`, which
+   * invokes `generateSessionRecap` (`core/services/sessionRecap.ts`) in
+   * the ACP child against the per-session chat history.
+   *
+   * Best-effort: the helper returns `null` when history is too short or
+   * the underlying side-query fails — both surface as a 200 response
+   * with `recap: null`. Hard errors (unknown session, ACP transport
+   * down) throw as usual.
+   */
+  generateSessionRecap(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<{ sessionId: string; recap: string | null }>;
 
   /**
    * Add or remove a tool name from the workspace's `tools.disabled`

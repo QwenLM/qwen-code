@@ -91,6 +91,7 @@ export type {
 } from './ui/index.js';
 export type {
   DaemonShellTranscriptBlock,
+  DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextTranscriptBlock,
   DaemonToolPreview,
@@ -237,6 +238,7 @@ export type {
   DaemonApprovalModeResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
+  DaemonSessionRecapResult,
   DaemonToolToggleResult,
   DaemonAvailableCommand,
   DaemonCapabilities,
@@ -283,6 +285,8 @@ export type {
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMcpToolStatus,
+  DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMemoryFile,
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
@@ -292,6 +296,8 @@ export type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceToolStatus,
+  DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
   HeartbeatResult,
