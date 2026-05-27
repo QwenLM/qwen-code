@@ -3688,7 +3688,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       }
       type AddOk = {
         name: string;
-        transport: string;
+        transport: 'stdio' | 'sse' | 'http' | 'tcp' | 'sdk';
         replaced: boolean;
         shadowedSettings: boolean;
         toolCount: number;
@@ -3699,37 +3699,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         skipped: true;
         reason: 'budget_warning_only';
       };
-      let response: AddOk | AddSkip;
-      try {
-        response = (await Promise.race([
-          withTimeout(
-            info.connection.extMethod(
-              SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
-              { name, config, originatorClientId },
-            ),
-            MCP_RESTART_TIMEOUT_MS,
+      const response = (await Promise.race([
+        withTimeout(
+          info.connection.extMethod(
             SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
+            { name, config, originatorClientId },
           ),
-          getChannelClosedReject(info),
-        ])) as AddOk | AddSkip;
-      } catch (err) {
-        // Re-instantiate structured ACP error payloads into typed bridge
-        // errors so `sendBridgeError` maps them to stable HTTP codes.
-        const data = (err as { data?: unknown })?.data;
-        if (data && typeof data === 'object') {
-          const kind = (data as { errorKind?: unknown }).errorKind;
-          if (kind === 'mcp_budget_would_exceed') {
-            throw err;
-          }
-          if (kind === 'mcp_server_spawn_failed') {
-            throw err;
-          }
-          if (kind === 'invalid_config') {
-            throw err;
-          }
-        }
-        throw err;
-      }
+          MCP_RESTART_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
+        ),
+        getChannelClosedReject(info),
+      ])) as AddOk | AddSkip;
       // Emit event on success (non-skip)
       const addSkipped = (response as { skipped?: boolean }).skipped === true;
       if (!addSkipped) {
@@ -3768,17 +3748,29 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         originatorClientId: string;
       };
       type RemoveSkip = { name: string; skipped: true; reason: 'not_present' };
-      const response = (await Promise.race([
-        withTimeout(
-          info.connection.extMethod(
+      let response: RemoveOk | RemoveSkip;
+      try {
+        response = (await Promise.race([
+          withTimeout(
+            info.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
+              { name, originatorClientId },
+            ),
+            MCP_RESTART_TIMEOUT_MS,
             SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
-            { name, originatorClientId },
           ),
-          MCP_RESTART_TIMEOUT_MS,
-          SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
-        ),
-        getChannelClosedReject(info),
-      ])) as RemoveOk | RemoveSkip;
+          getChannelClosedReject(info),
+        ])) as RemoveOk | RemoveSkip;
+      } catch (err) {
+        const data = (err as { data?: unknown })?.data;
+        if (data && typeof data === 'object') {
+          const kind = (data as { errorKind?: unknown }).errorKind;
+          if (kind === 'acp_channel_unavailable') {
+            throw err;
+          }
+        }
+        throw err;
+      }
       // Emit event on success (non-skip)
       const removeSkipped =
         (response as { skipped?: boolean }).skipped === true;

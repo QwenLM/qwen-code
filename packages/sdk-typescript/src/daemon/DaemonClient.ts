@@ -1213,7 +1213,7 @@ export class DaemonClient {
    */
   async addRuntimeMcpServer(
     request: DaemonRuntimeMcpAddRequest,
-    opts?: { clientId?: string },
+    opts?: { clientId?: string; timeoutMs?: number },
   ): Promise<DaemonRuntimeMcpAddResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp/servers`,
@@ -1231,6 +1231,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonRuntimeMcpAddResult;
       },
+      opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
     );
   }
 

@@ -3495,10 +3495,11 @@ function sendBridgeErrorImpl(
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
       if (kind === 'mcp_budget_would_exceed') {
+        const d = data as { serverName?: string };
         res.status(409).json({
           error: errorMessage(err),
           code: 'mcp_budget_would_exceed',
-          ...(data as object),
+          serverName: d.serverName,
         });
         return;
       }
@@ -3521,10 +3522,12 @@ function sendBridgeErrorImpl(
         return;
       }
       if (kind === 'invalid_config') {
+        const d = data as { serverName?: string; reason?: string };
         res.status(400).json({
           error: errorMessage(err),
           code: 'invalid_config',
-          ...(data as object),
+          serverName: d.serverName,
+          reason: d.reason,
         });
         return;
       }
@@ -3532,7 +3535,6 @@ function sendBridgeErrorImpl(
         res.status(503).json({
           error: errorMessage(err),
           code: 'acp_channel_unavailable',
-          ...(data as object),
         });
         return;
       }

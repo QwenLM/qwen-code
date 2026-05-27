@@ -2504,7 +2504,7 @@ class QwenAgent implements Agent {
             'Invalid or missing name',
           );
         }
-        if (!config || typeof config !== 'object') {
+        if (!config || typeof config !== 'object' || Array.isArray(config)) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing config',
@@ -2528,11 +2528,17 @@ class QwenAgent implements Agent {
         }
         try {
           // Strip security-sensitive fields — runtime-added servers must
-          // not bypass permission gates via trust:true from HTTP body
-          const { trust: _stripped, ...safeConfig } = config as Record<
-            string,
-            unknown
-          >;
+          // not bypass permission gates via trust:true, leak cloud creds
+          // via authProviderType, manipulate tool filtering, or spawn in
+          // arbitrary directories
+          const {
+            trust: _trust,
+            authProviderType: _auth,
+            includeTools: _inc,
+            excludeTools: _exc,
+            cwd: _cwd,
+            ...safeConfig
+          } = config as Record<string, unknown>;
           const result = await manager.addRuntimeMcpServer(
             name,
             safeConfig as MCPServerConfig,

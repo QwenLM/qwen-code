@@ -543,7 +543,7 @@ Response (200) — success:
 }
 ```
 
-- `replaced: true` — a runtime entry with the same name already existed and was replaced (old connection torn down, new one established).
+- `replaced: true` — a runtime entry with the same name already existed and the config fingerprint differs; old connection torn down, new one established. When the fingerprint matches (idempotent re-add), `replaced` is `false`.
 - `shadowedSettings: true` — a settings-defined server with the same name exists; the runtime entry now shadows it. The settings entry is untouched and re-emerges if the runtime entry is later removed.
 - `toolCount` — number of tools discovered on the newly connected server.
 

@@ -2649,6 +2649,18 @@ export class McpClientManager {
     config: MCPServerConfig,
     originatorClientId: string,
   ): Promise<AddRuntimeMcpServerResult> {
+    // Reject explicitly excluded servers
+    if (this.cliConfig.isMcpServerDisabled(name)) {
+      throw new InvalidMcpConfigError(
+        name,
+        `server '${name}' is in excludedMcpServers and cannot be added at runtime`,
+      );
+    }
+
+    debugLogger.info(
+      `addRuntimeMcpServer: ${name} (transport=${mcpTransportOf(config)}, client=${originatorClientId})`,
+    );
+
     // Validate config minimally: must have at least one transport field
     const transport = mcpTransportOf(config);
     if (transport === 'unknown') {
@@ -2668,14 +2680,13 @@ export class McpClientManager {
     const newConnId = connectionIdOf(name, config);
     const existingConn = this.pooledConnections.get(name);
     if (existingConn && existingConn.id === newConnId) {
-      // Same fingerprint — just update the Config overlay (in case
-      // non-transport fields like trust/includeTools changed).
+      // Same fingerprint — no transport churn, just update Config overlay
       this.cliConfig.addRuntimeMcpServer(name, config);
       const toolCount = existingConn.toolsSnapshot.length;
       return {
         name,
         transport,
-        replaced: true,
+        replaced: false,
         shadowedSettings,
         toolCount,
         originatorClientId,
@@ -2812,14 +2823,28 @@ export class McpClientManager {
         this.releaseSlotName(name);
       }
       // Clean up any partial state (including tools from partial discover)
-      this.pooledConnections.delete(name);
-      this.clients.delete(name);
       this.toolRegistry.removeMcpToolsByServer(name);
+      this.pooledConnections.delete(name);
+      const failedClient = this.clients.get(name);
+      if (failedClient) {
+        try {
+          await failedClient.disconnect();
+        } catch {
+          /* best effort */
+        }
+      }
+      this.clients.delete(name);
       this.stopHealthCheck(name);
+      this.eventEmitter?.emit('mcp-client-update', this.clients);
 
       const message = err instanceof Error ? err.message : String(err);
       const isTimeout = message.includes('timed out');
+      const exitCode =
+        err instanceof Error && 'exitCode' in err
+          ? (err as { exitCode?: number }).exitCode
+          : undefined;
       throw new McpServerSpawnFailedError(name, {
+        exitCode,
         stderr: message,
         timeout: isTimeout,
       });
@@ -2860,7 +2885,7 @@ export class McpClientManager {
     const settingsServers = this.cliConfig.getSettingsMcpServers() ?? {};
     const wasShadowingSettings = name in settingsServers;
 
-    // Release pool connection
+    // Release pool connection (identity-check prevents race with concurrent add)
     const poolConn = this.pooledConnections.get(name);
     if (poolConn) {
       try {
@@ -2868,7 +2893,9 @@ export class McpClientManager {
       } catch {
         /* best effort */
       }
-      this.pooledConnections.delete(name);
+      if (this.pooledConnections.get(name) === poolConn) {
+        this.pooledConnections.delete(name);
+      }
     }
 
     // Disconnect standalone client
@@ -2883,10 +2910,13 @@ export class McpClientManager {
       this.eventEmitter?.emit('mcp-client-update', this.clients);
     }
 
-    // Cleanup: tool registry, status, health check (mirrors removeServer)
+    // Cleanup: tool registry, status, health check, diagnostics (mirrors removeServer)
     this.toolRegistry.removeMcpToolsByServer(name);
     removeMCPServerStatus(name);
     this.stopHealthCheck(name);
+    this.consecutiveFailures.delete(name);
+    this.isReconnecting.delete(name);
+    this.dropRefusalEntry(name);
 
     // Release budget slot
     const budget = this.pool?.getBudget();

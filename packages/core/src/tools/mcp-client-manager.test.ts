@@ -3373,11 +3373,11 @@ describe('McpClientManager — addRuntimeMcpServer / removeRuntimeMcpServer (T2.
       'client-4',
     );
 
-    // pool.acquire should NOT have been re-called (idempotent replace)
+    // pool.acquire should NOT have been re-called (idempotent no-op)
     expect(acquireSpy).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       name: 'dup-srv',
-      replaced: true,
+      replaced: false,
       toolCount: 3,
     });
   });

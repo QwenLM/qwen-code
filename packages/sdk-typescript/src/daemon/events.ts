@@ -1342,6 +1342,7 @@ export function asKnownDaemonEvent(
     case 'followup_suggestion':
       return isFollowupSuggestionData(event.data)
         ? (event as DaemonFollowupSuggestionEvent)
+        : undefined;
     case 'mcp_server_added':
       return isMcpServerAddedData(event.data)
         ? (event as DaemonMcpServerAddedEvent)
@@ -2419,6 +2420,9 @@ function isFollowupSuggestionData(
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['suggestion']) &&
     isNonEmptyString(value['promptId'])
+  );
+}
+
 function isMcpServerAddedData(
   value: unknown,
 ): value is DaemonMcpServerAddedData {
