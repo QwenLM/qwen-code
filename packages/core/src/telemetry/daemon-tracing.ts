@@ -11,7 +11,7 @@ import {
   SpanKind,
   SpanStatusCode,
   trace,
-  type Attributes,
+  TraceState,
   type Context,
   type Span,
 } from '@opentelemetry/api';
@@ -40,10 +40,6 @@ export interface DaemonRequestSpanOptions {
   sessionId?: string;
 }
 
-function toOtelAttributes(attrs: DaemonAttributes): Attributes {
-  return attrs;
-}
-
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
@@ -54,11 +50,14 @@ function errorType(error: unknown): string {
   return typeof error;
 }
 
+const INVALID_TRACE_ID = '0'.repeat(32);
+const INVALID_SPAN_ID = '0'.repeat(16);
+
 function activeSpanContextIsValid(): boolean {
   const span = trace.getSpan(otelContext.active());
   if (!span) return false;
   const ctx = span.spanContext();
-  return ctx.traceId !== '0'.repeat(32) && ctx.spanId !== '0'.repeat(16);
+  return ctx.traceId !== INVALID_TRACE_ID && ctx.spanId !== INVALID_SPAN_ID;
 }
 
 function stripReservedTraceMeta(meta: unknown): Record<string, unknown> {
@@ -81,11 +80,14 @@ export async function withDaemonSpan<T>(
   fn: (span: Span) => Promise<T>,
   options: { autoOkOnSuccess?: boolean } = {},
 ): Promise<T> {
+  if (!isTelemetrySdkInitialized()) {
+    return await fn(trace.getSpan(otelContext.active()) as Span);
+  }
   const autoOkOnSuccess = options.autoOkOnSuccess ?? true;
   const tracer = trace.getTracer(SERVICE_NAME);
   return await tracer.startActiveSpan(
     name,
-    { kind: SpanKind.INTERNAL, attributes: toOtelAttributes(attributes) },
+    { kind: SpanKind.INTERNAL, attributes },
     async (span) => {
       try {
         const result = await fn(span);
@@ -149,8 +151,6 @@ export function recordDaemonHttpResponse(
         code: SpanStatusCode.ERROR,
         message: `HTTP ${statusCode}`,
       });
-    } else {
-      span?.setStatus({ code: SpanStatusCode.OK });
     }
   } catch {
     // Telemetry must not affect request handling.
@@ -188,7 +188,6 @@ export function emitDaemonLog(
       body,
       attributes: {
         'event.name': EVENT_DAEMON_ERROR,
-        'event.timestamp': new Date().toISOString(),
         ...attributes,
       },
     });
@@ -218,9 +217,15 @@ export async function runWithDaemonTelemetryContext<T>(
 
 export function injectDaemonTraceContext<T extends object>(request: T): T {
   const currentMeta = (request as { _meta?: unknown })._meta;
-  const nextMeta = stripReservedTraceMeta(currentMeta);
 
-  if (activeSpanContextIsValid()) {
+  if (!activeSpanContextIsValid()) {
+    return currentMeta
+      ? { ...request, _meta: stripReservedTraceMeta(currentMeta) }
+      : request;
+  }
+
+  const nextMeta = stripReservedTraceMeta(currentMeta);
+  try {
     const carrier: Record<string, string> = {};
     propagation.inject(otelContext.active(), carrier);
     if (carrier['traceparent']) {
@@ -229,6 +234,8 @@ export function injectDaemonTraceContext<T extends object>(request: T): T {
     if (carrier['tracestate']) {
       nextMeta[DAEMON_TRACESTATE_META_KEY] = carrier['tracestate'];
     }
+  } catch {
+    // Telemetry must not affect prompt forwarding.
   }
 
   return {
@@ -265,7 +272,9 @@ export function extractDaemonTraceContext(
     parts[0] !== '00' ||
     !traceId?.match(/^[0-9a-f]{32}$/) ||
     !spanId?.match(/^[0-9a-f]{16}$/) ||
-    !flags?.match(/^[0-9a-f]{2}$/)
+    !flags?.match(/^[0-9a-f]{2}$/) ||
+    traceId === INVALID_TRACE_ID ||
+    spanId === INVALID_SPAN_ID
   ) {
     return undefined;
   }
@@ -275,6 +284,10 @@ export function extractDaemonTraceContext(
       traceId,
       spanId,
       traceFlags: Number.parseInt(flags, 16),
+      isRemote: true,
+      ...(carrier['tracestate']
+        ? { traceState: new TraceState(carrier['tracestate']) }
+        : {}),
     }),
   );
 }
