@@ -27,7 +27,15 @@ export interface TokenUsageRecord {
   schemaVersion: typeof SCHEMA_VERSION;
   id: string;
   timestamp: string;
+  /**
+   * Calendar date in the local timezone of the process that wrote this record.
+   * Records written from different timezones keep their original local bucket.
+   */
   localDate: string;
+  /**
+   * Calendar month in the local timezone of the process that wrote this record.
+   * Records written from different timezones keep their original local bucket.
+   */
   localMonth: string;
   sessionId: string;
   model: string;
@@ -358,23 +366,29 @@ export async function recordTokenUsageFromApiResponse(
   await jsonl.writeLine(getTokenUsageFilePath(record.localMonth), record);
 }
 
+function logTokenUsageWriteFailure(error: unknown): void {
+  debugLogger.warn('Failed to record token usage:', error);
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code && code !== 'ENOENT') {
+    // eslint-disable-next-line no-console -- surface persistent local write failures outside debug mode
+    console.error(
+      `[token-usage] Write failed (${code}):`,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 export function recordTokenUsageFromApiResponseBestEffort(
   config: Config,
   event: ApiResponseEvent,
 ): void {
   try {
     const record = apiResponseEventToTokenUsageRecord(config, event);
-    jsonl.writeLineSync(getTokenUsageFilePath(record.localMonth), record);
+    void jsonl
+      .writeLine(getTokenUsageFilePath(record.localMonth), record)
+      .catch(logTokenUsageWriteFailure);
   } catch (error) {
-    debugLogger.warn('Failed to record token usage:', error);
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code && code !== 'ENOENT') {
-      // eslint-disable-next-line no-console -- surface persistent local write failures outside debug mode
-      console.error(
-        `[token-usage] Write failed (${code}):`,
-        error instanceof Error ? error.message : String(error),
-      );
-    }
+    logTokenUsageWriteFailure(error);
   }
 }
 

@@ -6,7 +6,6 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
@@ -199,7 +198,7 @@ describe('tokenUsageService', () => {
     ]);
   });
 
-  it('swallows best-effort write errors and surfaces non-ENOENT failures', () => {
+  it('swallows best-effort write errors and surfaces non-ENOENT failures', async () => {
     const config = makeFakeConfig({
       sessionId: 'session-1',
       targetDir: path.join(tempDir, 'project'),
@@ -210,11 +209,7 @@ describe('tokenUsageService', () => {
       totalTokenCount: 3,
     });
     const error = Object.assign(new Error('disk full'), { code: 'ENOSPC' });
-    const writeSpy = vi
-      .spyOn(jsonl, 'writeLineSync')
-      .mockImplementationOnce(() => {
-        throw error;
-      });
+    const writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
     const stderrSpy = vi
       .spyOn(console, 'error')
       .mockImplementation(() => undefined);
@@ -225,9 +220,45 @@ describe('tokenUsageService', () => {
       ).not.toThrow();
 
       expect(writeSpy).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledWith(
+          '[token-usage] Write failed (ENOSPC):',
+          'disk full',
+        );
+      });
+    } finally {
+      writeSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('swallows synchronous best-effort record conversion errors', () => {
+    const config = {
+      getSessionId: () => {
+        throw Object.assign(new Error('session unavailable'), {
+          code: 'EACCES',
+        });
+      },
+    } as unknown as ReturnType<typeof makeFakeConfig>;
+    const event = createEvent('model-a', 'prompt-1', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    const writeSpy = vi.spyOn(jsonl, 'writeLine');
+    const stderrSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    try {
+      expect(() =>
+        recordTokenUsageFromApiResponseBestEffort(config, event),
+      ).not.toThrow();
+
+      expect(writeSpy).not.toHaveBeenCalled();
       expect(stderrSpy).toHaveBeenCalledWith(
-        '[token-usage] Write failed (ENOSPC):',
-        'disk full',
+        '[token-usage] Write failed (EACCES):',
+        'session unavailable',
       );
     } finally {
       writeSpy.mockRestore();
@@ -235,7 +266,7 @@ describe('tokenUsageService', () => {
     }
   });
 
-  it('does not surface best-effort ENOENT write failures to stderr', () => {
+  it('does not surface best-effort ENOENT write failures to stderr', async () => {
     const config = makeFakeConfig({
       sessionId: 'session-1',
       targetDir: path.join(tempDir, 'project'),
@@ -248,11 +279,7 @@ describe('tokenUsageService', () => {
     const error = Object.assign(new Error('missing directory'), {
       code: 'ENOENT',
     });
-    const writeSpy = vi
-      .spyOn(jsonl, 'writeLineSync')
-      .mockImplementationOnce(() => {
-        throw error;
-      });
+    const writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
     const stderrSpy = vi
       .spyOn(console, 'error')
       .mockImplementation(() => undefined);
@@ -261,6 +288,9 @@ describe('tokenUsageService', () => {
       recordTokenUsageFromApiResponseBestEffort(config, event);
 
       expect(writeSpy).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => {
+        expect(writeSpy).toHaveBeenCalledTimes(1);
+      });
       expect(stderrSpy).not.toHaveBeenCalled();
     } finally {
       writeSpy.mockRestore();
@@ -513,7 +543,7 @@ describe('tokenUsageService', () => {
     );
   });
 
-  it('persists best-effort records synchronously', () => {
+  it('persists best-effort records asynchronously without blocking callers', async () => {
     const config = makeFakeConfig({
       sessionId: 'session-1',
       targetDir: path.join(tempDir, 'project'),
@@ -528,9 +558,8 @@ describe('tokenUsageService', () => {
       }),
     );
 
-    const fileContent = fs.readFileSync(
-      getTokenUsageFilePath('2026-05'),
-      'utf-8',
+    const fileContent = await vi.waitFor(() =>
+      readFile(getTokenUsageFilePath('2026-05'), 'utf-8'),
     );
     expect(fileContent).toContain('"model":"model-a"');
   });
