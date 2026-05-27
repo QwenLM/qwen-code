@@ -324,13 +324,13 @@ export async function startInteractiveUI(
                 <VimModeProvider settings={settings}>
                   <AgentViewProvider config={config}>
                     <BackgroundTaskViewProvider config={config}>
-                        <AppContainer
-                          config={config}
-                          settings={settings}
-                          startupWarnings={startupWarnings}
-                          version={version}
-                          initializationResult={initializationResult}
-                        />
+                      <AppContainer
+                        config={config}
+                        settings={settings}
+                        startupWarnings={startupWarnings}
+                        version={version}
+                        initializationResult={initializationResult}
+                      />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
                 </VimModeProvider>
@@ -421,10 +421,21 @@ export async function main() {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
+  // Load user settings — bare mode uses minimal config, normal mode loads full.
   const settings = isBareMode(argv.bare)
     ? createMinimalSettings()
     : loadSettings();
+
+  // Propagate corruption state to child process via env vars so
+  // relaunchAppInChildProcess() doesn't lose the marker.
+  if (settings.corruptedPath) {
+    process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'] = settings.corruptedPath;
+    process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] = settings.wasRecovered
+      ? '1'
+      : '0';
+  }
   await cleanupCheckpoints();
+  // Performance checkpoint
   profileCheckpoint('after_load_settings');
 
   // Check for invalid input combinations early to prevent crashes
