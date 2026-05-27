@@ -611,6 +611,10 @@ export function resetHomeEnvBootstrapForTesting(): void {
 function getHomeEnvFallbackVars(): Record<string, string> {
   const globalQwenDir = Storage.getGlobalQwenDir();
   const candidates = [path.join(globalQwenDir, '.env')];
+  // When QWEN_HOME is set, skip ~/.env to avoid surprise cross-contamination
+  // from a shared home .env. getUserLevelEnvPaths() always includes ~/.env
+  // because loadEnvironment() populates process.env independently — the two
+  // scopes are intentionally different.
   if (!process.env['QWEN_HOME']) {
     candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
   }
