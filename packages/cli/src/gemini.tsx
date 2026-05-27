@@ -424,6 +424,14 @@ export async function main() {
   await cleanupCheckpoints();
   profileCheckpoint('after_load_settings');
 
+  // Emit settings warnings early so the parent process surfaces them
+  // before relaunchAppInChildProcess() exits (the child has empty
+  // migrationWarnings because the parent already renamed the file).
+  const settingsWarnings = getSettingsWarnings(settings);
+  for (const warning of settingsWarnings) {
+    writeStderrLine(warning);
+  }
+
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
     writeStderrLine(

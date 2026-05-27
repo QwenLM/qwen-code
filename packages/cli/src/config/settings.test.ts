@@ -2001,6 +2001,35 @@ describe('Settings Loading and Merging', () => {
       vi.restoreAllMocks();
     });
 
+    it('should return warnings suitable for early stderr emission when settings.json has invalid JSON', () => {
+      const invalidJsonContent = '{ broken json!!!';
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
+          return '{}';
+        },
+      );
+      (fs.renameSync as Mock).mockImplementation(() => {});
+
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      const warnings = getSettingsWarnings(result);
+
+      // Warnings must be non-empty so the early stderr loop in gemini.tsx
+      // (before relaunchAppInChildProcess) actually emits something.
+      expect(warnings.length).toBeGreaterThan(0);
+      // Each warning should be a human-readable string suitable for stderr
+      for (const w of warnings) {
+        expect(typeof w).toBe('string');
+        expect(w.length).toBeGreaterThan(0);
+      }
+      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(true);
+
+      vi.restoreAllMocks();
+    });
+
     it('should resolve environment variables in user settings', () => {
       process.env['TEST_API_KEY'] = 'user_api_key_from_env';
       const userSettingsContent: TestSettings = {
