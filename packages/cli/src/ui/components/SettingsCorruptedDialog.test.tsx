@@ -100,24 +100,34 @@ describe('SettingsCorruptedDialog', () => {
       </KeypressProvider>,
     );
 
+    // Initially EXIT is selected — the line containing "Exit and restore"
+    // must have '>' in it
     await wait();
-    // Initially EXIT is selected
     await waitFor(() => {
-      expect(lastFrame()).toContain('>');
+      const lines = lastFrame().split('\n');
+      const exitLine = lines.find((l) => l.includes('Exit and restore'));
+      expect(exitLine).toBeTruthy();
+      expect(exitLine).toContain('>');
     });
 
-    // Press down to move to CONTINUE
+    // Press down — CONTINUE line gets '>'
     stdin.write(TerminalKeys.DOWN_ARROW as string);
     await wait();
     await waitFor(() => {
-      expect(lastFrame()).toContain('>');
+      const lines = lastFrame().split('\n');
+      const continueLine = lines.find((l) => l.includes('Continue with'));
+      expect(continueLine).toBeTruthy();
+      expect(continueLine).toContain('>');
     });
 
-    // Press up to move back to EXIT
+    // Press up — EXIT line gets '>' back
     stdin.write(TerminalKeys.UP_ARROW as string);
     await wait();
     await waitFor(() => {
-      expect(lastFrame()).toContain('>');
+      const lines = lastFrame().split('\n');
+      const exitLine = lines.find((l) => l.includes('Exit and restore'));
+      expect(exitLine).toBeTruthy();
+      expect(exitLine).toContain('>');
     });
 
     unmount();
