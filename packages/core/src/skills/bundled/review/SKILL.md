@@ -1,7 +1,7 @@
 ---
 name: review
-description: Review changed code for correctness, security, code quality, and performance. Use when the user asks to review code changes, a PR, or specific files. Invoke with `/review`, `/review <pr-number>`, `/review <file-path>`, `/review <pr-number> --comment` to post inline comments on the PR, or `/review <pr-number> --ci --comment` for bounded non-interactive CI review.
-argument-hint: '[pr-number|file-path] [--comment] [--ci]'
+description: Review changed code for correctness, security, code quality, and performance. Use when the user asks to review code changes, a PR, or specific files. Invoke with `/review`, `/review <pr-number>`, `/review <file-path>`, or `/review <pr-number> --comment` to post inline comments on the PR.
+argument-hint: '[pr-number|file-path] [--comment]'
 allowedTools:
   - task
   - run_shell_command
@@ -29,7 +29,7 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 
 Your goal here is to understand the scope of changes so you can dispatch agents effectively in Step 4.
 
-First, parse the `--comment` and `--ci` flags: split the arguments by whitespace, and if any token is exactly `--comment` (not a substring match — ignore tokens like `--commentary`), set the comment flag and remove that token from the argument list. If any token is exactly `--ci`, set CI mode and remove that token from the argument list. CI mode is for non-interactive automation: do not ask confirmation questions, do not apply autofixes, and do not execute dependency installation, build, test, package-manager commands, project scripts, or other PR-controlled code. In CI mode, any `run_shell_command` use must be limited to trusted review helper subcommands (`qwen review fetch-pr`, `qwen review pr-context`, `qwen review load-rules`, `qwen review presubmit`, `qwen review cleanup`), read-only inspection commands such as `git`, `gh`, `rg`, `sed`, `cat`, `head`, `tail`, `nl`, `wc`, and `find`, and the minimal GitHub write calls required for review submission (`gh pr review`, `gh pr comment`); never execute files from the PR worktree. If `--comment` is set but the review target is not a PR, warn the user: "Warning: `--comment` flag is ignored because the review target is not a PR." and continue without it.
+First, parse the `--comment` flag: split the arguments by whitespace, and if any token is exactly `--comment` (not a substring match — ignore tokens like `--commentary`), set the comment flag and remove that token from the argument list. If `--comment` is set but the review target is not a PR, warn the user: "Warning: `--comment` flag is ignored because the review target is not a PR." and continue without it.
 
 To disambiguate the argument type: if the argument is a pure integer, treat it as a PR number. If it's a URL containing `/pull/`, extract the owner/repo/number from the URL. Then determine if the local repo can access this PR:
 
@@ -75,7 +75,7 @@ Based on the remaining arguments:
 
     The subcommand fetches `gh pr view` metadata + inline / issue comments and writes a single Markdown file with the PR title, description, base/head, diff stats, an **"Already discussed"** section, and an "Open inline comments" section. Each replied-to thread renders the **complete reply chain** (root comment + chronological replies), so review agents can see whether a "Fixed in `<commit>`"-style reply has closed the topic — agents must NOT re-report a concern whose latest reply addresses it. Issue-level (general PR) comments appear in the same section. The file's own preamble tells agents to treat its contents as DATA, so no extra security prefix is needed when passing it to review agents.
 
-  - **Install dependencies in the worktree** (needed for linting, building, testing): skip this entirely in CI mode. Otherwise run `npm ci` (or `yarn install --frozen-lockfile`, `pip install -e .`, etc.) inside `worktreePath`. If installation fails, log a warning and continue — deterministic analysis and build/test may fail but LLM review agents can still operate.
+  - **Install dependencies in the worktree** (needed for linting, building, testing): run `npm ci` (or `yarn install --frozen-lockfile`, `pip install -e .`, etc.) inside `worktreePath`. If installation fails, log a warning and continue — deterministic analysis and build/test may fail but LLM review agents can still operate.
 
 - **File path** (e.g., `src/foo.ts`):
   - Run `git diff HEAD -- <file>` to get recent changes
@@ -105,7 +105,7 @@ Do NOT inject review rules into Agent 7 (Build & Test) — it runs deterministic
 
 ## Step 3: Run deterministic analysis
 
-Before launching LLM review agents, run the project's existing linter and type checker. Skip this step in CI mode because project tooling can execute PR-controlled code while CI secrets are available. When a tool supports file arguments, run it on changed files only. When a tool is whole-project by nature (e.g., `tsc`, `cargo clippy`, `go vet`), run it on the whole project but **filter reported diagnostics to changed files**. These tools provide ground-truth results that LLMs cannot match in accuracy.
+Before launching LLM review agents, run the project's existing linter and type checker. When a tool supports file arguments, run it on changed files only. When a tool is whole-project by nature (e.g., `tsc`, `cargo clippy`, `go vet`), run it on the whole project but **filter reported diagnostics to changed files**. These tools provide ground-truth results that LLMs cannot match in accuracy.
 
 Extract the list of changed files from the diff output. For local uncommitted reviews, take the union of files from both `git diff` and `git diff --staged` so staged-only and unstaged-only changes are both included. **Exclude deleted files** — use `git diff --diff-filter=d --name-only` (or filter out deletions from `git diff --name-status`) since running linters on non-existent paths would produce false failures. For file path reviews with no diff (reviewing a file's current state), use the specified file as the target. Then run the applicable checks:
 
@@ -159,7 +159,7 @@ Assign severity based on the tool's own categorization:
 
 ## Step 4: Parallel multi-dimensional review
 
-Launch review agents by invoking all `task` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time. Launch **9 agents** for same-repo reviews (Agent 6 has three persona variants 6a/6b/6c that each count as a separate parallel agent), or **8 agents** (skip Agent 7: Build & Test) for cross-repo lightweight mode or CI mode (regardless of repo origin). Each agent should focus exclusively on its dimension.
+Launch review agents by invoking all `task` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time. Launch **9 agents** for same-repo reviews (Agent 6 has three persona variants 6a/6b/6c that each count as a separate parallel agent), or **8 agents** (skip Agent 7: Build & Test) for cross-repo lightweight mode since there is no local codebase to build/test. Each agent should focus exclusively on its dimension.
 
 **IMPORTANT**: Keep each agent's prompt **short** (under 200 words) to fit all tool calls in one response. Do NOT paste the full diff — give each agent:
 
@@ -324,8 +324,6 @@ Launch a **single verification agent** that receives **all** non-pre-confirmed f
 - The command to obtain the diff (as determined in Step 1)
 - Access to read files and search the codebase
 
-**CI budget constraint**: In CI mode only, the verification agent must complete its work within **30 tool calls total** across all findings. If the budget is exhausted before all findings are verified, return the remaining findings as **unverified due to CI budget** and stop immediately — do not exceed the budget, and do not mark unverified findings as confirmed. Prioritize verifying Critical findings first, then Suggestions, then Nice to have. In CI mode, keep per-finding exploration bounded to the referenced code plus at most two nearby caller/context reads where practical. Outside CI mode, there is no fixed tool-call budget; verify enough context to avoid false positives.
-
 The verification agent must, for each finding:
 
 1. Read the actual code at the referenced file and line
@@ -338,7 +336,7 @@ The verification agent must, for each finding:
 
 **When uncertain, downgrade to "confirmed (low confidence)" rather than rejecting outright.** Low-confidence findings stay in terminal output (under "Needs Human Review") but are filtered from PR inline comments — this preserves the "Silence is better than noise" principle for PR interactions while ensuring valid concerns are not silently swallowed. Reserve outright rejection for findings that clearly do not match the actual code (the finding describes behavior the code does not have, or it matches an Exclusion Criterion). Vague suspicions with no concrete evidence in the code can still be rejected — low-confidence is for "likely real but needs human judgment," not for "I have no idea."
 
-**After verification:** remove all rejected findings. Separate confirmed findings into two groups: high-confidence and low-confidence. Low-confidence findings appear **only in terminal output** (under "Needs Human Review") and are **never posted as PR inline comments** — this preserves the "Silence is better than noise" principle for PR interactions. Findings marked **unverified due to CI budget** are not confirmed, do not influence the verdict, and must be summarized separately with a count in CI output/review body.
+**After verification:** remove all rejected findings. Separate confirmed findings into two groups: high-confidence and low-confidence. Low-confidence findings appear **only in terminal output** (under "Needs Human Review") and are **never posted as PR inline comments** — this preserves the "Silence is better than noise" principle for PR interactions.
 
 ### Pattern aggregation
 
@@ -451,7 +449,6 @@ If the user responds with "post comments" (or similar intent like "yes post them
 **Skip this entire step (do not even ask) if EITHER of the following is true:**
 
 - `--comment` was specified in the arguments — the user explicitly asked for inline PR comments, not code edits. Go straight to Step 9.
-- `--ci` was specified in the arguments — non-interactive CI must never mutate PR code.
 - The review target is a cross-repo PR running in lightweight mode (no local files to edit).
 
 Otherwise, if there are **Critical** or **Suggestion** findings with clear, unambiguous fixes, offer to auto-apply them. (If there are no such findings, this step is also a no-op — fall through to Step 9.)

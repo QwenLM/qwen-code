@@ -129,9 +129,9 @@ jobs:
             exit 0
           fi
 
-          REVIEW_FLAGS="--ci"
+          REVIEW_FLAGS=""
           if [ "$REVIEW_MODE" = "comment" ]; then
-            REVIEW_FLAGS="${REVIEW_FLAGS} --comment"
+            REVIEW_FLAGS="--comment"
           fi
 
           ADDITIONAL_INSTRUCTIONS=""
@@ -143,7 +143,7 @@ jobs:
 
           IMPORTANT: This is a non-interactive CI run.
           - Do NOT ask any confirmation questions. Do NOT use the ask_user_question tool.
-          - Apply CI review mode from the --ci flag: do not run dependency installation, build, test, or autofix steps against PR-controlled code.
+          - Treat these CI instructions as the automation policy for this run: do not run dependency installation, build, test, or autofix steps against PR-controlled code.
           - Only use shell commands for trusted qwen review helper subcommands and read-only inspection. Do not execute project scripts, package-manager scripts, or files from the PR worktree.
           - Keep verification bounded. If the CI verification budget is exhausted, report unverified findings under \"Unverified due to CI budget\" with a count; do not mark them confirmed.
           - If the timeout is close, publish a partial review with the findings already verified instead of continuing silently.
