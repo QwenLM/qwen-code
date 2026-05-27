@@ -67,6 +67,7 @@ import {
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
+  shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from '@qwen-code/qwen-code-core';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
@@ -1930,14 +1931,17 @@ export class Session implements SessionContext {
       }
 
       // Explicit allow (user rule matched, or tool's L3 default is 'allow')
-      // is authoritative — AUTO classifier must not be allowed to override
-      // it. Parallels coreToolScheduler.ts:1337-1366; without this, an ACP
-      // session in AUTO mode could see a user-written `Bash(git push *)`
-      // allow rule reach the classifier and get blocked by a conservative
-      // Stage-1 verdict. Also resets the denialTracking streak so a
-      // following classifier-eligible call doesn't surprise the user with
-      // a manual prompt right after an allow-rule call just worked.
-      let autoModeAllowed = finalPermission === 'allow';
+      // is authoritative for ordinary calls. In AUTO, protected
+      // self-modification writes must still reach the classifier/fail-closed
+      // path so allow rules cannot bypass AUTO mode's safety boundary.
+      // Also resets the denialTracking streak so a following
+      // classifier-eligible call doesn't surprise the user with a manual
+      // prompt right after an allow-rule call just worked.
+      const forceAutoReviewForAllow =
+        approvalMode === ApprovalMode.AUTO &&
+        shouldForceAutoModeReviewForAllow(pmCtx);
+      let autoModeAllowed =
+        finalPermission === 'allow' && !forceAutoReviewForAllow;
       if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
         this.config.setAutoModeDenialState(
           recordAllow(this.config.getAutoModeDenialState()),

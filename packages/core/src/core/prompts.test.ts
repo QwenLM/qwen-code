@@ -55,6 +55,19 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toMatchSnapshot(); // Use snapshot for base prompt structure
   });
 
+  it('instructs the model not to bypass denied tool calls through equivalent paths', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    // Forbid equivalent paths for the denied action while allowing unrelated
+    // safer alternatives.
+    expect(prompt).toContain('denied action through another tool');
+    expect(prompt).toContain(
+      'genuinely safer alternative that does not accomplish the denied action',
+    );
+    expect(prompt).toContain('stop and ask the user for explicit approval');
+  });
+
   it('should return the base prompt when userMemory is empty string', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt('');

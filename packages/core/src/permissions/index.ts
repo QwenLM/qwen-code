@@ -20,6 +20,7 @@ export {
   SAFE_TOOL_ALLOWLIST,
   isInSafeToolAllowlist,
   passesAcceptEditsFastPath,
+  shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
 export {

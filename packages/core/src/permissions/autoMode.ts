@@ -17,11 +17,19 @@
  * rule) the fast-paths are skipped — user intent takes precedence.
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
+import {
+  getAllGeminiMdFilenames,
+  LOCAL_CONTEXT_FILENAME,
+} from '../memory/const.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { classifyAction, type ClassifierResult } from './classifier.js';
+import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import {
   recordAllow,
   recordBlock,
@@ -81,6 +89,17 @@ const EDIT_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.WRITE_FILE,
 ]);
 
+const PROTECTED_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
+  ToolNames.EDIT,
+  ToolNames.WRITE_FILE,
+  ToolNames.NOTEBOOK_EDIT,
+]);
+
+const SHELL_LIKE_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
+  ToolNames.SHELL,
+  ToolNames.MONITOR,
+]);
+
 /**
  * Predicate for whether the AUTO mode L5 branch should run for a given call.
  * Centralizes the rule "only when the session is in AUTO and the tool isn't
@@ -98,32 +117,166 @@ export function shouldRunAutoModeForCall(
 }
 
 /**
- * Paths inside the workspace that nevertheless execute code on subsequent
- * tooling operations (git commit, npm install, CI runs, …) and must NOT
- * take the acceptEdits fast-path. Without this list, a hostile AGENTS.md
- * could instruct the agent to write `.git/hooks/pre-commit` → fast-path
- * approves (it's in workspace) → next `git commit` runs arbitrary code
- * without classifier review.
- *
- * Edits to these paths still pass through the AUTO classifier; users
- * who want to allow specific hook/script edits can add an explicit
- * `permissions.allow` rule.
+ * Workspace paths that can affect later execution and must not take the
+ * acceptEdits fast-path. Specific edits can still pass through the AUTO
+ * classifier or an explicit `permissions.allow` rule.
  */
 const PERSISTENCE_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /(^|\/)\.git\//, // git config, hooks, alias — covers .git/hooks/* and .git/config
   /(^|\/)\.husky\//, // git hooks via husky
   /(^|\/)package\.json$/, // npm scripts (root + nested workspaces)
   /(^|\/)\.npmrc$/, // registry override → malicious package fetch on next install
-  /(^|\/)(Makefile|makefile|GNUmakefile)$/, // make targets
-  /(^|\/)\.?[Jj]ustfile$/, // just task runner
-  /(^|\/)Taskfile\.ya?ml$/, // go-task
+  /(^|\/)(makefile|gnumakefile)$/, // make targets
+  /(^|\/)\.?justfile$/, // just task runner
+  /(^|\/)taskfile\.ya?ml$/, // go-task
   /(^|\/)\.github\/workflows\//, // CI workflow definitions
 ]);
+
+const SELF_MODIFICATION_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
+  /(^|\/)\.qwen\/settings(?:\.[^/]*)?\.json$/,
+  /(^|\/)(qwen|agents)\.md$/,
+  /(^|\/)\.qwen\/qwen\.local\.md$/,
+  /(^|\/)\.qwen\/rules(?:\/|$)/,
+  /(^|\/)\.qwen\/commands(?:\/|$)/,
+  /(^|\/)\.qwen\/agents(?:\/|$)/,
+  /(^|\/)\.qwen\/skills(?:\/|$)/,
+  /(^|\/)\.qwen\/hooks(?:\/|$)/,
+  /(^|\/)\.mcp\.json$/,
+]);
+
+function normalizePathForAutoModePattern(filePath: string): string {
+  return filePath.replace(/\\/g, '/').toLowerCase();
+}
+
+function matchesConfiguredContextFile(normalizedPath: string): boolean {
+  return [...getAllGeminiMdFilenames(), LOCAL_CONTEXT_FILENAME].some(
+    (filename) => {
+      const normalizedFilename = normalizePathForAutoModePattern(filename)
+        .replace(/^\/+/, '')
+        .replace(/\/+$/, '');
+      if (!normalizedFilename) return false;
+      return (
+        normalizedPath === normalizedFilename ||
+        normalizedPath.endsWith(`/${normalizedFilename}`)
+      );
+    },
+  );
+}
+
+function getNormalizedQwenHomePrefixes(): string[] {
+  const qwenHome = process.env['QWEN_HOME'];
+  if (!qwenHome) return [];
+
+  const candidates = new Set<string>([path.resolve(qwenHome)]);
+  try {
+    candidates.add(fs.realpathSync.native(qwenHome));
+  } catch {
+    // QWEN_HOME may not exist yet; the configured path still matters.
+  }
+
+  return [...candidates].map((candidate) =>
+    normalizePathForAutoModePattern(candidate).replace(/\/+$/, ''),
+  );
+}
+
+function matchesQwenHomeSurface(normalizedPath: string): boolean {
+  for (const normalizedQwenHome of getNormalizedQwenHomePrefixes()) {
+    const qwenHomePrefix = `${normalizedQwenHome}/`;
+    if (!normalizedPath.startsWith(qwenHomePrefix)) continue;
+
+    const relativePath = normalizedPath.slice(qwenHomePrefix.length);
+    if (
+      /^settings(?:\.[^/]*)?\.json$/.test(relativePath) ||
+      /^qwen\.local\.md$/.test(relativePath) ||
+      /^\.mcp\.json$/.test(relativePath) ||
+      /^(rules|commands|agents|skills|hooks)(?:\/|$)/.test(relativePath)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function getAutoModeWritePathCandidates(filePath: string): string[] {
+  const candidates = new Set<string>([filePath]);
+
+  try {
+    candidates.add(fs.realpathSync.native(filePath));
+  } catch {
+    const parentDir = path.dirname(filePath);
+    try {
+      candidates.add(
+        path.join(fs.realpathSync.native(parentDir), path.basename(filePath)),
+      );
+    } catch {
+      // Best-effort only: new files often do not exist yet, and the raw path
+      // still catches direct protected-path writes.
+    }
+  }
+
+  return [...candidates];
+}
+
+export function isAutoModeProtectedWritePath(filePath: string): boolean {
+  return getAutoModeWritePathCandidates(filePath).some((candidate) => {
+    const normalized = normalizePathForAutoModePattern(candidate);
+    return (
+      matchesConfiguredContextFile(normalized) ||
+      matchesQwenHomeSurface(normalized) ||
+      PERSISTENCE_PATH_PATTERNS.some((pattern) => pattern.test(normalized)) ||
+      SELF_MODIFICATION_PATH_PATTERNS.some((pattern) =>
+        pattern.test(normalized),
+      )
+    );
+  });
+}
+
+/**
+ * Returns true when an L4 `allow` verdict must still pass through the AUTO
+ * classifier because it writes protected configuration or instruction paths.
+ */
+export function shouldForceAutoModeReviewForAllow(
+  ctx: PermissionCheckContext,
+): boolean {
+  if (
+    PROTECTED_WRITE_TOOL_NAMES.has(ctx.toolName) &&
+    ctx.filePath &&
+    isAutoModeProtectedWritePath(ctx.filePath)
+  ) {
+    return true;
+  }
+
+  if (!SHELL_LIKE_TOOL_NAMES.has(ctx.toolName) || !ctx.command) return false;
+
+  // Monitor wraps the user command; analyze the same payload used by
+  // PermissionManager.
+  const command =
+    ctx.toolName === ToolNames.MONITOR
+      ? normalizeMonitorCommand(ctx.command).safetyCommand
+      : ctx.command;
+  const cwd = ctx.cwd ?? process.cwd();
+
+  return extractShellOperationsAcrossCommand(command, cwd).some((op) => {
+    if (
+      op.virtualTool !== ToolNames.EDIT &&
+      op.virtualTool !== ToolNames.WRITE_FILE
+    ) {
+      return false;
+    }
+    if (op.cwdUnknown && op.pathMayDependOnCwd) {
+      return true;
+    }
+    return Boolean(op.filePath && isAutoModeProtectedWritePath(op.filePath));
+  });
+}
 
 /**
  * Returns true when the pending action is a file edit / write targeting a
  * path that lies within the current workspace (cwd + additional directories)
- * AND is NOT in {@link PERSISTENCE_PATH_PATTERNS}.
+ * AND is not rejected by {@link isAutoModeProtectedWritePath} (covers
+ * persistence paths and Qwen self-modification surfaces, including symlinks
+ * whose realpath resolves to a protected target).
  *
  * Symlinks ARE resolved via `WorkspaceContext.isPathWithinWorkspace`, which
  * internally calls `fs.realpathSync`. A symlink whose target is outside the
@@ -138,10 +291,13 @@ export function passesAcceptEditsFastPath(
 ): boolean {
   if (!EDIT_TOOL_NAMES.has(ctx.toolName)) return false;
   if (!ctx.filePath) return false;
-  // Persistence paths (hooks, package.json scripts, CI definitions) must
-  // never auto-approve via fast-path — they execute code on subsequent
-  // tooling operations.
-  if (PERSISTENCE_PATH_PATTERNS.some((p) => p.test(ctx.filePath!))) {
+  // Persistence paths (hooks, package.json scripts, CI definitions) and
+  // Qwen self-modification surfaces (.qwen/settings*.json, configured context
+  // files, .qwen/rules|commands|agents|skills|hooks/, .mcp.json) must never
+  // auto-approve via fast-path — the former execute code on subsequent tooling
+  // operations, the latter let an agent rewrite its own permissions or
+  // instructions.
+  if (isAutoModeProtectedWritePath(ctx.filePath)) {
     return false;
   }
   return config.getWorkspaceContext().isPathWithinWorkspace(ctx.filePath);
@@ -169,32 +325,15 @@ export type AutoModeDecision =
     }
   | { via: 'fallback' };
 
-/**
- * Outcome of {@link applyAutoModeDecision}. Boils the union of
- * `AutoModeDecision` plus denial-tracking state updates down to a
- * three-way "what should the caller do" instruction so the scheduler /
- * ACP paths share one decision handler instead of duplicating the
- * switch + state-update boilerplate.
- */
+/** Outcome of {@link applyAutoModeDecision}. */
 export type AutoModeOutcome =
   | { kind: 'approved' }
   | { kind: 'blocked'; errorMessage: string }
   | { kind: 'fallback' };
 
 /**
- * Apply an {@link AutoModeDecision} to denial-tracking state and return
- * an outcome the caller can act on. Shared between
- * `coreToolScheduler.ts` and `acp-integration/session/Session.ts` — the
- * switch on `decision.via`, the `recordAllow / recordBlock /
- * recordUnavailable` updates, and the formatted block message used to
- * all be duplicated line-for-line across the two files. Drift between
- * those copies was a recurring class of bug across PR #4151 review
- * rounds; this helper makes the two paths share one source of truth.
- *
- * Callers retain responsibility for the surrounding integration
- * (marking the tool call scheduled vs writing an error response,
- * logging the fallback reason with denial-state context, etc.) — those
- * pieces differ between scheduler and Session.
+ * Apply an AUTO decision and denial-tracking update. Shared by the scheduler
+ * and ACP paths; callers still handle their integration-specific responses.
  */
 export function applyAutoModeDecision(
   decision: AutoModeDecision,
@@ -224,10 +363,7 @@ export function applyAutoModeDecision(
       return { kind: 'fallback' };
     default: {
       const _exhaustive: never = decision;
-      // Surface drift at runtime — TS exhaustiveness can be bypassed
-      // via `as` cast / JS interop / partial build. Without this log
-      // every tool call would silently degrade to manual approval with
-      // zero operator-visible signal.
+      // Make unexpected JS/interop values visible at runtime.
       autoModeDebugLogger.error(
         `Auto mode: unrecognised decision.via "${(decision as { via: string }).via}" — falling through to manual approval`,
       );
@@ -236,6 +372,16 @@ export function applyAutoModeDecision(
     }
   }
 }
+
+/**
+ * Trailing guidance appended to every classifier-denial tool-result message.
+ * Centralised so the policy boundary (no silent retries, no equivalent-path
+ * workarounds, stop and ask the user) is identical for "blocked" and
+ * "unavailable" verdicts and stays in sync with the main system prompt's
+ * Denied Tool Calls rule.
+ */
+export const AUTO_MODE_DENIAL_GUIDANCE =
+  'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
 
 /**
  * Build the tool-error message the scheduler / ACP session returns when
@@ -251,28 +397,17 @@ export function formatClassifierBlockMessage(
   decision: Extract<AutoModeDecision, { via: 'classifier' }>,
 ): string {
   if (decision.unavailable) {
-    return decision.reason
+    const message = decision.reason
       ? `Auto mode classifier unavailable (${decision.reason}); action blocked for safety`
       : `Auto mode classifier unavailable; action blocked for safety`;
+    return `${message}\n${AUTO_MODE_DENIAL_GUIDANCE}`;
   }
-  return `Blocked by auto mode policy: ${decision.reason}`;
+  return `Permission for this action has been denied. Reason: ${decision.reason}\n${AUTO_MODE_DENIAL_GUIDANCE}`;
 }
 
 export interface EvaluateAutoModeInput {
   ctx: PermissionCheckContext;
-  /**
-   * True when L4 PermissionManager forced `'ask'` because the user wrote
-   * an explicit ask rule that matched this call. When `true`, fast-paths
-   * must be skipped so the user's explicit intent is honored.
-   *
-   * Comes from `PermissionFlowResult.pmForcedAsk` (set by L4 in
-   * `evaluatePermissionRules` when a user-provided ask rule matched).
-   *
-   * False here covers both "no user rule matched at all" (L4 returned
-   * `'default'`) AND "tool's intrinsic L3 default was `'ask'` and the
-   * user has no rule" — both cases should still hit the fast-paths
-   * because the user hasn't expressed a contrary intent.
-   */
+  /** True when a user-provided `permissions.ask` rule matched this call. */
   pmForcedAsk: boolean;
   /** Raw tool params (forwarded to the classifier). */
   toolParams: Record<string, unknown>;
@@ -317,11 +452,7 @@ export async function evaluateAutoMode(
     return { via: 'fast-path:allowlist' };
   }
 
-  // User wrote an explicit `permissions.ask` rule matching this call —
-  // honor that intent and route to manual confirmation instead of letting
-  // the classifier auto-approve. The fast-paths above already opt out for
-  // the same reason; the classifier path was the missing leg.
-  // (auto-mode.md documents this as "ask rules force manual confirmation".)
+  // User `ask` rules require manual confirmation.
   if (input.pmForcedAsk) {
     return { via: 'fallback' };
   }

@@ -5,18 +5,24 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   SAFE_TOOL_ALLOWLIST,
   evaluateAutoMode,
   formatClassifierBlockMessage,
+  isAutoModeProtectedWritePath,
   isInSafeToolAllowlist,
   passesAcceptEditsFastPath,
+  shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from './types.js';
+import { setGeminiMdFilename } from '../memory/const.js';
 
 // ─── SAFE_TOOL_ALLOWLIST contents (frozen) ───────────────────────────────
 
@@ -127,6 +133,143 @@ function ctx(over: Partial<PermissionCheckContext>): PermissionCheckContext {
   };
 }
 
+describe('isAutoModeProtectedWritePath', () => {
+  it('matches Qwen self-modification files and directories', () => {
+    const protectedPaths = [
+      '/repo/.qwen/settings.json',
+      '/repo/.qwen/settings.local.json',
+      '/repo/QWEN.md',
+      '/repo/AGENTS.md',
+      '/repo/.qwen/commands/review.md',
+      '/repo/.qwen/agents/reviewer.md',
+      '/repo/.qwen/skills/skill-a/SKILL.md',
+      '/repo/.qwen/hooks/pre-tool-use.json',
+      '/repo/.qwen/QWEN.local.md',
+      '/repo/.qwen/rules/backend.md',
+      '/repo/.mcp.json',
+    ];
+
+    for (const filePath of protectedPaths) {
+      expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
+    }
+  });
+
+  it('does not treat ordinary source files or worktree files as protected', () => {
+    const ordinaryPaths = [
+      '/repo/src/index.ts',
+      '/repo/.qwen/PROJECT_SUMMARY.md',
+      '/repo/.qwen/worktrees/feature/src/index.ts',
+    ];
+
+    for (const filePath of ordinaryPaths) {
+      expect(isAutoModeProtectedWritePath(filePath)).toBe(false);
+    }
+  });
+
+  it('still protects config surfaces inside managed worktrees', () => {
+    const protectedPaths = [
+      '/repo/.qwen/worktrees/feature/.qwen/settings.json',
+      '/repo/.qwen/worktrees/feature/AGENTS.md',
+      '/repo/.qwen/worktrees/feature/.qwen/QWEN.local.md',
+      '/repo/.qwen/worktrees/feature/.qwen/rules/backend.md',
+      '/repo/.qwen/worktrees/feature/.mcp.json',
+    ];
+
+    for (const filePath of protectedPaths) {
+      expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
+    }
+  });
+
+  it('matches protected paths case-insensitively', () => {
+    const protectedPaths = [
+      '/repo/qwen.md',
+      '/repo/agents.md',
+      '/repo/.QWEN/SETTINGS.JSON',
+      '/repo/.QWEN/QWEN.LOCAL.MD',
+      '/repo/.QWEN/RULES/backend.md',
+      '/repo/.MCP.JSON',
+      '/repo/GNUmakefile',
+      '/repo/Taskfile.yaml',
+      '/repo/.Github/workflows/ci.yml',
+    ];
+
+    for (const filePath of protectedPaths) {
+      expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
+    }
+  });
+
+  it('matches configured context filenames', () => {
+    setGeminiMdFilename(['CUSTOM_AGENTS.md', 'docs/TEAM_CONTEXT.md']);
+    try {
+      const protectedPaths = [
+        '/repo/CUSTOM_AGENTS.md',
+        '/repo/docs/TEAM_CONTEXT.md',
+        '/repo/.qwen/worktrees/feature/CUSTOM_AGENTS.md',
+      ];
+
+      for (const filePath of protectedPaths) {
+        expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
+      }
+    } finally {
+      setGeminiMdFilename(['QWEN.md', 'AGENTS.md']);
+    }
+  });
+
+  it('matches self-modification surfaces in custom QWEN_HOME', () => {
+    const originalQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = '/tmp/custom-qwen-home';
+
+    try {
+      const protectedPaths = [
+        '/tmp/custom-qwen-home/settings.json',
+        '/tmp/custom-qwen-home/settings.local.json',
+        '/tmp/custom-qwen-home/QWEN.local.md',
+        '/tmp/custom-qwen-home/commands/review.md',
+        '/tmp/custom-qwen-home/agents/reviewer.md',
+        '/tmp/custom-qwen-home/skills/review/SKILL.md',
+        '/tmp/custom-qwen-home/hooks/pre-tool-use.json',
+        '/tmp/custom-qwen-home/rules/backend.md',
+        '/tmp/custom-qwen-home/.mcp.json',
+      ];
+
+      for (const filePath of protectedPaths) {
+        expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
+      }
+    } finally {
+      if (originalQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = originalQwenHome;
+      }
+    }
+  });
+
+  it('matches real paths under a symlinked custom QWEN_HOME', () => {
+    const originalQwenHome = process.env['QWEN_HOME'];
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-home-'));
+
+    try {
+      const realHome = path.join(tmpRoot, 'real-home');
+      const linkedHome = path.join(tmpRoot, 'linked-home');
+      fs.mkdirSync(realHome, { recursive: true });
+      fs.symlinkSync(realHome, linkedHome);
+      process.env['QWEN_HOME'] = linkedHome;
+
+      const settingsPath = path.join(realHome, 'settings.json');
+      fs.writeFileSync(settingsPath, '{}');
+
+      expect(isAutoModeProtectedWritePath(settingsPath)).toBe(true);
+    } finally {
+      if (originalQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = originalQwenHome;
+      }
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('passesAcceptEditsFastPath', () => {
   const cwd = '/Users/test/project';
   const config = makeConfig([cwd]);
@@ -147,6 +290,81 @@ describe('passesAcceptEditsFastPath', () => {
         config,
       ),
     ).toBe(true);
+  });
+
+  it('rejects Qwen self-modification paths even inside cwd', () => {
+    const protectedPaths = [
+      `${cwd}/.qwen/settings.json`,
+      `${cwd}/.qwen/settings.local.json`,
+      `${cwd}/QWEN.md`,
+      `${cwd}/AGENTS.md`,
+      `${cwd}/.qwen/commands/review.md`,
+      `${cwd}/.qwen/agents/reviewer.md`,
+      `${cwd}/.qwen/skills/review/SKILL.md`,
+      `${cwd}/.qwen/hooks/pre-tool-use.json`,
+      `${cwd}/.qwen/QWEN.local.md`,
+      `${cwd}/.qwen/rules/backend.md`,
+      `${cwd}/.mcp.json`,
+    ];
+
+    for (const filePath of protectedPaths) {
+      expect(
+        passesAcceptEditsFastPath(
+          ctx({ toolName: ToolNames.WRITE_FILE, filePath }),
+          config,
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it('allows ordinary files under .qwen/worktrees but rejects nested config surfaces', () => {
+    expect(
+      passesAcceptEditsFastPath(
+        ctx({
+          toolName: ToolNames.WRITE_FILE,
+          filePath: `${cwd}/.qwen/worktrees/feature/src/index.ts`,
+        }),
+        config,
+      ),
+    ).toBe(true);
+
+    expect(
+      passesAcceptEditsFastPath(
+        ctx({
+          toolName: ToolNames.WRITE_FILE,
+          filePath: `${cwd}/.qwen/worktrees/feature/.qwen/settings.json`,
+        }),
+        config,
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects symlinks that resolve to protected self-modification paths', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-auto-mode-'));
+    try {
+      const qwenDir = path.join(tmpRoot, '.qwen');
+      fs.mkdirSync(qwenDir, { recursive: true });
+      const target = path.join(qwenDir, 'settings.json');
+      fs.writeFileSync(target, '{}');
+
+      const link = path.join(tmpRoot, 'settings-link.json');
+      fs.symlinkSync(target, link);
+
+      const cfg = {
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: () => true,
+        }),
+      } as unknown as Config;
+
+      expect(
+        passesAcceptEditsFastPath(
+          ctx({ toolName: ToolNames.WRITE_FILE, filePath: link }),
+          cfg,
+        ),
+      ).toBe(false);
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 
   it('rejects EDIT targeting a path outside the workspace', () => {
@@ -239,6 +457,178 @@ describe('passesAcceptEditsFastPath', () => {
   });
 });
 
+describe('shouldForceAutoModeReviewForAllow', () => {
+  it('returns true for Edit/Write targeting protected self-modification paths', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.EDIT,
+          filePath: '/Users/test/.qwen/settings.json',
+        }),
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.WRITE_FILE,
+          filePath: '/repo/.qwen/QWEN.local.md',
+        }),
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.NOTEBOOK_EDIT,
+          filePath: '/repo/.qwen/skills/review/demo.ipynb',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true for shell-like commands writing protected paths', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'echo "{}" > .qwen/settings.json',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.MONITOR,
+          command: 'bash -lc \'echo "{}" > .qwen/settings.json\'',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true for nested wrappers writing protected paths after `cd`', () => {
+    // Regression guard: without `extractShellOperationsAcrossCommand` doing
+    // cross-segment cd tracking AND recursive wrapper unwrapping, this
+    // exact payload would slip past AUTO force-review. A user
+    // `permissions.allow: ["Bash(*)"]` rule plus this command would have
+    // silently overwritten settings.json.
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true for relative writes after an unresolved dynamic `cd`', () => {
+    // If cwd is dynamic, the apparent resolved path is only a guess. Route
+    // back to the classifier so an allow rule cannot hide writes like
+    // `cd "$QWEN_HOME" && echo > settings.json`.
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'cd "$QWEN_HOME" && echo "{}" > settings.json',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns false for ordinary writes after `cd` into project subdirs', () => {
+    // Counter-case for the cd-tracking check above: cd-into-src + write a
+    // generated file should NOT force AUTO review. Otherwise every
+    // workspace-internal compound shell command would round-trip through
+    // the classifier and dilute the policy boundary's signal.
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: "cd src && bash -lc 'echo ok > generated.txt'",
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('returns true for shell-like commands writing protected paths after cd', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'cd .qwen && echo "{}" > settings.json',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.MONITOR,
+          command: 'bash -lc \'cd .qwen && echo "{}" > settings.json\'',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true for protected writes in sibling segments after shell wrappers', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns false for ordinary edits and non-edit tools', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({ toolName: ToolNames.EDIT, filePath: '/repo/src/index.ts' }),
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.READ_FILE,
+          filePath: '/repo/.qwen/settings.json',
+        }),
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'echo "ok" > src/output.txt',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'cd src && echo "ok" > output.txt',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(false);
+  });
+});
+
 // ─── evaluateAutoMode gating ─────────────────────────────────────────────
 
 describe('evaluateAutoMode — fast-path gating', () => {
@@ -327,7 +717,9 @@ describe('formatClassifierBlockMessage', () => {
         reason: 'Irreversible filesystem destruction',
         unavailable: false,
       }),
-    ).toBe('Blocked by auto mode policy: Irreversible filesystem destruction');
+    ).toBe(
+      'Permission for this action has been denied. Reason: Irreversible filesystem destruction\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
+    );
   });
 
   it('renders an unavailable message with cause when reason is present', () => {
@@ -338,7 +730,7 @@ describe('formatClassifierBlockMessage', () => {
         unavailable: true,
       }),
     ).toBe(
-      'Auto mode classifier unavailable (Conversation transcript exceeds classifier context window); action blocked for safety',
+      'Auto mode classifier unavailable (Conversation transcript exceeds classifier context window); action blocked for safety\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
     );
   });
 
@@ -349,7 +741,9 @@ describe('formatClassifierBlockMessage', () => {
         reason: '',
         unavailable: true,
       }),
-    ).toBe('Auto mode classifier unavailable; action blocked for safety');
+    ).toBe(
+      'Auto mode classifier unavailable; action blocked for safety\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
+    );
   });
 });
 

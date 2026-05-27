@@ -33,6 +33,9 @@
 
 import nodePath from 'node:path';
 import os from 'node:os';
+import { parse } from 'shell-quote';
+import { stripShellWrapper } from '../utils/shell-utils.js';
+import { splitCompoundCommand } from './rule-parser.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -59,6 +62,17 @@ export interface ShellOperation {
   filePath?: string;
   /** Domain name without port (for web_fetch operations). */
   domain?: string;
+  /**
+   * True when this operation was extracted after a dynamic `cd` whose target
+   * cannot be statically resolved. Consumers that enforce protected relative
+   * paths should treat this as conservative signal, not as a concrete path.
+   */
+  cwdUnknown?: boolean;
+  /**
+   * True when `cwdUnknown` may affect the extracted file path. Absolute paths
+   * do not depend on cwd; relative redirect/path arguments do.
+   */
+  pathMayDependOnCwd?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1682,4 +1696,192 @@ export function extractShellOperations(
   );
 
   return ops;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Compound-aware extractor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Cap on recursive shell-wrapper unwrapping. A pathological command can wrap
+ * itself many levels deep (`bash -lc "bash -lc \"...\""`) to obscure intent;
+ * after this many unwraps we stop and analyse whatever remains as-is. Four is
+ * enough for every legitimate wrapper combination observed in the wild
+ * (login shells, sandbox shells, tmux send-keys).
+ */
+const MAX_SHELL_UNWRAP_DEPTH = 4;
+
+/**
+ * Classify a literal `cd` command and resolve its target cwd when static.
+ * Dynamic targets (command substitutions, variable expansions, `cd -`) are
+ * reported separately so callers can mark subsequent relative paths as
+ * uncertain instead of trusting a guessed cwd.
+ *
+ * Used by {@link extractShellOperationsAcrossCommand} to track the effective
+ * cwd left-to-right across compound segments, so a segment like
+ * `cd .qwen && echo > settings.json` correctly attributes the write to
+ * `<cwd>/.qwen/settings.json`.
+ */
+type CdResolution =
+  | { kind: 'not-cd' }
+  | { kind: 'dynamic' }
+  | { kind: 'static'; cwd: string; cwdUnknown: boolean };
+
+function isDynamicShellPath(word: string): boolean {
+  return word.includes('$') || word.includes('`');
+}
+
+function resolveCdTargetCwd(
+  command: string,
+  cwd: string,
+  cwdUnknown: boolean,
+): CdResolution {
+  const words: string[] = [];
+  try {
+    for (const part of parse(command)) {
+      // `parse` returns string for literal words, objects for
+      // operators/substitutions/expansions — bail on anything we can't
+      // statically resolve.
+      if (typeof part !== 'string') {
+        return words[0] === 'cd' ? { kind: 'dynamic' } : { kind: 'not-cd' };
+      }
+      words.push(part);
+    }
+  } catch {
+    return { kind: 'not-cd' };
+  }
+
+  if (words[0] !== 'cd') return { kind: 'not-cd' };
+
+  // Skip POSIX `cd` flags (-L, -P, --, -e, -@) without consuming the special
+  // `cd -` (previous directory) which is non-static and should bail out.
+  let targetIndex = 1;
+  while (
+    targetIndex < words.length &&
+    words[targetIndex]!.startsWith('-') &&
+    words[targetIndex] !== '-'
+  ) {
+    targetIndex++;
+  }
+
+  const target = words[targetIndex] ?? process.env['HOME'];
+  if (!target || target === '-' || isDynamicShellPath(target)) {
+    return { kind: 'dynamic' };
+  }
+
+  return {
+    kind: 'static',
+    cwd: nodePath.resolve(cwd, target),
+    cwdUnknown: cwdUnknown && !nodePath.isAbsolute(target),
+  };
+}
+
+/**
+ * Compound-aware shell-operation extractor.
+ *
+ * Unlike {@link extractShellOperations} (which only handles ONE simple
+ * command), this walks an arbitrary compound shell string and returns every
+ * virtual file / network operation it can statically resolve, while
+ * tracking effective cwd through literal `cd` segments and recursively
+ * unwrapping shell wrappers (`bash -lc '...'`, `sh -c "..."`).
+ *
+ * Behaviour:
+ *   - `splitCompoundCommand` produces the segment boundaries.
+ *   - Literal `cd <dir>` segments shift the effective cwd for subsequent
+ *     segments and themselves emit no ops.
+ *   - Dynamic `cd` targets (variables, substitutions, `cd -`) keep the last
+ *     known cwd for best-effort path extraction and mark subsequent relative
+ *     file operations with `cwdUnknown`.
+ *   - Shell wrappers are unwrapped after the outer command is split, so
+ *     wrapper suffixes remain visible while inner compound operators
+ *     (`&&`, `;`, `|`) are still recursively discovered.
+ *   - Operation order is preserved across segments.
+ *
+ * Single source of truth for compound shell analysis: both the
+ * PermissionManager (matching `Edit/Write` rules against shell writes) and
+ * AUTO mode (force-reviewing protected shell writes) call into this
+ * function so a deny / ask / force-review verdict is consistent regardless
+ * of how the shell call was wrapped.
+ *
+ * @example
+ *   extractShellOperationsAcrossCommand(
+ *     "cd .qwen && bash -lc 'echo {} > settings.json'",
+ *     '/repo',
+ *   )
+ *   // → [{ virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' }]
+ */
+export function extractShellOperationsAcrossCommand(
+  command: string,
+  cwd: string,
+): ShellOperation[] {
+  return walkCompoundCommand(command, cwd, 0, false);
+}
+
+function walkCompoundCommand(
+  command: string,
+  cwd: string,
+  depth: number,
+  initialCwdUnknown: boolean,
+): ShellOperation[] {
+  const subCommands = splitCompoundCommand(command);
+
+  const ops: ShellOperation[] = [];
+  let effectiveCwd = cwd;
+  let cwdUnknown = initialCwdUnknown;
+
+  for (const sub of subCommands) {
+    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
+    if (cdTarget.kind === 'static') {
+      effectiveCwd = cdTarget.cwd;
+      cwdUnknown = cdTarget.cwdUnknown;
+      continue;
+    }
+    if (cdTarget.kind === 'dynamic') {
+      cwdUnknown = true;
+      continue;
+    }
+
+    // Unwrap per segment, after the outer split, so wrapper suffixes like
+    // `bash -lc 'safe' && echo > file` are not discarded.
+    if (depth < MAX_SHELL_UNWRAP_DEPTH) {
+      const subUnwrapped = stripShellWrapper(sub);
+      if (subUnwrapped !== sub) {
+        ops.push(
+          ...walkCompoundCommand(
+            subUnwrapped,
+            effectiveCwd,
+            depth + 1,
+            cwdUnknown,
+          ),
+        );
+        continue;
+      }
+    }
+
+    const subOps = extractShellOperations(sub, effectiveCwd);
+    if (cwdUnknown) {
+      ops.push(...markCwdUnknownOps(subOps, effectiveCwd));
+    } else {
+      ops.push(...subOps);
+    }
+  }
+
+  return ops;
+}
+
+function markCwdUnknownOps(
+  ops: ShellOperation[],
+  effectiveCwd: string,
+): ShellOperation[] {
+  return ops.map((op) => {
+    if (!op.filePath) return op;
+    const rel = nodePath.relative(
+      nodePath.resolve(effectiveCwd),
+      nodePath.resolve(op.filePath),
+    );
+    const pathMayDependOnCwd =
+      rel === '' || (!rel.startsWith('..') && !nodePath.isAbsolute(rel));
+    if (!pathMayDependOnCwd) return op;
+    return { ...op, cwdUnknown: true, pathMayDependOnCwd: true };
+  });
 }

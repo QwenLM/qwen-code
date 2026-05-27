@@ -67,6 +67,7 @@ import {
 import {
   applyAutoModeDecision,
   evaluateAutoMode,
+  shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from '../permissions/autoMode.js';
 import { MAX_TRANSCRIPT_MESSAGES } from '../permissions/classifier-transcript.js';
@@ -1629,7 +1630,11 @@ export class CoreToolScheduler {
           const isPlanMode = approvalMode === ApprovalMode.PLAN;
           const isExitPlanModeTool = canonicalName === ToolNames.EXIT_PLAN_MODE;
 
-          if (finalPermission === 'allow') {
+          const forceAutoReviewForAllow =
+            approvalMode === ApprovalMode.AUTO &&
+            shouldForceAutoModeReviewForAllow(pmCtx);
+
+          if (finalPermission === 'allow' && !forceAutoReviewForAllow) {
             // Auto-approve: tool is inherently safe (read-only) or PM allows.
             // In AUTO mode, also reset denialTracking so an L4 allow-rule
             // match counts as a successful call and clears any in-flight
@@ -3248,9 +3253,13 @@ export class CoreToolScheduler {
           pendingTool.request.name,
           toolParams,
         );
-        const { finalPermission } = flowResult;
+        const { finalPermission, pmCtx } = flowResult;
 
-        if (finalPermission === 'allow') {
+        const forceAutoReviewForAllow =
+          this.config.getApprovalMode() === ApprovalMode.AUTO &&
+          shouldForceAutoModeReviewForAllow(pmCtx);
+
+        if (finalPermission === 'allow' && !forceAutoReviewForAllow) {
           this.setToolCallOutcome(
             pendingTool.request.callId,
             ToolConfirmationOutcome.ProceedAlways,

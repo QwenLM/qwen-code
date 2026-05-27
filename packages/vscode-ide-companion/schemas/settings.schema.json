@@ -699,8 +699,22 @@
                     "type": "string"
                   }
                 },
+                "softDeny": {
+                  "description": "Natural-language descriptions of destructive / irreversible actions AUTO mode should block unless the user explicitly authorised that exact action and scope.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "hardDeny": {
+                  "description": "Natural-language descriptions of security-boundary actions the AUTO classifier must block even when an autoMode allow hint or recent user request would normally authorise them. Does not override permissions.allow; use permissions.deny for deterministic hard permission rules.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "deny": {
-                  "description": "Natural-language descriptions of actions AUTO mode should block.",
+                  "description": "Deprecated alias for `softDeny`. Entries here are merged into the SOFT BLOCK user section so existing settings keep working; new configurations should use `softDeny` or `hardDeny` instead.",
                   "type": "array",
                   "items": {
                     "type": "string"

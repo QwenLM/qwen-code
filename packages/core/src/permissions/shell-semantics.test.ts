@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { extractShellOperations } from './shell-semantics.js';
+import {
+  extractShellOperations,
+  extractShellOperationsAcrossCommand,
+} from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 
 const CWD = '/home/user/project';
@@ -410,5 +413,115 @@ describe('extractShellOperations', () => {
     const ops = extractShellOperations('cat $SECRET_FILE', CWD);
     // $SECRET_FILE starts with $, filtered by looksLikePath
     expect(ops).toEqual([]);
+  });
+});
+
+// ─── extractShellOperationsAcrossCommand ─────────────────────────────────────
+//
+// Shared compound shell analysis for permission rules and AUTO review.
+
+describe('extractShellOperationsAcrossCommand', () => {
+  it('tracks literal `cd` across compound segments before resolving writes', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "cd .qwen && bash -lc 'echo {} > settings.json'",
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+
+  it('recursively unwraps nested shell wrappers', () => {
+    // The actual write is nested two wrapper levels deep.
+    expect(
+      extractShellOperationsAcrossCommand(
+        'bash -lc "sh -c \'echo hi > .mcp.json\'"',
+        '/repo',
+      ),
+    ).toEqual([{ virtualTool: 'write_file', filePath: '/repo/.mcp.json' }]);
+  });
+
+  it('preserves sibling segments after a shell wrapper', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+
+  it('handles `cd --` and other POSIX flag forms before the target', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "cd -- .qwen && printf '{}' > settings.local.json",
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/.qwen/settings.local.json',
+      },
+    ]);
+  });
+
+  it('marks relative writes after dynamic `cd` targets as cwd-unknown', () => {
+    // Keep the guessed path, but mark it unsafe to trust as final.
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd $TARGET && echo hi > out.txt',
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/out.txt',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
+  it('clears cwd-unknown after an absolute static `cd`', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd $TARGET && cd /repo/.qwen && echo hi > settings.json',
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+
+  it('preserves operation order across compound segments', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'echo a > one.txt && cd sub && echo b > two.txt; cat /etc/hosts',
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/one.txt' },
+      { virtualTool: 'write_file', filePath: '/repo/sub/two.txt' },
+      { virtualTool: 'read_file', filePath: '/etc/hosts' },
+    ]);
+  });
+
+  it('returns no ops when only `cd` segments are present', () => {
+    expect(
+      extractShellOperationsAcrossCommand('cd .qwen && cd ..', '/repo'),
+    ).toEqual([]);
+  });
+
+  it('falls back gracefully on excessively deep wrapper nesting', () => {
+    // A pathological wrapper chain hits MAX_SHELL_UNWRAP_DEPTH (4) and we
+    // analyse whatever remains as-is rather than recursing forever. The
+    // exact result here doesn't matter — what matters is that the call
+    // returns without throwing or hanging.
+    const deep = 'bash -lc "bash -lc \\"bash -lc \'bash -lc echo > x.txt\'\\""';
+    expect(() =>
+      extractShellOperationsAcrossCommand(deep, '/repo'),
+    ).not.toThrow();
   });
 });

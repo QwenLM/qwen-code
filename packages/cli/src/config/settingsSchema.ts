@@ -1563,14 +1563,45 @@ const SETTINGS_SCHEMA = {
                 showInDialog: false,
                 mergeStrategy: MergeStrategy.UNION,
               },
-              deny: {
+              softDeny: {
                 type: 'array',
-                label: 'Auto Mode Deny Hints',
+                label: 'Auto Mode Soft-Deny Hints',
                 category: 'Tools',
                 requiresRestart: true,
                 default: undefined as string[] | undefined,
                 description:
-                  'Natural-language descriptions of actions AUTO mode should block.',
+                  'Natural-language descriptions of destructive / irreversible ' +
+                  'actions AUTO mode should block unless the user explicitly ' +
+                  'authorised that exact action and scope.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.UNION,
+              },
+              hardDeny: {
+                type: 'array',
+                label: 'Auto Mode Hard-Deny Hints',
+                category: 'Tools',
+                requiresRestart: true,
+                default: undefined as string[] | undefined,
+                description:
+                  'Natural-language descriptions of security-boundary actions ' +
+                  'the AUTO classifier must block even when an autoMode ' +
+                  'allow hint or recent user request would normally ' +
+                  'authorise them. Does not override permissions.allow; use ' +
+                  'permissions.deny for deterministic hard permission rules.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.UNION,
+              },
+              deny: {
+                type: 'array',
+                label: 'Auto Mode Deny Hints (legacy)',
+                category: 'Tools',
+                requiresRestart: true,
+                default: undefined as string[] | undefined,
+                description:
+                  'Deprecated alias for `softDeny`. Entries here are merged ' +
+                  'into the SOFT BLOCK user section so existing settings keep ' +
+                  'working; new configurations should use `softDeny` or ' +
+                  '`hardDeny` instead.',
                 showInDialog: false,
                 mergeStrategy: MergeStrategy.UNION,
               },
