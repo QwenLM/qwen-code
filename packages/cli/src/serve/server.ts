@@ -40,6 +40,7 @@ import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
 import { isLoopbackBind } from './loopbackBinds.js';
+import { mountAcpHttp } from './acpHttp/index.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
@@ -2554,6 +2555,15 @@ export function createServeApp(
       }
     })();
   });
+
+  // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`
+  // alongside the REST surface, sharing this same `bridge` instance.
+  // Additive + toggleable (`QWEN_SERVE_ACP_HTTP=0` opts out). See
+  // `docs/design/daemon-acp-http/README.md` §6 for the dual-transport
+  // decision. Mounted AFTER the REST routes (distinct path, no overlap)
+  // and BEFORE the final error handler so malformed `/acp` bodies still
+  // route through the JSON error contract below.
+  mountAcpHttp(app, bridge, { boundWorkspace });
 
   // Final error handler. `express.json()` throws `SyntaxError` (with
   // `status: 400`) on malformed body — without this 4-arg middleware
