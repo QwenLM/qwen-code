@@ -12,7 +12,7 @@
  * tool toggle, init, and MCP server restart.
  */
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, constants as fsConstants } from 'node:fs';
 import * as path from 'node:path';
 
 import {
@@ -32,7 +32,13 @@ import {
   WorkspaceInitSymlinkError,
   WorkspaceInitConflictError,
   WorkspaceInitRaceError,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+
+import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge/status';
+
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 import { createFileService } from './fileService.js';
 import { createAuthService } from './authService.js';
@@ -83,6 +89,40 @@ async function canonicalizeExistingAncestor(
   }
 }
 
+/**
+ * Post-open parent re-verification. After a successful `fs.open(..., 'wx')`
+ * or `O_NOFOLLOW` open, re-canonicalize the parent directory and verify it
+ * still resolves within the workspace. Closes the TOCTOU window between
+ * the pre-open canonicalize and the open. On failure, closes the fd
+ * (for creates) and throws `WorkspaceInitSymlinkError`.
+ */
+async function verifyParentPostOpen(
+  target: string,
+  wsCanonical: string,
+  fh: import('node:fs/promises').FileHandle,
+): Promise<void> {
+  const parentCanonical = await canonicalizeExistingAncestor(
+    path.dirname(target),
+  );
+  const within =
+    parentCanonical === wsCanonical ||
+    parentCanonical.startsWith(wsCanonical + path.sep);
+  if (within) return;
+  // Close the fd before throwing. Do NOT fs.unlink(target) — the path
+  // now resolves through a potentially attacker-controlled parent symlink.
+  await fh.close().catch(() => {});
+  throw new WorkspaceInitSymlinkError(
+    target,
+    'parent',
+    `Workspace context file ${JSON.stringify(target)}'s parent moved ` +
+      `outside the workspace between the pre-open canonicalize and ` +
+      `the post-open verify (parent canonicalizes to ${JSON.stringify(parentCanonical)}, ` +
+      `workspace canonicalizes to ${JSON.stringify(wsCanonical)}). ` +
+      `Refusing to write — investigate the concurrent writer or the ` +
+      `parent-directory permissions.`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -112,19 +152,51 @@ export function createDaemonWorkspaceService(
   });
 
   // Device-flow registry may be absent during early boot (it's constructed
-  // inside createServeApp and injected later). Auth routes that reach through
-  // `workspaceService.auth` will throw at call time if the registry is missing.
-  const auth = createAuthService({
-    registry: deviceFlowRegistry as DeviceFlowRegistry,
-  });
+  // inside createServeApp and injected later). When absent, create a stub
+  // that throws descriptive errors at call time rather than crashing on
+  // undefined property access.
+  const auth = deviceFlowRegistry
+    ? createAuthService({ registry: deviceFlowRegistry })
+    : createAuthService({
+        registry: new Proxy({} as DeviceFlowRegistry, {
+          get(_target, prop) {
+            return () => {
+              throw new Error(
+                `DeviceFlowRegistry not available: cannot call '${String(prop)}' ` +
+                  `— the registry has not been injected yet.`,
+              );
+            };
+          },
+        }),
+      });
 
-  const agents = createAgentsService({
-    subagentManager:
-      subagentManager as import('@qwen-code/qwen-code-core').SubagentManager,
-    boundWorkspace,
-    publishWorkspaceEvent,
-    knownClientIds,
-  });
+  // SubagentManager may also be absent during early boot.
+  const agents = subagentManager
+    ? createAgentsService({
+        subagentManager:
+          subagentManager as import('@qwen-code/qwen-code-core').SubagentManager,
+        boundWorkspace,
+        publishWorkspaceEvent,
+        knownClientIds,
+      })
+    : createAgentsService({
+        subagentManager: new Proxy(
+          {} as import('@qwen-code/qwen-code-core').SubagentManager,
+          {
+            get(_target, prop) {
+              return () => {
+                throw new Error(
+                  `SubagentManager not available: cannot call '${String(prop)}' ` +
+                    `— the manager has not been injected yet.`,
+                );
+              };
+            },
+          },
+        ),
+        boundWorkspace,
+        publishWorkspaceEvent,
+        knownClientIds,
+      });
 
   const memory = createMemoryService({
     boundWorkspace,
@@ -165,16 +237,19 @@ export function createDaemonWorkspaceService(
       // Env status is answered daemon-locally from process state — no ACP
       // query needed. The old bridge used statusProvider.getEnvStatus()
       // directly; replicate that behavior here.
+      const acpChannelLive = isChannelLive?.() ?? false;
       if (!statusProvider) {
-        return createIdleEnvStatus(boundWorkspace, false);
+        return createIdleEnvStatus(boundWorkspace, acpChannelLive);
       }
       try {
-        const acpChannelLive = isChannelLive?.() ?? false;
         return await statusProvider.getEnvStatus(
           boundWorkspace,
           acpChannelLive,
         );
-      } catch {
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: getEnvStatus failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
         return createIdleEnvStatus(boundWorkspace, false);
       }
     },
@@ -192,8 +267,11 @@ export function createDaemonWorkspaceService(
         try {
           daemonCells =
             await statusProvider.getDaemonPreflightCells(boundWorkspace);
-        } catch {
+        } catch (err) {
           // Daemon cells failing is non-fatal; proceed with empty.
+          writeStderrLine(
+            `qwen serve: getDaemonPreflightCells failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
 
@@ -220,11 +298,13 @@ export function createDaemonWorkspaceService(
         } catch (err) {
           // ACP query failed — fall back to idle placeholders and report error.
           acpCells = idleCells;
+          const errorKind = mapDomainErrorToErrorKind(err);
           errors = [
             {
               kind: 'preflight',
               status: 'error',
               error: err instanceof Error ? err.message : String(err),
+              ...(errorKind ? { errorKind } : {}),
             },
           ];
         }
@@ -354,12 +434,54 @@ export function createDaemonWorkspaceService(
           throw err;
         }
         try {
+          // Post-open parent re-verification narrows the parent-symlink
+          // TOCTOU window between `canonicalizeExistingAncestor` and
+          // `fs.open`. Must verify before writing content.
+          await verifyParentPostOpen(target, wsCanonical, fh);
           await fh.writeFile('', 'utf8');
         } finally {
           await fh.close();
         }
       } else if (action === 'overwrote') {
-        await fs.writeFile(target, '', 'utf8');
+        // Use O_WRONLY | O_NOFOLLOW to avoid following symlinks that
+        // may have been swapped in between our lstat check and this open.
+        let overwriteFh: import('node:fs/promises').FileHandle;
+        try {
+          overwriteFh = await fs.open(
+            target,
+            fsConstants.O_WRONLY | (fsConstants.O_NOFOLLOW ?? 0),
+          );
+        } catch (err) {
+          const code = (err as { code?: unknown } | null | undefined)?.code;
+          if (code === 'ELOOP') {
+            throw new WorkspaceInitSymlinkError(
+              target,
+              'target',
+              `Workspace context file ${JSON.stringify(target)} could not ` +
+                `be opened with O_NOFOLLOW (ELOOP); the path may have been ` +
+                `swapped to a symlink between the content check and the ` +
+                `overwrite. Refusing to follow it.`,
+            );
+          }
+          if (code === 'ENOENT') {
+            throw new WorkspaceInitRaceError(
+              target,
+              'enoent',
+              `Workspace context file ${JSON.stringify(target)} was deleted ` +
+                `between the content check and the overwrite (likely a ` +
+                `concurrent writer). Refusing to recreate blindly; rerun init.`,
+            );
+          }
+          throw err;
+        }
+        try {
+          // Post-open parent re-verification (same as create path).
+          await verifyParentPostOpen(target, wsCanonical, overwriteFh);
+          // Truncate AFTER verify, using the fd we already hold.
+          await overwriteFh.truncate(0);
+        } finally {
+          await overwriteFh.close();
+        }
       }
       // action === 'noop' — no write needed.
 
@@ -381,15 +503,99 @@ export function createDaemonWorkspaceService(
       if (opts?.entryIndex !== undefined) {
         params['entryIndex'] = opts.entryIndex;
       }
-      const result = await invokeWorkspaceCommand<RestartMcpServerResult>(
-        SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
-        params,
-      );
-      publishWorkspaceEvent({
-        type: 'mcp_server_restarted',
-        data: { ...result, serverName },
-        originatorClientId: ctx.originatorClientId,
-      });
+
+      let result: RestartMcpServerResult;
+      try {
+        result = await invokeWorkspaceCommand<RestartMcpServerResult>(
+          SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+          params,
+          { timeoutMs: 300_000 },
+        );
+      } catch (err) {
+        // Translate structured ACP error payloads into typed bridge errors.
+        const data = (err as { data?: unknown })?.data;
+        if (data && typeof data === 'object') {
+          const kind = (data as { errorKind?: unknown }).errorKind;
+          const sn = (data as { serverName?: unknown }).serverName;
+          if (kind === 'mcp_server_not_found' && typeof sn === 'string') {
+            throw new McpServerNotFoundError(sn);
+          }
+          if (kind === 'mcp_restart_failed' && typeof sn === 'string') {
+            const status = (data as { mcpStatus?: unknown }).mcpStatus;
+            throw new McpServerRestartFailedError(
+              sn,
+              typeof status === 'string' ? status : 'unknown',
+            );
+          }
+        }
+        throw err;
+      }
+
+      // Pool-mode: fan out per-entry events.
+      if ('entries' in result) {
+        const entries = Array.isArray(result.entries) ? result.entries : [];
+        if (!Array.isArray(result.entries)) {
+          writeStderrLine(
+            `qwen serve: pool restart response carried 'entries' field ` +
+              `but it is not an array (server=${serverName}); ` +
+              `treating as empty.`,
+          );
+        }
+        for (const entry of entries) {
+          if (
+            typeof entry !== 'object' ||
+            entry === null ||
+            typeof (entry as { entryIndex?: unknown }).entryIndex !== 'number'
+          ) {
+            writeStderrLine(
+              `qwen serve: skipping malformed pool restart entry ` +
+                `(server=${serverName}): ${JSON.stringify(entry)}`,
+            );
+            continue;
+          }
+          if (entry.restarted) {
+            publishWorkspaceEvent({
+              type: 'mcp_server_restarted',
+              data: {
+                serverName,
+                durationMs: entry.durationMs ?? 0,
+                entryIndex: entry.entryIndex,
+              },
+              originatorClientId: ctx.originatorClientId,
+            });
+          } else {
+            publishWorkspaceEvent({
+              type: 'mcp_server_restart_refused',
+              data: {
+                serverName,
+                reason: 'restart_failed',
+                entryIndex: entry.entryIndex,
+                ...(entry.reason ? { details: entry.reason } : {}),
+              },
+              originatorClientId: ctx.originatorClientId,
+            });
+          }
+        }
+      } else if (result.restarted === true) {
+        publishWorkspaceEvent({
+          type: 'mcp_server_restarted',
+          data: {
+            serverName: result.serverName,
+            durationMs: result.durationMs,
+          },
+          originatorClientId: ctx.originatorClientId,
+        });
+      } else {
+        publishWorkspaceEvent({
+          type: 'mcp_server_restart_refused',
+          data: {
+            serverName: result.serverName,
+            reason: (result as { reason?: string }).reason,
+          },
+          originatorClientId: ctx.originatorClientId,
+        });
+      }
+
       return result;
     },
   };

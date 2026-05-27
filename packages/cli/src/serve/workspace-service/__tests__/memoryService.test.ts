@@ -12,12 +12,12 @@ import * as os from 'node:os';
 // Mock @qwen-code/qwen-code-core so the service can import it without
 // pulling in the full dependency tree.
 vi.mock('@qwen-code/qwen-code-core', () => ({
-    Storage: {
-      getGlobalQwenDir: () => '/mock-home/.qwen',
-    },
-    getAllGeminiMdFilenames: () => ['QWEN.md', 'AGENTS.md'],
-    writeWorkspaceContextFile: vi.fn(),
-  }));
+  Storage: {
+    getGlobalQwenDir: () => '/mock-home/.qwen',
+  },
+  getAllGeminiMdFilenames: () => ['QWEN.md', 'AGENTS.md'],
+  writeWorkspaceContextFile: vi.fn(),
+}));
 
 // Mock @qwen-code/acp-bridge/status
 vi.mock('@qwen-code/acp-bridge/status', () => {
@@ -244,7 +244,7 @@ describe('MemoryService', () => {
       });
     });
 
-    it('publishes memory_written event after successful write', async () => {
+    it('publishes memory_changed event after successful write', async () => {
       (writeWorkspaceContextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
         {
           filePath: '/workspace/QWEN.md',
@@ -264,7 +264,7 @@ describe('MemoryService', () => {
       });
 
       expect(deps.publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'memory_written',
+        type: 'memory_changed',
         data: {
           scope: 'workspace',
           filePath: '/workspace/QWEN.md',
@@ -316,7 +316,7 @@ describe('MemoryService', () => {
       });
 
       expect(deps.publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'memory_written',
+        type: 'memory_changed',
         data: expect.any(Object),
       });
     });
@@ -366,7 +366,7 @@ describe('MemoryService', () => {
       expect(result.deleted).toBe(false);
     });
 
-    it('publishes memory_deleted event after successful deletion', async () => {
+    it('publishes memory_changed event after successful deletion', async () => {
       await fs.writeFile(path.join(tmpDir, 'QWEN.md'), 'content');
 
       const deps = makeDeps({ boundWorkspace: tmpDir });
@@ -376,8 +376,9 @@ describe('MemoryService', () => {
       await svc.delete(ctx, 'workspace');
 
       expect(deps.publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'memory_deleted',
+        type: 'memory_changed',
         data: {
+          change: 'deleted',
           key: 'workspace',
           filePath: path.join(tmpDir, 'QWEN.md'),
         },
@@ -404,7 +405,7 @@ describe('MemoryService', () => {
       await svc.delete(ctx, 'workspace');
 
       expect(deps.publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'memory_deleted',
+        type: 'memory_changed',
         data: expect.any(Object),
       });
     });
