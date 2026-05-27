@@ -360,6 +360,26 @@ describe('clearCommand', () => {
       expect(mockResetChat).not.toHaveBeenCalled();
     });
 
+    it('continues session teardown even if ideContextStore.clear() throws', async () => {
+      if (!clearCommand.action) {
+        throw new Error('clearCommand must have an action.');
+      }
+
+      (ideContextStore.clear as ReturnType<typeof vi.fn>).mockImplementation(
+        () => {
+          throw new Error('subscriber blew up');
+        },
+      );
+
+      mockContext.overwriteConfirmed = true;
+      await clearCommand.action(mockContext, '--all');
+
+      expect(ideContextStore.clear).toHaveBeenCalledTimes(1);
+      expect(mockStartNewSession).toHaveBeenCalledTimes(1);
+      expect(mockResetChat).toHaveBeenCalledTimes(1);
+      expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
+    });
+
     it('treats --all as exact token (does not match --allow etc.)', async () => {
       if (!clearCommand.action) {
         throw new Error('clearCommand must have an action.');

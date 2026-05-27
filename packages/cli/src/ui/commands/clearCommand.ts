@@ -87,7 +87,11 @@ export const clearCommand: SlashCommand = {
     // even though the user asked for a complete reset. ideContextStore is a
     // global module-level store, so this runs regardless of `config`.
     if (isAll) {
-      ideContextStore.clear();
+      try {
+        ideContextStore.clear();
+      } catch (err) {
+        config?.getDebugLogger()?.warn(`ideContextStore.clear failed: ${err}`);
+      }
     }
 
     if (config) {
