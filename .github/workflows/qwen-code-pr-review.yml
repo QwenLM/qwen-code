@@ -64,14 +64,17 @@ jobs:
       pull-requests: 'write'
       issues: 'write'
     steps:
+      # SECURITY: checkout trusted base code; /review fetches PR diff context.
       - name: 'Checkout base branch'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: '${{ github.event.repository.default_branch }}'
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: 'Resolve PR context'
         id: 'context'
+        env:
+          TRIGGER_BODY: "${{ github.event.comment.body || github.event.review.body || '' }}"
         run: |-
           set -euo pipefail
 
@@ -79,22 +82,38 @@ jobs:
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
             REVIEW_MODE="${{ github.event.inputs.review_mode }}"
           elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            if ! printf '%s\n' "$TRIGGER_BODY" | grep -Eq '^@qwen-code[[:space:]]+/review([[:space:]]|$)'; then
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             PR_NUMBER="${{ github.event.issue.number }}"
             REVIEW_MODE="comment"
-          else
+          elif [ "${{ github.event_name }}" = "pull_request_target" ] ||
+               [ "${{ github.event_name }}" = "pull_request_review_comment" ] ||
+               [ "${{ github.event_name }}" = "pull_request_review" ]; then
+            if [ "${{ github.event_name }}" != "pull_request_target" ] &&
+               ! printf '%s\n' "$TRIGGER_BODY" | grep -Eq '^@qwen-code[[:space:]]+/review([[:space:]]|$)'; then
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             PR_NUMBER="${{ github.event.pull_request.number }}"
             REVIEW_MODE="comment"
+          else
+            echo "Unsupported event: ${{ github.event_name }}" >&2
+            exit 1
           fi
 
           TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '60' }}"
 
           {
+            echo "should_run=true"
             echo "pr_number=$PR_NUMBER"
             echo "review_mode=$REVIEW_MODE"
             echo "timeout_minutes=$TIMEOUT_MINUTES"
           } >> "$GITHUB_OUTPUT"
 
       - name: 'Run review'
+        if: "steps.context.outputs.should_run == 'true'"
         env:
           GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
@@ -107,7 +126,9 @@ jobs:
           set -euo pipefail
 
           REPO="${GITHUB_REPOSITORY}"
-          REVIEW_URL="https://github.com/${REPO}/pull/${PR_NUMBER}"
+          REVIEW_URL="${GITHUB_SERVER_URL}/${REPO}/pull/${PR_NUMBER}"
+          LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
+          trap 'rm -f "$LOG_PATH"' EXIT
 
           if [ -z "${GITHUB_TOKEN:-}" ]; then
             echo "CI_BOT_PAT secret is required for Qwen PR review." >&2
@@ -121,6 +142,11 @@ jobs:
             echo "REVIEW_OPENAI_BASE_URL secret is required for Qwen PR review." >&2
             exit 1
           fi
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "qwen CLI is required on the review runner." >&2
+            exit 1
+          fi
+          qwen --version
 
           case "$TIMEOUT_MINUTES" in
             ''|*[!0-9]*)
@@ -142,7 +168,7 @@ jobs:
             exit 1
           fi
           if [ "$PR_STATE" != "OPEN" ]; then
-            echo "Skipping: PR #${PR_NUMBER} is ${PR_STATE}."
+            echo "Skipping: PR #${PR_NUMBER} is ${PR_STATE}." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -151,7 +177,7 @@ jobs:
             exit 1
           fi
           if [ "$IS_FORK" = "true" ]; then
-            echo "Skipping: PR #${PR_NUMBER} is a fork PR."
+            echo "Skipping: PR #${PR_NUMBER} is a fork PR." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -183,9 +209,9 @@ jobs:
             "${MODEL_ARGS[@]}" \
             --prompt "$PROMPT" \
             --output-format stream-json \
-            > >(tee "/tmp/qwen-review-pr-${PR_NUMBER}.jsonl")
+            > >(tee "$LOG_PATH")
 
-          if [ ! -s "/tmp/qwen-review-pr-${PR_NUMBER}.jsonl" ]; then
+          if [ ! -s "$LOG_PATH" ]; then
             echo "Qwen review completed but produced no output." >&2
             exit 1
           fi
@@ -193,6 +219,7 @@ jobs:
       - name: 'Post fallback comment on failure'
         if: |-
           failure() &&
+          steps.context.outputs.should_run == 'true' &&
           steps.context.outputs.review_mode == 'comment' &&
           steps.context.outputs.pr_number != ''
         env:
