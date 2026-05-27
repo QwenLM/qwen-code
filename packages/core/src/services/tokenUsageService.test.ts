@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
@@ -198,7 +199,7 @@ describe('tokenUsageService', () => {
     ]);
   });
 
-  it('swallows best-effort write errors and surfaces non-ENOENT failures', async () => {
+  it('swallows best-effort write errors and surfaces non-ENOENT failures', () => {
     const config = makeFakeConfig({
       sessionId: 'session-1',
       targetDir: path.join(tempDir, 'project'),
@@ -209,35 +210,32 @@ describe('tokenUsageService', () => {
       totalTokenCount: 3,
     });
     const error = Object.assign(new Error('disk full'), { code: 'ENOSPC' });
-    const writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    const writeSpy = vi
+      .spyOn(jsonl, 'writeLineSync')
+      .mockImplementationOnce(() => {
+        throw error;
+      });
     const stderrSpy = vi
       .spyOn(console, 'error')
       .mockImplementation(() => undefined);
-    const unhandled: unknown[] = [];
-    const handler = (reason: unknown) => unhandled.push(reason);
-    process.on('unhandledRejection', handler);
 
     try {
       expect(() =>
         recordTokenUsageFromApiResponseBestEffort(config, event),
       ).not.toThrow();
-      await Promise.resolve();
-      await Promise.resolve();
 
       expect(writeSpy).toHaveBeenCalledTimes(1);
-      expect(unhandled).toHaveLength(0);
       expect(stderrSpy).toHaveBeenCalledWith(
         '[token-usage] Write failed (ENOSPC):',
         'disk full',
       );
     } finally {
-      process.off('unhandledRejection', handler);
       writeSpy.mockRestore();
       stderrSpy.mockRestore();
     }
   });
 
-  it('does not surface best-effort ENOENT write failures to stderr', async () => {
+  it('does not surface best-effort ENOENT write failures to stderr', () => {
     const config = makeFakeConfig({
       sessionId: 'session-1',
       targetDir: path.join(tempDir, 'project'),
@@ -250,15 +248,17 @@ describe('tokenUsageService', () => {
     const error = Object.assign(new Error('missing directory'), {
       code: 'ENOENT',
     });
-    const writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    const writeSpy = vi
+      .spyOn(jsonl, 'writeLineSync')
+      .mockImplementationOnce(() => {
+        throw error;
+      });
     const stderrSpy = vi
       .spyOn(console, 'error')
       .mockImplementation(() => undefined);
 
     try {
       recordTokenUsageFromApiResponseBestEffort(config, event);
-      await Promise.resolve();
-      await Promise.resolve();
 
       expect(writeSpy).toHaveBeenCalledTimes(1);
       expect(stderrSpy).not.toHaveBeenCalled();
@@ -383,6 +383,32 @@ describe('tokenUsageService', () => {
     expect(summary.totals.cachedTokens).toBe(5);
   });
 
+  it('uses cached tokens as fallback input when prompt tokens are missing', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+
+    await recordTokenUsageFromApiResponse(
+      config,
+      createEvent('model-a', 'prompt-1', {
+        promptTokenCount: 0,
+        candidatesTokenCount: 20,
+        cachedContentTokenCount: 5,
+        thoughtsTokenCount: 7,
+      }),
+    );
+
+    const summary = await queryTokenUsage({
+      period: 'day',
+      value: '2026-05-25',
+    });
+
+    expect(summary.totals.totalTokens).toBe(32);
+    expect(summary.totals.inputTokens).toBe(5);
+    expect(summary.totals.cachedTokens).toBe(5);
+  });
+
   it('returns empty summaries for missing usage files', async () => {
     const summary = await queryTokenUsage({
       period: 'month',
@@ -422,6 +448,27 @@ describe('tokenUsageService', () => {
     expect(summary.totals.requests).toBe(1);
   });
 
+  it('reads older compatible schema versions', async () => {
+    const filePath = getTokenUsageFilePath('2026-05');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(
+      filePath,
+      [
+        '{"schemaVersion":1,"id":"ok","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","inputTokens":1,"outputTokens":2,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":3,"apiDurationMs":4}',
+        '{"schemaVersion":2,"id":"future","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","inputTokens":100,"outputTokens":100,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":200,"apiDurationMs":4}',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const summary = await queryTokenUsage({
+      period: 'day',
+      value: '2026-05-25',
+    });
+
+    expect(summary.totals.totalTokens).toBe(3);
+    expect(summary.totals.requests).toBe(1);
+  });
+
   it('exports summaries as JSON and escaped CSV', async () => {
     const config = makeFakeConfig({
       sessionId: 'session-1',
@@ -430,7 +477,7 @@ describe('tokenUsageService', () => {
     await recordTokenUsageFromApiResponse(
       config,
       createEvent(
-        'model,quoted',
+        '=cmd|quoted',
         'prompt-1',
         {
           promptTokenCount: 1,
@@ -452,18 +499,40 @@ describe('tokenUsageService', () => {
       period: 'day',
       value: '2026-05-25',
       totals: { totalTokens: 3 },
-      coordination: { issues: ['#4479', '#4252', '#4182'] },
     });
+    expect(JSON.parse(json)).not.toHaveProperty('coordination');
 
     const csv = formatTokenUsageSummaryAsCsv(
       await queryTokenUsage({ period: 'day', value: '2026-05-25' }),
     );
     expect(csv).toContain(
-      'day,2026-05-25,model,"model,quoted","model,quoted",,,1,1,2,0,0,3,100',
+      "day,2026-05-25,model,'=cmd|quoted,'=cmd|quoted,,,1,1,2,0,0,3,100",
     );
     expect(csv).toContain(
       'day,2026-05-25,auth_type,"auth""quoted",,"auth""quoted",,1,1,2,0,0,3,100',
     );
+  });
+
+  it('persists best-effort records synchronously', () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+
+    recordTokenUsageFromApiResponseBestEffort(
+      config,
+      createEvent('model-a', 'prompt-1', {
+        promptTokenCount: 1,
+        candidatesTokenCount: 2,
+        totalTokenCount: 3,
+      }),
+    );
+
+    const fileContent = fs.readFileSync(
+      getTokenUsageFilePath('2026-05'),
+      'utf-8',
+    );
+    expect(fileContent).toContain('"model":"model-a"');
   });
 
   it('validates period values', async () => {
@@ -471,7 +540,17 @@ describe('tokenUsageService', () => {
       queryTokenUsage({ period: 'day', value: '2026-05' }),
     ).rejects.toThrow('Expected YYYY-MM-DD');
     await expect(
+      queryTokenUsage({ period: 'day', value: '2026-02-29' }),
+    ).rejects.toThrow('Expected YYYY-MM-DD');
+    await expect(
+      queryTokenUsage({ period: 'day', value: '2024-02-29' }),
+    ).resolves.toMatchObject({ value: '2024-02-29' });
+    await expect(
       queryTokenUsage({ period: 'month', value: '2026-05-25' }),
     ).rejects.toThrow('Expected YYYY-MM');
+    await expect(
+      queryTokenUsage({ period: 'month', value: '2026-13' }),
+    ).rejects.toThrow('Expected YYYY-MM');
+    expect(() => getTokenUsageFilePath('2026-00')).toThrow('Expected YYYY-MM');
   });
 });

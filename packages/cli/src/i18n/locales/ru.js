@@ -480,11 +480,12 @@ export default {
   'Breakdown:': 'Разбивка:',
   'Input: {{tokens}}': 'Ввод: {{tokens}}',
   'Output: {{tokens}}': 'Вывод: {{tokens}}',
-  'Cached: {{tokens}}': 'Кэш: {{tokens}}',
+  'Cached (included in Input): {{tokens}}': 'Кэш (включён во ввод): {{tokens}}',
   'Thoughts: {{tokens}}': 'Рассуждения: {{tokens}}',
   'By model:': 'По модели:',
   'By auth type:': 'По типу аутентификации:',
   'By model/auth type:': 'По модели/типу аутентификации:',
+  'By source:': 'По источнику:',
   'Failed to load token usage stats: {{error}}':
     'Не удалось загрузить статистику использования токенов: {{error}}',
   'Expected --format csv or --format json.':
@@ -500,8 +501,9 @@ export default {
     'Использование токенов экспортировано в {{format}}: {{path}}',
   'Failed to export token usage stats: {{error}}':
     'Не удалось экспортировать статистику использования токенов: {{error}}',
-  'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.':
-    'Примечание: использование токенов показывает только длительность ответа API; время генерации (TTFT/TPS) относится к метрикам генерации.',
+  'Unclosed quote in arguments.': 'Незакрытая кавычка в аргументах.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Примечание: время генерации (TTFT/TPS) относится к метрикам генерации.',
   'exit the cli': 'Выход из CLI',
   'Manage workspace directories':
     'Управление директориями рабочего пространства',

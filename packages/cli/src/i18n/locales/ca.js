@@ -528,11 +528,13 @@ export default {
   'Breakdown:': 'Desglossament:',
   'Input: {{tokens}}': 'Entrada: {{tokens}}',
   'Output: {{tokens}}': 'Sortida: {{tokens}}',
-  'Cached: {{tokens}}': 'Memòria cau: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Memòria cau (inclosa a l’entrada): {{tokens}}',
   'Thoughts: {{tokens}}': 'Raonament: {{tokens}}',
   'By model:': 'Per model:',
   'By auth type:': "Per tipus d'autenticació:",
   'By model/auth type:': "Per model/tipus d'autenticació:",
+  'By source:': 'Per origen:',
   'Failed to load token usage stats: {{error}}':
     "No s'han pogut carregar les estadístiques d'ús de tokens: {{error}}",
   'Expected --format csv or --format json.':
@@ -548,8 +550,9 @@ export default {
     'Ús de tokens exportat a {{format}}: {{path}}',
   'Failed to export token usage stats: {{error}}':
     "No s'han pogut exportar les estadístiques d'ús de tokens: {{error}}",
-  'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.':
-    "Nota: l'ús de tokens només mostra la durada de resposta de l'API; el temps de generació (TTFT/TPS) pertany a les mètriques de generació.",
+  'Unclosed quote in arguments.': 'Cometes sense tancar als arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Nota: el temps de generació (TTFT/TPS) pertany a les mètriques de generació.',
   'exit the cli': 'sortir del CLI',
   'Manage workspace directories':
     "Gestionar els directoris de l'espai de treball",

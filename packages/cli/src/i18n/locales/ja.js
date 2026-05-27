@@ -394,11 +394,13 @@ export default {
   'Breakdown:': '内訳:',
   'Input: {{tokens}}': '入力: {{tokens}}',
   'Output: {{tokens}}': '出力: {{tokens}}',
-  'Cached: {{tokens}}': 'キャッシュ: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'キャッシュ（入力に含まれる）: {{tokens}}',
   'Thoughts: {{tokens}}': '思考: {{tokens}}',
   'By model:': 'モデル別:',
   'By auth type:': '認証タイプ別:',
   'By model/auth type:': 'モデル/認証タイプ別:',
+  'By source:': 'ソース別:',
   'Failed to load token usage stats: {{error}}':
     'token 使用統計の読み込みに失敗しました: {{error}}',
   'Expected --format csv or --format json.':
@@ -414,8 +416,9 @@ export default {
     'token 使用量を {{format}} にエクスポートしました: {{path}}',
   'Failed to export token usage stats: {{error}}':
     'token 使用統計のエクスポートに失敗しました: {{error}}',
-  'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.':
-    '注: token 使用量は API 応答時間のみを示します。生成時間（TTFT/TPS）は生成メトリクスに属します。',
+  'Unclosed quote in arguments.': '引数の引用符が閉じられていません。',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    '注: 生成時間（TTFT/TPS）は生成メトリクスに属します。',
   'Manage workspace directories': 'ワークスペースディレクトリを管理',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'ワークスペースにディレクトリを追加。複数パスはカンマで区切ってください',

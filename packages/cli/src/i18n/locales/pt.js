@@ -483,11 +483,13 @@ export default {
   'Breakdown:': 'Detalhamento:',
   'Input: {{tokens}}': 'Entrada: {{tokens}}',
   'Output: {{tokens}}': 'Saída: {{tokens}}',
-  'Cached: {{tokens}}': 'Cache: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cache (incluído na entrada): {{tokens}}',
   'Thoughts: {{tokens}}': 'Raciocínio: {{tokens}}',
   'By model:': 'Por modelo:',
   'By auth type:': 'Por tipo de autenticação:',
   'By model/auth type:': 'Por modelo/tipo de autenticação:',
+  'By source:': 'Por origem:',
   'Failed to load token usage stats: {{error}}':
     'Falha ao carregar estatísticas de uso de tokens: {{error}}',
   'Expected --format csv or --format json.':
@@ -503,8 +505,9 @@ export default {
     'Uso de tokens exportado para {{format}}: {{path}}',
   'Failed to export token usage stats: {{error}}':
     'Falha ao exportar estatísticas de uso de tokens: {{error}}',
-  'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.':
-    'Observação: o uso de tokens mostra apenas a duração da resposta da API; o tempo de geração (TTFT/TPS) pertence às métricas de geração.',
+  'Unclosed quote in arguments.': 'Aspas não fechadas nos argumentos.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Observação: o tempo de geração (TTFT/TPS) pertence às métricas de geração.',
   'exit the cli': 'sair da cli',
   'Manage workspace directories': 'Gerenciar diretórios do workspace',
   'Add directories to the workspace. Use comma to separate multiple paths':

@@ -536,11 +536,13 @@ export default {
   'Breakdown:': 'Détail :',
   'Input: {{tokens}}': 'Entrée : {{tokens}}',
   'Output: {{tokens}}': 'Sortie : {{tokens}}',
-  'Cached: {{tokens}}': 'Cache : {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cache (inclus dans l’entrée) : {{tokens}}',
   'Thoughts: {{tokens}}': 'Raisonnement : {{tokens}}',
   'By model:': 'Par modèle :',
   'By auth type:': "Par type d'authentification :",
   'By model/auth type:': "Par modèle/type d'authentification :",
+  'By source:': 'Par source :',
   'Failed to load token usage stats: {{error}}':
     "Échec du chargement des statistiques d'utilisation des tokens : {{error}}",
   'Expected --format csv or --format json.':
@@ -556,8 +558,9 @@ export default {
     'Utilisation des tokens exportée en {{format}} : {{path}}',
   'Failed to export token usage stats: {{error}}':
     "Échec de l'export des statistiques d'utilisation des tokens : {{error}}",
-  'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.':
-    "Remarque : l'utilisation des tokens affiche uniquement la durée de réponse de l'API ; les temps de génération (TTFT/TPS) relèvent des métriques de génération.",
+  'Unclosed quote in arguments.': 'Guillemet non fermé dans les arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Remarque : les temps de génération (TTFT/TPS) relèvent des métriques de génération.',
   'exit the cli': 'quitter le CLI',
   'Manage workspace directories':
     "Gérer les répertoires de l'espace de travail",

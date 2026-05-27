@@ -460,11 +460,13 @@ export default {
   'Breakdown:': 'Aufschlüsselung:',
   'Input: {{tokens}}': 'Eingabe: {{tokens}}',
   'Output: {{tokens}}': 'Ausgabe: {{tokens}}',
-  'Cached: {{tokens}}': 'Cache: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cache (in Eingabe enthalten): {{tokens}}',
   'Thoughts: {{tokens}}': 'Gedanken: {{tokens}}',
   'By model:': 'Nach Modell:',
   'By auth type:': 'Nach Authentifizierungstyp:',
   'By model/auth type:': 'Nach Modell/Authentifizierungstyp:',
+  'By source:': 'Nach Quelle:',
   'Failed to load token usage stats: {{error}}':
     'Token-Nutzungsstatistiken konnten nicht geladen werden: {{error}}',
   'Expected --format csv or --format json.':
@@ -480,8 +482,10 @@ export default {
     'Token-Nutzung nach {{format}} exportiert: {{path}}',
   'Failed to export token usage stats: {{error}}':
     'Token-Nutzungsstatistiken konnten nicht exportiert werden: {{error}}',
-  'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.':
-    'Hinweis: Die Token-Nutzung zeigt nur die API-Antwortdauer; Generierungszeiten (TTFT/TPS) gehören zu den Generierungsmetriken.',
+  'Unclosed quote in arguments.':
+    'Nicht geschlossenes Anführungszeichen in Argumenten.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Hinweis: Generierungszeiten (TTFT/TPS) gehören zu den Generierungsmetriken.',
   'exit the cli': 'CLI beenden',
   'Manage workspace directories': 'Arbeitsbereichsverzeichnisse verwalten',
   'Add directories to the workspace. Use comma to separate multiple paths':

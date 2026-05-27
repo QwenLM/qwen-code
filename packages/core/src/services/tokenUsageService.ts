@@ -71,10 +71,6 @@ export interface TokenUsageSummary {
   byAuthType: TokenUsageGroupSummary[];
   byModelAndAuthType: TokenUsageGroupSummary[];
   bySource: TokenUsageGroupSummary[];
-  coordination: {
-    issues: string[];
-    notes: string[];
-  };
 }
 
 export interface TokenUsageQuery {
@@ -127,11 +123,44 @@ function currentPeriodValue(period: TokenUsagePeriod): string {
 }
 
 function isValidDay(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) {
+    return false;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1) {
+    return false;
+  }
+  const daysInMonth = [
+    31,
+    isLeapYear(year) ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+  return day <= daysInMonth[month - 1]!;
 }
 
 function isValidMonth(value: string): boolean {
-  return /^\d{4}-\d{2}$/.test(value);
+  const match = /^(\d{4})-(\d{2})$/.exec(value);
+  if (!match) {
+    return false;
+  }
+  const month = Number(match[2]);
+  return month >= 1 && month <= 12;
+}
+
+function isLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
 
 function normalizePeriodValue(
@@ -169,13 +198,21 @@ function toNonNegativeInteger(value: number | undefined): number {
   return Math.trunc(value);
 }
 
+function calculateInputTokens(event: ApiResponseEvent): number {
+  const inputTokens = toNonNegativeInteger(event.input_token_count);
+  if (inputTokens > 0) {
+    return inputTokens;
+  }
+  return toNonNegativeInteger(event.cached_content_token_count);
+}
+
 function calculateTotalTokens(event: ApiResponseEvent): number {
   const total = toNonNegativeInteger(event.total_token_count);
   if (total > 0) {
     return total;
   }
   return (
-    toNonNegativeInteger(event.input_token_count) +
+    calculateInputTokens(event) +
     toNonNegativeInteger(event.output_token_count) +
     toNonNegativeInteger(event.thoughts_token_count)
   );
@@ -200,7 +237,7 @@ export function apiResponseEventToTokenUsageRecord(
     model: event.model || 'unknown',
     authType: event.auth_type || UNKNOWN_AUTH_TYPE,
     source: event.subagent_name || MAIN_SOURCE,
-    inputTokens: toNonNegativeInteger(event.input_token_count),
+    inputTokens: calculateInputTokens(event),
     outputTokens: toNonNegativeInteger(event.output_token_count),
     cachedTokens: toNonNegativeInteger(event.cached_content_token_count),
     thoughtsTokens: toNonNegativeInteger(event.thoughts_token_count),
@@ -215,7 +252,10 @@ function isTokenUsageRecord(value: unknown): value is TokenUsageRecord {
   }
   const record = value as Partial<TokenUsageRecord>;
   return (
-    record.schemaVersion === SCHEMA_VERSION &&
+    typeof record.schemaVersion === 'number' &&
+    Number.isInteger(record.schemaVersion) &&
+    record.schemaVersion > 0 &&
+    record.schemaVersion <= SCHEMA_VERSION &&
     typeof record.timestamp === 'string' &&
     typeof record.localDate === 'string' &&
     typeof record.localMonth === 'string' &&
@@ -307,14 +347,6 @@ function summarizeRecords(
     byAuthType: sortGroups(byAuthType.values()),
     byModelAndAuthType: sortGroups(byModelAndAuthType.values()),
     bySource: sortGroups(bySource.values()),
-    coordination: {
-      issues: ['#4479', '#4252', '#4182'],
-      notes: [
-        'Token usage is exposed under /stats to share the statistics command surface.',
-        'apiDurationMs is API response duration only; generation timing, TTFT, and TPS remain out of scope for #4252.',
-        'Usage records are content-free aggregate counters and dimensions for #4182 compatibility.',
-      ],
-    },
   };
 }
 
@@ -330,19 +362,20 @@ export function recordTokenUsageFromApiResponseBestEffort(
   config: Config,
   event: ApiResponseEvent,
 ): void {
-  void recordTokenUsageFromApiResponse(config, event).catch(
-    (error: unknown) => {
-      debugLogger.warn('Failed to record token usage:', error);
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code && code !== 'ENOENT') {
-        // eslint-disable-next-line no-console -- surface persistent local write failures outside debug mode
-        console.error(
-          `[token-usage] Write failed (${code}):`,
-          error instanceof Error ? error.message : String(error),
-        );
-      }
-    },
-  );
+  try {
+    const record = apiResponseEventToTokenUsageRecord(config, event);
+    jsonl.writeLineSync(getTokenUsageFilePath(record.localMonth), record);
+  } catch (error) {
+    debugLogger.warn('Failed to record token usage:', error);
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code && code !== 'ENOENT') {
+      // eslint-disable-next-line no-console -- surface persistent local write failures outside debug mode
+      console.error(
+        `[token-usage] Write failed (${code}):`,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
 }
 
 export async function queryTokenUsage(
@@ -360,10 +393,13 @@ export async function queryTokenUsage(
 
 function csvEscape(value: string | number | undefined): string {
   const stringValue = value === undefined ? '' : String(value);
-  if (/[",\n\r]/.test(stringValue)) {
-    return `"${stringValue.replace(/"/g, '""')}"`;
+  const sanitized = /^[=+\-@\t\r\n]/.test(stringValue)
+    ? `'${stringValue}`
+    : stringValue;
+  if (/[",\n\r]/.test(sanitized)) {
+    return `"${sanitized.replace(/"/g, '""')}"`;
   }
-  return stringValue;
+  return sanitized;
 }
 
 function groupRows(
