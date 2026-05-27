@@ -833,7 +833,9 @@ export async function main() {
       const authType = modelsConfig.getCurrentAuthType();
       const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
       const proxy = config.getProxy();
-      preconnectApi(authType, { resolvedBaseUrl, proxy });
+      if (!config.getListExtensions()) {
+        preconnectApi(authType, { resolvedBaseUrl, proxy });
+      }
     } catch (error) {
       // If we can't get authType, skip preconnect - it's optional optimization
       debugLogger.debug(
@@ -1047,6 +1049,26 @@ export async function main() {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       profileCheckpoint('config_initialize_end');
+
+      if (config.getListExtensions()) {
+        const extensions = config.getExtensions();
+        if (extensions.length === 0) {
+          // eslint-disable-next-line no-console -- CLI flag output
+          console.log('No extensions installed.');
+        } else {
+          // eslint-disable-next-line no-console -- CLI flag output
+          console.log('Installed extensions:');
+          for (const extension of extensions) {
+            // eslint-disable-next-line no-console -- CLI flag output
+            console.log(
+              `- ${extension.name} (v${extension.version})${extension.isActive ? '' : ' [disabled]'}`,
+            );
+          }
+        }
+        await runExitCleanup();
+        process.exit(0);
+      }
+
       // Non-interactive paths feed a prompt to the model immediately after
       // init. Under PR-A's progressive MCP availability,
       // `config.initialize()` returns BEFORE MCP servers settle, so
