@@ -9,6 +9,7 @@ import { Box, useIsScreenReaderEnabled } from 'ink';
 import { useUIState } from './contexts/UIStateContext.js';
 import { useSettings } from './contexts/SettingsContext.js';
 import { CORRUPTED_SUFFIX } from '../config/settings.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { StreamingContext } from './contexts/StreamingContext.js';
 import { QuittingDisplay } from './components/QuittingDisplay.js';
 import { SettingsCorruptedDialog } from './components/SettingsCorruptedDialog.js';
@@ -46,8 +47,10 @@ export const App = () => {
                   );
                   fs.copyFileSync(settings.corruptedPath, settingsPath);
                   fs.unlinkSync(settings.corruptedPath);
-                } catch {
-                  /* ignore */
+                } catch (e) {
+                  writeStderrLine(
+                    `Failed to restore corrupted file: ${e instanceof Error ? e.message : String(e)}`,
+                  );
                 }
               }
               process.exit(1);
