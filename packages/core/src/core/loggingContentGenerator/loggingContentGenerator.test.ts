@@ -2228,13 +2228,22 @@ describe('LoggingContentGenerator — Phase 4b retry context propagation', () =>
     // Review comment R2 #8: the idle-timeout `setTimeout` fires in a separate
     // macrotask. Verify the closure-captured retrySnapshot reaches its
     // endLLMRequestSpan call with correct retry context values.
+    //
+    // Must use fake timers from the START so the 5-min setTimeout created
+    // inside loggingStreamWrapper uses the fake clock and can be advanced.
+    vi.useFakeTimers();
+
     const { retryContext } = await import('../../utils/retryContext.js');
 
-    // Stream that never yields (simulates an abandoned generator) — the
-    // idle timeout will fire.
+    // Stream that resolves its first .next() only after we've advanced
+    // timers past the idle timeout. We use a deferred promise to hold
+    // iteration without actually hanging the test runner.
+    let releaseStream: () => void;
+    const streamBlocker = new Promise<void>((r) => {
+      releaseStream = r;
+    });
     const neverYieldStream = (async function* () {
-      // Never yields — consumer will wait forever, triggering idle timeout
-      await new Promise(() => {}); // hang indefinitely
+      await streamBlocker; // holds until we release after timer advance
       yield createResponse('never', 'test-model', [{ text: 'x' }]);
     })();
 
@@ -2250,9 +2259,11 @@ describe('LoggingContentGenerator — Phase 4b retry context propagation', () =>
       contents: 'Hello',
     } as unknown as GenerateContentParameters;
 
-    // Start the stream inside a retry context, then DON'T consume it —
-    // the idle timeout (5 min) should fire and end the span with the
-    // retry context values captured at entry.
+    // Start the stream inside a retry context. The generator creation
+    // (generateContentStream) runs synchronously enough to capture the
+    // retrySnapshot. The consumer's first .next() call starts the for-await
+    // which immediately awaits the streamBlocker — at that point the idle
+    // timeout setTimeout(5min) is already scheduled.
     await retryContext.run(
       { attempt: 4, requestSetupMs: 3000, retryTotalDelayMs: 2500 },
       async () => {
@@ -2260,44 +2271,39 @@ describe('LoggingContentGenerator — Phase 4b retry context propagation', () =>
           request,
           'prompt-idle-timeout',
         );
-        // Start iterating but use a short timeout to simulate abandonment.
-        // The real idle timeout is 5 min — we advance fake timers.
         const iter = stream[Symbol.asyncIterator]();
-        // Don't await iter.next() — just let it hang. Advance timers past
-        // the idle timeout to trigger the span close.
+        // Start iteration — this enters for-await, resets the idle timer,
+        // then blocks on streamBlocker.
         void iter.next();
       },
     );
 
-    // Advance past the 5-minute idle timeout
-    vi.useFakeTimers();
-    vi.advanceTimersByTime(6 * 60_000);
-    vi.useRealTimers();
+    // Advance past the 5-minute idle timeout (STREAM_IDLE_TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
 
-    // Wait a tick for the setTimeout callback to run
-    await new Promise((r) => setTimeout(r, 50));
+    // Release the stream so the generator can clean up
+    releaseStream!();
+    await vi.advanceTimersByTimeAsync(100);
+
+    vi.useRealTimers();
 
     // Find the span that was ended by the idle timeout
     const records = loggingSpanRecords.filter(
       (r) => r.name === 'qwen-code.llm_request' && r.endMetadata !== undefined,
     );
-    // The idle-timeout span should have our retry context values
     const timeoutRecord = records.find(
-      (r) =>
-        r.endMetadata?.error === 'Stream span timed out (idle)' ||
-        (r.endMetadata as { attempt?: number })?.attempt === 4,
+      (r) => r.endMetadata?.error === 'Stream span timed out (idle)',
     );
-    if (timeoutRecord) {
-      const meta = timeoutRecord.endMetadata as {
-        attempt?: number;
-        requestSetupMs?: number;
-        retryTotalDelayMs?: number;
-      };
-      expect(meta.attempt).toBe(4);
-      expect(meta.requestSetupMs).toBe(3000);
-      expect(meta.retryTotalDelayMs).toBe(2500);
-    }
-    // If the timeout hasn't fired in this test environment (timer issues),
-    // the test is still valid — it exercises the code path.
+    expect(timeoutRecord).toBeDefined();
+    const meta = timeoutRecord!.endMetadata as {
+      attempt?: number;
+      requestSetupMs?: number;
+      retryTotalDelayMs?: number;
+      error?: string;
+    };
+    expect(meta.attempt).toBe(4);
+    expect(meta.requestSetupMs).toBe(3000);
+    expect(meta.retryTotalDelayMs).toBe(2500);
+    expect(meta.error).toBe('Stream span timed out (idle)');
   });
 });

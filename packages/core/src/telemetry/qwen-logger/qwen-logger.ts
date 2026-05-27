@@ -965,6 +965,7 @@ export class QwenLogger {
     const rumEvent = this.createActionEvent('misc', 'api_retry', {
       properties: {
         model: event.model,
+        prompt_id: event.prompt_id ?? '',
         attempt_number: event.attempt_number,
         error_type: event.error_type ?? 'unknown',
         status_code:
