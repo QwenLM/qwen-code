@@ -1706,6 +1706,42 @@ export class GitWorktreeService {
         continue;
       }
 
+      // Resolve through any symlinks in the source path and RE-RUN the
+      // containment + blocklist checks against the realpath. The lexical
+      // checks above only see `path.resolve(repoRoot, raw)` — they can't
+      // tell that `<repo>/node_modules` is actually a symlink chaining
+      // into `.git`, an outside dir, or `.qwen`. Without this step a
+      // committed-or-out-of-band source symlink bypasses every guard the
+      // lexical loop set up. Use the realpath as the symlink target so
+      // the new link points canonically rather than preserving the chain.
+      let realSource: string;
+      try {
+        realSource = await fs.realpath(sourceAbs);
+      } catch (error) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: cannot realpath source "${sourceAbs}": ${error}`,
+        );
+        continue;
+      }
+      if (!isWithinRoot(realSource, repoRootAbs)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} escapes repo root ${repoRootAbs}`,
+        );
+        continue;
+      }
+      if (isWithinRoot(realSource, gitDirAbs)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} resolves inside .git`,
+        );
+        continue;
+      }
+      if (isWithinRoot(realSource, qwenDirAbs)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} resolves inside .qwen`,
+        );
+        continue;
+      }
+
       const destAbs = path.join(worktreePath, raw);
 
       // Ensure the parent directory of `destAbs` exists. For top-level
@@ -1718,6 +1754,30 @@ export class GitWorktreeService {
       } catch (error) {
         debugLogger.warn(
           `symlinkConfiguredDirectories: cannot mkdir parent of ${destAbs}: ${error}`,
+        );
+        continue;
+      }
+
+      // Sibling-drift defense to the round-7 source-side realpath check:
+      // `path.join(worktreePath, raw)` is lexical too. If `git worktree
+      // add` materialized a committed symlink under the worktree
+      // (e.g. HEAD ships `tools → /etc`), then the OS-side resolution
+      // of `<worktree>/tools/cache` traverses through the committed
+      // symlink and our `fs.mkdir` / `fs.symlink` write OUTSIDE the
+      // worktree. Realpath the dest parent and refuse if it escapes.
+      let realDestParent: string;
+      try {
+        realDestParent = await fs.realpath(path.dirname(destAbs));
+      } catch (error) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: cannot realpath dest parent for "${raw}" (${path.dirname(destAbs)}): ${error}`,
+        );
+        continue;
+      }
+      const realWorktreePath = await fs.realpath(worktreePath).catch(() => worktreePath);
+      if (!isWithinRoot(realDestParent, realWorktreePath)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — dest parent ${realDestParent} escapes worktree root ${realWorktreePath} (committed-symlink chain)`,
         );
         continue;
       }
@@ -1740,9 +1800,12 @@ export class GitWorktreeService {
             ? 'junction'
             : 'dir'
           : 'file';
-        await fs.symlink(sourceAbs, destAbs, symlinkType);
+        // Point at the canonical realpath rather than the lexical
+        // `sourceAbs` so the new link is one-hop and doesn't preserve
+        // the chain we just validated.
+        await fs.symlink(realSource, destAbs, symlinkType);
         debugLogger.debug(
-          `symlinkConfiguredDirectories: linked ${destAbs} → ${sourceAbs} (${symlinkType})`,
+          `symlinkConfiguredDirectories: linked ${destAbs} → ${realSource} (${symlinkType})`,
         );
       } catch (error) {
         if (isNodeError(error) && error.code === 'EEXIST') {
@@ -1751,7 +1814,7 @@ export class GitWorktreeService {
           );
         } else {
           debugLogger.warn(
-            `symlinkConfiguredDirectories: failed to link ${destAbs} → ${sourceAbs}: ${error}`,
+            `symlinkConfiguredDirectories: failed to link ${destAbs} → ${realSource}: ${error}`,
           );
         }
       }

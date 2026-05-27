@@ -243,6 +243,72 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     expect(wrote).toBe(false);
   });
 
+  it('refuses sources whose realpath escapes the repo root or lands in .git/.qwen (committed-symlink bypass)', async () => {
+    // Round-7 security fix: the lexical `isWithinRoot(sourceAbs, …)` and
+    // `.git`/`.qwen` blocklist checks DON'T resolve symlinks, so a symlink
+    // committed into the source repo HEAD (or set up out-of-band by a
+    // malicious post-install script / repo tarball) can chain through to
+    // arbitrary targets. Two flavours covered here:
+    //
+    //   1. `escape-to-git` is an OUT-OF-BAND symlink pointing at .git.
+    //      `fs.stat(<repo>/escape-to-git)` follows the symlink and
+    //      succeeds against the .git directory; without the realpath
+    //      guard, we'd happily create `<wt>/escape-to-git →
+    //      <repo>/escape-to-git → <repo>/.git`, giving any tool inside
+    //      the worktree read/write access to .git/hooks, .git/config,
+    //      etc.
+    //
+    //   2. `escape-to-outside` is an OUT-OF-BAND symlink pointing at a
+    //      sibling dir OUTSIDE the repo. Same bypass shape; targets
+    //      whatever lives at the other end (e.g. /etc, ~/.aws, etc.).
+    //
+    // Both are intentionally set up out-of-band (no `git add`) so we
+    // don't rely on EEXIST-from-checkout masking the issue; the
+    // worktree's dest path is empty when the symlink loop runs, so
+    // without the realpath guard `fs.symlink` would succeed.
+    await fs.symlink('.git', path.join(repoRoot, 'escape-to-git'));
+
+    const outsideDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-wt-outside-'),
+    );
+    const outsideResolved = await fs.realpath(outsideDir);
+    await fs.writeFile(path.join(outsideResolved, 'secret'), 'should-not-leak');
+    await fs.symlink(outsideResolved, path.join(repoRoot, 'escape-to-outside'));
+
+    try {
+      const service = new GitWorktreeService(repoRoot);
+      const result = await service.createUserWorktree('bypass', 'main', {
+        symlinkDirectories: ['escape-to-git', 'escape-to-outside'],
+      });
+      expect(result.success).toBe(true);
+
+      const wt = result.worktree!.path;
+
+      // Neither entry should have produced a symlink we wrote: the
+      // realpath check refuses .git-chain and out-of-repo targets.
+      for (const name of ['escape-to-git', 'escape-to-outside']) {
+        const dest = path.join(wt, name);
+        const exists = await fs
+          .lstat(dest)
+          .then(() => true)
+          .catch(() => false);
+        expect(
+          exists,
+          `realpath guard must refuse to create <wt>/${name} — committed symlink escape would chain through to a sensitive location`,
+        ).toBe(false);
+      }
+
+      // Belt-and-suspenders: the outside file remains unreachable from
+      // the worktree (no path to it via any symlink we created).
+      const leak = await fs
+        .readFile(path.join(wt, 'escape-to-outside', 'secret'), 'utf8')
+        .catch(() => null);
+      expect(leak).toBeNull();
+    } finally {
+      await fs.rm(outsideResolved, { recursive: true, force: true });
+    }
+  });
+
   it("rejects any entry containing a '..' segment (docs contract)", async () => {
     // `foo/../bar` resolves to `bar` (inside the repo), so the
     // post-resolve isWithinRoot check would accept it. But the
