@@ -1910,13 +1910,15 @@ export function textBufferReducer(
 function looksLikePath(str: string): boolean {
   // Strip surrounding quotes first to handle quoted paths
   const unquoted = str.replace(/^'(.*)'$/, '$1');
+  // Also handle tokens that are the start of a quoted path split by whitespace
+  const inner = unquoted.startsWith("'") ? unquoted.slice(1) : unquoted;
   return (
-    unquoted.startsWith('/') ||
-    unquoted.startsWith('./') ||
-    unquoted.startsWith('../') ||
-    unquoted.startsWith('~/') ||
-    unquoted.startsWith('.') ||
-    /^[A-Za-z]:/.test(unquoted)
+    inner.startsWith('/') ||
+    inner.startsWith('./') ||
+    inner.startsWith('../') ||
+    inner.startsWith('~/') ||
+    inner.startsWith('.') ||
+    /^[A-Za-z]:/.test(inner)
   );
 }
 
@@ -1948,7 +1950,7 @@ function tryExtractFilePaths(
 
     // Use a regex that only matches quoted content starting with path-like chars
     // to avoid false matches on English contractions (e.g., "don't").
-    const quotedPathRegex = /'([~/.][^']*)'/g;
+    const quotedPathRegex = /'((?:[~/.]|[A-Za-z]:)[^']*)'/g;
     let lastIndex = 0;
     let match;
     let hasQuotedPaths = false;
@@ -2023,8 +2025,10 @@ function extractPathsFromSegment(
     // Short-circuit: once any token is flagged as non-path, the result will be null
     if (hadNonPathToken.value) break;
 
-    // Pre-filter: skip tokens that can't possibly be paths
-    if (!looksLikePath(tokens[i])) {
+    // Pre-filter: skip tokens that can't possibly be paths.
+    // For single-token segments, let isValidPath decide (preserves
+    // old behavior for bare filenames like README.md).
+    if (tokens.length > 1 && !looksLikePath(tokens[i])) {
       hadNonPathToken.value = true;
       i++;
       continue;

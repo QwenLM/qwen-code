@@ -843,6 +843,48 @@ describe('useTextBuffer', () => {
       // Content preserved unchanged because not all tokens are valid paths
       expect(getBufferState(result).text).toBe(filePaths);
     });
+
+    it('should handle Windows drive-letter paths', () => {
+      // Suggestion 6 (wenshao #4544): test drive-letter branch of looksLikePath
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === 'C:\\Users\\file.txt' || p === 'D:\\data\\report.csv',
+        }),
+      );
+      act(() =>
+        result.current.insert('C:\\Users\\file.txt D:\\data\\report.csv', {
+          paste: true,
+        }),
+      );
+      expect(getBufferState(result).text).toBe(
+        '@C:\\Users\\file.txt @D:\\data\\report.csv ',
+      );
+    });
+
+    it('should handle quoted Windows paths with spaces', () => {
+      // Suggestion 3 (wenshao #4544): test quoted Windows paths
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === 'C:\\Users\\my file.txt' || p === 'D:\\data\\report.csv',
+        }),
+      );
+      act(() =>
+        result.current.insert(
+          "'C:\\Users\\my file.txt' 'D:\\data\\report.csv'",
+          {
+            paste: true,
+          },
+        ),
+      );
+      // escapePath escapes spaces, so "my file" becomes "my\ file"
+      expect(getBufferState(result).text).toBe(
+        '@C:\\Users\\my\\ file.txt @D:\\data\\report.csv ',
+      );
+    });
   });
 
   describe('Shell Mode Behavior', () => {
