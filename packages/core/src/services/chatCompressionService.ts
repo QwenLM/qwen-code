@@ -543,6 +543,19 @@ export class ChatCompressionService {
         compressionUsageMetadata.totalTokenCount - compressionInputTokenCount,
       );
     }
+    if (compressionOutputTokenCount === undefined && !isSummaryEmpty) {
+      compressionOutputTokenCount = estimateContentTokens(
+        [{ role: 'model', parts: [{ text: summary }] }],
+        slimmingConfig.imageTokenEstimate,
+      );
+      config
+        .getDebugLogger()
+        .warn(
+          `[chat-compression] compression side-query omitted usage metadata; ` +
+            `using local estimate for summary output token count ` +
+            `(${compressionOutputTokenCount}).`,
+        );
+    }
 
     // Defensive guard: if the side-query hit COMPACT_MAX_OUTPUT_TOKENS, the
     // summary is likely truncated mid-content and unsafe to persist. Drop it
@@ -644,11 +657,34 @@ export class ChatCompressionService {
             compressionOutputTokenCount,
         );
       } else {
-        newTokenCount = estimateContentTokens(
+        const estimatedOriginalContentTokenCount = estimateContentTokens(
+          historyForSplit,
+          slimmingConfig.imageTokenEstimate,
+        );
+        const estimatedNewContentTokenCount = estimateContentTokens(
           extraHistory,
           slimmingConfig.imageTokenEstimate,
         );
-        canCalculateNewTokenCount = newTokenCount > 0;
+        if (
+          estimatedOriginalContentTokenCount > 0 &&
+          estimatedNewContentTokenCount > 0
+        ) {
+          const estimatedSavedContentTokens =
+            estimatedOriginalContentTokenCount - estimatedNewContentTokenCount;
+          newTokenCount = Math.max(
+            0,
+            originalTokenCount - estimatedSavedContentTokens,
+          );
+          canCalculateNewTokenCount = true;
+          config
+            .getDebugLogger()
+            .debug(
+              `[chat-compression] usage metadata missing; estimated ` +
+                `post-compression token count from local content delta ` +
+                `(${estimatedOriginalContentTokenCount} -> ` +
+                `${estimatedNewContentTokenCount}).`,
+            );
+        }
       }
     }
 

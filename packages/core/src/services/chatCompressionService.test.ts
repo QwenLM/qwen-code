@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ChatCompressionService,
+  COMPACT_MAX_OUTPUT_TOKENS,
   computeThresholds,
   findCompressSplitPoint,
   MAX_CONSECUTIVE_FAILURES,
@@ -992,6 +993,50 @@ describe('ChatCompressionService', () => {
   });
 
   it('should use estimated token count if usage metadata is missing', async () => {
+    const largeMessage = 'x'.repeat(4_000);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: largeMessage }] },
+      { role: 'model', parts: [{ text: largeMessage }] },
+      { role: 'user', parts: [{ text: largeMessage }] },
+      { role: 'model', parts: [{ text: largeMessage }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      5_000,
+    );
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 6_000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      // Some OpenAI-compatible providers (for example MiniMax-2.7) may omit
+      // usage on the compression side-query even when they return a summary.
+      usage: undefined,
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      model: mockModel,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.originalTokenCount).toBe(5_000);
+    expect(result.info.newTokenCount).toBeGreaterThan(1_000);
+    expect(result.info.newTokenCount).toBeLessThan(5_000);
+    expect(result.newHistory).not.toBeNull();
+    expect(result.newHistory![0].parts![0].text).toBe('Summary');
+  });
+
+  it('should reject cap-sized summaries even if usage metadata is missing', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -999,16 +1044,28 @@ describe('ChatCompressionService', () => {
       { role: 'model', parts: [{ text: 'msg4' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      180_000,
+    );
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 200_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
+    const warn = vi.fn();
+    (
+      mockConfig as unknown as {
+        getDebugLogger: () => {
+          warn: typeof warn;
+          debug: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).getDebugLogger = () => ({
+      warn,
+      debug: vi.fn(),
+    });
     const mockGenerateContent = vi.fn().mockResolvedValue({
-      text: 'Summary',
-      // Some OpenAI-compatible providers (for example MiniMax-2.7) may omit
-      // usage on the compression side-query even when they return a summary.
+      text: 'x'.repeat(COMPACT_MAX_OUTPUT_TOKENS * 4),
       usage: undefined,
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -1024,11 +1081,16 @@ describe('ChatCompressionService', () => {
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
     });
 
-    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-    expect(result.info.originalTokenCount).toBe(800);
-    expect(result.info.newTokenCount).toBeLessThan(800);
-    expect(result.newHistory).not.toBeNull();
-    expect(result.newHistory![0].parts![0].text).toBe('Summary');
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+    expect(result.newHistory).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('local estimate'),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+    );
   });
 
   it('should return FAILED if summary is empty string', async () => {
