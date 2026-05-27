@@ -457,7 +457,12 @@ function broadcastPromptCancelledOnce(
   originatorClientId: string | undefined,
   reason?: 'forward_failed',
 ): void {
-  if (entry.cancelBroadcast) return;
+  if (entry.cancelBroadcast) {
+    writeStderrLine(
+      `broadcastPromptCancelledOnce: suppressed duplicate cancel for session ${sessionId} (latch already set)`,
+    );
+    return;
+  }
   entry.cancelBroadcast = true;
   broadcastPromptCancelled(entry, sessionId, originatorClientId, reason);
 }
@@ -473,6 +478,7 @@ function hasControlCharacter(value: string): boolean {
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
+const PERSIST_TIMEOUT_MS = 5_000;
 /**
  * #4282 fold-in 2 (gpt-5.5 CV2). Bridge-race deadline for the
  * `workspace/mcp/:server/restart` ACP extMethod. The MCP manager's
@@ -2150,6 +2156,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
                 originatorClientId,
                 'forward_failed',
               );
+              cancelPendingForSession(sessionId);
+              entry.connection.cancel({ sessionId }).catch(() => {});
             },
           )
           .catch(() => {});
@@ -3052,7 +3060,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         let persisted = false;
         if (opts.persist) {
           try {
-            await persistApprovalMode?.(boundWorkspace, mode);
+            await withTimeout(
+              persistApprovalMode?.(boundWorkspace, mode) ?? Promise.resolve(),
+              PERSIST_TIMEOUT_MS,
+              'persistApprovalMode',
+            );
             persisted = persistApprovalMode !== undefined;
           } catch (err) {
             // Persist failure is non-fatal — the in-process change already

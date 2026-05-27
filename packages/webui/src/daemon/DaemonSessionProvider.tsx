@@ -205,6 +205,14 @@ export function DaemonSessionProvider({
             }
             if (event.type === 'replay_complete') {
               // Replay drained — flip from "catching up" to "live".
+              // Also clear the store's awaitingResync latch if it was set
+              // by a `state_resync_required` frame (epoch-reset). The
+              // replay IS the recovery — without this, the transcript
+              // reducer keeps dropping events even though the connection
+              // is healthy and replay has completed.
+              if (store.getSnapshot().awaitingResync) {
+                store.clearAwaitingResync();
+              }
               setConnection((current) =>
                 current.catchingUp
                   ? { ...current, catchingUp: false }
