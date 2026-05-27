@@ -27,6 +27,65 @@ bun run electron:start
 bun run server:start
 ```
 
+## Building for Distribution
+
+All build commands run from `packages/desktop/`.
+
+### Prerequisites
+
+- [Bun](https://bun.sh) (see `.bun-version` for exact version)
+- `bun install` — install all workspace dependencies
+
+### Developer Build (no code signing)
+
+Use this for local testing. Produces an ad-hoc signed app.
+
+```bash
+# macOS (arm64 + x64)
+bun run electron:dist:dev:mac
+
+# Windows
+bun run electron:dist:dev:win
+
+# Linux
+bun run electron:dist:dev:linux
+```
+
+### Release Build (with code signing)
+
+```bash
+bun run electron:dist:mac
+bun run electron:dist:win
+bun run electron:dist:linux
+```
+
+Release builds require signing credentials via environment variables:
+
+| Variable                      | Purpose                     |
+| ----------------------------- | --------------------------- |
+| `CSC_LINK`                    | Path to signing certificate |
+| `APPLE_ID`                    | Apple ID for notarization   |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password       |
+| `APPLE_TEAM_ID`               | Team ID for notarization    |
+
+### Build Output
+
+All artifacts are written to `apps/electron/release/`:
+
+| Platform | Artifact                                                 |
+| -------- | -------------------------------------------------------- |
+| macOS    | `Qwen-Code-{arm64,x64}.dmg`, `Qwen-Code-{arm64,x64}.zip` |
+| Windows  | `Qwen-Code-x64.exe`                                      |
+| Linux    | `Qwen-Code-x64.AppImage`                                 |
+
+### What the Build Does
+
+Each `electron:dist:*` command runs three stages:
+
+1. **`electron:vendor:qwen`** — builds the Qwen Code CLI from the local checkout and bundles it into `vendor/qwen-code/`. Set `QWEN_CODE_VERSION` to download a published npm version instead.
+2. **`electron:build`** — compiles the app via esbuild (main + preload), Vite (renderer), and copies resources/assets.
+3. **`electron-builder`** — downloads the Electron runtime, packages the app, signs it, and produces distributable installers (DMG, NSIS, AppImage).
+
 ## CLI
 
 ```bash
