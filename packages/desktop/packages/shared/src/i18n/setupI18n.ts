@@ -1,6 +1,7 @@
 import i18n, { type i18n as I18nInstance, type InitOptions } from "i18next";
 import { LOCALE_REGISTRY } from "./registry";
 import { SUPPORTED_LANGUAGE_CODES } from "./languages";
+import { BRAND } from "../branding.ts";
 
 // Build i18next resources from the locale registry.
 const resources = Object.fromEntries(
@@ -34,7 +35,10 @@ export function setupI18n(
     resources,
     fallbackLng: "en",
     supportedLngs: [...SUPPORTED_LANGUAGE_CODES],
-    interpolation: { escapeValue: false },
+    interpolation: {
+      escapeValue: false,
+      defaultVariables: { appName: BRAND.appName },
+    },
     initImmediate: false, // synchronous init — resources are bundled inline
     detection: {
       order: ["localStorage", "navigator"],

@@ -30,6 +30,8 @@ import {
 } from "lucide-react"
 // SessionStatusIcons no longer used - icons come from dynamic sessionStatuses
 import { TopBar } from "./TopBar"
+import { AboutDialog } from "../AboutDialog"
+import { BRAND } from "@craft-agent/shared/branding"
 import { SquarePenRounded } from "../icons/SquarePenRounded"
 import { cn } from "@/lib/utils"
 import { isMac } from "@/lib/platform"
@@ -736,6 +738,9 @@ function AppShellContent({
   } = contextValue
 
   const { t } = useTranslation()
+
+  // About dialog state (only shown when brand has credits)
+  const [showAboutDialog, setShowAboutDialog] = React.useState(false)
 
   // Get hotkey labels from centralized action registry
   const newChatHotkey = useActionLabel('app.newChat').hotkey
@@ -2524,6 +2529,7 @@ function AppShellContent({
           onOpenSettings={onOpenSettings}
           onOpenSettingsSubpage={handleSettingsClick}
           onOpenKeyboardShortcuts={onOpenKeyboardShortcuts}
+          onShowAbout={BRAND.creditsEntries.length > 0 ? () => setShowAboutDialog(true) : undefined}
           onBack={goBack}
           onForward={goForward}
           canGoBack={canGoBack}
@@ -2532,6 +2538,9 @@ function AppShellContent({
           onToggleFocusMode={() => setIsSidebarAndNavigatorHidden(prev => !prev)}
           isCompact={isAutoCompact}
         />
+
+      {/* About dialog */}
+      <AboutDialog open={showAboutDialog} onOpenChange={setShowAboutDialog} />
 
       {/* === OUTER LAYOUT: Unified Panel Stack | Right Sidebar === */}
       <div

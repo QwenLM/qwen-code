@@ -6,6 +6,7 @@ import { DOC_REFS, APP_ROOT } from '../docs/index.ts';
 import { PERMISSION_MODE_CONFIG } from '../agent/mode-types.ts';
 import { FEATURE_FLAGS } from '../feature-flags.ts';
 import { APP_VERSION } from '../version/index.ts';
+import { BRAND } from '../branding.ts';
 import { globSync } from 'glob';
 import os from 'os';
 
@@ -287,13 +288,13 @@ export interface SystemPromptOptions {
   workspaceRootPath?: string;
   /** Working directory for context file discovery (monorepo support) */
   workingDirectory?: string;
-  /** Backend name for "powered by X" text (default: 'Qwen Code') */
+  /** Backend name for "powered by X" text (default: BRAND.selfReferName) */
   backendName?: string;
 }
 
 /**
  * System prompt preset types for different agent contexts.
- * - 'default': Full Qwen Code system prompt
+ * - 'default': Full system prompt
  * - 'mini': Focused prompt for quick configuration edits
  */
 export type SystemPromptPreset = 'default' | 'mini';
@@ -309,7 +310,7 @@ export function getMiniAgentSystemPrompt(workspaceRootPath?: string): string {
     ? `\n## Workspace\nConfig files are in: \`${workspaceRootPath}\`\n- Statuses: \`statuses/config.json\`\n- Labels: \`labels/config.json\`\n- Permissions: \`permissions.json\`\n`
     : '';
 
-  return `You are a focused assistant for quick configuration edits in Qwen Code.
+  return `You are a focused assistant for quick configuration edits in ${BRAND.selfReferName}.
 
 ## Your Role
 You help users make targeted changes to configuration files. Be concise and efficient.
@@ -339,7 +340,7 @@ Use config_validate to verify changes match the expected schema.
  * @param workspaceRootPath - Root path of the workspace
  * @param workingDirectory - Working directory for context file discovery
  * @param preset - System prompt preset ('default' | 'mini' | custom string)
- * @param backendName - Backend name for "powered by X" text (default: 'Qwen Code')
+ * @param backendName - Backend name for "powered by X" text (default: BRAND.selfReferName)
  */
 export function getSystemPrompt(
   pinnedPreferencesPrompt?: string,
@@ -445,10 +446,10 @@ function getCraftAgentEnvironmentMarker(): string {
  * ${APP_ROOT}/docs/ and is read on-demand when topics come up.
  *
  * @param workspaceRootPath - Root path of the workspace
- * @param backendName - Backend name for "powered by X" text (default: 'Qwen Code')
+ * @param backendName - Backend name for "powered by X" text (default: BRAND.selfReferName)
  * @param includeCoAuthoredBy - Whether to include the Co-Authored-By git trailer instruction (default: true)
  */
-function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = 'Qwen Code', includeCoAuthoredBy: boolean = true): string {
+function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string = BRAND.selfReferName, includeCoAuthoredBy: boolean = true): string {
   // Default to ${APP_ROOT}/workspaces/{id} if no path provided
   const workspacePath = workspaceRootPath || `${APP_ROOT}/workspaces/{id}`;
 
@@ -460,7 +461,7 @@ function getCraftAssistantPrompt(workspaceRootPath?: string, backendName: string
 
   return `${environmentMarker}
 
-You are Qwen Code - an AI assistant that helps users connect and work across their data sources through a desktop interface.
+You are ${BRAND.selfReferName} - an AI assistant that helps users connect and work across their data sources through a desktop interface.
 
 **Core capabilities:**
 - **Connect external sources** - MCP servers, REST APIs, local filesystems. Users can integrate Linear, GitHub, Craft, custom APIs, and more.
@@ -531,7 +532,7 @@ Read relevant context files using the Read tool - they contain architecture info
 
 **IMPORTANT:** Always read the relevant doc file BEFORE making changes. Do NOT guess schemas - these have specific patterns that differ from standard approaches.${FEATURE_FLAGS.craftAgentsCli ? `
 
-## Qwen Code CLI
+## ${BRAND.selfReferName} CLI
 
 Prefer \`craft-agent\` CLI over direct file edits for labels, sources, skills, and automations.
 
@@ -556,14 +557,14 @@ When you learn information about the user (their name, timezone, location, langu
 6. **Nice Markdown Formatting**: The user sees your responses rendered in markdown. Use headings, lists, bold/italic text, and code blocks for clarity. Basic HTML is also supported, but use sparingly.
 7. **Math Delimiters**: Use \`$$...$$\` for math expressions. Do NOT use single-dollar delimiters (\`$...$\`) in normal prose so currency values like \`$100\` or \`$2M–$4M\` stay plain text.
 
-!!IMPORTANT!!. You must refer to yourself as Qwen Code when asked. You can acknowledge that you are powered by ${backendName}.
+!!IMPORTANT!!. You must refer to yourself as ${BRAND.selfReferName} when asked. You can acknowledge that you are powered by ${backendName}.
 
 ${includeCoAuthoredBy ? `## Git Conventions
 
-When creating git commits, include Qwen Code as a co-author:
+When creating git commits, include ${BRAND.selfReferName} as a co-author:
 
 \`\`\`
-Co-Authored-By: Qwen Code <agents-noreply@craft.do>
+${BRAND.coAuthorLine}
 \`\`\`
 ` : ''}## Permission Modes
 
@@ -1082,7 +1083,7 @@ These help with UI feedback and result summarization.${FEATURE_FLAGS.developerFe
 
 ## Developer Feedback
 
-You have a \`send_developer_feedback\` tool — a direct line to the Qwen Code development team.
+You have a \`send_developer_feedback\` tool — a direct line to the ${BRAND.selfReferName} development team.
 
 **Share freely — issues, ideas, suggestions, anything:**
 - Tools returning wrong results, missing data, confusing behavior
