@@ -2330,6 +2330,63 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('resets the cancel-broadcast latch per prompt (a second prompt re-broadcasts)', async () => {
+      // Guards the `entry.cancelBroadcast = false` reset at prompt start: if it
+      // were removed, every cancel after the first deduped turn would be
+      // silently suppressed. Cancel prompt 1 (latch sets), then cancel prompt 2
+      // — peers must see a SECOND prompt_cancelled.
+      const releasers: Array<() => void> = [];
+      const factory: ChannelFactory = async () =>
+        makeChannel({
+          promptImpl: async () =>
+            new Promise<{ stopReason: 'cancelled' }>((res) => {
+              releasers.push(() => res({ stopReason: 'cancelled' }));
+            }),
+        }).channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const peerAbort = new AbortController();
+      const peerIter = bridge.subscribeEvents(session.sessionId, {
+        signal: peerAbort.signal,
+      });
+      const cancelEvents: BridgeEvent[] = [];
+      const collecting = (async () => {
+        for await (const e of peerIter) {
+          if (e.type === 'prompt_cancelled') cancelEvents.push(e);
+        }
+      })();
+
+      const runTurn = async () => {
+        const p = bridge
+          .sendPrompt(
+            session.sessionId,
+            {
+              sessionId: session.sessionId,
+              prompt: [{ type: 'text', text: 'x' }],
+            },
+            undefined,
+            { clientId: session.clientId },
+          )
+          .catch(() => {});
+        await new Promise((r) => setTimeout(r, 10));
+        await bridge.cancelSession(
+          session.sessionId,
+          { sessionId: session.sessionId },
+          { clientId: session.clientId },
+        );
+        releasers.shift()?.();
+        await p;
+        await new Promise((r) => setTimeout(r, 5));
+      };
+
+      await runTurn(); // prompt 1: latch sets, 1 broadcast
+      await runTurn(); // prompt 2: latch was reset at start → re-broadcasts
+      peerAbort.abort();
+      await collecting;
+      expect(cancelEvents).toHaveLength(2);
+      await bridge.shutdown();
+    });
+
     it('emits a compensating prompt_cancelled{forward_failed} when the prompt forward rejects (C3)', async () => {
       // doudouOUC #4484 post-merge review (C3): the user echo is published
       // before the forward. If the forward itself rejects (transport died /
