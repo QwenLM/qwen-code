@@ -376,7 +376,7 @@ describe('FeishuChannel', () => {
       channel = createChannel();
     });
 
-    it('marks card as stopped even when still creating', () => {
+    it('marks card as stopped even when still creating', async () => {
       const cardSessions = getPrivateMethod<
         Map<string, Record<string, unknown>>
       >(channel, 'cardSessions');
@@ -393,7 +393,9 @@ describe('FeishuChannel', () => {
 
       // Mock bridge
       const bridge = getPrivateMethod<AcpBridge>(channel, 'bridge');
-      vi.spyOn(bridge, 'cancelSession').mockResolvedValue(undefined);
+      const cancelSessionSpy = vi
+        .spyOn(bridge, 'cancelSession')
+        .mockResolvedValue(undefined);
 
       // Mock updateCard to not actually call HTTP
       const updateCardMock = vi.fn().mockResolvedValue(true);
@@ -429,6 +431,11 @@ describe('FeishuChannel', () => {
         | Record<string, unknown>
         | undefined;
       expect(state?.['stopped']).toBe(true);
+
+      // Wait for async handleStop to complete
+      await vi.waitFor(() => {
+        expect(cancelSessionSpy).toHaveBeenCalledWith('session_abc');
+      });
     });
 
     it('rejects stop from a different user (operator mismatch)', () => {

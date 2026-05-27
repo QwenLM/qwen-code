@@ -7,6 +7,9 @@
 
 const BASE_URL = 'https://open.feishu.cn/open-apis';
 
+/** Validate Feishu ID format to prevent path traversal in URL interpolation. */
+const FEISHU_ID_RE = /^[a-zA-Z0-9_.:-]+$/;
+
 export interface MediaFile {
   buffer: Buffer;
   mimeType: string;
@@ -27,7 +30,13 @@ export async function downloadMedia(
   resourceType: 'image' | 'file',
   accessToken: string,
 ): Promise<MediaFile | null> {
-  if (!messageId || !fileKey || !accessToken) {
+  if (
+    !messageId ||
+    !fileKey ||
+    !accessToken ||
+    !FEISHU_ID_RE.test(messageId) ||
+    !FEISHU_ID_RE.test(fileKey)
+  ) {
     return null;
   }
 
