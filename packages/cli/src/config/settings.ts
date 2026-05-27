@@ -818,6 +818,7 @@ export function loadEnvironment(settings: Settings): void {
  */
 export function loadSettings(
   workspaceDir: string = process.cwd(),
+  consumeCorruptionEnvVars: boolean = true,
 ): LoadedSettings {
   // Apply any QWEN_HOME / QWEN_RUNTIME_DIR set in user-level `.env` files
   // BEFORE any code reads a path derived from them. After this call, the
@@ -959,7 +960,11 @@ export function loadSettings(
         // don't re-trigger this path.
         const envCorruptedPath =
           process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'];
-        if (envCorruptedPath && scope === SettingScope.User) {
+        if (
+          consumeCorruptionEnvVars &&
+          envCorruptedPath &&
+          scope === SettingScope.User
+        ) {
           corruptedSaved = true;
           recoveredFromEnvVar =
             process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] === '1';

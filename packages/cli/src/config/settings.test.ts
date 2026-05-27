@@ -2085,6 +2085,23 @@ describe('Settings Loading and Merging', () => {
         const result = loadSettings(MOCK_WORKSPACE_DIR);
         expect(result.wasRecovered).toBe(false);
       });
+
+      it('should not consume env vars when consumeCorruptionEnvVars=false', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'] =
+          '/test/path.corrupted';
+        process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] = '1';
+
+        loadSettings(MOCK_WORKSPACE_DIR, false);
+        // env vars should remain untouched so child processes can still read them
+        expect(process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH']).toBe(
+          '/test/path.corrupted',
+        );
+        expect(process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED']).toBe('1');
+      });
     });
 
     it('should resolve environment variables in user settings', () => {
