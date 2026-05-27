@@ -363,13 +363,25 @@ describe('StreamingToolExecutor', () => {
       expect(ex.getCompletedResults().map((r) => r.callId)).toEqual(['b']);
     });
 
-    it('clears closed flag', () => {
+    it('is a no-op on a Closed (but not Discarded) executor', () => {
+      // The lifecycle has Closed→Open as a non-transition: close() is
+      // the post-stream stable state and reset() is mid-stream-only.
+      // Previously `wipeBuffer()` unconditionally cleared `closed`, so
+      // a stray reset after close silently reopened the executor and
+      // allowed late `accept()` calls to populate a finished batch.
+      // The guard preserves the documented mutual exclusion.
       const ex = new StreamingToolExecutor();
+      ex.accept(req('a'));
       ex.close();
       ex.reset('retry');
-      expect(ex.isClosed()).toBe(false);
-      // After reset the executor accepts again.
-      ex.accept(req('a'));
+      // closed flag preserved
+      expect(ex.isClosed()).toBe(true);
+      expect(ex.isDiscarded()).toBe(false);
+      // Buffer is NOT wiped — the original request still drains
+      expect(ex.size()).toBe(1);
+      // Late accept on a closed executor remains a no-op (existing
+      // close() invariant, unchanged by this fix).
+      ex.accept(req('b'));
       expect(ex.size()).toBe(1);
     });
 

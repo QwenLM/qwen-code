@@ -345,6 +345,20 @@ export class StreamingToolCallParser {
       const meta = this.toolCallMeta.get(index);
       if (meta?.emitted) continue;
       if (meta?.name && buffer.trim()) {
+        // KNOWN LIMITATION: a buffer that parses to a non-object JSON
+        // root (array, primitive, null) now silently becomes `args = {}`
+        // rather than propagating the parsed value as-is. Pre-PR, the
+        // raw `JSON.parse(buffer)` was cast to `Record<string, unknown>`
+        // and the downstream tool's schema validator surfaced a clear
+        // "expected object" / "missing required field" error to the
+        // model. Post-PR, the tool runs with empty args and the
+        // diagnostic that the model emitted SOMETHING (just of the
+        // wrong shape) is lost. Real OpenAI-compatible providers
+        // enforce object-typed `arguments` so this is mostly a
+        // defensive concern for proxied/buggy providers, but if it
+        // bites in production the fix is to track the malformed
+        // payload (e.g. an `_invalidArgs` field) so downstream can
+        // surface a meaningful error rather than running empty.
         let args: Record<string, unknown> = {};
 
         // Try to parse the final buffer

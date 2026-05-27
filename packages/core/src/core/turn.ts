@@ -483,6 +483,20 @@ export class Turn {
     this.pendingToolCalls.push(toolCallRequest);
     this.streamingExecutor?.accept(toolCallRequest);
 
+    // KNOWN LATENT ISSUE (Phase 3 #4387 follow-up): a single response
+    // chunk can carry BOTH `functionCalls` AND `finishReason='length'`.
+    // The run() loop iterates functionCalls (calling this method, which
+    // yields ToolCallRequest → the consumer's dispatcher.accept fires
+    // executeToolCall synchronously) BEFORE entering the finishReason
+    // branch that calls `streamingExecutor.markTruncated()`. So a safe
+    // tool registered as Kind.Read whose execute() consults
+    // `request.wasOutputTruncated` would see `undefined` even when the
+    // args were auto-repaired from a truncated buffer. Today this is
+    // dormant: the only in-tree consumer of `wasOutputTruncated` is
+    // `coreToolScheduler.ts` gated on `Kind.Edit` (not early-dispatch-
+    // safe). Future safe tools that honor the flag must either
+    // re-check `request.wasOutputTruncated` post-completion or this
+    // method's call site must be reordered to mark truncation first.
     // Yield a request for the tool call, not the pending/confirming status
     return { type: GeminiEventType.ToolCallRequest, value: toolCallRequest };
   }

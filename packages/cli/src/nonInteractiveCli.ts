@@ -678,19 +678,14 @@ export async function runNonInteractive(
           // Documented in docs/users/features/headless.md → "Scope".
           // Combine with --max-session-turns or --max-wall-time.
           //
-          // Phase 3 of #4387 interaction: the tick fires for EVERY tool
-          // in the batch regardless of whether it was early-dispatched.
-          // Early dispatch is just "started running sooner"; from a
-          // budgeting perspective each tool still counts as one
-          // execution. The abort check at the end of the tick also
-          // applies — if --max-tool-calls is exhausted, we route the
-          // abort before either path actually consumes the result.
-          const isStructuredOutputExempt =
-            requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
-            config.getJsonSchema?.() !== undefined;
-          if (!isStructuredOutputExempt) {
-            budgetEnforcer.tickToolCall();
-          }
+          // Phase 3 of #4387: the budget tick now fires upstream when
+          // the ToolCallRequest event is seen by the stream loop, so
+          // `--max-tool-calls` bounds the early-dispatch side-effect
+          // surface (an over-budget tool never reaches executeToolCall
+          // via either path). We still need to honour any abort that
+          // already fired upstream — including the budget-overrun case
+          // where the (N+1)th tool's stream-level tick marked the
+          // controller as exceeded before we got here.
           if (abortController.signal.aborted) await routeAbort();
 
           // Phase 3 of #4387: if the streaming dispatcher kicked this
@@ -937,13 +932,39 @@ export async function runNonInteractive(
             }
             if (event.type === GeminiEventType.ToolCallRequest) {
               toolCallRequests.push(event.value);
-              // Kick off the early dispatch (no-op if the tool isn't
-              // safe-classified or the dispatcher is disabled). Turn
-              // has already accepted the request into the SHARED
-              // executor; calling dispatcher.accept() here is
-              // idempotent on the executor's accept-once guard and
-              // additionally fires the safe-tool dispatch.
-              dispatcher?.accept(event.value);
+              // SECURITY: tick the budget IN the stream loop so
+              // `--max-tool-calls` bounds the early-dispatch side-effect
+              // surface. The post-stream tick that used to live inside
+              // `processToolCallBatch` ran AFTER `dispatcher.accept()`
+              // had already fired `executeToolCall` synchronously — so
+              // over-budget tools' I/O (file reads, HTTP fetches) had
+              // already happened by the time the cap aborted the batch.
+              // Same structured_output exemption applies as in the
+              // post-stream path. The tick uses `event.value.name`
+              // because the consumer-level callId/name shape mirrors
+              // what processToolCallBatch sees (no canonicalisation
+              // happens between them).
+              const isStructuredOutputExempt =
+                event.value.name === ToolNames.STRUCTURED_OUTPUT &&
+                config.getJsonSchema?.() !== undefined;
+              if (!isStructuredOutputExempt) {
+                budgetEnforcer.tickToolCall();
+              }
+              // If the tick just marked the budget exceeded, the
+              // controller is already aborted — gate the early dispatch
+              // so the over-budget tool never starts. The next
+              // for-await iteration's top-of-loop abort check (the
+              // `if (abortController.signal.aborted)` block above)
+              // routes the abort.
+              if (!abortController.signal.aborted) {
+                // Kick off the early dispatch (no-op if the tool isn't
+                // safe-classified or the dispatcher is disabled). Turn
+                // has already accepted the request into the SHARED
+                // executor; calling dispatcher.accept() here is
+                // idempotent on the executor's accept-once guard and
+                // additionally fires the safe-tool dispatch.
+                dispatcher?.accept(event.value);
+              }
             }
             if (
               event.type === GeminiEventType.Content &&
@@ -1121,8 +1142,33 @@ export async function runNonInteractive(
                   await routeAbort();
                 }
                 adapter.processEvent(event);
+                if (event.type === GeminiEventType.Retry) {
+                  // Mirror the main loop: discard stale tool-call
+                  // requests when a mid-stream retry lands. The drain
+                  // path doesn't wire a streamingToolDispatcher (so no
+                  // doubled I/O risk), but processToolCallBatch would
+                  // still emit functionResponses for the discarded
+                  // attempt's callIds — the retried attempt's history
+                  // has no matching functionCall, corrupting subsequent
+                  // turns. See nonInteractiveCli.test.ts "discards
+                  // tool-call requests when a Retry event arrives
+                  // mid-stream" for the main-loop regression test.
+                  itemToolCallRequests.length = 0;
+                }
                 if (event.type === GeminiEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
+                  // SECURITY: same upstream budget tick as the main
+                  // loop. The drain path doesn't dispatch tools early,
+                  // but moving the tick here keeps the cap semantics
+                  // uniform across both loops (one tick per
+                  // ToolCallRequest event) — important because we just
+                  // removed the in-batch tick from processToolCallBatch.
+                  const isStructuredOutputExempt =
+                    event.value.name === ToolNames.STRUCTURED_OUTPUT &&
+                    config.getJsonSchema?.() !== undefined;
+                  if (!isStructuredOutputExempt) {
+                    budgetEnforcer.tickToolCall();
+                  }
                 }
                 if (event.type === GeminiEventType.LoopDetected) {
                   emitLoopDetectedMessage(config, event.value?.loopType);

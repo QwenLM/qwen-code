@@ -222,10 +222,21 @@ export class StreamingToolExecutor {
    * executor in the Open state so subsequent `accept()` calls populate a
    * fresh batch. Used by Turn on mid-stream retry, where the previous
    * attempt's tool calls are thrown away but the next attempt's still need
-   * to flow through the executor. No-op on already-discarded executors.
+   * to flow through the executor.
+   *
+   * No-op on already-discarded executors (the canonical terminal reason
+   * stays put) AND on Closed executors — the documented lifecycle table
+   * has Closed→Open as a non-transition, and `wipeBuffer()` clears the
+   * `closed` flag, so without this guard a stray `reset()` after `close()`
+   * would silently reopen a finished batch. The only intended caller
+   * (`Turn.run` on retry) always invokes reset BEFORE the post-stream
+   * close() — Closed is only reachable via Turn's finally — so this
+   * guard is preserving the invariant rather than rejecting a real
+   * caller. See the state-machine note at the top of this class.
    */
   reset(reason?: StreamingToolExecutorDiscardReason): void {
     if (this.discarded) return;
+    if (this.closed) return;
     this.wipeBuffer(reason);
   }
 

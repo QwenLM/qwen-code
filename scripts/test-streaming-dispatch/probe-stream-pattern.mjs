@@ -16,7 +16,6 @@
 // which side the qwen3.7-max endpoint sits on.
 
 import * as fs from 'node:fs';
-import * as readline from 'node:readline';
 
 const settings = JSON.parse(
   fs.readFileSync(`${process.env.HOME}/.qwen/settings.json`, 'utf8'),
@@ -114,7 +113,11 @@ function noteArgsChunk(idx, chunk) {
     try {
       JSON.parse(st.buf);
       st.closedAt = Date.now();
-    } catch {}
+    } catch {
+      // Expected: buffer briefly reaches depth 0 mid-args while still
+      // not valid JSON (e.g. a string fragment that happens to balance
+      // brackets). Keep accumulating; subsequent chunks will arrive.
+    }
   }
   return st;
 }

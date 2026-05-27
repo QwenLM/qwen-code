@@ -7,8 +7,20 @@
 import type { Config } from '../config/config.js';
 import { Kind, CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+// KNOWN LIMITATION (Phase 3 follow-up): the synchronous regex-based
+// `isShellCommandReadOnly` is `@deprecated` in favour of the AST-based
+// `isShellCommandReadOnlyAST`, but the AST checker is async and
+// `isEarlyDispatchSafe` runs on the synchronous stream-event hot path.
+// For shell shapes the two classifiers disagree on (rare — both share
+// the same allowlist; differences are around exotic redirections /
+// command substitutions), the early-dispatch path uses the looser
+// regex check, and a command the AST checker would deem unsafe can
+// execute during the stream before the post-stream confirmation path
+// can intervene. Migrating to the AST classifier requires making
+// `isEarlyDispatchSafe` (and therefore `accept`) async, which
+// cascades into the dispatch loop's dedupe / abort semantics.
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
-import { stripShellWrapper } from '../utils/shell-utils.js';
+import { getCommandRoot, stripShellWrapper } from '../utils/shell-utils.js';
 import {
   executeToolCall,
   type ExecuteToolCallOptions,
@@ -425,6 +437,29 @@ export class StreamingToolDispatcher {
  *   - Tools requiring confirmation — the early path bypasses the UI's
  *     approval flow.
  *
+ * **CAVEAT — Kind.Fetch idempotency (RFC #4387 follow-up):**
+ * Kind.Fetch is treated as concurrency-safe based on the kind's stated
+ * "read-only" contract, but kind membership alone does NOT guarantee
+ * idempotency. A user-supplied or MCP-registered Fetch tool hitting a
+ * stateful endpoint (POST /increment-counter, per-call-billed search,
+ * etc.) can be double-executed in this flow:
+ *
+ *   1. Early dispatch fires `executeToolCall`; the HTTP request reaches
+ *      the server and the server commits its side effect.
+ *   2. A mid-stream Retry / stream-error fires
+ *      `dispatcher.cancelInFlight()` → AbortController aborts; the
+ *      promise's `.then` orphan-guard returns `undefined` instead of
+ *      the (already-committed) response.
+ *   3. The post-stream consumer's `earlyResult ?? executeToolCall(...)`
+ *      fallback (see `nonInteractiveCli.ts` `processToolCallBatch`)
+ *      issues a SECOND request → server commits again.
+ *
+ * The contract is: tool authors registering as Kind.Fetch SHOULD ensure
+ * the underlying call is idempotent. The built-in `web-fetch` /
+ * `web_search` tools use GET so they're safe; non-idempotent third-party
+ * Fetch tools are at risk. A future RFC iteration may add a per-tool
+ * "idempotent" flag and gate early dispatch on it.
+ *
  * Fail-closed for unknown tool names (e.g. an MCP tool not in the
  * registry yet): the post-stream path will pick it up normally.
  */
@@ -473,6 +508,23 @@ export function isEarlyDispatchSafe(
       // For everyday `git log`, `cat`, etc. (no wrapper) the early
       // path stays fast.
       if (stripped !== command.trim()) return false;
+
+      // SECURITY: the `env` builtin is a LAUNCHER for arbitrary
+      // subsequent commands (and is currently green-lit by
+      // `isShellCommandReadOnly` because the deprecated regex
+      // classifier has `env` in its read-only allowlist). A model that
+      // emits `env FOO=bar ksh -c "rm -rf /tmp/evil"` would otherwise
+      // pass the wrapper check (no `sh/bash` recognised wrapper),
+      // satisfy the regex-root check (root = `env`), and reach
+      // `executeToolCall` during the stream — bypassing user
+      // confirmation entirely for the trailing destructive payload.
+      // Refuse early dispatch when `env` appears as the canonical
+      // root, even though the regex classifier would say it's safe.
+      // The post-stream permission flow still handles these via its
+      // AST-based analysis and confirmation prompt.
+      const root = getCommandRoot(stripped);
+      if (root === 'env') return false;
+
       return isShellCommandReadOnly(stripped);
     } catch {
       return false;
