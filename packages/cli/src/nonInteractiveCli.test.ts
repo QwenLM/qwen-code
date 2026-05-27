@@ -430,6 +430,91 @@ describe('runNonInteractive', () => {
     ).toHaveBeenCalled();
   });
 
+  it('discards tool-call requests when a Retry event arrives mid-stream', async () => {
+    // Regression for the streaming-tool-dispatch (#4402) Retry handler in
+    // the stream event loop. Before this fix the loop only matched
+    // `ToolCallRequest`, `Content`, `LoopDetected`, and `Error` — so a
+    // mid-stream `Retry` left the previous attempt's tool calls in
+    // `toolCallRequests`, and the retried attempt's tool call was
+    // appended on top of them. The post-stream `processToolCallBatch`
+    // would then re-execute the discarded safe tool AND emit an
+    // unpaired functionResponse for it (the matching functionCall is
+    // no longer in history, since Turn's `executor.reset('retry')`
+    // wiped the previous attempt). This test mirrors the parallel
+    // coverage in useGeminiStream.test.tsx.
+    setupMetricsMock();
+    const beforeRetry: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-pre-retry',
+        name: 'staleTool',
+        args: { arg1: 'stale' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-retry',
+      },
+    };
+    const retry: ServerGeminiStreamEvent = {
+      type: GeminiEventType.Retry,
+    };
+    const afterRetry: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-post-retry',
+        name: 'freshTool',
+        args: { arg1: 'fresh' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-retry',
+      },
+    };
+
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [{ text: 'Tool response' }],
+    });
+
+    const firstCallEvents: ServerGeminiStreamEvent[] = [
+      beforeRetry,
+      retry,
+      afterRetry,
+    ];
+    const secondCallEvents: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'Final answer' },
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 10 } },
+      },
+    ];
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
+      .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use a tool',
+      'prompt-id-retry',
+    );
+
+    // Only the post-retry tool call should have been executed. The
+    // pre-retry one was thrown away when the Retry event landed.
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({
+        callId: 'tool-post-retry',
+        name: 'freshTool',
+      }),
+      expect.any(AbortSignal),
+      expect.objectContaining({ outputUpdateHandler: expect.any(Function) }),
+    );
+    expect(mockCoreExecuteToolCall).not.toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({ callId: 'tool-pre-retry' }),
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
   it('should handle error during tool execution and should send error back to the model', async () => {
     setupMetricsMock();
     const toolCallEvent: ServerGeminiStreamEvent = {

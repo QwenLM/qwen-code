@@ -45,13 +45,28 @@ const cases = [
   // [command, expectedSafe, label]
   ['ls',                                                  true,  'plain read-only'],
   ['git log --oneline -n 5',                              true,  'plain git log'],
-  ['bash -c "ls"',                                        true,  'wrapper no trailing'],
-  ['sh -c \'grep foo bar\'',                              true,  'single-quoted wrapper'],
+  // SECURITY: the classifier now refuses early dispatch for ALL wrapper
+  // commands (any `bash -c "..."` / `sh -c '...'` shape), even when the
+  // wrapper has no trailing content. An earlier positional `lastIndexOf`
+  // guard was bypassable via substring collision (e.g. inner command
+  // string re-introduced in a trailing destructive payload's URL or
+  // comment). Conservative reject-all is the only correct guard until
+  // `stripShellWrapper` returns positional metadata; the post-stream
+  // permission path still runs these normally with proper AST analysis.
+  ['ls',                                                  true,  'plain read-only no wrapper'],
+  ['git log --oneline -n 5',                              true,  'plain git log no wrapper'],
+  ['bash -c "ls"',                                        false, 'plain wrapper now rejected'],
+  ['sh -c \'grep foo bar\'',                              false, 'single-quoted plain wrapper'],
   ['bash -c "cat x" && rm -rf /tmp/junk',                 false, '&& side-effect after wrapper'],
   ['bash -c "ls" | tee /tmp/out',                         false, '| pipe after wrapper'],
   ['sh -c "grep foo bar" ; chmod -R 777 /tmp',            false, '; chmod after wrapper'],
   ['bash -c "git log" ; git push --force',                false, '; git push --force after wrapper'],
   ['sh -c \'ls\' && rm -rf /tmp/junk',                    false, '&& after single-quoted'],
+  // Substring-collision bypasses the prior guard admitted (the inner
+  // command's text appears in the trailing payload, fooling
+  // `lastIndexOf` into reading the wrong end-of-stripped position).
+  ['bash -c "ls" && rm -rf / && ls',                      false, 'ls echoed after destructive &&'],
+  ['bash -c "echo safe" ; rm -rf / # echo safe',          false, 'inner string in # comment'],
   ['rm -rf node_modules',                                 false, 'bare destructive'],
 ];
 
