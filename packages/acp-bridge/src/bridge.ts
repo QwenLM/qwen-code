@@ -2943,15 +2943,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             ),
             transportClosed,
           ]);
-          try {
-            entry.events.publish({
-              type: 'model_switched',
-              data: { sessionId: entry.sessionId, modelId: req.modelId },
-              ...(originatorClientId ? { originatorClientId } : {}),
-            });
-          } catch {
-            /* bus closed */
-          }
+          entry.events.publish({
+            type: 'model_switched',
+            data: { sessionId: entry.sessionId, modelId: req.modelId },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
           return result;
         } finally {
           entry.modelRoundtripInFlight = false;

@@ -831,6 +831,12 @@ export function createServeApp(
       // ONLY when the operator opted in. Tag presence = behavior is
       // on; older daemons without this PR omit the tag and SDKs that
       // post-PR feature-detect on it stay backward compatible.
+      //
+      // F2 (#4175 commit 5): `mcpPoolActive` advertises
+      // `mcp_workspace_pool` + `mcp_pool_restart` together. Defaults
+      // to `true` when omitted so daemons that don't explicitly set
+      // the option still advertise the F2 surface; operators flip it
+      // to `false` only when `QWEN_SERVE_NO_MCP_POOL=1` is in scope.
       features: getAdvertisedServeFeatures(undefined, {
         requireAuth: opts.requireAuth === true,
         mcpPoolActive: opts.mcpPoolActive !== false,
