@@ -20,6 +20,7 @@ import {
   useDaemonActions,
   useDaemonConnection,
   useDaemonTranscriptBlocks,
+  useDaemonTranscriptState,
   type DaemonSessionProviderProps,
   type DaemonConnectionState,
 } from './DaemonSessionProvider.js';
@@ -1054,6 +1055,85 @@ describe('DaemonSessionProvider', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('clears awaitingResync on same-session reconnect after state_resync_required', async () => {
+    // Regression test: if `state_resync_required` arms the awaitingResync
+    // latch and then the SSE connection drops, a same-session reconnect
+    // must clear the latch. Otherwise the transcript reducer permanently
+    // drops all subsequent events.
+    const firstStreamDone = createDeferred<void>();
+    let streamCount = 0;
+
+    const session = createMockSession({
+      lastEventId: 10,
+      events: async function* resyncThenReconnect(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        streamCount += 1;
+        if (streamCount === 1) {
+          // First stream: emit state_resync_required, then close.
+          yield {
+            id: 11,
+            v: 1,
+            type: 'state_resync_required',
+            data: {
+              reason: 'epoch_reset',
+              lastDeliveredId: 10,
+              earliestAvailableId: 12,
+            },
+          };
+          firstStreamDone.resolve();
+          return; // stream closes → triggers reconnect
+        }
+        // Second stream (reconnect): emit replay_complete then idle.
+        yield {
+          v: 1,
+          type: 'replay_complete',
+          data: { replayedCount: 0, lastReplayedEventId: 11 },
+        };
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    // Queue the same session twice (reconnect reuses it).
+    sdkMocks.sessions.push(session, session);
+
+    let awaitingResync = false;
+    function Harness() {
+      const state = useDaemonTranscriptState();
+      awaitingResync = state.awaitingResync;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+
+    // Wait for first stream to emit state_resync_required.
+    await act(async () => {
+      await firstStreamDone.promise;
+      await flushPromises();
+    });
+    // Latch should have been armed by the event.
+    expect(awaitingResync).toBe(true);
+
+    // Wait for reconnect to clear it.
+    await act(async () => {
+      await wait(30);
+      await flushPromises();
+    });
+    expect(awaitingResync).toBe(false);
   });
 
   async function renderWithProvider(
