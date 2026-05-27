@@ -243,6 +243,83 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     expect(wrote).toBe(false);
   });
 
+  it('works when the repo path itself contains a symlink boundary (round-7 self-inflicted regression guard)', async () => {
+    // Round 7 introduced `realSource = await fs.realpath(sourceAbs)` and
+    // compared it against `repoRootAbs = path.resolve(sourceRepoPath)` —
+    // canonical vs lexical. On any system where the user's repo path
+    // contains a symlink component (macOS /tmp → /private/tmp, or a
+    // user-symlinked source tree on Linux/Windows), the prefixes diverge
+    // and `isWithinRoot` silently rejects EVERY configured entry.
+    //
+    // This guard provisions the same shape independently of the
+    // shared beforeEach (which realpaths `repoRoot` upfront, masking
+    // the bug). We point `GitWorktreeService` at a symlink path so
+    // `sourceRepoPath` differs from its canonical realpath.
+
+    const realDirRaw = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-wt-realdir-'),
+    );
+    const realDir = await fs.realpath(realDirRaw);
+    const linkParentRaw = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-wt-linkdir-'),
+    );
+    const linkParent = await fs.realpath(linkParentRaw);
+    const repoViaSymlink = path.join(linkParent, 'repo-via-symlink');
+    await fs.symlink(realDir, repoViaSymlink);
+
+    try {
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: realDir });
+      execFileSync('git', ['config', 'user.email', 't@e.com'], {
+        cwd: realDir,
+      });
+      execFileSync('git', ['config', 'user.name', 't'], { cwd: realDir });
+      execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+        cwd: realDir,
+      });
+      await fs.writeFile(path.join(realDir, 'README.md'), 'hi\n');
+      execFileSync('git', ['add', '.'], { cwd: realDir });
+      execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+        cwd: realDir,
+      });
+
+      // Create node_modules in the real dir so realpath resolves to a
+      // canonical path under realDir, NOT repoViaSymlink.
+      const nm = path.join(realDir, 'node_modules');
+      await fs.mkdir(nm);
+      await fs.writeFile(path.join(nm, 'marker'), 'real');
+
+      // Service rooted at the SYMLINK path — that's the production shape
+      // since git rev-parse --show-toplevel returns the user-supplied
+      // path, not the canonical realpath.
+      const service = new GitWorktreeService(repoViaSymlink);
+      const result = await service.createUserWorktree('symlinkedrepo', 'main', {
+        symlinkDirectories: ['node_modules'],
+      });
+      expect(result.success).toBe(true);
+
+      // The configured entry must have been linked. Pre-fix: realSource
+      // = realDir/node_modules, repoRootAbs = repoViaSymlink (lexical) →
+      // isWithinRoot fails → entry silently rejected → dest absent.
+      const dest = path.join(result.worktree!.path, 'node_modules');
+      const lst = await fs.lstat(dest).catch(() => null);
+      expect(
+        lst,
+        'symlinkDirectories entry was silently rejected — canonical vs lexical isWithinRoot mismatch',
+      ).not.toBeNull();
+      expect(lst!.isSymbolicLink()).toBe(true);
+
+      // Reading through the link reaches the real file.
+      const marker = await fs.readFile(path.join(dest, 'marker'), 'utf8');
+      expect(marker).toBe('real');
+    } finally {
+      // Remove via the realpath, not the symlink, so rm-rf clears the
+      // backing directory cleanly. The dangling symlink in linkParent
+      // gets removed when we rm-rf linkParent.
+      await fs.rm(realDir, { recursive: true, force: true });
+      await fs.rm(linkParent, { recursive: true, force: true });
+    }
+  });
+
   it('refuses sources whose realpath escapes the repo root or lands in .git/.qwen (committed-symlink bypass)', async () => {
     // Round-7 security fix: the lexical `isWithinRoot(sourceAbs, …)` and
     // `.git`/`.qwen` blocklist checks DON'T resolve symlinks, so a symlink

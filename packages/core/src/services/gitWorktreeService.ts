@@ -1613,6 +1613,42 @@ export class GitWorktreeService {
     worktreePath: string,
     configured: readonly string[],
   ): Promise<void> {
+    // Loop-invariant canonical paths, hoisted out of the per-entry loop.
+    //
+    // We must `fs.realpath` the repo root (rather than `path.resolve`,
+    // which is purely lexical) so every containment check below compares
+    // canonical paths to canonical paths. The post-stat `realSource =
+    // fs.realpath(sourceAbs)` produces a canonical path, and on any
+    // system where the repo path contains a symlink component (macOS
+    // `/tmp → /private/tmp` is ubiquitous; user-symlinked source trees on
+    // Linux/Windows too) the lexical `path.resolve(sourceRepoPath)` does
+    // not share a prefix with that canonical realpath. Without this hoist
+    // `isWithinRoot(realSource, repoRootAbs)` silently rejects EVERY
+    // configured entry — cf. PR #4381 round 8 regression.
+    let repoRootAbs: string;
+    try {
+      repoRootAbs = await fs.realpath(this.sourceRepoPath);
+    } catch {
+      // realpath of a non-existent / inaccessible repo root is fatal for
+      // the symlink loop's containment checks (we can't validate against
+      // a path we can't canonicalise). Bail out — the worktree itself is
+      // already on disk so this is non-destructive; we just skip the
+      // opt-in symlink step.
+      debugLogger.warn(
+        `symlinkConfiguredDirectories: cannot realpath sourceRepoPath "${this.sourceRepoPath}", skipping all entries`,
+      );
+      return;
+    }
+    const gitDirAbs = path.join(repoRootAbs, '.git');
+    const qwenDirAbs = path.join(repoRootAbs, '.qwen');
+    // Same canonical-vs-canonical requirement for the dest side. The
+    // worktree was just created by `git worktree add`, so the path
+    // should exist; fall back to the input path on realpath error so a
+    // weird-but-extant worktree path doesn't deadlock the whole loop.
+    const realWorktreePath = await fs
+      .realpath(worktreePath)
+      .catch(() => worktreePath);
+
     for (const raw of configured) {
       if (typeof raw !== 'string' || raw.length === 0) {
         debugLogger.warn(
@@ -1641,8 +1677,7 @@ export class GitWorktreeService {
         );
         continue;
       }
-      const sourceAbs = path.resolve(this.sourceRepoPath, raw);
-      const repoRootAbs = path.resolve(this.sourceRepoPath);
+      const sourceAbs = path.resolve(repoRootAbs, raw);
       if (sourceAbs === repoRootAbs) {
         // `""` / `"."` / `"./"` etc. — pointless and would alias the
         // entire repo into itself. Reject explicitly so the path-prefix
@@ -1669,14 +1704,15 @@ export class GitWorktreeService {
       // creates the same loop more obviously; and `.qwen/projects`
       // / `.qwen/tmp` are CLI metadata users have no legitimate
       // reason to share across worktrees.
-      const gitDirAbs = path.join(repoRootAbs, '.git');
+      // `gitDirAbs` / `qwenDirAbs` are canonical (derived from the
+      // realpath'd `repoRootAbs` hoisted above the loop), so these
+      // comparisons stay consistent with the post-stat realpath check.
       if (isWithinRoot(sourceAbs, gitDirAbs)) {
         debugLogger.warn(
           `symlinkConfiguredDirectories: refusing git-internal path "${raw}"`,
         );
         continue;
       }
-      const qwenDirAbs = path.join(repoRootAbs, '.qwen');
       if (isWithinRoot(sourceAbs, qwenDirAbs)) {
         debugLogger.warn(
           `symlinkConfiguredDirectories: refusing path "${raw}" — ` +
@@ -1774,7 +1810,6 @@ export class GitWorktreeService {
         );
         continue;
       }
-      const realWorktreePath = await fs.realpath(worktreePath).catch(() => worktreePath);
       if (!isWithinRoot(realDestParent, realWorktreePath)) {
         debugLogger.warn(
           `symlinkConfiguredDirectories: refusing path "${raw}" — dest parent ${realDestParent} escapes worktree root ${realWorktreePath} (committed-symlink chain)`,
