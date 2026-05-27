@@ -296,7 +296,7 @@ export class SkillLaunchEvent implements BaseTelemetryEvent {
 }
 ```
 
-**调用方更新**：`packages/core/src/tools/skill.ts` 的 4 个 `logSkillLaunch` 调用点（L386, L399, L426, L482），传入 `this.params` 拿不到 `prompt_id` — 需要 SkillTool 在 `build()` 或 `execute()` 时从 `ToolInvocation` 上下文取 `prompt_id`（`BaseToolInvocation` 已有 `request.prompt_id`）。
+**调用方更新**：`packages/core/src/tools/skill.ts` 的 4 个 `logSkillLaunch` 调用点（L386, L399, L426, L482），传入 `this.params` 拿不到 `prompt_id` — `BaseToolInvocation` 仅持有 `params`，没有 `request.prompt_id` 字段。**实际实现**用鸭子类型方式注入：`SkillToolInvocation` 暴露 `setPromptId(id)` setter + 私有 `promptId` 字段，`CoreToolScheduler.buildInvocation`（`coreToolScheduler.ts:1253`）在 build 后 duck-type 调 `setPromptId(request.prompt_id)`，对齐既有 `setCallId` hook 的 pattern；invocation 在 `execute()` 内的 4 个 `logSkillLaunch` 都传 `this.promptId`。**早期版本的本节描述（"BaseToolInvocation 已有 request.prompt_id"）是错的**，已在 PR #4565 review 后更正。
 
 #### 4.1.1b qwen-logger 链路修复（前置）
 

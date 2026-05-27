@@ -340,12 +340,8 @@ ${skillDescriptions}
 }
 
 class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
-  // Populated by the scheduler via setPromptId duck-typing (see
-  // CoreToolScheduler.buildInvocation). Empty when not set so
-  // SkillLaunchEvent always has a typed string for telemetry, but the
-  // empty-string case is itself a signal that the call originated outside
-  // a normal scheduled tool invocation (e.g. direct buildAndExecute in
-  // tests) and should be excluded from prompt_id-based joins downstream.
+  // Populated by scheduler via setPromptId; empty = direct/non-scheduled
+  // call, filter `prompt_id != ''` downstream. See design doc §4.1.1.
   private promptId = '';
 
   constructor(

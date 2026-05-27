@@ -900,7 +900,7 @@ export class SkillLaunchEvent implements BaseTelemetryEvent {
   success: boolean;
   prompt_id: string;
 
-  constructor(skill_name: string, success: boolean, prompt_id: string) {
+  constructor(skill_name: string, success: boolean, prompt_id: string = '') {
     this['event.name'] = 'skill_launch';
     this['event.timestamp'] = new Date().toISOString();
     this.skill_name = skill_name;

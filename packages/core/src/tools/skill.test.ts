@@ -37,7 +37,7 @@ vi.mock('../telemetry/index.js', () => ({
     constructor(
       public skill_name: string,
       public success: boolean,
-      public prompt_id: string,
+      public prompt_id: string = '',
     ) {}
   },
 }));
@@ -618,6 +618,9 @@ describe('SkillTool', () => {
       const invocation = (
         skillTool as SkillToolWithProtectedMethods
       ).createInvocation(params);
+      // setPromptId is intentionally a scheduler-only hook (duck-typed by
+      // CoreToolScheduler.buildInvocation; not on the public ToolInvocation
+      // interface). Tests cast through `unknown` to exercise it directly.
       (
         invocation as unknown as { setPromptId: (id: string) => void }
       ).setPromptId('prompt-abc-123');

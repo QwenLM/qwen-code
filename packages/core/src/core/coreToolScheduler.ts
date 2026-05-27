@@ -1250,6 +1250,18 @@ export class CoreToolScheduler {
     }
   }
 
+  /**
+   * Builds a tool invocation and threads optional context (callId,
+   * promptId) into it via duck-typed setters when the invocation
+   * exposes them. Both setters are intentionally optional:
+   * - Existing tools whose invocations do not implement these setters
+   *   stay compatible without any change.
+   * - Future contexts (subagent / direct buildAndExecute / non-scheduler
+   *   callers) may invoke this with fewer arguments and still get a
+   *   valid invocation back.
+   * Production call sites in this scheduler always pass both — see
+   * the setArgs path at L1036 and the schedule path at L1497.
+   */
   private buildInvocation(
     tool: AnyDeclarativeTool,
     args: object,
