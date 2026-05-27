@@ -274,7 +274,8 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
 | Setting                          | Type    | Description                                                                       | Default |
 | -------------------------------- | ------- | --------------------------------------------------------------------------------- | ------- |
 | `memory.enableManagedAutoMemory` | boolean | Enable background extraction of memories from conversations.                      | `true`  |
-| `memory.enableManagedAutoDream`  | boolean | Enable automatic consolidation (deduplication and cleanup) of collected memories. | `false` |
+| `memory.enableManagedAutoDream`  | boolean | Enable automatic consolidation (deduplication and cleanup) of collected memories. | `true`  |
+| `memory.enableAutoSkill`         | boolean | Enable background review for reusable project skills after tool-heavy sessions.   | `true`  |
 
 See [Memory](../features/memory) for details on how auto-memory works and how to use the `/memory`, `/remember`, and `/dream` commands.
 

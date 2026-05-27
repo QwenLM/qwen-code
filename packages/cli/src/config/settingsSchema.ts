@@ -1439,7 +1439,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Managed Auto-Dream',
         category: 'Memory',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
           'Enable automatic consolidation (dream) of collected memories.',
         showInDialog: false,
@@ -1449,7 +1449,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Auto Skill',
         category: 'Memory',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
           'Enable background review for reusable project skills after tool-heavy sessions.',
         showInDialog: false,

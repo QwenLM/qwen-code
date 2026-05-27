@@ -901,6 +901,7 @@ export default {
   'Auto-memory: {{status}}': 'Auto-memory: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Auto-dream: {{status}} · {{lastDream}} · /dream to run',
+  'Auto-skill: {{status}}': 'Auto-skill: {{status}}',
   never: 'never',
   on: 'on',
   off: 'off',

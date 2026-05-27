@@ -1265,8 +1265,8 @@ export class Config {
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
-    this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
-    this.enableAutoSkill = params.enableAutoSkill ?? false;
+    this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
+    this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
