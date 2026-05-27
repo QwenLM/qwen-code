@@ -681,6 +681,14 @@ function toParts(input: PartListUnion): Part[] {
   return parts;
 }
 
+function getApproxSerializedLength(value: unknown): number | 'unknown' {
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return 'unknown';
+  }
+}
+
 const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
 
 /** Directive injected when a tool call repeatedly fails validation. */
@@ -2898,10 +2906,11 @@ export class CoreToolScheduler {
             );
           }
         } else if (typeof content !== 'string') {
+          const approxSerializedLength = getApproxSerializedLength(content);
           debugLogger.debug(
             `Skipping tool output truncation for ${toolName} ` +
               `(callId=${scheduledCall.request.callId}, prompt_id=${scheduledCall.request.prompt_id}): ` +
-              'non-string content',
+              `non-string content (~${approxSerializedLength} chars)`,
           );
         }
 

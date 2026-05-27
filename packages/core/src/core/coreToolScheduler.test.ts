@@ -90,6 +90,21 @@ type ToolSpanRecord = {
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
 const shouldThrowToolSpanSetAttribute = vi.hoisted(() => ({ value: false }));
 const shouldThrowToolSpanSetStatus = vi.hoisted(() => ({ value: false }));
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: vi.fn(() => mockDebugLogger),
+  };
+});
 
 vi.mock('../telemetry/tracer.js', () => ({
   safeSetStatus: (
@@ -7388,6 +7403,10 @@ describe('CoreToolScheduler tool output truncation', () => {
   }
 
   beforeEach(() => {
+    mockDebugLogger.debug.mockReset();
+    mockDebugLogger.info.mockReset();
+    mockDebugLogger.warn.mockReset();
+    mockDebugLogger.error.mockReset();
     vi.mocked(fsPromises.chmod).mockReset();
     vi.mocked(fsPromises.mkdir).mockReset();
     vi.mocked(fsPromises.writeFile).mockReset();
@@ -7731,6 +7750,11 @@ describe('CoreToolScheduler tool output truncation', () => {
     expect(responsePart.functionResponse?.parts).toEqual(partOutput);
     expect(completedCalls[0].response.contentLength).toBeUndefined();
     expect(fsPromises.writeFile).not.toHaveBeenCalled();
+    expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+      `Skipping tool output truncation for ${LargeOutputTool.Name} ` +
+        `(callId=part-output-1, prompt_id=prompt-part-output-1): ` +
+        `non-string content (~${JSON.stringify(partOutput).length} chars)`,
+    );
   });
 });
 
