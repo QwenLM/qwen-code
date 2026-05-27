@@ -101,6 +101,8 @@ export class MemoryPressureMonitor extends EventEmitter {
   private lastCleanupTime = 0;
   private consecutiveCleanupFailures = 0;
   private consecutiveIneffectiveCleanups = 0;
+  private consecutiveIneffectiveAggressiveCleanups = 0;
+  private cleanupGeneration = 0;
   private readonly effectiveMemoryLimit: number;
 
   constructor(coreConfig: Config, pressureConfig?: MemoryPressureConfig) {
@@ -130,6 +132,21 @@ export class MemoryPressureMonitor extends EventEmitter {
   resetConsecutiveFailures(): void {
     this.consecutiveCleanupFailures = 0;
     this.consecutiveIneffectiveCleanups = 0;
+    this.consecutiveIneffectiveAggressiveCleanups = 0;
+  }
+
+  /**
+   * Reset session-scoped cleanup state and invalidate any async cleanup tail
+   * that was queued against the previous session's cache.
+   */
+  resetForNewSession(): void {
+    this.cleanupGeneration++;
+    this.resetConsecutiveFailures();
+    this.cleanupInProgress = false;
+    this.activeCleanupAction = 'none';
+    this.queuedCleanupRecommendation = undefined;
+    this.lastCleanupAction = 'none';
+    this.lastCleanupTime = 0;
   }
 
   /**
@@ -162,6 +179,9 @@ export class MemoryPressureMonitor extends EventEmitter {
 
   private performCheckInternal(): void {
     const pressure = this.getPressureLevel();
+    if (pressure !== 'critical') {
+      this.consecutiveIneffectiveAggressiveCleanups = 0;
+    }
     if (pressure === 'normal') return;
 
     const recommendation = this.recommendCleanup(pressure);
@@ -171,10 +191,8 @@ export class MemoryPressureMonitor extends EventEmitter {
     const isEscalation =
       cleanupActionRank(recommendation.action) >
       cleanupActionRank(this.lastCleanupAction);
-    if (
-      !isEscalation &&
-      now - this.lastCleanupTime < this.config.cleanupCooldownMs
-    ) {
+    const cleanupCooldownMs = this.getCleanupCooldownMs(recommendation.action);
+    if (!isEscalation && now - this.lastCleanupTime < cleanupCooldownMs) {
       return;
     }
 
@@ -268,11 +286,18 @@ export class MemoryPressureMonitor extends EventEmitter {
     this.activeCleanupAction = recommendation.action;
     this.lastCleanupAction = recommendation.action;
     this.lastCleanupTime = Date.now();
+    const cleanupGeneration = this.cleanupGeneration;
 
-    void this.runCleanupSteps(recommendation.steps)
+    void this.runCleanupSteps(recommendation.steps, cleanupGeneration)
       .then(() => {
+        if (cleanupGeneration !== this.cleanupGeneration) {
+          return;
+        }
         this.consecutiveCleanupFailures = 0;
         setImmediate(() => {
+          if (cleanupGeneration !== this.cleanupGeneration) {
+            return;
+          }
           try {
             const memAfter = process.memoryUsage().rss;
             this.logCleanupResult(memBefore, memAfter, recommendation);
@@ -281,17 +306,23 @@ export class MemoryPressureMonitor extends EventEmitter {
               `Cleanup measurement failed: ${getErrorMessage(err)}`,
             );
           } finally {
-            this.finishCleanupAndRunQueued();
+            this.finishCleanupAndRunQueued(cleanupGeneration);
           }
         });
       })
       .catch((err) => {
+        if (cleanupGeneration !== this.cleanupGeneration) {
+          return;
+        }
         this.recordCleanupFailure(recommendation, err);
-        this.finishCleanupAndRunQueued();
+        this.finishCleanupAndRunQueued(cleanupGeneration);
       });
   }
 
-  private finishCleanupAndRunQueued(): void {
+  private finishCleanupAndRunQueued(cleanupGeneration: number): void {
+    if (cleanupGeneration !== this.cleanupGeneration) {
+      return;
+    }
     this.cleanupInProgress = false;
     this.activeCleanupAction = 'none';
     const queuedRecommendation = this.queuedCleanupRecommendation;
@@ -303,6 +334,25 @@ export class MemoryPressureMonitor extends EventEmitter {
         this.recordCleanupFailure(queuedRecommendation, err);
       }
     }
+  }
+
+  private getCleanupCooldownMs(
+    action: CleanupRecommendation['action'],
+  ): number {
+    const baseCooldownMs = this.config.cleanupCooldownMs;
+    if (
+      action !== 'aggressive' ||
+      baseCooldownMs === 0 ||
+      this.consecutiveIneffectiveAggressiveCleanups < 3
+    ) {
+      return baseCooldownMs;
+    }
+
+    const exponent = Math.min(
+      this.consecutiveIneffectiveAggressiveCleanups - 2,
+      6,
+    );
+    return baseCooldownMs * 2 ** exponent;
   }
 
   private logCleanupResult(
@@ -320,6 +370,9 @@ export class MemoryPressureMonitor extends EventEmitter {
 
     if (freedRatio < 0.01) {
       this.consecutiveIneffectiveCleanups++;
+      if (recommendation.action === 'aggressive') {
+        this.consecutiveIneffectiveAggressiveCleanups++;
+      }
       if (shouldEmitRepeatedDiagnostic(this.consecutiveIneffectiveCleanups)) {
         const event = {
           rss: memAfter,
@@ -338,6 +391,9 @@ export class MemoryPressureMonitor extends EventEmitter {
     }
 
     this.consecutiveIneffectiveCleanups = 0;
+    if (recommendation.action === 'aggressive') {
+      this.consecutiveIneffectiveAggressiveCleanups = 0;
+    }
   }
 
   private recordCleanupFailure(
@@ -378,8 +434,14 @@ export class MemoryPressureMonitor extends EventEmitter {
     }
   }
 
-  private async runCleanupSteps(steps: CleanupStep[]): Promise<void> {
+  private async runCleanupSteps(
+    steps: CleanupStep[],
+    cleanupGeneration: number,
+  ): Promise<void> {
     for (const step of steps) {
+      if (cleanupGeneration !== this.cleanupGeneration) {
+        return;
+      }
       this.executeStep(step);
       // Keep a promise boundary between steps so escalated cleanups can queue
       // behind the active cleanup instead of interleaving in the same stack.

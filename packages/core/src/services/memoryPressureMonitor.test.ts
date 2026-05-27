@@ -156,6 +156,7 @@ describe('MemoryPressureMonitor', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -657,6 +658,37 @@ describe('MemoryPressureMonitor', () => {
       expect(evictSpy).not.toHaveBeenCalledWith(30);
     });
 
+    it('cancels queued cleanup when the session is reset', async () => {
+      const clearSpy = vi.fn();
+      const evictSpy = vi.fn().mockReturnValue(0);
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          fileReadCache: {
+            clear: clearSpy,
+            evictNotAccessedSince: evictSpy,
+          },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 60_000 },
+      );
+      vi.spyOn(monitor, 'getPressureLevel')
+        .mockReturnValueOnce('soft')
+        .mockReturnValueOnce('critical')
+        .mockReturnValue('critical');
+      setMemUsage(14 * 1024 * 1024 * 1024);
+
+      monitor.performCheck();
+      monitor.performCheck();
+      monitor.resetForNewSession();
+      await drainCleanupMeasurement();
+
+      expect(evictSpy).toHaveBeenCalledWith(60);
+      expect(clearSpy).not.toHaveBeenCalled();
+
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+      expect(clearSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('blocks same-level cleanup within the cooldown window', async () => {
       const evictSpy = vi.fn().mockReturnValue(0);
       const monitor = new MemoryPressureMonitor(
@@ -773,6 +805,40 @@ describe('MemoryPressureMonitor', () => {
           freedRatio: 0,
         }),
       );
+    });
+
+    it('backs off repeated ineffective aggressive cleanup', async () => {
+      let now = 1_000;
+      vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const clearSpy = vi.fn();
+      const monitor = new MemoryPressureMonitor(
+        createMockConfig({
+          fileReadCache: {
+            clear: clearSpy,
+            evictNotAccessedSince: vi.fn(),
+          },
+        }),
+        { ...DEFAULT_PRESSURE_CONFIG, cleanupCooldownMs: 1_000 },
+      );
+
+      setMemUsage(14 * 1024 * 1024 * 1024); // critical, unchanged RSS
+
+      for (let i = 0; i < 3; i++) {
+        monitor.performCheck();
+        await drainCleanupMeasurement();
+        now += 1_000;
+      }
+
+      expect(clearSpy).toHaveBeenCalledTimes(3);
+
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+      expect(clearSpy).toHaveBeenCalledTimes(3);
+
+      now += 1_000;
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+      expect(clearSpy).toHaveBeenCalledTimes(4);
     });
 
     it('measures a cleanup before running a queued escalation', async () => {

@@ -448,12 +448,12 @@ describe('Server Config (config.ts)', () => {
       expect(child.getMemoryPressureMonitor()).toBe(childMonitor);
     });
 
-    it('resets monitor cleanup failures when starting a new session', async () => {
+    it('resets monitor cleanup state when starting a new session', async () => {
       const config = new Config(baseParams);
       await config.initialize({ skipGeminiInitialization: true });
       const monitor = config.getMemoryPressureMonitor();
       expect(monitor).toBeDefined();
-      const resetSpy = vi.spyOn(monitor!, 'resetConsecutiveFailures');
+      const resetSpy = vi.spyOn(monitor!, 'resetForNewSession');
 
       config.startNewSession();
 
