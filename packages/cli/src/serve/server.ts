@@ -3450,7 +3450,10 @@ function sendBridgeErrorImpl(
     ...(ctx?.route ? { 'http.route': ctx.route } : {}),
     ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
     'error.type': err instanceof Error ? err.name : typeof err,
-    'error.message': err instanceof Error ? err.message : String(err),
+    'error.message': (err instanceof Error ? err.message : String(err)).slice(
+      0,
+      1024,
+    ),
   });
   if (daemonLog) {
     daemonLog.error(

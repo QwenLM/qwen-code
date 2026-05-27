@@ -60,10 +60,15 @@ function activeSpanContextIsValid(): boolean {
 }
 
 function stripReservedTraceMeta(meta: unknown): Record<string, unknown> {
-  const out =
-    meta && typeof meta === 'object' && !Array.isArray(meta)
-      ? { ...(meta as Record<string, unknown>) }
-      : {};
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return {};
+  const record = meta as Record<string, unknown>;
+  if (
+    !(DAEMON_TRACEPARENT_META_KEY in record) &&
+    !(DAEMON_TRACESTATE_META_KEY in record)
+  ) {
+    return { ...record };
+  }
+  const out = { ...record };
   delete out[DAEMON_TRACEPARENT_META_KEY];
   delete out[DAEMON_TRACESTATE_META_KEY];
   return out;
@@ -80,7 +85,7 @@ export async function withDaemonSpan<T>(
   options: { autoOkOnSuccess?: boolean } = {},
 ): Promise<T> {
   if (!isTelemetrySdkInitialized()) {
-    return await fn(trace.getSpan(otelContext.active()) as Span);
+    return await fn(undefined as unknown as Span);
   }
   const autoOkOnSuccess = options.autoOkOnSuccess ?? true;
   const tracer = trace.getTracer(SERVICE_NAME);
