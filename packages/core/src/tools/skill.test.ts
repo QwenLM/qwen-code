@@ -928,6 +928,26 @@ describe('SkillTool', () => {
       expect(llmText).toMatch(/is disabled/);
     });
 
+    it('falls through to disabled-error when commandExecutor throws', async () => {
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['mytool']),
+      );
+      const executor = vi.fn().mockRejectedValue(new Error('MCP timeout'));
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mytool' });
+      const result = await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mytool');
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toMatch(/is disabled/);
+    });
+
     it('does not affect a skill that is not disabled', async () => {
       // Sanity check: with skills.disabled empty, the original
       // loadSkillForRuntime → executor fallback ordering still applies.
