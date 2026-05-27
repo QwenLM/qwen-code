@@ -56,8 +56,8 @@ jobs:
     concurrency:
       group: 'qwen-pr-review-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}'
       cancel-in-progress: true
-    timeout-minutes: ${{ fromJSON(github.event.inputs.timeout_minutes || '60') }}
-    runs-on: [self-hosted, linux, x64, ecs-qwen]
+    timeout-minutes: 60
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -66,7 +66,7 @@ jobs:
       - name: 'Checkout base branch'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 1
 
       - name: 'Resolve PR context'
