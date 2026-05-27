@@ -885,6 +885,15 @@ describe('useTextBuffer', () => {
         '@C:\\Users\\my\\ file.txt @D:\\data\\report.csv ',
       );
     });
+
+    it('should prepend @ to a bare filename when isValidPath returns true', () => {
+      // Suggestion 3 (wenshao #4544): test bare filename for single-token segments
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: (p) => p === 'README.md' }),
+      );
+      act(() => result.current.insert('README.md', { paste: true }));
+      expect(getBufferState(result).text).toBe('@README.md ');
+    });
   });
 
   describe('Shell Mode Behavior', () => {

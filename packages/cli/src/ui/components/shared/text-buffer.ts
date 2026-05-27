@@ -1903,7 +1903,7 @@ export function textBufferReducer(
 // --- Path extraction helpers (pure functions, outside useTextBuffer) ---
 
 /**
- * Check if a string looks like a path prefix (starts with /, ./, ~/, or drive letter).
+ * Check if a string looks like a path prefix (starts with /, ./, ../, ~/, ., .., or drive letter).
  * Strips surrounding quotes first to handle quoted paths.
  * Used to pre-filter tokens before expensive fs calls.
  */
@@ -1926,9 +1926,9 @@ function looksLikePath(str: string): boolean {
  * Extract file paths from content and prepend @ prefix.
  * Handles quoted paths, unquoted paths, whitespace-separated, and newline-separated.
  * Supports file paths with spaces using greedy matching.
- * IMPORTANT: Escapes spaces and commas in paths with backslash so that the
- * downstream `parseAllAtCommands` parser (which terminates at unescaped
- * whitespace and commas) correctly includes the entire path.
+ * IMPORTANT: Escapes shell-special characters (spaces, commas, parentheses,
+ * brackets, semicolons, etc.) with backslash so that the downstream
+ * `parseAllAtCommands` parser correctly includes the entire path.
  *
  * Only transforms when ALL non-whitespace tokens are valid paths. If any
  * non-path, non-separator token exists, returns null to preserve original
