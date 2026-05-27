@@ -1,0 +1,456 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { FeishuChannel } from './FeishuAdapter.js';
+import type { ChannelConfig, AcpBridge } from '@qwen-code/channel-base';
+
+function createMockBridge(): AcpBridge {
+  return {
+    prompt: vi.fn().mockResolvedValue(undefined),
+    cancelSession: vi.fn().mockResolvedValue(undefined),
+    on: vi.fn(),
+    off: vi.fn(),
+  } as unknown as AcpBridge;
+}
+
+function createConfig(overrides?: Partial<ChannelConfig>): ChannelConfig {
+  return {
+    type: 'feishu',
+    token: '',
+    clientId: 'test_app_id',
+    clientSecret: 'test_app_secret',
+    senderPolicy: 'open',
+    allowedUsers: [],
+    sessionScope: 'user',
+    cwd: '/tmp',
+    groupPolicy: 'open',
+    groups: { '*': { requireMention: true } },
+    ...overrides,
+  };
+}
+
+function createChannel(
+  configOverrides?: Partial<ChannelConfig>,
+): FeishuChannel {
+  const config = createConfig(configOverrides);
+  const bridge = createMockBridge();
+  return new FeishuChannel('test', config, bridge);
+}
+
+// Access private methods for unit testing
+function getPrivateMethod<T>(instance: unknown, method: string): T {
+  return (instance as Record<string, unknown>)[method] as T;
+}
+
+describe('FeishuChannel', () => {
+  describe('constructor', () => {
+    it('throws if clientId is missing', () => {
+      expect(() => createChannel({ clientId: undefined })).toThrow(
+        /requires clientId/,
+      );
+    });
+
+    it('throws if clientSecret is missing', () => {
+      expect(() => createChannel({ clientSecret: undefined })).toThrow(
+        /requires clientId.*clientSecret/,
+      );
+    });
+  });
+
+  describe('extractContent', () => {
+    let channel: FeishuChannel;
+    let extractContent: (
+      messageType: string,
+      contentJson: string,
+    ) => {
+      text: string;
+      imageKey?: string;
+      fileKey?: string;
+      fileName?: string;
+    };
+
+    beforeEach(() => {
+      channel = createChannel();
+      extractContent = getPrivateMethod(channel, 'extractContent').bind(
+        channel,
+      );
+    });
+
+    it('handles text messages', () => {
+      const result = extractContent('text', JSON.stringify({ text: 'hello' }));
+      expect(result.text).toBe('hello');
+    });
+
+    it('handles post messages with nested paragraphs', () => {
+      const post = {
+        zh_cn: {
+          title: 'Post Title',
+          content: [
+            [
+              { tag: 'text', text: 'Line 1 ' },
+              { tag: 'a', text: 'link' },
+            ],
+            [{ tag: 'text', text: 'Line 2' }],
+          ],
+        },
+      };
+      const result = extractContent('post', JSON.stringify(post));
+      expect(result.text).toContain('Post Title');
+      expect(result.text).toContain('Line 1 link');
+      expect(result.text).toContain('Line 2');
+    });
+
+    it('handles image messages', () => {
+      const result = extractContent(
+        'image',
+        JSON.stringify({ image_key: 'img_key_123' }),
+      );
+      expect(result.text).toBe('(image)');
+      expect(result.imageKey).toBe('img_key_123');
+    });
+
+    it('handles file messages', () => {
+      const result = extractContent(
+        'file',
+        JSON.stringify({ file_key: 'file_key_456', file_name: 'doc.pdf' }),
+      );
+      expect(result.text).toBe('(file: doc.pdf)');
+      expect(result.fileKey).toBe('file_key_456');
+      expect(result.fileName).toBe('doc.pdf');
+    });
+
+    it('handles audio messages', () => {
+      const result = extractContent('audio', JSON.stringify({}));
+      expect(result.text).toBe('(audio)');
+    });
+
+    it('handles media (video) messages', () => {
+      const result = extractContent(
+        'media',
+        JSON.stringify({ file_key: 'vid_key', file_name: 'video.mp4' }),
+      );
+      expect(result.text).toBe('(video)');
+      expect(result.fileKey).toBe('vid_key');
+      expect(result.fileName).toBe('video.mp4');
+    });
+
+    it('returns empty text for unknown types', () => {
+      const result = extractContent('sticker', JSON.stringify({}));
+      expect(result.text).toBe('');
+    });
+
+    it('handles malformed JSON gracefully', () => {
+      const result = extractContent('text', 'not valid json');
+      expect(result.text).toBe('');
+    });
+
+    it('handles empty content', () => {
+      const result = extractContent('text', JSON.stringify({}));
+      expect(result.text).toBe('');
+    });
+  });
+
+  describe('extractCardText', () => {
+    let channel: FeishuChannel;
+    let extractCardText: (card: Record<string, unknown>) => string | undefined;
+
+    beforeEach(() => {
+      channel = createChannel();
+      extractCardText = getPrivateMethod(channel, 'extractCardText').bind(
+        channel,
+      );
+    });
+
+    it('extracts markdown from v2 card format (body.elements)', () => {
+      const card = {
+        body: {
+          elements: [
+            { tag: 'markdown', content: 'Hello world' },
+            { tag: 'markdown', content: 'Second block' },
+          ],
+        },
+      };
+      const result = extractCardText(card);
+      expect(result).toContain('Hello world');
+      expect(result).toContain('Second block');
+    });
+
+    it('extracts from collapsible_panel in v2 format', () => {
+      const card = {
+        body: {
+          elements: [
+            { tag: 'markdown', content: 'Preview' },
+            {
+              tag: 'collapsible_panel',
+              elements: [{ tag: 'markdown', content: 'Hidden content' }],
+            },
+          ],
+        },
+      };
+      const result = extractCardText(card);
+      expect(result).toContain('Preview');
+      expect(result).toContain('Hidden content');
+    });
+
+    it('extracts from v1/API format (flat elements array)', () => {
+      const card = {
+        title: 'Card Title',
+        elements: [{ tag: 'markdown', content: 'Body text' }],
+      };
+      const result = extractCardText(card);
+      expect(result).toContain('Card Title');
+      expect(result).toContain('Body text');
+    });
+
+    it('strips streaming indicator', () => {
+      const card = {
+        body: {
+          elements: [{ tag: 'markdown', content: 'Content\n---\n*生成中...*' }],
+        },
+      };
+      const result = extractCardText(card);
+      expect(result).not.toContain('生成中');
+      expect(result).toBe('Content');
+    });
+
+    it('returns undefined for empty card', () => {
+      const result = extractCardText({});
+      expect(result).toBeUndefined();
+    });
+
+    it('filters fallback text', () => {
+      const card = {
+        elements: [
+          [{ tag: 'text', text: '请升级至最新版本客户端，以查看内容' }],
+        ],
+      };
+      const result = extractCardText(card);
+      expect(result).toBeUndefined();
+    });
+  });
+
+  describe('state machine: dedup', () => {
+    let channel: FeishuChannel;
+    let seenMessages: Map<string, number>;
+
+    beforeEach(() => {
+      channel = createChannel();
+      seenMessages = getPrivateMethod(channel, 'seenMessages');
+    });
+
+    it('deduplicates messages with same ID within TTL', () => {
+      seenMessages.set('msg_1', Date.now());
+      // Simulate calling onMessage with same ID — it should be skipped
+      const onMessage = getPrivateMethod<(data: unknown) => void>(
+        channel,
+        'onMessage',
+      ).bind(channel);
+
+      // Mock fetchBotInfo result
+      (channel as unknown as Record<string, unknown>)['botOpenId'] = 'bot_123';
+
+      onMessage({
+        message: {
+          message_id: 'msg_1',
+          chat_id: 'chat_1',
+          chat_type: 'p2p',
+          message_type: 'text',
+          content: JSON.stringify({ text: 'hello' }),
+        },
+        sender: {
+          sender_id: { open_id: 'user_1' },
+          sender_type: 'user',
+        },
+      });
+
+      // Should not create a card session since it's a duplicate
+      const cardSessions = getPrivateMethod<Map<string, unknown>>(
+        channel,
+        'cardSessions',
+      );
+      expect(cardSessions.has('msg_1')).toBe(false);
+    });
+
+    it('allows message after TTL expiry', () => {
+      // Set a message that expired 6 minutes ago
+      const DEDUP_TTL_MS = 5 * 60 * 1000;
+      seenMessages.set('msg_old', Date.now() - DEDUP_TTL_MS - 1000);
+
+      // Simulate the cleanup timer logic
+      const now = Date.now();
+      for (const [id, ts] of seenMessages) {
+        if (now - ts > DEDUP_TTL_MS) {
+          seenMessages.delete(id);
+        }
+      }
+
+      expect(seenMessages.has('msg_old')).toBe(false);
+    });
+  });
+
+  describe('state machine: cleanupCard', () => {
+    let channel: FeishuChannel;
+    let cleanupCard: (inboundMsgId: string) => void;
+
+    beforeEach(() => {
+      channel = createChannel();
+      cleanupCard = getPrivateMethod<(id: string) => void>(
+        channel,
+        'cleanupCard',
+      ).bind(channel);
+    });
+
+    it('cleans up all maps for a given inbound message', () => {
+      const cardSessions = getPrivateMethod<Map<string, unknown>>(
+        channel,
+        'cardSessions',
+      );
+      const sessionToInboundMsg = getPrivateMethod<Map<string, string>>(
+        channel,
+        'sessionToInboundMsg',
+      );
+      const msgToQuestion = getPrivateMethod<Map<string, string>>(
+        channel,
+        'msgToQuestion',
+      );
+      const msgToSenderName = getPrivateMethod<Map<string, string>>(
+        channel,
+        'msgToSenderName',
+      );
+      // Populate all maps
+      cardSessions.set('msg_1', {
+        messageId: 'card_1',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'test',
+        lastUpdateAt: Date.now(),
+      });
+      sessionToInboundMsg.set('session_1', 'msg_1');
+      msgToQuestion.set('msg_1', 'question?');
+      msgToSenderName.set('msg_1', '<at>user</at>');
+
+      cleanupCard('msg_1');
+
+      expect(cardSessions.has('msg_1')).toBe(false);
+      expect(sessionToInboundMsg.has('session_1')).toBe(false);
+      expect(msgToQuestion.has('msg_1')).toBe(false);
+      expect(msgToSenderName.has('msg_1')).toBe(false);
+    });
+
+    it('clears pending timer on cleanup', () => {
+      const cardSessions = getPrivateMethod<
+        Map<string, Record<string, unknown>>
+      >(channel, 'cardSessions');
+      const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
+
+      const timer = setTimeout(() => {}, 10000);
+      cardSessions.set('msg_2', {
+        messageId: 'card_2',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: '',
+        lastUpdateAt: Date.now(),
+        pendingUpdateTimer: timer,
+      });
+
+      cleanupCard('msg_2');
+
+      expect(clearTimeoutSpy).toHaveBeenCalledWith(timer);
+      expect(cardSessions.has('msg_2')).toBe(false);
+      clearTimeoutSpy.mockRestore();
+    });
+  });
+
+  describe('state machine: stop button during card creation', () => {
+    let channel: FeishuChannel;
+
+    beforeEach(() => {
+      channel = createChannel();
+    });
+
+    it('marks card as stopped even when still creating', () => {
+      const cardSessions = getPrivateMethod<
+        Map<string, Record<string, unknown>>
+      >(channel, 'cardSessions');
+
+      // Simulate card in "creating" state
+      cardSessions.set('inbound_1', {
+        messageId: 'card_1',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'partial text',
+        lastUpdateAt: Date.now(),
+      });
+
+      // Mock bridge
+      const bridge = getPrivateMethod<AcpBridge>(channel, 'bridge');
+      vi.spyOn(bridge, 'cancelSession').mockResolvedValue(undefined);
+
+      // Mock updateCard to not actually call HTTP
+      const updateCardMock = vi.fn().mockResolvedValue(true);
+      (channel as unknown as Record<string, unknown>)['updateCard'] =
+        updateCardMock;
+
+      // Simulate sessionToInboundMsg mapping
+      const sessionToInboundMsg = getPrivateMethod<Map<string, string>>(
+        channel,
+        'sessionToInboundMsg',
+      );
+      sessionToInboundMsg.set('session_abc', 'inbound_1');
+
+      // Simulate msgToSenderId mapping (fail-closed auth check)
+      const msgToSenderId = getPrivateMethod<Map<string, string>>(
+        channel,
+        'msgToSenderId',
+      );
+      msgToSenderId.set('inbound_1', 'user_open_id');
+
+      // Call onCardAction with stop
+      const onCardAction = getPrivateMethod<
+        (data: Record<string, unknown>) => boolean
+      >(channel, 'onCardAction').bind(channel);
+
+      onCardAction({
+        action: { value: { action: 'stop' } },
+        context: { open_message_id: 'card_1' },
+        operator: { open_id: 'user_open_id' },
+      });
+
+      const state = cardSessions.get('inbound_1') as
+        | Record<string, unknown>
+        | undefined;
+      expect(state?.stopped).toBe(true);
+    });
+  });
+
+  describe('disconnect', () => {
+    it('closes wsClient on disconnect', () => {
+      const channel = createChannel();
+      const mockClose = vi.fn();
+      (channel as unknown as Record<string, unknown>)['wsClient'] = {
+        close: mockClose,
+      };
+
+      channel.disconnect();
+
+      expect(mockClose).toHaveBeenCalled();
+      expect(
+        (channel as unknown as Record<string, unknown>)['wsClient'],
+      ).toBeUndefined();
+    });
+
+    it('clears dedup timer on disconnect', () => {
+      const channel = createChannel();
+      const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
+      const timer = setInterval(() => {}, 60000);
+      (channel as unknown as Record<string, unknown>)['dedupTimer'] = timer;
+
+      channel.disconnect();
+
+      expect(clearIntervalSpy).toHaveBeenCalledWith(timer);
+      clearIntervalSpy.mockRestore();
+      clearInterval(timer);
+    });
+  });
+});

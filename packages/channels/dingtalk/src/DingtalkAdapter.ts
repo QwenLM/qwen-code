@@ -95,9 +95,6 @@ const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 /** Minimum interval between card updates (ms) to avoid API rate limiting. */
 const CARD_UPDATE_INTERVAL_MS = 1500;
 
-/** Default AI streaming card template (official DingTalk template, not robot-specific). */
-const DEFAULT_AI_CARD_TEMPLATE = '17b30ffb-26c6-4ace-a2cb-49ed03c6d1f2.schema';
-
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private seenMessages: Map<string, number> = new Map();
@@ -375,12 +372,10 @@ export class DingtalkChannel extends ChannelBase {
     }
   }
 
-  private get cardTemplateId(): string {
-    return (
-      ((this.config as unknown as Record<string, unknown>)[
-        'cardTemplateId'
-      ] as string) || DEFAULT_AI_CARD_TEMPLATE
-    );
+  private get cardTemplateId(): string | undefined {
+    return (this.config as unknown as Record<string, unknown>)[
+      'cardTemplateId'
+    ] as string | undefined;
   }
 
   private get hasCardTemplate(): boolean {

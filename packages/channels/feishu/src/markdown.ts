@@ -92,7 +92,9 @@ export function buildCardContent(
     markdown.length > threshold
   ) {
     const previewEnd = markdown.indexOf('\n', 200);
-    const splitAt = previewEnd > 0 ? previewEnd : 200;
+    const rawSplit = previewEnd > 0 ? previewEnd : 200;
+    const safeSplit = markdown.lastIndexOf(' ', rawSplit);
+    const splitAt = safeSplit > 100 ? safeSplit : rawSplit;
     const preview = markdown.slice(0, splitAt);
     const rest = markdown.slice(splitAt);
 
@@ -189,21 +191,36 @@ export function splitChunks(text: string): string[] {
   let buf = '';
   const lines = text.split('\n');
   let inCode = false;
+  let fenceLine = '```';
 
   for (const line of lines) {
     const fenceCount = (line.match(/```/g) || []).length;
 
-    if (buf.length + line.length + 1 > CHUNK_LIMIT && buf.length > 0) {
+    // Reserve space for closing fence when inside a code block
+    const reserve = inCode ? fenceLine.length + 1 : 0;
+    if (
+      buf.length + line.length + 1 + reserve > CHUNK_LIMIT &&
+      buf.length > 0
+    ) {
       if (inCode) {
         buf += '\n```';
       }
       chunks.push(buf);
-      buf = inCode ? '```\n' : '';
+      buf = inCode ? fenceLine + '\n' : '';
     }
 
     buf += (buf ? '\n' : '') + line;
 
+    // Hard-split oversized lines that exceed the limit on their own
+    while (buf.length > CHUNK_LIMIT) {
+      chunks.push(buf.slice(0, CHUNK_LIMIT));
+      buf = buf.slice(CHUNK_LIMIT);
+    }
+
     if (fenceCount % 2 === 1) {
+      if (!inCode) {
+        fenceLine = line.trim();
+      }
       inCode = !inCode;
     }
   }

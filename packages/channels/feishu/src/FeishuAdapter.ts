@@ -52,6 +52,12 @@ interface CardSessionState {
   accumulatedText: string;
   lastUpdateAt: number;
   pendingUpdateTimer?: ReturnType<typeof setTimeout>;
+  /** Captured before cleanup so the creating→stopped callback retains the @sender prefix. */
+  atPrefix?: string;
+  /** Set by onResponseComplete to prevent concurrent updateCard from pendingUpdateTimer callback. */
+  finalizing?: boolean;
+  /** Set when card creation has permanently failed to prevent retry spiral. */
+  cardCreationFailed?: boolean;
 }
 
 /** Track seen message IDs to deduplicate retried events. */
@@ -76,6 +82,10 @@ export class FeishuChannel extends ChannelBase {
   private msgToQuestion: Map<string, string> = new Map();
   /** Sender @tag keyed by inbound messageId. */
   private msgToSenderName: Map<string, string> = new Map();
+  /** Sender open_id keyed by inbound messageId — for stop-button auth in group chats. */
+  private msgToSenderId: Map<string, string> = new Map();
+  /** Tracks messages that were stopped. Cleaned up by cleanupCard, onResponseComplete, stale timer, and disconnect. */
+  private stoppedMessages: Set<string> = new Set();
   private botOpenId?: string;
   private tokenCache?: { token: string; expiresAt: number };
 
@@ -112,8 +122,12 @@ export class FeishuChannel extends ChannelBase {
         return {};
       },
       'card.action.trigger': (data: unknown) => {
-        this.onCardAction(data as Record<string, unknown>);
-        return { toast: { type: 'info', content: '已停止' } };
+        const payload = data as Record<string, unknown>;
+        const stopped = this.onCardAction(payload);
+        if (stopped) {
+          return { toast: { type: 'info', content: '已停止' } };
+        }
+        return {};
       },
     } as Record<string, (data: unknown) => unknown>);
 
@@ -126,6 +140,16 @@ export class FeishuChannel extends ChannelBase {
     const encryptKey = feishuConfig['encryptKey'] as string | undefined;
 
     if (webhookPort) {
+      if (!verificationToken) {
+        throw new Error(
+          `Channel "${this.name}" webhook mode requires verificationToken for request authentication.`,
+        );
+      }
+      if (!encryptKey) {
+        process.stderr.write(
+          `[Feishu:${this.name}] WARNING: webhook mode started without encryptKey. If the Feishu app has event encryption enabled, events will be silently dropped.\n`,
+        );
+      }
       // HTTP Webhook mode
       await this.connectWebhook(webhookPort, verificationToken, encryptKey);
     } else {
@@ -150,6 +174,7 @@ export class FeishuChannel extends ChannelBase {
       for (const [msgId, state] of this.cardSessions) {
         if (now - state.lastUpdateAt > STALE_MS && !state.creating) {
           this.cleanupCard(msgId);
+          this.stoppedMessages.delete(msgId);
         }
       }
     }, 60_000);
@@ -184,22 +209,53 @@ export class FeishuChannel extends ChannelBase {
         return {};
       },
       'card.action.trigger': (data: unknown) => {
-        this.onCardAction(data as Record<string, unknown>);
-        return { toast: { type: 'info', content: '已停止' } };
+        const payload = data as Record<string, unknown>;
+        const stopped = this.onCardAction(payload);
+        if (stopped) {
+          return { toast: { type: 'info', content: '已停止' } };
+        }
+        return {};
       },
     } as Record<string, (data: unknown) => unknown>);
 
+    const feishuCfg = this.config as unknown as Record<string, unknown>;
+    const MAX_BODY_BYTES = 1 * 1024 * 1024; // 1 MiB
+
     this.httpServer = createServer((req, res) => {
       if (req.method === 'POST') {
-        let body = '';
+        req.on('error', () => {
+          if (!res.headersSent) {
+            res.writeHead(400);
+            res.end('Bad Request');
+          }
+        });
+        const bodyChunks: Buffer[] = [];
+        let bodySize = 0;
+        let exceeded = false;
         req.on('data', (chunk: Buffer) => {
-          body += chunk.toString();
+          if (exceeded) return;
+          bodySize += chunk.length;
+          if (bodySize > MAX_BODY_BYTES) {
+            exceeded = true;
+            res.writeHead(413);
+            res.end('Payload Too Large');
+            req.destroy();
+            return;
+          }
+          bodyChunks.push(chunk);
         });
         req.on('end', () => {
+          if (exceeded) return;
           try {
+            const body = Buffer.concat(bodyChunks).toString('utf-8');
             const parsed = JSON.parse(body);
             // Handle URL verification challenge
             if (parsed.type === 'url_verification') {
+              if (verificationToken && parsed.token !== verificationToken) {
+                res.writeHead(403);
+                res.end('Forbidden');
+                return;
+              }
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ challenge: parsed.challenge }));
               return;
@@ -211,7 +267,10 @@ export class FeishuChannel extends ChannelBase {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(result || {}));
               })
-              .catch(() => {
+              .catch((err) => {
+                process.stderr.write(
+                  `[Feishu:${this.name}] Webhook dispatch error: ${err instanceof Error ? err.message : err}\n`,
+                );
                 res.writeHead(500);
                 res.end('Internal Server Error');
               });
@@ -226,8 +285,10 @@ export class FeishuChannel extends ChannelBase {
       }
     });
 
-    await new Promise<void>((resolve) => {
-      this.httpServer!.listen(port, () => resolve());
+    const host = (feishuCfg['webhookHost'] as string) || '127.0.0.1';
+    await new Promise<void>((resolve, reject) => {
+      this.httpServer!.on('error', reject);
+      this.httpServer!.listen(port, host, () => resolve());
     });
   }
 
@@ -266,9 +327,9 @@ export class FeishuChannel extends ChannelBase {
    */
   private async fetchMessageContent(
     messageId: string,
-  ): Promise<string | undefined> {
+  ): Promise<{ content?: string; isFromBot: boolean }> {
     const token = await this.getTenantAccessToken();
-    if (!token) return undefined;
+    if (!token) return { isFromBot: false };
 
     try {
       const resp = await fetch(
@@ -281,7 +342,7 @@ export class FeishuChannel extends ChannelBase {
       const respText = await resp.text();
 
       if (!resp.ok) {
-        return undefined;
+        return { isFromBot: false };
       }
 
       const data = JSON.parse(respText) as {
@@ -289,25 +350,38 @@ export class FeishuChannel extends ChannelBase {
           items?: Array<{
             msg_type?: string;
             body?: { content?: string };
+            sender?: {
+              sender_type?: string;
+              id?: string;
+            };
           }>;
         };
       };
 
       const item = data.data?.items?.[0];
+      const isFromBot =
+        item?.sender?.sender_type === 'app' ||
+        (!!this.botOpenId && item?.sender?.id === this.botOpenId);
+
       if (!item?.body?.content) {
-        return undefined;
+        return { isFromBot };
       }
 
       const content = JSON.parse(item.body.content);
 
       if (item.msg_type === 'interactive') {
-        // Extract markdown from card elements
-        return this.extractCardText(content);
+        return { content: this.extractCardText(content), isFromBot };
       } else if (item.msg_type === 'text') {
-        return content.text || undefined;
+        return { content: content.text || undefined, isFromBot };
       } else if (item.msg_type === 'post') {
-        // Rich text — extract inline text
-        const langPost = Object.values(content)[0] as
+        // Post content may be wrapped in a language key like {"zh_cn": {title, content}}
+        // or it may be directly {title, content} (e.g. from API history fetch).
+        const firstValue = Object.values(content)[0];
+        const langPost = (
+          typeof firstValue === 'object' && firstValue !== null
+            ? firstValue
+            : content
+        ) as
           | {
               title?: string;
               content?: Array<Array<{ tag: string; text?: string }>>;
@@ -326,15 +400,15 @@ export class FeishuChannel extends ChannelBase {
             lines.push(parts.join(''));
           }
         }
-        return lines.join('\n').trim() || undefined;
+        return { content: lines.join('\n').trim() || undefined, isFromBot };
       }
 
-      return undefined;
+      return { content: undefined, isFromBot };
     } catch (err) {
       process.stderr.write(
         `[Feishu:${this.name}] fetchMessageContent error: ${err}\n`,
       );
-      return undefined;
+      return { isFromBot: false };
     }
   }
 
@@ -650,6 +724,8 @@ export class FeishuChannel extends ChannelBase {
       return;
     }
 
+    if (this.stoppedMessages.has(inboundMsgId)) return;
+
     let cardState = this.cardSessions.get(inboundMsgId);
     if (!cardState) {
       // Fallback: if processMessage didn't create the session (shouldn't happen)
@@ -672,23 +748,53 @@ export class FeishuChannel extends ChannelBase {
     if (cardState.creating) return;
 
     // If card not yet created (fallback path), create now
-    if (!cardState.created) {
+    if (!cardState.created && !cardState.cardCreationFailed) {
       cardState.creating = true;
       const cs = cardState;
       setTimeout(async () => {
         try {
+          if (cs.stopped || this.stoppedMessages.has(inboundMsgId)) {
+            cs.creating = false;
+            this.cleanupCard(inboundMsgId);
+            return;
+          }
+          const atPrefix = this.msgToSenderName.get(inboundMsgId);
+          const displayContent = atPrefix
+            ? `${atPrefix}\n\n${cs.accumulatedText}`
+            : cs.accumulatedText;
           const result = await this.createStreamingCard(
             chatId,
-            cs.accumulatedText,
+            displayContent,
             undefined,
             inboundMsgId,
           );
+          if (cs.stopped || this.stoppedMessages.has(inboundMsgId)) {
+            if (result.success) {
+              const prefix =
+                cs.atPrefix || this.msgToSenderName.get(inboundMsgId) || '';
+              const stopText = prefix
+                ? `${prefix}\n\n*已停止生成*`
+                : '*已停止生成*';
+              this.updateCard(
+                result.messageId,
+                stopText,
+                true,
+                inboundMsgId,
+              ).catch(() => {});
+            }
+            cs.creating = false;
+            this.cleanupCard(inboundMsgId);
+            return;
+          }
           if (result.success) {
             cs.messageId = result.messageId;
             cs.created = true;
             cs.lastUpdateAt = Date.now();
+          } else {
+            cs.cardCreationFailed = true;
           }
         } catch (err) {
+          cs.cardCreationFailed = true;
           process.stderr.write(
             `[Feishu:${this.name}] card create error: ${err}\n`,
           );
@@ -706,13 +812,19 @@ export class FeishuChannel extends ChannelBase {
 
       cardState.pendingUpdateTimer = setTimeout(async () => {
         cs.pendingUpdateTimer = undefined;
-        if (cs.stopped) return;
+        if (cs.stopped || cs.finalizing) return;
         cs.lastUpdateAt = Date.now();
         try {
+          const MAX_CARD_CHARS = 20_000;
           const atPrefix = this.msgToSenderName.get(inboundMsgId);
-          const displayContent = atPrefix
+          let displayContent = atPrefix
             ? `${atPrefix}\n\n${cs.accumulatedText}`
             : cs.accumulatedText;
+          if (displayContent.length > MAX_CARD_CHARS) {
+            displayContent =
+              displayContent.slice(-MAX_CARD_CHARS) +
+              '\n\n_(内容过长，已截断早期内容)_';
+          }
           const ok = await this.updateCard(
             cs.messageId,
             displayContent,
@@ -752,14 +864,18 @@ export class FeishuChannel extends ChannelBase {
 
     const cardState = this.cardSessions.get(inboundMsgId);
 
-    if (cardState?.stopped) {
+    if (cardState?.stopped || this.stoppedMessages.has(inboundMsgId)) {
       this.cleanupCard(inboundMsgId);
+      this.stoppedMessages.delete(inboundMsgId);
       return;
     }
 
     // Prepend greeting with sender name
     const atSender = this.msgToSenderName.get(inboundMsgId);
     const displayText = atSender ? `${atSender}\n\n${fullText}` : fullText;
+
+    // Mark as finalizing to prevent concurrent updateCard from pendingUpdateTimer
+    if (cardState) cardState.finalizing = true;
 
     if (cardState?.pendingUpdateTimer) {
       clearTimeout(cardState.pendingUpdateTimer);
@@ -777,6 +893,13 @@ export class FeishuChannel extends ChannelBase {
           }
         }, 50);
       });
+    }
+
+    // Re-check stopped state after busy-wait (user may have clicked Stop during wait)
+    if (cardState?.stopped || this.stoppedMessages.has(inboundMsgId)) {
+      this.cleanupCard(inboundMsgId);
+      this.stoppedMessages.delete(inboundMsgId);
+      return;
     }
 
     if (cardState?.created) {
@@ -831,23 +954,102 @@ export class FeishuChannel extends ChannelBase {
   }
 
   protected override onPromptStart(
-    _chatId: string,
+    chatId: string,
     sessionId: string,
     messageId?: string,
   ): void {
     if (messageId) {
       this.sessionToInboundMsg.set(sessionId, messageId);
       this.addReaction(messageId, 'OnIt').catch(() => {});
+
+      // Create streaming card now that gating has passed
+      if (!this.cardSessions.has(messageId)) {
+        const atSender = this.msgToSenderName.get(messageId) || '';
+        const placeholderText = atSender
+          ? `${atSender}，思考中...`
+          : '思考中...';
+        const cardState: CardSessionState = {
+          messageId: '',
+          created: false,
+          creating: true,
+          stopped: false,
+          accumulatedText: '',
+          lastUpdateAt: 0,
+        };
+        this.cardSessions.set(messageId, cardState);
+
+        this.createStreamingCard(chatId, placeholderText, undefined, messageId)
+          .then((result) => {
+            if (cardState.stopped || this.stoppedMessages.has(messageId)) {
+              if (result.success) {
+                // Use cardState.atPrefix (captured by onCardAction before cleanupCard)
+                const prefix =
+                  cardState.atPrefix ||
+                  this.msgToSenderName.get(messageId) ||
+                  '';
+                const stopText = prefix
+                  ? `${prefix}\n\n*已停止生成*`
+                  : '*已停止生成*';
+                this.updateCard(
+                  result.messageId,
+                  stopText,
+                  true,
+                  messageId,
+                ).catch(() => {});
+              }
+              cardState.creating = false;
+              this.cleanupCard(messageId);
+              return;
+            }
+            if (result.success) {
+              cardState.messageId = result.messageId;
+              cardState.created = true;
+              cardState.lastUpdateAt = Date.now();
+            }
+            cardState.creating = false;
+          })
+          .catch((err) => {
+            process.stderr.write(
+              `[Feishu:${this.name}] Processing card error: ${err}\n`,
+            );
+            cardState.creating = false;
+            this.cleanupCard(messageId);
+          });
+      }
     }
   }
 
   protected override onPromptEnd(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
     if (messageId) {
       this.removeReaction(messageId, 'OnIt').catch(() => {});
+    }
+    // Finalize card if onResponseComplete didn't run (prompt was cancelled)
+    const inboundMsgId = messageId || this.sessionToInboundMsg.get(sessionId);
+    if (inboundMsgId) {
+      // Don't delete stoppedMessages here — let onResponseComplete / stale timer handle it.
+      // Deleting here causes a race where the stop button's card callback loses the @sender prefix.
+      const cs = this.cardSessions.get(inboundMsgId);
+      if (cs && !cs.stopped) {
+        if (cs.creating) {
+          // Card still being created — mark stopped so the callback will finalize it
+          cs.stopped = true;
+        } else if (cs.created) {
+          const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
+          const text = cs.accumulatedText
+            ? (atPrefix
+                ? `${atPrefix}\n\n${cs.accumulatedText}`
+                : cs.accumulatedText) + '\n\n---\n*已取消*'
+            : (atPrefix ? `${atPrefix}\n\n` : '') + '*已取消*';
+          this.updateCard(cs.messageId, text, true, inboundMsgId).catch(
+            () => {},
+          );
+          this.cleanupCard(inboundMsgId);
+        }
+      }
     }
   }
 
@@ -869,8 +1071,10 @@ export class FeishuChannel extends ChannelBase {
           reaction_type: { emoji_type: emojiType },
         }),
       });
-    } catch {
-      // best-effort
+    } catch (err) {
+      process.stderr.write(
+        `[Feishu:${this.name}] addReaction failed: ${err instanceof Error ? err.message : err}\n`,
+      );
     }
   }
 
@@ -913,14 +1117,16 @@ export class FeishuChannel extends ChannelBase {
           break;
         }
       }
-    } catch {
-      // best-effort
+    } catch (err) {
+      process.stderr.write(
+        `[Feishu:${this.name}] removeReaction failed: ${err instanceof Error ? err.message : err}\n`,
+      );
     }
   }
 
   // ----- Card Action Callback (Stop button) -----
 
-  private onCardAction(data: Record<string, unknown>): void {
+  private onCardAction(data: Record<string, unknown>): boolean {
     try {
       // Extract action value and message context
       const action = data['action'] as
@@ -932,7 +1138,7 @@ export class FeishuChannel extends ChannelBase {
       const messageId =
         context?.open_message_id || (data['open_message_id'] as string);
 
-      if (action?.value?.action !== 'stop') return;
+      if (action?.value?.action !== 'stop') return false;
 
       // Find the card session by card messageId (the card we sent, not the inbound msg)
       let targetInboundMsgId: string | undefined;
@@ -947,14 +1153,26 @@ export class FeishuChannel extends ChannelBase {
         process.stderr.write(
           `[Feishu:${this.name}] Stop: no card session for messageId=${messageId}\n`,
         );
-        return;
+        return false;
       }
 
       const cardState = this.cardSessions.get(targetInboundMsgId);
-      if (!cardState?.created) return;
+      if (!cardState) return false;
+      if (!cardState.created && !cardState.creating) return false;
+
+      // Only the original sender can stop (group chat protection) — fail-closed
+      const operator = data['operator'] as { open_id?: string } | undefined;
+      const operatorId = operator?.open_id;
+      const originalSender = this.msgToSenderId.get(targetInboundMsgId);
+      if (!operatorId || !originalSender || operatorId !== originalSender) {
+        return false;
+      }
 
       // Mark as stopped
       cardState.stopped = true;
+      // Preserve the @sender prefix before cleanupCard can delete msgToSenderName
+      cardState.atPrefix = this.msgToSenderName.get(targetInboundMsgId) || '';
+      this.stoppedMessages.add(targetInboundMsgId);
       if (cardState.pendingUpdateTimer) {
         clearTimeout(cardState.pendingUpdateTimer);
         cardState.pendingUpdateTimer = undefined;
@@ -975,31 +1193,43 @@ export class FeishuChannel extends ChannelBase {
         if (sessionId) {
           await this.bridge.cancelSession(sessionId).catch(() => {});
         }
-        // Finalize card — show "stopped" notice with sender prefix
-        const atPrefix = this.msgToSenderName.get(inboundId) || '';
-        const contentPart = cardState.accumulatedText.trim()
-          ? cardState.accumulatedText + '\n\n---\n*已停止生成*'
-          : '*已停止生成*';
-        const finalText = atPrefix
-          ? `${atPrefix}\n\n${contentPart}`
-          : contentPart;
-        await this.updateCard(cardState.messageId, finalText, true, inboundId);
+        // Only update card if it was actually created (skip if still creating —
+        // the createStreamingCard callback will finalize using cardState.atPrefix)
+        if (cardState.created && cardState.messageId) {
+          const prefix =
+            cardState.atPrefix || this.msgToSenderName.get(inboundId) || '';
+          const contentPart = cardState.accumulatedText.trim()
+            ? cardState.accumulatedText + '\n\n---\n*已停止生成*'
+            : '*已停止生成*';
+          const finalText = prefix
+            ? `${prefix}\n\n${contentPart}`
+            : contentPart;
+          await this.updateCard(
+            cardState.messageId,
+            finalText,
+            true,
+            inboundId,
+          );
+        }
         this.cleanupCard(inboundId);
       };
 
       handleStop().catch((err) => {
         process.stderr.write(`[Feishu:${this.name}] card stop error: ${err}\n`);
       });
+      return true;
     } catch (err) {
       process.stderr.write(
         `[Feishu:${this.name}] Failed to parse card action: ${err}\n`,
       );
+      return false;
     }
   }
 
   disconnect(): void {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
+      this.dedupTimer = undefined;
     }
     for (const state of this.cardSessions.values()) {
       if (state.pendingUpdateTimer) {
@@ -1007,9 +1237,20 @@ export class FeishuChannel extends ChannelBase {
       }
     }
     this.cardSessions.clear();
+    this.sessionToInboundMsg.clear();
+    this.msgToQuestion.clear();
+    this.msgToSenderName.clear();
+    this.msgToSenderId.clear();
+    this.stoppedMessages.clear();
+    this.seenMessages.clear();
 
+    if (this.wsClient) {
+      this.wsClient.close();
+      this.wsClient = undefined;
+    }
     if (this.httpServer) {
       this.httpServer.close();
+      this.httpServer = undefined;
     }
 
     process.stderr.write(`[Feishu:${this.name}] Disconnected.\n`);
@@ -1023,6 +1264,8 @@ export class FeishuChannel extends ChannelBase {
     this.cardSessions.delete(inboundMsgId);
     this.msgToQuestion.delete(inboundMsgId);
     this.msgToSenderName.delete(inboundMsgId);
+    this.msgToSenderId.delete(inboundMsgId);
+    this.stoppedMessages.delete(inboundMsgId);
 
     // Clean up sessionToInboundMsg (reverse lookup)
     for (const [sid, mid] of this.sessionToInboundMsg) {
@@ -1095,16 +1338,18 @@ export class FeishuChannel extends ChannelBase {
         threadId: msg.root_id || undefined,
         isGroup,
         isMentioned,
-        isReplyToBot: !!msg.parent_id,
+        isReplyToBot: false,
       };
 
       const processMessage = async () => {
         // If this message is a reply/quote, fetch the quoted content as context
         if (msg.parent_id) {
-          const quotedContent = await this.fetchMessageContent(msg.parent_id);
+          const { content: quotedContent, isFromBot } =
+            await this.fetchMessageContent(msg.parent_id);
           if (quotedContent) {
             envelope.text = `[引用内容]\n${quotedContent}\n[/引用内容]\n\n${envelope.text}`;
           }
+          envelope.isReplyToBot = isFromBot;
         }
 
         // Store question for card title, keyed by inbound messageId
@@ -1115,37 +1360,7 @@ export class FeishuChannel extends ChannelBase {
         // Use Feishu card markdown <at> tag — rendered as real name by Feishu client
         const atSender = `好的，<at id=${senderId}></at>`;
         this.msgToSenderName.set(msgId, atSender);
-
-        // Create "processing" card immediately for fast user feedback
-        const placeholderText = `${atSender}，思考中...`;
-        const cardState: CardSessionState = {
-          messageId: '',
-          created: false,
-          creating: true,
-          stopped: false,
-          accumulatedText: '',
-          lastUpdateAt: 0,
-        };
-        this.cardSessions.set(msgId, cardState);
-
-        try {
-          const result = await this.createStreamingCard(
-            chatId,
-            placeholderText,
-            undefined,
-            msgId,
-          );
-          if (result.success) {
-            cardState.messageId = result.messageId;
-            cardState.created = true;
-            cardState.lastUpdateAt = Date.now();
-          }
-        } catch (err) {
-          process.stderr.write(
-            `[Feishu:${this.name}] Processing card error: ${err}\n`,
-          );
-        }
-        cardState.creating = false;
+        this.msgToSenderId.set(msgId, senderId);
 
         // Download media if present
         if (content.imageKey) {
@@ -1186,7 +1401,8 @@ export class FeishuChannel extends ChannelBase {
               const dir = join(tmpdir(), 'channel-files', randomUUID());
               mkdirSync(dir, { recursive: true });
               const safeName =
-                basename(content.fileName) || `feishu_file_${Date.now()}`;
+                basename(content.fileName).replace(/\0/g, '') ||
+                `feishu_file_${Date.now()}`;
               const filePath = join(dir, safeName);
               writeFileSync(filePath, media.buffer);
 
@@ -1201,6 +1417,12 @@ export class FeishuChannel extends ChannelBase {
               ];
             }
           }
+        }
+
+        // If user clicked stop while we were preparing (downloading media, etc.), abort
+        if (this.stoppedMessages.has(msgId)) {
+          this.stoppedMessages.delete(msgId);
+          return;
         }
 
         await this.handleInbound(envelope);
@@ -1259,15 +1481,16 @@ export class FeishuChannel extends ChannelBase {
         case 'post': {
           // Rich text (post) format: extract text from nested structure
           const lines: string[] = [];
-          const post = content as Record<
-            string,
-            {
-              title?: string;
-              content?: Array<Array<{ tag: string; text?: string }>>;
-            }
-          >;
-          // Post can have multiple language versions; pick first
-          const langPost = Object.values(post)[0];
+          const post = content as Record<string, unknown>;
+          // Post can have multiple language versions like {"zh_cn": {title, content}}
+          // or be directly {title, content} (no language wrapper).
+          const firstVal = Object.values(post)[0];
+          const langPost = (
+            typeof firstVal === 'object' && firstVal !== null ? firstVal : post
+          ) as {
+            title?: string;
+            content?: Array<Array<{ tag: string; text?: string }>>;
+          };
           if (langPost?.title) {
             lines.push(langPost.title);
           }
@@ -1311,6 +1534,9 @@ export class FeishuChannel extends ChannelBase {
             fileKey: (content.file_key as string) || undefined,
             fileName: (content.file_name as string) || undefined,
           };
+
+        case 'interactive':
+          return { text: '(card message — not supported)' };
 
         default:
           return { text: '' };
