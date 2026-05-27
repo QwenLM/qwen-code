@@ -37,6 +37,34 @@ export default defineConfig({
         __dirname,
         '../acp-bridge/src/status.ts',
       ),
+      '@qwen-code/acp-bridge/bridge': path.resolve(
+        __dirname,
+        '../acp-bridge/src/bridge.ts',
+      ),
+      '@qwen-code/acp-bridge/spawnChannel': path.resolve(
+        __dirname,
+        '../acp-bridge/src/spawnChannel.ts',
+      ),
+      '@qwen-code/acp-bridge/bridgeClient': path.resolve(
+        __dirname,
+        '../acp-bridge/src/bridgeClient.ts',
+      ),
+      '@qwen-code/acp-bridge/bridgeOptions': path.resolve(
+        __dirname,
+        '../acp-bridge/src/bridgeOptions.ts',
+      ),
+      '@qwen-code/acp-bridge/bridgeTypes': path.resolve(
+        __dirname,
+        '../acp-bridge/src/bridgeTypes.ts',
+      ),
+      '@qwen-code/acp-bridge/bridgeFileSystem': path.resolve(
+        __dirname,
+        '../acp-bridge/src/bridgeFileSystem.ts',
+      ),
+      '@qwen-code/acp-bridge/workspacePaths': path.resolve(
+        __dirname,
+        '../acp-bridge/src/workspacePaths.ts',
+      ),
     },
   },
   test: {
