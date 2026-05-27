@@ -66,14 +66,15 @@ export function createServeBridgeMcpServer(
     tools,
   });
 
-  // Stop cleanup timer and abort all active SSE streams when server closes
-  const originalClose = server.instance.close.bind(server.instance);
-  server.instance.close = async () => {
+  // Stop cleanup timer and abort all active SSE streams when server closes.
+  // Use the SDK's onclose lifecycle hook (Protocol.onclose) instead of
+  // monkey-patching close() — the SDK calls onclose after transport shutdown
+  // and internal state cleanup, which is the supported extension point.
+  server.instance.server.onclose = () => {
     stopCleanup();
     for (const sessionId of [...state.eventStreams.keys()]) {
       stopEventStream(state, sessionId);
     }
-    return originalClose();
   };
 
   return server;

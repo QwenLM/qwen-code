@@ -615,5 +615,73 @@ describe('serve-bridge', () => {
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('expected_hash is required');
     });
+
+    it('should reject workspace_tool_toggle without allowGlobalScope', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+      });
+      state.allowGlobalScope = false;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const toggleTool = tools.find(
+        (t: { name: string }) => t.name === 'workspace_tool_toggle',
+      );
+
+      const result = await toggleTool.handler(
+        { tool_name: 'file_read', enabled: false },
+        {},
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('restricted for security');
+    });
+
+    it('should allow workspace_tool_toggle with allowGlobalScope', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: () => jsonResponse(200, { ok: true }),
+      });
+      state.allowGlobalScope = true;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const toggleTool = tools.find(
+        (t: { name: string }) => t.name === 'workspace_tool_toggle',
+      );
+
+      const result = await toggleTool.handler(
+        { tool_name: 'file_read', enabled: false },
+        {},
+      );
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('should reject agents_manage update with no fields', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+      });
+      state.allowGlobalScope = true;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const agentsTool = tools.find(
+        (t: { name: string }) => t.name === 'workspace_agents_manage',
+      );
+
+      const result = await agentsTool.handler(
+        { action: 'update', agent_type: 'test-agent' },
+        {},
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain(
+        'At least one field to update must be provided',
+      );
+    });
   });
 });

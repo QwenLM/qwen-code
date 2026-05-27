@@ -99,11 +99,16 @@ export function workspaceWriteTools(state: BridgeState): any[] {
         tool_name: z.string().describe('Name of the tool to toggle.'),
         enabled: z.boolean().describe('Whether to enable (true) or disable (false) the tool.'),
       },
-      handler(async (args) =>
-        formatJsonResult(
+      handler(async (args) => {
+        if (!state.allowGlobalScope) {
+          return formatToolError(
+            'Tool toggling is restricted for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.',
+          );
+        }
+        return formatJsonResult(
           await state.client.setWorkspaceToolEnabled(args.tool_name, args.enabled),
-        ),
-      ),
+        );
+      }),
     ),
 
     tool(
@@ -249,6 +254,18 @@ async function handleAgentCreate(state: BridgeState, args: any): Promise<any> {
 async function handleAgentUpdate(state: BridgeState, args: any): Promise<any> {
   if (!args.agent_type) {
     return formatToolError('agent_type is required for update action.');
+  }
+  const hasField =
+    args.description !== undefined ||
+    args.system_prompt !== undefined ||
+    args.tools !== undefined ||
+    args.disallowed_tools !== undefined ||
+    args.model !== undefined ||
+    args.scope !== undefined;
+  if (!hasField) {
+    return formatToolError(
+      'At least one field to update must be provided (description, system_prompt, tools, disallowed_tools, model, or scope).',
+    );
   }
   return formatJsonResult(
     await state.client.updateWorkspaceAgent(

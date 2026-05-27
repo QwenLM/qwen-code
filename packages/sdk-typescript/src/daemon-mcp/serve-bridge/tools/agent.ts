@@ -15,7 +15,7 @@ export function agentTools(state: BridgeState): any[] {
   return [
     tool(
       'prompt',
-      'Send a prompt to the qwen-code agent and wait for the full response. Collects all agent output text from the SSE event stream. Times out after 30s if no response chunks are received (returns an error suggesting to check session_context). Note: this call can take a long time as the agent processes the prompt.',
+      'Send a prompt to the qwen-code agent and wait for the full response. Collects all agent output text from the SSE event stream. Times out after 30s if the response completion signal is not received (returns partial text with an error suggesting to check session_context). Note: this call can take a long time as the agent processes the prompt.',
       {
         prompt: z.string().describe('The prompt text to send to the agent.'),
         session_id: z
