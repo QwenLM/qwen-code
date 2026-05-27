@@ -1885,10 +1885,7 @@ describe('Settings Loading and Merging', () => {
       );
       expect(corruptedCopy).toBeDefined();
 
-      // Verify migrationWarnings contains recovery message
-      const warnings = getSettingsWarnings(result);
-      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(true);
-      expect(warnings.some((w) => w.includes('reset'))).toBe(true);
+      // Corrupted dialog is driven by corruptedPath, not by migrationWarnings
       expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
       expect(result.wasRecovered).toBe(false);
 
@@ -1923,11 +1920,8 @@ describe('Settings Loading and Merging', () => {
       );
       expect(restoreWrite).toBeDefined();
 
-      // Verify migrationWarnings informs user about recovery
-      const warnings = getSettingsWarnings(result);
-      expect(warnings.some((w) => w.includes('recovered from backup'))).toBe(
-        true,
-      );
+      // Recovery is communicated via wasRecovered flag, not migrationWarnings
+      expect(result.wasRecovered).toBe(true);
 
       vi.restoreAllMocks();
     });

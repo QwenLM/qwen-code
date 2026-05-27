@@ -7,7 +7,6 @@
 import { Box, Text } from 'ink';
 import { useAppContext } from '../contexts/AppContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
-import { useSettings } from '../contexts/SettingsContext.js';
 import { theme } from '../semantic-colors.js';
 import { StreamingState } from '../types.js';
 import { UpdateNotification } from './UpdateNotification.js';
@@ -15,15 +14,8 @@ import { UpdateNotification } from './UpdateNotification.js';
 export const Notifications = () => {
   const { startupWarnings } = useAppContext();
   const { initError, streamingState, updateInfo } = useUIState();
-  const settings = useSettings();
 
-  // Corrupted dialog already handled — filter out warnings for the settings file path
-  const settingsPath = settings.corruptedPath?.replace(/\.corrupted$/, '');
-  const filteredWarnings = settingsPath
-    ? startupWarnings.filter((w) => !w.includes(settingsPath))
-    : startupWarnings;
-
-  const showStartupWarnings = filteredWarnings.length > 0;
+  const showStartupWarnings = startupWarnings.length > 0;
   const showInitError =
     initError && streamingState !== StreamingState.Responding;
 
@@ -38,7 +30,7 @@ export const Notifications = () => {
           marginY={1}
           flexDirection="column"
         >
-          {filteredWarnings.map((warning, index) => (
+          {startupWarnings.map((warning, index) => (
             <Text key={index} color={theme.status.warning}>
               {warning}
             </Text>

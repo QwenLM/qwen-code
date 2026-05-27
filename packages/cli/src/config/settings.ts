@@ -869,7 +869,6 @@ export function loadSettings(
       if (fs.existsSync(filePath)) {
         let content = fs.readFileSync(filePath, 'utf-8');
         let rawSettings: unknown;
-        let recoveryWarning: string | undefined;
         // Carry corruption state through to the final return so it
         // can be attached after the migration pipeline runs.
         const corruptedPath = `${filePath}.corrupted`;
@@ -917,7 +916,6 @@ export function loadSettings(
               rawSettings = backupSettings;
               const recoveryMsg = `Settings file ${filePath} had invalid JSON and was recovered from backup ${backupPath}. Some recent settings changes may have been lost.`;
               debugLogger.warn(recoveryMsg);
-              recoveryWarning = recoveryMsg;
               recoveredFromBackup = true;
             } catch (backupError) {
               // Backup also corrupted — give up recovery
@@ -931,9 +929,18 @@ export function loadSettings(
           if (!rawSettings) {
             const warningMsg = `Settings file ${filePath} has invalid JSON. Your settings have been reset.`;
             debugLogger.warn(warningMsg);
+            if (corruptedSaved) {
+              // Clear the original file so the settings UI shows empty settings
+              // instead of the corrupted content.
+              try {
+                fs.writeFileSync(filePath, '{}', 'utf-8');
+              } catch {
+                /* ignore — settings are already empty in memory */
+              }
+            }
             return {
               settings: {},
-              migrationWarnings: [warningMsg],
+              migrationWarnings: corruptedSaved ? [] : [warningMsg],
               corruptedPath: corruptedSaved ? corruptedPath : undefined,
               wasRecovered: false,
             };
@@ -1030,18 +1037,11 @@ export function loadSettings(
           persistSettingsObject('Error normalizing settings version on disk');
         }
 
-        // Prepend recovery warning if settings were restored from backup
-        const allWarnings = [
-          ...(recoveryWarning ? [recoveryWarning] : []),
-          ...(migrationWarnings ?? []),
-        ];
-
         // Attach corruption state if settings were recovered from backup
         const result: ReturnType<typeof loadAndMigrate> = {
           settings: settingsObject as Settings,
           rawJson: content,
-          migrationWarnings:
-            allWarnings.length > 0 ? allWarnings : migrationWarnings,
+          migrationWarnings: migrationWarnings ?? [],
         };
         if (corruptedSaved) {
           result.corruptedPath = corruptedPath;

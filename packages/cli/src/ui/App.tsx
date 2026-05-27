@@ -44,6 +44,7 @@ export const App = () => {
                     '',
                   );
                   fs.copyFileSync(settings.corruptedPath, settingsPath);
+                  fs.unlinkSync(settings.corruptedPath);
                 } catch {
                   /* ignore */
                 }
