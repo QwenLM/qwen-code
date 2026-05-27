@@ -24,6 +24,7 @@ import {
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
+  type DaemonUiEvent,
   type DaemonUiSessionActions,
   type PermissionResponse,
   type PromptResult,
@@ -162,16 +163,17 @@ export function DaemonSessionProvider({
               store.reset();
             } else if (previousSessionId !== undefined) {
               store.dispatch({ type: 'assistant.done', reason: 'reconnected' });
-              // wenshao R6 (qwen3.7-max): clear the awaitingResync latch
-              // BEFORE the new SSE event loop starts. Otherwise, if the
-              // prior connection ended after `state_resync_required` set
-              // the latch, every event from the fresh stream gets dropped
-              // by `applyDaemonTranscriptEvent`'s passthrough guard —
-              // transcript stays permanently frozen even though the
-              // connection is healthy. Same-session reconnect IS the
-              // recovery path; signal it to the reducer now.
-              if (store.getSnapshot().awaitingResync) {
-                store.clearAwaitingResync();
+              const snapshot = store.getSnapshot();
+              if (snapshot.awaitingResync) {
+                if (snapshot.lastResyncRequired?.reason === 'epoch_reset') {
+                  nextSession.setLastEventId(0);
+                  store.reset({
+                    resyncRequiredCount: snapshot.resyncRequiredCount,
+                    lastResyncRequired: snapshot.lastResyncRequired,
+                  });
+                } else {
+                  store.clearAwaitingResync();
+                }
               }
             }
             session = nextSession;
@@ -205,14 +207,6 @@ export function DaemonSessionProvider({
             }
             if (event.type === 'replay_complete') {
               // Replay drained — flip from "catching up" to "live".
-              // Also clear the store's awaitingResync latch if it was set
-              // by a `state_resync_required` frame (epoch-reset). The
-              // replay IS the recovery — without this, the transcript
-              // reducer keeps dropping events even though the connection
-              // is healthy and replay has completed.
-              if (store.getSnapshot().awaitingResync) {
-                store.clearAwaitingResync();
-              }
               setConnection((current) =>
                 current.catchingUp
                   ? { ...current, catchingUp: false }
@@ -226,6 +220,9 @@ export function DaemonSessionProvider({
                 suppressOwnUserEcho: eventOptions.suppressOwnUserEcho,
                 includeRawEvent: eventOptions.includeRawEvent,
               });
+              if (resetStoreForEpochResync(store, session, uiEvents)) {
+                continue;
+              }
               store.dispatch(uiEvents);
             } catch (error) {
               const message =
@@ -572,6 +569,43 @@ function dispatchActionError(
     recoverable: true,
   });
   return error instanceof Error ? error : new Error(message);
+}
+
+type DaemonStateResyncUiEvent = Extract<
+  DaemonUiEvent,
+  { type: 'session.state_resync_required' }
+>;
+
+function resetStoreForEpochResync(
+  store: DaemonTranscriptStore,
+  session: DaemonSessionClient,
+  events: readonly DaemonUiEvent[],
+): boolean {
+  const resync = events.find(isEpochResetResyncEvent);
+  if (!resync) return false;
+
+  // The cursor belongs to a dead daemon epoch. Reset it before the generator
+  // resumes so replayed low-id events from the new epoch can advance it again.
+  session.setLastEventId(0);
+  const snapshot = store.getSnapshot();
+  store.reset({
+    resyncRequiredCount: snapshot.resyncRequiredCount + 1,
+    lastResyncRequired: {
+      reason: resync.reason,
+      lastDeliveredId: resync.lastDeliveredId,
+      earliestAvailableId: resync.earliestAvailableId,
+    },
+  });
+  return true;
+}
+
+function isEpochResetResyncEvent(
+  event: DaemonUiEvent,
+): event is DaemonStateResyncUiEvent {
+  return (
+    event.type === 'session.state_resync_required' &&
+    event.reason === 'epoch_reset'
+  );
 }
 
 function isAbortError(error: unknown): boolean {

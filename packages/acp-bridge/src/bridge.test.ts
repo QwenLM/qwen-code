@@ -2393,12 +2393,13 @@ describe('createHttpAcpBridge', () => {
       // before the forward. If the forward itself rejects (transport died /
       // ACP error) without a user cancel, peers must still see the turn end
       // — otherwise they sit forever on the echoed input with no response.
-      const factory: ChannelFactory = async () =>
-        makeChannel({
-          promptImpl: async () => {
-            throw new Error('forward boom');
-          },
-        }).channel;
+      const h = makeChannel({
+        promptImpl: async () => {
+          throw new Error('forward boom');
+        },
+      });
+      const cancelSpy = vi.spyOn(h.agent, 'cancel');
+      const factory: ChannelFactory = async () => h.channel;
       const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
@@ -2430,6 +2431,11 @@ describe('createHttpAcpBridge', () => {
       const evt = await peerCancel;
       expect(evt.type).toBe('prompt_cancelled');
       expect((evt.data as { reason?: string }).reason).toBe('forward_failed');
+      await vi.waitFor(() => {
+        expect(cancelSpy).toHaveBeenCalledWith({
+          sessionId: session.sessionId,
+        });
+      });
       peerAbort.abort();
       await bridge.shutdown();
     });

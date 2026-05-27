@@ -30,6 +30,7 @@ interface MockSession {
   workspaceCwd: string;
   clientId: string;
   lastEventId?: number;
+  setLastEventId: (lastEventId: number | undefined) => void;
   prompt: (req: unknown, signal?: AbortSignal) => Promise<PromptResult>;
   cancel: () => Promise<void>;
   setModel: (modelId: string) => Promise<{ modelId: string }>;
@@ -1057,41 +1058,50 @@ describe('DaemonSessionProvider', () => {
     }
   });
 
-  it('clears awaitingResync on same-session reconnect after state_resync_required', async () => {
-    // Regression test: if `state_resync_required` arms the awaitingResync
-    // latch and then the SSE connection drops, a same-session reconnect
-    // must clear the latch. Otherwise the transcript reducer permanently
-    // drops all subsequent events.
-    const firstStreamDone = createDeferred<void>();
-    let streamCount = 0;
+  it('resets stale transcript and accepts replay after epoch-reset resync', async () => {
+    const startEpochReset = createDeferred<void>();
+    const replayDrained = createDeferred<void>();
+    const sessionRef: { current?: MockSession } = {};
+    const setLastEventId = vi.fn((lastEventId: number | undefined) => {
+      if (sessionRef.current) {
+        sessionRef.current.lastEventId = lastEventId;
+      }
+    });
 
     const session = createMockSession({
-      lastEventId: 10,
-      events: async function* resyncThenReconnect(
+      lastEventId: 50,
+      setLastEventId,
+      events: async function* epochResetThenReplay(
         opts: { signal?: AbortSignal } = {},
       ) {
-        streamCount += 1;
-        if (streamCount === 1) {
-          // First stream: emit state_resync_required, then close.
-          yield {
-            id: 11,
-            v: 1,
-            type: 'state_resync_required',
-            data: {
-              reason: 'epoch_reset',
-              lastDeliveredId: 10,
-              earliestAvailableId: 12,
+        await startEpochReset.promise;
+        if (opts.signal?.aborted) return;
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'epoch_reset',
+            lastDeliveredId: 50,
+            earliestAvailableId: 1,
+          },
+        };
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'fresh replayed' },
             },
-          };
-          firstStreamDone.resolve();
-          return; // stream closes → triggers reconnect
-        }
-        // Second stream (reconnect): emit replay_complete then idle.
+          },
+        };
         yield {
           v: 1,
           type: 'replay_complete',
-          data: { replayedCount: 0, lastReplayedEventId: 11 },
+          data: { replayedCount: 1, lastReplayedEventId: 1 },
         };
+        replayDrained.resolve();
         await new Promise<void>((resolve) => {
           if (opts.signal?.aborted) {
             resolve();
@@ -1103,37 +1113,38 @@ describe('DaemonSessionProvider', () => {
         });
       },
     });
-    // Queue the same session twice (reconnect reuses it).
-    sdkMocks.sessions.push(session, session);
+    sessionRef.current = session;
+    sdkMocks.sessions.push(session);
 
+    let actions: DaemonUiSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
     let awaitingResync = false;
     function Harness() {
-      const state = useDaemonTranscriptState();
-      awaitingResync = state.awaitingResync;
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      awaitingResync = useDaemonTranscriptState().awaitingResync;
       return null;
     }
 
-    await renderWithProvider(<Harness />, {
-      autoConnect: true,
-      autoReconnect: true,
-      reconnectDelayMs: 1,
-      maxReconnectDelayMs: 1,
-    });
-
-    // Wait for first stream to emit state_resync_required.
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
     await act(async () => {
-      await firstStreamDone.promise;
+      await providerActions.sendPrompt('stale local');
       await flushPromises();
     });
-    // Latch should have been armed by the event.
-    expect(awaitingResync).toBe(true);
+    expect(blocks).toMatchObject([{ kind: 'user', text: 'stale local' }]);
 
-    // Wait for reconnect to clear it.
     await act(async () => {
-      await wait(30);
+      startEpochReset.resolve();
+      await replayDrained.promise;
       await flushPromises();
     });
+
+    expect(setLastEventId).toHaveBeenCalledWith(0);
     expect(awaitingResync).toBe(false);
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'fresh replayed' },
+    ]);
   });
 
   async function renderWithProvider(
@@ -1169,11 +1180,16 @@ function requireActions(
 }
 
 function createMockSession(opts: Partial<MockSession> = {}): MockSession {
-  return {
+  const session = {
     sessionId: opts.sessionId ?? 'session-1',
     workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
     clientId: opts.clientId ?? 'client-1',
     lastEventId: opts.lastEventId,
+    setLastEventId:
+      opts.setLastEventId ??
+      vi.fn((lastEventId: number | undefined) => {
+        session.lastEventId = lastEventId;
+      }),
     prompt:
       opts.prompt ??
       vi.fn(async () => ({
@@ -1189,6 +1205,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
       opts.respondToSessionPermission ?? vi.fn(async () => true),
     events: opts.events ?? createIdleEvents(),
   };
+  return session;
 }
 
 function createIdleEvents(): MockSession['events'] {

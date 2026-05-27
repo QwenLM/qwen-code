@@ -49,36 +49,6 @@ The first npm release of `qwen serve` (v0.16-alpha) is intentionally narrow — 
 
 For the deeper "what we won't fix in Stage 1" enumeration (single-host session-state mutation model + N-parallel-sessions sharing one ACP child), see [Stage 1 scope boundaries](#stage-1-scope-boundaries--what-we-wont-fix-in-stage-15) below.
 
-## v0.16-alpha known limits
-
-The first npm release of `qwen serve` (v0.16-alpha) is intentionally narrow — text-only chat / coding for developers running the daemon on their own machine. The list below makes the deferred surface explicit so adopters can plan around it; everything here is on the v0.16.x patch roadmap or a near-term follow-up release.
-
-**Product surface — text-only:**
-
-- ✅ Text prompts and text responses (chat, coding, tool calls, MCP integration)
-- ❌ **Image / file attachments on the prompt path** — `MessageEmitter` currently only renders text; multimodal echo lands when an alpha target with image needs is committed (#4175 chiga0 #27 P0 item)
-- ❌ **Streaming uploads** — same gating as multimodal
-
-**Deployment surface — local-only:**
-
-- ✅ Loopback (`127.0.0.1`, default) — no auth required, suitable for dev workstations
-- ✅ Local launch via `systemd` / `launchd` / `nohup &` / `tmux` — see [Local launch templates](./qwen-serve-deploy-local.md)
-- ✅ Bring-your-own bearer token via `QWEN_SERVER_TOKEN` env var ([Authentication](#authentication) for setup)
-- ❌ **Containerized deployment** — Docker / Compose / Kubernetes / nginx reverse-proxy with TLS termination NOT in v0.16-alpha. Defers to v0.16.x once an enterprise pilot is committed (would otherwise rot from no-one-validating).
-- ❌ **Multi-daemon coordination on one host** — `1 daemon = 1 workspace × N sessions` is enforced. Cross-host federation, instance-path token keying, and stale-token cleanup defer to v0.16.x.
-- ❌ **Auto-generated daemon tokens** — alpha is BYO-token (one `openssl rand -hex 32` away). Auto-gen + token-store infrastructure defers to v0.16.x.
-
-**Hardening — minimum viable for local single-user:**
-
-- ✅ Boot-time security gate (refuses non-loopback bind without a token, [PR 15 / #4236](https://github.com/QwenLM/qwen-code/pull/4236))
-- ✅ Mutation-route auth gate, session-scoped permission routing (Wave 4 PRs)
-- ✅ MCP guardrails + multi-client permission coordination (F2 / F3)
-- ⏸️ **Prompt absolute deadline + SSE writer idle timeout** — current AbortSignal + 15s heartbeat + `res.on('error')` cleanup is sufficient for local dev; explicit application-layer deadlines defer to v0.16.x once a remote / long-running scenario lands.
-- ⏸️ **Rate limiting + observability + load test harness** — defers to v0.17 F4 Phase-1 scale instrumentation when 30-50 active sessions becomes a real target.
-- ⏸️ **`--max-body-size` CLI flag** — daemon enforces `express.json({ limit: '10mb' })` by default which comfortably covers text-only prompts (model context windows are well under 10 MiB of chars). Tunable via flag in v0.16.x.
-
-For the deeper "what we won't fix in Stage 1" enumeration (single-host session-state mutation model + N-parallel-sessions sharing one ACP child), see [Stage 1 scope boundaries](#stage-1-scope-boundaries--what-we-wont-fix-in-stage-15) below.
-
 ## Quickstart
 
 ### 1. Start the daemon (loopback, no auth)
