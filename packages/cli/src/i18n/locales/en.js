@@ -27,6 +27,23 @@ export default {
   'Auto mode': 'Auto mode',
   'plan mode': 'plan mode',
   'auto-accept edits': 'auto-accept edits',
+  'auto mode (classifier-evaluated)': 'auto mode (classifier-evaluated)',
+  'Auto mode enabled.': 'Auto mode enabled.',
+  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
+    'An LLM classifier evaluates each tool call and auto-approves safe actions,',
+  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
+    'blocks risky ones. Most read-only operations and in-cwd edits skip the',
+  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
+    'classifier for speed. To exit: Shift+Tab or /approval-mode default.',
+  '(This notice will not appear again.)':
+    '(This notice will not appear again.)',
+  'Auto mode temporarily disabled these allow rules':
+    'Auto mode temporarily disabled these allow rules',
+  '(they would bypass the classifier):': '(they would bypass the classifier):',
+  '(from user settings)': '(from user settings)',
+  '(session)': '(session)',
+  'These will be restored when leaving auto mode.':
+    'These will be restored when leaving auto mode.',
   'Accepting edits': 'Accepting edits',
   '(shift + tab to cycle)': '(shift + tab to cycle)',
   '(tab to cycle)': '(tab to cycle)',
@@ -516,11 +533,59 @@ export default {
   'Auto Edit': 'Auto Edit',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'toggle vim mode on/off',
+  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
+    'check session stats. Usage: /stats [model|tools|daily|monthly|export]',
   'Show usage statistics dashboard.': 'Show usage statistics dashboard.',
   'Show model-specific usage statistics.':
     'Show model-specific usage statistics.',
   'Show tool-specific usage statistics.':
     'Show tool-specific usage statistics.',
+  'Show daily token usage statistics.': 'Show daily token usage statistics.',
+  'Show monthly token usage statistics.':
+    'Show monthly token usage statistics.',
+  'Export token usage statistics to CSV or JSON.':
+    'Export token usage statistics to CSV or JSON.',
+  'No usage data.': 'No usage data.',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} requests)',
+  'Daily token usage for {{value}}': 'Daily token usage for {{value}}',
+  'Monthly token usage for {{value}}': 'Monthly token usage for {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Requests: {{requests}}',
+  'Breakdown:': 'Breakdown:',
+  'Input: {{tokens}}': 'Input: {{tokens}}',
+  'Output: {{tokens}}': 'Output: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cached (included in Input): {{tokens}}',
+  'Thoughts: {{tokens}}': 'Thoughts: {{tokens}}',
+  'By model:': 'By model:',
+  'By auth type:': 'By auth type:',
+  'By model/auth type:': 'By model/auth type:',
+  'By source:': 'By source:',
+  'Failed to load token usage stats: {{error}}':
+    'Failed to load token usage stats: {{error}}',
+  'Expected --format csv or --format json.':
+    'Expected --format csv or --format json.',
+  'Expected a file path after --output.':
+    'Expected a file path after --output.',
+  'Unexpected argument: {{argument}}': 'Unexpected argument: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Token usage export path must be within the project working directory.',
+  'Export target does not exist: {{path}}':
+    'Export target does not exist: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    'Cannot resolve export path within the working directory.',
+  'Could not create a temporary export file.':
+    'Could not create a temporary export file.',
+  'Token usage exported to {{format}}: {{path}}':
+    'Token usage exported to {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'Failed to export token usage stats: {{error}}',
+  'Unclosed quote in arguments.': 'Unclosed quote in arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Note: generation timing (TTFT/TPS) belongs to generation metrics.',
   'exit the cli': 'exit the cli',
   'Manage workspace directories': 'Manage workspace directories',
   'Add directories to the workspace. Use comma to separate multiple paths':

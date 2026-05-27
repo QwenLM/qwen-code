@@ -25,6 +25,22 @@ export default {
   'Auto mode': 'Auto 模式',
   'plan mode': '规划模式',
   'auto-accept edits': '自动接受编辑',
+  'auto mode (classifier-evaluated)': '自动模式（分类器已评估）',
+  'Auto mode enabled.': '自动模式已启用。',
+  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
+    'LLM 分类器会评估每次工具调用，并自动批准安全操作，',
+  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
+    '阻止有风险的操作。多数只读操作和当前目录内编辑会跳过',
+  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
+    '分类器以提升速度。退出方式：Shift+Tab 或 /approval-mode default。',
+  '(This notice will not appear again.)': '（此提示不会再次显示。）',
+  'Auto mode temporarily disabled these allow rules':
+    '自动模式已临时禁用以下允许规则',
+  '(they would bypass the classifier):': '（它们会绕过分类器）：',
+  '(from user settings)': '（来自用户设置）',
+  '(session)': '（会话）',
+  'These will be restored when leaving auto mode.':
+    '退出自动模式时将恢复这些规则。',
   'Accepting edits': '接受编辑',
   '(shift + tab to cycle)': '(Shift + Tab 切换)',
   '(tab to cycle)': '(按 Tab 切换)',
@@ -495,9 +511,53 @@ export default {
   'Auto Edit': '自动编辑',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切换 vim 模式开关',
+  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
+    '检查会话统计信息。用法：/stats [model|tools|daily|monthly|export]',
   'Show usage statistics dashboard.': '显示使用统计面板。',
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',
+  'Show daily token usage statistics.': '显示每日 token 使用统计信息',
+  'Show monthly token usage statistics.': '显示每月 token 使用统计信息',
+  'Export token usage statistics to CSV or JSON.':
+    '将 token 使用统计信息导出为 CSV 或 JSON',
+  'No usage data.': '没有使用数据。',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}：{{tokens}} 个 token（{{requests}} 个请求）',
+  'Daily token usage for {{value}}': '{{value}} 的每日 token 使用情况',
+  'Monthly token usage for {{value}}': '{{value}} 的每月 token 使用情况',
+  'Total: {{tokens}} tokens': '总计：{{tokens}} 个 token',
+  'Requests: {{requests}}': '请求数：{{requests}}',
+  'Breakdown:': '明细：',
+  'Input: {{tokens}}': '输入：{{tokens}}',
+  'Output: {{tokens}}': '输出：{{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    '缓存（已包含在输入中）：{{tokens}}',
+  'Thoughts: {{tokens}}': '思考：{{tokens}}',
+  'By model:': '按模型：',
+  'By auth type:': '按认证类型：',
+  'By model/auth type:': '按模型/认证类型：',
+  'By source:': '按来源：',
+  'Failed to load token usage stats: {{error}}':
+    '加载 token 使用统计信息失败：{{error}}',
+  'Expected --format csv or --format json.':
+    '应为 --format csv 或 --format json。',
+  'Expected a file path after --output.': '--output 后应提供文件路径。',
+  'Unexpected argument: {{argument}}': '意外参数：{{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    '用法：/stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Token 使用导出路径必须位于项目工作目录内。',
+  'Export target does not exist: {{path}}': '导出目标不存在：{{path}}',
+  'Cannot resolve export path within the working directory.':
+    '无法在工作目录内解析导出路径。',
+  'Could not create a temporary export file.': '无法创建临时导出文件。',
+  'Token usage exported to {{format}}: {{path}}':
+    'Token 使用情况已导出为 {{format}}：{{path}}',
+  'Failed to export token usage stats: {{error}}':
+    '导出 token 使用统计信息失败：{{error}}',
+  'Unclosed quote in arguments.': '参数中存在未闭合的引号。',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    '注意：生成耗时（TTFT/TPS）归属于生成指标。',
   'exit the cli': '退出命令行界面',
   'Manage workspace directories': '管理工作区目录',
   'Add directories to the workspace. Use comma to separate multiple paths':

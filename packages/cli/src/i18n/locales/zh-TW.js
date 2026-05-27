@@ -23,6 +23,22 @@ export default {
   'Auto mode': 'Auto 模式',
   'plan mode': '規劃模式',
   'auto-accept edits': '自動接受編輯',
+  'auto mode (classifier-evaluated)': '自動模式（分類器已評估）',
+  'Auto mode enabled.': '自動模式已啟用。',
+  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
+    'LLM 分類器會評估每次工具呼叫，並自動核准安全操作，',
+  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
+    '阻止有風險的操作。多數唯讀操作和目前目錄內編輯會跳過',
+  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
+    '分類器以提升速度。退出方式：Shift+Tab 或 /approval-mode default。',
+  '(This notice will not appear again.)': '（此提示不會再次顯示。）',
+  'Auto mode temporarily disabled these allow rules':
+    '自動模式已暫時停用以下允許規則',
+  '(they would bypass the classifier):': '（它們會繞過分類器）：',
+  '(from user settings)': '（來自使用者設定）',
+  '(session)': '（會話）',
+  'These will be restored when leaving auto mode.':
+    '退出自動模式時將復原這些規則。',
   'Accepting edits': '接受編輯',
   '(shift + tab to cycle)': '(Shift + Tab 切換)',
   '(tab to cycle)': '(按 Tab 切換)',
@@ -454,8 +470,52 @@ export default {
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',
-  'Show model-specific usage statistics.': '顯示模型相關的使用統計信息',
-  'Show tool-specific usage statistics.': '顯示工具相關的使用統計信息',
+  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
+    '檢查會話統計資訊。用法：/stats [model|tools|daily|monthly|export]',
+  'Show model-specific usage statistics.': '顯示模型相關的使用統計資訊',
+  'Show tool-specific usage statistics.': '顯示工具相關的使用統計資訊',
+  'Show daily token usage statistics.': '顯示每日 token 使用統計資訊',
+  'Show monthly token usage statistics.': '顯示每月 token 使用統計資訊',
+  'Export token usage statistics to CSV or JSON.':
+    '將 token 使用統計資訊匯出為 CSV 或 JSON',
+  'No usage data.': '沒有使用資料。',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}：{{tokens}} 個 token（{{requests}} 個請求）',
+  'Daily token usage for {{value}}': '{{value}} 的每日 token 使用情況',
+  'Monthly token usage for {{value}}': '{{value}} 的每月 token 使用情況',
+  'Total: {{tokens}} tokens': '總計：{{tokens}} 個 token',
+  'Requests: {{requests}}': '請求數：{{requests}}',
+  'Breakdown:': '明細：',
+  'Input: {{tokens}}': '輸入：{{tokens}}',
+  'Output: {{tokens}}': '輸出：{{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    '快取（已包含在輸入中）：{{tokens}}',
+  'Thoughts: {{tokens}}': '思考：{{tokens}}',
+  'By model:': '按模型：',
+  'By auth type:': '按認證類型：',
+  'By model/auth type:': '按模型/認證類型：',
+  'By source:': '按來源：',
+  'Failed to load token usage stats: {{error}}':
+    '載入 token 使用統計資訊失敗：{{error}}',
+  'Expected --format csv or --format json.':
+    '應為 --format csv 或 --format json。',
+  'Expected a file path after --output.': '--output 後應提供檔案路徑。',
+  'Unexpected argument: {{argument}}': '未預期的參數：{{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    '用法：/stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Token 使用匯出路徑必須位於專案工作目錄內。',
+  'Export target does not exist: {{path}}': '匯出目標不存在：{{path}}',
+  'Cannot resolve export path within the working directory.':
+    '無法在工作目錄內解析匯出路徑。',
+  'Could not create a temporary export file.': '無法建立臨時匯出檔案。',
+  'Token usage exported to {{format}}: {{path}}':
+    'Token 使用情況已匯出為 {{format}}：{{path}}',
+  'Failed to export token usage stats: {{error}}':
+    '匯出 token 使用統計資訊失敗：{{error}}',
+  'Unclosed quote in arguments.': '參數中有未閉合的引號。',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    '注意：生成耗時（TTFT/TPS）屬於生成指標。',
   'exit the cli': '退出命令行界面',
   'Manage workspace directories': '管理工作區目錄',
   'Add directories to the workspace. Use comma to separate multiple paths':

@@ -10,6 +10,7 @@ import {
   expect,
   vi,
   beforeEach,
+  afterEach,
   type MockedFunction,
   type Mock,
 } from 'vitest';
@@ -21,6 +22,7 @@ import type { Config as ActualConfigType } from '@qwen-code/qwen-code-core';
 import type { Key } from './useKeypress.js';
 import { useKeypress } from './useKeypress.js';
 import { MessageType } from '../types.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 vi.mock('./useKeypress.js');
 
@@ -120,6 +122,10 @@ describe('useAutoAcceptIndicator', () => {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     mockConfigInstance = new (Config as any)() as MockConfigInstanceShape;
+  });
+
+  afterEach(async () => {
+    await setLanguageAsync('en');
   });
 
   it('should initialize with ApprovalMode.AUTO_EDIT if config.getApprovalMode returns ApprovalMode.AUTO_EDIT', () => {
@@ -568,5 +574,50 @@ describe('useAutoAcceptIndicator', () => {
     Object.defineProperty(process, 'platform', {
       value: originalPlatform,
     });
+  });
+
+  it('localizes AUTO entry notices and stripped allow-rule sources', async () => {
+    await setLanguageAsync('zh');
+    mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.AUTO_EDIT);
+    const mockAddItem = vi.fn();
+    const mockSettings = {
+      merged: {
+        ui: {
+          autoModeAcknowledged: true,
+        },
+      },
+    };
+    const mockPermissionManager = {
+      getStrippedDangerousRules: vi.fn(() => ({
+        persistent: [{ raw: 'Bash(npm run *)' }],
+        session: [{ raw: 'Bash(node *)' }],
+      })),
+    };
+    const configWithPermissionManager = {
+      ...mockConfigInstance,
+      getPermissionManager: vi.fn(() => mockPermissionManager),
+    };
+
+    renderHook(() =>
+      useAutoAcceptIndicator({
+        config: configWithPermissionManager as unknown as ActualConfigType,
+        settings: mockSettings as never,
+        addItem: mockAddItem,
+      }),
+    );
+
+    act(() => {
+      capturedUseKeypressHandler({ name: 'tab', shift: true } as Key);
+    });
+
+    const noticeText = mockAddItem.mock.calls.at(-1)?.[0].text as string;
+    expect(noticeText).toContain('自动模式已临时禁用以下允许规则');
+    expect(noticeText).toContain('（它们会绕过分类器）：');
+    expect(noticeText).toContain('Bash(npm run *) （来自用户设置）');
+    expect(noticeText).toContain('Bash(node *) （会话）');
+    expect(noticeText).toContain('退出自动模式时将恢复这些规则。');
+    expect(noticeText).not.toContain('Auto mode temporarily disabled');
+    expect(noticeText).not.toContain('from user settings');
+    expect(noticeText).not.toContain('These will be restored');
   });
 });

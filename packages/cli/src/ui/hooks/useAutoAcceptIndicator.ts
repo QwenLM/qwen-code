@@ -14,13 +14,22 @@ import { useKeypress } from './useKeypress.js';
 import type { HistoryItemWithoutId } from '../types.js';
 import { MessageType } from '../types.js';
 import { type LoadedSettings, SettingScope } from '../../config/settings.js';
+import { t } from '../../i18n/index.js';
 
-const AUTO_MODE_FIRST_TIME_MESSAGE =
-  '✨ Auto mode enabled.\n' +
-  '   An LLM classifier evaluates each tool call and auto-approves safe actions,\n' +
-  '   blocks risky ones. Most read-only operations and in-cwd edits skip the\n' +
-  '   classifier for speed. To exit: Shift+Tab or /approval-mode default.\n' +
-  '   (This notice will not appear again.)';
+const getAutoModeFirstTimeMessage = (): string =>
+  [
+    `✨ ${t('Auto mode enabled.')}`,
+    `   ${t(
+      'An LLM classifier evaluates each tool call and auto-approves safe actions,',
+    )}`,
+    `   ${t(
+      'blocks risky ones. Most read-only operations and in-cwd edits skip the',
+    )}`,
+    `   ${t(
+      'classifier for speed. To exit: Shift+Tab or /approval-mode default.',
+    )}`,
+    `   ${t('(This notice will not appear again.)')}`,
+  ].join('\n');
 
 export interface UseAutoAcceptIndicatorArgs {
   config: Config;
@@ -147,7 +156,7 @@ export function emitAutoModeEntryNotices(opts: {
   const acknowledged = settings?.merged.ui?.autoModeAcknowledged === true;
   if (!acknowledged) {
     addItem(
-      { type: MessageType.INFO, text: AUTO_MODE_FIRST_TIME_MESSAGE },
+      { type: MessageType.INFO, text: getAutoModeFirstTimeMessage() },
       now,
     );
     if (settings) {
@@ -168,11 +177,13 @@ export function emitAutoModeEntryNotices(opts: {
     (stripped.persistent.length > 0 || stripped.session.length > 0)
   ) {
     const lines = [
-      'ℹ️ Auto mode temporarily disabled these allow rules',
-      '   (they would bypass the classifier):',
-      ...stripped.persistent.map((r) => `   - ${r.raw} (from user settings)`),
-      ...stripped.session.map((r) => `   - ${r.raw} (session)`),
-      '   These will be restored when leaving auto mode.',
+      `ℹ️ ${t('Auto mode temporarily disabled these allow rules')}`,
+      `   ${t('(they would bypass the classifier):')}`,
+      ...stripped.persistent.map(
+        (r) => `   - ${r.raw} ${t('(from user settings)')}`,
+      ),
+      ...stripped.session.map((r) => `   - ${r.raw} ${t('(session)')}`),
+      `   ${t('These will be restored when leaving auto mode.')}`,
     ];
     addItem({ type: MessageType.INFO, text: lines.join('\n') }, now + 1);
   }

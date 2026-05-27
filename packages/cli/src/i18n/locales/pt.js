@@ -21,6 +21,24 @@ export default {
   'Auto mode': 'Modo auto',
   'plan mode': 'modo planejamento',
   'auto-accept edits': 'aceitar edições automaticamente',
+  'auto mode (classifier-evaluated)':
+    'modo automático (classificador avaliado)',
+  'Auto mode enabled.': 'Modo automático ativado.',
+  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
+    'Um classificador LLM avalia cada chamada de ferramenta e aprova automaticamente ações seguras,',
+  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
+    'bloqueia as arriscadas. A maioria das operações somente leitura e edições no diretório atual ignoram o',
+  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
+    'classificador por velocidade. Para sair: Shift+Tab ou /approval-mode default.',
+  '(This notice will not appear again.)':
+    '(Este aviso não aparecerá novamente.)',
+  'Auto mode temporarily disabled these allow rules':
+    'O modo automático desativou temporariamente estas regras de permissão',
+  '(they would bypass the classifier):': '(elas contornariam o classificador):',
+  '(from user settings)': '(das configurações do usuário)',
+  '(session)': '(sessão)',
+  'These will be restored when leaving auto mode.':
+    'Elas serão restauradas ao sair do modo automático.',
   'Accepting edits': 'Aceitando edições',
   '(shift + tab to cycle)': '(Shift + Tab para alternar)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
@@ -443,12 +461,50 @@ export default {
   'Auto Edit': 'Edição Automática',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'alternar modo vim ligado/desligado',
-  'check session stats. Usage: /stats [model|tools]':
-    'verificar estatísticas da sessão. Uso: /stats [model|tools]',
+  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
+    'verificar estatísticas da sessão. Uso: /stats [model|tools|daily|monthly|export]',
   'Show model-specific usage statistics.':
     'Mostrar estatísticas de uso específicas do modelo.',
   'Show tool-specific usage statistics.':
     'Mostrar estatísticas de uso específicas da ferramenta.',
+  'Show daily token usage statistics.':
+    'Mostrar estatísticas diárias de uso de tokens.',
+  'Show monthly token usage statistics.':
+    'Mostrar estatísticas mensais de uso de tokens.',
+  'Export token usage statistics to CSV or JSON.':
+    'Exportar estatísticas de uso de tokens para CSV ou JSON.',
+  'No usage data.': 'Nenhum dado de uso.',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} requisições)',
+  'Daily token usage for {{value}}': 'Uso diário de tokens para {{value}}',
+  'Monthly token usage for {{value}}': 'Uso mensal de tokens para {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Requisições: {{requests}}',
+  'Breakdown:': 'Detalhamento:',
+  'Input: {{tokens}}': 'Entrada: {{tokens}}',
+  'Output: {{tokens}}': 'Saída: {{tokens}}',
+  'Cached: {{tokens}}': 'Cache: {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raciocínio: {{tokens}}',
+  'By model:': 'Por modelo:',
+  'By auth type:': 'Por tipo de autenticação:',
+  'By model/auth type:': 'Por modelo/tipo de autenticação:',
+  'Failed to load token usage stats: {{error}}':
+    'Falha ao carregar estatísticas de uso de tokens: {{error}}',
+  'Expected --format csv or --format json.':
+    'Esperado --format csv ou --format json.',
+  'Expected a file path after --output.':
+    'Esperado um caminho de arquivo após --output.',
+  'Unexpected argument: {{argument}}': 'Argumento inesperado: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Uso: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'O caminho de exportação do uso de tokens deve estar dentro do diretório de trabalho do projeto.',
+  'Token usage exported to {{format}}: {{path}}':
+    'Uso de tokens exportado para {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'Falha ao exportar estatísticas de uso de tokens: {{error}}',
+  'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.',
   'exit the cli': 'sair da cli',
   'Manage workspace directories': 'Gerenciar diretórios do workspace',
   'Add directories to the workspace. Use comma to separate multiple paths':

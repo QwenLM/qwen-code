@@ -25,6 +25,23 @@ export default {
   'Auto mode': 'Mode auto',
   'plan mode': 'mode de planificació',
   'auto-accept edits': 'acceptació automàtica de canvis',
+  'auto mode (classifier-evaluated)': 'mode automàtic (classificador avaluat)',
+  'Auto mode enabled.': 'Mode automàtic activat.',
+  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
+    "Un classificador LLM avalua cada crida d'eina i aprova automàticament les accions segures,",
+  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
+    "bloqueja les arriscades. La majoria d'operacions de només lectura i edicions dins del directori actual ometen el",
+  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
+    'classificador per rapidesa. Per sortir: Shift+Tab o /approval-mode default.',
+  '(This notice will not appear again.)':
+    '(Aquest avís no tornarà a aparèixer.)',
+  'Auto mode temporarily disabled these allow rules':
+    'El mode automàtic ha desactivat temporalment aquestes regles de permís',
+  '(they would bypass the classifier):': '(ometrian el classificador):',
+  '(from user settings)': "(de la configuració de l'usuari)",
+  '(session)': '(sessió)',
+  'These will be restored when leaving auto mode.':
+    'Es restauraran en sortir del mode automàtic.',
   'Accepting edits': 'Acceptant canvis',
   '(shift + tab to cycle)': '(Shift + Tab per canviar)',
   '(tab to cycle)': '(Tab per canviar)',
@@ -489,12 +506,50 @@ export default {
   'Auto Edit': 'Edició automàtica',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activar/desactivar el mode Vim',
-  'check session stats. Usage: /stats [model|tools]':
-    'comprovar les estadístiques de la sessió. Ús: /stats [model|tools]',
+  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
+    'comprovar les estadístiques de la sessió. Ús: /stats [model|tools|daily|monthly|export]',
   'Show model-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques del model.",
   'Show tool-specific usage statistics.':
     "Mostrar les estadístiques d'ús específiques de les eines.",
+  'Show daily token usage statistics.':
+    "Mostrar les estadístiques diàries d'ús de tokens.",
+  'Show monthly token usage statistics.':
+    "Mostrar les estadístiques mensuals d'ús de tokens.",
+  'Export token usage statistics to CSV or JSON.':
+    "Exportar les estadístiques d'ús de tokens a CSV o JSON.",
+  'No usage data.': "No hi ha dades d'ús.",
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens ({{requests}} sol·licituds)',
+  'Daily token usage for {{value}}': 'Ús diari de tokens per a {{value}}',
+  'Monthly token usage for {{value}}': 'Ús mensual de tokens per a {{value}}',
+  'Total: {{tokens}} tokens': 'Total: {{tokens}} tokens',
+  'Requests: {{requests}}': 'Sol·licituds: {{requests}}',
+  'Breakdown:': 'Desglossament:',
+  'Input: {{tokens}}': 'Entrada: {{tokens}}',
+  'Output: {{tokens}}': 'Sortida: {{tokens}}',
+  'Cached: {{tokens}}': 'Memòria cau: {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raonament: {{tokens}}',
+  'By model:': 'Per model:',
+  'By auth type:': "Per tipus d'autenticació:",
+  'By model/auth type:': "Per model/tipus d'autenticació:",
+  'Failed to load token usage stats: {{error}}':
+    "No s'han pogut carregar les estadístiques d'ús de tokens: {{error}}",
+  'Expected --format csv or --format json.':
+    "S'esperava --format csv o --format json.",
+  'Expected a file path after --output.':
+    "S'esperava una ruta de fitxer després de --output.",
+  'Unexpected argument: {{argument}}': 'Argument inesperat: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Ús: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    "La ruta d'exportació de l'ús de tokens ha d'estar dins del directori de treball del projecte.",
+  'Token usage exported to {{format}}: {{path}}':
+    'Ús de tokens exportat a {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    "No s'han pogut exportar les estadístiques d'ús de tokens: {{error}}",
+  'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.',
   'exit the cli': 'sortir del CLI',
   'Manage workspace directories':
     "Gestionar els directoris de l'espai de treball",

@@ -21,6 +21,22 @@ export default {
   'Auto mode': 'Autoモード',
   'plan mode': 'プランモード',
   'auto-accept edits': '編集を自動承認',
+  'auto mode (classifier-evaluated)': '自動モード（分類器評価済み）',
+  'Auto mode enabled.': '自動モードが有効になりました。',
+  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
+    'LLM 分類器が各ツール呼び出しを評価し、安全な操作を自動承認し、',
+  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
+    'リスクのある操作をブロックします。多くの読み取り専用操作と作業ディレクトリ内の編集は',
+  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
+    '速度向上のため分類器をスキップします。終了: Shift+Tab または /approval-mode default。',
+  '(This notice will not appear again.)': '（この通知は再表示されません。）',
+  'Auto mode temporarily disabled these allow rules':
+    '自動モードが次の許可ルールを一時的に無効化しました',
+  '(they would bypass the classifier):': '（分類器をバイパスするため）:',
+  '(from user settings)': '（ユーザー設定から）',
+  '(session)': '（セッション）',
+  'These will be restored when leaving auto mode.':
+    '自動モードを終了すると復元されます。',
   'Accepting edits': '編集を承認中',
   '(shift + tab to cycle)': '(Shift + Tab で切り替え)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
@@ -360,10 +376,46 @@ export default {
   'Auto (detect from system)': '自動(システムから検出)',
   'Auto (detect terminal theme)': '自動（端末テーマを検出）',
   Auto: '自動',
-  'check session stats. Usage: /stats [model|tools]':
-    'セッション統計を確認。使い方: /stats [model|tools]',
+  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
+    'セッション統計を確認。使い方: /stats [model|tools|daily|monthly|export]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
   'Show tool-specific usage statistics.': 'ツール別の使用統計を表示',
+  'Show daily token usage statistics.': '日次 token 使用統計を表示',
+  'Show monthly token usage statistics.': '月次 token 使用統計を表示',
+  'Export token usage statistics to CSV or JSON.':
+    'token 使用統計を CSV または JSON にエクスポート',
+  'No usage data.': '使用データはありません。',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens（{{requests}} リクエスト）',
+  'Daily token usage for {{value}}': '{{value}} の日次 token 使用量',
+  'Monthly token usage for {{value}}': '{{value}} の月次 token 使用量',
+  'Total: {{tokens}} tokens': '合計: {{tokens}} tokens',
+  'Requests: {{requests}}': 'リクエスト数: {{requests}}',
+  'Breakdown:': '内訳:',
+  'Input: {{tokens}}': '入力: {{tokens}}',
+  'Output: {{tokens}}': '出力: {{tokens}}',
+  'Cached: {{tokens}}': 'キャッシュ: {{tokens}}',
+  'Thoughts: {{tokens}}': '思考: {{tokens}}',
+  'By model:': 'モデル別:',
+  'By auth type:': '認証タイプ別:',
+  'By model/auth type:': 'モデル/認証タイプ別:',
+  'Failed to load token usage stats: {{error}}':
+    'token 使用統計の読み込みに失敗しました: {{error}}',
+  'Expected --format csv or --format json.':
+    '--format csv または --format json を指定してください。',
+  'Expected a file path after --output.':
+    '--output の後にファイルパスを指定してください。',
+  'Unexpected argument: {{argument}}': '予期しない引数: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    '使い方: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'token 使用量のエクスポート先はプロジェクト作業ディレクトリ内である必要があります。',
+  'Token usage exported to {{format}}: {{path}}':
+    'token 使用量を {{format}} にエクスポートしました: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'token 使用統計のエクスポートに失敗しました: {{error}}',
+  'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.',
   'Manage workspace directories': 'ワークスペースディレクトリを管理',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'ワークスペースにディレクトリを追加。複数パスはカンマで区切ってください',

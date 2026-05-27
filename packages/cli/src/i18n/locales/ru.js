@@ -27,6 +27,24 @@ export default {
   'Auto mode': 'Автоматический режим',
   'plan mode': 'Режим планирования',
   'auto-accept edits': 'Режим принятия правок',
+  'auto mode (classifier-evaluated)':
+    'Автоматический режим (классификатор выполнен)',
+  'Auto mode enabled.': 'Автоматический режим включен.',
+  'An LLM classifier evaluates each tool call and auto-approves safe actions,':
+    'LLM-классификатор оценивает каждый вызов инструмента и автоматически одобряет безопасные действия,',
+  'blocks risky ones. Most read-only operations and in-cwd edits skip the':
+    'блокируя рискованные. Большинство операций только для чтения и правок в рабочем каталоге пропускают',
+  'classifier for speed. To exit: Shift+Tab or /approval-mode default.':
+    'классификатор для скорости. Выход: Shift+Tab или /approval-mode default.',
+  '(This notice will not appear again.)':
+    '(Это уведомление больше не появится.)',
+  'Auto mode temporarily disabled these allow rules':
+    'Автоматический режим временно отключил эти разрешающие правила',
+  '(they would bypass the classifier):': '(они обходили бы классификатор):',
+  '(from user settings)': '(из пользовательских настроек)',
+  '(session)': '(сеанс)',
+  'These will be restored when leaving auto mode.':
+    'Они будут восстановлены при выходе из автоматического режима.',
   'Accepting edits': 'Принятие правок',
   '(shift + tab to cycle)': '(Shift + Tab для переключения)',
   '(tab to cycle)': '(Tab для переключения)',
@@ -438,12 +456,52 @@ export default {
   'Auto Edit': 'Авторедактирование',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Включение/выключение режима vim',
-  'check session stats. Usage: /stats [model|tools]':
-    'Просмотр статистики сессии. Использование: /stats [model|tools]',
+  'check session stats. Usage: /stats [model|tools|daily|monthly|export]':
+    'Просмотр статистики сессии. Использование: /stats [model|tools|daily|monthly|export]',
   'Show model-specific usage statistics.':
     'Показать статистику использования модели.',
   'Show tool-specific usage statistics.':
     'Показать статистику использования инструментов.',
+  'Show daily token usage statistics.':
+    'Показать дневную статистику использования токенов.',
+  'Show monthly token usage statistics.':
+    'Показать месячную статистику использования токенов.',
+  'Export token usage statistics to CSV or JSON.':
+    'Экспортировать статистику использования токенов в CSV или JSON.',
+  'No usage data.': 'Нет данных об использовании.',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} токенов ({{requests}} запросов)',
+  'Daily token usage for {{value}}':
+    'Дневное использование токенов за {{value}}',
+  'Monthly token usage for {{value}}':
+    'Месячное использование токенов за {{value}}',
+  'Total: {{tokens}} tokens': 'Всего: {{tokens}} токенов',
+  'Requests: {{requests}}': 'Запросы: {{requests}}',
+  'Breakdown:': 'Разбивка:',
+  'Input: {{tokens}}': 'Ввод: {{tokens}}',
+  'Output: {{tokens}}': 'Вывод: {{tokens}}',
+  'Cached: {{tokens}}': 'Кэш: {{tokens}}',
+  'Thoughts: {{tokens}}': 'Рассуждения: {{tokens}}',
+  'By model:': 'По модели:',
+  'By auth type:': 'По типу аутентификации:',
+  'By model/auth type:': 'По модели/типу аутентификации:',
+  'Failed to load token usage stats: {{error}}':
+    'Не удалось загрузить статистику использования токенов: {{error}}',
+  'Expected --format csv or --format json.':
+    'Ожидается --format csv или --format json.',
+  'Expected a file path after --output.':
+    'После --output ожидается путь к файлу.',
+  'Unexpected argument: {{argument}}': 'Неожиданный аргумент: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Использование: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'Путь экспорта использования токенов должен находиться внутри рабочего каталога проекта.',
+  'Token usage exported to {{format}}: {{path}}':
+    'Использование токенов экспортировано в {{format}}: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'Не удалось экспортировать статистику использования токенов: {{error}}',
+  'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.',
   'exit the cli': 'Выход из CLI',
   'Manage workspace directories':
     'Управление директориями рабочего пространства',
