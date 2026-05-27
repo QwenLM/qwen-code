@@ -1147,6 +1147,172 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('clears awaitingResync on replay_complete after ring-evicted resync', async () => {
+    const liveDelivered = createDeferred<void>();
+    const session = createMockSession({
+      lastEventId: 10,
+      events: async function* ringEvictedThenLive(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 10,
+            earliestAvailableId: 12,
+          },
+        };
+        yield {
+          v: 1,
+          type: 'replay_complete',
+          data: { replayedCount: 0 },
+        };
+        yield {
+          id: 12,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'live after replay' },
+            },
+          },
+        };
+        liveDelivered.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let awaitingResync = false;
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await liveDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(awaitingResync).toBe(false);
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'live after replay',
+        }),
+      ]),
+    );
+  });
+
+  it('clears ring-evicted awaitingResync on same-session reattach', async () => {
+    const firstStreamDone = createDeferred<void>();
+    const reattachDelivered = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-reattach',
+      lastEventId: 10,
+      events: async function* ringEvictedThenGone() {
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 10,
+            earliestAvailableId: 12,
+          },
+        };
+        firstStreamDone.resolve();
+        const error = new Error('session temporarily unavailable') as Error & {
+          status: number;
+        };
+        error.status = 410;
+        throw error;
+      },
+    });
+    const secondSession = createMockSession({
+      sessionId: 'session-reattach',
+      lastEventId: 10,
+      events: async function* reattachedLive(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 12,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'after reattach' },
+            },
+          },
+        };
+        reattachDelivered.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(firstSession, secondSession);
+
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let awaitingResync = false;
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await firstStreamDone.promise;
+      await flushPromises();
+    });
+    expect(awaitingResync).toBe(true);
+
+    await act(async () => {
+      await reattachDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(awaitingResync).toBe(false);
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'error',
+          text: expect.stringContaining('State resync required'),
+        }),
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'after reattach',
+        }),
+      ]),
+    );
+  });
+
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},

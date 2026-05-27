@@ -166,6 +166,10 @@ export function DaemonSessionProvider({
               const snapshot = store.getSnapshot();
               if (snapshot.awaitingResync) {
                 if (snapshot.lastResyncRequired?.reason === 'epoch_reset') {
+                  // Defensive: epoch_reset is normally caught by
+                  // resetStoreForEpochResync in the event loop before the
+                  // reducer arms awaitingResync. If a previous iteration did
+                  // dispatch it, the count already includes that event.
                   nextSession.setLastEventId(0);
                   store.reset({
                     resyncRequiredCount: snapshot.resyncRequiredCount,
@@ -207,6 +211,13 @@ export function DaemonSessionProvider({
             }
             if (event.type === 'replay_complete') {
               // Replay drained — flip from "catching up" to "live".
+              // For non-epoch resyncs (ring_evicted), the daemon keeps the
+              // stream open after state_resync_required. Clear the latch here
+              // so post-replay live events are accepted. Epoch reset is
+              // handled before dispatch by resetStoreForEpochResync.
+              if (store.getSnapshot().awaitingResync) {
+                store.clearAwaitingResync();
+              }
               setConnection((current) =>
                 current.catchingUp
                   ? { ...current, catchingUp: false }
