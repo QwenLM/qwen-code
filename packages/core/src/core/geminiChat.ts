@@ -132,7 +132,10 @@ function getHardRescueFailureMessage(
 ): string {
   const tokenCount =
     compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
-      ? compressionInfo.newTokenCount
+      ? Math.max(
+          compressionInfo.newTokenCount,
+          localPromptTokensAfterCompression,
+        )
       : Math.max(effectiveTokens, localPromptTokensAfterCompression);
   return (
     `Context is too large to send safely after automatic compression. ` +
@@ -1561,9 +1564,13 @@ export class GeminiChat {
         imageTokenEstimate,
       );
       const shouldForceFromHard = effectiveTokens >= hard;
+      const historyBeforeHardRescue = shouldForceFromHard
+        ? this.getHistoryShallow()
+        : undefined;
+      const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
       if (shouldForceFromHard) {
         debugLogger.warn(
-          `[compaction] hard-tier rescue triggered: effectiveTokens=${effectiveTokens}, hard=${hard}, consecutiveFailures=${this.consecutiveFailures}.`,
+          `[compaction] hard-tier rescue triggered: prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}, consecutiveFailures=${this.consecutiveFailures}.`,
         );
       }
 
@@ -1588,9 +1595,9 @@ export class GeminiChat {
 
       const localPromptTokensAfterCompression = shouldForceFromHard
         ? estimatePromptTokens(
-            this.getHistoryShallow(true),
+            this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
             userContent,
-            0,
+            this.lastPromptTokenCount,
             imageTokenEstimate,
           )
         : 0;
@@ -1608,7 +1615,25 @@ export class GeminiChat {
           compressionInfo,
           localPromptTokensAfterCompression,
         );
-        debugLogger.warn(message);
+        if (
+          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED &&
+          historyBeforeHardRescue
+        ) {
+          this.setHistory(historyBeforeHardRescue);
+          this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
+          this.telemetryService?.setLastPromptTokenCount(
+            lastPromptTokenCountBeforeHardRescue,
+          );
+        }
+        debugLogger.warn(
+          `[compaction] hard-tier rescue stopped oversized prompt: ` +
+            `prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, ` +
+            `hard=${hard}, localPromptTokensAfterCompression=` +
+            `${localPromptTokensAfterCompression}, compressionStatus=` +
+            `${compressionInfo.compressionStatus}, newTokenCount=` +
+            `${compressionInfo.newTokenCount}, consecutiveFailures=` +
+            `${this.consecutiveFailures}. ${message}`,
+        );
         throw new Error(message);
       }
 

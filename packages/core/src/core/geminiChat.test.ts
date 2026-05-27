@@ -1632,6 +1632,11 @@ describe('GeminiChat', async () => {
     });
 
     it('seeds inherited token count via setLastPromptTokenCount', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        contextWindowSize: 200_000,
+      });
       const subagentChat = new GeminiChat(mockConfig, config, [
         { role: 'user', parts: [{ text: 'inherited' }] },
         { role: 'model', parts: [{ text: 'inherited reply' }] },
@@ -2465,11 +2470,12 @@ describe('GeminiChat', async () => {
       expect(chat.getHistory()).toHaveLength(2);
     });
 
-    it('rejects before request serialization when hard-rescue compression is still oversized', async () => {
-      chat.setHistory([
+    it('rejects before request serialization and restores history when hard-rescue compression is still oversized', async () => {
+      const originalHistory: Content[] = [
         { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
         { role: 'model', parts: [{ text: 'ack' }] },
-      ]);
+      ];
+      chat.setHistory(originalHistory);
 
       vi.spyOn(
         ChatCompressionService.prototype,
@@ -2498,7 +2504,44 @@ describe('GeminiChat', async () => {
       ).rejects.toThrow(/context is too large/i);
 
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
-      expect(chat.getHistory()[0].parts?.[0].text).toBe('still large summary');
+      expect(chat.getHistory()[0].parts?.[0].text).toBe(
+        originalHistory[0].parts?.[0].text,
+      );
+    });
+
+    it('rejects when compressed history is below hard but the pending user message pushes it over', async () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'x'.repeat(720_000) }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ]);
+
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [
+          { role: 'user', parts: [{ text: 'summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        info: {
+          originalTokenCount: 180_000,
+          newTokenCount: 176_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('should not send'),
+      );
+
+      await expect(
+        chat.sendMessageStream(
+          'test-model',
+          { message: 'x'.repeat(8_000) },
+          'prompt-id-oversized-after-compression-and-user',
+        ),
+      ).rejects.toThrow(/Estimated prompt tokens: 178000; hard limit: 177000/i);
+
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
     });
 
     it('forwards latched consecutiveFailures into hard-rescue (no pre-call reset); success recovers via the post-call branch', async () => {
