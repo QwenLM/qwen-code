@@ -1915,7 +1915,9 @@ function looksLikePath(str: string): boolean {
     unquoted.startsWith('./') ||
     unquoted.startsWith('../') ||
     unquoted.startsWith('~/') ||
-    /^[A-Za-z]:/.test(unquoted)
+    unquoted.startsWith('.') ||
+    /^[A-Za-z]:/.test(unquoted) ||
+    unquoted.includes('/')
   );
 }
 
@@ -2030,7 +2032,9 @@ function extractPathsFromSegment(
       continue;
     }
     let found = false;
-    for (let j = i + 1; j <= tokens.length; j++) {
+    // Try longest-match-first so paths with spaces are tried before shorter
+    // prefixes (e.g., "/tmp/a b.txt" before "/tmp/a").
+    for (let j = tokens.length; j >= i + 1; j--) {
       const candidate = tokens.slice(i, j).join(' ');
       let unquoted = candidate;
       const quoteMatch = unquoted.match(/^'(.*)'$/);

@@ -593,7 +593,13 @@ describe('useTextBuffer', () => {
 
     it('should prepend @ to multiple unquoted file paths separated by spaces', () => {
       const { result } = renderHook(() =>
-        useTextBuffer({ viewport, isValidPath: () => true }),
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === '/path/to/file1.txt' ||
+            p === '/path/to/file2.txt' ||
+            p === '/path/to/file3.txt',
+        }),
       );
       const filePaths =
         '/path/to/file1.txt /path/to/file2.txt /path/to/file3.txt';
@@ -758,6 +764,54 @@ describe('useTextBuffer', () => {
       );
       // Comma should be escaped so parseAllAtCommands doesn't truncate
       expect(getBufferState(result).text).toBe('@/path/to/report\\,v2.txt ');
+    });
+
+    it('should handle relative paths like ./src/index.ts', () => {
+      // Suggestion 1 (wenshao #4544): looksLikePath should support relative paths
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === './src/index.ts' ||
+            p === '../lib/utils.ts' ||
+            p === '~/notes.md',
+        }),
+      );
+      const filePaths = './src/index.ts ../lib/utils.ts ~/notes.md';
+      act(() => result.current.insert(filePaths, { paste: true }));
+      // Paths with ~ are escaped by escapePath
+      expect(getBufferState(result).text).toBe(
+        '@./src/index.ts @../lib/utils.ts @\\~/notes.md ',
+      );
+    });
+
+    it('should handle unquoted paths with spaces via longest-match-first greedy matching', () => {
+      // Suggestion 2 (wenshao #4544): longest-match-first greedy matching
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === '/tmp/a b.txt' || p === '/tmp/a' || p === 'b.txt',
+        }),
+      );
+      // Without longest-match-first, this would match "/tmp/a" + "b.txt" (invalid)
+      // With longest-match-first, this matches "/tmp/a b.txt"
+      act(() => result.current.insert('/tmp/a b.txt', { paste: true }));
+      expect(getBufferState(result).text).toBe('@/tmp/a\\ b.txt ');
+    });
+
+    it('should handle unquoted invalid paths without crashing', () => {
+      // Suggestion 4 (wenshao #4544): cover the !found branch
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) => p === '/valid/file.txt',
+        }),
+      );
+      const filePaths = '/valid/file.txt /nonexistent/path';
+      act(() => result.current.insert(filePaths, { paste: true }));
+      // Content preserved unchanged because not all tokens are valid paths
+      expect(getBufferState(result).text).toBe(filePaths);
     });
   });
 
