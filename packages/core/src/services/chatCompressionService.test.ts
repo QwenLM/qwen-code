@@ -1036,6 +1036,45 @@ describe('ChatCompressionService', () => {
     expect(result.newHistory![0].parts![0].text).toBe('Summary');
   });
 
+  it('should reject inflated local delta if usage metadata is missing', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'short user message' }] },
+      { role: 'model', parts: [{ text: 'short model response' }] },
+      { role: 'user', parts: [{ text: 'another short user message' }] },
+      { role: 'model', parts: [{ text: 'another short model response' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 6_000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      text: 'x'.repeat(40_000),
+      usage: undefined,
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      model: mockModel,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+    );
+    expect(result.info.originalTokenCount).toBe(800);
+    expect(result.info.newTokenCount).toBeGreaterThan(800);
+    expect(result.newHistory).toBeNull();
+  });
+
   it('should reject cap-sized summaries even if usage metadata is missing', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
