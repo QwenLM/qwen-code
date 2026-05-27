@@ -11,7 +11,6 @@ import {
   SpanKind,
   SpanStatusCode,
   trace,
-  TraceState,
   type Context,
   type Span,
 } from '@opentelemetry/api';
@@ -285,9 +284,6 @@ export function extractDaemonTraceContext(
       spanId,
       traceFlags: Number.parseInt(flags, 16),
       isRemote: true,
-      ...(carrier['tracestate']
-        ? { traceState: new TraceState(carrier['tracestate']) }
-        : {}),
     }),
   );
 }
