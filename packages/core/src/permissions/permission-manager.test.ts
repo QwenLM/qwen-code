@@ -2479,6 +2479,24 @@ describe('PermissionManager — compound shell write attribution', () => {
     ).toBe(false);
   });
 
+  it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+  });
+
   it('hasMatchingAskRule sees writes after `cd` into a subdir', () => {
     const pm = new PermissionManager(
       makeConfig({

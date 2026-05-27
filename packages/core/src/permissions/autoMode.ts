@@ -148,12 +148,20 @@ function normalizePathForAutoModePattern(filePath: string): string {
   return filePath.replace(/\\/g, '/').toLowerCase();
 }
 
+function trimPathSlashes(filePath: string): string {
+  let start = 0;
+  let end = filePath.length;
+  while (start < end && filePath[start] === '/') start++;
+  while (end > start && filePath[end - 1] === '/') end--;
+  return filePath.slice(start, end);
+}
+
 function matchesConfiguredContextFile(normalizedPath: string): boolean {
   return [...getAllGeminiMdFilenames(), LOCAL_CONTEXT_FILENAME].some(
     (filename) => {
-      const normalizedFilename = normalizePathForAutoModePattern(filename)
-        .replace(/^\/+/, '')
-        .replace(/\/+$/, '');
+      const normalizedFilename = trimPathSlashes(
+        normalizePathForAutoModePattern(filename),
+      );
       if (!normalizedFilename) return false;
       return (
         normalizedPath === normalizedFilename ||
