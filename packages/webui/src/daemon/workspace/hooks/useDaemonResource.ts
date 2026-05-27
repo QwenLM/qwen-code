@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   DaemonResourceOptions,
   ResourceResult,
@@ -21,9 +21,11 @@ export function useDaemonResource<T>(
     loading: false,
     error: undefined,
   });
+  const requestSeqRef = useRef(0);
 
   const reload = useCallback(async (): Promise<T | undefined> => {
     if (!enabled) return undefined;
+    const seq = ++requestSeqRef.current;
     setState((current) => ({
       ...current,
       loading: true,
@@ -31,9 +33,11 @@ export function useDaemonResource<T>(
     }));
     try {
       const data = await load();
+      if (seq !== requestSeqRef.current) return undefined;
       setState({ data, loading: false, error: undefined });
       return data;
     } catch (error) {
+      if (seq !== requestSeqRef.current) return undefined;
       const normalized =
         error instanceof Error ? error : new Error(String(error));
       setState((current) => ({

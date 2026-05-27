@@ -154,7 +154,9 @@ export function createDaemonSessionActions({
         ) {
           activePromptsRef.current.delete(session.sessionId);
         }
-        setPromptStatus('idle');
+        if (sessionRef.current?.sessionId === session.sessionId) {
+          setPromptStatus('idle');
+        }
       }
     },
 

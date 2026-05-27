@@ -2010,12 +2010,54 @@ class QwenAgent implements Agent {
   ): Promise<ServeSessionContextUsageStatus> {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
-    const usage = await collectContextData(config, showDetails);
+    let usage;
+    try {
+      usage = await collectContextData(config, showDetails);
+    } catch {
+      usage = {
+        type: 'context_usage' as const,
+        modelName: config.getModel() || 'unknown',
+        totalTokens: 0,
+        contextWindowSize: 0,
+        breakdown: {
+          systemPrompt: 0,
+          builtinTools: 0,
+          mcpTools: 0,
+          memoryFiles: 0,
+          skills: 0,
+          messages: 0,
+          freeSpace: 0,
+          autocompactBuffer: 0,
+        },
+        builtinTools: [] as Array<{ name: string; tokens: number }>,
+        mcpTools: [] as Array<{ name: string; tokens: number }>,
+        memoryFiles: [] as Array<{ path: string; tokens: number }>,
+        skills: [] as Array<{
+          name: string;
+          tokens: number;
+          loaded?: boolean;
+          bodyTokens?: number;
+        }>,
+        isEstimated: true,
+        showDetails,
+      };
+    }
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
-      usage,
+      usage: {
+        modelName: usage.modelName,
+        totalTokens: usage.totalTokens,
+        contextWindowSize: usage.contextWindowSize,
+        breakdown: usage.breakdown,
+        builtinTools: usage.builtinTools,
+        mcpTools: usage.mcpTools,
+        memoryFiles: usage.memoryFiles,
+        skills: usage.skills,
+        isEstimated: usage.isEstimated,
+        showDetails: usage.showDetails,
+      },
       formattedText: formatContextUsageText(usage),
     };
   }

@@ -70,7 +70,7 @@ export function sanitizeSvg(svg: string): string {
     .querySelectorAll(
       'script, iframe, object, embed, link, ' +
         'animate, set, animateTransform, animateMotion, ' +
-        'image, feImage, mpath',
+        'image, feImage, mpath, foreignObject, style',
     )
     .forEach((node) => node.remove());
 
@@ -158,7 +158,7 @@ function MermaidBlock({ code }: { code: string }) {
         mermaid.initialize({
           startOnLoad: false,
           theme: mermaidTheme,
-          securityLevel: 'loose',
+          securityLevel: 'strict',
         });
         try {
           const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

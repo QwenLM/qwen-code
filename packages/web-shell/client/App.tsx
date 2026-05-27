@@ -359,6 +359,7 @@ export function App({
   useEffect(() => {
     activeSessionIdRef.current = connection.sessionId;
     setRecapMessage(null);
+    lastRecapBlockCountRef.current = 0;
   }, [connection.sessionId]);
 
   const runVisibleRecap = useCallback(() => {
@@ -1022,7 +1023,6 @@ export function App({
           (o) => o.kind === 'allow_always',
         );
         if (allowAlways) {
-          handleSetMode('yolo');
           handleConfirm(pendingApproval.id, allowAlways.id);
         }
         return;

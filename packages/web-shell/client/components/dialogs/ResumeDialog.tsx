@@ -27,7 +27,7 @@ interface ResumeDialogProps {
 export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
   const { language, t } = useI18n();
   const connection = useConnection();
-  const { sessions, loading } = useSessions({ autoLoad: true });
+  const { sessions, loading, error } = useSessions({ autoLoad: true });
   const currentSessionId = connection.sessionId;
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [searchMode, setSearchMode] = useState(false);
@@ -198,7 +198,12 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
         {loading && (
           <div className={dp('resume-picker-empty')}>{t('common.loading')}</div>
         )}
-        {!loading && filtered.length === 0 && (
+        {!loading && error && (
+          <div className={dp('resume-picker-empty')}>
+            {error.message || 'Failed to load sessions'}
+          </div>
+        )}
+        {!loading && !error && filtered.length === 0 && (
           <div className={dp('resume-picker-empty')}>
             {searchQuery
               ? t('resume.noMatch', { query: searchQuery })

@@ -10,10 +10,10 @@ export function getStableClientId(clientId: string | undefined): string {
   if (clientId) return clientId;
   if (typeof window === 'undefined') return createWebuiClientId();
   try {
-    const existing = window.localStorage.getItem(WEBUI_CLIENT_ID_KEY);
+    const existing = window.sessionStorage.getItem(WEBUI_CLIENT_ID_KEY);
     if (existing) return existing;
     const next = createWebuiClientId();
-    window.localStorage.setItem(WEBUI_CLIENT_ID_KEY, next);
+    window.sessionStorage.setItem(WEBUI_CLIENT_ID_KEY, next);
     return next;
   } catch {
     return createWebuiClientId();
@@ -34,7 +34,7 @@ export async function detachDaemonClient(opts: {
   const url = `${stripTrailingSlashes(opts.baseUrl)}/session/${encodeURIComponent(
     opts.sessionId,
   )}/detach`;
-  const res = await fetch(url, { method: 'POST', headers });
+  const res = await fetch(url, { method: 'POST', headers, keepalive: true });
   if (res.status === 204 || res.status === 404) return;
   throw new Error(`Detach client failed (${res.status})`);
 }

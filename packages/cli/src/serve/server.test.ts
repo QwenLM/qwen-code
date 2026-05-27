@@ -126,6 +126,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_env',
   'workspace_preflight',
   'session_context',
+  'session_context_usage',
   'session_supported_commands',
   'session_tasks',
   'session_close',

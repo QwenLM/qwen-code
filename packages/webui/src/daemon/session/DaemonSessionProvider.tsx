@@ -7,6 +7,7 @@
 import {
   createContext,
   type Dispatch,
+  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -733,11 +734,8 @@ export function useDaemonTranscriptState(): DaemonTranscriptState {
 
 export function useDaemonTranscriptBlocks(): readonly DaemonTranscriptBlock[] {
   const store = useDaemonTranscriptStore();
-  return useSyncExternalStore(
-    store.subscribe,
-    () => store.getSnapshot().blocks,
-    () => store.getSnapshot().blocks,
-  );
+  const getBlocks = useCallback(() => store.getSnapshot().blocks, [store]);
+  return useSyncExternalStore(store.subscribe, getBlocks, getBlocks);
 }
 
 export function useDaemonPendingPermissions() {
