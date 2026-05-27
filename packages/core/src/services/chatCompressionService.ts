@@ -657,32 +657,38 @@ export class ChatCompressionService {
             compressionOutputTokenCount,
         );
       } else {
-        const estimatedOriginalContentTokenCount = estimateContentTokens(
+        const estimatedOriginalVisibleTokenCount = estimateContentTokens(
           historyForSplit,
           slimmingConfig.imageTokenEstimate,
         );
-        const estimatedNewContentTokenCount = estimateContentTokens(
+        const estimatedNewVisibleTokenCount = estimateContentTokens(
           extraHistory,
           slimmingConfig.imageTokenEstimate,
         );
         if (
-          estimatedOriginalContentTokenCount > 0 &&
-          estimatedNewContentTokenCount > 0
+          estimatedOriginalVisibleTokenCount > 0 &&
+          estimatedNewVisibleTokenCount > 0
         ) {
-          const estimatedSavedContentTokens =
-            estimatedOriginalContentTokenCount - estimatedNewContentTokenCount;
-          newTokenCount = Math.max(
+          const estimatedNonVisibleTokenCount = Math.max(
             0,
-            originalTokenCount - estimatedSavedContentTokens,
+            originalTokenCount - estimatedOriginalVisibleTokenCount,
           );
+          // Keep the API-reported system/tool/prompt remainder intact. The
+          // local estimator is only used for the visible conversation delta, so
+          // missing usage metadata cannot replace the authoritative total with
+          // a much smaller visible-history-only estimate.
+          newTokenCount =
+            estimatedNonVisibleTokenCount + estimatedNewVisibleTokenCount;
           canCalculateNewTokenCount = true;
           config
             .getDebugLogger()
             .debug(
               `[chat-compression] usage metadata missing; estimated ` +
-                `post-compression token count from local content delta ` +
-                `(${estimatedOriginalContentTokenCount} -> ` +
-                `${estimatedNewContentTokenCount}).`,
+                `post-compression token count by preserving the ` +
+                `API-reported non-visible remainder ` +
+                `(${estimatedNonVisibleTokenCount}) and replacing the ` +
+                `visible-history estimate (${estimatedOriginalVisibleTokenCount} -> ` +
+                `${estimatedNewVisibleTokenCount}).`,
             );
         }
       }
