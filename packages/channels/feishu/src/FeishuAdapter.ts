@@ -1,7 +1,7 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -152,8 +152,8 @@ export class FeishuChannel extends ChannelBase {
         );
       }
       if (!encryptKey) {
-        process.stderr.write(
-          `[Feishu:${this.name}] WARNING: webhook mode started without encryptKey. If the Feishu app has event encryption enabled, events will be silently dropped.\n`,
+        throw new Error(
+          `Channel "${this.name}" webhook mode requires encryptKey for HMAC request authentication. Without it, the Lark SDK skips signature verification and any client can forge events.`,
         );
       }
       // HTTP Webhook mode
@@ -180,7 +180,10 @@ export class FeishuChannel extends ChannelBase {
       const CREATING_TIMEOUT_MS = 60_000; // 1 minute for card creation
       for (const [msgId, state] of this.cardSessions) {
         if (state.creating && now - state.lastUpdateAt > CREATING_TIMEOUT_MS) {
-          // Card creation hung — force fail and clean up
+          // Card creation hung — force fail, log, and clean up
+          process.stderr.write(
+            `[Feishu:${this.name}] WARNING: card creation timed out for msg=${msgId} (accumulated ${state.accumulatedText.length} chars dropped)\n`,
+          );
           state.creating = false;
           state.cardCreationFailed = true;
           if (state.creationTimer) clearTimeout(state.creationTimer);
@@ -266,10 +269,14 @@ export class FeishuChannel extends ChannelBase {
             const parsed = JSON.parse(body);
             // Handle URL verification challenge
             if (parsed.type === 'url_verification') {
-              if (verificationToken && parsed.token !== verificationToken) {
-                res.writeHead(403);
-                res.end('Forbidden');
-                return;
+              if (verificationToken) {
+                const a = Buffer.from(parsed.token || '');
+                const b = Buffer.from(verificationToken);
+                if (a.length !== b.length || !timingSafeEqual(a, b)) {
+                  res.writeHead(403);
+                  res.end('Forbidden');
+                  return;
+                }
               }
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify({ challenge: parsed.challenge }));
@@ -366,6 +373,7 @@ export class FeishuChannel extends ChannelBase {
       const respText = await resp.text();
 
       if (!resp.ok) {
+        if (resp.status === 401) this.tokenCache = undefined;
         return { isFromBot: false };
       }
 
@@ -626,6 +634,7 @@ export class FeishuChannel extends ChannelBase {
         );
 
         if (!resp.ok) {
+          if (resp.status === 401) this.tokenCache = undefined;
           const detail = await resp.text().catch(() => '');
           process.stderr.write(
             `[Feishu:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
@@ -681,6 +690,7 @@ export class FeishuChannel extends ChannelBase {
       );
 
       if (!resp.ok) {
+        if (resp.status === 401) this.tokenCache = undefined;
         const detail = await resp.text().catch(() => '');
         process.stderr.write(
           `[Feishu:${this.name}] createStreamingCard failed: HTTP ${resp.status} ${detail}\n`,
@@ -739,6 +749,7 @@ export class FeishuChannel extends ChannelBase {
       });
 
       if (!resp.ok) {
+        if (resp.status === 401) this.tokenCache = undefined;
         const detail = await resp.text().catch(() => '');
         process.stderr.write(
           `[Feishu:${this.name}] updateCard failed: HTTP ${resp.status} ${detail}\n`,
@@ -929,9 +940,8 @@ export class FeishuChannel extends ChannelBase {
       const maxBody =
         MAX_FINAL_CARD_CHARS - prefix.length - suffix.length - fenceReserve;
       displayText = prefix + fullText.slice(-maxBody) + suffix;
-      // Re-balance code fences after truncation
-      const fenceCount = (displayText.match(/^```/gm) || []).length;
-      if (fenceCount % 2 === 1) {
+      // Re-balance code fences after truncation (line-by-line, handles indented fences)
+      if (this.countFences(displayText) % 2 === 1) {
         displayText = '```\n' + displayText;
       }
     }
@@ -964,9 +974,14 @@ export class FeishuChannel extends ChannelBase {
       return;
     }
 
-    // Abandon in-flight card creation if busy-wait timed out
+    // Abandon in-flight card creation if busy-wait timed out — fall back to
+    // plain message instead of creating a second card (which would race with
+    // the original in-flight creation).
     if (cardState?.creating) {
       cardState.stopped = true;
+      this.cleanupCard(inboundMsgId);
+      await this.sendMessage(chatId, fullText);
+      return;
     }
 
     if (cardState?.created) {
@@ -991,8 +1006,7 @@ export class FeishuChannel extends ChannelBase {
         if (!retried) {
           // Final fallback: just mark as done with a short message
           let truncated = displayText.slice(0, 2000);
-          const fences = (truncated.match(/^```/gm) || []).length;
-          if (fences % 2 === 1) truncated += '\n```';
+          if (this.countFences(truncated) % 2 === 1) truncated += '\n```';
           await this.updateCard(
             cardState.messageId,
             truncated + '\n\n---\n*内容过长，已截断*',
@@ -1013,14 +1027,25 @@ export class FeishuChannel extends ChannelBase {
       inboundMsgId,
     );
     if (result.success) {
-      await this.updateCard(result.messageId, displayText, true, inboundMsgId);
-      this.cleanupCard(inboundMsgId);
-      return;
+      const finalized = await this.updateCard(
+        result.messageId,
+        displayText,
+        true,
+        inboundMsgId,
+      );
+      if (finalized) {
+        this.cleanupCard(inboundMsgId);
+        return;
+      }
+      // updateCard failed — fall through to sendMessage below
     }
 
-    // Fallback to plain message
+    // Fallback to plain message (include @sender prefix for consistency)
     this.cleanupCard(inboundMsgId);
-    await this.sendMessage(chatId, fullText);
+    await this.sendMessage(
+      chatId,
+      atSender ? `${atSender}\n\n${fullText}` : fullText,
+    );
   }
 
   protected override onPromptStart(
@@ -1094,11 +1119,11 @@ export class FeishuChannel extends ChannelBase {
     }
   }
 
-  protected override onPromptEnd(
+  protected override async onPromptEnd(
     _chatId: string,
     sessionId: string,
     messageId?: string,
-  ): void {
+  ): Promise<void> {
     if (messageId) {
       this.removeReaction(messageId, 'OnIt').catch(() => {});
     }
@@ -1120,7 +1145,9 @@ export class FeishuChannel extends ChannelBase {
                 ? `${atPrefix}\n\n${cs.accumulatedText}`
                 : cs.accumulatedText) + '\n\n---\n*已取消*'
             : (atPrefix ? `${atPrefix}\n\n` : '') + '*已取消*';
-          this.updateCard(cs.messageId, text, true, inboundMsgId).catch(
+          // Must await updateCard before cleanupCard — updateCard reads
+          // msgToQuestion after an await, which cleanupCard would delete.
+          await this.updateCard(cs.messageId, text, true, inboundMsgId).catch(
             () => {},
           );
           this.cleanupCard(inboundMsgId);
@@ -1165,17 +1192,21 @@ export class FeishuChannel extends ChannelBase {
     if (!token || !FEISHU_ID_RE.test(messageId)) return;
 
     try {
-      await fetch(`${BASE_URL}/im/v1/messages/${messageId}/reactions`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
+      const resp = await fetch(
+        `${BASE_URL}/im/v1/messages/${messageId}/reactions`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            reaction_type: { emoji_type: emojiType },
+          }),
+          signal: AbortSignal.timeout(15_000),
         },
-        body: JSON.stringify({
-          reaction_type: { emoji_type: emojiType },
-        }),
-        signal: AbortSignal.timeout(15_000),
-      });
+      );
+      if (resp.status === 401) this.tokenCache = undefined;
     } catch (err) {
       process.stderr.write(
         `[Feishu:${this.name}] addReaction failed: ${err instanceof Error ? err.message : err}\n`,
@@ -1193,13 +1224,16 @@ export class FeishuChannel extends ChannelBase {
     try {
       // List reactions to find the one we added
       const resp = await fetch(
-        `${BASE_URL}/im/v1/messages/${messageId}/reactions?reaction_type=${emojiType}`,
+        `${BASE_URL}/im/v1/messages/${messageId}/reactions?reaction_type=${emojiType}&user_id_type=open_id`,
         {
           headers: { Authorization: `Bearer ${token}` },
           signal: AbortSignal.timeout(15_000),
         },
       );
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        if (resp.status === 401) this.tokenCache = undefined;
+        return;
+      }
 
       const data = (await resp.json()) as {
         data?: {
@@ -1305,7 +1339,11 @@ export class FeishuChannel extends ChannelBase {
 
       const handleStop = async () => {
         if (sessionId) {
-          await this.bridge.cancelSession(sessionId).catch(() => {});
+          await this.bridge.cancelSession(sessionId).catch((err) => {
+            process.stderr.write(
+              `[Feishu:${this.name}] cancelSession failed for msg=${inboundId}: ${err instanceof Error ? err.message : err}\n`,
+            );
+          });
         }
         // Only update card if it was actually created (skip if still creating —
         // the createStreamingCard callback will finalize using cardState.atPrefix)
@@ -1376,26 +1414,48 @@ export class FeishuChannel extends ChannelBase {
   }
 
   /**
+   * Count code fence boundaries in text using line-by-line tracking.
+   * Handles indented fences and inline triple-backticks consistently.
+   */
+  private countFences(text: string): number {
+    let count = 0;
+    for (const line of text.split('\n')) {
+      if ((line.match(/```/g) || []).length % 2 === 1) count++;
+    }
+    return count;
+  }
+
+  /**
    * Strip markdown tables from text while preserving code-fenced blocks.
-   * Uses line-by-line fence tracking instead of regex spanning to avoid
-   * CodeQL polynomial regex warnings.
+   * Collapses consecutive table rows into a single replacement line.
    */
   private stripTables(text: string, replacement: string): string {
     const lines = text.split('\n');
     let inCode = false;
-    return lines
-      .map((line) => {
-        if ((line.match(/```/g) || []).length % 2 === 1) {
-          inCode = !inCode;
+    let prevWasTable = false;
+    const result: string[] = [];
+    for (const line of lines) {
+      if ((line.match(/```/g) || []).length % 2 === 1) {
+        inCode = !inCode;
+      }
+      if (inCode) {
+        prevWasTable = false;
+        result.push(line);
+        continue;
+      }
+      const trimmed = line.trim();
+      if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+        if (!prevWasTable) {
+          result.push(replacement);
+          prevWasTable = true;
         }
-        if (inCode) return line;
-        const trimmed = line.trim();
-        if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
-          return replacement;
-        }
-        return line;
-      })
-      .join('\n');
+        // Skip consecutive table rows (collapse into single replacement)
+      } else {
+        prevWasTable = false;
+        result.push(line);
+      }
+    }
+    return result.join('\n');
   }
 
   private cleanupCard(inboundMsgId: string): void {
@@ -1519,7 +1579,9 @@ export class FeishuChannel extends ChannelBase {
 
         // Use Feishu card markdown <at> tag — rendered as real name by Feishu client
         const safeSenderId = /^[a-zA-Z0-9_:-]+$/.test(senderId) ? senderId : '';
-        const atSender = `好的，<at id=${safeSenderId}></at>`;
+        const atSender = safeSenderId
+          ? `好的，<at id=${safeSenderId}></at>`
+          : '好的，';
         this.msgToSenderName.set(msgId, atSender);
         this.msgToSenderId.set(msgId, senderId);
 
@@ -1549,6 +1611,7 @@ export class FeishuChannel extends ChannelBase {
           }
         }
 
+        let downloadedFileDir: string | undefined;
         if (content.fileKey && content.fileName) {
           const token = await this.getTenantAccessToken();
           if (token) {
@@ -1563,10 +1626,11 @@ export class FeishuChannel extends ChannelBase {
               mkdirSync(dir, { recursive: true });
               const rawName = basename(content.fileName).replace(/\0/g, '');
               const safeName =
-                rawName.replace(/[^\w.-]/g, '_').replace(/^\./, '_') ||
+                rawName.replace(/[^\w.-]/g, '_').replace(/^\.+/, '_') ||
                 `feishu_file_${Date.now()}`;
               const filePath = join(dir, safeName);
               writeFileSync(filePath, media.buffer);
+              downloadedFileDir = dir;
 
               envelope.attachments = [
                 ...(envelope.attachments || []),
@@ -1584,10 +1648,28 @@ export class FeishuChannel extends ChannelBase {
         // If user clicked stop while we were preparing (downloading media, etc.), abort
         if (this.stoppedMessages.has(msgId)) {
           this.stoppedMessages.delete(msgId);
+          if (downloadedFileDir) {
+            try {
+              rmSync(downloadedFileDir, { recursive: true, force: true });
+            } catch {
+              /* best-effort cleanup */
+            }
+          }
           return;
         }
 
         await this.handleInbound(envelope);
+
+        // Clean up downloaded file after handleInbound has consumed it
+        if (downloadedFileDir) {
+          setTimeout(() => {
+            try {
+              rmSync(downloadedFileDir!, { recursive: true, force: true });
+            } catch {
+              /* best-effort cleanup */
+            }
+          }, 60_000);
+        }
 
         // Clean up auxiliary maps if gate rejected the message (no card session created)
         if (!this.cardSessions.has(msgId)) {
@@ -1619,6 +1701,7 @@ export class FeishuChannel extends ChannelBase {
           this.cleanupCard(msgId);
         } else {
           this.sendMessage(chatId, '处理消息时出错，请重试。').catch(() => {});
+          this.cleanupCard(msgId);
         }
       });
     } catch (err) {
@@ -1710,7 +1793,10 @@ export class FeishuChannel extends ChannelBase {
         default:
           return { text: '' };
       }
-    } catch {
+    } catch (err) {
+      process.stderr.write(
+        `[Feishu:${this.name}] extractContent parse error (type=${messageType}): ${err instanceof Error ? err.message : err}\n`,
+      );
       return { text: '' };
     }
   }
