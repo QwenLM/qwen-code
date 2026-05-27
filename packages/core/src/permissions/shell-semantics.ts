@@ -164,7 +164,12 @@ function isShellAbsolutePath(p: string): boolean {
 }
 
 function normalizeShellPath(p: string): string {
-  return p.replace(/\\/g, '/').replace(/\/+$/, '');
+  const normalized = p.replace(/\\/g, '/');
+  let end = normalized.length;
+  while (end > 0 && normalized[end - 1] === '/') {
+    end--;
+  }
+  return normalized.slice(0, end);
 }
 
 /**
