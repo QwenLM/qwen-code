@@ -120,6 +120,9 @@ function getHardRescueFailureMessage(
   compressionInfo: ChatCompressionInfo,
   localPromptTokensAfterCompression: number,
 ): string {
+  const compressionStatus =
+    CompressionStatus[compressionInfo.compressionStatus] ??
+    String(compressionInfo.compressionStatus);
   const tokenCount =
     compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
       ? Math.max(
@@ -130,7 +133,7 @@ function getHardRescueFailureMessage(
   return (
     `Context is too large to send safely after automatic compression. ` +
     `Estimated prompt tokens: ${tokenCount}; hard limit: ${hardLimit}; ` +
-    `compression status: ${compressionInfo.compressionStatus}. ` +
+    `compression status: ${compressionStatus}. ` +
     `Start a new session or reduce the resumed history before continuing.`
   );
 }

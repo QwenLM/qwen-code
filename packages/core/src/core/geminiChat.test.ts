@@ -2485,11 +2485,14 @@ describe('GeminiChat', async () => {
           { message: 'continue' },
           'prompt-id-oversized-resume-guard',
         ),
-      ).rejects.toThrow(/context is too large/i);
+      ).rejects.toThrow(
+        /compression status: COMPRESSION_FAILED_EMPTY_SUMMARY/i,
+      );
 
       expect(compressSpy).toHaveBeenCalledTimes(1);
       expect(compressSpy.mock.calls[0][1].force).toBe(true);
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      expect(chat.getLastPromptTokenCount()).toBe(0);
       expect(chat.getHistory()).toHaveLength(2);
     });
 
@@ -2536,7 +2539,7 @@ describe('GeminiChat', async () => {
           { message: 'continue' },
           'prompt-id-oversized-after-compression',
         ),
-      ).rejects.toThrow(/context is too large/i);
+      ).rejects.toThrow(/compression status: COMPRESSED/i);
 
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
       expect(recordChatCompression).not.toHaveBeenCalled();
