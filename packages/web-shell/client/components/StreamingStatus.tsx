@@ -3,18 +3,17 @@ import {
   PHRASE_CHANGE_INTERVAL_MS,
   getLoadingPhrases,
 } from '../constants/loadingPhrases';
+import {
+  useConnection,
+  useStreamingState,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import styles from './StreamingStatus.module.css';
 
-interface StreamingStatusProps {
-  streamingState: 'idle' | 'waiting' | 'responding' | 'thinking';
-  tokenCount: number;
-}
-
-export function StreamingStatus({
-  streamingState,
-  tokenCount,
-}: StreamingStatusProps) {
+export function StreamingStatus() {
+  const streamingState = useStreamingState();
+  const connection = useConnection();
+  const tokenCount = connection.tokenCount ?? 0;
   const { language, t } = useI18n();
   const [elapsed, setElapsed] = useState(0);
   const startTime = useRef(Date.now());

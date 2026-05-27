@@ -126,7 +126,12 @@ import {
   type ServeWorkspaceSkillsStatus,
   type ServeWorkspaceToolStatus,
   type ServeWorkspaceToolsStatus,
+  type ServeSessionContextUsageStatus,
 } from '../serve/status.js';
+import {
+  collectContextData,
+  formatContextUsageText,
+} from '../ui/commands/contextCommand.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 
@@ -1999,6 +2004,22 @@ class QwenAgent implements Agent {
     };
   }
 
+  private async buildSessionContextUsageStatus(
+    sessionId: string,
+    showDetails: boolean,
+  ): Promise<ServeSessionContextUsageStatus> {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    const usage = await collectContextData(config, showDetails);
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      workspaceCwd: this.workspaceCwd(config),
+      usage,
+      formattedText: formatContextUsageText(usage),
+    };
+  }
+
   private async buildSessionSupportedCommandsStatus(
     sessionId: string,
   ): Promise<ServeSessionSupportedCommandsStatus> {
@@ -2073,6 +2094,19 @@ class QwenAgent implements Agent {
           string,
           unknown
         >;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionContextUsage: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return (await this.buildSessionContextUsageStatus(
+          sessionId,
+          params['detail'] === true,
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionSupportedCommands: {
         const sessionId = params['sessionId'];

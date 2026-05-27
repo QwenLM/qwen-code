@@ -3,7 +3,6 @@ import type {
   CompletionContext,
   CompletionResult,
 } from '@codemirror/autocomplete';
-import type { EditorView } from '@codemirror/view';
 import type { CommandInfo } from '../adapters/types';
 import type { WebShellLanguage } from '../i18n';
 
@@ -12,8 +11,6 @@ interface SubcommandNode {
   description: string;
   children?: SubcommandNode[];
 }
-
-type SubmitCompletionCommand = (view: EditorView, command: string) => void;
 
 const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
   agents: [
@@ -48,10 +45,6 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
     { name: 'html', description: '将会话导出为 HTML 文件' },
     { name: 'json', description: '将会话导出为 JSON 文件' },
     { name: 'jsonl', description: '将会话导出为 JSONL 文件（每行一条消息）' },
-  ],
-  stats: [
-    { name: 'model', description: '显示各模型的使用统计' },
-    { name: 'tools', description: '显示工具调用统计' },
   ],
   language: [
     {
@@ -100,10 +93,6 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
     { name: 'json', description: 'Export as JSON' },
     { name: 'jsonl', description: 'Export as JSONL' },
   ],
-  stats: [
-    { name: 'model', description: 'Show model usage stats' },
-    { name: 'tools', description: 'Show tool call stats' },
-  ],
   language: [
     {
       name: 'ui',
@@ -140,18 +129,6 @@ function resolveSubcommands(
   return nodes;
 }
 
-function commandHasSubcommands(
-  command: CommandInfo,
-  language: WebShellLanguage,
-): boolean {
-  const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
-  return !!tree[command.name] || !!command.subcommands?.length;
-}
-
-function shouldSubmitSubcommand(node: SubcommandNode): boolean {
-  return !node.children;
-}
-
 function comparePrefixFirst(a: string, b: string, query: string): number {
   const aLower = a.toLowerCase();
   const bLower = b.toLowerCase();
@@ -161,28 +138,9 @@ function comparePrefixFirst(a: string, b: string, query: string): number {
   return a.localeCompare(b);
 }
 
-function applyAndSubmitCommand(
-  command: string,
-  submitCompletionCommand: SubmitCompletionCommand,
-) {
-  return (
-    view: EditorView,
-    _completion: Completion,
-    from: number,
-    to: number,
-  ) => {
-    view.dispatch({
-      changes: { from, to, insert: command },
-      selection: { anchor: command.length },
-    });
-    submitCompletionCommand(view, command);
-  };
-}
-
 export function slashCompletionSource(
   getCommands: () => CommandInfo[],
   getSkills: () => string[] = () => [],
-  submitCompletionCommand?: SubmitCompletionCommand,
   getLanguage: () => WebShellLanguage = () => 'en',
 ) {
   return (context: CompletionContext): CompletionResult | null => {
@@ -223,14 +181,10 @@ export function slashCompletionSource(
         )
         .map((n): Completion => {
           const command = `${prefix}${n.name}`;
-          const submitOnApply = shouldSubmitSubcommand(n);
           return {
             label: n.name,
             detail: n.description || undefined,
-            apply:
-              submitOnApply && submitCompletionCommand
-                ? applyAndSubmitCommand(command, submitCompletionCommand)
-                : `${command}${n.children || submitOnApply ? ' ' : ''}`,
+            apply: `${command} `,
           };
         });
 
@@ -259,14 +213,10 @@ export function slashCompletionSource(
       .sort((a, b) => (prefix ? comparePrefixFirst(a.name, b.name, lp) : 0))
       .map((c): Completion => {
         const command = `/${c.name}`;
-        const hasSubcommands = commandHasSubcommands(c, getLanguage());
         return {
           label: command,
           detail: c.description || undefined,
-          apply:
-            !hasSubcommands && submitCompletionCommand
-              ? applyAndSubmitCommand(command, submitCompletionCommand)
-              : `${command}${hasSubcommands ? ' ' : ''}`,
+          apply: `${command} `,
         };
       });
 

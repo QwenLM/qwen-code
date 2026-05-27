@@ -7,13 +7,11 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { dp } from './dialogStyles';
-import type {
-  DaemonAgentMutationResult,
-  DaemonCreateAgentRequest,
-  DaemonWorkspaceAgentDetail,
-  DaemonWorkspaceAgentSummary,
-  DaemonWorkspaceAgentsStatus,
-} from '@qwen-code/sdk/daemon';
+import {
+  useAgents,
+  type DaemonWorkspaceAgentDetail,
+  type DaemonWorkspaceAgentSummary,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 
@@ -26,15 +24,6 @@ export type AgentsDialogInitialMode =
 
 interface AgentsDialogProps {
   initialMode?: AgentsDialogInitialMode;
-  listAgents: () => Promise<DaemonWorkspaceAgentsStatus>;
-  getAgent: (agentType: string) => Promise<DaemonWorkspaceAgentDetail>;
-  createAgent: (
-    req: DaemonCreateAgentRequest,
-  ) => Promise<DaemonAgentMutationResult>;
-  deleteAgent: (
-    agentType: string,
-    scope?: 'workspace' | 'global',
-  ) => Promise<void>;
   onClose: () => void;
 }
 
@@ -42,6 +31,14 @@ function scopeForLevel(level: string): 'workspace' | 'global' | undefined {
   if (level === 'project') return 'workspace';
   if (level === 'user') return 'global';
   return undefined;
+}
+
+function canDeleteAgent(agent: DaemonWorkspaceAgentSummary): boolean {
+  return (
+    scopeForLevel(agent.level) !== undefined &&
+    !agent.isBuiltin &&
+    agent.level !== 'extension'
+  );
 }
 
 function initialDialogMode(
@@ -58,20 +55,23 @@ function initialScope(mode: AgentsDialogInitialMode): 'workspace' | 'global' {
 
 export function AgentsDialog({
   initialMode = 'menu',
-  listAgents,
-  getAgent,
-  createAgent,
-  deleteAgent,
   onClose,
 }: AgentsDialogProps) {
   const { t } = useI18n();
+  const {
+    agents,
+    loading,
+    error: agentsError,
+    reload,
+    getAgent,
+    createAgent,
+    deleteAgent,
+  } = useAgents({ autoLoad: true });
   const [mode, setMode] = useState<
     'menu' | 'create-scope' | 'create' | 'manage'
   >(() => initialDialogMode(initialMode));
-  const [agents, setAgents] = useState<DaemonWorkspaceAgentSummary[]>([]);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [detail, setDetail] = useState<DaemonWorkspaceAgentDetail | null>(null);
-  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [name, setName] = useState('');
@@ -124,22 +124,9 @@ export function AgentsDialog({
     [scope, t],
   );
 
-  const reload = useCallback(() => {
-    setLoading(true);
-    listAgents()
-      .then((status) => {
-        setAgents(status.agents);
-        setMessage(null);
-      })
-      .catch((error: unknown) => {
-        setMessage(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => setLoading(false));
-  }, [listAgents]);
-
   useEffect(() => {
-    reload();
-  }, [reload]);
+    if (agentsError) setMessage(agentsError.message);
+  }, [agentsError]);
 
   useEffect(() => {
     if (mode !== 'manage') return;
@@ -312,6 +299,13 @@ export function AgentsDialog({
         <span className={dp('resume-picker-count')}>
           {t('agent.count', { count: agents.length })}
         </span>
+        <button
+          className={dp('resume-picker-close')}
+          onClick={onClose}
+          title="Close"
+        >
+          ESC
+        </button>
       </div>
 
       <div className={dp('resume-picker-search')}>
@@ -468,15 +462,15 @@ export function AgentsDialog({
                     {t('agent.tools')}: {detail.tools.join(', ')}
                   </div>
                 )}
-                <button
-                  className={dp('dialog-danger-button')}
-                  disabled={
-                    busy || detail.isBuiltin || detail.level === 'extension'
-                  }
-                  onClick={() => handleDelete(detail)}
-                >
-                  {busy ? t('agent.delete.loading') : t('agent.delete')}
-                </button>
+                {canDeleteAgent(detail) && (
+                  <button
+                    className={dp('dialog-danger-button')}
+                    disabled={busy}
+                    onClick={() => handleDelete(detail)}
+                  >
+                    {busy ? t('agent.delete.loading') : t('agent.delete')}
+                  </button>
+                )}
               </>
             ) : (
               <div className={dp('resume-picker-empty')}>

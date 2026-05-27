@@ -1428,6 +1428,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   const requestSessionStatus = async <T>(
     sessionId: string,
     method: string,
+    params: Record<string, unknown> = {},
   ): Promise<T> => {
     const entry = byId.get(sessionId);
     if (!entry) throw new SessionNotFoundError(sessionId);
@@ -1435,7 +1436,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
     const response = await Promise.race([
       withTimeout(
-        entry.connection.extMethod(method, { sessionId }),
+        entry.connection.extMethod(method, { ...params, sessionId }),
         initTimeoutMs,
         method,
       ),
@@ -2993,6 +2994,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return requestSessionStatus(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionContext,
+      );
+    },
+
+    async getSessionContextUsageStatus(sessionId, opts) {
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionContextUsage,
+        { detail: opts?.detail === true },
       );
     },
 

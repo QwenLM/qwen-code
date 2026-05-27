@@ -104,18 +104,19 @@ describe('sanitizeSvg', () => {
     expect(result).toContain('<rect');
   });
 
-  it('strips foreignObject elements', () => {
+  it('preserves foreignObject elements (needed for mermaid text labels)', () => {
     const svg =
-      '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><div>XSS</div></foreignObject></svg>';
+      '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><div>Label</div></foreignObject></svg>';
     const result = sanitizeSvg(svg);
-    expect(result).not.toContain('foreignObject');
+    expect(result).toContain('foreignObject');
+    expect(result).toContain('Label');
   });
 
-  it('strips style elements', () => {
+  it('preserves style elements (needed for mermaid theming)', () => {
     const svg =
-      '<svg xmlns="http://www.w3.org/2000/svg"><style>body{}</style><rect/></svg>';
+      '<svg xmlns="http://www.w3.org/2000/svg"><style>.node{fill:#fff}</style><rect/></svg>';
     const result = sanitizeSvg(svg);
-    expect(result).not.toContain('<style');
+    expect(result).toContain('<style');
   });
 
   it('strips image elements (external resource loading)', () => {

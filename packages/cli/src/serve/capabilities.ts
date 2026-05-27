@@ -80,6 +80,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_env: { since: 'v1' },
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
+  session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
   session_close: { since: 'v1' },

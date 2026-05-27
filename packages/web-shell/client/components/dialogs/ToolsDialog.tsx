@@ -1,44 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
+import {
+  useTools,
+  type DaemonWorkspaceToolStatus,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 
-export interface WebShellWorkspaceToolStatus {
-  name: string;
-  displayName?: string;
-  description?: string;
-  enabled: boolean;
-}
-
-export interface WebShellWorkspaceToolsStatus {
-  v: 1;
-  workspaceCwd: string;
-  initialized: boolean;
-  tools: WebShellWorkspaceToolStatus[];
-  errors?: Array<{ error?: string }>;
-}
-
 interface ToolsDialogProps {
-  loadStatus: () => Promise<WebShellWorkspaceToolsStatus>;
-  setToolEnabled: (toolName: string, enabled: boolean) => Promise<unknown>;
   onClose: () => void;
 }
 
-function toolLabel(tool: WebShellWorkspaceToolStatus): string {
+function toolLabel(tool: DaemonWorkspaceToolStatus): string {
   return tool.displayName || tool.name;
 }
 
-export function ToolsDialog({
-  loadStatus,
-  setToolEnabled,
-  onClose,
-}: ToolsDialogProps) {
+export function ToolsDialog({ onClose }: ToolsDialogProps) {
   const { t } = useI18n();
-  const [status, setStatus] = useState<WebShellWorkspaceToolsStatus | null>(
-    null,
-  );
+  const { status, tools, loading, error, reload, setEnabled } = useTools({
+    autoLoad: true,
+  });
   const [selectedIdx, setSelectedIdx] = useState(0);
-  const [loading, setLoading] = useState(true);
   const [busyTool, setBusyTool] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(
@@ -46,38 +28,30 @@ export function ToolsDialog({
   );
   const listRef = useRef<HTMLDivElement>(null);
 
-  const tools = useMemo(() => status?.tools ?? [], [status?.tools]);
   const selected = tools[selectedIdx];
   const selectedExpanded = selected ? expandedTools.has(selected.name) : false;
 
-  const reload = useCallback(() => {
-    setLoading(true);
-    loadStatus()
-      .then((next) => {
-        setStatus(next);
-        setMessage(next.errors?.[0]?.error ?? null);
-      })
-      .catch((error: unknown) => {
-        setMessage(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => setLoading(false));
-  }, [loadStatus]);
+  useEffect(() => {
+    if (error) setMessage(error.message);
+    else if (status?.errors?.[0]?.error) setMessage(status.errors[0].error);
+    else if (status) setMessage(null);
+  }, [status, error]);
 
   const handleToggle = useCallback(
-    (tool: WebShellWorkspaceToolStatus) => {
+    (tool: DaemonWorkspaceToolStatus) => {
       setBusyTool(tool.name);
       setMessage(null);
-      setToolEnabled(tool.name, !tool.enabled)
+      setEnabled(tool.name, !tool.enabled)
         .then(() => reload())
-        .catch((error: unknown) => {
-          setMessage(error instanceof Error ? error.message : String(error));
+        .catch((err: unknown) => {
+          setMessage(err instanceof Error ? err.message : String(err));
         })
         .finally(() => setBusyTool(null));
     },
-    [reload, setToolEnabled],
+    [reload, setEnabled],
   );
 
-  const toggleDetails = useCallback((tool: WebShellWorkspaceToolStatus) => {
+  const toggleDetails = useCallback((tool: DaemonWorkspaceToolStatus) => {
     setExpandedTools((current) => {
       const next = new Set(current);
       if (next.has(tool.name)) {
@@ -88,10 +62,6 @@ export function ToolsDialog({
       return next;
     });
   }, []);
-
-  useEffect(() => {
-    reload();
-  }, [reload]);
 
   useEffect(() => {
     if (selectedIdx >= tools.length && tools.length > 0) {
@@ -152,6 +122,13 @@ export function ToolsDialog({
       <div className={dp('resume-picker-header')}>
         <span className={dp('resume-picker-title')}>{t('tools.title')}</span>
         <span className={dp('resume-picker-count')}>{summary}</span>
+        <button
+          className={dp('resume-picker-close')}
+          onClick={onClose}
+          title="Close"
+        >
+          ESC
+        </button>
       </div>
 
       <div className={dp('resume-picker-search')}>

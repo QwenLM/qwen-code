@@ -12,28 +12,6 @@ import './styles/timeline.css';
 import './styles/components.css';
 
 // Shared UI Components Export
-// Export all shared components from this package
-
-// Daemon UI bindings
-export {
-  DaemonSessionProvider,
-  daemonTranscriptToUnifiedMessages,
-  useDaemonActions,
-  useDaemonConnection,
-  useDaemonFollowupSuggestion,
-  useDaemonPendingPermissions,
-  useDaemonSession,
-  useDaemonTranscriptBlocks,
-  useDaemonTranscriptState,
-  useDaemonTranscriptStore,
-} from './daemon/index';
-export type {
-  DaemonConnectionState,
-  DaemonConnectionStatus,
-  DaemonSessionContextValue,
-  DaemonSessionProviderProps,
-  UseDaemonFollowupSuggestionReturn,
-} from './daemon/index';
 
 // Context
 export {

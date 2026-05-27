@@ -1,14 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
-import type {
-  DaemonWorkspaceSkillStatus,
-  DaemonWorkspaceSkillsStatus,
-} from '@qwen-code/sdk/daemon';
+import {
+  useSkills,
+  type DaemonWorkspaceSkillStatus,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 
 interface SkillsDialogProps {
-  loadStatus: () => Promise<DaemonWorkspaceSkillsStatus>;
   onClose: () => void;
 }
 
@@ -31,35 +30,18 @@ function metaText(skill: DaemonWorkspaceSkillStatus): string {
     .join(' · ');
 }
 
-export function SkillsDialog({ loadStatus, onClose }: SkillsDialogProps) {
+export function SkillsDialog({ onClose }: SkillsDialogProps) {
   const { t } = useI18n();
-  const [status, setStatus] = useState<DaemonWorkspaceSkillsStatus | null>(
-    null,
-  );
+  const { status, loading, error, reload } = useSkills({ autoLoad: true });
   const [selectedIdx, setSelectedIdx] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [message, setMessage] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const skills = useMemo(() => status?.skills ?? [], [status?.skills]);
+  const skills: DaemonWorkspaceSkillStatus[] = useMemo(
+    () => status?.skills ?? [],
+    [status?.skills],
+  );
   const selected = skills[selectedIdx];
-
-  const reload = useCallback(() => {
-    setLoading(true);
-    loadStatus()
-      .then((next) => {
-        setStatus(next);
-        setMessage(next.errors?.[0]?.error ?? null);
-      })
-      .catch((error: unknown) => {
-        setMessage(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => setLoading(false));
-  }, [loadStatus]);
-
-  useEffect(() => {
-    reload();
-  }, [reload]);
+  const message = error?.message ?? status?.errors?.[0]?.error ?? null;
 
   useEffect(() => {
     if (selectedIdx >= skills.length && skills.length > 0) {
@@ -110,6 +92,13 @@ export function SkillsDialog({ loadStatus, onClose }: SkillsDialogProps) {
       <div className={dp('resume-picker-header')}>
         <span className={dp('resume-picker-title')}>{t('skills.title')}</span>
         <span className={dp('resume-picker-count')}>{summary}</span>
+        <button
+          className={dp('resume-picker-close')}
+          onClick={onClose}
+          title="Close"
+        >
+          ESC
+        </button>
       </div>
 
       <div className={dp('resume-picker-search')}>

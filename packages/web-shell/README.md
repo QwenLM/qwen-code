@@ -1,60 +1,119 @@
-# @alife/dataworks-qwen-code-web-shell
+# @qwen-code/web-shell
 
-Qwen Code Web Shell 是面向浏览器的 daemon 会话 UI，可以打包成 React
-组件给其他项目集成。
+Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
+组件嵌入到其他项目中。
 
-## React 组件接入
-
-### 环境要求
+## 环境要求
 
 - React：`^18.0.0 || ^19.0.0`
 - React DOM：`^18.0.0 || ^19.0.0`
+- `@qwen-code/webui`：`>=0.0.1`
+- `@qwen-code/sdk`：`>=0.1.8`
 - 浏览器环境需要能访问 Qwen Code daemon serve 的 HTTP 接口。
 
 组件包会自动注入自身样式，样式已通过 CSS Modules 和组件作用域隔离；
 接入方不需要额外引入全局 CSS。
 
-### 安装
+## 安装
 
 ```bash
-npm install @alife/dataworks-qwen-code-web-shell
+npm install @qwen-code/web-shell
 ```
 
-### 基本用法
+Peer dependencies 需要同时安装：
+
+```bash
+npm install react react-dom @qwen-code/webui @qwen-code/sdk
+```
+
+## 接入方式
+
+WebShell 提供两种接入形态：
+
+### 1. 独立接入（自带 Provider）
+
+适合只需要嵌入一个终端视图的场景。组件内部自建
+`DaemonWorkspaceProvider` + `DaemonSessionProvider`。
 
 ```tsx
-import { WebShell } from '@alife/dataworks-qwen-code-web-shell';
+import { WebShellWithProviders } from '@qwen-code/web-shell';
 
 export function QwenCodePanel() {
   return (
-    <WebShell
+    <WebShellWithProviders
       baseUrl="http://127.0.0.1:4170"
-      token="qwen-local-4170-abc123"
+      token="your-bearer-token"
       initialSessionId="838e1811-9f84-4848-9915-d9a7f01ff5c6"
       onSessionIdChange={(sessionId) => {
         console.log('current session:', sessionId);
       }}
       theme="dark"
       language="zh-CN"
-      onLanguageChange={(language) => {
-        console.log('current language:', language);
-      }}
     />
   );
 }
 ```
 
-### Props
+### 2. 共享 Provider 接入（纯消费者）
 
-| 属性                | 类型                                   | 说明                                                                                               |
-| ------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `baseUrl`           | `string`                               | daemon API 地址。组件化接入时建议显式传入，例如 `http://127.0.0.1:4170`。未传时使用同源 API 路径。 |
-| `token`             | `string`                               | daemon API Bearer token。未传时会从当前 URL 的 `?token=` 中读取。                                  |
-| `initialSessionId`  | `string`                               | 初始要连接的 daemon session id。未传时，独立应用会尝试从 `/session/:id` 路径中读取。               |
-| `onSessionIdChange` | `(sessionId: string) => void`          | 当前 session id 变化时触发。组件化接入建议用它同步外层路由或状态。                                 |
-| `theme`             | `'dark' \| 'light'`                    | UI 主题，默认 `dark`。也可以通过 `/theme` 命令在组件内部切换。                                     |
-| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`   | UI 语言。未传时独立应用会读取 URL、localStorage 或浏览器语言。                                     |
-| `onLanguageChange`  | `(language: WebShellLanguage) => void` | `/language ui` 切换 UI 语言后触发。组件化接入方可在这里持久化语言设置。                            |
+适合同一个 React 应用中多个视图共享同一个 daemon session 的场景（如
+chat + terminal）。宿主自行提供 Provider，WebShell 只消费 hooks。
+
+```tsx
+import {
+  DaemonWorkspaceProvider,
+  DaemonSessionProvider,
+} from '@qwen-code/webui/daemon-react-sdk';
+import { WebShell } from '@qwen-code/web-shell';
+
+export function App() {
+  return (
+    <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170" token="...">
+      <DaemonSessionProvider initialSessionId="...">
+        <ChatPanel />
+        <WebShell theme="dark" language="zh-CN" />
+      </DaemonSessionProvider>
+    </DaemonWorkspaceProvider>
+  );
+}
+```
+
+> **注意**：不要在已有 `DaemonSessionProvider` 下使用
+> `WebShellWithProviders`，否则会创建嵌套的重复 Provider。
+
+## Props
+
+### WebShellWithProviders
+
+包含 `WebShell` 的所有 Props，加上 Provider 配置：
+
+| 属性               | 类型     | 说明                                                 |
+| ------------------ | -------- | ---------------------------------------------------- |
+| `baseUrl`          | `string` | daemon API 地址，未传时使用 `window.location.origin` |
+| `token`            | `string` | daemon API Bearer token                              |
+| `initialSessionId` | `string` | 初始要连接的 session id                              |
+
+### WebShell
+
+| 属性                | 类型                                   | 说明                              |
+| ------------------- | -------------------------------------- | --------------------------------- |
+| `onSessionIdChange` | `(sessionId: string) => void`          | 当前 session id 变化时触发        |
+| `theme`             | `'dark' \| 'light'`                    | UI 主题，默认 `dark`              |
+| `onThemeChange`     | `(theme: WebShellTheme) => void`       | `/theme` 命令切换主题后触发       |
+| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`   | UI 语言                           |
+| `onLanguageChange`  | `(language: WebShellLanguage) => void` | `/language ui` 切换 UI 语言后触发 |
+
+## 架构说明
+
+```text
+@qwen-code/sdk/daemon         ← 协议层（SSE, REST, normalizer）
+@qwen-code/webui/daemon-react-sdk  ← React adapter（Provider, hooks, store）
+@qwen-code/web-shell          ← 终端 UI 组件
+```
+
+- `WebShell` 必须在 `DaemonWorkspaceProvider` 和 `DaemonSessionProvider` 之下使用。
+- `WebShellWithProviders` 是内置 Provider 的便捷 wrapper。
+- 同一个 React 树共享一个 `DaemonSessionProvider` 时只开一条 SSE。
 
 ## 已支持的斜杠命令
 

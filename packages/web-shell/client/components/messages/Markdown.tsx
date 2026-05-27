@@ -1,4 +1,5 @@
-import { memo, useEffect, useState, useRef, type ReactNode } from 'react';
+import { memo, useEffect, useState, type ReactNode } from 'react';
+import { useTheme } from '../../themeContext';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -67,7 +68,7 @@ export function sanitizeSvg(svg: string): string {
 
   doc
     .querySelectorAll(
-      'script, foreignObject, iframe, object, embed, link, style, ' +
+      'script, iframe, object, embed, link, ' +
         'animate, set, animateTransform, animateMotion, ' +
         'image, feImage, mpath',
     )
@@ -138,24 +139,30 @@ export function isSafeImageSrc(url: string | undefined): boolean {
 }
 
 function MermaidBlock({ code }: { code: string }) {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const { t } = useI18n();
+  const appTheme = useTheme();
   const [svg, setSvg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'diagram' | 'code'>('diagram');
+  const [copied, setCopied] = useState(false);
+  const mermaidTheme = appTheme === 'light' ? 'default' : 'dark';
 
   useEffect(() => {
     let cancelled = false;
+    setSvg(null);
+    setError(null);
     const timer = setTimeout(() => {
       import('mermaid').then(async (mod) => {
         if (cancelled) return;
         const mermaid = mod.default;
         mermaid.initialize({
           startOnLoad: false,
-          theme: 'dark',
-          securityLevel: 'strict',
+          theme: mermaidTheme,
+          securityLevel: 'loose',
         });
         try {
           const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-          const { svg: rendered } = await mermaid.render(id, code);
+          const { svg: rendered } = await mermaid.render(id, code.trim());
           const safeSvg = sanitizeSvg(rendered);
           if (!cancelled) {
             if (safeSvg) {
@@ -177,7 +184,17 @@ function MermaidBlock({ code }: { code: string }) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [code]);
+  }, [code, mermaidTheme]);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(code).then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      },
+      () => {},
+    );
+  };
 
   if (error) {
     return (
@@ -192,20 +209,43 @@ function MermaidBlock({ code }: { code: string }) {
     );
   }
 
-  if (!svg) {
-    return (
-      <div className={`${styles.mermaidBlock} ${styles.mermaidLoading}`}>
-        <span>Rendering diagram...</span>
-      </div>
-    );
-  }
-
   return (
-    <div
-      ref={containerRef}
-      className={styles.mermaidBlock}
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
+    <div className={styles.codeBlock}>
+      <div className={styles.codeBlockHeader}>
+        <span className={styles.codeBlockLang}>mermaid</span>
+        <span className={styles.mermaidActions}>
+          <button
+            className={styles.codeBlockCopy}
+            onClick={() =>
+              setViewMode(viewMode === 'diagram' ? 'code' : 'diagram')
+            }
+          >
+            {viewMode === 'diagram'
+              ? t('mermaid.viewCode')
+              : t('mermaid.viewDiagram')}
+          </button>
+          <button className={styles.codeBlockCopy} onClick={handleCopy}>
+            {copied ? t('code.copied') : t('code.copy')}
+          </button>
+        </span>
+      </div>
+      {viewMode === 'code' ? (
+        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+          <code>{code}</code>
+        </pre>
+      ) : !svg ? (
+        <div
+          className={`${styles.mermaidBlock} ${styles.mermaidLoading} ${styles.mermaidInline}`}
+        >
+          <span>{t('mermaid.rendering')}</span>
+        </div>
+      ) : (
+        <div
+          className={`${styles.mermaidBlock} ${styles.mermaidInline}`}
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+      )}
+    </div>
   );
 }
 
@@ -217,6 +257,7 @@ function CodeBlock({
   children: string;
 }) {
   const { t } = useI18n();
+  const appTheme = useTheme();
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -224,6 +265,8 @@ function CodeBlock({
   const lang = match?.[1] || '';
   const code = String(children).replace(/\n$/, '');
   const resolvedLang = SUPPORTED_LANGUAGES.has(lang) ? lang : 'text';
+  const shikiTheme =
+    appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
 
   useEffect(() => {
     if (lang === 'mermaid' || resolvedLang === 'text') {
@@ -236,7 +279,7 @@ function CodeBlock({
     const timer = setTimeout(() => {
       codeToHtml(code, {
         lang: resolvedLang as BundledLanguage,
-        theme: 'github-dark-default',
+        theme: shikiTheme,
       })
         .then((result) => {
           if (!cancelled) setHtml(result);
@@ -250,7 +293,7 @@ function CodeBlock({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [code, lang, resolvedLang]);
+  }, [code, lang, resolvedLang, shikiTheme]);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(code).then(

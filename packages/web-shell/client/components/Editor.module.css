@@ -5,7 +5,7 @@
 .borderTop,
 .borderBottom {
   height: 1px;
-  background: var(--border-color);
+  background: var(--text-secondary);
 }
 
 .line {
@@ -25,6 +25,14 @@
 
 .prefixShell {
   color: var(--warning-color);
+}
+
+.prefixAutoEdit {
+  color: var(--warning-color);
+}
+
+.prefixYolo {
+  color: var(--error-color);
 }
 
 .shellMode .borderTop,

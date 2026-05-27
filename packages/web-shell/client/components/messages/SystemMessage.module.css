@@ -1,9 +1,26 @@
 .message {
-  margin-left: 22px;
   padding: 4px 10px;
   font-size: 12px;
   border-radius: 4px;
   margin-bottom: 8px;
+}
+
+.flushMessage {
+  margin-bottom: 8px;
+}
+
+.message pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.message p {
+  margin: 0 0 8px;
+}
+
+.message p:last-child {
+  margin-bottom: 0;
 }
 
 .info {

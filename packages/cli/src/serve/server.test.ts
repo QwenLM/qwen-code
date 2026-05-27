@@ -71,6 +71,7 @@ import {
 import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type {
   ServeSessionContextStatus,
+  ServeSessionContextUsageStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceEnvStatus,
@@ -254,6 +255,10 @@ interface FakeBridgeOpts {
   sessionContextImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionContextStatus>;
+  sessionContextUsageImpl?: (
+    sessionId: string,
+    opts?: { detail?: boolean },
+  ) => Promise<ServeSessionContextUsageStatus>;
   sessionSupportedCommandsImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
@@ -356,6 +361,7 @@ interface FakeBridge extends HttpAcpBridge {
   workspaceEnvCalls: number;
   workspacePreflightCalls: number;
   sessionContextCalls: string[];
+  sessionContextUsageCalls: string[];
   sessionSupportedCommandsCalls: string[];
   sessionTasksCalls: string[];
   setModelCalls: Array<{
@@ -536,6 +542,34 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspaceCwd: WS_BOUND,
       state: {},
     }));
+  const sessionContextUsageImpl =
+    opts.sessionContextUsageImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      workspaceCwd: WS_BOUND,
+      usage: {
+        modelName: 'test-model',
+        totalTokens: 1000,
+        contextWindowSize: 200000,
+        breakdown: {
+          systemPrompt: 500,
+          builtinTools: 100,
+          mcpTools: 50,
+          memoryFiles: 50,
+          skills: 100,
+          messages: 150,
+          freeSpace: 199000,
+          autocompactBuffer: 50,
+        },
+        builtinTools: [],
+        mcpTools: [],
+        memoryFiles: [],
+        skills: [],
+      },
+      formattedText: 'Context usage: 1000/200000 tokens',
+    }));
+  const sessionContextUsageCalls: string[] = [];
   const sessionSupportedCommandsImpl =
     opts.sessionSupportedCommandsImpl ??
     (async (sessionId) => ({
@@ -634,6 +668,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     listCalls,
     workspaceMcpToolsCalls,
     sessionContextCalls,
+    sessionContextUsageCalls,
     sessionSupportedCommandsCalls,
     sessionTasksCalls,
     setModelCalls,
@@ -767,6 +802,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionContextStatus(sessionId) {
       sessionContextCalls.push(sessionId);
       return sessionContextImpl(sessionId);
+    },
+    async getSessionContextUsageStatus(sessionId, opts) {
+      sessionContextUsageCalls.push(sessionId);
+      return sessionContextUsageImpl(sessionId, opts);
     },
     async getSessionSupportedCommandsStatus(sessionId) {
       sessionSupportedCommandsCalls.push(sessionId);
@@ -1568,6 +1607,96 @@ describe('createServeApp', () => {
       expect(bridge.sessionContextCalls).toEqual(['s-1']);
       expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
       expect(bridge.sessionTasksCalls).toEqual(['s-1']);
+    });
+
+    it('returns session context-usage from the bridge', async () => {
+      const usage: ServeSessionContextUsageStatus = {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: WS_BOUND,
+        usage: {
+          modelName: 'qwen3',
+          totalTokens: 5000,
+          contextWindowSize: 200000,
+          breakdown: {
+            systemPrompt: 2000,
+            builtinTools: 500,
+            mcpTools: 200,
+            memoryFiles: 300,
+            skills: 500,
+            messages: 1500,
+            freeSpace: 195000,
+            autocompactBuffer: 0,
+          },
+          builtinTools: [{ name: 'Read', tokens: 100 }],
+          mcpTools: [],
+          memoryFiles: [],
+          skills: [],
+        },
+        formattedText: 'Context: 5000/200000 tokens',
+      };
+      const bridge = fakeBridge({
+        sessionContextUsageImpl: async () => usage,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-1/context-usage')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(usage);
+      expect(bridge.sessionContextUsageCalls).toEqual(['s-1']);
+    });
+
+    it('passes detail query param to context-usage bridge call', async () => {
+      let receivedOpts: { detail?: boolean } | undefined;
+      const bridge = fakeBridge({
+        sessionContextUsageImpl: async (sessionId, opts) => {
+          receivedOpts = opts;
+          return {
+            v: 1 as const,
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            usage: {
+              modelName: 'qwen3',
+              totalTokens: 0,
+              contextWindowSize: 200000,
+              breakdown: {
+                systemPrompt: 0,
+                builtinTools: 0,
+                mcpTools: 0,
+                memoryFiles: 0,
+                skills: 0,
+                messages: 0,
+                freeSpace: 200000,
+                autocompactBuffer: 0,
+              },
+              builtinTools: [],
+              mcpTools: [],
+              memoryFiles: [],
+              skills: [],
+              showDetails: true,
+            },
+            formattedText: '',
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      await request(app)
+        .get('/session/s-1/context-usage?detail=true')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(receivedOpts).toEqual({ detail: true });
     });
 
     it('maps missing sessions on read-only session routes to 404', async () => {

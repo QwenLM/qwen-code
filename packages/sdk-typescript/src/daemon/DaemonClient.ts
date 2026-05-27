@@ -16,6 +16,7 @@ import type {
   DaemonDeviceFlowState,
   DaemonEvent,
   DaemonSessionContextStatus,
+  DaemonSessionContextUsageStatus,
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
@@ -928,6 +929,28 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /session/:id/context');
         }
         return (await res.json()) as DaemonSessionContextStatus;
+      },
+    );
+  }
+
+  async sessionContextUsage(
+    sessionId: string,
+    opts: { detail?: boolean } = {},
+    clientId?: string,
+  ): Promise<DaemonSessionContextUsageStatus> {
+    const params = new URLSearchParams();
+    if (opts.detail === true) params.set('detail', 'true');
+    const query = params.toString();
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/context-usage${
+        query ? `?${query}` : ''
+      }`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/context-usage');
+        }
+        return (await res.json()) as DaemonSessionContextUsageStatus;
       },
     );
   }

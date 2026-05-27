@@ -307,6 +307,13 @@ export function HelpDialog({ commands, onClose }: HelpDialogProps) {
         <span className={dp('resume-picker-count')}>
           {t('help.commandCount', { count: commands.length })}
         </span>
+        <button
+          className={dp('resume-picker-close')}
+          onClick={onClose}
+          title="Close"
+        >
+          ESC
+        </button>
       </div>
       <div className={dp('resume-picker-sep')} />
       <div className={styles.body}>

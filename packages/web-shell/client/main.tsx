@@ -1,13 +1,24 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import {
+  DaemonWorkspaceProvider,
+  DaemonSessionProvider,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { App } from './App';
-import { removeDaemonTokenFromUrl } from './config/daemon';
+import {
+  getDaemonBaseUrl,
+  getDaemonToken,
+  removeDaemonTokenFromUrl,
+} from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
 removeDaemonTokenFromUrl();
+
+const DAEMON_BASE_URL = getDaemonBaseUrl();
+const DAEMON_TOKEN = getDaemonToken();
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';
@@ -63,11 +74,23 @@ function getInitialLanguage(): WebShellLanguage {
   return normalizeLanguage(readStoredLanguage() ?? navigator.language);
 }
 
+function getSessionIdFromUrl(): string | undefined {
+  const match = window.location.pathname.match(/\/session\/([^/]+)/);
+  if (!match) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined;
+  }
+}
+
 function StandaloneApp() {
   const [theme, setTheme] = useState<StandaloneTheme>(() => getInitialTheme());
   const [language, setLanguage] = useState<WebShellLanguage>(() =>
     getInitialLanguage(),
   );
+  const initialSessionId = useMemo(() => getSessionIdFromUrl(), []);
+  const baseUrl = DAEMON_BASE_URL || window.location.origin;
   const handleThemeChange = useCallback((nextTheme: StandaloneTheme) => {
     setTheme(nextTheme);
     storeTheme(nextTheme);
@@ -78,12 +101,19 @@ function StandaloneApp() {
   }, []);
 
   return (
-    <App
-      theme={theme}
-      onThemeChange={handleThemeChange}
-      language={language}
-      onLanguageChange={handleLanguageChange}
-    />
+    <DaemonWorkspaceProvider baseUrl={baseUrl} token={DAEMON_TOKEN}>
+      <DaemonSessionProvider
+        initialSessionId={initialSessionId}
+        suppressOwnUserEcho
+      >
+        <App
+          theme={theme}
+          onThemeChange={handleThemeChange}
+          language={language}
+          onLanguageChange={handleLanguageChange}
+        />
+      </DaemonSessionProvider>
+    </DaemonWorkspaceProvider>
   );
 }
 

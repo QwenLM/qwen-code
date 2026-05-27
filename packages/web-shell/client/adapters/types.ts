@@ -1,58 +1,30 @@
-export type ToolCallStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
-export type StreamingState = 'idle' | 'waiting' | 'responding' | 'thinking';
+import type {
+  DaemonMessage,
+  DaemonMessageToolCall,
+  DaemonMessageToolCallContent,
+  DaemonMessageToolCallStatus,
+  DaemonMessageToolKind,
+  DaemonMessageToolCallLocation,
+  DaemonMessageTodoItem,
+  DaemonStreamingState,
+} from '@qwen-code/webui/daemon-react-sdk';
 
-export type ToolKind =
-  | 'read'
-  | 'edit'
-  | 'delete'
-  | 'move'
-  | 'search'
-  | 'execute'
-  | 'think'
-  | 'fetch'
-  | 'switch_mode'
-  | 'other';
+export type Message = DaemonMessage;
+export type ACPToolCall = DaemonMessageToolCall;
+export type ToolCallContent = DaemonMessageToolCallContent;
+export type ToolCallStatus = DaemonMessageToolCallStatus;
+export type ToolKind = DaemonMessageToolKind;
+export type ToolCallLocation = DaemonMessageToolCallLocation;
+export type TodoItem = DaemonMessageTodoItem;
+export type StreamingState = DaemonStreamingState;
 
-export interface ToolCallLocation {
-  file: string;
-  line?: number;
-}
-
-export interface DiffContent {
-  type: 'diff';
-  path: string;
-  oldText?: string;
-  newText: string;
-}
-
-export interface TextContent {
-  type: 'content';
-  content: ContentBlock;
-}
-
-export interface TerminalContent {
-  type: 'terminal';
-  terminalId: string;
-}
-
-export type ToolCallContent = TextContent | DiffContent | TerminalContent;
-
-export interface ACPToolCall {
-  callId: string;
-  toolName: string;
-  args?: Record<string, unknown>;
-  status: ToolCallStatus;
-  parentToolCallId?: string;
-  title?: string;
-  content?: ToolCallContent[];
-  rawOutput?: unknown;
-  locations?: ToolCallLocation[];
-  kind?: ToolKind;
-  startTime?: number;
-  endTime?: number;
-  subContent?: string;
-  subTools?: ACPToolCall[];
-}
+export type {
+  DaemonUserMessage as UserMessage,
+  DaemonAssistantMessage as AssistantMessage,
+  DaemonToolGroupMessage as ToolGroupMessage,
+  DaemonPlanMessage as PlanMessage,
+  DaemonSystemMessage as SystemMessage,
+} from '@qwen-code/webui/daemon-react-sdk';
 
 export interface ContentBlock {
   type: 'text' | 'image';
@@ -83,13 +55,6 @@ export interface PermissionRequest {
   kind?: string;
 }
 
-export interface TodoItem {
-  id: string;
-  content: string;
-  status: 'pending' | 'in_progress' | 'completed';
-  priority?: 'high' | 'medium' | 'low';
-}
-
 export interface CommandInfo {
   name: string;
   description: string;
@@ -101,44 +66,3 @@ export interface ModelInfo {
   id: string;
   label?: string;
 }
-
-export interface UserMessage {
-  id: string;
-  role: 'user';
-  content: string;
-  turnIndex?: number;
-}
-
-export interface AssistantMessage {
-  id: string;
-  role: 'assistant';
-  content: string;
-  thinking?: string;
-  isStreaming?: boolean;
-}
-
-export interface ToolGroupMessage {
-  id: string;
-  role: 'tool_group';
-  tools: ACPToolCall[];
-}
-
-export interface PlanMessage {
-  id: string;
-  role: 'plan';
-  todos: TodoItem[];
-}
-
-export interface SystemMessage {
-  id: string;
-  role: 'system';
-  content: string;
-  variant: 'info' | 'error' | 'warning';
-}
-
-export type Message =
-  | UserMessage
-  | AssistantMessage
-  | ToolGroupMessage
-  | PlanMessage
-  | SystemMessage;

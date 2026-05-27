@@ -1,7 +1,7 @@
 .panel {
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
-  border-left: 3px solid var(--assist-color);
+
   border-radius: var(--radius);
   padding: 8px 12px;
   width: 100%;
@@ -77,6 +77,33 @@
   color: var(--text-primary);
   max-height: 400px;
   overflow-y: auto;
+}
+
+.tabBar {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 6px;
+}
+
+.tab {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--text-dimmed);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.tab:hover {
+  color: var(--text-secondary);
+}
+
+.tabActive {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent-color);
 }
 
 .tools {

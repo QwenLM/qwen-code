@@ -1,14 +1,16 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
 import {
-  EditorView,
-  keymap,
-  placeholder,
-  ViewPlugin,
-  ViewUpdate,
-} from '@codemirror/view';
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useCallback,
+  useState,
+} from 'react';
+import { EditorView, keymap, placeholder } from '@codemirror/view';
 import { EditorState, Compartment, Prec } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import {
+  acceptCompletion,
   autocompletion,
   completionStatus,
   startCompletion,
@@ -17,6 +19,7 @@ import {
 import { minimalSetup } from 'codemirror';
 import type { CommandInfo } from '../adapters/types';
 import type { PromptImage } from '../adapters/promptTypes';
+import { useOptionalWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { slashCompletionSource } from '../completions/slashCompletion';
 import { createAtCompletionSource } from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
@@ -26,6 +29,7 @@ import {
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
+import { PromptChevron } from './PromptChevron';
 import styles from './Editor.module.css';
 
 interface EditorProps {
@@ -39,12 +43,17 @@ interface EditorProps {
   queuedMessages?: string[];
   onPopQueuedMessages?: () => string | null;
   onClearQueuedMessages?: () => boolean;
-  prefix?: string;
   currentMode?: string;
   draftText?: string;
   draftVersion?: number;
-  daemonBaseUrl?: string;
-  daemonToken?: string;
+  onFocusActiveAgents?: () => boolean;
+  dialogOpen?: boolean;
+}
+
+export interface EditorHandle {
+  blur(): void;
+  focus(): void;
+  insertText(text: string): void;
 }
 
 const editableCompartment = new Compartment();
@@ -64,24 +73,27 @@ function getModeClass(mode: string, shellMode: boolean): string {
   }
 }
 
-export function Editor({
-  onSubmit,
-  onCycleMode,
-  onToggleShortcuts,
-  disabled = false,
-  placeholderText = 'Type a message...',
-  commands,
-  skills = [],
-  queuedMessages = [],
-  onPopQueuedMessages,
-  onClearQueuedMessages,
-  prefix = '>',
-  currentMode = 'default',
-  draftText,
-  draftVersion,
-  daemonBaseUrl,
-  daemonToken,
-}: EditorProps) {
+export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
+  {
+    onSubmit,
+    onCycleMode,
+    onToggleShortcuts,
+    disabled = false,
+    placeholderText = 'Type a message...',
+    commands,
+    skills = [],
+    queuedMessages = [],
+    onPopQueuedMessages,
+    onClearQueuedMessages,
+    currentMode = 'default',
+    draftText,
+    draftVersion,
+    onFocusActiveAgents,
+    dialogOpen = false,
+  },
+  ref,
+) {
+  const workspace = useOptionalWorkspace();
   const { language, t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -103,13 +115,15 @@ export function Editor({
   onPopQueuedMessagesRef.current = onPopQueuedMessages;
   const onClearQueuedMessagesRef = useRef(onClearQueuedMessages);
   onClearQueuedMessagesRef.current = onClearQueuedMessages;
+  const onFocusActiveAgentsRef = useRef(onFocusActiveAgents);
+  onFocusActiveAgentsRef.current = onFocusActiveAgents;
   const languageRef = useRef(language);
   languageRef.current = language;
-  const daemonBaseUrlRef = useRef(daemonBaseUrl);
-  daemonBaseUrlRef.current = daemonBaseUrl;
-  const daemonTokenRef = useRef(daemonToken);
-  daemonTokenRef.current = daemonToken;
+  const workspaceActionsRef = useRef(workspace?.actions);
+  workspaceActionsRef.current = workspace?.actions;
   const [shellMode, setShellMode] = useState(false);
+  const shellModeRef = useRef(shellMode);
+  shellModeRef.current = shellMode;
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMatches, setSearchMatches] = useState<string[]>([]);
@@ -119,6 +133,9 @@ export function Editor({
   const [pastedImages, setPastedImages] = useState<PromptImage[]>([]);
   const pastedImagesRef = useRef<PromptImage[]>([]);
 
+  const promptHistory = useInputHistory();
+  const shellHistory = useInputHistory('qwen-web-shell-command-history');
+
   const {
     push,
     navigateUp,
@@ -126,7 +143,7 @@ export function Editor({
     reset,
     getReverseMatches,
     resetSearch,
-  } = useInputHistory();
+  } = promptHistory;
   const historyActionsRef = useRef({
     push,
     navigateUp,
@@ -143,6 +160,8 @@ export function Editor({
     getReverseMatches,
     resetSearch,
   };
+  const shellHistoryActionsRef = useRef(shellHistory);
+  shellHistoryActionsRef.current = shellHistory;
   pastedImagesRef.current = pastedImages;
 
   useEffect(() => {
@@ -152,13 +171,19 @@ export function Editor({
       const text = (textOverride ?? view.state.doc.toString()).trim();
       if (!text) return true;
       const images = pastedImagesRef.current;
+      const isShellMode = shellModeRef.current;
       const accepted = onSubmitRef.current(
-        text,
+        isShellMode ? `!${text}` : text,
         images.length > 0 ? [...images] : undefined,
       );
       if (accepted === false) return true;
-      historyActionsRef.current.push(text);
-      historyActionsRef.current.reset();
+      if (isShellMode) {
+        shellHistoryActionsRef.current.push(text);
+        shellHistoryActionsRef.current.reset();
+      } else {
+        historyActionsRef.current.push(text);
+        historyActionsRef.current.reset();
+      }
       setPastedImages([]);
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: '' },
@@ -170,17 +195,11 @@ export function Editor({
       slashCompletionSource(
         () => commandsRef.current,
         () => skillsRef.current,
-        submitText,
         () => languageRef.current,
       ),
-      createAtCompletionSource({
-        get baseUrl() {
-          return daemonBaseUrlRef.current;
-        },
-        get token() {
-          return daemonTokenRef.current;
-        },
-      }),
+      createAtCompletionSource(
+        () => workspaceActionsRef.current?.globWorkspace,
+      ),
     ];
 
     const submitKeymap = keymap.of([
@@ -198,6 +217,10 @@ export function Editor({
       {
         key: 'Escape',
         run: () => {
+          if (shellModeRef.current) {
+            setShellMode(false);
+            return true;
+          }
           if (queuedMessagesRef.current.length === 0) return false;
           return onClearQueuedMessagesRef.current?.() ?? false;
         },
@@ -211,6 +234,16 @@ export function Editor({
         run: (view) => {
           if (completionStatus(view.state) === 'active') return false;
           if (view.state.doc.lines > 1) return false;
+          if (shellModeRef.current) {
+            const current = view.state.doc.toString();
+            const prev = shellHistoryActionsRef.current.navigateUp(current);
+            if (prev === null) return true;
+            view.dispatch({
+              changes: { from: 0, to: view.state.doc.length, insert: prev },
+              selection: { anchor: prev.length },
+            });
+            return true;
+          }
           if (queuedMessagesRef.current.length > 0) {
             const queuedText = onPopQueuedMessagesRef.current?.();
             if (queuedText) {
@@ -240,8 +273,19 @@ export function Editor({
         run: (view) => {
           if (completionStatus(view.state) === 'active') return false;
           if (view.state.doc.lines > 1) return false;
+          if (shellModeRef.current) {
+            const next = shellHistoryActionsRef.current.navigateDown();
+            if (next === null) return true;
+            view.dispatch({
+              changes: { from: 0, to: view.state.doc.length, insert: next },
+              selection: { anchor: next.length },
+            });
+            return true;
+          }
           const next = historyActionsRef.current.navigateDown();
-          if (next === null) return false;
+          if (next === null) {
+            return onFocusActiveAgentsRef.current?.() ?? false;
+          }
           view.dispatch({
             changes: { from: 0, to: view.state.doc.length, insert: next },
             selection: { anchor: next.length },
@@ -256,12 +300,19 @@ export function Editor({
           searchDraftRef.current = query;
           setSearchMode(true);
           setSearchQuery(query);
-          setSearchMatches(historyActionsRef.current.getReverseMatches(query));
+          const history = shellModeRef.current
+            ? shellHistoryActionsRef.current
+            : historyActionsRef.current;
+          setSearchMatches(history.getReverseMatches(query));
           setSearchActiveIndex(0);
-          historyActionsRef.current.resetSearch();
+          history.resetSearch();
           setTimeout(() => searchInputRef.current?.focus(), 0);
           return true;
         },
+      },
+      {
+        key: 'Tab',
+        run: acceptCompletion,
       },
       {
         key: 'Shift-Tab',
@@ -271,17 +322,6 @@ export function Editor({
         },
       },
     ]);
-
-    const shellModeDetector = ViewPlugin.fromClass(
-      class {
-        update(update: ViewUpdate) {
-          if (update.docChanged) {
-            const text = update.state.doc.toString();
-            setShellMode(text.startsWith('!'));
-          }
-        }
-      },
-    );
 
     const slashCompletionRestarter = EditorView.updateListener.of((update) => {
       if (!update.docChanged || completionStatus(update.state) === 'active') {
@@ -333,9 +373,16 @@ export function Editor({
         editableCompartment.of(EditorView.editable.of(true)),
         inputHighlight,
         inputHighlightTheme,
-        shellModeDetector,
         slashCompletionRestarter,
         EditorView.inputHandler.of((view, from, to, insert) => {
+          if (
+            insert === '!' &&
+            view.state.doc.toString() === '' &&
+            completionStatus(view.state) !== 'active'
+          ) {
+            setShellMode((value) => !value);
+            return true;
+          }
           if (
             insert === '?' &&
             view.state.doc.toString() === '' &&
@@ -494,8 +541,18 @@ export function Editor({
   }, [draftText, draftVersion]);
 
   useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    if (dialogOpen) {
+      view.contentDOM.blur();
+    } else {
+      view.focus();
+    }
+  }, [dialogOpen]);
+
+  useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (disabledRef.current || searchMode) return;
+      if (disabledRef.current || searchMode || dialogOpen) return;
       if (event.defaultPrevented) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key.length !== 1) return;
@@ -505,6 +562,11 @@ export function Editor({
       if (!view || view.hasFocus) return;
 
       event.preventDefault();
+      if (event.key === '!' && view.state.doc.toString() === '') {
+        setShellMode((value) => !value);
+        view.focus();
+        return;
+      }
       const selection = view.state.selection.main;
       view.dispatch({
         changes: { from: selection.from, to: selection.to, insert: event.key },
@@ -524,11 +586,48 @@ export function Editor({
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [searchMode]);
+  }, [searchMode, dialogOpen]);
 
   const focus = useCallback(() => {
     viewRef.current?.focus();
   }, []);
+
+  const blur = useCallback(() => {
+    viewRef.current?.contentDOM.blur();
+  }, []);
+
+  const insertText = useCallback((text: string) => {
+    const view = viewRef.current;
+    if (!view || !text) {
+      view?.focus();
+      return;
+    }
+    const selection = view.state.selection.main;
+    view.dispatch({
+      changes: { from: selection.from, to: selection.to, insert: text },
+      selection: { anchor: selection.from + text.length },
+      scrollIntoView: true,
+    });
+    view.focus();
+    if (text === '/' || text === '@') {
+      window.setTimeout(() => {
+        const nextView = viewRef.current;
+        if (nextView && nextView.hasFocus) {
+          startCompletion(nextView);
+        }
+      }, 0);
+    }
+  }, []);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      blur,
+      focus,
+      insertText,
+    }),
+    [blur, focus, insertText],
+  );
 
   const replaceEditorText = useCallback((text: string) => {
     const view = viewRef.current;
@@ -549,7 +648,10 @@ export function Editor({
       setSearchQuery('');
       setSearchMatches([]);
       setSearchActiveIndex(0);
-      historyActionsRef.current.resetSearch();
+      const history = shellModeRef.current
+        ? shellHistoryActionsRef.current
+        : historyActionsRef.current;
+      history.resetSearch();
       viewRef.current?.focus();
     },
     [replaceEditorText],
@@ -563,16 +665,22 @@ export function Editor({
       const text = match.trim();
       if (!text) return;
       const images = pastedImagesRef.current;
+      const isShellMode = shellModeRef.current;
       const accepted = onSubmitRef.current(
-        text,
+        isShellMode ? `!${text}` : text,
         images.length > 0 ? [...images] : undefined,
       );
       if (accepted === false) {
         replaceEditorText(match);
         return;
       }
-      historyActionsRef.current.push(text);
-      historyActionsRef.current.reset();
+      if (isShellMode) {
+        shellHistoryActionsRef.current.push(text);
+        shellHistoryActionsRef.current.reset();
+      } else {
+        historyActionsRef.current.push(text);
+        historyActionsRef.current.reset();
+      }
       setPastedImages([]);
       replaceEditorText('');
     },
@@ -621,9 +729,12 @@ export function Editor({
   const handleSearchInput = (e: React.ChangeEvent<HTMLInputElement>) => {
     const q = e.target.value;
     setSearchQuery(q);
-    setSearchMatches(historyActionsRef.current.getReverseMatches(q));
+    const history = shellModeRef.current
+      ? shellHistoryActionsRef.current
+      : historyActionsRef.current;
+    setSearchMatches(history.getReverseMatches(q));
     setSearchActiveIndex(0);
-    historyActionsRef.current.resetSearch();
+    history.resetSearch();
   };
 
   const modeClass = getModeClass(currentMode, shellMode);
@@ -641,6 +752,25 @@ export function Editor({
   const visibleSearchMatches = searchMatches.slice(
     visibleSearchStart,
     visibleSearchStart + 6,
+  );
+  const prefixClass = [
+    styles.prefix,
+    shellMode
+      ? styles.prefixShell
+      : currentMode === 'yolo'
+        ? styles.prefixYolo
+        : currentMode === 'auto-edit'
+          ? styles.prefixAutoEdit
+          : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const prefixContent = shellMode ? (
+    '!'
+  ) : currentMode === 'yolo' ? (
+    '*'
+  ) : (
+    <PromptChevron />
   );
 
   return (
@@ -712,14 +842,10 @@ export function Editor({
         </div>
       )}
       <div className={styles.line}>
-        <span
-          className={`${styles.prefix} ${shellMode ? styles.prefixShell : ''}`}
-        >
-          {shellMode ? '!' : prefix}
-        </span>
+        <span className={prefixClass}>{prefixContent}</span>
         <div ref={containerRef} className={styles.wrapper} />
       </div>
       <div className={styles.borderBottom} />
     </div>
   );
-}
+});

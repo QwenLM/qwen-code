@@ -12,6 +12,11 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
+    "./daemon-react-sdk": {
+      "types": "./dist/daemon-react-sdk.d.ts",
+      "import": "./dist/daemon-react-sdk.js",
+      "require": "./dist/daemon-react-sdk.cjs"
+    },
     "./icons": {
       "types": "./dist/components/icons/index.d.ts",
       "import": "./dist/components/icons/index.js",
