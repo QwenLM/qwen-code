@@ -485,6 +485,42 @@ describe('BaseLlmClient', () => {
       expect(result).toEqual({ answer: 'actual' });
     });
 
+    it('should return the enclosing object, not a nested inner object', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{"result":{"status":"ok"}}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ result: { status: 'ok' } });
+    });
+
+    it('should repair the last unquoted-key JSON candidate with a quoted string value', async () => {
+      const mockResponse = createMockResponseWithText(
+        'Format example: {"status":"ok"}\nResult: {status: "complete"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ status: 'complete' });
+    });
+
+    it('should fall back to an earlier JSON candidate when the last one fails parsing and repair', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{"good":1} some text {bad json,}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ good: 1 });
+    });
+
     it('should parse a JSON object containing arrays with nested objects', async () => {
       const mockResponse = createMockResponseWithText(
         '{"data":[{"x":1}],"ok":true}',
@@ -529,6 +565,16 @@ describe('BaseLlmClient', () => {
       const result = await client.generateJson(defaultOptions);
 
       expect(result).toEqual({ color: 'blue' });
+    });
+
+    it('should repair unquoted keys when typed values are present without trailing comma', async () => {
+      const mockResponse = createMockResponseWithText('{count:42}');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ count: 42 });
     });
 
     it('should not repair prose fragments into fabricated JSON objects', async () => {

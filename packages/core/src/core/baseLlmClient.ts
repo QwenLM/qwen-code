@@ -550,14 +550,17 @@ function parseJsonObjectFromText(
     withoutFence = withoutFence.replace(/\s*```$/i, '');
   }
 
-  for (const jsonSlice of findJsonObjectSlices(withoutFence)
-    .slice()
-    .reverse()) {
+  const jsonSlices = findJsonObjectSlices(withoutFence);
+  for (const jsonSlice of jsonSlices.slice().reverse()) {
     let parsed: unknown;
     try {
       parsed = JSON.parse(jsonSlice);
     } catch {
-      if (!shouldAttemptJsonRepair(jsonSlice)) {
+      if (
+        !shouldAttemptJsonRepair(jsonSlice, {
+          allowUnquotedKeyStringValues: jsonSlices.length > 1,
+        })
+      ) {
         continue;
       }
       try {
@@ -578,14 +581,23 @@ function parseJsonObjectFromText(
   return undefined;
 }
 
-function shouldAttemptJsonRepair(jsonSlice: string): boolean {
+function shouldAttemptJsonRepair(
+  jsonSlice: string,
+  options: { allowUnquotedKeyStringValues?: boolean } = {},
+): boolean {
   if (/"[^"]+"\s*:/.test(jsonSlice)) {
     return true;
   }
   if (/,\s*[}\]]/.test(jsonSlice)) {
     return /:\s*(?:"|[-\d[{]|\btrue\b|\bfalse\b|\bnull\b)/.test(jsonSlice);
   }
-  return /:\s*(?:[-\d[{]|\btrue\b|\bfalse\b|\bnull\b)/.test(jsonSlice);
+  if (/:\s*(?:[-\d[{]|\btrue\b|\bfalse\b|\bnull\b)/.test(jsonSlice)) {
+    return true;
+  }
+  return Boolean(
+    options.allowUnquotedKeyStringValues &&
+      /[{,]\s*[A-Za-z_$][\w$-]*\s*:\s*"[^"]*"\s*(?:[,}])/.test(jsonSlice),
+  );
 }
 
 function findJsonObjectSlices(text: string): string[] {
@@ -630,6 +642,7 @@ function findJsonObjectSlices(text: string): string[] {
     const slice = findJsonObjectSliceFrom(text, i);
     if (slice) {
       slices.push(slice);
+      i += slice.length - 1;
     }
   }
 
