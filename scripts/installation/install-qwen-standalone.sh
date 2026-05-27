@@ -933,7 +933,7 @@ validate_archive_entry_path() {
     esac
 }
 
-archive_contains_symlinks() {
+archive_contains_symlinks_or_hardlinks() {
     local archive_path="$1"
 
     case "${archive_path}" in
@@ -941,7 +941,7 @@ archive_contains_symlinks() {
             unzip -Z -v "${archive_path}" 2>/dev/null | grep -E 'Unix file attributes \(12[0-7]{4} octal\)' >/dev/null
             ;;
         *.tar.gz|*.tgz|*.tar.xz)
-            tar -tvf "${archive_path}" 2>/dev/null | awk '$1 ~ /^l/ { found=1 } END { exit found ? 0 : 1 }'
+            tar -tvf "${archive_path}" 2>/dev/null | awk '$1 ~ /^[lh]/ { found=1 } END { exit found ? 0 : 1 }'
             ;;
         *)
             return 1
@@ -982,8 +982,8 @@ validate_archive_contents() {
         return 1
     fi
 
-    if archive_contains_symlinks "${archive_path}"; then
-        log_error "Archive contains symlinks; refusing to install."
+    if archive_contains_symlinks_or_hardlinks "${archive_path}"; then
+        log_error "Archive contains symlinks or hardlinks; refusing to install."
         return 1
     fi
 
@@ -1284,6 +1284,9 @@ install_standalone() {
         return 1
     fi
 
+    # Suppress INT/TERM during the critical mv swap to avoid leaving
+    # INSTALL_LIB_DIR absent if the user presses Ctrl+C between the two moves.
+    trap '' INT TERM
     if [[ -e "${INSTALL_LIB_DIR}" ]]; then
         mv "${INSTALL_LIB_DIR}" "${old_install_dir}"
     fi
@@ -1292,10 +1295,14 @@ install_standalone() {
         if [[ -e "${old_install_dir}" ]]; then
             mv "${old_install_dir}" "${INSTALL_LIB_DIR}"
         fi
+        trap 'restore_cursor >&2; kill_active_download; cleanup_temp_dirs; exit 130' INT
+        trap 'restore_cursor >&2; kill_active_download; cleanup_temp_dirs; exit 143' TERM
         rm -rf "${temp_dir}" "${wrapper_tmp}"
         log_error "Failed to install standalone archive to ${INSTALL_LIB_DIR}."
         return 1
     fi
+    trap 'restore_cursor >&2; kill_active_download; cleanup_temp_dirs; exit 130' INT
+    trap 'restore_cursor >&2; kill_active_download; cleanup_temp_dirs; exit 143' TERM
 
     if ! mv -f "${wrapper_tmp}" "${INSTALL_BIN_DIR}/qwen"; then
         rm -rf "${INSTALL_LIB_DIR}" "${wrapper_tmp}"

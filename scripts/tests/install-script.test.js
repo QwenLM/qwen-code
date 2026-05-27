@@ -1437,6 +1437,14 @@ describe('standalone release packaging', () => {
     await expect(
       verifyReleaseBaseUrl('https://sub.localhost./releases/'),
     ).rejects.toThrow(/must not target a private network/);
+    // IPv4-mapped IPv6
+    await expect(
+      verifyReleaseBaseUrl('https://[::ffff:127.0.0.1]/releases/'),
+    ).rejects.toThrow(/must not target a private network/);
+    // IPv4-compatible IPv6
+    await expect(
+      verifyReleaseBaseUrl('https://[::7f00:1]/releases/'),
+    ).rejects.toThrow(/must not target a private network/);
   });
 
   it('downloads release archive bodies instead of relying on HEAD probes', async () => {
@@ -2073,6 +2081,20 @@ describe('isPrivateOrReservedHost', () => {
     expect(isPrivateOrReservedHost('::ffff:abcd:7f00:1')).toBe(false);
   });
 
+  it('blocks IPv4-compatible IPv6 addresses (deprecated but parseable)', async () => {
+    const { isPrivateOrReservedHost } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    // ::7f00:1 → 127.0.0.1 (loopback)
+    expect(isPrivateOrReservedHost('::7f00:1')).toBe(true);
+    // ::a9fe:a9fe → 169.254.169.254 (cloud metadata)
+    expect(isPrivateOrReservedHost('::a9fe:a9fe')).toBe(true);
+    // ::a00:1 → 10.0.0.1 (private)
+    expect(isPrivateOrReservedHost('::a00:1')).toBe(true);
+    // ::c0a8:101 → 192.168.1.1 (private)
+    expect(isPrivateOrReservedHost('::c0a8:101')).toBe(true);
+  });
+
   it('allows public IP addresses', async () => {
     const { isPrivateOrReservedHost } = await import(
       installationReleaseVerificationScriptUrl
@@ -2081,6 +2103,8 @@ describe('isPrivateOrReservedHost', () => {
     expect(isPrivateOrReservedHost('142.250.80.46')).toBe(false);
     expect(isPrivateOrReservedHost('example.com')).toBe(false);
     expect(isPrivateOrReservedHost('example.com.')).toBe(false);
+    // Public IPv6
+    expect(isPrivateOrReservedHost('2607:f8b0:4004:800::200e')).toBe(false);
   });
 });
 

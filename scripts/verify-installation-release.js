@@ -363,6 +363,12 @@ function isPrivateOrReservedHost(hostname) {
     return false;
   }
 
+  // IPv4-compatible IPv6 (deprecated RFC 4291 §2.5.5.1): ::x.x.x.x or ::HHHH:HHHH
+  const compatIpv4 = ipv4FromCompatibleIpv6(normalized);
+  if (compatIpv4) {
+    return isPrivateOrReservedIpv4(compatIpv4);
+  }
+
   return isPrivateOrReservedIpv6(normalized);
 }
 
@@ -436,6 +442,36 @@ function ipv4FromMappedIpv6(value) {
   }
   const high = Number.parseInt(relevantParts[0], 16);
   const low = Number.parseInt(relevantParts[1], 16);
+  return `${(high >> 8) & 255}.${high & 255}.${(low >> 8) & 255}.${low & 255}`;
+}
+
+// Detect IPv4-compatible IPv6 addresses (::x.x.x.x or ::HHHH:HHHH form).
+// These are deprecated (RFC 4291) but Node.js URL parser still accepts them.
+function ipv4FromCompatibleIpv6(value) {
+  // Must start with :: but NOT ::ffff: (already handled by ipv4FromMappedIpv6)
+  if (!value.startsWith('::') || /^::ffff:/i.test(value)) {
+    return null;
+  }
+  const suffix = value.slice(2);
+  if (!suffix || suffix.startsWith(':')) {
+    return null;
+  }
+
+  // Dotted-quad form: ::169.254.169.254
+  if (parseIpv4Octets(suffix)) {
+    return suffix;
+  }
+
+  // Hex form: ::a9fe:a9fe (two hex groups encoding 4 IPv4 octets)
+  const hexParts = suffix.split(':');
+  if (
+    hexParts.length !== 2 ||
+    !hexParts.every((part) => /^[0-9a-f]{1,4}$/i.test(part))
+  ) {
+    return null;
+  }
+  const high = Number.parseInt(hexParts[0], 16);
+  const low = Number.parseInt(hexParts[1], 16);
   return `${(high >> 8) & 255}.${high & 255}.${(low >> 8) & 255}.${low & 255}`;
 }
 

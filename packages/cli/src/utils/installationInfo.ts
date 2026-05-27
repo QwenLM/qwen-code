@@ -250,7 +250,8 @@ function isStandaloneInstallDir(installDir: string): boolean {
         : path.join(installDir, 'node', 'bin', 'node');
 
     return fs.existsSync(qwenBin) && fs.existsSync(nodeBin);
-  } catch {
+  } catch (err) {
+    debugLogger.error('Standalone detection failed:', installDir, err);
     return false;
   }
 }
