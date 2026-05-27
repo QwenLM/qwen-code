@@ -8,7 +8,11 @@ import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
-import { APPROVAL_MODES, TrustGateError } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  SessionService,
+  TrustGateError,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   allowOriginCors,
@@ -56,6 +60,7 @@ import {
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
   WorkspaceMismatchError,
+  type BridgeSessionSummary,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
 import {
@@ -162,6 +167,49 @@ export function resolveBridgeFsFactory(input: {
     boundWorkspace: input.boundWorkspace,
     trusted: input.trusted,
     emit: input.emit ?? createDefaultFsAuditEmit(),
+  });
+}
+
+const WORKSPACE_SESSION_LIST_SIZE = 100;
+
+async function listWorkspaceSessionsForResponse(
+  bridge: HttpAcpBridge,
+  workspaceCwd: string,
+): Promise<BridgeSessionSummary[]> {
+  const persisted = await new SessionService(workspaceCwd).listSessions({
+    size: WORKSPACE_SESSION_LIST_SIZE,
+  });
+  const bySessionId = new Map<string, BridgeSessionSummary>();
+
+  for (const item of persisted.items) {
+    bySessionId.set(item.sessionId, {
+      sessionId: item.sessionId,
+      workspaceCwd: item.cwd,
+      createdAt: item.startTime,
+      updatedAt: new Date(item.mtime).toISOString(),
+      title: item.customTitle ?? item.prompt,
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+  }
+
+  for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
+    const existing = bySessionId.get(live.sessionId);
+    bySessionId.set(live.sessionId, {
+      ...existing,
+      ...live,
+      createdAt: existing?.createdAt ?? live.createdAt,
+      title: live.title ?? existing?.title,
+      updatedAt: live.updatedAt ?? existing?.updatedAt,
+      clientCount: live.clientCount,
+      hasActivePrompt: live.hasActivePrompt,
+    });
+  }
+
+  return [...bySessionId.values()].sort((a, b) => {
+    const aTime = Date.parse(a.updatedAt ?? a.createdAt);
+    const bTime = Date.parse(b.updatedAt ?? b.createdAt);
+    return bTime - aTime;
   });
 }
 
@@ -712,6 +760,17 @@ export function createServeApp(
   app.use(bearerAuth(opts.token));
 
   app.use(express.json({ limit: '10mb' }));
+  app.use(
+    (
+      err: unknown,
+      _req: import('express').Request,
+      res: import('express').Response,
+      next: import('express').NextFunction,
+    ) => {
+      if (sendJsonBodyParserError(res, err)) return;
+      next(err);
+    },
+  );
 
   if (!exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
@@ -779,11 +838,42 @@ export function createServeApp(
     }
   });
 
+  app.get('/workspace/mcp/:server/tools', async (req, res) => {
+    const serverName = req.params['server'];
+    if (!serverName || typeof serverName !== 'string') {
+      res.status(400).json({
+        error: 'Server name path parameter is required',
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    if (serverName.length > MAX_SERVER_NAME_LENGTH) {
+      res.status(400).json({
+        error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    try {
+      res.status(200).json(await bridge.getWorkspaceMcpToolsStatus(serverName));
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/mcp/:server/tools' });
+    }
+  });
+
   app.get('/workspace/skills', async (_req, res) => {
     try {
       res.status(200).json(await bridge.getWorkspaceSkillsStatus());
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/skills' });
+    }
+  });
+
+  app.get('/workspace/tools', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceToolsStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/tools' });
     }
   });
 
@@ -1527,6 +1617,27 @@ export function createServeApp(
     }
   });
 
+  app.post('/session/:id/detach', mutate(), async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      await bridge.detachClient(sessionId, clientId);
+      res.status(204).end();
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/detach',
+        sessionId,
+      });
+    }
+  });
+
   app.post('/session/:id/cancel', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
@@ -1568,13 +1679,13 @@ export function createServeApp(
     }
   });
 
-  app.patch('/session/:id/metadata', (req, res) => {
+  app.patch('/session/:id/metadata', async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
-    const displayName = body['displayName'];
-    if (displayName !== undefined && typeof displayName !== 'string') {
+    const rawDisplayName = body['displayName'];
+    if (rawDisplayName !== undefined && typeof rawDisplayName !== 'string') {
       res.status(400).json({
         error: '`displayName` must be a string',
         code: 'invalid_metadata',
@@ -1582,12 +1693,28 @@ export function createServeApp(
       });
       return;
     }
+    const displayName =
+      typeof rawDisplayName === 'string'
+        ? rawDisplayName.slice(0, 256)
+        : undefined;
     try {
       const effective = bridge.updateSessionMetadata(
         sessionId,
         { displayName },
         clientId !== undefined ? { clientId } : undefined,
       );
+      if (displayName !== undefined) {
+        try {
+          await new SessionService(boundWorkspace).renameSession(
+            sessionId,
+            displayName,
+          );
+        } catch {
+          // Best-effort: session file may not exist yet (fresh session
+          // with no turns written). The in-memory update still applies
+          // for the lifetime of this daemon process.
+        }
+      }
       res.status(200).json({ sessionId, ...effective });
     } catch (err) {
       sendBridgeError(res, err, {
@@ -1597,7 +1724,7 @@ export function createServeApp(
     }
   });
 
-  app.get('/workspace/:id/sessions', (req, res) => {
+  app.get('/workspace/:id/sessions', async (req, res) => {
     // Express decodes URL-encoded path params automatically; clients pass
     // the absolute workspace cwd encoded (e.g.
     // GET /workspace/%2Fwork%2Fa/sessions).
@@ -1620,8 +1747,20 @@ export function createServeApp(
       });
       return;
     }
-    const sessions = bridge.listWorkspaceSessions(workspaceCwd);
-    res.status(200).json({ sessions });
+    try {
+      const sessions = await listWorkspaceSessionsForResponse(bridge, key);
+      res.status(200).json({ sessions });
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: failed to list sessions for workspace ${safeLogValue(
+          key,
+        )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+      );
+      res.status(500).json({
+        error: 'Failed to list sessions',
+        code: 'session_list_failed',
+      });
+    }
   });
 
   app.post('/session/:id/model', mutate(), async (req, res) => {
@@ -2403,29 +2542,7 @@ export function createServeApp(
       res: import('express').Response,
       _next: import('express').NextFunction,
     ) => {
-      if (
-        err instanceof SyntaxError &&
-        'status' in err &&
-        (err as { status: number }).status === 400
-      ) {
-        res.status(400).json({ error: 'Invalid JSON in request body' });
-        return;
-      }
-      // body-parser raises a typed error with `status: 413` when a
-      // request body exceeds the `express.json({ limit: '10mb' })`
-      // ceiling. Without this branch it falls through to the 500 path
-      // and clients see a misleading "Internal server error" instead
-      // of a clear "payload too large" — which is the kind of error
-      // they can actually act on (chunk the request, raise the limit).
-      if (
-        err &&
-        typeof err === 'object' &&
-        'status' in err &&
-        (err as { status: number }).status === 413
-      ) {
-        res.status(413).json({ error: 'Request body too large (max 10 MB)' });
-        return;
-      }
+      if (sendJsonBodyParserError(res, err)) return;
       writeStderrLine(
         `qwen serve: unhandled error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
@@ -2436,6 +2553,36 @@ export function createServeApp(
   );
 
   return app;
+}
+
+function sendJsonBodyParserError(
+  res: import('express').Response,
+  err: unknown,
+): boolean {
+  if (
+    err instanceof SyntaxError &&
+    'status' in err &&
+    (err as { status: number }).status === 400
+  ) {
+    res.status(400).json({ error: 'Invalid JSON in request body' });
+    return true;
+  }
+  // body-parser raises a typed error with `status: 413` when a
+  // request body exceeds the `express.json({ limit: '10mb' })`
+  // ceiling. Without this branch it falls through to the 500 path
+  // and clients see a misleading "Internal server error" instead
+  // of a clear "payload too large" — which is the kind of error
+  // they can actually act on (chunk the request, raise the limit).
+  if (
+    err &&
+    typeof err === 'object' &&
+    'status' in err &&
+    (err as { status: number }).status === 413
+  ) {
+    res.status(413).json({ error: 'Request body too large (max 10 MB)' });
+    return true;
+  }
+  return false;
 }
 
 /**

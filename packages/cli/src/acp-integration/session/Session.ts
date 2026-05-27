@@ -24,6 +24,7 @@ import type {
   StreamEvent,
   ChatCompressionInfo,
 } from '@qwen-code/qwen-code-core';
+import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   AuthType,
   ApprovalMode,
@@ -469,7 +470,7 @@ export class Session implements SessionContext {
     const hadCron = !!this.cronAbortController;
 
     if (!hadPrompt && !hadCron) {
-      throw new Error('Not currently generating');
+      throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
     }
 
     if (this.pendingPrompt) {

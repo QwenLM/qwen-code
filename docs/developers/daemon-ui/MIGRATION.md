@@ -263,9 +263,7 @@ function renderTool(block) {
   return (
     <ToolBlock block={block}>
       {block.subagentType && <SubagentBadge type={block.subagentType} />}
-      {children.length > 0 && (
-        <Indent>{children.map(renderTool)}</Indent>
-      )}
+      {children.length > 0 && <Indent>{children.map(renderTool)}</Indent>}
     </ToolBlock>
   );
 }

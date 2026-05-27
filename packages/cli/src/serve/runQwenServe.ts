@@ -20,6 +20,7 @@ import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import { parseAllowOriginPatterns } from './auth.js';
+import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
 } from './permissionAudit.js';

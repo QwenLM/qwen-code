@@ -31,10 +31,12 @@ import type {
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
   HeartbeatResult,
@@ -460,6 +462,21 @@ export class DaemonClient {
     );
   }
 
+  async workspaceMcpTools(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpToolsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/tools`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/mcp/:server/tools');
+        }
+        return (await res.json()) as DaemonWorkspaceMcpToolsStatus;
+      },
+    );
+  }
+
   async workspaceSkills(): Promise<DaemonWorkspaceSkillsStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/skills`,
@@ -798,6 +815,19 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace/preflight');
         }
         return (await res.json()) as DaemonWorkspacePreflightStatus;
+      },
+    );
+  }
+
+  async workspaceTools(): Promise<DaemonWorkspaceToolsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/tools`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/tools');
+        }
+        return (await res.json()) as DaemonWorkspaceToolsStatus;
       },
     );
   }

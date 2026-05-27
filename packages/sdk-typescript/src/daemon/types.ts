@@ -159,6 +159,8 @@ export interface DaemonSessionSummary {
   sessionId: string;
   workspaceCwd: string;
   createdAt?: string;
+  updatedAt?: string;
+  title?: string;
   displayName?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
@@ -304,6 +306,26 @@ export interface DaemonWorkspaceMcpStatus {
    * resolves to `off`. Pre-PR-14 daemons omit the field.
    */
   budgets?: DaemonMcpBudgetStatusCell[];
+}
+
+export interface DaemonWorkspaceMcpToolStatus {
+  name: string;
+  serverToolName?: string;
+  description?: string;
+  schema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+  isValid: boolean;
+  invalidReason?: string;
+}
+
+export interface DaemonWorkspaceMcpToolsStatus {
+  v: 1;
+  workspaceCwd: string;
+  serverName: string;
+  initialized: boolean;
+  acpChannelLive: boolean;
+  tools: DaemonWorkspaceMcpToolStatus[];
+  errors?: DaemonStatusCell[];
 }
 
 export type DaemonSkillLevel = 'project' | 'user' | 'extension' | 'bundled';
@@ -675,6 +697,22 @@ export interface DaemonWorkspacePreflightStatus {
   initialized: true;
   acpChannelLive: boolean;
   cells: DaemonPreflightCell[];
+  errors?: DaemonStatusCell[];
+}
+
+export interface DaemonWorkspaceToolStatus {
+  name: string;
+  displayName?: string;
+  description?: string;
+  enabled: boolean;
+}
+
+export interface DaemonWorkspaceToolsStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: true;
+  acpChannelLive: boolean;
+  tools: DaemonWorkspaceToolStatus[];
   errors?: DaemonStatusCell[];
 }
 

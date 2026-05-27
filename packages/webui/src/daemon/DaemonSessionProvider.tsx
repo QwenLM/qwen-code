@@ -481,7 +481,9 @@ export function useDaemonPendingPermissions() {
   return useMemo(
     () =>
       blocks.filter(
-        (block): block is Extract<DaemonTranscriptBlock, { kind: 'permission' }> =>
+        (
+          block,
+        ): block is Extract<DaemonTranscriptBlock, { kind: 'permission' }> =>
           block.kind === 'permission' && block.resolved === undefined,
       ),
     [blocks],

@@ -909,7 +909,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks).toMatchObject([
       {
         kind: 'tool',
-        toolCallId: 'daemon-plan',
+        toolCallId: 'daemon-plan-60',
         toolKind: 'updated_plan',
         content: [
           {
@@ -920,6 +920,53 @@ describe('daemon UI normalizer and transcript reducer', () => {
             },
           },
         ],
+      },
+    ]);
+  });
+
+  it('keeps each plan session update as a separate visible block', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 63,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: 'Design API', status: 'in_progress' }],
+          },
+        },
+      }),
+      { now: 2 },
+    );
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 64,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: 'Design API', status: 'completed' }],
+          },
+        },
+      }),
+      { now: 3 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'tool',
+        toolCallId: 'daemon-plan-63',
+        toolKind: 'updated_plan',
+      },
+      {
+        kind: 'tool',
+        toolCallId: 'daemon-plan-64',
+        toolKind: 'updated_plan',
       },
     ]);
   });
@@ -998,7 +1045,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(state.blocks).toMatchObject([
       {
         kind: 'tool',
-        toolCallId: 'daemon-plan',
+        toolCallId: 'daemon-plan-61',
         content: [
           {
             type: 'content',

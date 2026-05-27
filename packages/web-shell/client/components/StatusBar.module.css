@@ -1,0 +1,55 @@
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 2ch;
+  font-size: 13px;
+  color: var(--text-dimmed);
+  flex-shrink: 0;
+}
+
+.left,
+.right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.left {
+  position: relative;
+}
+
+.modeLabel {
+  font-size: 13px;
+}
+
+.modePlan {
+  color: var(--success-color);
+}
+
+.modeAutoEdit {
+  color: var(--warning-color);
+}
+
+.modeYolo {
+  color: var(--error-color);
+}
+
+.modeHint {
+  color: var(--text-dimmed);
+  font-size: 12px;
+}
+
+.model {
+  color: var(--text-dimmed);
+  font-size: 12px;
+}
+
+.disconnected {
+  color: var(--error-color);
+}
+
+.context {
+  font-size: 11px;
+  color: var(--text-dimmed);
+}

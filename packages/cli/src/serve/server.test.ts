@@ -9,7 +9,7 @@ import type { ServerResponse } from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, it, expect, afterEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import {
   createServeApp,
@@ -35,14 +35,21 @@ import type {
   SetSessionModelRequest,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
-import { ApprovalMode, TrustGateError } from '@qwen-code/qwen-code-core';
 import {
+  ApprovalMode,
+  Storage,
+  TrustGateError,
+} from '@qwen-code/qwen-code-core';
+import {
+  CancelSentinelCollisionError,
   InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   MAX_WORKSPACE_PATH_LENGTH,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  PermissionForbiddenError,
+  PermissionPolicyNotImplementedError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -67,9 +74,11 @@ import type {
   ServeSessionSupportedCommandsStatus,
   ServeWorkspaceEnvStatus,
   ServeWorkspaceMcpStatus,
+  ServeWorkspaceMcpToolsStatus,
   ServeWorkspacePreflightStatus,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceSkillsStatus,
+  ServeWorkspaceToolsStatus,
 } from './status.js';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
@@ -232,7 +241,11 @@ interface FakeBridgeOpts {
   ) => boolean;
   listImpl?: (workspaceCwd: string) => BridgeSessionSummary[];
   workspaceMcpImpl?: () => Promise<ServeWorkspaceMcpStatus>;
+  workspaceMcpToolsImpl?: (
+    serverName: string,
+  ) => Promise<ServeWorkspaceMcpToolsStatus>;
   workspaceSkillsImpl?: () => Promise<ServeWorkspaceSkillsStatus>;
+  workspaceToolsImpl?: () => Promise<ServeWorkspaceToolsStatus>;
   workspaceProvidersImpl?: () => Promise<ServeWorkspaceProvidersStatus>;
   workspaceEnvImpl?: () => Promise<ServeWorkspaceEnvStatus>;
   workspacePreflightImpl?: () => Promise<ServeWorkspacePreflightStatus>;
@@ -333,7 +346,9 @@ interface FakeBridge extends HttpAcpBridge {
   }>;
   listCalls: string[];
   workspaceMcpCalls: number;
+  workspaceMcpToolsCalls: string[];
   workspaceSkillsCalls: number;
+  workspaceToolsCalls: number;
   workspaceProvidersCalls: number;
   workspaceEnvCalls: number;
   workspacePreflightCalls: number;
@@ -400,7 +415,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
   let workspaceMcpCalls = 0;
+  const workspaceMcpToolsCalls: string[] = [];
   let workspaceSkillsCalls = 0;
+  let workspaceToolsCalls = 0;
   let workspaceProvidersCalls = 0;
   let workspaceEnvCalls = 0;
   let workspacePreflightCalls = 0;
@@ -460,6 +477,25 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspaceCwd: WS_BOUND,
       initialized: false,
       skills: [],
+    }));
+  const workspaceToolsImpl =
+    opts.workspaceToolsImpl ??
+    (async () => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      initialized: true,
+      acpChannelLive: false,
+      tools: [],
+    }));
+  const workspaceMcpToolsImpl =
+    opts.workspaceMcpToolsImpl ??
+    (async (serverName: string) => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      serverName,
+      initialized: true,
+      acpChannelLive: false,
+      tools: [],
     }));
   const workspaceProvidersImpl =
     opts.workspaceProvidersImpl ??
@@ -583,6 +619,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     permissionVotes,
     sessionPermissionVotes,
     listCalls,
+    workspaceMcpToolsCalls,
     sessionContextCalls,
     sessionSupportedCommandsCalls,
     setModelCalls,
@@ -603,6 +640,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     get workspaceSkillsCalls() {
       return workspaceSkillsCalls;
+    },
+    get workspaceToolsCalls() {
+      return workspaceToolsCalls;
     },
     get workspaceProvidersCalls() {
       return workspaceProvidersCalls;
@@ -686,9 +726,17 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspaceMcpCalls += 1;
       return workspaceMcpImpl();
     },
+    async getWorkspaceMcpToolsStatus(serverName) {
+      workspaceMcpToolsCalls.push(serverName);
+      return workspaceMcpToolsImpl(serverName);
+    },
     async getWorkspaceSkillsStatus() {
       workspaceSkillsCalls += 1;
       return workspaceSkillsImpl();
+    },
+    async getWorkspaceToolsStatus() {
+      workspaceToolsCalls += 1;
+      return workspaceToolsImpl();
     },
     async getWorkspaceProvidersStatus() {
       workspaceProvidersCalls += 1;
@@ -969,7 +1017,9 @@ describe('createServeApp', () => {
           expect(predicate({ writerIdleTimeoutMs: 0 })).toBe(false);
           expect(predicate({})).toBe(false);
           expect(
-            getAdvertisedServeFeatures(undefined, { writerIdleTimeoutMs: 60_000 }),
+            getAdvertisedServeFeatures(undefined, {
+              writerIdleTimeoutMs: 60_000,
+            }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
@@ -1316,6 +1366,42 @@ describe('createServeApp', () => {
       expect(providersRes.body).toEqual(providers);
       expect(bridge.workspaceSkillsCalls).toBe(1);
       expect(bridge.workspaceProvidersCalls).toBe(1);
+    });
+
+    it('returns workspace tools status from the bridge', async () => {
+      const tools: ServeWorkspaceToolsStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        acpChannelLive: true,
+        tools: [
+          {
+            name: 'ReadFile',
+            displayName: 'Read',
+            description: 'Read a file',
+            enabled: true,
+          },
+          {
+            name: 'Shell',
+            displayName: 'Shell',
+            description: 'Run shell commands',
+            enabled: false,
+          },
+        ],
+      };
+      const bridge = fakeBridge({ workspaceToolsImpl: async () => tools });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/tools')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(tools);
+      expect(bridge.workspaceToolsCalls).toBe(1);
     });
 
     it('returns workspace env status from the bridge', async () => {
@@ -1758,6 +1844,17 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(res.body).toMatchObject({ code: 'invalid_client_id' });
       expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('204 detaches without client identity when X-Qwen-Client-Id is absent', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/detach')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
+      expect(res.status).toBe(204);
+      expect(bridge.detachCalls).toEqual([{ sessionId: 'session-A' }]);
     });
 
     it('400 invalid_session_scope when `sessionScope` is not "single"/"thread"', async () => {
@@ -2241,6 +2338,52 @@ describe('createServeApp', () => {
   });
 
   describe('GET /workspace/:id/sessions', () => {
+    let previousRuntimeDir: string | undefined;
+    let runtimeDir: string;
+
+    beforeEach(async () => {
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-sessions-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    });
+
+    afterEach(async () => {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      await fsp.rm(runtimeDir, { recursive: true, force: true });
+    });
+
+    async function writeStoredSession(input: {
+      sessionId: string;
+      cwd: string;
+      timestamp: string;
+      prompt: string;
+      mtime: Date;
+    }): Promise<void> {
+      const chatsDir = path.join(
+        new Storage(input.cwd).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      const filePath = path.join(chatsDir, `${input.sessionId}.jsonl`);
+      const record = {
+        uuid: `${input.sessionId}-user-1`,
+        parentUuid: null,
+        sessionId: input.sessionId,
+        timestamp: input.timestamp,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: input.prompt }] },
+        cwd: input.cwd,
+      };
+      await fsp.writeFile(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+      await fsp.utimes(filePath, input.mtime, input.mtime);
+    }
+
     it('returns the list returned by the bridge', async () => {
       // #3803 §02 (commit 0c6e963cd): the route now rejects
       // cross-workspace queries with 400 workspace_mismatch (so
@@ -2275,23 +2418,132 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(2);
+      expect(res.body.sessions).toEqual(
+        expect.arrayContaining([
+          {
+            sessionId: 's-1',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+          {
+            sessionId: 's-2',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:01:00.000Z',
+            clientCount: 0,
+            hasActivePrompt: true,
+          },
+        ]),
+      );
+      expect(bridge.listCalls).toEqual([WS_BOUND]);
+    });
+
+    it('includes persisted sessions from the CLI session store', async () => {
+      const storedOnlyId = '550e8400-e29b-41d4-a716-446655440000';
+      const liveAndStoredId = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      await writeStoredSession({
+        sessionId: storedOnlyId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored only prompt',
+        mtime: new Date('2026-05-17T12:10:00.000Z'),
+      });
+      await writeStoredSession({
+        sessionId: liveAndStoredId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:01:00.000Z',
+        prompt: 'stored live prompt',
+        mtime: new Date('2026-05-17T12:11:00.000Z'),
+      });
+
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: liveAndStoredId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:01:00.000Z',
+            displayName: 'Live display name',
+            clientCount: 3,
+            hasActivePrompt: true,
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.sessions).toHaveLength(2);
+      expect(res.body.sessions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionId: storedOnlyId,
+            workspaceCwd: WS_BOUND,
+            title: 'stored only prompt',
+            clientCount: 0,
+            hasActivePrompt: false,
+          }),
+          expect.objectContaining({
+            sessionId: liveAndStoredId,
+            workspaceCwd: WS_BOUND,
+            title: 'stored live prompt',
+            displayName: 'Live display name',
+            clientCount: 3,
+            hasActivePrompt: true,
+          }),
+        ]),
+      );
+      expect(bridge.listCalls).toEqual([WS_BOUND]);
+    });
+
+    it('preserves persisted createdAt when a live entry exists', async () => {
+      const sessionId = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:01:00.000Z',
+        prompt: 'stored live prompt',
+        mtime: new Date('2026-05-17T12:11:00.000Z'),
+      });
+
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:30:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
       expect(res.body.sessions).toEqual([
-        {
-          sessionId: 's-1',
-          workspaceCwd: WS_BOUND,
-          createdAt: '2026-05-17T12:00:00.000Z',
+        expect.objectContaining({
+          sessionId,
+          createdAt: '2026-05-17T12:01:00.000Z',
+          updatedAt: '2026-05-17T12:11:00.000Z',
           clientCount: 1,
           hasActivePrompt: false,
-        },
-        {
-          sessionId: 's-2',
-          workspaceCwd: WS_BOUND,
-          createdAt: '2026-05-17T12:01:00.000Z',
-          clientCount: 0,
-          hasActivePrompt: true,
-        },
+        }),
       ]);
-      expect(bridge.listCalls).toEqual([WS_BOUND]);
     });
 
     it('returns an empty array when no sessions exist for the workspace', async () => {
@@ -6385,6 +6637,155 @@ describe('auth device-flow routes', () => {
     expect(identified.status).toBe(200);
     expect(identified.body).not.toHaveProperty('userCode');
     expect(identified.body).not.toHaveProperty('verificationUri');
+  });
+});
+
+describe('GET /workspace/mcp/:server/tools', () => {
+  it('returns tools for a valid server name', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .get('/workspace/mcp/my-server/tools')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ serverName: 'my-server' });
+    expect(bridge.workspaceMcpToolsCalls).toEqual(['my-server']);
+  });
+
+  it('decodes URL-encoded server names', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .get('/workspace/mcp/my%20server/tools')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(bridge.workspaceMcpToolsCalls).toEqual(['my server']);
+  });
+
+  it('400 when server name exceeds length limit', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const longName = 'a'.repeat(300);
+    const res = await request(app)
+      .get(`/workspace/mcp/${longName}/tools`)
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_server_name');
+    expect(bridge.workspaceMcpToolsCalls).toHaveLength(0);
+  });
+});
+
+describe('POST /workspace/mcp/:server/restart — entryIndex validation', () => {
+  const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+  const auth = (req: request.Test): request.Test =>
+    req
+      .set('Host', `127.0.0.1:${tokenOpts.port}`)
+      .set('Authorization', 'Bearer secret');
+
+  it('400 on entryIndex=-1', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(tokenOpts, undefined, { bridge });
+    const res = await auth(
+      request(app).post('/workspace/mcp/docs/restart?entryIndex=-1'),
+    ).send({});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_entry_index');
+    expect(bridge.restartMcpServerCalls).toHaveLength(0);
+  });
+
+  it('400 on entryIndex=abc', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(tokenOpts, undefined, { bridge });
+    const res = await auth(
+      request(app).post('/workspace/mcp/docs/restart?entryIndex=abc'),
+    ).send({});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_entry_index');
+  });
+
+  it('400 on entryIndex=1.5', async () => {
+    const bridge = fakeBridge();
+    const app = createServeApp(tokenOpts, undefined, { bridge });
+    const res = await auth(
+      request(app).post('/workspace/mcp/docs/restart?entryIndex=1.5'),
+    ).send({});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_entry_index');
+  });
+});
+
+describe('sendPermissionVoteError branches', () => {
+  it('403 permission_forbidden when bridge throws PermissionForbiddenError', async () => {
+    const bridge = fakeBridge({
+      respondImpl: () => {
+        throw new PermissionForbiddenError(
+          'req-1',
+          'session-A',
+          'designated_mismatch',
+        );
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/permission/req-1')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ outcome: { outcome: 'selected', optionId: 'opt-1' } });
+    expect(res.status).toBe(403);
+    expect(res.body).toMatchObject({
+      code: 'permission_forbidden',
+      requestId: 'req-1',
+      sessionId: 'session-A',
+      reason: 'designated_mismatch',
+    });
+  });
+
+  it('501 permission_policy_not_implemented when bridge throws PermissionPolicyNotImplementedError', async () => {
+    const bridge = fakeBridge({
+      respondImpl: () => {
+        throw new PermissionPolicyNotImplementedError('consensus');
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/permission/req-1')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ outcome: { outcome: 'selected', optionId: 'opt-1' } });
+    expect(res.status).toBe(501);
+    expect(res.body).toMatchObject({
+      code: 'permission_policy_not_implemented',
+      policy: 'consensus',
+    });
+  });
+
+  it('500 cancel_sentinel_collision when bridge throws CancelSentinelCollisionError', async () => {
+    const bridge = fakeBridge({
+      respondImpl: () => {
+        throw new CancelSentinelCollisionError('req-1', '__cancel__');
+      },
+    });
+    const app = createServeApp(baseOpts, undefined, { bridge });
+    const res = await request(app)
+      .post('/permission/req-1')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ outcome: { outcome: 'selected', optionId: 'opt-1' } });
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({
+      code: 'cancel_sentinel_collision',
+      requestId: 'req-1',
+      sentinel: '__cancel__',
+    });
+  });
+});
+
+describe('GET /capabilities — policy.permission', () => {
+  it('includes policy.permission in capabilities response', async () => {
+    const app = createServeApp(baseOpts);
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('policy');
+    expect(res.body.policy).toHaveProperty('permission');
   });
 });
 

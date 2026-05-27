@@ -1,0 +1,74 @@
+.view {
+  margin-top: 6px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  font-size: 12px;
+}
+
+.stats {
+  display: flex;
+  gap: 8px;
+  padding: 3px 8px;
+  background: var(--subtle-bg);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 11px;
+}
+
+.statAdd {
+  color: var(--success-color);
+}
+
+.statDel {
+  color: var(--error-color);
+}
+
+.lines {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.line {
+  display: flex;
+  padding: 0 8px;
+  min-height: 18px;
+  line-height: 18px;
+}
+
+.lineAdd {
+  background: var(--success-bg);
+}
+
+.lineDel {
+  background: var(--error-bg);
+}
+
+.lineHeader {
+  background: var(--info-bg);
+  color: var(--text-dimmed);
+  font-style: italic;
+}
+
+.lineContext {
+  background: transparent;
+}
+
+.marker {
+  width: 14px;
+  flex-shrink: 0;
+  user-select: none;
+  color: var(--text-dimmed);
+}
+
+.lineAdd .marker {
+  color: var(--success-color);
+}
+
+.lineDel .marker {
+  color: var(--error-color);
+}
+
+.content {
+  white-space: pre;
+  overflow-x: auto;
+}

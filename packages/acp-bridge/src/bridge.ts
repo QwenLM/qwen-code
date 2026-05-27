@@ -61,6 +61,7 @@ import {
   WorkspaceInitRaceError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  isNotCurrentlyGeneratingCancelError,
 } from './bridgeErrors.js';
 import { canonicalizeWorkspace } from './workspacePaths.js';
 import type {
@@ -1324,12 +1325,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   const requestWorkspaceStatus = async <T>(
     method: string,
     idle: () => T,
+    params: Record<string, unknown> = {},
   ): Promise<T> => {
     const info = liveChannelInfo();
     if (!info) return idle();
     const response = await withTimeout(
       Promise.race([
-        info.connection.extMethod(method, { cwd: boundWorkspace }),
+        info.connection.extMethod(method, { ...params, cwd: boundWorkspace }),
         getChannelClosedReject(info),
       ]),
       initTimeoutMs,
@@ -2192,7 +2194,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       const notif: CancelNotification = req
         ? { ...req, sessionId }
         : { sessionId };
-      await entry.connection.cancel(notif);
+      try {
+        await entry.connection.cancel(notif);
+      } catch (err) {
+        if (isNotCurrentlyGeneratingCancelError(err)) return;
+        throw err;
+      }
     },
 
     subscribeEvents(sessionId, subOpts) {
@@ -2685,10 +2692,52 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       );
     },
 
+    async getWorkspaceMcpToolsStatus(serverName) {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcpTools,
+        () => ({
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd: boundWorkspace,
+          serverName,
+          initialized: false,
+          acpChannelLive: false,
+          tools: [],
+          errors: [
+            {
+              kind: 'mcp_tools',
+              status: 'not_started' as const,
+              hint: 'spawn a session to populate',
+            },
+          ],
+        }),
+        { serverName },
+      );
+    },
+
     async getWorkspaceSkillsStatus() {
       return requestWorkspaceStatus(
         SERVE_STATUS_EXT_METHODS.workspaceSkills,
         () => createIdleWorkspaceSkillsStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceToolsStatus() {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceTools,
+        () => ({
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd: boundWorkspace,
+          initialized: true as const,
+          acpChannelLive: false,
+          tools: [],
+          errors: [
+            {
+              kind: 'tools',
+              status: 'not_started' as const,
+              hint: 'spawn a session to populate',
+            },
+          ],
+        }),
       );
     },
 
@@ -3598,6 +3647,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         entry.spawnOwnerWantedKill = true;
         return;
       }
+      // F3 Commit 3 — mediator-driven cancel cascade. Must run BEFORE
+      // byId.delete so the mediator's emit callback can still reach
+      // entry.events via byId.get(sessionId) (same order as closeSession).
+      permissionMediator.forgetSession(sessionId);
+      entry.pendingPermissionIds.clear();
       // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (defaultEntry === entry) defaultEntry = undefined;
@@ -3638,9 +3692,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // subsequent load/resume of the same persisted id. See the
       // matching guard in BridgeClient.bufferEarlyEvent.
       ci?.client.markSessionClosed(sessionId);
-      // F3 Commit 3 — mediator-driven cancel cascade.
-      permissionMediator.forgetSession(sessionId);
-      entry.pendingPermissionIds.clear();
       // Publish `session_died` BEFORE closing the bus. After the eager
       // `byId.delete` above, the channel.exited handler's
       // `byId.get(...)` returns undefined so the automatic publish

@@ -1,0 +1,27 @@
+.panel {
+  display: flex;
+  gap: 32px;
+  padding: 4px 2ch;
+  font-size: 13px;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.key {
+  color: var(--accent-color);
+  min-width: 12ch;
+}
+
+.desc {
+  color: var(--text-secondary);
+}
