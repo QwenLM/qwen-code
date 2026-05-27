@@ -758,4 +758,41 @@ describe('writeInPlaceWithFdGuards', () => {
       expect(Buffer.compare(written, buf)).toBe(0);
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'should call fh.sync() when flush:true and skip it when flush is absent',
+    async () => {
+      const filePath = path.join(tmpDir, 'sync-guard.txt');
+      await fs.writeFile(filePath, 'original');
+      const beforeStat = await fs.stat(filePath);
+
+      const probeFh = await fs.open(filePath, 'r');
+      const FileHandleProto = Object.getPrototypeOf(probeFh);
+      const origSync = FileHandleProto.sync;
+      await probeFh.close();
+
+      let syncCallCount = 0;
+      FileHandleProto.sync = async function mockSync(): Promise<void> {
+        syncCallCount++;
+        return origSync.call(this);
+      };
+
+      try {
+        await writeInPlaceWithFdGuards(filePath, 'with-flush', beforeStat, {
+          encoding: 'utf-8',
+          flush: true,
+        });
+        expect(syncCallCount).toBeGreaterThanOrEqual(1);
+
+        const stat2 = await fs.stat(filePath);
+        syncCallCount = 0;
+        await writeInPlaceWithFdGuards(filePath, 'no-flush', stat2, {
+          encoding: 'utf-8',
+        });
+        expect(syncCallCount).toBe(0);
+      } finally {
+        FileHandleProto.sync = origSync;
+      }
+    },
+  );
 });

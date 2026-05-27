@@ -290,8 +290,8 @@ export async function writeInPlaceWithFdGuards(
     }
   } finally {
     // close() can throw on NFS (COMMIT failure) or FUSE. Don't let it
-    // mask the original try-body exception — flush:true already fsync'd
-    // the data, so close failure here is best-effort.
+    // mask the original try-body exception — the explicit fh.sync()
+    // above already fsync'd the data, so close failure is best-effort.
     try {
       await fh.close();
     } catch {
