@@ -317,6 +317,18 @@ export function SkillsManagerDialog({
     );
     const previousMap = new Map(previousStrings.map((n) => [lower(n), n]));
     const nextDisabled: string[] = [];
+    // Preserve workspace entries that don't correspond to any currently-
+    // loaded skill (e.g. from a different git branch, uninstalled
+    // extension, deleted .qwen/skills/ directory). Without this, opening
+    // /skills and pressing Esc would silently drop orphaned entries and
+    // the user's prior disable setting would vanish if the skill later
+    // reappears (branch switch, extension reinstall).
+    const unlockedLower = new Set(unlockedSkills.map((s) => lower(s.name)));
+    for (const prev of previousStrings) {
+      if (!unlockedLower.has(lower(prev))) {
+        nextDisabled.push(prev);
+      }
+    }
     for (const s of unlockedSkills) {
       if (selected.has(s.name)) continue;
       const existing = previousMap.get(lower(s.name));
