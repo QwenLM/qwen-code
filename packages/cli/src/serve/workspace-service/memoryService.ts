@@ -36,6 +36,8 @@ import type {
   WorkspaceRequestContext,
 } from './types.js';
 
+import { validateClientId as validateClientIdShared } from './validation.js';
+
 // ---------------------------------------------------------------------------
 // Dependencies
 // ---------------------------------------------------------------------------
@@ -61,13 +63,17 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
   const { boundWorkspace, publishWorkspaceEvent, knownClientIds } = deps;
 
   function validateClientId(ctx: WorkspaceRequestContext): void {
-    const clientId = ctx.originatorClientId;
-    if (clientId === undefined) return;
-    if (!knownClientIds().has(clientId)) {
-      throw new Error(
-        `Client id "${clientId}" is not registered for this workspace`,
-      );
+    validateClientIdShared(ctx, knownClientIds);
+  }
+
+  /** Resolve the memory file path for a given scope key ('global' | 'workspace'). */
+  function resolveMemoryFilePath(key: string): string {
+    const filenames = getAllGeminiMdFilenames();
+    const filename = filenames[0] ?? 'QWEN.md';
+    if (key === 'global') {
+      return path.join(Storage.getGlobalQwenDir(), filename);
     }
+    return path.join(boundWorkspace, filename);
   }
 
   return {
@@ -134,18 +140,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       ctx: WorkspaceRequestContext,
       key: string,
     ): Promise<{ content: string; path: string }> {
-      // key is the scope: 'workspace' or 'global' — resolve to the current filename
-      const filenames = getAllGeminiMdFilenames();
-      const filename = filenames[0] ?? 'QWEN.md';
-
-      let filePath: string;
-      if (key === 'global') {
-        filePath = path.join(Storage.getGlobalQwenDir(), filename);
-      } else {
-        // Default to workspace scope
-        filePath = path.join(boundWorkspace, filename);
-      }
-
+      const filePath = resolveMemoryFilePath(key);
       const content = await fs.readFile(filePath, 'utf8');
       return { content, path: filePath };
     },
@@ -172,9 +167,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
             mode: params.mode,
             bytesWritten: result.bytesWritten,
           },
-          ...(ctx.originatorClientId
-            ? { originatorClientId: ctx.originatorClientId }
-            : {}),
+          originatorClientId: ctx.originatorClientId,
         });
       }
 
@@ -191,15 +184,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
     ): Promise<{ deleted: boolean }> {
       validateClientId(ctx);
 
-      const filenames = getAllGeminiMdFilenames();
-      const filename = filenames[0] ?? 'QWEN.md';
-
-      let filePath: string;
-      if (key === 'global') {
-        filePath = path.join(Storage.getGlobalQwenDir(), filename);
-      } else {
-        filePath = path.join(boundWorkspace, filename);
-      }
+      const filePath = resolveMemoryFilePath(key);
 
       try {
         await fs.unlink(filePath);
@@ -217,9 +202,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       publishWorkspaceEvent({
         type: 'memory_deleted',
         data: { key, filePath },
-        ...(ctx.originatorClientId
-          ? { originatorClientId: ctx.originatorClientId }
-          : {}),
+        originatorClientId: ctx.originatorClientId,
       });
 
       return { deleted: true };
