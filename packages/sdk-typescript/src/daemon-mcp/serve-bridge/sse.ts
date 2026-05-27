@@ -99,7 +99,10 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
             `[serve-bridge] daemon error event for ${sessionId}: ${JSON.stringify(update)}\n`,
           );
           // Resolve collector so prompt returns immediately with partial text
-          stream.activeCollector?.resolve();
+          if (stream.activeCollector) {
+            stream.activeCollector.interrupted = true;
+            stream.activeCollector.resolve();
+          }
         }
       }
     } catch (err) {

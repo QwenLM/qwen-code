@@ -78,7 +78,7 @@ export function workspaceWriteTools(state: BridgeState): any[] {
       handler(async (args) => {
         // Block dangerous modes and persistent changes without explicit opt-in
         if (
-          (args.persist || ['yolo', 'auto'].includes(args.mode)) &&
+          (args.persist || ['yolo', 'auto', 'auto-edit'].includes(args.mode)) &&
           !state.allowGlobalScope
         ) {
           return formatToolError(

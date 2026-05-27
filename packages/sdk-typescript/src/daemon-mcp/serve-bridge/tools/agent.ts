@@ -85,12 +85,15 @@ export function agentTools(state: BridgeState): any[] {
 
           // SSE disconnect or stopEventStream resolved the collector
           if (collector.interrupted) {
-            return formatJsonResult({
-              session_id: sessionId,
-              stop_reason: 'interrupted',
-              response: collector.texts.join('') || '(no text received)',
-              warning: 'SSE stream was closed before the response completed.',
-            });
+            return {
+              content: [{ type: 'text' as const, text: JSON.stringify({
+                session_id: sessionId,
+                stop_reason: 'interrupted',
+                response: collector.texts.join('') || '(no text received)',
+                warning: 'SSE stream was closed before the response completed.',
+              }, null, 2) }],
+              isError: true,
+            };
           }
 
           const responseText =
@@ -118,10 +121,16 @@ export function agentTools(state: BridgeState): any[] {
       },
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
-        await state.client.cancel(sessionId);
-        // Resolve active collector so the prompt handler returns immediately
         const stream = state.eventStreams.get(sessionId);
-        stream?.activeCollector?.resolve();
+        // Best-effort cancel — must not prevent collector resolution
+        try {
+          await state.client.cancel(sessionId);
+        } catch { /* best-effort */ }
+        // Resolve active collector so the prompt handler returns immediately
+        if (stream?.activeCollector) {
+          stream.activeCollector.interrupted = true;
+          stream.activeCollector.resolve();
+        }
         return formatJsonResult({ ok: true, sessionId });
       }),
     ),
