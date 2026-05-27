@@ -223,15 +223,16 @@ export function splitChunks(text: string): string[] {
         buf += '\n```';
       }
       chunks.push(buf);
-      buf = inCode ? fenceLine + '\n' : '';
+      buf = inCode ? fenceLine : '';
     }
 
     buf += (buf ? '\n' : '') + line;
 
     // Hard-split oversized lines that exceed the limit on their own
     while (buf.length > CHUNK_LIMIT) {
-      let piece = buf.slice(0, CHUNK_LIMIT);
-      buf = buf.slice(CHUNK_LIMIT);
+      const maxSlice = inCode ? CHUNK_LIMIT - '\n```'.length - 1 : CHUNK_LIMIT;
+      let piece = buf.slice(0, maxSlice);
+      buf = buf.slice(maxSlice);
       if (inCode) {
         piece += '\n```';
         buf = fenceLine + '\n' + buf;

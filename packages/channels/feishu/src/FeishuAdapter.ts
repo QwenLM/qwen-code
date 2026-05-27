@@ -60,6 +60,13 @@ interface CardSessionState {
   cardCreationFailed?: boolean;
   /** Timer for fallback card creation in onResponseChunk — cleared by cleanupCard. */
   creationTimer?: ReturnType<typeof setTimeout>;
+  /** Set when busy-wait timeout abandons in-flight card creation. */
+  abandoned?: boolean;
+  /** Set by onResponseComplete to distinguish completed from cancelled in onPromptEnd. */
+  completed?: boolean;
+  /** Set synchronously in onCardAction so .then() callbacks can detect stop intent
+   *  before cancelSession resolves. Cleared on cancelSession failure. */
+  cancelling?: boolean;
 }
 
 /** Track seen message IDs to deduplicate retried events. */
@@ -118,13 +125,11 @@ export class FeishuChannel extends ChannelBase {
       (feishuCfg['collapsibleThreshold'] as number) || 500;
   }
 
-  async connect(): Promise<void> {
-    // Build event dispatcher
-    this.eventDispatcher = new lark.EventDispatcher({});
-
-    this.eventDispatcher.register({
-      'im.message.receive_v1': (data: FeishuMessageEvent) => {
-        this.onMessage(data);
+  /** Build the event handler map shared between WebSocket and webhook modes. */
+  private buildHandlerMap(): Record<string, (data: unknown) => unknown> {
+    return {
+      'im.message.receive_v1': (data: unknown) => {
+        this.onMessage(data as FeishuMessageEvent);
         return {};
       },
       'card.action.trigger': (data: unknown) => {
@@ -135,7 +140,13 @@ export class FeishuChannel extends ChannelBase {
         }
         return {};
       },
-    } as Record<string, (data: unknown) => unknown>);
+    };
+  }
+
+  async connect(): Promise<void> {
+    // Build event dispatcher
+    this.eventDispatcher = new lark.EventDispatcher({});
+    this.eventDispatcher.register(this.buildHandlerMap());
 
     // Determine connection mode
     const feishuConfig = this.config as unknown as Record<string, unknown>;
@@ -190,9 +201,27 @@ export class FeishuChannel extends ChannelBase {
           this.cleanupCard(msgId);
           continue;
         }
-        if (now - state.lastUpdateAt > STALE_MS && !state.creating) {
+        if (
+          now - state.lastUpdateAt > STALE_MS &&
+          !state.creating &&
+          !state.finalizing &&
+          !state.completed
+        ) {
           this.cleanupCard(msgId);
           this.stoppedMessages.delete(msgId);
+        }
+      }
+      // Clean orphaned auxiliary map entries (no card session — e.g. gate
+      // rejected or collect-mode buffered messages that never drained).
+      for (const map of [
+        this.msgToQuestion,
+        this.msgToSenderName,
+        this.msgToSenderId,
+      ]) {
+        for (const msgId of map.keys()) {
+          if (!this.cardSessions.has(msgId)) {
+            map.delete(msgId);
+          }
         }
       }
     }, 60_000);
@@ -221,31 +250,21 @@ export class FeishuChannel extends ChannelBase {
       encryptKey: encryptKey || '',
     });
 
-    dispatcher.register({
-      'im.message.receive_v1': (data: FeishuMessageEvent) => {
-        this.onMessage(data);
-        return {};
-      },
-      'card.action.trigger': (data: unknown) => {
-        const payload = data as Record<string, unknown>;
-        const stopped = this.onCardAction(payload);
-        if (stopped) {
-          return { toast: { type: 'info', content: '已停止' } };
-        }
-        return {};
-      },
-    } as Record<string, (data: unknown) => unknown>);
+    dispatcher.register(this.buildHandlerMap());
 
     const feishuCfg = this.config as unknown as Record<string, unknown>;
     const MAX_BODY_BYTES = 1 * 1024 * 1024; // 1 MiB
 
     this.httpServer = createServer((req, res) => {
       if (req.method === 'POST') {
-        req.on('error', () => {
+        req.on('error', (err) => {
           if (!res.headersSent) {
             res.writeHead(400);
             res.end('Bad Request');
           }
+          process.stderr.write(
+            `[Feishu:${this.name}] Webhook request error: ${err.message}\n`,
+          );
         });
         const bodyChunks: Buffer[] = [];
         let bodySize = 0;
@@ -303,7 +322,10 @@ export class FeishuChannel extends ChannelBase {
                 res.writeHead(500);
                 res.end('Internal Server Error');
               });
-          } catch {
+          } catch (err) {
+            process.stderr.write(
+              `[Feishu:${this.name}] Webhook JSON parse error: ${err instanceof Error ? err.message : err}\n`,
+            );
             res.writeHead(400);
             res.end('Bad Request');
           }
@@ -427,6 +449,11 @@ export class FeishuChannel extends ChannelBase {
             for (const node of paragraph) {
               if ((node.tag === 'text' || node.tag === 'a') && node.text) {
                 parts.push(node.text);
+              } else if (node.tag === 'at') {
+                const userName = (node as Record<string, unknown>)['user_name'];
+                if (typeof userName === 'string' && userName) {
+                  parts.push(`@${userName}`);
+                }
               }
             }
             lines.push(parts.join(''));
@@ -764,6 +791,33 @@ export class FeishuChannel extends ChannelBase {
     }
   }
 
+  /** Delete a card message from Feishu to prevent orphaned "思考中..." cards. */
+  private async deleteCard(messageId: string): Promise<boolean> {
+    const token = await this.getTenantAccessToken();
+    if (!token || !FEISHU_ID_RE.test(messageId)) return false;
+    try {
+      const resp = await fetch(`${BASE_URL}/im/v1/messages/${messageId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!resp.ok) {
+        if (resp.status === 401) this.tokenCache = undefined;
+        const detail = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[Feishu:${this.name}] deleteCard failed: HTTP ${resp.status} msg=${messageId} ${detail}\n`,
+        );
+        return false;
+      }
+      return true;
+    } catch (err) {
+      process.stderr.write(
+        `[Feishu:${this.name}] deleteCard error: msg=${messageId} ${err instanceof Error ? err.message : err}\n`,
+      );
+      return false;
+    }
+  }
+
   protected override onResponseChunk(
     chatId: string,
     chunk: string,
@@ -800,7 +854,12 @@ export class FeishuChannel extends ChannelBase {
 
     if (cardState.stopped) return;
 
+    const MAX_ACCUMULATE = 25_000;
     cardState.accumulatedText += chunk;
+    if (cardState.accumulatedText.length > MAX_ACCUMULATE) {
+      cardState.accumulatedText =
+        cardState.accumulatedText.slice(-MAX_ACCUMULATE);
+    }
 
     // If card is still being created, just accumulate — it will update on next chunk
     if (cardState.creating) return;
@@ -816,6 +875,8 @@ export class FeishuChannel extends ChannelBase {
             this.cleanupCard(inboundMsgId);
             return;
           }
+          // Note: don't check cancelling here — let the card creation proceed.
+          // handleStop will update or delete the card once cancelSession resolves.
           const atPrefix = this.msgToSenderName.get(inboundMsgId);
           const displayContent = atPrefix
             ? `${atPrefix}\n\n${cs.accumulatedText}`
@@ -827,6 +888,15 @@ export class FeishuChannel extends ChannelBase {
             inboundMsgId,
           );
           if (cs.stopped || this.stoppedMessages.has(inboundMsgId)) {
+            // If abandoned by busy-wait timeout, delete the streaming card —
+            // the response was already delivered via sendMessage.
+            if (cs.abandoned) {
+              if (result.success) {
+                await this.deleteCard(result.messageId);
+              }
+              cs.creating = false;
+              return;
+            }
             if (result.success) {
               const prefix =
                 cs.atPrefix || this.msgToSenderName.get(inboundMsgId) || '';
@@ -885,6 +955,10 @@ export class FeishuChannel extends ChannelBase {
             const marker = '\n\n_(内容过长，已截断早期内容)_';
             displayContent =
               displayContent.slice(-(MAX_CARD_CHARS - marker.length)) + marker;
+            // Re-balance code fences after truncation
+            if (this.countFences(displayContent) % 2 === 1) {
+              displayContent = '```\n' + displayContent;
+            }
           }
           const ok = await this.updateCard(
             cs.messageId,
@@ -921,6 +995,7 @@ export class FeishuChannel extends ChannelBase {
     }
 
     const cardState = this.cardSessions.get(inboundMsgId);
+    if (cardState) cardState.completed = true;
 
     if (cardState?.stopped || this.stoppedMessages.has(inboundMsgId)) {
       this.cleanupCard(inboundMsgId);
@@ -946,11 +1021,14 @@ export class FeishuChannel extends ChannelBase {
       }
     }
 
-    // Mark as finalizing to prevent concurrent updateCard from pendingUpdateTimer
+    // Mark as finalizing to prevent concurrent updates/create from timers
     if (cardState) cardState.finalizing = true;
 
     if (cardState?.pendingUpdateTimer) {
       clearTimeout(cardState.pendingUpdateTimer);
+    }
+    if (cardState?.creationTimer) {
+      clearTimeout(cardState.creationTimer);
     }
 
     // Wait for in-flight card creation (with 10s timeout)
@@ -979,6 +1057,7 @@ export class FeishuChannel extends ChannelBase {
     // the original in-flight creation).
     if (cardState?.creating) {
       cardState.stopped = true;
+      cardState.abandoned = true;
       this.cleanupCard(inboundMsgId);
       await this.sendMessage(chatId, fullText);
       return;
@@ -1007,12 +1086,23 @@ export class FeishuChannel extends ChannelBase {
           // Final fallback: just mark as done with a short message
           let truncated = displayText.slice(0, 2000);
           if (this.countFences(truncated) % 2 === 1) truncated += '\n```';
-          await this.updateCard(
+          const lastResort = await this.updateCard(
             cardState.messageId,
             truncated + '\n\n---\n*内容过长，已截断*',
             true,
             inboundMsgId,
           );
+          if (!lastResort) {
+            // All three updateCard attempts failed — delete orphaned card
+            // before falling back to sendMessage
+            await this.deleteCard(cardState.messageId);
+            this.cleanupCard(inboundMsgId);
+            await this.sendMessage(
+              chatId,
+              atSender ? `${atSender}\n\n${fullText}` : fullText,
+            );
+            return;
+          }
         }
       }
       this.cleanupCard(inboundMsgId);
@@ -1037,7 +1127,8 @@ export class FeishuChannel extends ChannelBase {
         this.cleanupCard(inboundMsgId);
         return;
       }
-      // updateCard failed — fall through to sendMessage below
+      // updateCard failed — delete the orphaned streaming card before fallback
+      await this.deleteCard(result.messageId);
     }
 
     // Fallback to plain message (include @sender prefix for consistency)
@@ -1078,7 +1169,23 @@ export class FeishuChannel extends ChannelBase {
 
         this.createStreamingCard(chatId, placeholderText, undefined, messageId)
           .then((result) => {
+            // Only check stopped (not cancelling) — cancelling is set before
+            // cancelSession resolves, and the card must still be created so
+            // handleStop can update it once cancelSession completes.
             if (cardState.stopped || this.stoppedMessages.has(messageId)) {
+              // If abandoned by busy-wait timeout, delete the streaming card —
+              // the response was already delivered via sendMessage.
+              if (cardState.abandoned) {
+                if (result.success) {
+                  this.deleteCard(result.messageId).catch((err) => {
+                    process.stderr.write(
+                      `[Feishu:${this.name}] ORPHANED CARD: failed to delete abandoned card msg=${result.messageId}: ${err instanceof Error ? err.message : err}\n`,
+                    );
+                  });
+                }
+                cardState.creating = false;
+                return;
+              }
               if (result.success) {
                 // Use cardState.atPrefix (captured by onCardAction before cleanupCard)
                 const prefix =
@@ -1133,18 +1240,25 @@ export class FeishuChannel extends ChannelBase {
       // Don't delete stoppedMessages here — let onResponseComplete / stale timer handle it.
       // Deleting here causes a race where the stop button's card callback loses the @sender prefix.
       const cs = this.cardSessions.get(inboundMsgId);
-      if (cs && !cs.stopped) {
+      // Skip if already completed by onResponseComplete (empty-but-successful response)
+      if (cs && !cs.stopped && !cs.completed) {
         if (cs.creating) {
           // Card still being created — mark stopped so the callback will finalize it
           cs.stopped = true;
         } else if (cs.created) {
           cs.stopped = true;
           const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
+          // Distinguish backend error (user didn't cancel) from user cancellation.
+          // User cancellation sets cs.stopped via onCardAction before onPromptEnd,
+          // so reaching here with !cs.stopped means the prompt failed unexpectedly.
+          const errorLabel = '*出错了，请重试*';
           const text = cs.accumulatedText
             ? (atPrefix
                 ? `${atPrefix}\n\n${cs.accumulatedText}`
-                : cs.accumulatedText) + '\n\n---\n*已取消*'
-            : (atPrefix ? `${atPrefix}\n\n` : '') + '*已取消*';
+                : cs.accumulatedText) +
+              '\n\n---\n' +
+              errorLabel
+            : (atPrefix ? `${atPrefix}\n\n` : '') + errorLabel;
           // Must await updateCard before cleanupCard — updateCard reads
           // msgToQuestion after an await, which cleanupCard would delete.
           await this.updateCard(cs.messageId, text, true, inboundMsgId).catch(
@@ -1159,6 +1273,17 @@ export class FeishuChannel extends ChannelBase {
               ? `${atPrefix}\n\n${cs.accumulatedText}`
               : cs.accumulatedText;
             this.sendMessage(_chatId, fallbackText).catch(() => {});
+          } else {
+            // No accumulated text (e.g. immediate LLM error before first chunk)
+            // — send a generic error so the user isn't left without feedback.
+            const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
+            const errorText = atPrefix
+              ? `${atPrefix}\n\n*出错了，请重试*`
+              : '*出错了，请重试*';
+            this.sendMessage(_chatId, errorText).catch(() => {});
+            process.stderr.write(
+              `[Feishu:${this.name}] onPromptEnd: no card and no accumulated text for inbound=${inboundMsgId}, sent error fallback\n`,
+            );
           }
           this.cleanupCard(inboundMsgId);
         }
@@ -1282,6 +1407,7 @@ export class FeishuChannel extends ChannelBase {
         | undefined;
       const messageId =
         context?.open_message_id || (data['open_message_id'] as string);
+      const chatId = context?.open_chat_id;
 
       if (action?.value?.action !== 'stop') return false;
 
@@ -1316,15 +1442,12 @@ export class FeishuChannel extends ChannelBase {
         return false;
       }
 
-      // Mark as stopped
-      cardState.stopped = true;
       // Preserve the @sender prefix before cleanupCard can delete msgToSenderName
       cardState.atPrefix = this.msgToSenderName.get(targetInboundMsgId) || '';
-      this.stoppedMessages.add(targetInboundMsgId);
-      if (cardState.pendingUpdateTimer) {
-        clearTimeout(cardState.pendingUpdateTimer);
-        cardState.pendingUpdateTimer = undefined;
-      }
+      // Set cancelling synchronously so .then() callbacks (onPromptStart, onResponseChunk)
+      // can detect the stop intent even before cancelSession resolves.
+      // This replaces the old stopped=true which caused chunk loss on cancel failure.
+      cardState.cancelling = true;
 
       // Find sessionId for this inbound message
       let sessionId: string | undefined;
@@ -1338,30 +1461,53 @@ export class FeishuChannel extends ChannelBase {
       const inboundId = targetInboundMsgId;
 
       const handleStop = async () => {
+        let cancelSucceeded = true;
         if (sessionId) {
           await this.bridge.cancelSession(sessionId).catch((err) => {
+            cancelSucceeded = false;
             process.stderr.write(
               `[Feishu:${this.name}] cancelSession failed for msg=${inboundId}: ${err instanceof Error ? err.message : err}\n`,
             );
           });
         }
+        // Only mark as stopped after cancelSession succeeds. If it failed,
+        // don't set stopped=true — let the agent continue running normally.
+        if (cancelSucceeded) {
+          cardState.stopped = true;
+          cardState.cancelling = false;
+          this.stoppedMessages.add(inboundId);
+        } else {
+          // Clear cancelling flag so .then() callbacks don't treat this as stopped
+          cardState.cancelling = false;
+        }
+        // If onResponseComplete is already finalizing the card, don't race with it.
+        if (cardState.finalizing) return;
         // Only update card if it was actually created (skip if still creating —
         // the createStreamingCard callback will finalize using cardState.atPrefix)
         if (cardState.created && cardState.messageId) {
           const prefix =
             cardState.atPrefix || this.msgToSenderName.get(inboundId) || '';
+          const stopLabel = cancelSucceeded
+            ? '*已停止生成*'
+            : '*停止失败，请重试*';
           const contentPart = cardState.accumulatedText.trim()
-            ? cardState.accumulatedText + '\n\n---\n*已停止生成*'
-            : '*已停止生成*';
+            ? cardState.accumulatedText + '\n\n---\n' + stopLabel
+            : stopLabel;
           const finalText = prefix
             ? `${prefix}\n\n${contentPart}`
             : contentPart;
-          await this.updateCard(
+          const updated = await this.updateCard(
             cardState.messageId,
             finalText,
-            true,
+            cancelSucceeded,
             inboundId,
           );
+          // If updateCard failed and cancel succeeded, try to delete the orphaned
+          // card and fall back to sendMessage to avoid leaving a stuck "生成中..." card.
+          if (!updated && cancelSucceeded && chatId) {
+            await this.deleteCard(cardState.messageId);
+            await this.sendMessage(chatId, finalText);
+          }
         }
         // Do NOT cleanupCard here — let onResponseComplete / onPromptEnd handle it.
         // Early cleanup would delete sessionToInboundMsg, causing onResponseComplete
@@ -1406,6 +1552,7 @@ export class FeishuChannel extends ChannelBase {
       this.wsClient = undefined;
     }
     if (this.httpServer) {
+      this.httpServer.closeAllConnections();
       this.httpServer.close();
       this.httpServer = undefined;
     }
@@ -1524,13 +1671,14 @@ export class FeishuChannel extends ChannelBase {
             () => `@${mention.name}`,
           );
         }
-        // Strip bot @mention from text
+        // Strip bot @mention from text — use replace (not replaceAll) to
+        // avoid removing literal occurrences of the bot's name the user typed.
         if (isMentioned && this.botOpenId) {
           for (const mention of msg.mentions) {
             const mentionId =
               mention.id.open_id || mention.id.user_id || mention.id.union_id;
             if (mentionId === this.botOpenId) {
-              cleanText = cleanText.replaceAll(`@${mention.name}`, '').trim();
+              cleanText = cleanText.replace(`@${mention.name}`, '').trim();
             }
           }
         }
@@ -1578,7 +1726,7 @@ export class FeishuChannel extends ChannelBase {
         this.msgToQuestion.set(msgId, questionTitle);
 
         // Use Feishu card markdown <at> tag — rendered as real name by Feishu client
-        const safeSenderId = /^[a-zA-Z0-9_:-]+$/.test(senderId) ? senderId : '';
+        const safeSenderId = FEISHU_ID_RE.test(senderId) ? senderId : '';
         const atSender = safeSenderId
           ? `好的，<at id=${safeSenderId}></at>`
           : '好的，';
@@ -1658,28 +1806,33 @@ export class FeishuChannel extends ChannelBase {
           return;
         }
 
-        await this.handleInbound(envelope);
-
-        // Clean up downloaded file after handleInbound has consumed it
-        if (downloadedFileDir) {
-          setTimeout(() => {
-            try {
-              rmSync(downloadedFileDir!, { recursive: true, force: true });
-            } catch {
-              /* best-effort cleanup */
-            }
-          }, 60_000);
+        try {
+          await this.handleInbound(envelope);
+        } finally {
+          // Always schedule temp file cleanup — even if handleInbound throws.
+          // Without this, a failure after file download leaks the temp dir.
+          if (downloadedFileDir) {
+            setTimeout(() => {
+              try {
+                rmSync(downloadedFileDir!, { recursive: true, force: true });
+              } catch {
+                /* best-effort cleanup */
+              }
+            }, 60_000);
+          }
         }
 
-        // Clean up auxiliary maps if gate rejected the message (no card session created)
-        if (!this.cardSessions.has(msgId)) {
-          this.msgToQuestion.delete(msgId);
-          this.msgToSenderName.delete(msgId);
-          this.msgToSenderId.delete(msgId);
-        }
+        // Auxiliary maps (msgToQuestion, msgToSenderName, msgToSenderId) are
+        // NOT cleaned up here — in collect dispatch mode, handleInbound buffers
+        // the message without creating a card session, so the maps must persist
+        // until the coalesced prompt drains. Orphaned entries are cleaned by the
+        // stale timer after STALE_MS.
       };
 
       processMessage().catch((err) => {
+        // Allow Feishu retries by removing the dedup entry on failure
+        this.seenMessages.delete(msgId);
+
         // If stopped by user, don't show error
         const existingCard = this.cardSessions.get(msgId);
         if (existingCard?.stopped) {
@@ -1690,8 +1843,14 @@ export class FeishuChannel extends ChannelBase {
         process.stderr.write(
           `[Feishu:${this.name}] Error handling message: ${err}\n`,
         );
+
+        // If card session was already cleaned up by onPromptEnd (which runs
+        // in bridge.prompt()'s finally block before this catch), skip error
+        // delivery — onPromptEnd already sent accumulated text or cancelled.
+        if (!existingCard) return;
+
         // Update existing card with error, or send plain message
-        if (existingCard?.created && existingCard.messageId) {
+        if (existingCard.created && existingCard.messageId) {
           this.updateCard(
             existingCard.messageId,
             '处理消息时出错，请重试。',
@@ -1755,7 +1914,13 @@ export class FeishuChannel extends ChannelBase {
                 } else if (node.tag === 'a' && node.text) {
                   parts.push(node.text);
                 } else if (node.tag === 'at') {
-                  // handled by mentions
+                  // Extract @mention display name from post node
+                  const userName = (node as Record<string, unknown>)[
+                    'user_name'
+                  ];
+                  if (typeof userName === 'string' && userName) {
+                    parts.push(`@${userName}`);
+                  }
                 }
               }
               lines.push(parts.join(''));
