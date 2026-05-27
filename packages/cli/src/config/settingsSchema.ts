@@ -1439,7 +1439,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Managed Auto-Dream',
         category: 'Memory',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
           'Enable automatic consolidation (dream) of collected memories.',
         showInDialog: false,
@@ -1449,7 +1449,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Auto Skill',
         category: 'Memory',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
           'Enable background review for reusable project skills after tool-heavy sessions.',
         showInDialog: false,
@@ -2314,6 +2314,41 @@ const SETTINGS_SCHEMA = {
         description:
           'Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.',
         showInDialog: true,
+      },
+    },
+  },
+
+  worktree: {
+    type: 'object',
+    label: 'Worktree',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Configuration for general-purpose git worktrees created by the ' +
+      'CLI (the `enter_worktree` tool, the `agent isolation: "worktree"` ' +
+      'parameter, and the startup `--worktree` flag). Does NOT affect ' +
+      'Agent Arena worktrees — see `agents.arena.worktreeBaseDir` for those.',
+    showInDialog: false,
+    properties: {
+      symlinkDirectories: {
+        type: 'array',
+        label: 'Symlink Directories Into Worktrees',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        description:
+          'Directories under the main repository to symlink into every ' +
+          'general-purpose worktree on creation. Useful for sharing ' +
+          'large opt-in dirs like `node_modules` so the model can run ' +
+          'tests / builds inside the worktree without a fresh install. ' +
+          'Paths must be relative to the repo root; absolute paths, ' +
+          'anything containing `..`, and any path inside `.git` or ' +
+          '`.qwen` (the CLI-managed metadata tree, which contains ' +
+          'the worktrees directory itself) are rejected. Missing ' +
+          'source dirs and existing destination paths are silently ' +
+          'skipped (no overwrite, no failure).',
+        showInDialog: false,
       },
     },
   },

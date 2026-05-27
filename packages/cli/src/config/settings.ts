@@ -457,7 +457,8 @@ export class LoadedSettings {
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
-    saveSettings(settingsFile, createSettingsUpdate(key, value));
+    const replacePath = key === 'mcpServers' ? key.split('.') : [];
+    saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
   }
 
   recomputeMerged(): void {
@@ -1202,6 +1203,7 @@ export function saveSettings(
     string,
     unknown
   >,
+  replacePath: readonly string[] = [],
 ): void {
   try {
     // Ensure the directory exists
@@ -1211,7 +1213,17 @@ export function saveSettings(
     }
 
     // Use the format-preserving update function
-    updateSettingsFilePreservingFormat(settingsFile.path, updates);
+    const written = updateSettingsFilePreservingFormat(
+      settingsFile.path,
+      updates,
+      false,
+      replacePath,
+    );
+    if (!written) {
+      debugLogger.error(
+        `saveSettings: updateSettingsFilePreservingFormat returned false for ${settingsFile.path}`,
+      );
+    }
   } catch (error) {
     debugLogger.error('Error saving user settings file.');
     debugLogger.error(error instanceof Error ? error.message : String(error));
