@@ -507,8 +507,7 @@ export class BridgeClient implements Client {
         typeof promptId !== 'string'
       ) {
         writeStderrLine(
-          `[demux] method=prompt-suggestion action=dropped reason=malformed ` +
-            `sessionId=${typeof sessionId === 'string' ? sessionId : '<missing>'}`,
+          `[demux] session=${typeof sessionId === 'string' ? sessionId : '<missing>'} type=prompt_suggestion action=dropped reason=malformed`,
         );
         return;
       }

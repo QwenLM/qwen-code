@@ -6394,7 +6394,7 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
-    it('drops malformed prompt-suggestion payloads silently', async () => {
+    it('drops malformed prompt-suggestion payloads', async () => {
       let capturedConn: AgentSideConnection | undefined;
       const factory: ChannelFactory = async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
