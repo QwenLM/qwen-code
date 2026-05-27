@@ -99,13 +99,11 @@ function makeDeps(
       .mockImplementation((_method: string, idle: () => unknown) =>
         Promise.resolve(idle()),
       ),
-    invokeWorkspaceCommand: vi
-      .fn()
-      .mockResolvedValue({
-        serverName: 'test',
-        restarted: true,
-        durationMs: 42,
-      }),
+    invokeWorkspaceCommand: vi.fn().mockResolvedValue({
+      serverName: 'test',
+      restarted: true,
+      durationMs: 42,
+    }),
     publishWorkspaceEvent: vi.fn(),
     knownClientIds: vi.fn().mockReturnValue(new Set(['client-1'])),
     ...overrides,
@@ -416,6 +414,7 @@ describe('createDaemonWorkspaceService', () => {
       expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
         'qwen/control/workspace/mcp/restart',
         { serverName: 'myServer' },
+        { timeoutMs: 300_000 },
       );
     });
 
@@ -434,6 +433,7 @@ describe('createDaemonWorkspaceService', () => {
       expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
         'qwen/control/workspace/mcp/restart',
         { serverName: 'poolServer', entryIndex: 3 },
+        { timeoutMs: 300_000 },
       );
     });
 
@@ -452,7 +452,7 @@ describe('createDaemonWorkspaceService', () => {
 
       expect(publishWorkspaceEvent).toHaveBeenCalledWith({
         type: 'mcp_server_restarted',
-        data: { serverName: 'x', restarted: true, durationMs: 10 },
+        data: { serverName: 'x', durationMs: 10 },
         originatorClientId: 'c-7',
       });
     });
