@@ -1622,8 +1622,8 @@ export class GeminiChat {
           // Hard-rescue compression mutates in-memory history before this
           // guard can compare the compressed prompt size. If the compressed
           // prompt is still too large to send, restore the pre-compression
-          // state and defer the JSONL compression checkpoint until a guarded
-          // send is actually allowed below.
+          // state. The JSONL compression checkpoint is intentionally not
+          // written because the send is about to be rejected.
           this.setHistory(historyBeforeHardRescue);
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.telemetryService?.setLastPromptTokenCount(
