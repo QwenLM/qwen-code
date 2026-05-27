@@ -21,7 +21,7 @@ import {
 import { render } from 'ink';
 import dns from 'node:dns';
 import os from 'node:os';
-import { basename } from 'node:path';
+import path, { basename } from 'node:path';
 import v8 from 'node:v8';
 import React from 'react';
 import { validateAuthMethod } from './config/auth.js';
@@ -39,6 +39,12 @@ import {
   type InitializationResult,
 } from './core/initializer.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
+import {
+  setupStartupWorktree,
+  persistStartupWorktreeSidecar,
+  buildStartupWorktreeNotice,
+  type StartupWorktreeContext,
+} from './startup/worktreeStartup.js';
 import { runNonInteractiveStreamJson } from './nonInteractive/session.js';
 import { AppContainer } from './ui/AppContainer.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
@@ -78,7 +84,9 @@ import { start_sandbox } from './utils/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
+import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
+import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
 import {
   startEarlyInputCapture,
@@ -322,13 +330,13 @@ export async function startInteractiveUI(
                 <VimModeProvider settings={settings}>
                   <AgentViewProvider config={config}>
                     <BackgroundTaskViewProvider config={config}>
-                      <AppContainer
-                        config={config}
-                        settings={settings}
-                        startupWarnings={startupWarnings}
-                        version={version}
-                        initializationResult={initializationResult}
-                      />
+                        <AppContainer
+                          config={config}
+                          settings={settings}
+                          startupWarnings={startupWarnings}
+                          version={version}
+                          initializationResult={initializationResult}
+                        />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
                 </VimModeProvider>
@@ -402,6 +410,7 @@ export async function main() {
     setStartupEventSink((name, attrs) => recordStartupEvent(name, attrs));
   }
   setupUnhandledRejectionHandler();
+  initializeWarningHandler();
 
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -581,6 +590,86 @@ export async function main() {
     }
   }
 
+  // When --worktree is going to chdir us into a worktree below, resolve
+  // any relative-path argv fields to absolute paths now — BEFORE the
+  // chdir. Otherwise downstream `fs.existsSync('./mcp.json')` calls in
+  // `loadCliConfig` re-resolve against the worktree dir, where the file
+  // doesn't exist. Only touches values that look like paths (mcpConfig
+  // also accepts inline JSON — skip those).
+  //
+  // The list of fields below is hand-maintained. If you add a new
+  // CLI flag that takes a relative path, register it here too,
+  // otherwise --worktree silently breaks for that flag.
+  if (argv.worktree !== undefined) {
+    const launchCwdForPaths = process.cwd();
+    const looksLikeInlineJson = (v: string): boolean => {
+      const t = v.trim();
+      return t.startsWith('{') || t.startsWith('[');
+    };
+    const resolveIfPath = (v: string | undefined): string | undefined => {
+      if (typeof v !== 'string' || v.length === 0) return v;
+      if (looksLikeInlineJson(v)) return v;
+      return path.resolve(launchCwdForPaths, v);
+    };
+    argv.mcpConfig = resolveIfPath(argv.mcpConfig);
+    argv.openaiLoggingDir = resolveIfPath(argv.openaiLoggingDir);
+    argv.jsonFile = resolveIfPath(argv.jsonFile);
+    argv.inputFile = resolveIfPath(argv.inputFile);
+    argv.telemetryOutfile = resolveIfPath(argv.telemetryOutfile);
+    if (Array.isArray(argv.includeDirectories)) {
+      argv.includeDirectories = argv.includeDirectories.map((d) =>
+        typeof d === 'string' && d.length > 0
+          ? path.resolve(launchCwdForPaths, d)
+          : d,
+      );
+    }
+    // `--json-schema` accepts either an inline schema or `@<path>`. The
+    // `@`-prefixed form is read from disk inside `resolveJsonSchemaArg`
+    // (`packages/cli/src/config/config.ts`), AFTER chdir, so a relative
+    // value would resolve against the worktree — fix the prefix path
+    // here.
+    if (typeof argv.jsonSchema === 'string') {
+      const trimmedSchema = argv.jsonSchema.trim();
+      if (trimmedSchema.startsWith('@')) {
+        const rel = trimmedSchema.slice(1);
+        if (rel.length > 0 && !path.isAbsolute(rel)) {
+          argv.jsonSchema = '@' + path.resolve(launchCwdForPaths, rel);
+        }
+      }
+    }
+  }
+
+  // Phase D-1: process --worktree before the resume picker so the picker
+  // (which uses process.cwd() to scope its session search) finds sessions
+  // saved inside the target worktree. Creates the worktree directory on
+  // disk and chdirs into it; on failure we emit to stderr and exit before
+  // any expensive initialization runs.
+  //
+  // ACP mode is exempt: the ACP host (Zed, etc.) supplies its own per-session
+  // cwd, and the startup-level chdir would not propagate. Reject the
+  // combination with a clear error rather than silently dropping --worktree.
+  let startupWorktreeContext: StartupWorktreeContext | null = null;
+  if (argv.worktree !== undefined && (argv.acp || argv.experimentalAcp)) {
+    writeStderrLine(
+      '--worktree cannot be combined with --acp / --experimental-acp. ' +
+        'Pass the worktree path as the cwd of the ACP loadSession / newSession ' +
+        'request instead.',
+    );
+    process.exit(1);
+  }
+  {
+    const startupRes = await setupStartupWorktree(argv.worktree, {
+      symlinkDirectories: settings.merged.worktree?.symlinkDirectories,
+    });
+    if (startupRes !== null) {
+      if (!startupRes.ok) {
+        writeStderrLine(startupRes.error);
+        process.exit(1);
+      }
+      startupWorktreeContext = startupRes.context;
+    }
+  }
+
   // Handle --resume without a session ID, or with a custom title, by showing
   // the session picker. Set the runtime output dir early so the picker can find
   // sessions stored under a custom runtimeOutputDir (setRuntimeBaseDir is
@@ -652,6 +741,51 @@ export async function main() {
       },
     );
     profileCheckpoint('after_load_cli_config');
+
+    // Phase D-1: persist the WorktreeSession sidecar so Phase C's restore
+    // machinery on a subsequent `--resume` picks the worktree back up, and
+    // capture any override of a previously-resumed session's worktree so
+    // we can emit a one-shot notice on the model's first prompt.
+    //
+    // The notice is set BEFORE the persist attempt and AGAIN inside the
+    // try block (so the override addendum can be appended on success).
+    // A persist failure must NOT silently drop the notice — the cwd is
+    // already switched, and the model needs to know which worktree it's
+    // operating in regardless of whether the sidecar landed.
+    if (startupWorktreeContext) {
+      config.setPendingStartupWorktreeNotice(
+        buildStartupWorktreeNotice(startupWorktreeContext),
+      );
+      try {
+        const startupWorktreePersist = await persistStartupWorktreeSidecar(
+          config,
+          startupWorktreeContext,
+        );
+        if (startupWorktreePersist.overrodeResumedWorktree) {
+          writeStderrLine(
+            `--worktree overrode the resumed session's previous worktree ` +
+              `"${startupWorktreePersist.overriddenSlug ?? '(unknown)'}". ` +
+              `That worktree directory was left intact on disk.`,
+          );
+        }
+        // Refresh the notice with the override addendum (if any). When
+        // there is no override this is a no-op text-wise; on override it
+        // gives the model the "you overrode <previous-slug>" hint. TUI
+        // and headless consume this via Config.consumePendingStartupWorktreeNotice();
+        // ACP is excluded above (`--worktree` × `--acp` is mutually
+        // exclusive — see the mutex check earlier in this function).
+        config.setPendingStartupWorktreeNotice(
+          buildStartupWorktreeNotice(
+            startupWorktreeContext,
+            startupWorktreePersist,
+          ),
+        );
+      } catch (error) {
+        debugLogger.warn(
+          `--worktree sidecar persist failed (non-fatal, notice preserved): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
 
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
@@ -820,6 +954,17 @@ export async function main() {
           'Warning: Debug logging is degraded (write failures occurred)',
         );
       }
+    }
+
+    // Headless + YOLO without a sandbox lets the model auto-approve and
+    // execute shell / write / edit tools at the current process's
+    // privilege level. Emit a one-line stderr warning so unattended runs
+    // have at least an observable signal. Interactive runs are excluded
+    // because the user is at the keyboard and the TUI shows approval
+    // state directly. See issue #4103.
+    if (!config.isInteractive()) {
+      const yoloWarning = getHeadlessYoloSafetyWarning(config);
+      if (yoloWarning) writeStderrLine(yoloWarning);
     }
 
     // For non-stream-json mode, initialize config here. Stream-json defers

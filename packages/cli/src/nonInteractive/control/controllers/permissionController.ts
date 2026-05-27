@@ -36,6 +36,8 @@ import { BaseController } from './baseController.js';
 // Import ToolCallConfirmationDetails types for type alignment
 type ToolConfirmationType = 'edit' | 'exec' | 'mcp' | 'info' | 'plan';
 
+const DEFAULT_CAN_USE_TOOL_TIMEOUT_MS = 60_000;
+
 export class PermissionController extends BaseController {
   private pendingOutgoingRequests = new Set<string>();
 
@@ -427,7 +429,7 @@ export class PermissionController extends BaseController {
           permission_suggestions: permissionSuggestions,
           blocked_path: null,
         } as CLIControlPermissionRequest,
-        undefined, // use default timeout
+        this.context.sdkCanUseToolTimeoutMs ?? DEFAULT_CAN_USE_TOOL_TIMEOUT_MS,
         this.context.abortSignal,
       );
 
