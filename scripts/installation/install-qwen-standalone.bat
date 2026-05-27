@@ -592,7 +592,7 @@ rem already on the user PATH. Uses PowerShell rather than `setx` because setx
 rem truncates PATH at 1024 chars, which can silently mangle long PATHs.
 set "QWEN_NEW_BIN=%~1"
 if "!QWEN_NEW_BIN!"=="" exit /b 0
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$bin = $env:QWEN_NEW_BIN; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if ([string]::IsNullOrEmpty($userPath)) { $userPath = '' }; $entries = $userPath -split ';' | Where-Object { $_ -ne '' }; if ($entries -contains $bin) { Write-Output ('INFO: User PATH already contains ' + $bin + ' (skipping).'); exit 0 }; $newPath = (@($bin) + $entries) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, 'User'); Write-Output ('SUCCESS: Prepended ' + $bin + ' to your user PATH.'); Write-Output 'INFO: Open a NEW command prompt for the change to take effect.'"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$bin = $env:QWEN_NEW_BIN; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if ([string]::IsNullOrEmpty($userPath)) { $userPath = '' }; $entries = @($userPath -split ';' | Where-Object { $_ -ne '' }); $remaining = @($entries | Where-Object { $_ -ne $bin }); if ($entries.Count -gt 0 -and $entries[0] -eq $bin -and $remaining.Count -eq ($entries.Count - 1)) { Write-Output ('INFO: User PATH already starts with ' + $bin + ' (skipping).'); exit 0 }; $newPath = (@($bin) + $remaining) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, 'User'); Write-Output ('SUCCESS: Prepended ' + $bin + ' to your user PATH.'); Write-Output 'INFO: Open a NEW command prompt for the change to take effect.'"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_NEW_BIN="
 exit /b %PS_STATUS%
@@ -1236,6 +1236,7 @@ set "EXTRA_BIN=%~1"
 set "SUMMARY_INSTALL_DIR=%~2"
 set "SUMMARY_INSTALL_METHOD=%~3"
 set "STANDALONE_UNINSTALL_URL=https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.ps1"
+set "PATH_UPDATE_APPLIED=0"
 if "!SUMMARY_INSTALL_METHOD!"=="" set "SUMMARY_INSTALL_METHOD=standalone"
 
 set "INSTALLED_BIN="
@@ -1302,6 +1303,8 @@ if not "!EXTRA_BIN!"=="" if /i not "!NO_MODIFY_PATH!"=="1" (
     if !ERRORLEVEL! NEQ 0 (
         echo WARNING: Failed to update user PATH. Add the directory manually:
         echo   !EXTRA_BIN!
+    ) else (
+        set "PATH_UPDATE_APPLIED=1"
     )
 )
 
@@ -1314,7 +1317,21 @@ if defined OTHER_QWENS (
         if not "!OQ!"=="" echo WARNING:   !OQ!
     )
     echo.
-    echo To make this install take priority, restart your command prompt.
+    if /i "!SUMMARY_INSTALL_METHOD!"=="standalone" (
+        echo Existing npm or package-manager installs are left unchanged.
+        if "!PATH_UPDATE_APPLIED!"=="1" (
+            echo This standalone install is configured as the preferred qwen for new command prompt or PowerShell sessions.
+            echo Check active command with: where qwen
+        ) else (
+            echo This standalone install was not added to your user PATH automatically.
+            echo Add this directory before older qwen commands in PATH to make it the default:
+            echo   !EXTRA_BIN!
+        )
+        echo Remove npm/global package install with: npm uninstall -g @qwen-code/qwen-code
+        echo To keep using npm, rerun this installer with --method npm.
+        echo.
+    )
+    if "!PATH_UPDATE_APPLIED!"=="1" echo To make this install take priority, restart your command prompt.
     echo Or invoke directly: "!INSTALLED_BIN!"
     exit /b 0
 )

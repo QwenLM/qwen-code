@@ -233,9 +233,11 @@ function isStandaloneInstallDir(installDir: string): boolean {
       name?: unknown;
       target?: unknown;
     };
+    // Manifest format is produced by writeManifest in create-standalone-package.js.
     if (
       manifest.name !== '@qwen-code/qwen-code' ||
-      typeof manifest.target !== 'string'
+      typeof manifest.target !== 'string' ||
+      !isStandaloneTargetForCurrentPlatform(manifest.target)
     ) {
       return false;
     }
@@ -249,9 +251,35 @@ function isStandaloneInstallDir(installDir: string): boolean {
         ? path.join(installDir, 'node', 'node.exe')
         : path.join(installDir, 'node', 'bin', 'node');
 
-    return fs.existsSync(qwenBin) && fs.existsSync(nodeBin);
+    return (
+      fs.existsSync(qwenBin) &&
+      fs.existsSync(nodeBin) &&
+      isStandaloneRuntimeFile(qwenBin) &&
+      isStandaloneRuntimeFile(nodeBin)
+    );
   } catch (err) {
     debugLogger.error('Standalone detection failed:', installDir, err);
     return false;
   }
+}
+
+function isStandaloneTargetForCurrentPlatform(target: string): boolean {
+  switch (process.platform) {
+    case 'darwin':
+      return /^darwin-(arm64|x64)$/.test(target);
+    case 'linux':
+      return /^linux-(arm64|x64)$/.test(target);
+    case 'win32':
+      return /^win-(arm64|x64)$/.test(target);
+    default:
+      return false;
+  }
+}
+
+function isStandaloneRuntimeFile(filePath: string): boolean {
+  const stats = fs.lstatSync(filePath);
+  if (!stats.isFile() || stats.isSymbolicLink()) {
+    return false;
+  }
+  return process.platform === 'win32' || (stats.mode & 0o111) !== 0;
 }

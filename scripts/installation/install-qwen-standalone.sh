@@ -66,6 +66,7 @@ command_exists() {
 
 TEMP_DIRS=()
 ACTIVE_DOWNLOAD_PID=""
+PATH_UPDATE_APPLIED=0
 
 cleanup_temp_dirs() {
     local temp_dir
@@ -556,8 +557,14 @@ maybe_update_shell_path() {
     fi
 
     if [[ -f "${rc_file}" ]] && grep -qxF "${export_line}" "${rc_file}" 2>/dev/null; then
-        log_info "PATH update for ${install_bin_dir} already present in ${rc_file} (skipping)."
-        return 0
+        local current_tail
+        current_tail=$(tail -n 3 "${rc_file}" 2>/dev/null || true)
+        if [[ "${current_tail}" == "${begin_marker}"$'\n'"${export_line}"$'\n'"${end_marker}" ]]; then
+            log_info "PATH update for ${install_bin_dir} already present in ${rc_file} (skipping)."
+            PATH_UPDATE_APPLIED=1
+            return 0
+        fi
+        log_info "PATH update for ${install_bin_dir} exists but is not last; appending a fresh block."
     fi
 
     mkdir -p "$(dirname "${rc_file}")" 2>/dev/null || true
@@ -573,6 +580,7 @@ maybe_update_shell_path() {
 
     log_success "Appended PATH prepend to ${rc_file}"
     log_info "Open a new terminal, or run: source ${rc_file}"
+    PATH_UPDATE_APPLIED=1
 }
 
 github_base_url_for_version() {
@@ -809,11 +817,20 @@ download_file_simple() {
             wget_args+=(--read-timeout=300)
         fi
         if wget --help 2>&1 | grep -q -- '--progress'; then
-            wget --progress=bar:force:noscroll "${wget_args[@]}" "${url}" -O "${destination}" || return 1
+            wget --progress=bar:force:noscroll "${wget_args[@]}" "${url}" -O "${destination}" &
+            ACTIVE_DOWNLOAD_PID=$!
+            wait "${ACTIVE_DOWNLOAD_PID}"
+            local exit_code=$?
+            ACTIVE_DOWNLOAD_PID=""
+            return "${exit_code}"
         else
-            wget "${wget_args[@]}" "${url}" -O "${destination}" || return 1
+            wget "${wget_args[@]}" "${url}" -O "${destination}" &
+            ACTIVE_DOWNLOAD_PID=$!
+            wait "${ACTIVE_DOWNLOAD_PID}"
+            local exit_code=$?
+            ACTIVE_DOWNLOAD_PID=""
+            return "${exit_code}"
         fi
-        return $?
     fi
 
     log_error "curl or wget is required to download the standalone archive."
@@ -1495,6 +1512,7 @@ print_final_instructions() {
     fi
 
     if [[ -n "${install_bin_dir}" && "${NO_MODIFY_PATH:-0}" != "1" ]]; then
+        PATH_UPDATE_APPLIED=0
         maybe_update_shell_path "${install_bin_dir}"
     fi
 
@@ -1511,7 +1529,24 @@ print_final_instructions() {
         done
         IFS="${saved_ifs}"
         echo ""
-        echo "To make this install take priority, restart your terminal."
+        if [[ "${install_method}" == "standalone" ]]; then
+            echo "Existing npm or package-manager installs are left unchanged."
+            if [[ "${PATH_UPDATE_APPLIED:-0}" == "1" ]]; then
+                echo "This standalone install is configured as the preferred qwen for new shells."
+                echo "Check active command with: command -v qwen"
+                echo "List all qwen commands with: which -a qwen"
+            else
+                echo "This standalone install was not added to your shell startup PATH automatically."
+                echo "Add this directory before older qwen commands in PATH to make it the default:"
+                echo "  ${install_bin_dir}"
+            fi
+            echo "Remove npm/global package install with: npm uninstall -g @qwen-code/qwen-code"
+            echo "To keep using npm, rerun this installer with --method npm."
+            echo ""
+        fi
+        if [[ "${PATH_UPDATE_APPLIED:-0}" == "1" ]]; then
+            echo "To make this install take priority, restart your terminal."
+        fi
         echo "Or invoke directly: ${installed_bin}"
         return 0
     fi
