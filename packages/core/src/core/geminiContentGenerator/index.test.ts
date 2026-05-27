@@ -23,8 +23,6 @@ describe('createGeminiContentGenerator', () => {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
-      getTelemetryEnabled: vi.fn().mockReturnValue(false),
-      getSessionId: vi.fn().mockReturnValue('test-session'),
     } as unknown as Config;
   });
 

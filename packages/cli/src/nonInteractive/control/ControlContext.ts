@@ -35,7 +35,6 @@ export interface IControlContext {
   readonly settings: LoadedSettings;
 
   permissionMode: PermissionMode;
-  sdkCanUseToolTimeoutMs?: number;
   sdkMcpServers: Set<string>;
   mcpClients: Map<string, { client: Client; config: MCPServerConfig }>;
   inputClosed: boolean;
@@ -55,7 +54,6 @@ export class ControlContext implements IControlContext {
   readonly settings: LoadedSettings;
 
   permissionMode: PermissionMode;
-  sdkCanUseToolTimeoutMs?: number;
   sdkMcpServers: Set<string>;
   mcpClients: Map<string, { client: Client; config: MCPServerConfig }>;
   inputClosed: boolean;

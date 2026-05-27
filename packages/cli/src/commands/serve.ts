@@ -12,12 +12,7 @@ import type { Argv, CommandModule } from 'yargs';
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { DEFAULT_RING_SIZE } from '../serve/eventBus.js';
-import {
-  ApprovalMode,
-  MCP_BUDGET_WARN_FRACTION,
-} from '@qwen-code/qwen-code-core';
-import { loadSettings } from '../config/settings.js';
-import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
+import { MCP_BUDGET_WARN_FRACTION } from '@qwen-code/qwen-code-core';
 
 /**
  * Pause the current async function indefinitely. Used after the daemon
@@ -46,6 +41,9 @@ interface ServeArgs {
   'http-bridge': boolean;
   'mcp-client-budget'?: number;
   'mcp-budget-mode'?: 'enforce' | 'warn' | 'off';
+  'allow-origin'?: string[];
+  'prompt-deadline-ms'?: number;
+  'writer-idle-timeout-ms'?: number;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -149,6 +147,24 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'refused (`disabledReason: "budget"`, deterministic by mcpServers ' +
           'declaration order). `off`: pure observability. Boot rejects ' +
           '`enforce` without a budget.',
+      })
+      .option('allow-origin', {
+        type: 'string',
+        array: true,
+        description:
+          'T2.4 (#4514). Cross-origin allowlist for browser webui clients.',
+      })
+      .option('prompt-deadline-ms', {
+        type: 'number',
+        description:
+          'T2.9 (#4514). Server-side wallclock cap on POST /session/:id/prompt (ms). ' +
+          'Falls back to QWEN_SERVE_PROMPT_DEADLINE_MS. Positive integer.',
+      })
+      .option('writer-idle-timeout-ms', {
+        type: 'number',
+        description:
+          'T2.9 (#4514). Per-SSE-connection idle deadline (ms). ' +
+          'Falls back to QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS. Positive integer.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
     if (!argv['http-bridge']) {
@@ -208,37 +224,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       );
     }
 
-    // Emit the headless-YOLO safety warning at daemon startup if
-    // settings.json statically configures yolo + no sandbox. We can't
-    // use `getHeadlessYoloSafetyWarning(config)` here because the daemon
-    // hasn't constructed a `Config` yet — sessions get their own — so
-    // we re-derive the predicate from the same settings.json the
-    // sessions will load. Per-session override (the ACP client flipping
-    // approval mode mid-session) is out of scope here; this warns about
-    // a deployment that's wide-open at boot. Suppress with
-    // QWEN_CODE_SUPPRESS_YOLO_WARNING=1.
-    try {
-      const loaded = loadSettings(argv.workspace ?? process.cwd());
-      const merged = loaded.merged;
-      const approvalMode = merged.tools?.approvalMode;
-      const sandbox = merged.tools?.sandbox;
-      const sandboxEnv = process.env['SANDBOX'];
-      const suppress = process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
-      const suppressed = suppress === '1' || suppress === 'true';
-      if (
-        approvalMode === ApprovalMode.YOLO &&
-        !sandbox &&
-        !sandboxEnv &&
-        !suppressed
-      ) {
-        writeStderrLine(HEADLESS_YOLO_NO_SANDBOX_WARNING);
-      }
-    } catch {
-      // Settings load can fail (corrupt JSON, etc.); don't block
-      // daemon startup just to emit a warning — the existing settings
-      // path will report the same error to the user via Session.
-    }
-
     // Lazy-load the serve module so non-serve invocations don't pay for
     // express + body-parser + qs in their startup path.
     const { runQwenServe } = await import('../serve/index.js');
@@ -255,6 +240,15 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requireAuth: argv['require-auth'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
+        ...(argv['allow-origin'] && argv['allow-origin'].length > 0
+          ? { allowOrigins: argv['allow-origin'] }
+          : {}),
+        ...(argv['prompt-deadline-ms'] !== undefined
+          ? { promptDeadlineMs: argv['prompt-deadline-ms'] }
+          : {}),
+        ...(argv['writer-idle-timeout-ms'] !== undefined
+          ? { writerIdleTimeoutMs: argv['writer-idle-timeout-ms'] }
+          : {}),
       });
     } catch (err) {
       writeStderrLine(

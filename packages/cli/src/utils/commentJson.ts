@@ -14,8 +14,6 @@ import { writeWithBackupSync } from './writeWithBackup.js';
  *
  * In merge mode (default), updates are deep-merged into the existing file,
  * preserving keys not mentioned in the updates object.
- * A replacePath can be provided for a single updated subtree that should be
- * replaced exactly instead of deep-merged.
  *
  * In sync mode (sync=true), the file is synchronized to match the updates
  * object exactly — keys present in the original but not in updates are
@@ -31,7 +29,6 @@ export function updateSettingsFilePreservingFormat(
   filePath: string,
   updates: Record<string, unknown>,
   sync = false,
-  replacePath: readonly string[] = [],
 ): boolean {
   if (!fs.existsSync(filePath)) {
     const content = stringify(updates, null, 2);
@@ -55,7 +52,7 @@ export function updateSettingsFilePreservingFormat(
   // In sync mode, applyUpdates recursively removes keys not present in the
   // migrated object, preventing zombie keys at every nesting level.
   // In merge mode, only the specified updates are applied.
-  const updatedStructure = applyUpdates(parsed, updates, sync, replacePath);
+  const updatedStructure = applyUpdates(parsed, updates, sync);
 
   const updatedContent = stringify(updatedStructure, null, 2);
 
@@ -83,8 +80,6 @@ export function applyUpdates(
   current: Record<string, unknown>,
   updates: Record<string, unknown>,
   sync = false,
-  replacePath: readonly string[] = [],
-  currentPath: readonly string[] = [],
 ): Record<string, unknown> {
   const result = current;
 
@@ -99,39 +94,12 @@ export function applyUpdates(
   }
 
   for (const key of Object.getOwnPropertyNames(updates)) {
-    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
-      continue;
-    }
-
     const value = updates[key];
-    const nextPath = [...currentPath, key];
-    const valueIsObject =
+    if (
       typeof value === 'object' &&
       value !== null &&
       !Array.isArray(value) &&
-      Object.keys(value).length > 0;
-    if (pathsEqual(nextPath, replacePath)) {
-      result[key] = valueIsObject
-        ? applyUpdates({}, value as Record<string, unknown>)
-        : value;
-      continue;
-    }
-
-    if (
-      valueIsObject &&
-      (typeof result[key] !== 'object' ||
-        result[key] === null ||
-        Array.isArray(result[key]))
-    ) {
-      result[key] = applyUpdates(
-        {},
-        value as Record<string, unknown>,
-        sync,
-        replacePath,
-        nextPath,
-      );
-    } else if (
-      valueIsObject &&
+      Object.keys(value).length > 0 &&
       typeof result[key] === 'object' &&
       result[key] !== null &&
       !Array.isArray(result[key])
@@ -140,8 +108,6 @@ export function applyUpdates(
         result[key] as Record<string, unknown>,
         value as Record<string, unknown>,
         sync,
-        replacePath,
-        nextPath,
       );
     } else {
       result[key] = value;
@@ -149,14 +115,4 @@ export function applyUpdates(
   }
 
   return result;
-}
-
-function pathsEqual(
-  left: readonly string[],
-  right: readonly string[],
-): boolean {
-  return (
-    left.length === right.length &&
-    left.every((segment, index) => segment === right[index])
-  );
 }

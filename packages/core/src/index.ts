@@ -155,10 +155,6 @@ export * from './providers/index.js';
 // Services
 // ============================================================================
 
-export {
-  computeThresholds,
-  type CompactionThresholds,
-} from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';

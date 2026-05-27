@@ -70,7 +70,7 @@ export const AgentTabBar: React.FC = () => {
     setAgentTabBarFocused,
   } = useAgentViewActions();
   const { entries: bgEntries } = useBackgroundTaskViewState();
-  const { setLivePanelFocused } = useBackgroundTaskViewActions();
+  const { setPillFocused: setBgPillFocused } = useBackgroundTaskViewActions();
   const { embeddedShellFocused } = useUIState();
   const hasBgAgents = bgEntries.length > 0;
 
@@ -86,10 +86,13 @@ export const AgentTabBar: React.FC = () => {
       } else if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
         setAgentTabBarFocused(false);
       } else if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
+        // Switch to main first — the footer pill only renders under the
+        // main view, so focusing it from an agent tab would strand focus
+        // on an offscreen surface.
         if (hasBgAgents) {
           setAgentTabBarFocused(false);
           switchToMain();
-          setLivePanelFocused(true);
+          setBgPillFocused(true);
         }
       } else if (
         key.sequence &&

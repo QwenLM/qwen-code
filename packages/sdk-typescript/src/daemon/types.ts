@@ -159,6 +159,8 @@ export interface DaemonSessionSummary {
   sessionId: string;
   workspaceCwd: string;
   createdAt?: string;
+  updatedAt?: string;
+  title?: string;
   displayName?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
@@ -193,6 +195,17 @@ export const DAEMON_ERROR_KINDS = [
   // Issue #4175 PR 14: budget refusal under `--mcp-budget-mode=enforce`.
   // Mirrors the serve-side `SERVE_ERROR_KINDS` addition.
   'budget_exhausted',
+  // Issue #4514 T2.9: a prompt exceeded the daemon-configured wallclock
+  // cap (or the request's own `deadlineMs`, capped at the server flag).
+  // Surfaced on the `POST /session/:id/prompt` 504 response. Mirrors
+  // the serve-side `SERVE_ERROR_KINDS` addition.
+  'prompt_deadline_exceeded',
+  // Issue #4514 T2.9: an SSE writer's last successful flush was older
+  // than the daemon's writer-idle deadline. Daemon emits a terminal
+  // `client_evicted` frame with `reason: 'writer_idle_timeout'`; the
+  // kind appears on that frame's `errorKind` field. Mirrors the
+  // serve-side `SERVE_ERROR_KINDS` addition.
+  'writer_idle_timeout',
 ] as const;
 
 export type DaemonErrorKind = (typeof DAEMON_ERROR_KINDS)[number];
@@ -293,6 +306,26 @@ export interface DaemonWorkspaceMcpStatus {
    * resolves to `off`. Pre-PR-14 daemons omit the field.
    */
   budgets?: DaemonMcpBudgetStatusCell[];
+}
+
+export interface DaemonWorkspaceMcpToolStatus {
+  name: string;
+  serverToolName?: string;
+  description?: string;
+  schema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+  isValid: boolean;
+  invalidReason?: string;
+}
+
+export interface DaemonWorkspaceMcpToolsStatus {
+  v: 1;
+  workspaceCwd: string;
+  serverName: string;
+  initialized: boolean;
+  acpChannelLive: boolean;
+  tools: DaemonWorkspaceMcpToolStatus[];
+  errors?: DaemonStatusCell[];
 }
 
 export type DaemonSkillLevel = 'project' | 'user' | 'extension' | 'bundled';
@@ -664,6 +697,22 @@ export interface DaemonWorkspacePreflightStatus {
   initialized: true;
   acpChannelLive: boolean;
   cells: DaemonPreflightCell[];
+  errors?: DaemonStatusCell[];
+}
+
+export interface DaemonWorkspaceToolStatus {
+  name: string;
+  displayName?: string;
+  description?: string;
+  enabled: boolean;
+}
+
+export interface DaemonWorkspaceToolsStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: true;
+  acpChannelLive: boolean;
+  tools: DaemonWorkspaceToolStatus[];
   errors?: DaemonStatusCell[];
 }
 

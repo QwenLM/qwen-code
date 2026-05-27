@@ -494,10 +494,14 @@ function normalizePlanUpdate(
 ): DaemonUiEvent {
   const entries = Array.isArray(update['entries']) ? update['entries'] : [];
   const contentText = capDetails(formatPlanEntries(entries));
+  const planCallId =
+    base.eventId !== undefined
+      ? `${DAEMON_PLAN_TOOL_CALL_ID}-${base.eventId}`
+      : DAEMON_PLAN_TOOL_CALL_ID;
   return {
     ...base,
     type: 'tool.update',
-    toolCallId: DAEMON_PLAN_TOOL_CALL_ID,
+    toolCallId: planCallId,
     title: 'Updated Plan',
     status: 'completed',
     toolName: 'TodoWrite',
@@ -639,12 +643,19 @@ function normalizePermissionResolved(
       },
     ];
   }
+  // A4: the canonical voter is `data.voterClientId`; fall back to the
+  // envelope `originatorClientId` (deprecated alias) for daemons predating
+  // the rename. Both may be absent for no-voter resolutions (timer /
+  // session-closed). `originatorClientId` stays on the base unchanged.
+  const voterClientId =
+    getString(event.data, 'voterClientId') ?? base.originatorClientId;
   return [
     {
       ...base,
       type: 'permission.resolved',
       requestId,
       outcome: describePermissionOutcome(event.data),
+      ...(voterClientId ? { voterClientId } : {}),
     },
   ];
 }

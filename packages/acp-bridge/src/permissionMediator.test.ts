@@ -169,6 +169,9 @@ describe('MultiClientPermissionMediator — first-responder', () => {
         data: {
           requestId: 'req-1',
           outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          // A4: canonical voterClientId in data, same value as the
+          // (deprecated) envelope originatorClientId below.
+          voterClientId: 'client_B',
         },
         originatorClientId: 'client_B',
       },
@@ -189,7 +192,7 @@ describe('MultiClientPermissionMediator — first-responder', () => {
     });
   });
 
-  it('omits originatorClientId on permission_resolved when voter has no clientId', async () => {
+  it('omits both voterClientId and originatorClientId on permission_resolved when voter has no clientId', async () => {
     const { mediator, events } = makeMediator();
     const record = makeRecord();
     const promise = mediator.request(record, 5_000);
@@ -197,10 +200,11 @@ describe('MultiClientPermissionMediator — first-responder', () => {
     mediator.vote(makeVote({ clientId: undefined }));
     await promise;
 
-    // Loopback voter without X-Qwen-Client-Id — pre-F3 spread guard
-    // omits the field entirely (not `originatorClientId: undefined`).
+    // Loopback voter without X-Qwen-Client-Id — the spread guard omits
+    // both fields entirely (A4: no-voter resolutions carry neither).
     expect(events).toHaveLength(1);
     expect(events[0]!.event).not.toHaveProperty('originatorClientId');
+    expect(events[0]!.event.data).not.toHaveProperty('voterClientId');
   });
 
   it('returns already_resolved on a duplicate vote and re-emits the SSE notification', async () => {

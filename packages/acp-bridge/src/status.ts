@@ -28,6 +28,19 @@ export const SERVE_ERROR_KINDS = [
   // Surfaced on per-server `mcp_server` cells (refused at discovery)
   // and on the workspace-level `mcp_budget` cell (any refusal this pass).
   'budget_exhausted',
+  // Issue #4514 T2.9: a prompt exceeded the server-configured wallclock
+  // cap (`--prompt-deadline-ms`) or the request's own `deadlineMs`
+  // (capped at the server flag). Surfaced on the
+  // `POST /session/:id/prompt` 504 response so callers can branch on a
+  // typed kind instead of regex-matching the message.
+  'prompt_deadline_exceeded',
+  // Issue #4514 T2.9: an SSE writer's last successful flush was older
+  // than `--writer-idle-timeout-ms`. The daemon emits a terminal
+  // `client_evicted` frame with `reason: 'writer_idle_timeout'` before
+  // tearing the connection down; the kind appears on the frame payload
+  // (not an HTTP response — by the time we detect the stall the stream
+  // is already in flight).
+  'writer_idle_timeout',
 ] as const;
 
 export type ServeErrorKind = (typeof SERVE_ERROR_KINDS)[number];
@@ -88,7 +101,9 @@ export class MissingCliEntryError extends Error {
 
 export const SERVE_STATUS_EXT_METHODS = {
   workspaceMcp: 'qwen/status/workspace/mcp',
+  workspaceMcpTools: 'qwen/status/workspace/mcp/tools',
   workspaceSkills: 'qwen/status/workspace/skills',
+  workspaceTools: 'qwen/status/workspace/tools',
   workspaceProviders: 'qwen/status/workspace/providers',
   workspaceMemory: 'qwen/status/workspace/memory',
   workspaceAgents: 'qwen/status/workspace/agents',
@@ -259,6 +274,26 @@ export interface ServeWorkspaceMcpStatus {
    * daemons. PR 23 will add a `scope: 'pool'` cell alongside.
    */
   budgets?: ServeMcpBudgetStatusCell[];
+}
+
+export interface ServeWorkspaceMcpToolStatus {
+  name: string;
+  serverToolName?: string;
+  description?: string;
+  schema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+  isValid: boolean;
+  invalidReason?: string;
+}
+
+export interface ServeWorkspaceMcpToolsStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  serverName: string;
+  initialized: boolean;
+  acpChannelLive: boolean;
+  tools: ServeWorkspaceMcpToolStatus[];
+  errors?: ServeStatusCell[];
 }
 
 export type ServeSkillLevel = 'project' | 'user' | 'extension' | 'bundled';
@@ -547,6 +582,22 @@ export interface ServeWorkspaceEnvStatus {
   /** Whether an ACP channel is currently live; informational only. */
   acpChannelLive: boolean;
   cells: ServeEnvCell[];
+  errors?: ServeStatusCell[];
+}
+
+export interface ServeWorkspaceToolStatus {
+  name: string;
+  displayName?: string;
+  description?: string;
+  enabled: boolean;
+}
+
+export interface ServeWorkspaceToolsStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  initialized: true;
+  acpChannelLive: boolean;
+  tools: ServeWorkspaceToolStatus[];
   errors?: ServeStatusCell[];
 }
 

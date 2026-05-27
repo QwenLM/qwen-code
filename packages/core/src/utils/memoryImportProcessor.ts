@@ -9,7 +9,6 @@ import * as path from 'node:path';
 import { isSubpath } from './paths.js';
 import { marked, type Token } from 'marked';
 import { createDebugLogger } from './debugLogger.js';
-import { findProjectRoot } from './projectRoot.js';
 
 const logger = createDebugLogger('IMPORT_PROCESSOR');
 
@@ -39,11 +38,29 @@ export interface ProcessImportsResult {
   importTree: MemoryFile;
 }
 
-// `findProjectRoot` now lives in `./projectRoot.ts` and is shared with
-// memoryDiscovery. It returns `string | null`; `processImports` below
-// preserves the previous "fall back to startDir" contract at the call
-// site, so behavior for code paths that don't care about the difference
-// (a non-git scratch dir for example) is unchanged.
+// Helper to find the project root (looks for .git directory)
+async function findProjectRoot(startDir: string): Promise<string> {
+  let currentDir = path.resolve(startDir);
+  while (true) {
+    const gitPath = path.join(currentDir, '.git');
+    try {
+      const stats = await fs.lstat(gitPath);
+      if (stats.isDirectory()) {
+        return currentDir;
+      }
+    } catch {
+      // .git not found, continue to parent
+    }
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) {
+      // Reached filesystem root
+      break;
+    }
+    currentDir = parentDir;
+  }
+  // Fallback to startDir if .git not found
+  return path.resolve(startDir);
+}
 
 // Add a type guard for error objects
 function hasMessage(err: unknown): err is { message: string } {
@@ -192,10 +209,7 @@ export async function processImports(
   importFormat: 'flat' | 'tree' = 'tree',
 ): Promise<ProcessImportsResult> {
   if (!projectRoot) {
-    // Preserve the previous local helper's contract: if no `.git`
-    // ancestor exists, fall back to the absolute basePath so
-    // `@`-imports can still resolve relatively.
-    projectRoot = (await findProjectRoot(basePath)) ?? path.resolve(basePath);
+    projectRoot = await findProjectRoot(basePath);
   }
 
   if (importState.currentDepth >= importState.maxDepth) {

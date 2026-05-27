@@ -27,6 +27,7 @@ import {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   RestoreInProgressError,
   SessionNotFoundError,
   McpServerNotFoundError,
@@ -2490,6 +2491,65 @@ describe('createHttpAcpBridge', () => {
       await expect(bridge.cancelSession('unknown')).rejects.toBeInstanceOf(
         SessionNotFoundError,
       );
+    });
+
+    it('treats idle agent cancel as success', async () => {
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({
+          cancelImpl: () => {
+            throw {
+              code: -32603,
+              message: 'Internal error',
+              data: { details: 'Not currently generating' },
+            };
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.cancelSession(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
+
+      await bridge.shutdown();
+    });
+
+    it('treats idle agent cancel wording variants as success', async () => {
+      const variants: unknown[] = [
+        new Error(`${NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE} (session idle)`),
+        {
+          code: -32603,
+          message: 'Internal error',
+          data: { details: 'not currently generating' },
+        },
+      ];
+
+      for (const err of variants) {
+        const handles: ChannelHandle[] = [];
+        const factory: ChannelFactory = async () => {
+          const h = makeChannel({
+            cancelImpl: () => {
+              throw err;
+            },
+          });
+          handles.push(h);
+          return h.channel;
+        };
+        const bridge = makeBridge({ channelFactory: factory });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        await expect(
+          bridge.cancelSession(session.sessionId),
+        ).resolves.toBeUndefined();
+        expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
+
+        await bridge.shutdown();
+      }
     });
   });
 
@@ -5997,6 +6057,293 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('extNotification — in-session model update (A1, #4511)', () => {
+    it('promotes current_model_update to model_switched when no bridge roundtrip is in flight', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      void capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModelId: 'qwen-max',
+      });
+
+      const collected: Array<{ type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      // Promoted to model_switched with currentModelId mapped to modelId.
+      expect(collected[0]?.type).toBe('model_switched');
+      expect(collected[0]?.data).toEqual({
+        sessionId: session.sessionId,
+        modelId: 'qwen-max',
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('suppresses current_model_update while a bridge model roundtrip is in flight', async () => {
+      // Hang the agent's unstable_setSessionModel so the bridge roundtrip
+      // stays in flight (modelRoundtripInFlight = true). The concurrent
+      // in-session current_model_update must be suppressed; only the bridge's
+      // own model_switched (after the roundtrip) reaches the bus.
+      let releaseModel: (() => void) | undefined;
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return () =>
+                new Promise<Record<string, never>>((res) => {
+                  releaseModel = () => res({});
+                });
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        capturedConn = new AgentSideConnection(
+          () => augmented as Agent,
+          agentStream,
+        );
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      // Start a bridge-driven model change; it hangs → roundtrip in flight.
+      const modelChange = bridge
+        .setSessionModel(
+          session.sessionId,
+          { sessionId: session.sessionId, modelId: 'qwen-max' },
+          undefined,
+        )
+        .catch(() => {});
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Concurrent in-session notification — must be SUPPRESSED.
+      void capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModelId: 'qwen-turbo',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Release the hung roundtrip → the bridge publishes its authoritative one.
+      releaseModel?.();
+      await modelChange;
+
+      const collected: Array<{ type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      // Exactly the bridge's model_switched (qwen-max) — the suppressed
+      // qwen-turbo notification did NOT produce a second model_switched.
+      expect(collected[0]?.type).toBe('model_switched');
+      expect((collected[0]?.data as { modelId?: string }).modelId).toBe(
+        'qwen-max',
+      );
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('drops malformed model-update params (non-string ids) without throwing or emitting', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capturedConn = new AgentSideConnection(
+          () => new FakeAgent(),
+          agentStream,
+        );
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const seen: string[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) seen.push(e.type);
+      })();
+
+      // Non-string currentModelId / missing sessionId → early return, no throw.
+      await capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModelId: 123 as unknown as string,
+      });
+      await capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        currentModelId: 'qwen-max',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      abort.abort();
+      await collecting;
+      expect(seen.filter((t) => t === 'model_switched')).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('drops a model-update for an unknown sessionId (no entry, no buffer)', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capturedConn = new AgentSideConnection(
+          () => new FakeAgent(),
+          agentStream,
+        );
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const seen: string[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) seen.push(e.type);
+      })();
+
+      await capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: 'nonexistent-session',
+        currentModelId: 'qwen-max',
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      abort.abort();
+      await collecting;
+      // Unlike the MCP-budget path (which buffers unknown ids), model-update
+      // drops them — the real session's bus sees nothing.
+      expect(seen.filter((t) => t === 'model_switched')).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('stamps originatorClientId from the active prompt on the promoted model_switched', async () => {
+      // While a prompt with a clientId is in flight, the session entry carries
+      // activePromptOriginatorClientId; the promoted model_switched must
+      // inherit it so peers can attribute the change.
+      let releasePrompt: (() => void) | undefined;
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          promptImpl: async () => {
+            await new Promise<void>((res) => {
+              releasePrompt = res;
+            });
+            return { stopReason: 'end_turn' };
+          },
+        });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      // Hang a prompt with a clientId → activePromptOriginatorClientId set.
+      const promptDone = bridge
+        .sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'hi' }],
+          },
+          undefined,
+          { clientId: session.clientId },
+        )
+        .catch(() => {});
+      await new Promise((r) => setTimeout(r, 10));
+
+      void capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModelId: 'qwen-max',
+      });
+
+      const collected: Array<{ type: string; originatorClientId?: string }> =
+        [];
+      for await (const e of iter) {
+        if (e.type === 'model_switched') {
+          collected.push({
+            type: e.type,
+            originatorClientId: e.originatorClientId,
+          });
+          break;
+        }
+      }
+      expect(collected[0]?.originatorClientId).toBe(session.clientId);
+      releasePrompt?.();
+      await promptDone;
+      abort.abort();
+      await bridge.shutdown();
+    });
+  });
+
   describe('maxSessions cap (chiga0 Rec 3)', () => {
     it('refuses NEW spawns past the cap with SessionLimitExceededError', async () => {
       let n = 0;
@@ -6812,5 +7159,164 @@ describe('createHttpAcpBridge — F3 multi-client permission coordination', () =
         permissionConsensusQuorum: 1.5,
       }),
     ).toThrow(/positive integer/);
+  });
+});
+
+// ============================================================
+// BridgeOptions.onDiagnosticLine — verify the tee callback
+// receives writeServeDebugLine output when QWEN_SERVE_DEBUG=1.
+// ============================================================
+describe('onDiagnosticLine', () => {
+  const originalDebug = process.env['QWEN_SERVE_DEBUG'];
+  afterEach(() => {
+    if (originalDebug === undefined) delete process.env['QWEN_SERVE_DEBUG'];
+    else process.env['QWEN_SERVE_DEBUG'] = originalDebug;
+  });
+
+  it('receives writeServeDebugLine output when QWEN_SERVE_DEBUG=1', async () => {
+    process.env['QWEN_SERVE_DEBUG'] = '1';
+    const captured: Array<{ line: string; level?: string }> = [];
+
+    // Thread scope → two distinct sessions sharing one channel.
+    let capturedConn: InstanceType<typeof AgentSideConnection> | undefined;
+    const factory: ChannelFactory = async () => {
+      const { clientStream, agentStream } = createInMemoryChannel();
+      const fakeAgent = new FakeAgent();
+      const conn = new AgentSideConnection(() => fakeAgent, agentStream);
+      capturedConn = conn;
+      return {
+        stream: clientStream,
+        exited: new Promise<
+          | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+          | undefined
+        >(() => {}),
+        kill: async () => {},
+        killSync: () => {},
+      };
+    };
+
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      channelFactory: factory,
+      onDiagnosticLine: (line, level) => captured.push({ line, level }),
+    });
+
+    const sessionA = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const sessionB = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(sessionA.sessionId).not.toBe(sessionB.sessionId);
+
+    // Issue a permission request on session A via the agent side.
+    const subAbort = new AbortController();
+    const iter = bridge.subscribeEvents(sessionA.sessionId, {
+      signal: subAbort.signal,
+    });
+
+    // Fire requestPermission from the agent side (same pattern as
+    // setupForPermission in the permission_request tests above).
+    void (
+      capturedConn as unknown as {
+        requestPermission(p: unknown): Promise<unknown>;
+      }
+    ).requestPermission({
+      sessionId: sessionA.sessionId,
+      toolCall: { toolCallId: 'tc-diag', title: 'test-tool' },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ],
+    });
+
+    // Read the permission_request event to get the requestId.
+    const it2 = iter[Symbol.asyncIterator]();
+    const next = await it2.next();
+    expect(next.done).toBe(false);
+    const payload = next.value!.data as { requestId: string };
+
+    // Vote using session B's sessionId → cross-session rejection path
+    // which triggers teeServeDebugLine (bridge.ts line ~2253).
+    const accepted = bridge.respondToSessionPermission(
+      sessionB.sessionId,
+      payload.requestId,
+      { outcome: { outcome: 'cancelled' } },
+    );
+    expect(accepted).toBe(false);
+
+    // Verify the onDiagnosticLine callback received the debug line.
+    expect(captured.some((e) => e.line.includes('qwen serve debug: '))).toBe(
+      true,
+    );
+    expect(
+      captured.some((e) => e.line.includes('rejected permission vote')),
+    ).toBe(true);
+    expect(
+      captured.every((e) => e.level === undefined || e.level === 'info'),
+    ).toBe(true);
+
+    subAbort.abort();
+    await bridge.shutdown();
+  });
+
+  it('does not invoke callback when QWEN_SERVE_DEBUG is off', async () => {
+    delete process.env['QWEN_SERVE_DEBUG'];
+    const captured: Array<{ line: string; level?: string }> = [];
+
+    let capturedConn: InstanceType<typeof AgentSideConnection> | undefined;
+    const factory: ChannelFactory = async () => {
+      const { clientStream, agentStream } = createInMemoryChannel();
+      const fakeAgent = new FakeAgent();
+      const conn = new AgentSideConnection(() => fakeAgent, agentStream);
+      capturedConn = conn;
+      return {
+        stream: clientStream,
+        exited: new Promise<
+          | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+          | undefined
+        >(() => {}),
+        kill: async () => {},
+        killSync: () => {},
+      };
+    };
+
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      channelFactory: factory,
+      onDiagnosticLine: (line, level) => captured.push({ line, level }),
+    });
+
+    const sessionA = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const sessionB = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const subAbort = new AbortController();
+    const iter = bridge.subscribeEvents(sessionA.sessionId, {
+      signal: subAbort.signal,
+    });
+
+    void (
+      capturedConn as unknown as {
+        requestPermission(p: unknown): Promise<unknown>;
+      }
+    ).requestPermission({
+      sessionId: sessionA.sessionId,
+      toolCall: { toolCallId: 'tc-diag2', title: 'test-tool' },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ],
+    });
+
+    const it2 = iter[Symbol.asyncIterator]();
+    const next = await it2.next();
+    const payload = next.value!.data as { requestId: string };
+
+    // Same cross-session vote — but QWEN_SERVE_DEBUG is off.
+    bridge.respondToSessionPermission(sessionB.sessionId, payload.requestId, {
+      outcome: { outcome: 'cancelled' },
+    });
+
+    // Callback must NOT have been invoked.
+    expect(captured).toHaveLength(0);
+
+    subAbort.abort();
+    await bridge.shutdown();
   });
 });

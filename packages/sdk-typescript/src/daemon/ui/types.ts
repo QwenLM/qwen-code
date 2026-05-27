@@ -166,6 +166,16 @@ export interface DaemonUiPermissionResolvedEvent extends DaemonUiEventBase {
   type: 'permission.resolved';
   requestId: string;
   outcome: string;
+  /**
+   * A4: the client that cast the resolving vote (canonical name). On
+   * `permission_resolved` the base `originatorClientId` carries the same
+   * value for back-compat — but it means the *voter* here, vs the *prompt
+   * originator* on `permission_request`; prefer `voterClientId` for clarity.
+   * Absent for system-initiated resolutions (timer expiry / session-closed /
+   * loopback voter with no clientId). The prompt originator remains available
+   * by correlating with the matching `permission.request`.
+   */
+  voterClientId?: string;
 }
 
 export interface DaemonUiModelChangedEvent extends DaemonUiEventBase {

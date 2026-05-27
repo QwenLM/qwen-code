@@ -1,0 +1,187 @@
+.group {
+  margin-bottom: 12px;
+  margin-left: 14px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.line {
+  padding: 2px 0;
+  min-width: 0;
+}
+
+.lineMain {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.icon {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.iconDone {
+  color: var(--success-color);
+}
+
+.iconError {
+  color: var(--error-color);
+}
+
+.iconPending {
+  color: var(--text-dimmed);
+}
+
+.iconSpin {
+  color: var(--warning-color);
+  display: inline-block;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.lineName {
+  font-weight: 700;
+  color: var(--text-primary);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.lineArg {
+  color: var(--text-secondary);
+  font-size: 13px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lineElapsed {
+  margin-left: auto;
+  color: var(--text-dimmed);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.lineExpandable {
+  cursor: pointer;
+}
+
+.lineExpandable:hover .lineName {
+  color: var(--accent-color);
+}
+
+.lineChevron {
+  font-size: 10px;
+  color: var(--text-dimmed);
+  flex-shrink: 0;
+  margin-left: 6px;
+}
+
+.lineOutput {
+  margin-left: 28px;
+  font-size: 12px;
+  color: var(--text-dimmed);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+.lineDetail {
+  margin-top: 4px;
+  margin-left: 22px;
+}
+
+.expandedBash,
+.expandedRead {
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.expandedOutput {
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--editor-bg);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.expandedEdit {
+  margin-top: 2px;
+}
+
+.expandedWrite {
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.writeAdd {
+  color: var(--success-color);
+}
+
+.expandBtn {
+  display: block;
+  width: 100%;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  background: var(--subtle-bg);
+  border: none;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-dimmed);
+  cursor: pointer;
+  text-align: left;
+}
+
+.expandBtn:hover {
+  color: var(--accent-color);
+  background: var(--info-bg);
+}
+
+.todoList {
+  padding: 6px 0 4px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.todoItem {
+  font-size: 13px;
+  font-family: var(--font-mono);
+  line-height: 1.6;
+  padding-left: 4px;
+}
+
+.todoDone {
+  color: var(--text-primary);
+}
+
+.todoActive {
+  color: var(--success-color);
+  font-weight: 600;
+}
+
+.todoPending {
+  color: var(--text-dimmed);
+}

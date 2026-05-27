@@ -17,7 +17,6 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
@@ -592,253 +591,252 @@ export class AgentCore {
         break;
       }
 
-      // Per-round child controller so model-SDK retry layers don't accumulate
-      // listeners on the long-lived parent. createChildAbortController handles
-      // parent propagation; the try/finally below guarantees reverse-cleanup
-      // fires for every exit (success, break, return, throw).
-      const roundAbortController = createChildAbortController(abortController);
+      // Create a new AbortController per round to avoid listener accumulation
+      // in the model SDK. The parent abortController propagates abort to it.
+      const roundAbortController = new AbortController();
+      const onParentAbort = () => roundAbortController.abort();
+      abortController.signal.addEventListener('abort', onParentAbort);
+      if (abortController.signal.aborted) {
+        roundAbortController.abort();
+      }
 
-      try {
-        const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${turnCounter++}`;
+      const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${turnCounter++}`;
 
-        const messageParams = {
-          message: currentMessages[0]?.parts || [],
-          config: {
-            abortSignal: roundAbortController.signal,
-            tools: [{ functionDeclarations: toolsList }],
-          },
-        };
+      const messageParams = {
+        message: currentMessages[0]?.parts || [],
+        config: {
+          abortSignal: roundAbortController.signal,
+          tools: [{ functionDeclarations: toolsList }],
+        },
+      };
 
-        const roundStreamStart = Date.now();
-        const responseStream = await chat.sendMessageStream(
-          this.modelConfig.model ||
-            this.runtimeContext.getModel() ||
-            DEFAULT_QWEN_MODEL,
-          messageParams,
-          promptId,
-        );
-        this.eventEmitter?.emit(AgentEventType.ROUND_START, {
+      const roundStreamStart = Date.now();
+      const responseStream = await chat.sendMessageStream(
+        this.modelConfig.model ||
+          this.runtimeContext.getModel() ||
+          DEFAULT_QWEN_MODEL,
+        messageParams,
+        promptId,
+      );
+      this.eventEmitter?.emit(AgentEventType.ROUND_START, {
+        subagentId: this.subagentId,
+        round: turnCounter,
+        promptId,
+        timestamp: Date.now(),
+      } as AgentRoundEvent);
+
+      const functionCalls: FunctionCall[] = [];
+      let roundText = '';
+      let roundThoughtText = '';
+      let lastUsage: GenerateContentResponseUsageMetadata | undefined =
+        undefined;
+      let currentResponseId: string | undefined = undefined;
+      let wasOutputTruncated = false;
+
+      for await (const streamEvent of responseStream) {
+        if (roundAbortController.signal.aborted) {
+          abortController.signal.removeEventListener('abort', onParentAbort);
+          return {
+            text: finalText,
+            terminateMode: AgentTerminateMode.CANCELLED,
+            turnsUsed: turnCounter,
+          };
+        }
+
+        // Handle retry events — reset all per-attempt state so a successful
+        // retry does not inherit stale data (e.g. wasOutputTruncated) from a
+        // previous attempt that may have hit MAX_TOKENS.
+        if (streamEvent.type === 'retry') {
+          functionCalls.length = 0;
+          roundText = '';
+          roundThoughtText = '';
+          lastUsage = undefined;
+          currentResponseId = undefined;
+          wasOutputTruncated = false;
+          continue;
+        }
+
+        // GeminiChat already mutated its own history; surface to the debug
+        // log so subagent compactions show up alongside the main session's.
+        if (streamEvent.type === 'compressed') {
+          this.runtimeContext
+            .getDebugLogger()
+            .debug(
+              `[AGENT-COMPACT] subagent=${this.subagentId} round=${turnCounter} ` +
+                `tokens ${streamEvent.info.originalTokenCount} -> ${streamEvent.info.newTokenCount}`,
+            );
+          continue;
+        }
+
+        // Handle chunk events
+        if (streamEvent.type === 'chunk') {
+          const resp = streamEvent.value;
+          // Track the response ID for tool call correlation
+          if (resp.responseId) {
+            currentResponseId = resp.responseId;
+          }
+          if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
+          if (resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS) {
+            wasOutputTruncated = true;
+          }
+          const content = resp.candidates?.[0]?.content;
+          const parts = content?.parts || [];
+          for (const p of parts) {
+            const txt = p.text;
+            const isThought = p.thought ?? false;
+            if (txt && isThought) roundThoughtText += txt;
+            if (txt && !isThought) roundText += txt;
+            if (txt)
+              this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
+                subagentId: this.subagentId,
+                round: turnCounter,
+                text: txt,
+                thought: isThought,
+                timestamp: Date.now(),
+              });
+          }
+          if (resp.usageMetadata) lastUsage = resp.usageMetadata;
+        }
+      }
+
+      if (roundText || roundThoughtText) {
+        this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
           subagentId: this.subagentId,
           round: turnCounter,
-          promptId,
+          text: roundText,
+          thoughtText: roundThoughtText,
           timestamp: Date.now(),
-        } as AgentRoundEvent);
+        } as AgentRoundTextEvent);
+      }
 
-        const functionCalls: FunctionCall[] = [];
-        let roundText = '';
-        let roundThoughtText = '';
-        let lastUsage: GenerateContentResponseUsageMetadata | undefined =
-          undefined;
-        let currentResponseId: string | undefined = undefined;
-        let wasOutputTruncated = false;
+      this.executionStats.rounds = turnCounter;
+      this.stats.setRounds(turnCounter);
 
-        for await (const streamEvent of responseStream) {
-          if (roundAbortController.signal.aborted) {
-            return {
-              text: finalText,
-              terminateMode: AgentTerminateMode.CANCELLED,
-              turnsUsed: turnCounter,
-            };
-          }
+      durationMin = (Date.now() - startTime) / (1000 * 60);
+      if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
+        abortController.signal.removeEventListener('abort', onParentAbort);
+        terminateMode = AgentTerminateMode.TIMEOUT;
+        break;
+      }
 
-          // Handle retry events — reset all per-attempt state so a successful
-          // retry does not inherit stale data (e.g. wasOutputTruncated) from a
-          // previous attempt that may have hit MAX_TOKENS.
-          if (streamEvent.type === 'retry') {
-            functionCalls.length = 0;
-            roundText = '';
-            roundThoughtText = '';
-            lastUsage = undefined;
-            currentResponseId = undefined;
-            wasOutputTruncated = false;
-            continue;
-          }
+      // Update token usage if available
+      if (lastUsage) {
+        this.recordTokenUsage(lastUsage, turnCounter, roundStreamStart);
+      }
 
-          // GeminiChat already mutated its own history; surface to the debug
-          // log so subagent compactions show up alongside the main session's.
-          if (streamEvent.type === 'compressed') {
-            this.runtimeContext
-              .getDebugLogger()
-              .debug(
-                `[AGENT-COMPACT] subagent=${this.subagentId} round=${turnCounter} ` +
-                  `tokens ${streamEvent.info.originalTokenCount} -> ${streamEvent.info.newTokenCount}`,
-              );
-            continue;
-          }
+      if (functionCalls.length > 0) {
+        currentMessages = await this.processFunctionCalls(
+          functionCalls,
+          roundAbortController,
+          promptId,
+          turnCounter,
+          toolsList,
+          currentResponseId,
+          wasOutputTruncated,
+        );
 
-          // Handle chunk events
-          if (streamEvent.type === 'chunk') {
-            const resp = streamEvent.value;
-            // Track the response ID for tool call correlation
-            if (resp.responseId) {
-              currentResponseId = resp.responseId;
-            }
-            if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
-            if (
-              resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS
-            ) {
-              wasOutputTruncated = true;
-            }
-            const content = resp.candidates?.[0]?.content;
-            const parts = content?.parts || [];
-            for (const p of parts) {
-              const txt = p.text;
-              const isThought = p.thought ?? false;
-              if (txt && isThought) roundThoughtText += txt;
-              if (txt && !isThought) roundText += txt;
-              if (txt)
-                this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
-                  subagentId: this.subagentId,
-                  round: turnCounter,
-                  text: txt,
-                  thought: isThought,
-                  timestamp: Date.now(),
-                });
-            }
-            if (resp.usageMetadata) lastUsage = resp.usageMetadata;
-          }
+        const externalInputs = this.drainExternalInputs(options);
+        if (externalInputs.length > 0) {
+          // Append to the tool-response user message so external input rides
+          // alongside the tool results the model is about to see.
+          // processFunctionCalls always returns exactly one user-role entry.
+          const last = currentMessages[currentMessages.length - 1];
+          last.parts!.push(...this.externalInputsToParts(externalInputs, true));
+          // Emit one event per injection so observers (e.g. the JSONL
+          // transcript writer) can persist each external message as a
+          // user-role record. The framing prefix is stripped — the prefix
+          // is a model-facing detail, not part of the original message.
+          this.emitExternalInputEvents(externalInputs);
         }
-
-        if (roundText || roundThoughtText) {
-          this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
+      } else {
+        const immediateExternalInputs = this.drainExternalInputs(options);
+        if (immediateExternalInputs.length > 0) {
+          currentMessages = this.externalInputsToContent(
+            immediateExternalInputs,
+          );
+          this.emitExternalInputEvents(immediateExternalInputs);
+        } else if (options?.shouldWaitForExternalMessages?.()) {
+          this.eventEmitter?.emit(AgentEventType.ROUND_END, {
             subagentId: this.subagentId,
             round: turnCounter,
-            text: roundText,
-            thoughtText: roundThoughtText,
-            timestamp: Date.now(),
-          } as AgentRoundTextEvent);
-        }
-
-        this.executionStats.rounds = turnCounter;
-        this.stats.setRounds(turnCounter);
-
-        durationMin = (Date.now() - startTime) / (1000 * 60);
-        if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
-          terminateMode = AgentTerminateMode.TIMEOUT;
-          break;
-        }
-
-        // Update token usage if available
-        if (lastUsage) {
-          this.recordTokenUsage(lastUsage, turnCounter, roundStreamStart);
-        }
-
-        if (functionCalls.length > 0) {
-          currentMessages = await this.processFunctionCalls(
-            functionCalls,
-            roundAbortController,
             promptId,
-            turnCounter,
-            toolsList,
-            currentResponseId,
-            wasOutputTruncated,
-          );
+            timestamp: Date.now(),
+          } as AgentRoundEvent);
+          abortController.signal.removeEventListener('abort', onParentAbort);
 
-          const externalInputs = this.drainExternalInputs(options);
-          if (externalInputs.length > 0) {
-            // Append to the tool-response user message so external input rides
-            // alongside the tool results the model is about to see.
-            // processFunctionCalls always returns exactly one user-role entry.
-            const last = currentMessages[currentMessages.length - 1];
-            last.parts!.push(
-              ...this.externalInputsToParts(externalInputs, true),
-            );
-            // Emit one event per injection so observers (e.g. the JSONL
-            // transcript writer) can persist each external message as a
-            // user-role record. The framing prefix is stripped — the prefix
-            // is a model-facing detail, not part of the original message.
-            this.emitExternalInputEvents(externalInputs);
+          const waitResult = await this.waitForExternalInputs(
+            options,
+            abortController,
+            startTime,
+            turnCounter,
+          );
+          if (waitResult.terminateMode) {
+            finalText = roundText.trim();
+            terminateMode = waitResult.terminateMode;
+            break;
           }
+          if (waitResult.inputs.length > 0) {
+            currentMessages = this.externalInputsToContent(waitResult.inputs);
+            this.emitExternalInputEvents(waitResult.inputs);
+            continue;
+          }
+
+          if (roundText && roundText.trim().length > 0) {
+            finalText = roundText.trim();
+            break;
+          }
+          currentMessages = [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: 'Please provide the final result now and stop calling tools.',
+                },
+              ],
+            },
+          ];
+          continue;
         } else {
-          const immediateExternalInputs = this.drainExternalInputs(options);
-          if (immediateExternalInputs.length > 0) {
-            currentMessages = this.externalInputsToContent(
-              immediateExternalInputs,
-            );
-            this.emitExternalInputEvents(immediateExternalInputs);
-          } else if (options?.shouldWaitForExternalMessages?.()) {
+          // No tool calls — treat this as the model's final answer.
+          if (roundText && roundText.trim().length > 0) {
+            finalText = roundText.trim();
+            // Emit ROUND_END for the final round so all consumers see it.
+            // Previously this was skipped, requiring AgentInteractive to
+            // compensate with an explicit flushStreamBuffers() call.
             this.eventEmitter?.emit(AgentEventType.ROUND_END, {
               subagentId: this.subagentId,
               round: turnCounter,
               promptId,
               timestamp: Date.now(),
             } as AgentRoundEvent);
-
-            const waitResult = await this.waitForExternalInputs(
-              options,
-              abortController,
-              startTime,
-              turnCounter,
-            );
-            if (waitResult.terminateMode) {
-              finalText = roundText.trim();
-              terminateMode = waitResult.terminateMode;
-              break;
-            }
-            if (waitResult.inputs.length > 0) {
-              currentMessages = this.externalInputsToContent(waitResult.inputs);
-              this.emitExternalInputEvents(waitResult.inputs);
-              continue;
-            }
-
-            if (roundText && roundText.trim().length > 0) {
-              finalText = roundText.trim();
-              break;
-            }
-            currentMessages = [
-              {
-                role: 'user',
-                parts: [
-                  {
-                    text: 'Please provide the final result now and stop calling tools.',
-                  },
-                ],
-              },
-            ];
-            continue;
-          } else {
-            // No tool calls — treat this as the model's final answer.
-            if (roundText && roundText.trim().length > 0) {
-              finalText = roundText.trim();
-              // Emit ROUND_END for the final round so all consumers see it.
-              // Previously this was skipped, requiring AgentInteractive to
-              // compensate with an explicit flushStreamBuffers() call.
-              this.eventEmitter?.emit(AgentEventType.ROUND_END, {
-                subagentId: this.subagentId,
-                round: turnCounter,
-                promptId,
-                timestamp: Date.now(),
-              } as AgentRoundEvent);
-              // null terminateMode = normal text completion
-              break;
-            }
-            // Otherwise, nudge the model to finalize a result.
-            currentMessages = [
-              {
-                role: 'user',
-                parts: [
-                  {
-                    text: 'Please provide the final result now and stop calling tools.',
-                  },
-                ],
-              },
-            ];
+            // Clean up before breaking
+            abortController.signal.removeEventListener('abort', onParentAbort);
+            // null terminateMode = normal text completion
+            break;
           }
+          // Otherwise, nudge the model to finalize a result.
+          currentMessages = [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: 'Please provide the final result now and stop calling tools.',
+                },
+              ],
+            },
+          ];
         }
-
-        this.eventEmitter?.emit(AgentEventType.ROUND_END, {
-          subagentId: this.subagentId,
-          round: turnCounter,
-          promptId,
-          timestamp: Date.now(),
-        } as AgentRoundEvent);
-      } finally {
-        // Reverse-cleanup fires whether the iteration ended normally, broke,
-        // returned, or threw — preventing parent-listener accumulation on
-        // long-running parents like the per-message roundAbortController in
-        // AgentInteractive or the session-lived externalSignal in headless.
-        roundAbortController.abort();
       }
+
+      this.eventEmitter?.emit(AgentEventType.ROUND_END, {
+        subagentId: this.subagentId,
+        round: turnCounter,
+        promptId,
+        timestamp: Date.now(),
+      } as AgentRoundEvent);
+
+      // Clean up the per-round listener before the next iteration
+      abortController.signal.removeEventListener('abort', onParentAbort);
     }
 
     return {
@@ -945,7 +943,12 @@ export class AgentCore {
         return { inputs: [] };
       }
 
-      const waitAbortController = createChildAbortController(abortController);
+      const waitAbortController = new AbortController();
+      const onAbort = () => waitAbortController.abort();
+      abortController.signal.addEventListener('abort', onAbort, { once: true });
+      if (abortController.signal.aborted) {
+        waitAbortController.abort();
+      }
       let timedOut = false;
       let timeout: ReturnType<typeof setTimeout> | undefined;
       if (remainingTimeMs !== undefined) {
@@ -982,9 +985,7 @@ export class AgentCore {
         throw error;
       } finally {
         if (timeout) clearTimeout(timeout);
-        // Aborting the child fires reverse-cleanup of its listener on the
-        // parent; no-op if it already aborted from the parent or the timeout.
-        waitAbortController.abort();
+        abortController.signal.removeEventListener('abort', onAbort);
       }
     }
   }
@@ -1324,23 +1325,17 @@ export class AgentCore {
         }
       };
       abortController.signal.addEventListener('abort', onAbort, { once: true });
-      try {
-        // If already aborted before the listener was registered, resolve
-        // immediately to avoid blocking forever.
-        if (abortController.signal.aborted) {
-          onAbort();
-        }
 
-        await scheduler.schedule(requests, abortController.signal);
-        await batchDone;
-      } finally {
-        // Always remove `onAbort` — otherwise a throw from scheduler.schedule
-        // or batchDone would leak it on the round controller, and the round's
-        // outer try/finally `.abort()` would later fire spurious cancellation
-        // TOOL_RESULT events for every un-emitted callId (corrupting the
-        // transcript and misleading the model on the next round).
-        abortController.signal.removeEventListener('abort', onAbort);
+      // If already aborted before the listener was registered, resolve
+      // immediately to avoid blocking forever.
+      if (abortController.signal.aborted) {
+        onAbort();
       }
+
+      await scheduler.schedule(requests, abortController.signal);
+      await batchDone;
+
+      abortController.signal.removeEventListener('abort', onAbort);
     }
 
     // If all tool calls failed, inform the model so it can re-evaluate.

@@ -1646,70 +1646,63 @@ describe('standalone release packaging', () => {
   });
 
   it('syncs standalone and hosted installation assets during release', () => {
-    const releaseWorkflow = readScript('.github/workflows/release.yml');
-    const ossWorkflow = readScript('.github/workflows/sync-release-to-oss.yml');
+    const workflow = readScript('.github/workflows/release.yml');
 
-    // release.yml builds standalone archives, verifies them, and creates GitHub Release
-    expect(releaseWorkflow).toContain('npm run package:standalone:release --');
-    expect(releaseWorkflow).toContain(
+    expect(workflow).toContain('npm run package:standalone:release --');
+    expect(workflow).toContain(
+      'npm run package:hosted-installation -- --out-dir dist/installation',
+    );
+    expect(workflow).not.toContain('package:installation-assets');
+    expect(workflow).not.toContain('verify_node_checksum()');
+    expect(workflow).not.toContain('download_node()');
+    expect(workflow).not.toContain('dist/standalone/qwen-code-*.tar.gz');
+    expect(workflow).not.toContain('dist/standalone/qwen-code-*.zip');
+    expect(workflow).toContain('--list-release-asset-paths');
+    expect(workflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
-    expect(releaseWorkflow).not.toContain('package:installation-assets');
-    expect(releaseWorkflow).not.toContain('verify_node_checksum()');
-    expect(releaseWorkflow).not.toContain('download_node()');
-    const createReleaseStepIndex = releaseWorkflow.indexOf(
+    expect(workflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
+    expect(workflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_SECRET');
+    expect(workflow).toContain('vars.ALIYUN_OSS_BUCKET');
+    expect(workflow).toContain('vars.ALIYUN_OSS_ENDPOINT');
+    expect(workflow).toContain('vars.OSSUTIL_URL');
+    expect(workflow).toContain('vars.OSSUTIL_SHA256');
+    expect(workflow).not.toContain('sudo install');
+    expect(workflow).toContain('${HOME}/.local/bin/ossutil');
+    expect(workflow).toContain('${GITHUB_PATH}');
+    expect(existsSync('scripts/upload-aliyun-oss-assets.js')).toBe(true);
+    expect(workflow).toContain('node scripts/upload-aliyun-oss-assets.js');
+    expect(workflow.match(/upload_asset\(\)/g) || []).toHaveLength(0);
+    expect(workflow).toContain('releases/qwen-code/${RELEASE_TAG}');
+    expect(workflow).toContain('releases/qwen-code/latest');
+    expect(workflow).not.toContain(
+      'upload_release_assets "releases/qwen-code/latest"',
+    );
+    const createReleaseStepIndex = workflow.indexOf(
       "name: 'Create GitHub Release and Tag'",
     );
     expect(createReleaseStepIndex).toBeGreaterThanOrEqual(0);
-    const createReleaseStep = releaseWorkflow.slice(createReleaseStepIndex);
-    expect(createReleaseStep).toContain('dist/standalone/qwen-code-*');
-    expect(createReleaseStep).toContain('dist/standalone/SHA256SUMS');
-    // OSS upload logic must not remain in release.yml
-    expect(releaseWorkflow).not.toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
-    expect(releaseWorkflow).not.toContain(
-      'node scripts/upload-aliyun-oss-assets.js',
+    const createReleaseStep = workflow.slice(createReleaseStepIndex);
+    expect(createReleaseStep).toContain('mapfile -t release_assets');
+    expect(createReleaseStep).toContain('"${release_assets[@]}"');
+    expect(createReleaseStep).not.toContain(
+      'dist/standalone/qwen-code-*.tar.gz',
     );
-    expect(releaseWorkflow).not.toContain('package:hosted-installation');
+    expect(createReleaseStep).not.toContain('dist/standalone/qwen-code-*.zip');
 
-    // sync-release-to-oss.yml handles OSS sync triggered by release publish
-    expect(ossWorkflow).toContain(
-      'npm run package:hosted-installation -- --out-dir dist/installation',
-    );
-    expect(ossWorkflow).toContain('--list-release-asset-paths');
-    expect(ossWorkflow).toContain(
-      'npm run verify:installation-release -- --dir dist/standalone',
-    );
-    expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
-    expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_SECRET');
-    expect(ossWorkflow).toContain('vars.ALIYUN_OSS_BUCKET');
-    expect(ossWorkflow).toContain('vars.ALIYUN_OSS_ENDPOINT');
-    expect(ossWorkflow).toContain('vars.OSSUTIL_URL');
-    expect(ossWorkflow).toContain('vars.OSSUTIL_SHA256');
-    expect(ossWorkflow).not.toContain('sudo install');
-    expect(ossWorkflow).toContain('${HOME}/.local/bin/ossutil');
-    expect(ossWorkflow).toContain('${GITHUB_PATH}');
-    expect(existsSync('scripts/upload-aliyun-oss-assets.js')).toBe(true);
-    expect(ossWorkflow).toContain('node scripts/upload-aliyun-oss-assets.js');
-    expect(ossWorkflow.match(/upload_asset\(\)/g) || []).toHaveLength(0);
-    expect(ossWorkflow).toContain('releases/qwen-code/${RELEASE_TAG}');
-    expect(ossWorkflow).toContain('releases/qwen-code/latest');
-    expect(ossWorkflow).not.toContain(
-      'upload_release_assets "releases/qwen-code/latest"',
-    );
-
-    const syncStepIndex = ossWorkflow.indexOf(
+    const syncStepIndex = workflow.indexOf(
       "name: 'Sync Release Assets to Aliyun OSS'",
     );
-    const verifyStepIndex = ossWorkflow.indexOf(
+    const verifyStepIndex = workflow.indexOf(
       "name: 'Verify Aliyun OSS Release Assets'",
     );
-    const publishLatestStepIndex = ossWorkflow.indexOf(
+    const publishLatestStepIndex = workflow.indexOf(
       "name: 'Publish Aliyun OSS Latest VERSION'",
     );
-    const syncHostedStepIndex = ossWorkflow.indexOf(
+    const syncHostedStepIndex = workflow.indexOf(
       "name: 'Sync Hosted Installation Assets to Aliyun OSS'",
     );
-    const verifyHostedStepIndex = ossWorkflow.indexOf(
+    const verifyHostedStepIndex = workflow.indexOf(
       "name: 'Verify Aliyun OSS Hosted Installation Assets'",
     );
     expect(syncStepIndex).toBeGreaterThanOrEqual(0);
@@ -1719,16 +1712,16 @@ describe('standalone release packaging', () => {
     // Latest VERSION pointer must flip only after every release asset and
     // hosted installer object is uploaded and verified.
     expect(publishLatestStepIndex).toBeGreaterThan(verifyHostedStepIndex);
-    expect(ossWorkflow.slice(syncStepIndex, verifyStepIndex)).not.toContain(
+    expect(workflow.slice(syncStepIndex, verifyStepIndex)).not.toContain(
       'releases/qwen-code/latest/VERSION',
     );
-    expect(ossWorkflow.slice(publishLatestStepIndex)).toContain(
+    expect(workflow.slice(publishLatestStepIndex)).toContain(
       'releases/qwen-code/latest/VERSION',
     );
-    const syncStep = ossWorkflow.slice(syncStepIndex, verifyStepIndex);
+    const syncStep = workflow.slice(syncStepIndex, verifyStepIndex);
     expect(syncStep).not.toContain('dist/installation/');
     expect(syncStep).not.toContain('installation/install-qwen-standalone.sh');
-    const syncHostedStep = ossWorkflow.slice(
+    const syncHostedStep = workflow.slice(
       syncHostedStepIndex,
       verifyHostedStepIndex,
     );
@@ -1755,22 +1748,22 @@ describe('standalone release packaging', () => {
     const uploadScript = readScript('scripts/upload-aliyun-oss-assets.js');
     expect(uploadScript).toContain("'--acl'");
     expect(uploadScript).toContain("'public-read'");
-    expect(ossWorkflow).toContain(
+    expect(workflow).toContain(
       'curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}"',
     );
-    expect(ossWorkflow).toContain(
+    expect(workflow).toContain(
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"',
     );
-    expect(ossWorkflow).toContain(
+    expect(workflow).toContain(
       'latest_version="$(curl -fsSL --connect-timeout 15 --max-time 300 "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest/VERSION" | tr -d',
     );
-    expect(ossWorkflow).not.toContain(
+    expect(workflow).not.toContain(
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest"',
     );
-    const verifyStep = ossWorkflow.slice(verifyStepIndex, syncHostedStepIndex);
+    const verifyStep = workflow.slice(verifyStepIndex, syncHostedStepIndex);
     expect(verifyStep).not.toContain('hosted_tmp_dir');
-    const verifyHostedStep = ossWorkflow.slice(verifyHostedStepIndex);
-    expect(ossWorkflow).toContain('hosted_tmp_dir="$(mktemp -d)"');
+    const verifyHostedStep = workflow.slice(verifyHostedStepIndex);
+    expect(workflow).toContain('hosted_tmp_dir="$(mktemp -d)"');
     expect(verifyHostedStep).toContain(
       'url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${RELEASE_TAG}/${asset}"',
     );
@@ -1783,16 +1776,16 @@ describe('standalone release packaging', () => {
     expect(verifyHostedStep).toContain(
       'curl -fsSL --connect-timeout 15 --max-time 300 "${global_url}"',
     );
-    expect(ossWorkflow).toContain(
+    expect(workflow).toContain(
       'cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/versioned/SHA256SUMS"',
     );
-    expect(ossWorkflow).toContain(
+    expect(workflow).toContain(
       'cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/global/SHA256SUMS"',
     );
-    expect(ossWorkflow).toContain(
+    expect(workflow).toContain(
       '(cd "${hosted_tmp_dir}/versioned" && sha256sum -c SHA256SUMS)',
     );
-    expect(ossWorkflow).toContain(
+    expect(workflow).toContain(
       '(cd "${hosted_tmp_dir}/global" && sha256sum -c SHA256SUMS)',
     );
   });

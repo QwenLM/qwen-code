@@ -10,6 +10,7 @@ import {
   AuthType,
   clearCachedCredentialFile,
   createDebugLogger,
+  generateSessionRecap,
   QwenOAuth2Event,
   qwenOAuth2Events,
   MCP_BUDGET_WARN_FRACTION,
@@ -21,7 +22,11 @@ import {
   getMCPServerStatus,
   MCPDiscoveryState,
   MCPServerStatus,
+  McpTransportPool,
+  POOLED_TRANSPORTS_DEFAULT,
   SessionEndReason,
+  WorkspaceMcpBudget,
+  DiscoveredMCPTool,
   restoreWorktreeContext,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -29,6 +34,9 @@ import type {
   Config,
   ConversationRecord,
   DeviceAuthorizationData,
+  McpBudgetEvent,
+  McpBudgetMode,
+  McpTransportKind,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -72,6 +80,7 @@ import type {
 import { buildAuthMethods } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
+import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import type { ApprovalModeValue } from './session/types.js';
@@ -98,6 +107,8 @@ import {
   type ServeMcpDiscoveryState,
   type ServeMcpServerRuntimeStatus,
   type ServeMcpTransport,
+  type ServeWorkspaceMcpToolStatus,
+  type ServeWorkspaceMcpToolsStatus,
   type ServePreflightCell,
   type ServePreflightKind,
   type ServeSessionContextStatus,
@@ -111,6 +122,8 @@ import {
   type ServeWorkspaceProvidersStatus,
   type ServeWorkspaceSkillStatus,
   type ServeWorkspaceSkillsStatus,
+  type ServeWorkspaceToolStatus,
+  type ServeWorkspaceToolsStatus,
 } from '../serve/status.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
@@ -153,30 +166,46 @@ export async function runAcpAgent(
   settings: LoadedSettings,
   argv: CliArgs,
 ) {
-  // Initialize config to set up ACP bootstrap services (hooks, tools, MCP)
-  // without creating a chat session. The real per-session Config will own
-  // GeminiClient.initialize() and any SessionStart hook execution.
-  await config.initialize({ skipGeminiInitialization: true });
-  // ACP forwards session messages straight to the model; under progressive
-  // MCP availability `initialize()` returns before MCP servers settle, so
-  // we wait here to keep the first session's tool surface consistent with
-  // the legacy synchronous behavior.
-  await config.waitForMcpReady();
-  // Surface MCP failures to stderr. ACP's stdout is the protocol channel
-  // so info/log writes are already redirected to stderr below, but we
-  // emit this BEFORE that redirection takes effect to keep the message
-  // visible regardless of how the host process is wired.
-  // Defensive against tests that pass a stubbed Config without
-  // `getFailedMcpServerNames`.
-  const failedMcpServers =
-    typeof config.getFailedMcpServerNames === 'function'
-      ? config.getFailedMcpServerNames()
-      : [];
-  if (failedMcpServers.length > 0) {
-    process.stderr.write(
-      `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
-        `Continuing with built-in tools and any servers that did connect.\n`,
-    );
+  // F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): skip MCP
+  // discovery in the BOOTSTRAP config. Pre-fix every stdio MCP server
+  // was spawned twice — once by the bootstrap (legacy per-server path,
+  // pool=undefined, invisible to budget / drainAll / pid-sweep) and
+  // once via each session's pool-routed discovery. With N servers and
+  // M sessions, the headline `4 sessions × budget=2 caps at 2`
+  // contract was silently violated by the bootstrap copies. Bootstrap
+  // MCP clients are never used to serve a session (each session
+  // builds its own per-session Config and runs discovery there), so
+  // skipping at the bootstrap layer is safe AND closes the 2N
+  // subprocess leak.
+  const bootstrapSkipsMcpDiscovery = true;
+  await config.initialize({
+    skipGeminiInitialization: true,
+    skipMcpDiscovery: bootstrapSkipsMcpDiscovery,
+  });
+  // F2 (#4175 commit 6 review fix — claude-opus-4-7 W132): the
+  // `failedMcpServers` warning was unconditional, but
+  // `getMCPServerStatus` defaults to DISCONNECTED for absent entries
+  // (`mcp-client.ts:407-409`). Under `skipMcpDiscovery: true` the
+  // global `serverStatuses` map has no entries for any of this
+  // workspace's MCP servers, so every configured non-disabled server
+  // was reported as failed — false-positive "Warning: MCP server(s)
+  // failed to start" on every `qwen serve` startup, even when the
+  // per-session pool-routed discovery would spin them up successfully
+  // a moment later. Skip the warning when we know discovery was
+  // intentionally bypassed; per-session paths surface real failures
+  // through their own status routes / events.
+  if (!bootstrapSkipsMcpDiscovery) {
+    await config.waitForMcpReady();
+    const failedMcpServers =
+      typeof config.getFailedMcpServerNames === 'function'
+        ? config.getFailedMcpServerNames()
+        : [];
+    if (failedMcpServers.length > 0) {
+      process.stderr.write(
+        `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+          `Continuing with built-in tools and any servers that did connect.\n`,
+      );
+    }
   }
 
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
@@ -194,6 +223,24 @@ export async function runAcpAgent(
     agentInstance = new QwenAgent(config, settings, argv, conn);
     return agentInstance;
   }, stream);
+
+  // F2 (#4175 commit 5 review fix — wenshao R8): both the SIGTERM
+  // handler and the IDE-initiated close path need to drain the MCP
+  // pool before runExitCleanup. Pre-fix the same try/catch with the
+  // same 8s timeout was duplicated verbatim — easy drift target.
+  // Single helper closure keeps the timeout + log labels consistent
+  // and means future changes to the drain semantics happen in one
+  // place. 8s budget is `MAX_DRAIN_MS - 2s` (per design §17 wall-
+  // clock budget) so descendant pid sweeps still complete before
+  // runExitCleanup's own kill loop kicks in.
+  const drainPoolBeforeExit = async (label: string): Promise<void> => {
+    if (!agentInstance) return;
+    try {
+      await agentInstance.shutdownMcpPool(8_000);
+    } catch (err) {
+      debugLogger.error(`[ACP] MCP pool drain (${label}) error:`, err);
+    }
+  };
 
   // Handle SIGTERM/SIGINT for graceful shutdown.
   // Without this, signal handlers registered elsewhere in the CLI
@@ -257,6 +304,11 @@ export async function runAcpAgent(
     } catch {
       // stdout may already be closed
     }
+    // F2 (#4175 commit 4): drain the workspace MCP pool BEFORE
+    // runExitCleanup so the descendant pid sweep (commit 3) can
+    // SIGTERM npx/uvx wrapper grandchildren. runExitCleanup's own
+    // child kill is a fallback for processes the pool didn't track.
+    await drainPoolBeforeExit('signal');
     // Clean up child processes (MCP servers, etc.) and force exit.
     // Without this, orphan subprocesses keep the Node.js event loop alive
     // and the CLI process never terminates after the IDE disconnects.
@@ -274,6 +326,15 @@ export async function runAcpAgent(
   await connection.closed;
   // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
   await fireSessionEndOnce(SessionEndReason.PromptInputExit);
+  // F2 (#4175 commit 4 review fix — wenshao C1): the SIGTERM/SIGINT
+  // shutdownHandler drains the pool, but the IDE-initiated normal
+  // close path (this branch) returned without draining, leaking
+  // shared MCP entries (subprocess + descendants) until the OS
+  // eventually reaped them — a real regression vs pre-F2 daemon
+  // mode where each session's manager torn down its own clients
+  // on disconnect. Mirror the SIGTERM handler's pool drain here via
+  // the shared helper (R8 fold-in).
+  await drainPoolBeforeExit('ide_close');
 
   process.off('SIGTERM', shutdownHandler);
   process.off('SIGINT', shutdownHandler);
@@ -304,12 +365,217 @@ export function toHttpServer(
   return undefined;
 }
 
+/**
+ * F2 (#4175 commit 4): parse `QWEN_SERVE_MCP_POOL_TRANSPORTS` env var
+ * (set by `runQwenServe.ts` from the `--mcp-pool-transports` CLI flag).
+ * Comma-separated list e.g. "stdio,websocket,http". Falls back to
+ * `POOLED_TRANSPORTS_DEFAULT` ({stdio, websocket}) on missing /
+ * malformed input. Unknown transport names are silently dropped — the
+ * resulting set is still a valid `ReadonlySet<McpTransportKind>`.
+ */
+function parsePooledTransports(
+  envValue: string | undefined,
+): ReadonlySet<McpTransportKind> {
+  if (!envValue || !envValue.trim()) return POOLED_TRANSPORTS_DEFAULT;
+  const KNOWN: ReadonlySet<McpTransportKind> = new Set([
+    'stdio',
+    'websocket',
+    'http',
+    'sse',
+  ]);
+  const out = new Set<McpTransportKind>();
+  for (const raw of envValue.split(',')) {
+    const trimmed = raw.trim().toLowerCase();
+    if (KNOWN.has(trimmed as McpTransportKind)) {
+      out.add(trimmed as McpTransportKind);
+    }
+  }
+  // Empty after parsing (all unknown) → fall back to defaults so an
+  // operator typo doesn't silently disable the pool entirely.
+  return out.size > 0 ? out : POOLED_TRANSPORTS_DEFAULT;
+}
+
+/**
+ * Parse `QWEN_SERVE_MCP_POOL_DRAIN_MS` env var. Default 30000ms per
+ * design §6.3. Bounded to [1000, 600000] (1s–10min) so a typo
+ * can't permanently strand pool entries (lower bound) or starve the
+ * MAX_IDLE hard cap (upper bound).
+ */
+function parsePoolDrainMs(envValue: string | undefined): number {
+  if (!envValue) return 30_000;
+  // F2 (#4175 commit 6 review fix — wenshao W9): reject input that
+  // contains anything other than digits. Pre-fix `Number.parseInt`
+  // accepted `'30000ms'`, `'30000abc'`, etc. (silently truncating to
+  // 30000), so an operator hand-editing env vars with a unit
+  // suffix or typo would get a value that "looks parsed" but
+  // actually represents a misconfiguration. Strict regex prevents
+  // both classes; on rejection we log a stderr warning AND fall
+  // back to the default rather than raising at boot (boot-fatal
+  // would be more aggressive than the rest of `qwen serve`'s
+  // env-validation surface, which uniformly degrades-with-warning).
+  const trimmed = envValue.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    process.stderr.write(
+      `qwen serve: QWEN_SERVE_MCP_POOL_DRAIN_MS=${JSON.stringify(envValue)} ` +
+        `is not a valid integer; using default 30000ms.\n`,
+    );
+    return 30_000;
+  }
+  const n = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(n)) return 30_000;
+  return Math.min(600_000, Math.max(1_000, n));
+}
+
+/**
+ * F2 (#4175 commit 6): construct the workspace-scoped MCP budget
+ * controller from the daemon's env vars (`QWEN_SERVE_MCP_CLIENT_BUDGET`,
+ * `QWEN_SERVE_MCP_BUDGET_MODE`). Returns `undefined` when budget is
+ * unset OR resolves to `off` mode — both signal "no enforcement", and
+ * the pool's snapshot path should treat the controller as absent so
+ * the legacy per-session cell shape remains. Mirrors
+ * `McpClientManager`'s constructor-time budget resolution to keep
+ * env-var behavior identical between pool and non-pool modes.
+ *
+ * The pool is responsible for invoking `tryReserve`/`release`; this
+ * helper just produces the controller and wires the event callback.
+ * `onEvent` is invoked with the workspace-scoped budget event; the
+ * callback (typically `QwenAgent.broadcastBudgetEvent`) fans it out
+ * to every attached session.
+ */
+function createWorkspaceMcpBudget(
+  onEvent: (event: McpBudgetEvent) => void,
+): WorkspaceMcpBudget | undefined {
+  const rawBudget = process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+  const rawMode = process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
+  // F2 (#4175 commit 6 review fix — wenshao W24): match
+  // `McpClientManager.readBudgetFromEnv`'s parsing exactly. Pre-fix
+  // we used `Number.parseInt(rawBudget, 10)` which silently accepted
+  // `"2.5"` as `2`, `"1e2"` as `1` (manager reads it as `100` — 100×
+  // enforcement divergence on the same env var), and rejected
+  // `"0x10"` (manager accepts as `16`). Switch to `Number(...)` +
+  // explicit `Number.isInteger` guard so the pool and the manager
+  // honor the same env values.
+  const budget =
+    rawBudget !== undefined && rawBudget !== '' ? Number(rawBudget) : undefined;
+  const mode: McpBudgetMode = (() => {
+    if (rawMode === 'enforce' || rawMode === 'warn' || rawMode === 'off') {
+      return rawMode;
+    }
+    return budget !== undefined &&
+      Number.isFinite(budget) &&
+      Number.isInteger(budget) &&
+      budget > 0
+      ? 'warn'
+      : 'off';
+  })();
+  if (
+    mode === 'off' ||
+    budget === undefined ||
+    !Number.isFinite(budget) ||
+    !Number.isInteger(budget) ||
+    budget <= 0
+  ) {
+    return undefined;
+  }
+  return new WorkspaceMcpBudget({
+    clientBudget: budget,
+    mode,
+    onEvent,
+  });
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
 
+  /**
+   * F2 (#4175 commit 4): workspace-shared MCP transport pool. Eagerly
+   * constructed in the ctor (per V21-13 Q6 resolved); lazy w.r.t.
+   * actual MCP work — spawns nothing until the first session's
+   * `discoverAllMcpToolsViaPool` calls `pool.acquire`.
+   *
+   * Set to `undefined` when `QWEN_SERVE_NO_MCP_POOL=1` env var is
+   * present (kill switch for rollback / A-B comparison). When
+   * undefined, sessions fall back to per-session McpClient spawn
+   * (pre-F2 behavior, identical to standalone `qwen` runtime).
+   *
+   * Single instance per QwenAgent → single instance per ACP child
+   * process → single instance per workspace (post-#4113 invariant).
+   * Pool is workspace-bound via `this.config.getWorkspaceContext()`.
+   */
+  private readonly mcpPool?: McpTransportPool;
+
+  /**
+   * F2 (#4175 commit 6): workspace-scoped MCP budget controller.
+   * Constructed alongside `mcpPool` when `--mcp-client-budget=N` is
+   * configured. Pool delegates `tryReserve` / `release` to this
+   * controller so the cap caps the workspace, not each session.
+   * `undefined` when no budget is configured OR when the pool kill
+   * switch is on.
+   */
+  private readonly workspaceMcpBudget?: WorkspaceMcpBudget;
+
   getActiveSessions(): Session[] {
     return [...this.sessions.values()];
+  }
+
+  /**
+   * F2 (#4175 commit 4): drain the workspace MCP transport pool.
+   * Called by the runAcpAgent SIGTERM/SIGINT shutdownHandler so all
+   * pool entries (subprocess + wrappers) get a coordinated SIGTERM
+   * with descendant pid sweep before process.exit. No-op when pool
+   * is undefined (kill-switch mode).
+   *
+   * Bounded by `timeoutMs` (default 10s); entries that don't close
+   * cleanly are reported in `DrainResult.errors` but the pool clears
+   * its maps regardless because the process is exiting.
+   */
+  async shutdownMcpPool(timeoutMs = 10_000): Promise<void> {
+    if (!this.mcpPool) return;
+    try {
+      const result = await this.mcpPool.drainAll({ force: true, timeoutMs });
+      if (result.forced > 0 || result.errors.length > 0) {
+        debugLogger.warn(
+          `MCP pool drain: ${result.drained} clean, ${result.forced} timed out, ` +
+            `${result.errors.length} errors`,
+        );
+      }
+    } catch (err) {
+      debugLogger.error(
+        `MCP pool drainAll failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private async closeStoredSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      this.mcpPool?.releaseSession(sessionId);
+      return;
+    }
+
+    try {
+      await session.cancelPendingPrompt();
+    } catch (err) {
+      debugLogger.debug(
+        `Session ${sessionId} cancel during close failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+
+    try {
+      await session.getConfig().getToolRegistry()?.stop();
+    } catch (err) {
+      debugLogger.debug(
+        `Session ${sessionId} tool registry stop during close failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+
+    this.mcpPool?.releaseSession(sessionId);
+    this.sessions.delete(sessionId);
   }
 
   constructor(
@@ -317,7 +583,104 @@ class QwenAgent implements Agent {
     private settings: LoadedSettings,
     private argv: CliArgs,
     private connection: AgentSideConnection,
-  ) {}
+  ) {
+    // Pool kill switch via env var so operators can A/B compare or
+    // roll back without rebuilding. `runQwenServe.ts` sets this when
+    // `--no-mcp-pool` is passed at daemon startup.
+    if (process.env['QWEN_SERVE_NO_MCP_POOL'] === '1') {
+      this.mcpPool = undefined;
+      this.workspaceMcpBudget = undefined;
+    } else {
+      // F2 (#4175 commit 6): construct the workspace-scoped budget
+      // controller when `--mcp-client-budget=N` was set at boot. The
+      // ACP child receives the value via env var (set by the daemon
+      // parent in `runQwenServe.ts`), the same path the pre-F2
+      // per-session McpClientManager reads from. With the pool
+      // active, this controller's accounting REPLACES per-session
+      // copies — 4 sessions × budget=2 caps the workspace at 2,
+      // not 8 (per design §11). Budget event delivery uses
+      // `broadcastBudgetEvent` to fan out to every attached session
+      // via SSE notifications; if no sessions are attached at fire
+      // time, the event is dropped (snapshot still carries the
+      // hysteresis state for clients that reconnect).
+      this.workspaceMcpBudget = createWorkspaceMcpBudget((event) => {
+        this.broadcastBudgetEvent(event);
+      });
+      this.mcpPool = new McpTransportPool(this.config, {
+        workspaceContext: this.config.getWorkspaceContext(),
+        debugMode: this.config.getDebugMode(),
+        // sendSdkMcpMessage left undefined: SDK MCP servers always
+        // bypass the pool via createUnpooledConnection (per-session
+        // routing through ACP control plane). The legacy
+        // McpClientManager path retains its own per-session SDK
+        // wiring; pool-mode discoverAllMcpToolsViaPool delegates SDK
+        // MCP to that bypass.
+        pooledTransports: parsePooledTransports(
+          process.env['QWEN_SERVE_MCP_POOL_TRANSPORTS'],
+        ),
+        drainDelayMs: parsePoolDrainMs(
+          process.env['QWEN_SERVE_MCP_POOL_DRAIN_MS'],
+        ),
+        budget: this.workspaceMcpBudget,
+      });
+    }
+  }
+
+  /**
+   * F2 (#4175 commit 6): expose pool's workspace-scoped budget
+   * controller for snapshot builders. Returns `undefined` when the
+   * pool is disabled (`QWEN_SERVE_NO_MCP_POOL=1`) OR no
+   * `--mcp-client-budget` was configured (controller not constructed).
+   */
+  getWorkspaceMcpBudget(): WorkspaceMcpBudget | undefined {
+    return this.workspaceMcpBudget;
+  }
+
+  /**
+   * F2 (#4175 commit 6): fan-out a workspace-scoped MCP budget event
+   * to every active session's SSE bus. Replaces the per-session
+   * `setMcpBudgetEventCallback` wiring in `newSessionConfig` for
+   * pool-mode daemons — the pool's `WorkspaceMcpBudget` fires once,
+   * this method sends one `extNotification` per attached session.
+   * Each notification is independently fire-and-forget (a mid-flight
+   * ACP disconnect on one session must not sink delivery to siblings).
+   */
+  private broadcastBudgetEvent(event: McpBudgetEvent): void {
+    // The QwenAgent's `this.connection` is the single ACP channel to
+    // the daemon. The daemon's bridge `bridgeClient.extNotification`
+    // resolves the per-session SSE bus from the `sessionId` field of
+    // each notification — so we send N notifications (one per active
+    // session id) over the same connection. Each notification is
+    // independently fire-and-forget; a mid-flight ACP disconnect
+    // shouldn't sink delivery to siblings.
+    //
+    // R3 (commit 6 self-review fold-in): snapshot the session id
+    // list before the async fan-out so a concurrent `killSession`
+    // (which mutates `this.sessions` synchronously) can't corrupt
+    // the iterator. `Array.from` produces a stable snapshot; per-id
+    // notifications then run on the snapshot regardless of live-map
+    // mutations.
+    const sessionIds = Array.from(this.sessions.keys());
+    for (const sid of sessionIds) {
+      void this.connection
+        .extNotification('qwen/notify/session/mcp-budget-event', {
+          v: 1,
+          sessionId: sid,
+          // F2 (#4175 commit 6): tag every workspace-scoped event so
+          // SDK reducers can branch via `isWorkspaceScopedBudgetEvent`.
+          // Per-session legacy events keep `scope` absent (means
+          // 'session'), preserving the additive-protocol contract.
+          scope: 'workspace' as const,
+          ...event,
+        })
+        .catch((err: unknown) => {
+          debugLogger.debug(
+            `MCP workspace budget event delivery to session ${sid} failed ` +
+              `(kind=${event.kind}): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+    }
+  }
 
   async initialize(args: InitializeRequest): Promise<InitializeResponse> {
     this.clientCapabilities = args.clientCapabilities;
@@ -735,38 +1098,89 @@ class QwenAgent implements Agent {
       const workspaceCwd = this.workspaceCwd(config);
       const servers = config.getMcpServers() ?? {};
 
+      // F2 (#4175 commit 5): pool snapshot powers `entryCount` +
+      // `entrySummary` per-server fields. Captured once outside the
+      // per-server loop because `pool.getSnapshot()` walks every entry
+      // and we don't want N walks for N servers. Absent when the pool
+      // is disabled (`QWEN_SERVE_NO_MCP_POOL=1`); per-server
+      // enrichment then no-ops and the snapshot reverts to the legacy
+      // (pre-F2) shape — that's the contract for daemons that
+      // advertise `mcp_workspace_pool: false`.
+      let poolByName: Record<
+        string,
+        {
+          entryCount: number;
+          entrySummary: ReadonlyArray<{
+            entryIndex: number;
+            refs: number;
+            status: MCPServerStatus;
+          }>;
+        }
+      > = {};
+      try {
+        const snap = this.mcpPool?.getSnapshot();
+        if (snap) poolByName = snap.byName;
+      } catch (err) {
+        // Pool snapshot failures must not crash the wider status —
+        // surface to stderr so silent regressions are visible without
+        // depending on `debugLogger.debug` operator opt-in (matches
+        // the budget-accounting fail-loud pattern below).
+        process.stderr.write(
+          `qwen serve: pool snapshot for workspace MCP status failed: ` +
+            `${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+
       // PR 14: pull live accounting + budget config from the child's
       // McpClientManager so the daemon's read-only route reflects the
       // single source of truth (not a daemon-side polled cache).
       // `getToolRegistry()` and `getMcpClientManager()` are best-effort
       // — older test stubs or partially-initialized configs may not
       // expose them; in that case we fall back to "no budget surface".
+      //
+      // F2 (#4175 commit 6): when the workspace-scoped budget
+      // controller is active, prefer its accounting — clientCount /
+      // clientBudget / budgetMode come from the workspace budget
+      // (one cap across all sessions) and the snapshot cell carries
+      // `scope: 'workspace'`. Manager fall-back keeps the legacy
+      // per-session cell shape for daemons without a configured
+      // budget OR with the kill switch on.
       let clientCount: number | undefined;
       let clientBudget: number | undefined;
       let budgetMode: ServeMcpBudgetMode | undefined;
       let refusedSet: ReadonlySet<string> = new Set<string>();
-      try {
-        const manager = config.getToolRegistry()?.getMcpClientManager();
-        if (manager) {
-          const accounting = manager.getMcpClientAccounting();
-          clientCount = accounting.total;
-          clientBudget = manager.getMcpClientBudget();
-          budgetMode = manager.getMcpBudgetMode();
-          refusedSet = new Set(accounting.refusedServerNames);
+      let budgetCellScope: 'workspace' | 'session' = 'session';
+      const wsBudget = this.workspaceMcpBudget;
+      if (wsBudget !== undefined) {
+        budgetCellScope = 'workspace';
+        clientCount = wsBudget.getReservedCount();
+        clientBudget = wsBudget.getBudget();
+        budgetMode = this.coerceBudgetMode(wsBudget.getMode());
+        refusedSet = new Set(wsBudget.getRefusedServerNames());
+      } else {
+        try {
+          const manager = config.getToolRegistry()?.getMcpClientManager();
+          if (manager) {
+            const accounting = manager.getMcpClientAccounting();
+            clientCount = accounting.total;
+            clientBudget = manager.getMcpClientBudget();
+            budgetMode = manager.getMcpBudgetMode();
+            refusedSet = new Set(accounting.refusedServerNames);
+          }
+        } catch (err) {
+          // Accounting failure must not crash the snapshot — the per-
+          // server data is still useful even without budget overlay.
+          // PR 14 fix (review #4247 wenshao S7a): bumped from
+          // `debugLogger.debug` to stderr `process.stderr.write` so a
+          // production daemon emits a visible warning when accounting
+          // breaks. `debugLogger.debug` is gated on the operator
+          // having set debug=true, which makes silent slot-leak / type-
+          // mismatch failures invisible in real deployments.
+          process.stderr.write(
+            `qwen serve: getMcpClientAccounting failed: ` +
+              `${err instanceof Error ? err.message : String(err)}\n`,
+          );
         }
-      } catch (err) {
-        // Accounting failure must not crash the snapshot — the per-
-        // server data is still useful even without budget overlay.
-        // PR 14 fix (review #4247 wenshao S7a): bumped from
-        // `debugLogger.debug` to stderr `process.stderr.write` so a
-        // production daemon emits a visible warning when accounting
-        // breaks. `debugLogger.debug` is gated on the operator
-        // having set debug=true, which makes silent slot-leak / type-
-        // mismatch failures invisible in real deployments.
-        process.stderr.write(
-          `qwen serve: getMcpClientAccounting failed: ` +
-            `${err instanceof Error ? err.message : String(err)}\n`,
-        );
       }
 
       return {
@@ -824,6 +1238,22 @@ class QwenAgent implements Agent {
           if (typeof extensionName === 'string') {
             out.extensionName = extensionName;
           }
+          // F2 (#4175 commit 5): pool entries enrichment. `entryCount`
+          // and `entrySummary` are present together (or both absent)
+          // — guards on `mcp_workspace_pool` capability advertise the
+          // pair atomically. The runtime status is mapped through the
+          // existing `this.mcpStatus(...)` so downstream string-typed
+          // consumers see the same `'connected' | 'connecting' |
+          // 'disconnected'` enum the top-level `mcpStatus` field uses.
+          const poolRow = poolByName[name];
+          if (poolRow) {
+            out.entryCount = poolRow.entryCount;
+            out.entrySummary = poolRow.entrySummary.map((e) => ({
+              entryIndex: e.entryIndex,
+              refs: e.refs,
+              status: this.mcpStatus(e.status),
+            }));
+          }
           return out;
         }),
         ...(clientCount !== undefined ? { clientCount } : {}),
@@ -848,6 +1278,7 @@ class QwenAgent implements Agent {
                 Array.from(refusedSet).filter(
                   (n) => !config.isMcpServerDisabled(n),
                 ).length,
+                budgetCellScope,
               ),
             }
           : {}),
@@ -859,6 +1290,88 @@ class QwenAgent implements Agent {
         initialized: true,
         servers: [],
         errors: [this.errorCell('mcp', error)],
+      };
+    }
+  }
+
+  private buildWorkspaceMcpToolsStatus(
+    config: Config,
+    serverName: string,
+  ): ServeWorkspaceMcpToolsStatus {
+    const workspaceCwd = this.safeWorkspaceCwd(config);
+    try {
+      const servers = config.getMcpServers() ?? {};
+      if (!Object.prototype.hasOwnProperty.call(servers, serverName)) {
+        return {
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd,
+          serverName,
+          initialized: true,
+          acpChannelLive: true,
+          tools: [],
+          errors: [
+            {
+              kind: 'mcp_tools',
+              status: 'error',
+              error: `MCP server not configured: ${serverName}`,
+            },
+          ],
+        };
+      }
+
+      const registry = config.getToolRegistry();
+      const allTools = registry?.getAllTools() ?? [];
+      const tools: ServeWorkspaceMcpToolStatus[] = allTools
+        .filter(
+          (tool): tool is DiscoveredMCPTool =>
+            tool instanceof DiscoveredMCPTool && tool.serverName === serverName,
+        )
+        .map((tool) => {
+          const invalidReasons: string[] = [];
+          if (!tool.name) invalidReasons.push('missing name');
+          if (!tool.description) invalidReasons.push('missing description');
+          const schema =
+            tool.parameterSchema &&
+            typeof tool.parameterSchema === 'object' &&
+            !Array.isArray(tool.parameterSchema)
+              ? (tool.parameterSchema as Record<string, unknown>)
+              : undefined;
+          const annotations =
+            tool.annotations &&
+            typeof tool.annotations === 'object' &&
+            !Array.isArray(tool.annotations)
+              ? (tool.annotations as Record<string, unknown>)
+              : undefined;
+          return {
+            name: tool.name || '(unnamed)',
+            serverToolName: tool.serverToolName,
+            description: tool.description,
+            ...(schema ? { schema } : {}),
+            ...(annotations ? { annotations } : {}),
+            isValid: invalidReasons.length === 0,
+            ...(invalidReasons.length > 0
+              ? { invalidReason: invalidReasons.join(', ') }
+              : {}),
+          };
+        });
+
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        serverName,
+        initialized: true,
+        acpChannelLive: true,
+        tools,
+      };
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        serverName,
+        initialized: true,
+        acpChannelLive: true,
+        tools: [],
+        errors: [this.errorCell('mcp_tools', error)],
       };
     }
   }
@@ -897,6 +1410,7 @@ class QwenAgent implements Agent {
     budget: number | undefined,
     mode: ServeMcpBudgetMode,
     refusedCount: number,
+    scope: 'workspace' | 'session' = 'session',
   ): ServeMcpBudgetStatusCell[] {
     // PR 14 fix (review #4247): when no `--mcp-client-budget` is
     // configured the manager resolves to `mode: 'off'`. The protocol
@@ -928,12 +1442,14 @@ class QwenAgent implements Agent {
     }
     const cell: ServeMcpBudgetStatusCell = {
       kind: 'mcp_budget',
-      // PR 14 v1: per-session, not per-workspace. Each ACP session has
-      // its own `Config`/`McpClientManager` (via `newSessionConfig`)
-      // and reads `QWEN_SERVE_MCP_CLIENT_BUDGET` independently.
-      // Snapshot shows the bootstrap session's view. Wave 5 PR 23
-      // shared MCP pool will graduate this to `'workspace'`.
-      scope: 'session',
+      // F2 (#4175 commit 6): `scope` graduates from 'session' to
+      // 'workspace' when `QwenAgent.workspaceMcpBudget` is active —
+      // the cap covers the whole workspace, not each ACP session
+      // independently. Daemons running with `--no-mcp-pool` or with
+      // budget unset keep the legacy `'session'` scope. SDK consumers
+      // narrow via `isWorkspaceScopedBudgetEvent` for events; the
+      // snapshot route surfaces the same `scope` value here.
+      scope,
       status,
       liveCount,
       mode,
@@ -943,6 +1459,18 @@ class QwenAgent implements Agent {
     if (errorKind) cell.errorKind = errorKind;
     if (hint) cell.hint = hint;
     return [cell];
+  }
+
+  /**
+   * F2 (#4175 commit 6): map the core `McpBudgetMode` enum to the
+   * status protocol's `ServeMcpBudgetMode`. The two are wire-compat
+   * 1:1 today (`'enforce' | 'warn' | 'off'`); this helper exists so
+   * a future divergence (e.g. an `'audit'` mode added on the core
+   * side before the protocol catches up) doesn't break the snapshot
+   * builder via a TS structural-narrowing surprise.
+   */
+  private coerceBudgetMode(mode: McpBudgetMode): ServeMcpBudgetMode {
+    return mode;
   }
 
   private errorCell(
@@ -1381,6 +1909,66 @@ class QwenAgent implements Agent {
     }
   }
 
+  private buildWorkspaceToolsStatus(config: Config): ServeWorkspaceToolsStatus {
+    const workspaceCwd = this.safeWorkspaceCwd(config);
+    try {
+      const registry = config.getToolRegistry();
+      if (!registry) {
+        return {
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd,
+          initialized: true,
+          acpChannelLive: true,
+          tools: [],
+          errors: [
+            {
+              kind: 'tools',
+              status: 'error',
+              errorKind: 'protocol_error',
+              error: 'Tool registry is not initialized.',
+            },
+          ],
+        };
+      }
+
+      const disabled = config.getDisabledTools();
+      const tools: ServeWorkspaceToolStatus[] = registry
+        .getAllTools()
+        .filter((tool) => !('serverName' in tool))
+        .map((tool) => ({
+          name: tool.name,
+          displayName: tool.displayName,
+          description: tool.description,
+          enabled: !disabled.has(tool.name),
+        }));
+
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        acpChannelLive: true,
+        tools,
+      };
+    } catch (err) {
+      const errorKind = mapDomainErrorToErrorKind(err) ?? 'protocol_error';
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        acpChannelLive: true,
+        tools: [],
+        errors: [
+          {
+            kind: 'tools',
+            status: 'error',
+            error: err instanceof Error ? err.message : String(err),
+            errorKind,
+          },
+        ],
+      };
+    }
+  }
+
   private sessionOrThrow(sessionId: string): Session {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -1436,10 +2024,28 @@ class QwenAgent implements Agent {
           string,
           unknown
         >;
+      case SERVE_STATUS_EXT_METHODS.workspaceMcpTools: {
+        const serverName = params['serverName'];
+        if (typeof serverName !== 'string' || serverName.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing serverName',
+          );
+        }
+        return this.buildWorkspaceMcpToolsStatus(
+          this.config,
+          serverName,
+        ) as unknown as Record<string, unknown>;
+      }
       case SERVE_STATUS_EXT_METHODS.workspaceSkills:
         return (await this.buildWorkspaceSkillsStatus(
           this.config,
         )) as unknown as Record<string, unknown>;
+      case SERVE_STATUS_EXT_METHODS.workspaceTools:
+        return this.buildWorkspaceToolsStatus(this.config) as unknown as Record<
+          string,
+          unknown
+        >;
       case SERVE_STATUS_EXT_METHODS.workspaceProviders:
         return this.buildWorkspaceProvidersStatus(
           this.config,
@@ -1481,12 +2087,43 @@ class QwenAgent implements Agent {
         // config, manager unavailable, post-discover not connected)
         // propagate as JSON-RPC errors with structured `data` that
         // the bridge translates to typed HTTP responses.
+        //
+        // F2 (#4175 commit 5): when `this.mcpPool` is present AND the
+        // pool currently holds at least one entry for this server
+        // name, restart routes through `pool.restartByName(name, opts)`
+        // instead of the legacy per-session `discoverToolsForServer`.
+        // The pool may hold multiple entries for the same name (e.g.
+        // sessions injected divergent OAuth headers); `entryIndex`
+        // narrows to one entry, omitted = restart all entries in
+        // parallel via `Promise.allSettled`. Soft-skip pre-flight
+        // checks (disabled / in_flight / budget) still run BEFORE the
+        // pool branch so the existing legacy event shape covers the
+        // skip cases without inventing per-entry skip semantics.
         const serverName = params['serverName'];
         if (typeof serverName !== 'string' || serverName.length === 0) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing serverName',
           );
+        }
+        // F2 (#4175 commit 5): optional `entryIndex` selector. The
+        // server.ts route validates the wire format (integer >= 0 or
+        // `'*'`); here we just accept a finite non-negative integer.
+        // `'*'` flattens to undefined (semantically "all").
+        let entryIndex: number | undefined;
+        const rawEntryIndex = params['entryIndex'];
+        if (rawEntryIndex !== undefined && rawEntryIndex !== '*') {
+          if (
+            typeof rawEntryIndex !== 'number' ||
+            !Number.isInteger(rawEntryIndex) ||
+            rawEntryIndex < 0
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'entryIndex must be a non-negative integer or "*"',
+            );
+          }
+          entryIndex = rawEntryIndex;
         }
         const servers = this.config.getMcpServers() ?? {};
         if (!Object.prototype.hasOwnProperty.call(servers, serverName)) {
@@ -1551,8 +2188,145 @@ class QwenAgent implements Agent {
             reason: 'budget_would_exceed' as const,
           };
         }
+        // #4282 fold-in 5 (Codex P2-2). Re-read settings to pick up
+        // any `tools.disabled` toggles applied since this ACP child
+        // booted. The original snapshot was frozen by Config's
+        // constructor; without this refresh, a `setWorkspaceToolEnabled`
+        // call followed by the documented `mcp restart` would
+        // re-register a just-disabled MCP tool because
+        // `discoverMcpToolsForServer` walks `ToolRegistry.registerTool`,
+        // which consults `Config.getDisabledTools()`.
+        //
+        // #4297 fold-in 3 (wenshao critical, addresses #3260725526):
+        // read the MERGED settings (User + System + Workspace union)
+        // rather than the workspace scope alone. The bootstrap Config
+        // received `merged.tools?.disabled`, so user/system policy is
+        // already enforced by `ToolRegistry.registerTool`. Replacing
+        // the in-memory set with the workspace scope alone would
+        // silently drop higher-scope entries — a user-level disable
+        // would survive boot but vanish after the first MCP restart,
+        // letting `discoverMcpToolsForServer` re-register the
+        // user-disabled tool.
+        //
+        // The asymmetry vs. the persist-write path is deliberate:
+        // `runQwenServe.persistDisabledTools` writes to
+        // `SettingScope.Workspace` only so the workspace file doesn't
+        // bake in user/system entries (the fold-in 1 H2 fix). Reads
+        // need the union; writes need the scope. The two paths look
+        // alike but answer different questions.
+        try {
+          const fresh = loadSettings(this.config.getTargetDir());
+          const mergedDisabled = fresh.merged.tools?.disabled;
+          // #4297 fold-in 7 (qwen-latest critical, addresses
+          // #3262625101): a malformed `tools.disabled` (boolean,
+          // string, object — hand-edited settings.json) DOESN'T
+          // throw, so the catch block below would never fire. The
+          // ternary used to silently substitute `[]`, clearing the
+          // entire disabled set with zero operator signal. Detect
+          // and stderr-log the malformed shape before clearing so a
+          // misconfigured settings file is loud rather than silent.
+          if (mergedDisabled !== undefined && !Array.isArray(mergedDisabled)) {
+            process.stderr.write(
+              `qwen serve: MCP restart for ${JSON.stringify(serverName)}: ` +
+                `tools.disabled has unexpected type ${typeof mergedDisabled}; ` +
+                `clearing disabled set — check settings.json. ` +
+                `Expected an array of strings.\n`,
+            );
+          }
+          // #4329 F1 fold-in (#4319): use the shared
+          // `normalizeDisabledToolList` helper so the boot path
+          // (`cli/src/config/config.ts`) and this MCP restart refresh
+          // path agree byte-for-byte on what counts as "disabled".
+          // Without the shared helper a `tools.disabled: ['  Foo  ',
+          // '', 'Foo']` settings entry would produce different sets
+          // at boot vs after restart — `ToolRegistry.has(tool.name)`
+          // exact-match check would then silently re-register the
+          // trimmed tool. Helper is in `cli/src/config/normalizeDisabledTools.ts`
+          // with its own unit tests covering the trim / empty-skip /
+          // dedupe contract.
+          const disabledList = normalizeDisabledToolList(mergedDisabled);
+          this.config.setDisabledTools(new Set(disabledList));
+        } catch (err) {
+          // #4297 fold-in 2 (wenshao S3): settings load failures are
+          // non-fatal — fall through with the existing in-memory
+          // snapshot. The MCP restart still runs; only the
+          // disabledTools sync is skipped. Surface a stderr line so a
+          // persistent failure (corrupted settings.json, permission
+          // denied) is visible to operators rather than silently
+          // breaking the documented "toggle + restart" workflow with
+          // zero diagnostic.
+          process.stderr.write(
+            `qwen serve: MCP restart for ${JSON.stringify(serverName)} ` +
+              `could not refresh disabledTools from merged settings ` +
+              `(${err instanceof Error ? err.message : String(err)}); ` +
+              `proceeding with the bootstrap snapshot — recently toggled ` +
+              `tools may not take effect until daemon restart.\n`,
+          );
+        }
+        // F2 (#4175 commit 5): pool-mode routing. When the pool holds
+        // entries for this name, route restart through the pool so all
+        // matching entries restart with proper per-entry generation
+        // tracking + snapshot replay (see mcp-pool-entry.ts). The
+        // legacy per-session path stays as fallback when the pool is
+        // disabled (`QWEN_SERVE_NO_MCP_POOL=1`), absent, or empty for
+        // this name (e.g. unpooled HTTP/SSE/SDK transports).
+        const poolSnapshot = this.mcpPool?.getSnapshot();
+        const poolHasEntries =
+          poolSnapshot !== undefined &&
+          (poolSnapshot.byName[serverName]?.entryCount ?? 0) > 0;
+        if (this.mcpPool && poolHasEntries) {
+          const restartResults = await this.mcpPool.restartByName(serverName, {
+            ...(entryIndex !== undefined ? { entryIndex } : {}),
+          });
+          // V21-7: when the caller asked for a specific `entryIndex`
+          // that doesn't match any current pool entry, return an
+          // empty `entries` array rather than throwing — matches the
+          // design's documented "404-like soft signal" for narrowed
+          // restarts where the underlying entry drained between the
+          // status snapshot and the restart call.
+          return {
+            serverName,
+            entries: restartResults,
+          };
+        }
+        // #4297 fold-in 9 (gpt-5.5 critical, addresses #3263088414):
+        // route through `ToolRegistry.discoverToolsForServer` instead
+        // of calling `manager.discoverMcpToolsForServer` directly.
+        // The registry wrapper PURGES this server's existing
+        // `DiscoveredMCPTool` entries (and its `revealedDeferred`
+        // markers) plus its prompts before rediscovery, so a
+        // toggle-disable-then-restart workflow actually removes the
+        // newly-disabled tool from the live registry. Without the
+        // wrapper, `registerTool` would only consult the refreshed
+        // `disabledTools` set for newly-discovered tools — entries
+        // that were already in the registry from the prior boot
+        // would keep serving requests, silently breaking the
+        // documented "toggle + restart" promise.
+        //
+        // F2 (#4175 commit 5): an explicit `entryIndex` query against
+        // the legacy (no-pool) path is invalid — the legacy path has
+        // exactly one entry per server name, so `entryIndex !== 0` can
+        // never match. Reject with invalidParams to surface the
+        // operator's mistake (likely calling pool semantics against a
+        // `--no-mcp-pool` daemon) rather than silently restarting the
+        // single legacy entry.
+        if (entryIndex !== undefined && entryIndex !== 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            `entryIndex=${entryIndex} requested but pool not active for ` +
+              `${JSON.stringify(serverName)} — legacy single-entry path ` +
+              `only supports entryIndex=0 or undefined`,
+          );
+        }
         const start = Date.now();
-        await manager.discoverMcpToolsForServer(serverName, this.config);
+        const toolRegistry = this.config.getToolRegistry();
+        if (!toolRegistry) {
+          throw RequestError.internalError(
+            undefined,
+            'ToolRegistry unavailable on this Config',
+          );
+        }
+        await toolRegistry.discoverToolsForServer(serverName);
         // #4282 gpt-5.5 C4 fold-in: `discoverMcpToolsForServer`
         // catches reconnect/discovery errors internally (logs and
         // resolves void) so a broken MCP server would otherwise
@@ -1577,6 +2351,17 @@ class QwenAgent implements Agent {
           restarted: true,
           durationMs: Date.now() - start,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionClose: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        await this.closeStoredSession(sessionId);
+        return { sessionId, closed: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
         // #4175 Wave 4 PR 17: remote callers change a live session's
@@ -1623,6 +2408,38 @@ class QwenAgent implements Agent {
         }
         const current = config.getApprovalMode();
         return { previous, current };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionRecap: {
+        // #4175 follow-up. Generate a one-sentence "where did I leave
+        // off" summary by running `generateSessionRecap` against the
+        // session's GeminiClient history. Best-effort: the core helper
+        // is documented to return `null` on any failure (short history,
+        // transient model error, etc.) and never throws — we surface
+        // that null verbatim so the daemon route returns a 200 with
+        // `recap: null` rather than a 5xx.
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        // v1: no cross-process abort plumbing. The bridge does not listen
+        // for HTTP client disconnect and no AbortSignal is threaded through
+        // the ext-method, so the LLM call in this child always runs to
+        // completion. The only ceilings are the bridge's 60s
+        // `SESSION_RECAP_TIMEOUT_MS` backstop and the transport-closed race
+        // against ACP channel death. Acceptable because recap is short
+        // (single-attempt side-query, `maxOutputTokens: 300`). A future
+        // request-id-based cancel ext-method can plumb a real signal
+        // end-to-end if the bandwidth cost ever becomes an issue.
+        const recap = await generateSessionRecap(
+          config,
+          new AbortController().signal,
+        );
+        return { sessionId, recap };
       }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
@@ -1848,6 +2665,20 @@ class QwenAgent implements Agent {
         projectHooks: this.settings.getProjectHooks(),
       },
     );
+    // F2 (#4175 commit 4): inject the workspace-shared MCP transport
+    // pool BEFORE `config.initialize()` so the ToolRegistry that
+    // initialize() constructs picks up the pool reference and the
+    // session's McpClientManager routes non-SDK MCP discovery
+    // through it. Calling after initialize would leave the manager
+    // with a stale `pool=undefined` and the pool would never be
+    // exercised. The pool is workspace-scoped (`QwenAgent.mcpPool`)
+    // and lives for the daemon's lifetime — see ctor.
+    if (
+      this.mcpPool !== undefined &&
+      typeof config.setMcpTransportPool === 'function'
+    ) {
+      config.setMcpTransportPool(this.mcpPool);
+    }
     // PR 14b fix #2 (codex review round 1): register the MCP guardrail
     // budget-event callback BEFORE `config.initialize()`. Pre-fix the
     // registration ran AFTER initialize, which (a) missed end-of-pass
@@ -1872,7 +2703,19 @@ class QwenAgent implements Agent {
       typeof config.getSessionId === 'function'
         ? config.getSessionId()
         : undefined;
+    // F2 (#4175 commit 6): when the workspace-scoped budget controller
+    // is active, the pool's `WorkspaceMcpBudget` fires events at
+    // workspace level and `broadcastBudgetEvent` fans them to every
+    // attached session. Skipping the per-session manager callback
+    // here prevents double-firing (manager's inline state machine is
+    // dormant in pool mode anyway, but defensively skipping the
+    // callback also avoids any future wiring that might re-activate
+    // it). Daemons without a configured budget — or running with the
+    // pool kill switch — keep the per-session callback so legacy
+    // `scope: 'session'` events still fan out via the ACP child path.
+    const skipPerSessionBudgetCallback = this.workspaceMcpBudget !== undefined;
     if (
+      !skipPerSessionBudgetCallback &&
       typeof config.setMcpBudgetEventCallback === 'function' &&
       wiredSessionId !== undefined
     ) {

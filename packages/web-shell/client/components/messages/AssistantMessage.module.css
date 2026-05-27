@@ -1,0 +1,55 @@
+.message {
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prefix {
+  color: var(--assist-color);
+  flex-shrink: 0;
+  margin-right: 6px;
+  line-height: 1.2;
+}
+
+.thinking {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  margin-bottom: 4px;
+}
+
+.thinking .prefix {
+  color: var(--text-dimmed);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.thinking pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--thinking-pre-color);
+  line-height: 1.5;
+}
+
+.content {
+  display: flex;
+  align-items: baseline;
+}
+
+.contentBody {
+  flex: 1;
+  min-width: 0;
+}
+
+.contentBody pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}

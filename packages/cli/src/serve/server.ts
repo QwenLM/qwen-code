@@ -8,13 +8,20 @@ import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
-import { APPROVAL_MODES, TrustGateError } from '@qwen-code/qwen-code-core';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
+  APPROVAL_MODES,
+  SessionService,
+  TrustGateError,
+} from '@qwen-code/qwen-code-core';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
+import type { DaemonLogger } from './daemonLogger.js';
+import {
+  allowOriginCors,
   bearerAuth,
   createMutationGate,
   denyBrowserOriginCors,
   hostAllowlist,
+  parseAllowOriginPatterns,
 } from './auth.js';
 import {
   DeviceFlowRegistry,
@@ -33,7 +40,7 @@ import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
 import { isLoopbackBind } from './loopbackBinds.js';
-import { mountAcpHttp, type AcpHttpHandle } from './acpHttp/index.js';
+import { mountAcpHttp } from './acpHttp/index.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
@@ -55,6 +62,7 @@ import {
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
   WorkspaceMismatchError,
+  type BridgeSessionSummary,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
 import {
@@ -164,6 +172,49 @@ export function resolveBridgeFsFactory(input: {
   });
 }
 
+const WORKSPACE_SESSION_LIST_SIZE = 100;
+
+async function listWorkspaceSessionsForResponse(
+  bridge: HttpAcpBridge,
+  workspaceCwd: string,
+): Promise<BridgeSessionSummary[]> {
+  const persisted = await new SessionService(workspaceCwd).listSessions({
+    size: WORKSPACE_SESSION_LIST_SIZE,
+  });
+  const bySessionId = new Map<string, BridgeSessionSummary>();
+
+  for (const item of persisted.items) {
+    bySessionId.set(item.sessionId, {
+      sessionId: item.sessionId,
+      workspaceCwd: item.cwd,
+      createdAt: item.startTime,
+      updatedAt: new Date(item.mtime).toISOString(),
+      title: item.customTitle ?? item.prompt,
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+  }
+
+  for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
+    const existing = bySessionId.get(live.sessionId);
+    bySessionId.set(live.sessionId, {
+      ...existing,
+      ...live,
+      createdAt: existing?.createdAt ?? live.createdAt,
+      title: live.title ?? existing?.title,
+      updatedAt: live.updatedAt ?? existing?.updatedAt,
+      clientCount: live.clientCount,
+      hasActivePrompt: live.hasActivePrompt,
+    });
+  }
+
+  return [...bySessionId.values()].sort((a, b) => {
+    const aTime = Date.parse(a.updatedAt ?? a.createdAt);
+    const bTime = Date.parse(b.updatedAt ?? b.createdAt);
+    return bTime - aTime;
+  });
+}
+
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: HttpAcpBridge;
@@ -211,6 +262,86 @@ export interface ServeAppDeps {
    * Qwen provider. Used by tests that stub the OAuth flow.
    */
   deviceFlowProviders?: DeviceFlowProvider[];
+  /**
+   * Optional daemon logger. When provided, `sendBridgeError` routes
+   * each 5xx error through `daemonLog.error(...)` (which tees to stderr +
+   * the daemon log file). When omitted, falls back to existing
+   * stderr-only behavior.
+   */
+  daemonLog?: DaemonLogger;
+}
+
+/**
+ * Issue #4514 T2.9. Sentinel passed as `AbortController.abort(reason)`
+ * when a prompt exceeds its server-configured wallclock. The catch
+ * block on `POST /session/:id/prompt` distinguishes
+ * `instanceof PromptDeadlineExceededError` (→ HTTP 504 with the typed
+ * `errorKind`) from the existing client-disconnect path (→ swallow,
+ * socket is gone). Exported so tests can match on the class identity
+ * without parsing the response body for the kind string.
+ */
+export class PromptDeadlineExceededError extends Error {
+  readonly deadlineMs: number;
+  constructor(deadlineMs: number) {
+    super(`prompt exceeded the ${deadlineMs}ms deadline`);
+    this.name = 'PromptDeadlineExceededError';
+    this.deadlineMs = deadlineMs;
+  }
+}
+
+/**
+ * Issue #4514 T2.9. Resolve the effective per-prompt wallclock from
+ * the server flag + an optional request body override. Returns
+ * `undefined` when no deadline applies (server flag is unset).
+ * When the server flag is set, the request override may SHORTEN the
+ * deadline but never EXTEND it — operators stay the upper bound.
+ *
+ * Exported (named) for the unit test that asserts the capping
+ * contract without spinning up an HTTP listener.
+ */
+export function resolvePromptDeadlineMs(
+  serverMs: number | undefined,
+  requestMs: number | undefined,
+): number | undefined {
+  if (serverMs === undefined || !Number.isFinite(serverMs) || serverMs <= 0) {
+    return undefined;
+  }
+  if (
+    requestMs === undefined ||
+    !Number.isFinite(requestMs) ||
+    requestMs <= 0
+  ) {
+    return serverMs;
+  }
+  return Math.min(serverMs, requestMs);
+}
+
+/**
+ * Issue #4514 T2.9. Single source of truth for the prompt-deadline 504
+ * response: log the operator-facing stderr breadcrumb (so a 504 spike
+ * at the load balancer can be grepped back to a session) and emit the
+ * typed JSON body. Keeping the wire format and log line together
+ * prevents drift between future prompt-deadline response paths.
+ */
+function emitPromptDeadline504(
+  res: import('express').Response,
+  err: PromptDeadlineExceededError,
+  sessionId: string,
+): void {
+  try {
+    writeStderrLine(
+      `qwen serve: prompt deadline fired (session ${sessionId}) — ` +
+        `deadlineMs=${err.deadlineMs}`,
+    );
+  } catch {
+    /* stderr pipe closed; 504 response still going out. */
+  }
+  res.status(504).json({
+    error: err.message,
+    code: 'prompt_deadline_exceeded',
+    errorKind: 'prompt_deadline_exceeded',
+    deadlineMs: err.deadlineMs,
+  });
 }
 
 /**
@@ -509,11 +640,52 @@ export function createServeApp(
   // detaching `runQwenServe`'s shutdown dispose call.
   setDeviceFlowRegistry(app, deviceFlowRegistry);
 
+  // Daemon logger — when injected via `deps.daemonLog`, 5xx errors logged
+  // by `sendBridgeError` route through the structured daemon log (which
+  // already tees to stderr). When absent (tests, direct embeds), the
+  // legacy `writeStderrLine` path is preserved.
+  const { daemonLog } = deps;
+
+  // Curry `daemonLog` into the module-level error helpers so route
+  // handlers don't repeat the parameter at every call site.
+  const sendBridgeError = (
+    res: import('express').Response,
+    err: unknown,
+    ctx?: { route?: string; sessionId?: string },
+  ) => sendBridgeErrorImpl(res, err, ctx, daemonLog);
+  const sendPermissionVoteError = (
+    res: import('express').Response,
+    err: unknown,
+    ctx: { route: string; sessionId?: string },
+  ) => sendPermissionVoteErrorImpl(res, err, ctx, daemonLog);
+
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
   // gets a full 10MB `JSON.parse` before the 401 fires — a trivially
   // amplified CPU/memory cost from any wrong-token client.
-  app.use(denyBrowserOriginCors);
+  //
+  // T2.4 (issue #4514): when `--allow-origin` is configured, install the
+  // allowlist middleware instead of the deny-wall. The allowlist owns
+  // both halves of the policy (matched → CORS headers + pass-through or
+  // 204 preflight; unmatched → 403 with the same error envelope as the
+  // wall). When `--allow-origin` is empty/undefined, the deny-wall stays
+  // installed. Pattern parsing happens in `runQwenServe.ts` for validation;
+  // here we still keep the wildcard/no-token invariant for embedded
+  // callers that construct the app directly.
+  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
+    const parsedAllowOrigins = parseAllowOriginPatterns(opts.allowOrigins);
+    if (parsedAllowOrigins.allowAny && !opts.token) {
+      throw new Error(
+        `Refusing to start with --allow-origin '*' but no bearer token ` +
+          `configured. '*' admits any cross-origin browser to the API; ` +
+          `without a token, any local page can drive the daemon. Set a ` +
+          `token or list specific origins instead of '*'.`,
+      );
+    }
+    app.use(allowOriginCors(parsedAllowOrigins));
+  } else {
+    app.use(denyBrowserOriginCors);
+  }
   app.use(hostAllowlist(opts.hostname, getPort));
 
   // --- Demo page: mirrors the `/health` loopback-gating pattern.
@@ -616,6 +788,17 @@ export function createServeApp(
   app.use(bearerAuth(opts.token));
 
   app.use(express.json({ limit: '10mb' }));
+  app.use(
+    (
+      err: unknown,
+      _req: import('express').Request,
+      res: import('express').Response,
+      next: import('express').NextFunction,
+    ) => {
+      if (sendJsonBodyParserError(res, err)) return;
+      next(err);
+    },
+  );
 
   if (!exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
@@ -648,15 +831,17 @@ export function createServeApp(
       // ONLY when the operator opted in. Tag presence = behavior is
       // on; older daemons without this PR omit the tag and SDKs that
       // post-PR feature-detect on it stay backward compatible.
-      //
-      // F2 (#4175 commit 5): `mcpPoolActive` advertises
-      // `mcp_workspace_pool` + `mcp_pool_restart` together. Defaults
-      // to `true` when omitted so daemons that don't explicitly set
-      // the option still advertise the F2 surface; operators flip it
-      // to `false` only when `QWEN_SERVE_NO_MCP_POOL=1` is in scope.
       features: getAdvertisedServeFeatures(undefined, {
         requireAuth: opts.requireAuth === true,
         mcpPoolActive: opts.mcpPoolActive !== false,
+        allowOriginActive:
+          opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
+        ...(opts.promptDeadlineMs !== undefined
+          ? { promptDeadlineMs: opts.promptDeadlineMs }
+          : {}),
+        ...(opts.writerIdleTimeoutMs !== undefined
+          ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
+          : {}),
       }),
       modelServices: [],
       // #3803 §02: surface the bound workspace so clients can detect
@@ -681,11 +866,42 @@ export function createServeApp(
     }
   });
 
+  app.get('/workspace/mcp/:server/tools', async (req, res) => {
+    const serverName = req.params['server'];
+    if (!serverName || typeof serverName !== 'string') {
+      res.status(400).json({
+        error: 'Server name path parameter is required',
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    if (serverName.length > MAX_SERVER_NAME_LENGTH) {
+      res.status(400).json({
+        error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    try {
+      res.status(200).json(await bridge.getWorkspaceMcpToolsStatus(serverName));
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/mcp/:server/tools' });
+    }
+  });
+
   app.get('/workspace/skills', async (_req, res) => {
     try {
       res.status(200).json(await bridge.getWorkspaceSkillsStatus());
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/skills' });
+    }
+  });
+
+  app.get('/workspace/tools', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceToolsStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/tools' });
     }
   });
 
@@ -1234,6 +1450,29 @@ export function createServeApp(
       });
       return;
     }
+    // T2.9: validate the optional per-prompt `deadlineMs` override BEFORE
+    // we touch the abort controller — a malformed value is operator-
+    // visible client error (400) rather than silently dropped (which
+    // would let the client believe their deadline was active when it
+    // wasn't). Capping vs the server flag happens later, after we
+    // know what the server is willing to enforce.
+    const rawRequestDeadline = body['deadlineMs'];
+    let requestDeadlineMs: number | undefined;
+    if (rawRequestDeadline !== undefined && rawRequestDeadline !== null) {
+      if (
+        typeof rawRequestDeadline !== 'number' ||
+        !Number.isFinite(rawRequestDeadline) ||
+        !Number.isInteger(rawRequestDeadline) ||
+        rawRequestDeadline <= 0
+      ) {
+        res.status(400).json({
+          error: '`deadlineMs` must be a positive integer (milliseconds)',
+          code: 'invalid_deadline_ms',
+        });
+        return;
+      }
+      requestDeadlineMs = rawRequestDeadline;
+    }
     // Propagate HTTP-client disconnect to an ACP cancel notification so
     // the agent winds down promptly and the per-session FIFO doesn't
     // stay blocked on a dead client. Detached after the prompt settles.
@@ -1251,35 +1490,97 @@ export function createServeApp(
       if (!res.writableEnded) abort.abort();
     };
     res.once('close', onResClose);
+    // T2.9: arm the server-side wallclock deadline (if configured).
+    // `resolvePromptDeadlineMs` returns `undefined` when the server
+    // flag is unset, preserving the legacy "client disconnect is
+    // the only auto-cancel" behavior bit-for-bit. When a deadline IS
+    // configured we Promise.race the bridge call against an explicit
+    // rejecting timer — without the race, a non-cooperative agent
+    // that ignores AbortSignal could keep the HTTP request open
+    // indefinitely (the FIXME in `httpAcpBridge.ts` `sendPrompt` was
+    // promised closed by T2.9 in the PR description; relying on the
+    // bridge alone wouldn't deliver). The race makes the 504 a hard
+    // guarantee independent of bridge cooperation; `abort.abort` is
+    // still called as best-effort wind-down so the agent's FIFO slot
+    // is freed if it does honor the signal.
+    const effectiveDeadlineMs = resolvePromptDeadlineMs(
+      opts.promptDeadlineMs,
+      requestDeadlineMs,
+    );
+    const forwardedBody = { ...body };
+    delete forwardedBody['deadlineMs'];
+    let deadlineTimer: NodeJS.Timeout | undefined;
+    const deadlinePromise: Promise<never> | undefined =
+      effectiveDeadlineMs !== undefined
+        ? new Promise<never>((_, reject) => {
+            deadlineTimer = setTimeout(() => {
+              const err = new PromptDeadlineExceededError(effectiveDeadlineMs);
+              // Reject FIRST so Promise.race resolves deterministically
+              // with the typed deadline error; the bridge's own
+              // AbortError rejection (if the agent honors abort)
+              // would otherwise race the route's microtask queue and
+              // surface as a generic AbortError in the catch path.
+              reject(err);
+              if (!abort.signal.aborted) abort.abort(err);
+            }, effectiveDeadlineMs);
+            // unref so a still-armed timer can't keep the daemon alive
+            // past shutdown.
+            deadlineTimer.unref();
+          })
+        : undefined;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) {
       res.off('close', onResClose);
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       return;
     }
     try {
-      // SECURITY NOTE: this `...(body as object)` passthrough is
+      // SECURITY NOTE: this `...forwardedBody` passthrough is
       // intentional — the bridge / ACP SDK ignores fields it
       // doesn't recognize (ACP-spec `_meta` etc are forwarded
       // wholesale to the agent, which is the documented behavior).
-      // `sessionId` and `prompt` are forced to the route's view to
-      // prevent body-spoofing of the routing key. If a future
-      // bridge version starts trusting an additional field by name,
-      // that field becomes a client-controlled input surface — at
-      // that point switch this to an explicit pick. The same
-      // pattern repeats on cancel / model below; review them all
-      // together when adding new bridge-trusted fields.
-      const result = await bridge.sendPrompt(
+      // `sessionId`, `prompt`, and the route-only `deadlineMs` are
+      // forced/stripped so the child never sees uncapped client input.
+      const bridgePromise = bridge.sendPrompt(
         sessionId,
         {
-          ...(body as object),
+          ...forwardedBody,
           sessionId,
           prompt,
         } as Parameters<HttpAcpBridge['sendPrompt']>[1],
         abort.signal,
         clientId !== undefined ? { clientId } : undefined,
       );
+      // T2.9: when the deadline race fires first, the underlying
+      // bridge promise becomes an orphan that may eventually settle
+      // minutes later (especially against a buggy agent). Tail-attach
+      // a no-op handler so its eventual rejection doesn't surface as
+      // an unhandledRejection — the 504 has already been sent and the
+      // route has no further use for the result.
+      if (deadlinePromise !== undefined) {
+        bridgePromise.catch(() => undefined);
+      }
+      const result = await (deadlinePromise !== undefined
+        ? Promise.race([bridgePromise, deadlinePromise])
+        : bridgePromise);
       res.status(200).json(result);
     } catch (err) {
+      // T2.9: the deadline race won — emit the typed 504 directly.
+      // This is the primary deadline-exceeded path now that the
+      // route races the bridge against its own timer.
+      //
+      // The `return` MUST fire on every `PromptDeadlineExceededError`,
+      // including the writableEnded race (client disconnected in the
+      // same tick the deadline timer fired). Without the early return,
+      // the typed error would fall through to the AbortError branch
+      // (false — not a DOMException), then `sendBridgeError`, which
+      // would call `res.status(500).json(...)` on an already-ended
+      // response and trip `ERR_STREAM_WRITE_AFTER_END`. wenshao
+      // review #4530 inline #3 (Critical).
+      if (err instanceof PromptDeadlineExceededError) {
+        if (!res.writableEnded) emitPromptDeadline504(res, err, sessionId);
+        return;
+      }
       // The HTTP client disconnecting fires the abort path above and
       // the bridge re-throws as `AbortError`. That's a normal
       // wind-down, not an error worth a 500 + stderr stack trace.
@@ -1309,6 +1610,7 @@ export function createServeApp(
       });
     } finally {
       res.off('close', onResClose);
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
     }
   });
 
@@ -1338,6 +1640,27 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'POST /session/:id/heartbeat',
+        sessionId,
+      });
+    }
+  });
+
+  app.post('/session/:id/detach', mutate(), async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      await bridge.detachClient(sessionId, clientId);
+      res.status(204).end();
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/detach',
         sessionId,
       });
     }
@@ -1384,13 +1707,13 @@ export function createServeApp(
     }
   });
 
-  app.patch('/session/:id/metadata', (req, res) => {
+  app.patch('/session/:id/metadata', async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
-    const displayName = body['displayName'];
-    if (displayName !== undefined && typeof displayName !== 'string') {
+    const rawDisplayName = body['displayName'];
+    if (rawDisplayName !== undefined && typeof rawDisplayName !== 'string') {
       res.status(400).json({
         error: '`displayName` must be a string',
         code: 'invalid_metadata',
@@ -1398,12 +1721,28 @@ export function createServeApp(
       });
       return;
     }
+    const displayName =
+      typeof rawDisplayName === 'string'
+        ? rawDisplayName.slice(0, 256)
+        : undefined;
     try {
       const effective = bridge.updateSessionMetadata(
         sessionId,
         { displayName },
         clientId !== undefined ? { clientId } : undefined,
       );
+      if (displayName !== undefined) {
+        try {
+          await new SessionService(boundWorkspace).renameSession(
+            sessionId,
+            displayName,
+          );
+        } catch {
+          // Best-effort: session file may not exist yet (fresh session
+          // with no turns written). The in-memory update still applies
+          // for the lifetime of this daemon process.
+        }
+      }
       res.status(200).json({ sessionId, ...effective });
     } catch (err) {
       sendBridgeError(res, err, {
@@ -1413,7 +1752,7 @@ export function createServeApp(
     }
   });
 
-  app.get('/workspace/:id/sessions', (req, res) => {
+  app.get('/workspace/:id/sessions', async (req, res) => {
     // Express decodes URL-encoded path params automatically; clients pass
     // the absolute workspace cwd encoded (e.g.
     // GET /workspace/%2Fwork%2Fa/sessions).
@@ -1436,8 +1775,20 @@ export function createServeApp(
       });
       return;
     }
-    const sessions = bridge.listWorkspaceSessions(workspaceCwd);
-    res.status(200).json({ sessions });
+    try {
+      const sessions = await listWorkspaceSessionsForResponse(bridge, key);
+      res.status(200).json({ sessions });
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: failed to list sessions for workspace ${safeLogValue(
+          key,
+        )}: ${safeLogValue(err instanceof Error ? err.message : String(err))}`,
+      );
+      res.status(500).json({
+        error: 'Failed to list sessions',
+        code: 'session_list_failed',
+      });
+    }
   });
 
   app.post('/session/:id/model', mutate(), async (req, res) => {
@@ -1908,6 +2259,21 @@ export function createServeApp(
     // SSE frames on the wire. The chain is single-flight: each call
     // waits for the previous write to settle before scheduling its own.
     let writeChain: Promise<void> = Promise.resolve();
+    // T2.9: epoch (ms) of the last write that fully resolved — either
+    // synchronous `res.write` returned `true`, or the async `drain`
+    // fired. The idle-timeout interval below compares
+    // `Date.now() - lastWriteAt` against the configured budget; a
+    // writer that stalls indefinitely on `drain` will never refresh
+    // this stamp, so the timer fires and forces cleanup. Initialized
+    // to "now" because cleanup runs only after the FIRST stall, and
+    // the SSE handshake itself counts as activity.
+    //
+    // Gated on `trackWriterIdle` so the default (flag unset) avoids
+    // a per-chunk `Date.now()` on a chatty stream — SSE writers can
+    // be in the hundreds-to-thousands of frames per session.
+    const trackWriterIdle =
+      opts.writerIdleTimeoutMs !== undefined && opts.writerIdleTimeoutMs > 0;
+    let lastWriteAt = trackWriterIdle ? Date.now() : 0;
     const doWrite = (chunk: string): Promise<void> =>
       new Promise((resolve, reject) => {
         if (res.writableEnded) {
@@ -1930,12 +2296,14 @@ export function createServeApp(
           return;
         }
         if (ok) {
+          if (trackWriterIdle) lastWriteAt = Date.now();
           resolve();
           return;
         }
         const onDrain = () => {
           res.off('close', onClose);
           res.off('error', onError);
+          if (trackWriterIdle) lastWriteAt = Date.now();
           resolve();
         };
         const onClose = () => {
@@ -1974,13 +2342,16 @@ export function createServeApp(
     // notice a dead client through write-back-pressure. Comment frame is
     // ignored by EventSource.
     //
-    // KNOWN GAP: this only catches dead connections via write
-    // back-pressure on heartbeat itself. A network partition without TCP
-    // RST can leave the connection looking alive (no FIN received) for
-    // however long Node's keepalive probes take to time out — usually
-    // ~2 hours by default, configurable via `server.keepAliveTimeout`.
-    // Stage 2 may add an explicit application-level idle timeout
-    // (last-byte-written tracking + per-connection deadline).
+    // T2.9 (issue #4514): the 15s heartbeat detects a TCP-dead writer
+    // via `drain` back-pressure on the comment frame itself. The
+    // `--writer-idle-timeout-ms` flag below adds the orthogonal
+    // application-level guard: if the LAST SUCCESSFUL FLUSH (any
+    // write — heartbeat, replay frame, live event) is older than the
+    // configured budget, the writer is considered stuck (NAT silently
+    // dropping flows, peer process frozen, etc.) and we force a
+    // terminal `client_evicted` frame + cleanup. The historical "Stage
+    // 2 may add an explicit application-level idle timeout" gap
+    // referenced here is now closed when the flag is set.
     const heartbeatTimer = setInterval(() => {
       if (!res.writableEnded) {
         // Heartbeat writes are best-effort; failure swallowed via the
@@ -1990,10 +2361,94 @@ export function createServeApp(
     }, 15_000);
     heartbeatTimer.unref();
 
+    // T2.9: declare the idle-timer slot up-front so `cleanup` below can
+    // clear it unconditionally. The actual interval is armed only when
+    // `--writer-idle-timeout-ms` is configured.
+    let idleTimer: NodeJS.Timeout | undefined;
+
     const cleanup = () => {
       clearInterval(heartbeatTimer);
+      if (idleTimer !== undefined) clearInterval(idleTimer);
       abort.abort();
     };
+
+    // T2.9: arm the SSE writer idle timeout (if configured). Distinct
+    // from the heartbeat above: heartbeat = "try to ping every 15s";
+    // this = "if no write SUCCEEDED for N ms, force-evict." Values
+    // BELOW the 15s heartbeat interval WILL evict otherwise-healthy
+    // idle connections before the first heartbeat fires — they're not
+    // a no-op. Production deployments should pick a value comfortably
+    // above 15s (e.g. 30000–300000ms) so legitimate idle streams stay
+    // alive and only genuinely stuck writers are reaped; small values
+    // are useful for tests / short-lived dev sessions. The interval
+    // polls at 1/4 the budget (bounded by [250ms, 5s]) so tests
+    // using short budgets still detect promptly, while long
+    // production budgets stay cheap. Values below roughly 1000ms all
+    // use the 250ms polling floor, so eviction can lag until the next
+    // tick instead of landing at exact millisecond precision.
+    if (trackWriterIdle) {
+      // Narrowed by `trackWriterIdle`; the const assertion keeps
+      // TypeScript happy inside the closure without re-reading opts.
+      const writerIdleTimeoutMs = opts.writerIdleTimeoutMs as number;
+      const checkIntervalMs = Math.max(
+        250,
+        Math.min(5_000, Math.floor(writerIdleTimeoutMs / 4)),
+      );
+      idleTimer = setInterval(() => {
+        if (res.writableEnded) return;
+        const idleForMs = Date.now() - lastWriteAt;
+        if (idleForMs < writerIdleTimeoutMs) return;
+        // Reuse the existing `client_evicted` taxonomy from
+        // `eventBus.ts` so SDK reducers branch on the same frame type
+        // they already handle for queue-overflow eviction; the new
+        // `reason` slot is the differentiator. Write DIRECTLY here
+        // (bypassing `writeWithBackpressure`) because the chain may
+        // already be stuck on a `drain` that will never come — which
+        // is the exact scenario this timer exists to catch. If the
+        // kernel send buffer has room the client sees the frame; if
+        // not, the client gets EPIPE on next read. Either way the
+        // socket is closed in the next two statements, so any drop
+        // is bounded.
+        try {
+          res.write(
+            formatSseFrame({
+              v: 1,
+              type: 'client_evicted',
+              data: {
+                reason: 'writer_idle_timeout',
+                errorKind: 'writer_idle_timeout',
+                idleForMs,
+                timeoutMs: writerIdleTimeoutMs,
+              },
+            }),
+          );
+        } catch {
+          /* socket already destroyed; nothing to send. */
+        }
+        // wenshao review #4530 inline #2: wrap stderr + res.end so an
+        // EPIPE on the stderr pipe (or a synchronous throw from
+        // `res.end()` against a destroyed socket) can't escape this
+        // interval callback. If it did, `cleanup()` wouldn't run, the
+        // heartbeat + idle timers would never clear, and every
+        // subsequent tick would re-throw — turning one transient
+        // failure into a permanent uncaughtException loop.
+        try {
+          writeStderrLine(
+            `qwen serve: evicting SSE client (session ${sessionId}) — ` +
+              `writer idle for ${idleForMs}ms > ${writerIdleTimeoutMs}ms timeout`,
+          );
+        } catch {
+          /* stderr pipe closed; eviction is still happening. */
+        }
+        cleanup();
+        try {
+          if (!res.writableEnded) res.end();
+        } catch {
+          /* socket already destroyed; nothing more to do. */
+        }
+      }, checkIntervalMs);
+      idleTimer.unref();
+    }
     req.on('close', cleanup);
     // Swallow socket-level write errors. When the underlying TCP connection
     // dies (RST, mid-flight kill -9), the next `res.write` throws EPIPE.
@@ -2107,13 +2562,8 @@ export function createServeApp(
   // `docs/design/daemon-acp-http/README.md` §6 for the dual-transport
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
-  // route through the JSON error contract below. The handle is parked on
-  // `app.locals` so `runQwenServe`'s close hook can `dispose()` it (clear
-  // the TTL sweep timer + tear down live SSE streams) before
-  // `bridge.shutdown()` — mirrors the device-flow registry pattern above.
-  const acpHttpHandle = mountAcpHttp(app, bridge, { boundWorkspace });
-  (app.locals as { acpHttpHandle?: AcpHttpHandle }).acpHttpHandle =
-    acpHttpHandle;
+  // route through the JSON error contract below.
+  mountAcpHttp(app, bridge, { boundWorkspace });
 
   // Final error handler. `express.json()` throws `SyntaxError` (with
   // `status: 400`) on malformed body — without this 4-arg middleware
@@ -2129,29 +2579,7 @@ export function createServeApp(
       res: import('express').Response,
       _next: import('express').NextFunction,
     ) => {
-      if (
-        err instanceof SyntaxError &&
-        'status' in err &&
-        (err as { status: number }).status === 400
-      ) {
-        res.status(400).json({ error: 'Invalid JSON in request body' });
-        return;
-      }
-      // body-parser raises a typed error with `status: 413` when a
-      // request body exceeds the `express.json({ limit: '10mb' })`
-      // ceiling. Without this branch it falls through to the 500 path
-      // and clients see a misleading "Internal server error" instead
-      // of a clear "payload too large" — which is the kind of error
-      // they can actually act on (chunk the request, raise the limit).
-      if (
-        err &&
-        typeof err === 'object' &&
-        'status' in err &&
-        (err as { status: number }).status === 413
-      ) {
-        res.status(413).json({ error: 'Request body too large (max 10 MB)' });
-        return;
-      }
+      if (sendJsonBodyParserError(res, err)) return;
       writeStderrLine(
         `qwen serve: unhandled error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
@@ -2162,6 +2590,36 @@ export function createServeApp(
   );
 
   return app;
+}
+
+function sendJsonBodyParserError(
+  res: import('express').Response,
+  err: unknown,
+): boolean {
+  if (
+    err instanceof SyntaxError &&
+    'status' in err &&
+    (err as { status: number }).status === 400
+  ) {
+    res.status(400).json({ error: 'Invalid JSON in request body' });
+    return true;
+  }
+  // body-parser raises a typed error with `status: 413` when a
+  // request body exceeds the `express.json({ limit: '10mb' })`
+  // ceiling. Without this branch it falls through to the 500 path
+  // and clients see a misleading "Internal server error" instead
+  // of a clear "payload too large" — which is the kind of error
+  // they can actually act on (chunk the request, raise the limit).
+  if (
+    err &&
+    typeof err === 'object' &&
+    'status' in err &&
+    (err as { status: number }).status === 413
+  ) {
+    res.status(413).json({ error: 'Request body too large (max 10 MB)' });
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -2623,10 +3081,11 @@ function parseLastEventId(raw: unknown): number | undefined {
   return n;
 }
 
-function sendPermissionVoteError(
+function sendPermissionVoteErrorImpl(
   res: import('express').Response,
   err: unknown,
   ctx: { route: string; sessionId?: string },
+  daemonLog?: DaemonLogger,
 ): void {
   // BkwQI: voter's `optionId` wasn't in the option set the agent
   // originally offered (e.g. forging `ProceedAlways*` when the
@@ -2680,7 +3139,7 @@ function sendPermissionVoteError(
     });
     return;
   }
-  sendBridgeError(res, err, ctx);
+  sendBridgeErrorImpl(res, err, ctx, daemonLog);
 }
 
 function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
@@ -2749,10 +3208,11 @@ type OmitId<T> = Omit<T, 'id'>;
  * /session/:id/prompt', sessionId })`. Optional so test/dev call
  * sites that don't care about the log can omit it.
  */
-function sendBridgeError(
+function sendBridgeErrorImpl(
   res: import('express').Response,
   err: unknown,
   ctx?: { route?: string; sessionId?: string },
+  daemonLog?: DaemonLogger,
 ): void {
   if (err instanceof WorkspaceInitConflictError) {
     // #4175 Wave 4 PR 17. The target file already exists with non-
@@ -2959,18 +3419,29 @@ function sendBridgeError(
   // 5xx is the kind of error operators need to see in their daemon log
   // — bridge ENOMEM, agent stack trace, unexpected throw, etc. Without
   // logging here every 500 disappears once the caller consumes the
-  // response body. This is a stop-gap until structured access/error
-  // logging lands (tracked under §10 follow-ups). Use the stdio helper
-  // (not `console.error`) to keep the no-console lint rule happy and
-  // route through the same writer the rest of the daemon uses.
-  const ctxParts = [
-    ctx?.route,
-    ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
-  ].filter(Boolean);
-  const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
-  writeStderrLine(
-    `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-  );
+  // response body. When `daemonLog` is provided, route through the
+  // structured daemon logger (which tees to stderr + log file). When
+  // absent (tests, direct embeds), fall back to the legacy stderr-only
+  // `writeStderrLine` path.
+  if (daemonLog) {
+    daemonLog.error(
+      err instanceof Error ? err.message : String(err),
+      err instanceof Error ? err : undefined,
+      {
+        ...(ctx?.route ? { route: ctx.route } : {}),
+        ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+      },
+    );
+  } else {
+    const ctxParts = [
+      ctx?.route,
+      ctx?.sessionId ? `session=${ctx.sessionId}` : undefined,
+    ].filter(Boolean);
+    const ctxStr = ctxParts.length > 0 ? ` (${ctxParts.join(' ')})` : '';
+    writeStderrLine(
+      `qwen serve: bridge error${ctxStr}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+    );
+  }
   res.status(500).json(errorPayload(err));
 }
 

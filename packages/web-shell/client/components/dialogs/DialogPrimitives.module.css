@@ -1,0 +1,285 @@
+/* Shared dialog and picker primitives reused by dialog components. */
+/* ===== Dialog Overlay & Panel ===== */
+/* ===== CLI-style Picker (Model, Mode, Resume) ===== */
+.resume-picker {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.resume-picker-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.resume-picker-title {
+  font-weight: 700;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.resume-picker-count {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.resume-picker-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 13px;
+  min-height: 24px;
+}
+
+.resume-picker-search-label {
+  color: var(--text-secondary);
+}
+
+.resume-picker-search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.resume-picker-search-value {
+  color: var(--text-primary);
+}
+
+.resume-picker-search-hint {
+  color: var(--text-dimmed);
+}
+
+.resume-picker-sep {
+  height: 1px;
+  background: var(--border-color);
+}
+
+.resume-picker-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.resume-picker-empty {
+  padding: 16px 12px;
+  color: var(--text-dimmed);
+  font-size: 13px;
+}
+
+.resume-picker-item {
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.resume-picker-item.selected {
+  background: var(--bg-tertiary);
+}
+
+.resume-picker-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.resume-picker-item.disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.resume-picker-item-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.resume-picker-item-prefix {
+  width: 12px;
+  flex-shrink: 0;
+  color: var(--accent-color);
+  font-weight: 700;
+}
+
+.resume-picker-item-title {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resume-picker-item.selected .resume-picker-item-title {
+  color: var(--accent-color);
+  font-weight: 700;
+}
+
+.resume-picker-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.resume-picker-item-detail {
+  color: var(--text-dimmed);
+}
+
+.resume-picker-item-detail::before {
+  content: '·';
+  margin-right: 8px;
+  color: var(--text-dimmed);
+}
+
+.resume-picker-item-check {
+  color: var(--accent-color, #4a9eff);
+  font-weight: bold;
+  margin-left: 4px;
+}
+
+.resume-picker-item-badge {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--accent-color, #4a9eff);
+  opacity: 0.8;
+}
+
+.resume-picker-item-current {
+  border-left: 2px solid var(--accent-color, #4a9eff);
+  padding-left: 10px;
+}
+
+.resume-picker-footer {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-dimmed);
+}
+
+.dialog-inline-button,
+.dialog-primary-button,
+.dialog-danger-button {
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.dialog-inline-button:hover,
+.dialog-primary-button:hover {
+  border-color: var(--accent-color);
+}
+
+.dialog-inline-button:disabled,
+.dialog-primary-button:disabled,
+.dialog-danger-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.dialog-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dialog-primary-button {
+  align-self: flex-start;
+  color: var(--accent-color);
+}
+
+.dialog-danger-button {
+  align-self: flex-start;
+  color: var(--error-color);
+}
+
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.dialog-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.dialog-form input,
+.dialog-form select,
+.dialog-form textarea {
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 6px 8px;
+}
+
+.dialog-form-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 180px);
+  gap: 10px;
+}
+
+.dialog-textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.dialog-split {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(220px, 38%) minmax(0, 1fr);
+}
+
+.dialog-split-list {
+  border-right: 1px solid var(--border-color);
+}
+
+.dialog-detail {
+  padding: 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dialog-detail-title {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+.dialog-detail-meta {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.dialog-detail-body {
+  color: var(--text-primary);
+  font-size: 12px;
+  white-space: pre-wrap;
+  line-height: 1.5;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 8px;
+  background: var(--bg-secondary);
+}

@@ -61,6 +61,7 @@ import {
   WorkspaceInitRaceError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
+  isNotCurrentlyGeneratingCancelError,
 } from './bridgeErrors.js';
 import { canonicalizeWorkspace } from './workspacePaths.js';
 import type {
@@ -205,6 +206,16 @@ interface SessionEntry {
    * failures swallowed at the tail like `promptQueue`.
    */
   modelChangeQueue: Promise<void>;
+  /**
+   * A1 (#4511): true while the bridge is driving a model roundtrip
+   * (`setSessionModel` / `applyModelServiceId`) for this session. The
+   * `current_model_update` extNotification demux in `BridgeClient` reads this
+   * to SUPPRESS promotion of the agent's notification during a bridge-driven
+   * change — the bridge publishes the authoritative `model_switched` itself,
+   * so promoting the notification too would double-publish. In-session
+   * `/model` (no bridge roundtrip) sees this false and IS promoted.
+   */
+  modelRoundtripInFlight?: boolean;
   /**
    * Cached "transport closed" promise. The first `sendPrompt` on a
    * session lazy-builds this from `channel.exited.then(throw)`; every
@@ -686,6 +697,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // (b) `server.close` rejecting new connections, during which a
   // late-arriving `POST /session` slips a fresh child past cleanup.
   let shuttingDown = false;
+
+  // Tee writeServeDebugLine through the optional onDiagnosticLine callback.
+  // The module-level writeServeDebugLine is left intact for other entry points;
+  // inside createHttpAcpBridge we use this wrapper exclusively.
+  const teeServeDebugLine = (message: string): void => {
+    writeServeDebugLine(message);
+    if (opts.onDiagnosticLine && isServeDebugLoggingEnabled()) {
+      opts.onDiagnosticLine(`qwen serve debug: ${message}`, 'info');
+    }
+  };
+
   // Coalesces concurrent `spawnOrAttach` calls under single-scope and
   // tracks in-progress thread-scope spawns for shutdown to await.
   // Single-scope uses the workspaceKey as the dedup key (at most one
@@ -1166,6 +1188,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     // wedges the HTTP handler for 10s.
     const transportClosed = getTransportClosedReject(entry);
     const work = entry.modelChangeQueue.then(async () => {
+      // A1: mark a bridge-driven model roundtrip so the agent's
+      // `current_model_update` extNotification (this path also drives
+      // `Session.setModel`, which emits it) is suppressed by the demux —
+      // the authoritative `model_switched` is published below.
+      entry.modelRoundtripInFlight = true;
       try {
         await Promise.race([
           withTimeout(
@@ -1197,6 +1224,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           ...(originatorClientId ? { originatorClientId } : {}),
         });
         throw err;
+      } finally {
+        entry.modelRoundtripInFlight = false;
       }
     });
     // Tail swallows failures so subsequent model changes still run; the
@@ -1307,12 +1336,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   const requestWorkspaceStatus = async <T>(
     method: string,
     idle: () => T,
+    params: Record<string, unknown> = {},
   ): Promise<T> => {
     const info = liveChannelInfo();
     if (!info) return idle();
     const response = await withTimeout(
       Promise.race([
-        info.connection.extMethod(method, { cwd: boundWorkspace }),
+        info.connection.extMethod(method, { ...params, cwd: boundWorkspace }),
         getChannelClosedReject(info),
       ]),
       initTimeoutMs,
@@ -1407,7 +1437,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         const published = entry.events.publish(envelope);
         if (published === undefined) {
           failureCount += 1;
-          writeServeDebugLine(
+          teeServeDebugLine(
             `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
           );
         } else {
@@ -1420,7 +1450,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           `${JSON.stringify(entry.sessionId)} (type=${envelope.type}): ` +
           `${err instanceof Error ? err.message : String(err)}`;
         if (shuttingDown) {
-          writeServeDebugLine(detail);
+          teeServeDebugLine(detail);
         } else {
           writeStderrLine(`qwen serve: ${detail}`);
         }
@@ -2175,7 +2205,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       const notif: CancelNotification = req
         ? { ...req, sessionId }
         : { sessionId };
-      await entry.connection.cancel(notif);
+      try {
+        await entry.connection.cancel(notif);
+      } catch (err) {
+        if (isNotCurrentlyGeneratingCancelError(err)) return;
+        throw err;
+      }
     },
 
     subscribeEvents(sessionId, subOpts) {
@@ -2239,7 +2274,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `context.clientId` against this session's registry.
       const actualSessionId = permissionMediator.peekSessionFor(requestId);
       if (actualSessionId !== undefined && actualSessionId !== sessionId) {
-        writeServeDebugLine(
+        teeServeDebugLine(
           `rejected permission vote ${JSON.stringify(requestId)} ` +
             `for session ${JSON.stringify(sessionId)}; request belongs to ` +
             `session ${JSON.stringify(actualSessionId)}.`,
@@ -2325,7 +2360,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           // Mediator already emitted `permission_already_resolved`.
           return false;
         case 'unknown_request':
-          writeServeDebugLine(
+          teeServeDebugLine(
             `rejected permission vote ${JSON.stringify(requestId)} ` +
               `for session ${JSON.stringify(sessionId)}; mediator has no ` +
               `pending or resolved record.`,
@@ -2621,7 +2656,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           const published = entry.events.publish(event);
           if (published === undefined) {
             failureCount += 1;
-            writeServeDebugLine(
+            teeServeDebugLine(
               `publishWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
             );
           } else {
@@ -2634,7 +2669,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             `${JSON.stringify(entry.sessionId)} (type=${event.type}): ` +
             `${err instanceof Error ? err.message : String(err)}`;
           if (shuttingDown) {
-            writeServeDebugLine(detail);
+            teeServeDebugLine(detail);
           } else {
             writeStderrLine(`qwen serve: ${detail}`);
           }
@@ -2668,10 +2703,52 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       );
     },
 
+    async getWorkspaceMcpToolsStatus(serverName) {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcpTools,
+        () => ({
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd: boundWorkspace,
+          serverName,
+          initialized: false,
+          acpChannelLive: false,
+          tools: [],
+          errors: [
+            {
+              kind: 'mcp_tools',
+              status: 'not_started' as const,
+              hint: 'spawn a session to populate',
+            },
+          ],
+        }),
+        { serverName },
+      );
+    },
+
     async getWorkspaceSkillsStatus() {
       return requestWorkspaceStatus(
         SERVE_STATUS_EXT_METHODS.workspaceSkills,
         () => createIdleWorkspaceSkillsStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceToolsStatus() {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceTools,
+        () => ({
+          v: STATUS_SCHEMA_VERSION,
+          workspaceCwd: boundWorkspace,
+          initialized: true as const,
+          acpChannelLive: false,
+          tools: [],
+          errors: [
+            {
+              kind: 'tools',
+              status: 'not_started' as const,
+              hint: 'spawn a session to populate',
+            },
+          ],
+        }),
       );
     },
 
@@ -2849,16 +2926,37 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `model_switch_failed`). Both depend on ACP exposing a cancel
       // signal for `unstable_setSessionModel`.
       const transportClosed = getTransportClosedReject(entry);
-      const work = entry.modelChangeQueue.then(() =>
-        Promise.race([
-          withTimeout(
-            conn.unstable_setSessionModel(normalized),
-            initTimeoutMs,
-            'setSessionModel',
-          ),
-          transportClosed,
-        ]),
-      );
+      const work = entry.modelChangeQueue.then(async () => {
+        // A1: suppress the agent's current_model_update notification (this
+        // path drives Session.setModel, which emits it) while the bridge
+        // owns the change. Publish the authoritative model_switched INSIDE
+        // this callback — i.e. while the flag is still true — mirroring
+        // `applyModelServiceId`, so the agent notification can never slip
+        // through after the flag clears even if transport ordering changes.
+        entry.modelRoundtripInFlight = true;
+        try {
+          const result = await Promise.race([
+            withTimeout(
+              conn.unstable_setSessionModel(normalized),
+              initTimeoutMs,
+              'setSessionModel',
+            ),
+            transportClosed,
+          ]);
+          try {
+            entry.events.publish({
+              type: 'model_switched',
+              data: { sessionId: entry.sessionId, modelId: req.modelId },
+              ...(originatorClientId ? { originatorClientId } : {}),
+            });
+          } catch {
+            /* bus closed */
+          }
+          return result;
+        } finally {
+          entry.modelRoundtripInFlight = false;
+        }
+      });
       // Tail-swallow on the queue so a model-change failure doesn't poison
       // every subsequent change (matches `applyModelServiceId`'s pattern).
       entry.modelChangeQueue = work.then(
@@ -2888,15 +2986,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         }
         throw err;
       }
-      try {
-        entry.events.publish({
-          type: 'model_switched',
-          data: { sessionId: entry.sessionId, modelId: req.modelId },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-      } catch {
-        /* bus closed */
-      }
+      // model_switched is published inside the work callback above (while the
+      // suppress flag is still set), mirroring applyModelServiceId.
       return response;
     },
 
@@ -3567,6 +3658,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         entry.spawnOwnerWantedKill = true;
         return;
       }
+      // F3 Commit 3 — mediator-driven cancel cascade. Must run BEFORE
+      // byId.delete so the mediator's emit callback can still reach
+      // entry.events via byId.get(sessionId) (same order as closeSession).
+      permissionMediator.forgetSession(sessionId);
+      entry.pendingPermissionIds.clear();
       // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (defaultEntry === entry) defaultEntry = undefined;
@@ -3607,9 +3703,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // subsequent load/resume of the same persisted id. See the
       // matching guard in BridgeClient.bufferEarlyEvent.
       ci?.client.markSessionClosed(sessionId);
-      // F3 Commit 3 — mediator-driven cancel cascade.
-      permissionMediator.forgetSession(sessionId);
-      entry.pendingPermissionIds.clear();
       // Publish `session_died` BEFORE closing the bus. After the eager
       // `byId.delete` above, the channel.exited handler's
       // `byId.get(...)` returns undefined so the automatic publish

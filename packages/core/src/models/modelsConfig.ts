@@ -350,61 +350,12 @@ export class ModelsConfig {
     }
 
     // Raw model override: update generation config in-place
-    const rollbackSnapshot = this.createStateSnapshotForRollback();
-    try {
-      this.strictModelProviderSelection = false;
-      this._generationConfig.model = newModel;
-      this.generationConfigSources['model'] = {
-        kind: 'programmatic',
-        detail: metadata?.reason || 'setModel',
-      };
-      this.applyRawModelDerivedDefaults(newModel);
-
-      if (this.onModelChange && this.currentAuthType) {
-        await this.onModelChange(this.currentAuthType, true);
-      }
-    } catch (error) {
-      this.rollbackToStateSnapshot(rollbackSnapshot);
-      throw error;
-    }
-  }
-
-  /**
-   * Raw model switches keep the current credentials, but model-derived
-   * generation defaults must follow the new model. Otherwise a switch from a
-   * multimodal registry model to a text-only raw model can keep stale image
-   * support and send unsupported inline media.
-   */
-  private applyRawModelDerivedDefaults(modelId: string): void {
-    if (this.shouldUpdateModelDerivedDefault('modalities')) {
-      this._generationConfig.modalities = defaultModalities(modelId);
-      this.generationConfigSources['modalities'] = {
-        kind: 'computed',
-        detail: 'auto-detected from model',
-      };
-    }
-
-    if (this.shouldUpdateModelDerivedDefault('contextWindowSize')) {
-      this._generationConfig.contextWindowSize = tokenLimit(modelId, 'input');
-      this.generationConfigSources['contextWindowSize'] = {
-        kind: 'computed',
-        detail: 'auto-detected from model',
-      };
-    }
-  }
-
-  private shouldUpdateModelDerivedDefault(
-    field: 'modalities' | 'contextWindowSize',
-  ): boolean {
-    const source = this.generationConfigSources[field];
-    return (
-      source === undefined ||
-      source.kind === 'computed' ||
-      source.kind === 'default' ||
-      source.kind === 'modelProviders' ||
-      source.kind === 'programmatic' ||
-      source.kind === 'unknown'
-    );
+    this.strictModelProviderSelection = false;
+    this._generationConfig.model = newModel;
+    this.generationConfigSources['model'] = {
+      kind: 'programmatic',
+      detail: metadata?.reason || 'setModel',
+    };
   }
 
   /**

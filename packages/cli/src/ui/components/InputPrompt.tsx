@@ -153,23 +153,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     entries: bgEntries,
     dialogOpen: bgDialogOpen,
     pillFocused: bgPillFocused,
-    livePanelFocused,
-    livePanelSelectedIndex,
   } = useBackgroundTaskViewState();
-  const {
-    setLivePanelFocused,
-    setLivePanelSelectedIndex,
-    enterDetailFromPanel: enterBgDetailFromPanel,
-    setSelectedIndex: setBgSelectedIndex,
-  } = useBackgroundTaskViewActions();
+  const { setPillFocused: setBgPillFocused } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
   // Includes terminal entries — the pill stays open so users can reopen
   // the dialog to inspect final state after the last agent finishes.
   const hasBgAgents = bgEntries.length > 0;
-  const bgAgentCount = useMemo(
-    () => bgEntries.filter((e) => e.kind === 'agent').length,
-    [bgEntries],
-  );
   const hasActiveToolConfirmation = useMemo(
     () =>
       Boolean(uiState.confirmationRequest) ||
@@ -509,49 +498,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Printable characters fall through to BaseTextInput's default
       // handler so the first keystroke appears in the input immediately
       // (each surface's own handler releases focus on the same event).
-      // LiveAgentPanel keyboard navigation: ↓/↑ move selection,
-      // Enter opens dialog for selected agent, Esc/↑-at-top returns
-      // focus to composer. Printable chars type through (auto-unfocus).
-      if (livePanelFocused) {
-        if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
-          const maxIdx = bgAgentCount; // 0=main, 1..N=agents
-          if (livePanelSelectedIndex < maxIdx) {
-            setLivePanelSelectedIndex(livePanelSelectedIndex + 1);
-          }
-          return true;
-        }
-        if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
-          if (livePanelSelectedIndex <= 0) {
-            setLivePanelFocused(false);
-          } else {
-            setLivePanelSelectedIndex(livePanelSelectedIndex - 1);
-          }
-          return true;
-        }
-        if (key.name === 'return') {
-          if (livePanelSelectedIndex === 0) {
-            setLivePanelFocused(false);
-          } else {
-            const agentIdx = livePanelSelectedIndex - 1;
-            if (agentIdx < bgAgentCount) {
-              setBgSelectedIndex(agentIdx);
-              enterBgDetailFromPanel();
-            }
-            setLivePanelFocused(false);
-          }
-          return true;
-        }
-        if (key.name === 'escape') {
-          setLivePanelFocused(false);
-          return true;
-        }
-        if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
-          setLivePanelFocused(false);
-          return false;
-        }
-        return true;
-      }
-
       if (agentTabBarFocused || bgPillFocused) {
         if (
           key.sequence &&
@@ -1103,7 +1049,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             return true;
           }
           if (hasBgAgents) {
-            setLivePanelFocused(true);
+            setBgPillFocused(true);
             return true;
           }
           return true;
@@ -1140,14 +1086,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             return true;
           }
           // Focus order on Down from an empty composer:
-          // team tab bar (if any Arena agents) → Background tasks
-          // dialog (if any bg agents) → otherwise stay put.
+          // team tab bar (if any Arena agents) → Background tasks pill
+          // (if any bg agents) → otherwise stay put. The pill itself
+          // opens the dialog on Enter; the tab bar re-routes Down into
+          // the pill once it has focus, so both surfaces remain reachable
+          // in sequence.
           if (hasAgents) {
             setAgentTabBarFocused(true);
             return true;
           }
           if (hasBgAgents) {
-            setLivePanelFocused(true);
+            setBgPillFocused(true);
             return true;
           }
           return true;
@@ -1344,13 +1293,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       hasBgAgents,
       hasActiveToolConfirmation,
       setAgentTabBarFocused,
-      setLivePanelFocused,
-      setLivePanelSelectedIndex,
-      livePanelFocused,
-      livePanelSelectedIndex,
-      bgAgentCount,
-      enterBgDetailFromPanel,
-      setBgSelectedIndex,
+      setBgPillFocused,
       followup,
       onPromptSuggestionDismiss,
       exportCompletion,

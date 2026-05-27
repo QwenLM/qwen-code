@@ -268,6 +268,7 @@ export interface BugCommandSettings {
 }
 
 export interface ChatCompressionSettings {
+  contextPercentageThreshold?: number;
   /**
    * Estimated tokens for a single inline image / document part when
    * apportioning chars across history in `findCompressSplitPoint`.
@@ -334,42 +335,6 @@ export interface TelemetryMetricsSettings {
    * short-term debugging — spans and logs still carry session.id.
    */
   includeSessionId?: boolean;
-}
-
-/**
- * Security-relevant settings controlling what client-side correlation
- * data qwen-code writes into outbound LLM API requests.
- *
- * **Why this is a separate namespace from `telemetry.*`:** telemetry
- * controls data flow into the user's OWN observability backend (OTLP
- * collector / file outfile). The settings here control data flow OUT of
- * the qwen-code process and INTO third-party LLM provider request
- * streams (DashScope, OpenAI, Anthropic, etc.). Different recipients =
- * different consent decision, so a different settings tree. See PR
- * #4390 review (LaZzyMan) for the framing rationale.
- *
- * All values default to off / no propagation. Operators who want to
- * propagate trace context for server-side trace stitching (e.g. ARMS
- * Tracing + DashScope) opt in explicitly.
- */
-export interface OutboundCorrelationSettings {
-  /**
-   * Inject W3C `traceparent` header on outbound HTTP requests
-   * originated by undici / global `fetch` (LLM SDK calls, MCP
-   * StreamableHTTP clients, WebFetch tool, etc.). Default: `false`.
-   *
-   * When `false`, the SDK is configured with a no-op
-   * `TextMapPropagator` so trace context stays internal to the user's
-   * OTLP collector (operator still gets client HTTP spans, but the
-   * trace id is not written onto third-party request streams).
-   *
-   * When `true`, the OTel default W3C composite propagator
-   * (`tracecontext` + `baggage`) is installed and `traceparent` is
-   * written on every outbound `fetch`. Useful when the LLM provider
-   * also reports into the operator's OTel collector — e.g. ARMS
-   * Tracing + DashScope — for cross-process trace stitching.
-   */
-  propagateTraceContext?: boolean;
 }
 
 export interface OutputSettings {
@@ -600,7 +565,6 @@ export interface ConfigParameters {
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
-  outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
   /**
@@ -629,19 +593,6 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
-  /**
-   * Wall-clock budget for an unattended run, in seconds. `-1` (default)
-   * means no limit. Enforced by the CLI's non-interactive run loop —
-   * see `RunBudgetEnforcer` in `packages/cli/src/utils/runBudget.ts`.
-   * Issue: QwenLM/qwen-code#4103.
-   */
-  maxWallTimeSeconds?: number;
-  /**
-   * Cumulative tool-call budget across the entire run. `-1` means no
-   * limit. Counts every `executeToolCall` invocation (incl. failed
-   * tools, since the model is still consuming tokens reading the error).
-   */
-  maxToolCalls?: number;
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
@@ -811,6 +762,22 @@ export interface ConfigInitializeOptions {
    * need config services (hooks, tools, MCP) before a real session exists.
    */
   skipGeminiInitialization?: boolean;
+  /**
+   * F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): skip MCP
+   * discovery entirely (both inline tool-registry-time discovery AND
+   * the post-`createToolRegistry` background `startMcpDiscoveryInBackground`).
+   * The bootstrap config in ACP daemon mode uses this to AVOID spawning
+   * MCP servers under the bootstrap's pool-less McpClientManager.
+   * Pre-fix every stdio MCP server was spawned twice — once by the
+   * bootstrap (legacy per-server path, invisible to pool / budget /
+   * drainAll / pid-sweep) and once by each session's pool-routed
+   * discovery — silently violating the workspace budget contract.
+   * The bootstrap's MCP clients were never actually used to serve a
+   * session (each session builds its own per-session Config and runs
+   * its own discovery), so skipping at the bootstrap layer is safe
+   * AND closes the 2N subprocess leak.
+   */
+  skipMcpDiscovery?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
@@ -878,7 +845,15 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
-  private readonly disabledTools: ReadonlySet<string>;
+  // #4282 fold-in 5 (Codex P2-2). `disabledTools` is set at construction
+  // time but can be re-synced by the daemon mutation surface
+  // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
+  // `discoverMcpToolsForServer` sees the latest disabled set instead
+  // of the bootstrap snapshot. Stays `ReadonlySet` for callers; the
+  // setter swaps the reference rather than mutating in place so any
+  // captured reference (e.g. by ToolRegistry mid-iteration) remains
+  // self-consistent.
+  private disabledTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -903,7 +878,6 @@ export class Config {
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
-  private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
@@ -934,8 +908,6 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
-  private readonly maxWallTimeSeconds: number;
-  private readonly maxToolCalls: number;
   private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
@@ -1074,10 +1046,6 @@ export class Config {
       metrics: params.telemetry?.metrics,
       resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
-    this.outboundCorrelationSettings = {
-      propagateTraceContext:
-        params.outboundCorrelation?.propagateTraceContext ?? false,
-    };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
       name: 'Qwen-Coder',
@@ -1103,8 +1071,6 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
-    this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
-    this.maxToolCalls = params.maxToolCalls ?? -1;
     this.clearContextOnIdle = {
       toolResultsThresholdMinutes:
         params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
@@ -1130,24 +1096,6 @@ export class Config {
     this.loadMemoryFromIncludeDirectories =
       params.loadMemoryFromIncludeDirectories ?? false;
     this.importFormat = params.importFormat ?? 'tree';
-    // Auto-compaction threshold moved to built-in constants (computeThresholds
-    // in chatCompressionService.ts). The old `contextPercentageThreshold`
-    // field is deprecated; if present in user settings, emit a one-time
-    // warning and ignore the value.
-    if (
-      params.chatCompression &&
-      typeof (params.chatCompression as Record<string, unknown>)[
-        'contextPercentageThreshold'
-      ] !== 'undefined'
-    ) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        '[qwen-code] chatCompression.contextPercentageThreshold has been removed ' +
-          'and is now controlled by built-in thresholds. Setting will be ignored. ' +
-          'Remove this key from your settings.json to silence this warning; ' +
-          'see docs/users/configuration/settings.md for current compaction behavior.',
-      );
-    }
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
@@ -1470,7 +1418,14 @@ export class Config {
     // an escape hatch.
     const legacyBlockingMcp =
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
-    const skipInlineMcpDiscovery = this.getBareMode() || !legacyBlockingMcp;
+    // W119: also force the inline-discovery skip when the caller opts
+    // out of MCP entirely (ACP bootstrap path) — otherwise the legacy
+    // blocking mode would still spawn MCP servers via the tool-registry
+    // construction path.
+    const skipInlineMcpDiscovery =
+      this.getBareMode() ||
+      !legacyBlockingMcp ||
+      options?.skipMcpDiscovery === true;
 
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
@@ -1503,7 +1458,15 @@ export class Config {
     // `setTools()` (~16ms / one frame) so the model sees the new tools
     // shortly after each server settles. See `AppContainer.tsx`'s
     // `mcp-client-update` subscriber.
-    if (skipInlineMcpDiscovery && !this.getBareMode()) {
+    //
+    // W119: also gated on `!options?.skipMcpDiscovery` — the ACP
+    // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
+    // config doesn't run discovery under its pool-less manager.
+    if (
+      skipInlineMcpDiscovery &&
+      !this.getBareMode() &&
+      !options?.skipMcpDiscovery
+    ) {
       this.startMcpDiscoveryInBackground();
     }
 
@@ -2240,14 +2203,6 @@ export class Config {
     return this.maxSessionTurns;
   }
 
-  getMaxWallTimeSeconds(): number {
-    return this.maxWallTimeSeconds;
-  }
-
-  getMaxToolCalls(): number {
-    return this.maxToolCalls;
-  }
-
   getClearContextOnIdle(): ClearContextOnIdleSettings {
     return this.clearContextOnIdle;
   }
@@ -2432,12 +2387,45 @@ export class Config {
   /**
    * Returns the read-only set of tool names hidden from this Config's
    * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
-   * `ToolRegistry.registerFactory` to skip registration. Toggling at
-   * runtime requires re-spawning the ACP child (the set is frozen at
-   * construction time). See `disabledTools` in ConfigParameters.
+   * `ToolRegistry.registerFactory` to skip registration.
+   *
+   * Mutability semantics (#4282 fold-in 5 P2-2): the snapshot is
+   * mutable via `setDisabledTools()` so the daemon's
+   * `setWorkspaceToolEnabled` route can re-sync the set after a
+   * `tools.disabled` settings write — without that sync, the
+   * documented "toggle + restart" workflow would re-register the
+   * just-disabled MCP tool against the bootstrap snapshot.
+   *
+   * Already-registered tools are NOT retroactively unregistered:
+   * `ToolRegistry` consults the set at registration time only, so a
+   * mid-session disable only takes effect on the next `registerTool`
+   * call (next ACP child spawn, MCP rediscover, etc.). This matches
+   * the documented "toggling does not unregister live tools"
+   * contract.
+   *
+   * See `disabledTools` in ConfigParameters and `setDisabledTools`
+   * for the runtime sync entry point.
    */
   getDisabledTools(): ReadonlySet<string> {
     return this.disabledTools;
+  }
+
+  /**
+   * #4282 fold-in 5 (Codex P2-2). Replace the in-process `disabledTools`
+   * snapshot with a fresh set sourced from the workspace settings.
+   * Intended for the `qwen serve` mutation surface
+   * (`setWorkspaceToolEnabled` → ACP `qwen/control/...` → here): the
+   * settings file is the source of truth, and this setter keeps the
+   * in-memory Config in sync so a subsequent MCP rediscovery / next
+   * tool registration honors the just-toggled value.
+   *
+   * Already-registered tools are NOT retroactively unregistered —
+   * `ToolRegistry` consults the set at registration time only, which
+   * matches the documented "toggling does not unregister live tools"
+   * contract.
+   */
+  setDisabledTools(disabled: ReadonlySet<string>): void {
+    this.disabledTools = new Set(disabled);
   }
 
   getToolCallCommand(): string | undefined {
@@ -2446,6 +2434,32 @@ export class Config {
 
   getMcpServerCommand(): string | undefined {
     return this.mcpServerCommand;
+  }
+
+  /**
+   * F2 (#4175 commit 4): optional workspace-shared MCP transport pool
+   * injected by the daemon-mode `QwenAgent`. When set, the wrapping
+   * `ToolRegistry` threads it into `McpClientManager`, which delegates
+   * non-SDK MCP server discovery to the pool instead of spawning its
+   * own per-session `McpClient`. Standalone `qwen` (non-daemon) leaves
+   * this `undefined` and the manager keeps its pre-F2 behavior.
+   *
+   * Eagerly instantiated by `QwenAgent` (per V21-13 Q6 resolved); the
+   * pool itself is lazy w.r.t. actual MCP work — it spawns nothing
+   * until the first `acquire()` from a session.
+   */
+  private mcpTransportPool?: import('../tools/mcp-transport-pool.js').McpTransportPool;
+
+  setMcpTransportPool(
+    pool: import('../tools/mcp-transport-pool.js').McpTransportPool | undefined,
+  ): void {
+    this.mcpTransportPool = pool;
+  }
+
+  getMcpTransportPool():
+    | import('../tools/mcp-transport-pool.js').McpTransportPool
+    | undefined {
+    return this.mcpTransportPool;
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
@@ -2935,15 +2949,6 @@ export class Config {
 
   getTelemetryResourceAttributeWarnings(): readonly string[] {
     return this.telemetrySettings.resourceAttributeWarnings ?? [];
-  }
-
-  /**
-   * Whether to inject W3C `traceparent` on outbound `fetch` requests
-   * (LLM SDKs, MCP, WebFetch, etc.). Default false — see
-   * `OutboundCorrelationSettings` for rationale.
-   */
-  getOutboundCorrelationPropagateTraceContext(): boolean {
-    return this.outboundCorrelationSettings.propagateTraceContext ?? false;
   }
 
   getTelemetryOutfile(): string | undefined {

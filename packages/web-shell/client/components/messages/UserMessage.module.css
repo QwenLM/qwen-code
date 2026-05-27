@@ -1,0 +1,18 @@
+.message {
+  margin-bottom: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.prefix {
+  color: var(--user-color);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.body {
+  color: var(--msg-body-color);
+  white-space: pre-wrap;
+  word-break: break-word;
+}

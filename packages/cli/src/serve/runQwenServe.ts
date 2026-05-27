@@ -19,27 +19,69 @@ import {
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
+import { parseAllowOriginPatterns } from './auth.js';
 import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
 } from './permissionAudit.js';
 import { createServeApp, resolveBridgeFsFactory } from './server.js';
-// Wenshao review #4335 / 3272581563 — single runtime source of
-// truth for the closed permission-policy set. `validatePolicyConfig`
-// derives its valid-set from `permission_mediation.modes` so a
-// future 5th policy lands in one place.
+import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
+import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 import type { ServeOptions } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
-// Wenshao review #4335 / 3272493805 — use the canonical
-// `PermissionPolicy` union from acp-bridge instead of inlining
-// the four string literals at the let-declaration, the `as`
-// cast, and the validation Set. Same drift-protection rationale
-// as types.ts/3271978342.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
+const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
+const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
+  'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+
+function isPositiveIntegerMs(value: number): boolean {
+  return Number.isFinite(value) && Number.isInteger(value) && value > 0;
+}
+
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+function assertTimerDelayInRange(name: string, value: number): void {
+  if (value > MAX_TIMEOUT_MS) {
+    throw new TypeError(
+      `Invalid ${name}: ${value}. Exceeds maximum JS timer delay of ` +
+        `${MAX_TIMEOUT_MS} ms (~24.8 days); Node would silently ` +
+        `compress longer delays to 1ms.`,
+    );
+  }
+}
+
+/**
+ * Issue #4514 T2.9. Resolve a positive-integer millisecond value from
+ * an env var. Returns `undefined` when the var is absent (caller falls
+ * back to the CLI option / `ServeOptions` field), throws when the var
+ * is present but malformed so a typo fails the boot loudly instead of
+ * silently disabling the deadline. Whitespace-only values are also
+ * treated as malformed (rather than silently "unset") — the JSDoc
+ * "fail loud on typo" promise applies symmetrically.
+ */
+function parseDeadlineEnv(
+  envName: string,
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined) return undefined;
+  // Don't early-return on empty/whitespace: `Number('')` and
+  // `Number(' ')` both yield `0`, which the positive-integer check
+  // below rejects with the standard error message. Silently treating
+  // `QWEN_SERVE_PROMPT_DEADLINE_MS=" "` as "not set" would let a
+  // shell-substitution typo slip past.
+  const trimmed = raw.trim();
+  const parsed = Number(trimmed);
+  if (!isPositiveIntegerMs(parsed)) {
+    throw new Error(
+      `Invalid ${envName}="${raw}": must be a positive integer (milliseconds).`,
+    );
+  }
+  return parsed;
+}
 
 /**
  * Wenshao review #4335 / 3271978374 — boot-time policy validation
@@ -320,7 +362,28 @@ export async function runQwenServe(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
-  const opts: ServeOptions = { ...optsIn, token };
+  // T2.9: env-var fallback for the deadline options. Explicit option
+  // beats the env beats unset (= unlimited). `parseDeadlineEnv` throws
+  // on malformed values so an `export QWEN_SERVE_PROMPT_DEADLINE_MS=abc`
+  // typo fails boot loudly instead of silently disabling the cap.
+  const promptDeadlineMs =
+    optsIn.promptDeadlineMs ??
+    parseDeadlineEnv(
+      QWEN_SERVE_PROMPT_DEADLINE_MS_ENV,
+      process.env[QWEN_SERVE_PROMPT_DEADLINE_MS_ENV],
+    );
+  const writerIdleTimeoutMs =
+    optsIn.writerIdleTimeoutMs ??
+    parseDeadlineEnv(
+      QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV,
+      process.env[QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV],
+    );
+  const opts: ServeOptions = {
+    ...optsIn,
+    token,
+    ...(promptDeadlineMs !== undefined ? { promptDeadlineMs } : {}),
+    ...(writerIdleTimeoutMs !== undefined ? { writerIdleTimeoutMs } : {}),
+  };
 
   // BU-sh: catch the `--hostname localhost:4170` / `127.0.0.1:4170`
   // typo BEFORE the loopback / token check so the operator sees a
@@ -356,6 +419,46 @@ export async function runQwenServe(
       `Refusing to start with --require-auth set but no bearer token ` +
         `configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or omit ` +
         `--require-auth to keep the loopback developer default.`,
+    );
+  }
+
+  // T2.4 (issue #4514). Validate `--allow-origin` patterns at boot so
+  // operators discover typos before the daemon advertises
+  // `allow_origin` to clients. Each entry must be either `*` or a value
+  // that round-trips through `new URL(...).origin` — see
+  // `parseAllowOriginPatterns` JSDoc for the strict-by-intent rationale.
+  // The parsed `ParsedAllowOriginPatterns` is then re-derived in
+  // `createServeApp` to avoid threading an extra option shape through;
+  // re-parsing is O(n) over operator-listed patterns and only happens
+  // once at boot.
+  if (opts.allowOrigins && opts.allowOrigins.length > 0) {
+    // `InvalidAllowOriginPatternError` already names the bad pattern
+    // and the canonical form; surface it verbatim.
+    const parsed = parseAllowOriginPatterns(opts.allowOrigins);
+    // `*` admits cross-origin requests from any browser tab on the
+    // host. On a token-less loopback default that's a wide-open API
+    // surface — any page (https://evil.example.com, attacker-controlled
+    // ad-frame) can read every route. Refuse to start so operators
+    // don't ship this combination by accident. Mirrors the
+    // `--require-auth + no token` boot-refusal above. A token (any
+    // source: --token, env, --require-auth) makes the bearer the
+    // security boundary, so `*` is acceptable under that posture.
+    if (parsed.allowAny && !token) {
+      throw new Error(
+        `Refusing to start with --allow-origin '*' but no bearer token ` +
+          `configured. '*' admits any cross-origin browser to the API; ` +
+          `without a token, any local page can drive the daemon. Set ` +
+          `${QWEN_SERVER_TOKEN_ENV} or pass --token, or list specific ` +
+          `origins instead of '*'.`,
+      );
+    }
+    writeStderrLine(
+      `qwen serve: --allow-origin: ${opts.allowOrigins.join(', ')}` +
+        (parsed.allowAny
+          ? ' (WARNING: `*` admits any cross-origin browser — bearer ' +
+            'token gates API routes; /health and /demo remain pre-auth ' +
+            'on loopback unless --require-auth is set)'
+          : ''),
     );
   }
 
@@ -417,6 +520,14 @@ export async function runQwenServe(
   // server.ts's raw `opts.workspace` and clients see one path on
   // `/capabilities` but another on `POST /session` responses.
   const boundWorkspace = canonicalizeWorkspace(rawWorkspace);
+
+  // Init daemon logger early so all subsequent lifecycle events
+  // (bridge spawn diagnostics, shutdown errors) are captured to file.
+  const daemonLog: DaemonLogger = initDaemonLogger({ boundWorkspace });
+  writeStderrLine(
+    `qwen serve: daemon log → ${daemonLog.getLogPath() || '(disabled)'}`,
+  );
+
   // Issue #4175 PR 14. The MCP client guardrails enforce in the ACP
   // child process (where `McpClientManager` lives), not the daemon.
   // Forward the budget config via env vars so the child's
@@ -456,6 +567,26 @@ export async function runQwenServe(
       'mcpBudgetMode="enforce" requires a positive mcpClientBudget. ' +
         'Pass mcpClientBudget=N, or set mcpBudgetMode to "warn" or "off".',
     );
+  }
+  // T2.9: validate the deadline options on the explicit option path.
+  // The env path is already validated inside `parseDeadlineEnv`. Boot-
+  // loud so an embedded caller passing `{ promptDeadlineMs: -5 }`
+  // doesn't end up with a daemon that silently fails to enforce the
+  // cap, leaving the operator believing the timeout is active.
+  if (opts.promptDeadlineMs !== undefined) {
+    if (!isPositiveIntegerMs(opts.promptDeadlineMs)) {
+      throw new TypeError(
+        `Invalid promptDeadlineMs: ${opts.promptDeadlineMs}. Must be a positive integer (milliseconds).`,
+      );
+    }
+    assertTimerDelayInRange('promptDeadlineMs', opts.promptDeadlineMs);
+  }
+  if (opts.writerIdleTimeoutMs !== undefined) {
+    if (!isPositiveIntegerMs(opts.writerIdleTimeoutMs)) {
+      throw new TypeError(
+        `Invalid writerIdleTimeoutMs: ${opts.writerIdleTimeoutMs}. Must be a positive integer (milliseconds).`,
+      );
+    }
   }
   // Per-handle env overrides: `undefined` value means "scrub this
   // var from the child env" — important when a different daemon
@@ -560,6 +691,14 @@ export async function runQwenServe(
     ...(deps.fsAuditEmit ? { emit: deps.fsAuditEmit } : {}),
   });
 
+  // Create a spawn channel factory that tees child-stderr diagnostics
+  // into the daemon log file (file-only, no duplicate stderr write).
+  const diagnosticSink = (line: string, level?: 'info' | 'warn' | 'error') =>
+    daemonLog.raw(line, level);
+  const channelFactory = createSpawnChannelFactory({
+    onDiagnosticLine: diagnosticSink,
+  });
+
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -569,6 +708,8 @@ export async function runQwenServe(
         : {}),
       boundWorkspace,
       childEnvOverrides,
+      channelFactory,
+      onDiagnosticLine: diagnosticSink,
       // F3 Commit 5 — wire the validated policy/quorum from
       // settings into the bridge. Bridge factory does its own
       // defensive `Number.isInteger` recheck on the quorum so a
@@ -666,6 +807,7 @@ export async function runQwenServe(
     bridge,
     boundWorkspace,
     fsFactory,
+    daemonLog,
   });
   // Issue #4175 PR 21 — `createServeApp` parks the device-flow registry
   // on `app.locals` when it constructs (or accepts) one. Pull it back
@@ -677,15 +819,6 @@ export async function runQwenServe(
   // visibility. Typed accessor (fold-in 4 review thread D) prevents
   // a key-name typo from silently nulling out the dispose path.
   const deviceFlowRegistry = getDeviceFlowRegistry(app);
-
-  // ACP-over-HTTP transport handle (#/acp, RFD #721). Pulled off
-  // `app.locals` so the close hook can dispose it (clear the connection
-  // TTL sweep timer + close live SSE streams) before `bridge.shutdown()`,
-  // alongside the device-flow registry. `undefined` when the transport is
-  // disabled via `QWEN_SERVE_ACP_HTTP=0`.
-  const acpHttpHandle = (
-    app.locals as { acpHttpHandle?: { dispose(): void } }
-  ).acpHttpHandle;
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
   // operators conventionally type `[::1]` (or copy/paste from URLs that
@@ -824,25 +957,27 @@ export async function runQwenServe(
           // vanishes but its child processes keep running with
           // dangling stdin/stdout pipes — visible as orphan
           // `qwen` processes in the operator's `ps` output.
-          writeStderrLine(
-            `qwen serve: received ${signal} during drain — forcing exit`,
-          );
+          daemonLog.warn(`received ${signal} during drain — forcing exit`);
           try {
             bridge.killAllSync();
           } catch (err) {
-            writeStderrLine(
-              `qwen serve: force-kill error: ${err instanceof Error ? err.message : String(err)}`,
+            daemonLog.error(
+              'force-kill error',
+              err instanceof Error ? err : null,
             );
           }
+          await daemonLog.flush().catch(() => {});
           process.exit(1);
           return;
         }
-        writeStderrLine(`qwen serve: received ${signal}, draining...`);
+        daemonLog.warn(`received ${signal}, draining`);
         try {
           await handle.close();
+          await daemonLog.flush();
           process.exit(0);
         } catch (err) {
-          writeStderrLine(`qwen serve: shutdown error: ${String(err)}`);
+          daemonLog.error('shutdown error', err instanceof Error ? err : null);
+          await daemonLog.flush().catch(() => {});
           process.exit(1);
         }
       };
@@ -916,19 +1051,8 @@ export async function runQwenServe(
               try {
                 deviceFlowRegistry.dispose();
               } catch (err) {
-                writeStderrLine(
-                  `qwen serve: device-flow registry dispose error: ${
-                    err instanceof Error ? err.message : String(err)
-                  }`,
-                );
-              }
-            }
-            if (acpHttpHandle) {
-              try {
-                acpHttpHandle.dispose();
-              } catch (err) {
-                writeStderrLine(
-                  `qwen serve: ACP-HTTP transport dispose error: ${
+                daemonLog.warn(
+                  `device-flow registry dispose error: ${
                     err instanceof Error ? err.message : String(err)
                   }`,
                 );
@@ -937,8 +1061,9 @@ export async function runQwenServe(
             bridge
               .shutdown()
               .catch((err) => {
-                writeStderrLine(
-                  `qwen serve: bridge shutdown error: ${String(err)}`,
+                daemonLog.error(
+                  'bridge shutdown error',
+                  err instanceof Error ? err : null,
                 );
                 bridgeShutdownError =
                   err instanceof Error ? err : new Error(String(err));
@@ -962,8 +1087,8 @@ export async function runQwenServe(
                 const SECONDARY_DEADLINE_MS = 2_000;
                 let secondaryTimer: NodeJS.Timeout | undefined;
                 const forceTimer = setTimeout(() => {
-                  writeStderrLine(
-                    `qwen serve: ${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
+                  daemonLog.warn(
+                    `${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
                   );
                   server.closeAllConnections();
                   // After force-close, server.close's callback
@@ -973,8 +1098,8 @@ export async function runQwenServe(
                   // logged so the operator knows the contract was
                   // bent.
                   secondaryTimer = setTimeout(() => {
-                    writeStderrLine(
-                      `qwen serve: server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
+                    daemonLog.warn(
+                      `server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
                     );
                     finish();
                   }, SECONDARY_DEADLINE_MS);
@@ -1003,9 +1128,7 @@ export async function runQwenServe(
       // persistent listener that logs to stderr instead.
       server.removeAllListeners('error');
       server.on('error', (err) => {
-        writeStderrLine(
-          `qwen serve: server error: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        daemonLog.error('server error', err instanceof Error ? err : null);
       });
       resolve(handle);
     });
