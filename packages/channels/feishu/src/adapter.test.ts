@@ -376,8 +376,8 @@ describe('FeishuChannel', () => {
       // Simulate card in "creating" state
       cardSessions.set('inbound_1', {
         messageId: 'card_1',
-        created: true,
-        creating: false,
+        created: false,
+        creating: true,
         stopped: false,
         accumulatedText: 'partial text',
         lastUpdateAt: Date.now(),

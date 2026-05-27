@@ -22,8 +22,8 @@ function splitByTables(text: string): string[] {
   let inCode = false;
 
   for (const line of lines) {
-    // Track code fences
-    if (line.trim().startsWith('```')) {
+    // Track code fences (parity-based to handle inline code on same line)
+    if ((line.match(/```/g) || []).length % 2 === 1) {
       inCode = !inCode;
       current.push(line);
       continue;
@@ -213,8 +213,13 @@ export function splitChunks(text: string): string[] {
 
     // Hard-split oversized lines that exceed the limit on their own
     while (buf.length > CHUNK_LIMIT) {
-      chunks.push(buf.slice(0, CHUNK_LIMIT));
+      let piece = buf.slice(0, CHUNK_LIMIT);
       buf = buf.slice(CHUNK_LIMIT);
+      if (inCode) {
+        piece += '\n```';
+        buf = fenceLine + '\n' + buf;
+      }
+      chunks.push(piece);
     }
 
     if (fenceCount % 2 === 1) {

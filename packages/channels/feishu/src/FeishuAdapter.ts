@@ -84,7 +84,7 @@ export class FeishuChannel extends ChannelBase {
   private msgToSenderName: Map<string, string> = new Map();
   /** Sender open_id keyed by inbound messageId — for stop-button auth in group chats. */
   private msgToSenderId: Map<string, string> = new Map();
-  /** Tracks messages that were stopped. Cleaned up by cleanupCard, onResponseComplete, stale timer, and disconnect. */
+  /** Tracks messages that were stopped. Cleaned up by onResponseComplete, onPromptEnd, stale timer, and disconnect. */
   private stoppedMessages: Set<string> = new Set();
   private botOpenId?: string;
   private tokenCache?: { token: string; expiresAt: number };
@@ -538,9 +538,10 @@ export class FeishuChannel extends ChannelBase {
         tenant_access_token: string;
         expire: number;
       };
+      const expirySeconds = Math.max(data.expire, 300);
       this.tokenCache = {
         token: data.tenant_access_token,
-        expiresAt: Date.now() + (data.expire - 300) * 1000,
+        expiresAt: Date.now() + (expirySeconds - 60) * 1000,
       };
       return this.tokenCache.token;
     } catch (err) {
@@ -813,6 +814,9 @@ export class FeishuChannel extends ChannelBase {
       return;
     }
 
+    // Card creation permanently failed — skip all further card updates
+    if (!cardState.created) return;
+
     // Throttle updates
     if (!cardState.pendingUpdateTimer) {
       const cs = cardState;
@@ -841,11 +845,17 @@ export class FeishuChannel extends ChannelBase {
             inboundMsgId,
           );
           if (!ok) {
-            // Fallback: strip tables to avoid card table limit
-            const stripped = displayContent.replace(
-              /\|[^\n]+\|(\n\|[^\n]+\|)*/g,
-              '(表格)',
+            // Fallback: strip tables to avoid card table limit (code-fence aware)
+            const fenceParts = displayContent.split(
+              /(```[^\n]*\n[\s\S]*?```)/g,
             );
+            const stripped = fenceParts
+              .map((part, i) =>
+                i % 2 === 1
+                  ? part
+                  : part.replace(/\|[^\n]+\|(\n\|[^\n]+\|)*/g, '(表格)'),
+              )
+              .join('');
             await this.updateCard(cs.messageId, stripped, false, inboundMsgId);
           }
         } catch (err) {
@@ -881,7 +891,20 @@ export class FeishuChannel extends ChannelBase {
 
     // Prepend greeting with sender name
     const atSender = this.msgToSenderName.get(inboundMsgId);
-    const displayText = atSender ? `${atSender}\n\n${fullText}` : fullText;
+    let displayText = atSender ? `${atSender}\n\n${fullText}` : fullText;
+    // Enforce card size limit to avoid wasted API round-trips
+    const MAX_FINAL_CARD_CHARS = 20_000;
+    if (displayText.length > MAX_FINAL_CARD_CHARS) {
+      const prefix = atSender ? `${atSender}\n\n` : '';
+      const maxBody = MAX_FINAL_CARD_CHARS - prefix.length;
+      displayText =
+        prefix + fullText.slice(-maxBody) + '\n\n_(内容过长，已截断早期内容)_';
+      // Re-balance code fences after truncation
+      const fenceCount = (displayText.match(/^```/gm) || []).length;
+      if (fenceCount % 2 === 1) {
+        displayText = '```\n' + displayText;
+      }
+    }
 
     // Mark as finalizing to prevent concurrent updateCard from pendingUpdateTimer
     if (cardState) cardState.finalizing = true;
@@ -911,6 +934,11 @@ export class FeishuChannel extends ChannelBase {
       return;
     }
 
+    // Abandon in-flight card creation if busy-wait timed out
+    if (cardState?.creating) {
+      cardState.stopped = true;
+    }
+
     if (cardState?.created) {
       const updated = await this.updateCard(
         cardState.messageId,
@@ -919,11 +947,18 @@ export class FeishuChannel extends ChannelBase {
         inboundMsgId,
       );
       if (!updated) {
-        // Fallback: try without tables (card table number limit)
-        const noTableText = displayText.replace(
-          /\|[^\n]+\|(\n\|[^\n]+\|)*/g,
-          '(表格内容请查看原文)',
-        );
+        // Fallback: try without tables (card table number limit, code-fence aware)
+        const finalFenceParts = displayText.split(/(```[^\n]*\n[\s\S]*?```)/g);
+        const noTableText = finalFenceParts
+          .map((part, i) =>
+            i % 2 === 1
+              ? part
+              : part.replace(
+                  /\|[^\n]+\|(\n\|[^\n]+\|)*/g,
+                  '(表格内容请查看原文)',
+                ),
+          )
+          .join('');
         const retried = await this.updateCard(
           cardState.messageId,
           noTableText,
@@ -1017,6 +1052,8 @@ export class FeishuChannel extends ChannelBase {
               cardState.messageId = result.messageId;
               cardState.created = true;
               cardState.lastUpdateAt = Date.now();
+            } else {
+              cardState.cardCreationFailed = true;
             }
             cardState.creating = false;
           })
@@ -1050,6 +1087,7 @@ export class FeishuChannel extends ChannelBase {
           // Card still being created — mark stopped so the callback will finalize it
           cs.stopped = true;
         } else if (cs.created) {
+          cs.stopped = true;
           const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
           const text = cs.accumulatedText
             ? (atPrefix
@@ -1059,6 +1097,9 @@ export class FeishuChannel extends ChannelBase {
           this.updateCard(cs.messageId, text, true, inboundMsgId).catch(
             () => {},
           );
+          this.cleanupCard(inboundMsgId);
+        } else {
+          // Card creation failed or never started — clean up orphaned state
           this.cleanupCard(inboundMsgId);
         }
       } else if (cs?.stopped) {
@@ -1182,6 +1223,9 @@ export class FeishuChannel extends ChannelBase {
       const operatorId = operator?.open_id;
       const originalSender = this.msgToSenderId.get(targetInboundMsgId);
       if (!operatorId || !originalSender || operatorId !== originalSender) {
+        process.stderr.write(
+          `[Feishu:${this.name}] Stop rejected: operator=${operatorId ?? 'n/a'} sender=${originalSender ?? 'n/a'}\n`,
+        );
         return false;
       }
 
@@ -1333,7 +1377,10 @@ export class FeishuChannel extends ChannelBase {
             isMentioned = true;
           }
           // Replace @mention placeholder in text
-          cleanText = cleanText.replace(mention.key, `@${mention.name}`);
+          cleanText = cleanText.replaceAll(
+            mention.key,
+            () => `@${mention.name}`,
+          );
         }
         // Strip bot @mention from text
         if (isMentioned && this.botOpenId) {
@@ -1341,7 +1388,7 @@ export class FeishuChannel extends ChannelBase {
             const mentionId =
               mention.id.open_id || mention.id.user_id || mention.id.union_id;
             if (mentionId === this.botOpenId) {
-              cleanText = cleanText.replace(`@${mention.name}`, '').trim();
+              cleanText = cleanText.replaceAll(`@${mention.name}`, '').trim();
             }
           }
         }
@@ -1377,7 +1424,8 @@ export class FeishuChannel extends ChannelBase {
         this.msgToQuestion.set(msgId, questionTitle);
 
         // Use Feishu card markdown <at> tag — rendered as real name by Feishu client
-        const atSender = `好的，<at id=${senderId}></at>`;
+        const safeSenderId = /^[a-zA-Z0-9_:]+$/.test(senderId) ? senderId : '';
+        const atSender = `好的，<at id=${safeSenderId}></at>`;
         this.msgToSenderName.set(msgId, atSender);
         this.msgToSenderId.set(msgId, senderId);
 
