@@ -166,6 +166,9 @@ function applyDaemonTranscriptEvent(
 
   switch (event.type) {
     case 'user.text.delta':
+      if (!next.activeUserBlockId) {
+        next.lastFollowupSuggestion = undefined;
+      }
       appendTextDelta(next, 'user', 'activeUserBlockId', event.text, event);
       break;
     case 'assistant.text.delta':

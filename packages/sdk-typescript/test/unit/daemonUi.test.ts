@@ -5321,6 +5321,37 @@ describe('daemon assist push: followup_suggestion', () => {
     });
   });
 
+  it('clears lastFollowupSuggestion when a new user prompt starts', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'followup_suggestion',
+        data: {
+          sessionId: 's-1',
+          suggestion: 'Try this',
+          promptId: 's-1########1',
+        },
+      } as never),
+      { now: 2 },
+    );
+    expect(state.lastFollowupSuggestion).toBeDefined();
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'user_message_chunk',
+        data: { sessionId: 's-1', text: 'next question' },
+      } as never),
+      { now: 3 },
+    );
+    expect(state.lastFollowupSuggestion).toBeUndefined();
+  });
+
   it('store.clearFollowupSuggestion drops the sidechannel suggestion', () => {
     const store = createDaemonTranscriptStore();
     store.dispatch(
