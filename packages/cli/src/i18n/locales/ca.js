@@ -546,6 +546,10 @@ export default {
     'Ús: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
   'Token usage export path must be within the project working directory.':
     "La ruta d'exportació de l'ús de tokens ha d'estar dins del directori de treball del projecte.",
+  'Cannot resolve export path within the working directory.':
+    "No s'ha pogut resoldre la ruta d'exportació dins del directori de treball.",
+  'Could not create a temporary export file.':
+    "No s'ha pogut crear un fitxer temporal d'exportació.",
   'Token usage exported to {{format}}: {{path}}':
     'Ús de tokens exportat a {{format}}: {{path}}',
   'Failed to export token usage stats: {{error}}':

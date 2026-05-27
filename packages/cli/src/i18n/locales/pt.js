@@ -501,6 +501,10 @@ export default {
     'Uso: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
   'Token usage export path must be within the project working directory.':
     'O caminho de exportação do uso de tokens deve estar dentro do diretório de trabalho do projeto.',
+  'Cannot resolve export path within the working directory.':
+    'Não foi possível resolver o caminho de exportação dentro do diretório de trabalho.',
+  'Could not create a temporary export file.':
+    'Não foi possível criar um arquivo temporário de exportação.',
   'Token usage exported to {{format}}: {{path}}':
     'Uso de tokens exportado para {{format}}: {{path}}',
   'Failed to export token usage stats: {{error}}':

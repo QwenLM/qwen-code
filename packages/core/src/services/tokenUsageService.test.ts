@@ -457,6 +457,24 @@ describe('tokenUsageService', () => {
     expect(summary.byModel).toEqual([]);
   });
 
+  it('surfaces token usage read failures instead of returning zero totals', async () => {
+    const error = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    const readSpy = vi.spyOn(jsonl, 'read').mockRejectedValueOnce(error);
+
+    try {
+      await expect(
+        queryTokenUsage({ period: 'month', value: '2026-05' }),
+      ).rejects.toThrow('permission denied');
+      expect(readSpy).toHaveBeenCalledWith(getTokenUsageFilePath('2026-05'), {
+        throwOnNonEnoentError: true,
+      });
+    } finally {
+      readSpy.mockRestore();
+    }
+  });
+
   it('tolerates malformed JSONL lines while querying', async () => {
     const filePath = getTokenUsageFilePath('2026-05');
     await mkdir(path.dirname(filePath), { recursive: true });

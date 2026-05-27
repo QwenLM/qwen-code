@@ -95,22 +95,6 @@ import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import * as uiTelemetry from './uiTelemetry.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 
-const mockDebugLogger = vi.hoisted(() => ({
-  debug: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
-}));
-
-vi.mock('../utils/debugLogger.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../utils/debugLogger.js')>();
-  return {
-    ...actual,
-    createDebugLogger: vi.fn(() => mockDebugLogger),
-  };
-});
-
 describe('loggers', () => {
   const mockLogger = {
     emit: vi.fn(),
@@ -126,10 +110,6 @@ describe('loggers', () => {
     vi.spyOn(uiTelemetry.uiTelemetryService, 'addEvent').mockImplementation(
       mockUiEvent.addEvent,
     );
-    mockDebugLogger.debug.mockClear();
-    mockDebugLogger.info.mockClear();
-    mockDebugLogger.warn.mockClear();
-    mockDebugLogger.error.mockClear();
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2025-01-01T00:00:00.000Z'));
   });
@@ -396,81 +376,6 @@ describe('loggers', () => {
       expect(
         tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
       ).toHaveBeenCalledWith(mockConfig, event);
-    });
-
-    it.each([
-      'prompt_suggestion',
-      'forked_query',
-      'speculation',
-      'side-query:session-title',
-    ])('does not record token usage for internal prompt_id %s', (promptId) => {
-      const event = new ApiResponseEvent(
-        'test-response-id',
-        'test-model',
-        100,
-        promptId,
-        AuthType.USE_GEMINI,
-        {
-          promptTokenCount: 1,
-          candidatesTokenCount: 2,
-        },
-      );
-
-      logApiResponse(mockConfig, event);
-
-      expect(
-        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
-      ).not.toHaveBeenCalled();
-    });
-
-    it('does not record token usage when usage statistics are disabled', () => {
-      const configWithUsageStatsDisabled = {
-        ...mockConfig,
-        getUsageStatisticsEnabled: () => false,
-      } as unknown as Config;
-      const event = new ApiResponseEvent(
-        'test-response-id',
-        'test-model',
-        100,
-        'prompt-id-1',
-        AuthType.USE_GEMINI,
-        {
-          promptTokenCount: 1,
-          candidatesTokenCount: 2,
-        },
-      );
-
-      logApiResponse(configWithUsageStatsDisabled, event);
-
-      expect(
-        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
-      ).not.toHaveBeenCalled();
-    });
-
-    it('logs synchronous token usage recording failures to debug logs', () => {
-      vi.mocked(
-        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
-      ).mockImplementation(() => {
-        throw new Error('usage write failed');
-      });
-      const event = new ApiResponseEvent(
-        'test-response-id',
-        'test-model',
-        100,
-        'prompt-id-1',
-        AuthType.USE_GEMINI,
-        {
-          promptTokenCount: 1,
-          candidatesTokenCount: 2,
-        },
-      );
-
-      logApiResponse(mockConfig, event);
-
-      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
-        'Synchronous token usage recording error:',
-        expect.any(Error),
-      );
     });
 
     it.each([

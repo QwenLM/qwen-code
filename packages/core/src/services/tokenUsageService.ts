@@ -281,7 +281,9 @@ function isTokenUsageRecord(value: unknown): value is TokenUsageRecord {
 
 async function readRecordsForMonth(month: string): Promise<TokenUsageRecord[]> {
   const filePath = getTokenUsageFilePath(month);
-  const records = await jsonl.read<unknown>(filePath);
+  const records = await jsonl.read<unknown>(filePath, {
+    throwOnNonEnoentError: true,
+  });
   return records.filter(isTokenUsageRecord);
 }
 
