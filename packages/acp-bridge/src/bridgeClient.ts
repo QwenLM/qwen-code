@@ -516,9 +516,6 @@ export class BridgeClient implements Client {
       entry.events.publish({
         type: 'followup_suggestion',
         data: { sessionId, suggestion, promptId },
-        ...(entry.activePromptOriginatorClientId
-          ? { originatorClientId: entry.activePromptOriginatorClientId }
-          : {}),
       });
       return;
     }
