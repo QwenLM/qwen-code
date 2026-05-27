@@ -1889,6 +1889,8 @@ describe('Settings Loading and Merging', () => {
       const warnings = getSettingsWarnings(result);
       expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(true);
       expect(warnings.some((w) => w.includes('reset'))).toBe(true);
+      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+      expect(result.wasRecovered).toBe(false);
 
       vi.restoreAllMocks();
     });
