@@ -1059,9 +1059,16 @@ export async function main() {
           // eslint-disable-next-line no-console -- CLI flag output
           console.log('Installed extensions:');
           for (const extension of extensions) {
+            // Strip non-printable characters from version to prevent
+            // terminal escape sequence injection.
+            const safeVersion = extension.version.replace(
+              // eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
+              /[\x00-\x1f\x7f-\x9f]/g,
+              '',
+            );
             // eslint-disable-next-line no-console -- CLI flag output
             console.log(
-              `- ${extension.name} (v${extension.version})${extension.isActive ? '' : ' [disabled]'}`,
+              `- ${extension.name} (v${safeVersion})${extension.isActive ? '' : ' [disabled]'}`,
             );
           }
         }

@@ -756,6 +756,7 @@ describe('gemini.tsx main function', () => {
       getExtensions: () => [
         { name: 'my-ext', version: '1.0.0', isActive: true },
         { name: 'old-ext', version: '0.5.2', isActive: false },
+        { name: 'esc-ext', version: '2.0\x1b[31m.0', isActive: true },
       ],
       getApprovalMode: () => 'suggest',
       getMcpServers: () => ({}),
@@ -783,6 +784,8 @@ describe('gemini.tsx main function', () => {
     expect(consoleLogSpy).toHaveBeenCalledWith('Installed extensions:');
     expect(consoleLogSpy).toHaveBeenCalledWith('- my-ext (v1.0.0)');
     expect(consoleLogSpy).toHaveBeenCalledWith('- old-ext (v0.5.2) [disabled]');
+    // Verify non-printable characters are stripped from version output
+    expect(consoleLogSpy).toHaveBeenCalledWith('- esc-ext (v2.0[31m.0)');
     expect(processExitSpy).toHaveBeenCalledWith(0);
     expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
     // Verify config.initialize() is called before getExtensions() — extensions are loaded during initialize
