@@ -7341,6 +7341,7 @@ describe('CoreToolScheduler tool output truncation', () => {
       disableHooks?: boolean;
       returnDisplay?: ToolResultDisplay;
       throwOnThresholdRead?: boolean;
+      throwOnThresholdReadAfter?: number;
       alreadyTruncated?: boolean;
       onResult?: (result: ToolResult) => void;
     } = {},
@@ -7372,6 +7373,7 @@ describe('CoreToolScheduler tool output truncation', () => {
       getToolsByServer: () => [],
     } as unknown as ToolRegistry;
 
+    let thresholdReadCount = 0;
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getUsageStatisticsEnabled: () => true,
@@ -7388,7 +7390,14 @@ describe('CoreToolScheduler tool output truncation', () => {
       }),
       storage: { getProjectTempDir: () => tempDir },
       getTruncateToolOutputThreshold: () => {
+        thresholdReadCount += 1;
         if (options.throwOnThresholdRead) {
+          throw new Error('threshold read failed');
+        }
+        if (
+          options.throwOnThresholdReadAfter !== undefined &&
+          thresholdReadCount > options.throwOnThresholdReadAfter
+        ) {
           throw new Error('threshold read failed');
         }
         return options.threshold ?? 100;
@@ -7504,7 +7513,7 @@ describe('CoreToolScheduler tool output truncation', () => {
   });
 
   it('does not fail a successful tool call when output truncation fails', async () => {
-    const largeOutput = 'A'.repeat(5000);
+    const largeOutput = 'A'.repeat(50_000);
     const { scheduler, onAllToolCallsComplete, mockConfig } =
       createLargeOutputScheduler(largeOutput, { throwOnThresholdRead: true });
 
@@ -7528,7 +7537,9 @@ describe('CoreToolScheduler tool output truncation', () => {
     );
 
     expect(completedCalls[0].status).toBe('success');
-    expect(output).toBe(largeOutput);
+    expect(output).toContain('[CONTENT TRUNCATED]');
+    expect(output).toContain('[Note: Could not save full tool output to file]');
+    expect(output.length).toBeLessThan(largeOutput.length);
     expect(mockLogToolOutputTruncationFailed).toHaveBeenCalledWith(
       mockConfig,
       expect.objectContaining({
@@ -7689,10 +7700,79 @@ describe('CoreToolScheduler tool output truncation', () => {
     );
 
     expect(output).toContain(smallOutput);
+    expect(output).toContain(
+      'PostToolUse hook context was too large and has been truncated.',
+    );
     expect(output).toContain('[CONTENT TRUNCATED]');
     expect(output.length).toBeLessThan(smallOutput.length + hookContext.length);
     expect(completedCalls[0].response.contentLength).toBe(output.length);
     expect(mockWriteFile).toHaveBeenCalledTimes(1);
+    const savedFileName = path.basename(String(mockWriteFile.mock.calls[0][0]));
+    expect(savedFileName).toContain(
+      `${LargeOutputTool.Name}__post_tool_use_additional_context_`,
+    );
+    expect(savedFileName).not.toContain(':');
+  });
+
+  it('falls back to bounded in-memory hook context when hook truncation fails', async () => {
+    const smallOutput = 'small output';
+    const hookContext = 'H'.repeat(50_000);
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output:
+          request.eventName === 'PostToolUse'
+            ? { hookSpecificOutput: { additionalContext: hookContext } }
+            : {},
+      })),
+    };
+    const { scheduler, onAllToolCallsComplete, mockConfig } =
+      createLargeOutputScheduler(smallOutput, {
+        threshold: 120,
+        truncateLines: 6,
+        messageBus,
+        disableHooks: false,
+        throwOnThresholdReadAfter: 1,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'large-hook-context-fallback-1',
+          name: LargeOutputTool.Name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-large-hook-context-fallback-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    const output = extractFunctionResponseOutput(
+      completedCalls[0].response.responseParts,
+    );
+
+    expect(completedCalls[0].status).toBe('success');
+    expect(output).toContain(smallOutput);
+    expect(output).toContain(
+      'PostToolUse hook context was too large and has been truncated.',
+    );
+    expect(output).toContain('[CONTENT TRUNCATED]');
+    expect(output.length).toBeLessThan(smallOutput.length + hookContext.length);
+    expect(mockLogToolOutputTruncationFailed).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({
+        tool_name: `${LargeOutputTool.Name}__post_tool_use_additional_context`,
+        prompt_id: 'prompt-large-hook-context-fallback-1',
+        call_id: 'large-hook-context-fallback-1',
+        original_content_length: hookContext.length,
+        error_message: 'threshold read failed',
+      }),
+    );
   });
 
   it('does not truncate already-truncated tool output again', async () => {

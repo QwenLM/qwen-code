@@ -432,7 +432,9 @@ describe('QwenLogger', () => {
         toolName: 'test-tool',
         callId: 'call-id-1',
         originalContentLength: 1000,
-        error: new Error('disk full'),
+        error: new Error(
+          "EACCES: permission denied, open 'C:\\Users\\alice\\.qwen\\tmp\\test-tool.output'",
+        ),
       });
 
       logger.logToolOutputTruncationFailedEvent(event);
@@ -450,7 +452,7 @@ describe('QwenLogger', () => {
           },
           snapshots: JSON.stringify({
             original_content_length: 1000,
-            error_message: 'disk full',
+            error_message: "EACCES: permission denied, open 'test-tool.output'",
           }),
         }),
       );

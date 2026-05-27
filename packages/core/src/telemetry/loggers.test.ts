@@ -1283,7 +1283,9 @@ describe('loggers', () => {
         toolName: 'test-tool',
         callId: 'call-id-1',
         originalContentLength: 1000,
-        error: new Error('disk full'),
+        error: new Error(
+          "EACCES: permission denied, open '/Users/alice/.qwen/tmp/test-tool.output'",
+        ),
       });
 
       logToolOutputTruncationFailed(mockConfig, event);
@@ -1300,7 +1302,7 @@ describe('loggers', () => {
           call_id: 'call-id-1',
           original_content_length: 1000,
           error_type: 'Error',
-          error_message: 'disk full',
+          error_message: "EACCES: permission denied, open 'test-tool.output'",
         },
       });
     });

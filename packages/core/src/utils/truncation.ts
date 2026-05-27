@@ -18,28 +18,22 @@ const debugLogger = createDebugLogger('TRUNCATION');
 export const TOOL_OUTPUT_TRUNCATED_PREFIX =
   'Tool output was too large and has been truncated.';
 
-/**
- * Truncates large tool output and saves the full content to a temp file.
- * Used to prevent excessively large outputs from being
- * sent to the LLM context.
- *
- * If content length is within the threshold, returns it unchanged.
- * Otherwise, saves full content to a file and returns a truncated version
- * with head/tail lines and a pointer to the saved file.
- */
-export async function truncateAndSaveToFile(
+export function shouldTruncateContent(
   content: string,
-  fileName: string,
-  projectTempDir: string,
   threshold: number,
   truncateLines: number,
-): Promise<{ content: string; outputFile?: string }> {
-  const lines = content.split('\n');
+): boolean {
+  return (
+    content.length > threshold || content.split('\n').length > truncateLines
+  );
+}
 
-  // Check both constraints: character threshold and line limit.
-  if (content.length <= threshold && lines.length <= truncateLines) {
-    return { content };
-  }
+function truncateContentHeadTail(
+  content: string,
+  threshold: number,
+  truncateLines: number,
+): string {
+  const lines = content.split('\n');
 
   // Build head and tail within both line and character budgets.
   const effectiveLines = Math.min(truncateLines, lines.length);
@@ -85,10 +79,90 @@ export async function truncateAndSaveToFile(
     tailChars += lines[i].length + 1;
   }
 
-  const truncatedContent = beginning.join('\n') + separator + end.join('\n');
+  return beginning.join('\n') + separator + end.join('\n');
+}
+
+function formatTruncatedContent(
+  truncatedContent: string,
+  contentLabel: string,
+  outputFile?: string,
+): string {
+  const prefix =
+    contentLabel === 'Tool output'
+      ? TOOL_OUTPUT_TRUNCATED_PREFIX
+      : `${contentLabel} was too large and has been truncated.`;
+
+  if (!outputFile) {
+    return `${prefix}
+[Note: Could not save full ${contentLabel.toLowerCase()} to file]
+
+Truncated part of the output:
+${truncatedContent}`;
+  }
+
+  return `${prefix}
+The full output has been saved to: ${outputFile}
+To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
+The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
+
+Truncated part of the output:
+${truncatedContent}`;
+}
+
+function sanitizeOutputFileName(fileName: string): string {
+  return path
+    .basename(fileName)
+    .replace(/[<>:"/\\|?*]/g, '_')
+    .split('')
+    .map((char) => (char.charCodeAt(0) < 32 ? '_' : char))
+    .join('');
+}
+
+export function truncateContentInMemory(
+  content: string,
+  threshold: number,
+  truncateLines: number,
+  contentLabel = 'Tool output',
+): string {
+  if (!shouldTruncateContent(content, threshold, truncateLines)) {
+    return content;
+  }
+  return formatTruncatedContent(
+    truncateContentHeadTail(content, threshold, truncateLines),
+    contentLabel,
+  );
+}
+
+/**
+ * Truncates large tool output and saves the full content to a temp file.
+ * Used to prevent excessively large outputs from being
+ * sent to the LLM context.
+ *
+ * If content length is within the threshold, returns it unchanged.
+ * Otherwise, saves full content to a file and returns a truncated version
+ * with head/tail lines and a pointer to the saved file.
+ */
+export async function truncateAndSaveToFile(
+  content: string,
+  fileName: string,
+  projectTempDir: string,
+  threshold: number,
+  truncateLines: number,
+  contentLabel = 'Tool output',
+): Promise<{ content: string; outputFile?: string }> {
+  // Check both constraints: character threshold and line limit.
+  if (!shouldTruncateContent(content, threshold, truncateLines)) {
+    return { content };
+  }
+
+  const truncatedContent = truncateContentHeadTail(
+    content,
+    threshold,
+    truncateLines,
+  );
 
   // Sanitize fileName to prevent path traversal.
-  const safeFileName = `${path.basename(fileName)}.output`;
+  const safeFileName = `${sanitizeOutputFileName(fileName)}.output`;
   const outputFile = path.join(projectTempDir, safeFileName);
   try {
     await fs.mkdir(projectTempDir, { recursive: true, mode: 0o700 });
@@ -105,13 +179,11 @@ export async function truncateAndSaveToFile(
     await fs.writeFile(outputFile, content, { mode: 0o600 });
 
     return {
-      content: `${TOOL_OUTPUT_TRUNCATED_PREFIX}
-The full output has been saved to: ${outputFile}
-To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
-The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
-
-Truncated part of the output:
-${truncatedContent}`,
+      content: formatTruncatedContent(
+        truncatedContent,
+        contentLabel,
+        outputFile,
+      ),
       outputFile,
     };
   } catch (error) {
@@ -120,8 +192,7 @@ ${truncatedContent}`,
         (error instanceof Error ? error.message : String(error)),
     );
     return {
-      content:
-        truncatedContent + `\n[Note: Could not save full output to file]`,
+      content: formatTruncatedContent(truncatedContent, contentLabel),
     };
   }
 }
@@ -144,9 +215,15 @@ export async function truncateToolOutput(
   toolName: string,
   content: string,
   promptId = '',
+  options: {
+    threshold?: number;
+    lines?: number;
+    contentLabel?: string;
+  } = {},
 ): Promise<{ content: string; outputFile?: string }> {
-  const threshold = config.getTruncateToolOutputThreshold();
-  const lines = config.getTruncateToolOutputLines();
+  const threshold =
+    options.threshold ?? config.getTruncateToolOutputThreshold();
+  const lines = options.lines ?? config.getTruncateToolOutputLines();
 
   if (threshold <= 0 || lines <= 0) {
     return { content };
@@ -160,6 +237,7 @@ export async function truncateToolOutput(
     config.storage.getProjectTempDir(),
     threshold,
     lines,
+    options.contentLabel,
   );
 
   if (result.outputFile) {

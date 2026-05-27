@@ -277,7 +277,7 @@ describe('truncateAndSaveToFile', () => {
 
     expect(result.outputFile).toBeUndefined();
     expect(result.content).toContain(
-      '[Note: Could not save full output to file]',
+      '[Note: Could not save full tool output to file]',
     );
     expect(mockWriteFile).toHaveBeenCalled();
     expect(debugWarnMessages).toEqual([

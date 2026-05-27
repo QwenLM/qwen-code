@@ -5,6 +5,7 @@
  */
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
+import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import type { ApprovalMode } from '../config/config.js';
 import type { CompletedToolCall } from '../core/coreToolScheduler.js';
@@ -755,11 +756,22 @@ export class ToolOutputTruncationFailedEvent implements BaseTelemetryEvent {
       details.error instanceof Error
         ? details.error.name
         : typeof details.error;
-    this.error_message =
+    this.error_message = sanitizeTelemetryErrorMessage(
       details.error instanceof Error
         ? details.error.message
-        : String(details.error);
+        : String(details.error),
+    );
   }
+}
+
+function sanitizeTelemetryErrorMessage(message: string): string {
+  return message.replace(
+    /(?:[A-Za-z]:)?[\\/](?:[^\\/\s'"]+[\\/])*[^\\/\s'"]+/g,
+    (match) =>
+      match.includes('\\')
+        ? path.win32.basename(match)
+        : path.posix.basename(match),
+  );
 }
 
 export class ExtensionUninstallEvent implements BaseTelemetryEvent {
