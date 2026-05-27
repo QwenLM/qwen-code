@@ -934,7 +934,7 @@ export function loadSettings(
             return {
               settings: {},
               migrationWarnings: [warningMsg],
-              corruptedPath,
+              corruptedPath: corruptedSaved ? corruptedPath : undefined,
               wasRecovered: false,
             };
           }
