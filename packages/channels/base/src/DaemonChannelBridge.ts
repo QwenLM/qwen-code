@@ -37,6 +37,10 @@ export interface DaemonChannelSessionClient {
     requestId: string,
     response: RequestPermissionResponse,
   ): Promise<boolean>;
+  shellCommand?(
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
 }
 
 export interface DaemonChannelSessionFactoryRequest {
@@ -311,6 +315,17 @@ export class DaemonChannelBridge extends EventEmitter {
         this.activePromptControllers.delete(sessionId);
       }
     }
+  }
+
+  async shellCommand(
+    sessionId: string,
+    command: string,
+  ): Promise<{ exitCode: number | null; output: string; aborted: boolean }> {
+    const session = this.ensureSession(sessionId);
+    if (!session.shellCommand) {
+      throw new Error('Shell command not supported by this session client');
+    }
+    return session.shellCommand(command);
   }
 
   async cancelSession(sessionId: string): Promise<void> {

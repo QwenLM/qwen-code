@@ -1873,6 +1873,51 @@ export function createServeApp(
     }
   });
 
+  app.post('/session/:id/shell', mutate(), async (req, res) => {
+    const sessionId = req.params['id'];
+    const body = safeBody(req);
+    const command = body['command'];
+    if (typeof command !== 'string' || command.trim().length === 0) {
+      res.status(400).json({
+        error: '`command` is required and must be a non-empty string',
+      });
+      return;
+    }
+    const abort = new AbortController();
+    const onResClose = () => {
+      if (!res.writableEnded) abort.abort();
+    };
+    res.once('close', onResClose);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) {
+      res.off('close', onResClose);
+      return;
+    }
+    try {
+      const result = await bridge.executeShellCommand(
+        sessionId,
+        command.trim(),
+        abort.signal,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      if (
+        err instanceof DOMException &&
+        err.name === 'AbortError' &&
+        abort.signal.aborted
+      ) {
+        return;
+      }
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/shell',
+        sessionId,
+      });
+    } finally {
+      res.off('close', onResClose);
+    }
+  });
+
   app.post(
     '/session/:id/approval-mode',
     mutate({ strict: true }),

@@ -270,6 +270,35 @@ export abstract class ChannelBase {
       this.config.cwd,
     );
 
+    // 3.5. Bang (!) shell command — direct execution, no LLM
+    if (envelope.text.startsWith('!')) {
+      const cmd = envelope.text.slice(1).trim();
+      if (cmd && 'shellCommand' in this.bridge) {
+        try {
+          const result = await (
+            this.bridge as { shellCommand: (sid: string, c: string) => Promise<{ exitCode: number | null; output: string; aborted: boolean }> }
+          ).shellCommand(sessionId, cmd);
+          const output = result.output
+            ? `\`\`\`\n${result.output}\n\`\`\``
+            : '(no output)';
+          const exitLine =
+            result.exitCode !== null && result.exitCode !== 0
+              ? `\nExit code: ${result.exitCode}`
+              : '';
+          await this.sendMessage(
+            envelope.chatId,
+            `$ ${cmd}\n${output}${exitLine}`,
+          );
+        } catch (error) {
+          await this.sendMessage(
+            envelope.chatId,
+            `Shell command failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        return;
+      }
+    }
+
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
     if (envelope.referencedText) {

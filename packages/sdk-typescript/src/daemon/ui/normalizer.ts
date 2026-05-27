@@ -161,6 +161,23 @@ export function normalizeDaemonEvent(
     case 'followup_suggestion':
       return normalizeFollowupSuggestion(event, base);
 
+    case 'user_shell_command': {
+      const command = getString(event.data, 'command');
+      return command
+        ? [{ ...base, type: 'user.text.delta', text: `! ${command}` }]
+        : [];
+    }
+    case 'user_shell_result': {
+      const exitCode = numberField(event.data, 'exitCode');
+      return [
+        {
+          ...base,
+          type: 'status',
+          text: `Shell command exited with code ${exitCode ?? 'unknown'}`,
+        },
+      ];
+    }
+
     case 'replay_complete': {
       const replayedCount = numberField(event.data, 'replayedCount') ?? 0;
       const lastReplayedEventId = numberField(event.data, 'lastEventId');

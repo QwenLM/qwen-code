@@ -123,6 +123,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionClose: 'qwen/control/session/close',
   sessionApprovalMode: 'qwen/control/session/approval_mode',
   sessionRecap: 'qwen/control/session/recap',
+  sessionShellHistory: 'qwen/control/session/shell_history',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
 } as const;
 

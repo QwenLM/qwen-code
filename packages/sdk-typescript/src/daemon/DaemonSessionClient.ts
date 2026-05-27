@@ -15,6 +15,7 @@ import type {
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonSessionRecapResult,
+  DaemonShellCommandResult,
   DaemonSessionState,
   DaemonSession,
   DaemonSessionSupportedCommandsStatus,
@@ -232,6 +233,16 @@ export class DaemonSessionClient {
   }): Promise<DaemonSessionRecapResult> {
     return await this.client.recapSession(this.sessionId, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  async shellCommand(
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonShellCommandResult> {
+    return await this.client.shellCommand(this.sessionId, command, {
+      ...(signal ? { signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }

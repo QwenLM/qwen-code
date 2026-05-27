@@ -30,6 +30,7 @@ import {
   type PermissionResponse,
   type PromptResult,
   type HeartbeatResult,
+  type DaemonShellCommandResult,
 } from '@qwen-code/sdk/daemon';
 import type { CommandInfo, ModelInfo } from '../adapters/types';
 import type { PromptImage } from '../adapters/promptTypes';
@@ -143,6 +144,7 @@ export interface DaemonActions {
   ): Promise<DaemonAgentMutationResult>;
   deleteAgent(agentType: string, scope?: 'workspace' | 'global'): Promise<void>;
   renameSession(displayName: string): Promise<SessionMetadataResult>;
+  sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
 }
 
 interface ActivePrompt {
@@ -921,6 +923,14 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         const session = sessionRef.current;
         if (!session) throw new Error('Not connected');
         return session.updateMetadata({ displayName });
+      },
+
+      async sendShellCommand(
+        command: string,
+      ): Promise<DaemonShellCommandResult> {
+        const session = sessionRef.current;
+        if (!session) throw new Error('Not connected');
+        return session.shellCommand(command);
       },
     }),
     // Actions access the server via sessionRef (set by the connection effect), not opts directly.

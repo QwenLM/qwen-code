@@ -359,6 +359,19 @@ export interface HttpAcpBridge {
   ): Promise<{ sessionId: string; recap: string | null }>;
 
   /**
+   * Execute a shell command directly on the daemon (no LLM involvement).
+   * Streams output through the session's SSE bus and injects the
+   * command+result into the LLM's chat history via extMethod.
+   * Throws `SessionNotFoundError` for unknown ids.
+   */
+  executeShellCommand(
+    sessionId: string,
+    command: string,
+    signal?: AbortSignal,
+    context?: BridgeClientRequestContext,
+  ): Promise<ShellCommandResult>;
+
+  /**
    * Add or remove a tool name from the workspace's `tools.disabled`
    * settings list and fan-out a `tool_toggled` event to every live
    * session SSE bus.
@@ -468,4 +481,10 @@ export interface HttpAcpBridge {
 
   /** Close all live child processes; called on daemon shutdown. */
   shutdown(): Promise<void>;
+}
+
+export interface ShellCommandResult {
+  exitCode: number | null;
+  output: string;
+  aborted: boolean;
 }

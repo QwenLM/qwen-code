@@ -50,6 +50,7 @@ import type {
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
   DaemonSessionRecapResult,
+  DaemonShellCommandResult,
   DaemonToolToggleResult,
 } from './types.js';
 
@@ -1064,6 +1065,27 @@ export class DaemonClient {
     );
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/recap');
     return (await res.json()) as DaemonSessionRecapResult;
+  }
+
+  async shellCommand(
+    sessionId: string,
+    command: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonShellCommandResult> {
+    const res = await this._fetch(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/shell`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ command }),
+        signal: opts?.signal,
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/shell');
+    return (await res.json()) as DaemonShellCommandResult;
   }
 
   /**

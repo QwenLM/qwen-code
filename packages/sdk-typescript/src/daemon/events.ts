@@ -97,6 +97,8 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // consumers silently drop this event via `asKnownDaemonEvent`
   // returning undefined (no protocol bump required).
   'followup_suggestion',
+  'user_shell_command',
+  'user_shell_result',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(

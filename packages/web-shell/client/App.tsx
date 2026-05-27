@@ -749,9 +749,9 @@ export function App({
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
         actions
-          .sendPrompt(formatShellCommandPrompt(cmd))
+          .sendShellCommand(cmd)
           .catch((error: unknown) => {
-            reportError(error, 'Failed to send shell command');
+            reportError(error, 'Failed to execute shell command');
           });
         return true;
       } else {
@@ -1084,11 +1084,4 @@ export function App({
   );
 }
 
-function formatShellCommandPrompt(cmd: string): string {
-  const longestBacktickRun = Math.max(
-    0,
-    ...Array.from(cmd.matchAll(/`+/g), (match) => match[0].length),
-  );
-  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
-  return `Run the following shell command exactly, do not modify it:\n${fence}sh\n${cmd}\n${fence}`;
-}
+
