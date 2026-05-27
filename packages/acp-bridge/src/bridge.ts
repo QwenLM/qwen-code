@@ -2883,15 +2883,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             ),
             transportClosed,
           ]);
-          try {
-            entry.events.publish({
-              type: 'model_switched',
-              data: { sessionId: entry.sessionId, modelId: req.modelId },
-              ...(originatorClientId ? { originatorClientId } : {}),
-            });
-          } catch {
-            /* bus closed */
-          }
+          // `EventBus.publish` never throws (BX9_p — eventBus.ts:190 says
+          // don't wrap it), so a try/catch here is dead code. Bare publish.
+          entry.events.publish({
+            type: 'model_switched',
+            data: { sessionId: entry.sessionId, modelId: req.modelId },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
           return result;
         } finally {
           entry.modelRoundtripInFlight = false;
