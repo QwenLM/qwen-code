@@ -73,7 +73,7 @@ export interface UIActions {
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
-  // Skills manager dialog (`/skills manage`)
+  // Skills manager dialog (`/skills`)
   openSkillsManagerDialog: () => void;
   closeSkillsManagerDialog: () => void;
   // Trigger a CommandService rebuild — dialogs that mutate settings

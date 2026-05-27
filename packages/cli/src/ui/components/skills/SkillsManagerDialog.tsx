@@ -3,7 +3,7 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  *
- * Skills enable/disable dialog (`/skills manage`).
+ * Skills enable/disable dialog (`/skills`).
  *
  * Two key invariants worth knowing before editing:
  *
@@ -289,7 +289,7 @@ export function SkillsManagerDialog({
   // The Esc-during-loading race is handled BY THE CALLER (see
   // `handleSaveAndClose`) — `persistChanges` assumes data is loaded.
   const persistChanges = useCallback(async (): Promise<
-    'ok' | 'untrusted' | 'error'
+    'ok' | 'untrusted' | 'error' | 'refresh-failed'
   > => {
     if (!settings.isTrusted) {
       addItem(
@@ -385,6 +385,7 @@ export function SkillsManagerDialog({
         },
         Date.now(),
       );
+      return 'refresh-failed';
     }
     return 'ok';
   }, [

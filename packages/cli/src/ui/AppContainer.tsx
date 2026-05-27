@@ -3282,7 +3282,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
-      // Skills manager dialog (`/skills manage`)
+      // Skills manager dialog (`/skills`)
       isSkillsManagerDialogOpen,
       // Extensions manager dialog
       isExtensionsManagerDialogOpen,
@@ -3409,7 +3409,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
-      // Skills manager dialog (`/skills manage`)
+      // Skills manager dialog (`/skills`)
       isSkillsManagerDialogOpen,
       // Extensions manager dialog
       isExtensionsManagerDialogOpen,
@@ -3482,7 +3482,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
-      // Skills manager dialog (`/skills manage`)
+      // Skills manager dialog (`/skills`)
       openSkillsManagerDialog,
       closeSkillsManagerDialog,
       reloadCommands,
@@ -3563,7 +3563,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
-      // Skills manager dialog (`/skills manage`)
+      // Skills manager dialog (`/skills`)
       openSkillsManagerDialog,
       closeSkillsManagerDialog,
       reloadCommands,

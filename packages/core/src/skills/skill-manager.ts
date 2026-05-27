@@ -122,8 +122,8 @@ export class SkillManager {
 
   /**
    * Public re-entry into the change-listener pipeline for non-disk events,
-   * specifically when the user toggles `skills.disabled` via `/skills
-   * manage`, `/skills enable`, or `/skills disable`. The underlying
+   * specifically when the user toggles `skills.disabled` via the
+   * `/skills` dialog. The underlying
    * `SKILL.md` files have not changed, so `refreshCache` is unnecessary —
    * we just need every consumer (`SkillTool.refreshSkills`, the slash
    * command list reload bridged in `slashCommandProcessor`) to re-read its
