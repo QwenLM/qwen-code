@@ -69,9 +69,17 @@ describe('FeishuChannel', () => {
 
     beforeEach(() => {
       channel = createChannel();
-      extractContent = getPrivateMethod(channel, 'extractContent').bind(
-        channel,
-      );
+      extractContent = getPrivateMethod<
+        (
+          messageType: string,
+          contentJson: string,
+        ) => {
+          text: string;
+          imageKey?: string;
+          fileKey?: string;
+          fileName?: string;
+        }
+      >(channel, 'extractContent').bind(channel);
     });
 
     it('handles text messages', () => {
@@ -154,9 +162,9 @@ describe('FeishuChannel', () => {
 
     beforeEach(() => {
       channel = createChannel();
-      extractCardText = getPrivateMethod(channel, 'extractCardText').bind(
-        channel,
-      );
+      extractCardText = getPrivateMethod<
+        (card: Record<string, unknown>) => string | undefined
+      >(channel, 'extractCardText').bind(channel);
     });
 
     it('extracts markdown from v2 card format (body.elements)', () => {
@@ -420,7 +428,103 @@ describe('FeishuChannel', () => {
       const state = cardSessions.get('inbound_1') as
         | Record<string, unknown>
         | undefined;
-      expect(state?.stopped).toBe(true);
+      expect(state?.['stopped']).toBe(true);
+    });
+
+    it('rejects stop from a different user (operator mismatch)', () => {
+      const cardSessions = getPrivateMethod<
+        Map<string, Record<string, unknown>>
+      >(channel, 'cardSessions');
+      cardSessions.set('inbound_1', {
+        messageId: 'card_1',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'test',
+        lastUpdateAt: Date.now(),
+      });
+
+      const msgToSenderId = getPrivateMethod<Map<string, string>>(
+        channel,
+        'msgToSenderId',
+      );
+      msgToSenderId.set('inbound_1', 'original_user');
+
+      const onCardAction = getPrivateMethod<
+        (data: Record<string, unknown>) => boolean
+      >(channel, 'onCardAction').bind(channel);
+
+      const result = onCardAction({
+        action: { value: { action: 'stop' } },
+        context: { open_message_id: 'card_1' },
+        operator: { open_id: 'different_user' },
+      });
+
+      expect(result).toBe(false);
+      const state = cardSessions.get('inbound_1') as
+        | Record<string, unknown>
+        | undefined;
+      expect(state?.['stopped']).toBe(false);
+    });
+
+    it('rejects stop when operator field is missing (fail-closed)', () => {
+      const cardSessions = getPrivateMethod<
+        Map<string, Record<string, unknown>>
+      >(channel, 'cardSessions');
+      cardSessions.set('inbound_1', {
+        messageId: 'card_1',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'test',
+        lastUpdateAt: Date.now(),
+      });
+
+      const msgToSenderId = getPrivateMethod<Map<string, string>>(
+        channel,
+        'msgToSenderId',
+      );
+      msgToSenderId.set('inbound_1', 'original_user');
+
+      const onCardAction = getPrivateMethod<
+        (data: Record<string, unknown>) => boolean
+      >(channel, 'onCardAction').bind(channel);
+
+      // No operator field at all
+      const result = onCardAction({
+        action: { value: { action: 'stop' } },
+        context: { open_message_id: 'card_1' },
+      });
+
+      expect(result).toBe(false);
+    });
+
+    it('rejects stop when msgToSenderId has no entry (no originalSender)', () => {
+      const cardSessions = getPrivateMethod<
+        Map<string, Record<string, unknown>>
+      >(channel, 'cardSessions');
+      cardSessions.set('inbound_1', {
+        messageId: 'card_1',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'test',
+        lastUpdateAt: Date.now(),
+      });
+
+      // msgToSenderId intentionally not populated for inbound_1
+
+      const onCardAction = getPrivateMethod<
+        (data: Record<string, unknown>) => boolean
+      >(channel, 'onCardAction').bind(channel);
+
+      const result = onCardAction({
+        action: { value: { action: 'stop' } },
+        context: { open_message_id: 'card_1' },
+        operator: { open_id: 'some_user' },
+      });
+
+      expect(result).toBe(false);
     });
   });
 

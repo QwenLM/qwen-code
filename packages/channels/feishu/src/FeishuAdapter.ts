@@ -846,16 +846,7 @@ export class FeishuChannel extends ChannelBase {
           );
           if (!ok) {
             // Fallback: strip tables to avoid card table limit (code-fence aware)
-            const fenceParts = displayContent.split(
-              /(```[^\n]*\n[\s\S]*?```)/g,
-            );
-            const stripped = fenceParts
-              .map((part, i) =>
-                i % 2 === 1
-                  ? part
-                  : part.replace(/\|[^\n]+\|(\n\|[^\n]+\|)*/g, '(表格)'),
-              )
-              .join('');
+            const stripped = this.stripTables(displayContent, '(表格)');
             await this.updateCard(cs.messageId, stripped, false, inboundMsgId);
           }
         } catch (err) {
@@ -948,17 +939,10 @@ export class FeishuChannel extends ChannelBase {
       );
       if (!updated) {
         // Fallback: try without tables (card table number limit, code-fence aware)
-        const finalFenceParts = displayText.split(/(```[^\n]*\n[\s\S]*?```)/g);
-        const noTableText = finalFenceParts
-          .map((part, i) =>
-            i % 2 === 1
-              ? part
-              : part.replace(
-                  /\|[^\n]+\|(\n\|[^\n]+\|)*/g,
-                  '(表格内容请查看原文)',
-                ),
-          )
-          .join('');
+        const noTableText = this.stripTables(
+          displayText,
+          '(表格内容请查看原文)',
+        );
         const retried = await this.updateCard(
           cardState.messageId,
           noTableText,
@@ -1317,6 +1301,29 @@ export class FeishuChannel extends ChannelBase {
     }
 
     process.stderr.write(`[Feishu:${this.name}] Disconnected.\n`);
+  }
+
+  /**
+   * Strip markdown tables from text while preserving code-fenced blocks.
+   * Uses line-by-line fence tracking instead of regex spanning to avoid
+   * CodeQL polynomial regex warnings.
+   */
+  private stripTables(text: string, replacement: string): string {
+    const lines = text.split('\n');
+    let inCode = false;
+    return lines
+      .map((line) => {
+        if ((line.match(/```/g) || []).length % 2 === 1) {
+          inCode = !inCode;
+        }
+        if (inCode) return line;
+        const trimmed = line.trim();
+        if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+          return replacement;
+        }
+        return line;
+      })
+      .join('\n');
   }
 
   private cleanupCard(inboundMsgId: string): void {
