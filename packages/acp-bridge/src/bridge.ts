@@ -697,6 +697,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // (b) `server.close` rejecting new connections, during which a
   // late-arriving `POST /session` slips a fresh child past cleanup.
   let shuttingDown = false;
+
+  // Tee writeServeDebugLine through the optional onDiagnosticLine callback.
+  // The module-level writeServeDebugLine is left intact for other entry points;
+  // inside createHttpAcpBridge we use this wrapper exclusively.
+  const teeServeDebugLine = (message: string): void => {
+    writeServeDebugLine(message);
+    if (opts.onDiagnosticLine && isServeDebugLoggingEnabled()) {
+      opts.onDiagnosticLine(`qwen serve debug: ${message}`, 'info');
+    }
+  };
+
   // Coalesces concurrent `spawnOrAttach` calls under single-scope and
   // tracks in-progress thread-scope spawns for shutdown to await.
   // Single-scope uses the workspaceKey as the dedup key (at most one
@@ -1426,7 +1437,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         const published = entry.events.publish(envelope);
         if (published === undefined) {
           failureCount += 1;
-          writeServeDebugLine(
+          teeServeDebugLine(
             `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
           );
         } else {
@@ -1439,7 +1450,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           `${JSON.stringify(entry.sessionId)} (type=${envelope.type}): ` +
           `${err instanceof Error ? err.message : String(err)}`;
         if (shuttingDown) {
-          writeServeDebugLine(detail);
+          teeServeDebugLine(detail);
         } else {
           writeStderrLine(`qwen serve: ${detail}`);
         }
@@ -2263,7 +2274,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `context.clientId` against this session's registry.
       const actualSessionId = permissionMediator.peekSessionFor(requestId);
       if (actualSessionId !== undefined && actualSessionId !== sessionId) {
-        writeServeDebugLine(
+        teeServeDebugLine(
           `rejected permission vote ${JSON.stringify(requestId)} ` +
             `for session ${JSON.stringify(sessionId)}; request belongs to ` +
             `session ${JSON.stringify(actualSessionId)}.`,
@@ -2349,7 +2360,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           // Mediator already emitted `permission_already_resolved`.
           return false;
         case 'unknown_request':
-          writeServeDebugLine(
+          teeServeDebugLine(
             `rejected permission vote ${JSON.stringify(requestId)} ` +
               `for session ${JSON.stringify(sessionId)}; mediator has no ` +
               `pending or resolved record.`,
@@ -2645,7 +2656,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           const published = entry.events.publish(event);
           if (published === undefined) {
             failureCount += 1;
-            writeServeDebugLine(
+            teeServeDebugLine(
               `publishWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
             );
           } else {
@@ -2658,7 +2669,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             `${JSON.stringify(entry.sessionId)} (type=${event.type}): ` +
             `${err instanceof Error ? err.message : String(err)}`;
           if (shuttingDown) {
-            writeServeDebugLine(detail);
+            teeServeDebugLine(detail);
           } else {
             writeStderrLine(`qwen serve: ${detail}`);
           }

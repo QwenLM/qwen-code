@@ -480,6 +480,30 @@ const result = await flow.awaitCompletion({ signal: abortCtrl.signal });
 
 **Cross-client take-over.** Two SDK clients on the same daemon that both `POST /workspace/auth/device-flow` for the same provider get the per-provider singleton: the first call starts a fresh IdP request and returns `attached: false`; the second call returns the EXISTING in-flight entry with `attached: true`. The take-over is recorded on the audit trail (under the second client's `X-Qwen-Client-Id`) but does NOT emit a separate event — both clients eventually observe the SAME `auth_device_flow_authorized` once the user finishes the IdP page. If your UI distinguishes "I started this" from "someone else's flow I joined", branch on the `attached` field returned by `start()`.
 
+## Daemon log file
+
+`qwen serve` writes a per-process diagnostic log to:
+
+```
+${QWEN_RUNTIME_DIR or ~/.qwen}/debug/daemon/serve-<pid>-<workspaceHash>.log
+```
+
+A `latest` symlink in the same directory always points at the current process's log, so `tail -f ~/.qwen/debug/daemon/latest` will follow whichever daemon is running.
+
+The log captures lifecycle messages, route errors (with `route=` and `sessionId=` context), ACP child stderr, and — when `QWEN_SERVE_DEBUG=1` is set — extra bridge breadcrumbs. Lines that go to stderr today still go to stderr; the file log is **additive**, not a replacement.
+
+### Disabling
+
+Set `QWEN_DAEMON_LOG_FILE=0` (or `false`/`off`/`no`) to skip file logging entirely. Stderr output is unaffected.
+
+### Relation to session debug logs
+
+Session-scoped debug logs (`~/.qwen/debug/<sessionId>.txt` and the `~/.qwen/debug/latest` symlink) are independent. The daemon log lives in a sibling `daemon/` subdirectory; per-session debug semantics are unchanged by this feature.
+
+### No rotation
+
+The daemon log appends indefinitely. Rotate manually if it grows large. A future enhancement may add automatic rotation; track via [#4548](https://github.com/QwenLM/qwen-code/issues/4548) follow-ups.
+
 ## What's next
 
 - **Setting up a long-running daemon?** [Local launch templates (systemd / launchd / nohup / tmux)](./qwen-serve-deploy-local.md) for v0.16-alpha (local-only).

@@ -25,6 +25,8 @@ import {
   PermissionAuditRing,
 } from './permissionAudit.js';
 import { createServeApp, resolveBridgeFsFactory } from './server.js';
+import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
+import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 import type { ServeOptions } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
@@ -518,6 +520,14 @@ export async function runQwenServe(
   // server.ts's raw `opts.workspace` and clients see one path on
   // `/capabilities` but another on `POST /session` responses.
   const boundWorkspace = canonicalizeWorkspace(rawWorkspace);
+
+  // Init daemon logger early so all subsequent lifecycle events
+  // (bridge spawn diagnostics, shutdown errors) are captured to file.
+  const daemonLog: DaemonLogger = initDaemonLogger({ boundWorkspace });
+  writeStderrLine(
+    `qwen serve: daemon log → ${daemonLog.getLogPath() || '(disabled)'}`,
+  );
+
   // Issue #4175 PR 14. The MCP client guardrails enforce in the ACP
   // child process (where `McpClientManager` lives), not the daemon.
   // Forward the budget config via env vars so the child's
@@ -681,6 +691,14 @@ export async function runQwenServe(
     ...(deps.fsAuditEmit ? { emit: deps.fsAuditEmit } : {}),
   });
 
+  // Create a spawn channel factory that tees child-stderr diagnostics
+  // into the daemon log file (file-only, no duplicate stderr write).
+  const diagnosticSink = (line: string, level?: 'info' | 'warn' | 'error') =>
+    daemonLog.raw(line, level);
+  const channelFactory = createSpawnChannelFactory({
+    onDiagnosticLine: diagnosticSink,
+  });
+
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -690,6 +708,8 @@ export async function runQwenServe(
         : {}),
       boundWorkspace,
       childEnvOverrides,
+      channelFactory,
+      onDiagnosticLine: diagnosticSink,
       // F3 Commit 5 — wire the validated policy/quorum from
       // settings into the bridge. Bridge factory does its own
       // defensive `Number.isInteger` recheck on the quorum so a
@@ -787,6 +807,7 @@ export async function runQwenServe(
     bridge,
     boundWorkspace,
     fsFactory,
+    daemonLog,
   });
   // Issue #4175 PR 21 — `createServeApp` parks the device-flow registry
   // on `app.locals` when it constructs (or accepts) one. Pull it back
@@ -936,25 +957,27 @@ export async function runQwenServe(
           // vanishes but its child processes keep running with
           // dangling stdin/stdout pipes — visible as orphan
           // `qwen` processes in the operator's `ps` output.
-          writeStderrLine(
-            `qwen serve: received ${signal} during drain — forcing exit`,
-          );
+          daemonLog.warn(`received ${signal} during drain — forcing exit`);
           try {
             bridge.killAllSync();
           } catch (err) {
-            writeStderrLine(
-              `qwen serve: force-kill error: ${err instanceof Error ? err.message : String(err)}`,
+            daemonLog.error(
+              'force-kill error',
+              err instanceof Error ? err : null,
             );
           }
+          await daemonLog.flush().catch(() => {});
           process.exit(1);
           return;
         }
-        writeStderrLine(`qwen serve: received ${signal}, draining...`);
+        daemonLog.warn(`received ${signal}, draining`);
         try {
           await handle.close();
+          await daemonLog.flush();
           process.exit(0);
         } catch (err) {
-          writeStderrLine(`qwen serve: shutdown error: ${String(err)}`);
+          daemonLog.error('shutdown error', err instanceof Error ? err : null);
+          await daemonLog.flush().catch(() => {});
           process.exit(1);
         }
       };
@@ -1028,8 +1051,8 @@ export async function runQwenServe(
               try {
                 deviceFlowRegistry.dispose();
               } catch (err) {
-                writeStderrLine(
-                  `qwen serve: device-flow registry dispose error: ${
+                daemonLog.warn(
+                  `device-flow registry dispose error: ${
                     err instanceof Error ? err.message : String(err)
                   }`,
                 );
@@ -1038,8 +1061,9 @@ export async function runQwenServe(
             bridge
               .shutdown()
               .catch((err) => {
-                writeStderrLine(
-                  `qwen serve: bridge shutdown error: ${String(err)}`,
+                daemonLog.error(
+                  'bridge shutdown error',
+                  err instanceof Error ? err : null,
                 );
                 bridgeShutdownError =
                   err instanceof Error ? err : new Error(String(err));
@@ -1063,8 +1087,8 @@ export async function runQwenServe(
                 const SECONDARY_DEADLINE_MS = 2_000;
                 let secondaryTimer: NodeJS.Timeout | undefined;
                 const forceTimer = setTimeout(() => {
-                  writeStderrLine(
-                    `qwen serve: ${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
+                  daemonLog.warn(
+                    `${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
                   );
                   server.closeAllConnections();
                   // After force-close, server.close's callback
@@ -1074,8 +1098,8 @@ export async function runQwenServe(
                   // logged so the operator knows the contract was
                   // bent.
                   secondaryTimer = setTimeout(() => {
-                    writeStderrLine(
-                      `qwen serve: server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
+                    daemonLog.warn(
+                      `server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
                     );
                     finish();
                   }, SECONDARY_DEADLINE_MS);
@@ -1104,9 +1128,7 @@ export async function runQwenServe(
       // persistent listener that logs to stderr instead.
       server.removeAllListeners('error');
       server.on('error', (err) => {
-        writeStderrLine(
-          `qwen serve: server error: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        daemonLog.error('server error', err instanceof Error ? err : null);
       });
       resolve(handle);
     });
