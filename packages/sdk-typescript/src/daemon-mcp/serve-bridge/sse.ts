@@ -83,7 +83,10 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
             if (typeof text === 'string' && text) {
               collector.texts.push(text);
             }
-            // _meta is emitted at the update level (sibling of sessionUpdate/content)
+            // Protocol contract: daemon emits _meta only on the final
+            // agent_message_chunk update (sibling of sessionUpdate/content).
+            // If future daemon versions move _meta elsewhere, this check
+            // will need updating — the collector will hang until timeout.
             if ('_meta' in update) {
               collector.resolve();
             }
