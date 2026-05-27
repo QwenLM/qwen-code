@@ -35,7 +35,10 @@ import nodePath from 'node:path';
 import os from 'node:os';
 import { parse } from 'shell-quote';
 import { stripShellWrapper } from '../utils/shell-utils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { splitCompoundCommand } from './rule-parser.js';
+
+const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -150,11 +153,18 @@ function resolvePath(p: string, cwd: string): string {
     // join('C:/Users/foo', '/.ssh/id_rsa') → 'C:/Users/foo/.ssh/id_rsa'
     return rest ? nodePath.posix.join(homeDir, rest) : homeDir;
   }
-  // isAbsolute check: handle both POSIX (/foo) and Windows (C:\foo) absolute paths
-  if (nodePath.isAbsolute(normP) || normP.startsWith('/')) {
+  if (isShellAbsolutePath(normP)) {
     return normP;
   }
   return nodePath.posix.join(normCwd, normP);
+}
+
+function isShellAbsolutePath(p: string): boolean {
+  return p.startsWith('/') || /^[A-Za-z]:\//.test(p.replace(/\\/g, '/'));
+}
+
+function normalizeShellPath(p: string): string {
+  return p.replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
 /**
@@ -1771,8 +1781,8 @@ function resolveCdTargetCwd(
 
   return {
     kind: 'static',
-    cwd: nodePath.resolve(cwd, target),
-    cwdUnknown: cwdUnknown && !nodePath.isAbsolute(target),
+    cwd: resolvePath(target, cwd),
+    cwdUnknown: cwdUnknown && !isShellAbsolutePath(target),
   };
 }
 
@@ -1856,6 +1866,10 @@ function walkCompoundCommand(
         );
         continue;
       }
+    } else if (stripShellWrapper(sub) !== sub) {
+      shellSemanticsDebugLogger.warn(
+        `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
+      );
     }
 
     const subOps = extractShellOperations(sub, effectiveCwd);
@@ -1875,12 +1889,11 @@ function markCwdUnknownOps(
 ): ShellOperation[] {
   return ops.map((op) => {
     if (!op.filePath) return op;
-    const rel = nodePath.relative(
-      nodePath.resolve(effectiveCwd),
-      nodePath.resolve(op.filePath),
-    );
+    const normalizedCwd = normalizeShellPath(effectiveCwd);
+    const normalizedPath = normalizeShellPath(op.filePath);
     const pathMayDependOnCwd =
-      rel === '' || (!rel.startsWith('..') && !nodePath.isAbsolute(rel));
+      normalizedPath === normalizedCwd ||
+      normalizedPath.startsWith(`${normalizedCwd}/`);
     if (!pathMayDependOnCwd) return op;
     return { ...op, cwdUnknown: true, pathMayDependOnCwd: true };
   });

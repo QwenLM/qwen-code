@@ -176,6 +176,9 @@ function getNormalizedQwenHomePrefixes(): string[] {
   if (!qwenHome) return [];
 
   const candidates = new Set<string>([path.resolve(qwenHome)]);
+  if (qwenHome.startsWith('/') || /^[A-Za-z]:[\\/]/.test(qwenHome)) {
+    candidates.add(qwenHome);
+  }
   try {
     candidates.add(fs.realpathSync.native(qwenHome));
   } catch {
