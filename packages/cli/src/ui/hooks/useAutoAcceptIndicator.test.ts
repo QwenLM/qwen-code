@@ -22,6 +22,7 @@ import type { Config as ActualConfigType } from '@qwen-code/qwen-code-core';
 import type { Key } from './useKeypress.js';
 import { useKeypress } from './useKeypress.js';
 import { MessageType } from '../types.js';
+import { SettingScope } from '../../config/settings.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 
 vi.mock('./useKeypress.js');
@@ -137,6 +138,43 @@ describe('useAutoAcceptIndicator', () => {
       }),
     );
     expect(result.current).toBe(ApprovalMode.AUTO_EDIT);
+    expect(mockConfigInstance.getApprovalMode).toHaveBeenCalledTimes(1);
+  });
+
+  it('should show AUTO entry notices on mount when initially in AUTO mode', () => {
+    mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.AUTO);
+    const mockAddItem = vi.fn();
+    const mockSetValue = vi.fn();
+    const mockSettings = {
+      merged: {
+        ui: {
+          autoModeAcknowledged: false,
+        },
+      },
+      setValue: mockSetValue,
+    };
+
+    const { result } = renderHook(() =>
+      useAutoAcceptIndicator({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        settings: mockSettings as never,
+        addItem: mockAddItem,
+      }),
+    );
+
+    expect(result.current).toBe(ApprovalMode.AUTO);
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('Auto mode enabled.'),
+      }),
+      expect.any(Number),
+    );
+    expect(mockSetValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'ui.autoModeAcknowledged',
+      true,
+    );
     expect(mockConfigInstance.getApprovalMode).toHaveBeenCalledTimes(1);
   });
 
@@ -619,5 +657,47 @@ describe('useAutoAcceptIndicator', () => {
     expect(noticeText).not.toContain('Auto mode temporarily disabled');
     expect(noticeText).not.toContain('from user settings');
     expect(noticeText).not.toContain('These will be restored');
+  });
+
+  it('persists the first-time AUTO notice when cycling into AUTO mode', () => {
+    mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.AUTO_EDIT);
+    const mockAddItem = vi.fn();
+    const mockSetValue = vi.fn();
+    const mockSettings = {
+      merged: {
+        ui: {
+          autoModeAcknowledged: false,
+        },
+      },
+      setValue: mockSetValue,
+    };
+
+    renderHook(() =>
+      useAutoAcceptIndicator({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        settings: mockSettings as never,
+        addItem: mockAddItem,
+      }),
+    );
+
+    act(() => {
+      capturedUseKeypressHandler({ name: 'tab', shift: true } as Key);
+    });
+
+    expect(mockConfigInstance.setApprovalMode).toHaveBeenCalledWith(
+      ApprovalMode.AUTO,
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('Auto mode enabled.'),
+      }),
+      expect.any(Number),
+    );
+    expect(mockSetValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'ui.autoModeAcknowledged',
+      true,
+    );
   });
 });

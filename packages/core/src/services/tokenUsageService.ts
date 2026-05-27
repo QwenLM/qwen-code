@@ -333,6 +333,14 @@ export function recordTokenUsageFromApiResponseBestEffort(
   void recordTokenUsageFromApiResponse(config, event).catch(
     (error: unknown) => {
       debugLogger.warn('Failed to record token usage:', error);
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code && code !== 'ENOENT') {
+        // eslint-disable-next-line no-console -- surface persistent local write failures outside debug mode
+        console.error(
+          `[token-usage] Write failed (${code}):`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
     },
   );
 }

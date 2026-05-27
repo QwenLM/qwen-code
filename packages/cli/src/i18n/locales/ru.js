@@ -501,7 +501,7 @@ export default {
   'Failed to export token usage stats: {{error}}':
     'Не удалось экспортировать статистику использования токенов: {{error}}',
   'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.':
-    'Note: token usage shows API response duration only; generation timing (TTFT/TPS) belongs to generation metrics.',
+    'Примечание: использование токенов показывает только длительность ответа API; время генерации (TTFT/TPS) относится к метрикам генерации.',
   'exit the cli': 'Выход из CLI',
   'Manage workspace directories':
     'Управление директориями рабочего пространства',

@@ -13,6 +13,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { Storage } from '../config/storage.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
+import * as jsonl from '../utils/jsonl-utils.js';
 import {
   apiResponseEventToTokenUsageRecord,
   exportTokenUsageSummary,
@@ -20,6 +21,7 @@ import {
   getTokenUsageFilePath,
   queryTokenUsage,
   recordTokenUsageFromApiResponse,
+  recordTokenUsageFromApiResponseBestEffort,
 } from './tokenUsageService.js';
 
 describe('tokenUsageService', () => {
@@ -194,6 +196,76 @@ describe('tokenUsageService', () => {
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,
     ]);
+  });
+
+  it('swallows best-effort write errors and surfaces non-ENOENT failures', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent('model-a', 'prompt-1', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    const error = Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+    const writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    const stderrSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+    const unhandled: unknown[] = [];
+    const handler = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', handler);
+
+    try {
+      expect(() =>
+        recordTokenUsageFromApiResponseBestEffort(config, event),
+      ).not.toThrow();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+      expect(unhandled).toHaveLength(0);
+      expect(stderrSpy).toHaveBeenCalledWith(
+        '[token-usage] Write failed (ENOSPC):',
+        'disk full',
+      );
+    } finally {
+      process.off('unhandledRejection', handler);
+      writeSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
+  });
+
+  it('does not surface best-effort ENOENT write failures to stderr', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent('model-a', 'prompt-1', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    const error = Object.assign(new Error('missing directory'), {
+      code: 'ENOENT',
+    });
+    const writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    const stderrSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    try {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+      expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      writeSpy.mockRestore();
+      stderrSpy.mockRestore();
+    }
   });
 
   it('aggregates monthly model, auth type, model/auth, and source groups', async () => {

@@ -426,6 +426,55 @@ describe('loggers', () => {
         tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
       ).not.toHaveBeenCalled();
     });
+
+    it.each([
+      'prompt_suggestion',
+      'forked_query',
+      'speculation',
+      'side-query:session-title',
+    ])('does not record token usage for internal prompt_id %s', (promptId) => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        promptId,
+        AuthType.USE_GEMINI,
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+        },
+      );
+
+      logApiResponse(mockConfig, event);
+
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does not record token usage when usage statistics are disabled', () => {
+      const configWithUsageStatsDisabled = {
+        ...mockConfig,
+        getUsageStatisticsEnabled: () => false,
+      } as unknown as Config;
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        'prompt-id-1',
+        AuthType.USE_GEMINI,
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+        },
+      );
+
+      logApiResponse(configWithUsageStatsDisabled, event);
+
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).not.toHaveBeenCalled();
+    });
   });
 
   describe('logApiResponse skips chatRecordingService for internal prompt IDs', () => {
