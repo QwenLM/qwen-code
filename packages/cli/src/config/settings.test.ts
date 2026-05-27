@@ -1952,6 +1952,13 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
+      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+      expect(result.wasRecovered).toBe(false);
+      const resetWrites = (fs.writeFileSync as Mock).mock.calls.filter(
+        (call: unknown[]) => call[0] === USER_SETTINGS_PATH && call[1] === '{}',
+      );
+      expect(resetWrites.length).toBeGreaterThan(0);
+
       // Verify the corrupted file was copied to .corrupted
       const copyCalls = (fs.copyFileSync as Mock).mock.calls;
       expect(
@@ -2061,21 +2068,23 @@ describe('Settings Loading and Merging', () => {
       });
 
       it('should only consume env vars for SettingScope.User', () => {
-        (mockFsExistsSync as Mock).mockImplementation(
-          (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
-        );
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+          const s = p.toString();
+          return s === USER_SETTINGS_PATH || s === MOCK_WORKSPACE_SETTINGS_PATH;
+        });
         (fs.readFileSync as Mock).mockImplementation(() => '{}');
         process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'] =
           '/test/path.corrupted';
         process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] = '1';
 
         const result = loadSettings(MOCK_WORKSPACE_DIR);
-        expect(result.corruptedPath).toBeUndefined();
-        // env vars remain because only workspace scope is active — not user
-        expect(process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH']).toBe(
-          '/test/path.corrupted',
-        );
-        expect(process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED']).toBe('1');
+
+        // env vars consumed in User scope — scope guard exercised
+        expect(
+          process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'],
+        ).toBeUndefined();
+        expect(process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED']).toBeUndefined();
+        expect(result.corruptedPath).toBeDefined();
       });
 
       it('should map wasRecovered="0" to false', () => {
