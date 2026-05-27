@@ -17,9 +17,10 @@ export const Notifications = () => {
   const { initError, streamingState, updateInfo } = useUIState();
   const settings = useSettings();
 
-  // Corrupted dialog already handled — filter out its startup warnings
-  const filteredWarnings = settings.corruptedPath
-    ? startupWarnings.filter((w) => !w.includes('invalid JSON'))
+  // Corrupted dialog already handled — filter out warnings for the settings file path
+  const settingsPath = settings.corruptedPath?.replace(/\.corrupted$/, '');
+  const filteredWarnings = settingsPath
+    ? startupWarnings.filter((w) => !w.includes(settingsPath))
     : startupWarnings;
 
   const showStartupWarnings = filteredWarnings.length > 0;

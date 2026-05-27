@@ -870,6 +870,12 @@ export function loadSettings(
         let content = fs.readFileSync(filePath, 'utf-8');
         let rawSettings: unknown;
         let recoveryWarning: string | undefined;
+        // Carry corruption state through to the final return so it
+        // can be attached after the migration pipeline runs.
+        const corruptedPath = `${filePath}.corrupted`;
+        let corruptedSaved = false;
+        let recoveredFromBackup = false;
+        let recoveredFromEnvVar: boolean | null = null;
 
         try {
           rawSettings = JSON.parse(stripJsonComments(content));
@@ -878,15 +884,19 @@ export function loadSettings(
           // Strategy: save corrupted file as .corrupted → recover from .orig →
           // show dialog in UI. Never crash due to a corrupted settings file.
 
-          // Step 1: save corrupted file for reference
-          const corruptedPath = `${filePath}.corrupted`;
-          let corruptedSaved = false;
+          // Step 1: copy corrupted file to .corrupted for reference
+          // MUST guarantee .corrupted exists so onExit can restore it.
+          // Use copy (not rename) — the file must stay on disk so that
+          // child processes spawned by relaunchAppInChildProcess() can
+          // enter the existsSync block where env-var propagation is
+          // checked.  Step 2 will overwrite it with .orig if available.
+
           try {
             fs.copyFileSync(filePath, corruptedPath);
             corruptedSaved = true;
           } catch (copyError) {
             debugLogger.warn(
-              `Failed to save corrupted file to ${corruptedPath}: ${getErrorMessage(copyError)}`,
+              `Failed to copy corrupted file: ${getErrorMessage(copyError)}`,
             );
           }
 
@@ -908,6 +918,7 @@ export function loadSettings(
               const recoveryMsg = `Settings file ${filePath} had invalid JSON and was recovered from backup ${backupPath}. Some recent settings changes may have been lost.`;
               debugLogger.warn(recoveryMsg);
               recoveryWarning = recoveryMsg;
+              recoveredFromBackup = true;
             } catch (backupError) {
               // Backup also corrupted — give up recovery
               debugLogger.warn(
@@ -923,20 +934,12 @@ export function loadSettings(
             return {
               settings: {},
               migrationWarnings: [warningMsg],
-              corruptedPath: corruptedSaved ? corruptedPath : undefined,
+              corruptedPath,
               wasRecovered: false,
             };
           }
-
-          // Recovery succeeded — return corruptedPath for the dialog
-          if (corruptedSaved) {
-            return {
-              settings: rawSettings as Settings,
-              migrationWarnings: recoveryWarning ? [recoveryWarning] : [],
-              corruptedPath,
-              wasRecovered: true,
-            };
-          }
+          // Fall through to migration pipeline — .orig backup may be in
+          // an older schema and needs to go through runMigrations.
         }
 
         // Propagate corruption state from parent process via env vars.
@@ -944,15 +947,16 @@ export function loadSettings(
         // settings.json (already valid after parent recovered it). The
         // env vars preserve the corruption marker across the boundary.
         // Only apply to user scope since that's where corruption is detected.
+        // Clear env vars after reading so subsequent loadSettings calls
+        // don't re-trigger this path.
         const envCorruptedPath =
           process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'];
         if (envCorruptedPath && scope === SettingScope.User) {
-          return {
-            settings: rawSettings as Settings,
-            corruptedPath: envCorruptedPath,
-            wasRecovered:
-              process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] === '1',
-          };
+          corruptedSaved = true;
+          recoveredFromEnvVar =
+            process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] === '1';
+          delete process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'];
+          delete process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'];
         }
 
         if (
@@ -1032,12 +1036,19 @@ export function loadSettings(
           ...(migrationWarnings ?? []),
         ];
 
-        return {
+        // Attach corruption state if settings were recovered from backup
+        const result: ReturnType<typeof loadAndMigrate> = {
           settings: settingsObject as Settings,
           rawJson: content,
           migrationWarnings:
             allWarnings.length > 0 ? allWarnings : migrationWarnings,
         };
+        if (corruptedSaved) {
+          result.corruptedPath = corruptedPath;
+          result.wasRecovered =
+            recoveredFromBackup || (recoveredFromEnvVar ?? false);
+        }
+        return result;
       }
     } catch (error: unknown) {
       settingsErrors.push({

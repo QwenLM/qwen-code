@@ -28,8 +28,13 @@ export const SettingsCorruptedDialog: React.FC<
 
   useKeypress(
     (key) => {
-      if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+      if (key.name === 'escape') {
+        onContinue();
+        return;
+      }
+      if (key.ctrl && key.name === 'c') {
         onExit();
+        return;
       }
       if (key.name === 'up') {
         setSelectedIndex(EXIT_INDEX);
@@ -49,8 +54,8 @@ export const SettingsCorruptedDialog: React.FC<
   );
 
   const continueLabel = wasRecovered
-    ? t('Continue with recovered settings')
-    : t('Continue with empty settings');
+    ? t('Continue with recovered settings (esc)')
+    : t('Continue with empty settings (esc)');
 
   return (
     <Box
@@ -91,7 +96,7 @@ export const SettingsCorruptedDialog: React.FC<
                 : theme.text.primary
             }
           >
-            {t('Exit and restore corrupted file (esc)')}
+            {t('Exit and restore corrupted file')}
           </Text>
         </Box>
         <Box>

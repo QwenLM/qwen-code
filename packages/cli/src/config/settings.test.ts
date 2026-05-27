@@ -108,6 +108,7 @@ vi.mock('node:fs', async (importOriginal) => {
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
+    copyFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
     realpathSync: (p: string) => p,
@@ -126,6 +127,7 @@ vi.mock('fs', async (importOriginal) => {
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
+    copyFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
     realpathSync: (p: string) => p,
@@ -1874,19 +1876,19 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
-      // Verify the corrupted file was renamed with timestamp suffix
-      const renameCalls = (fs.renameSync as Mock).mock.calls;
-      const corruptedRename = renameCalls.find(
+      // Verify the corrupted file was copied to .corrupted
+      const copyCalls = (fs.copyFileSync as Mock).mock.calls;
+      const corruptedCopy = copyCalls.find(
         (call: unknown[]) =>
           call[0] === USER_SETTINGS_PATH &&
-          String(call[1]).includes('.corrupted.'),
+          String(call[1]).includes('.corrupted'),
       );
-      expect(corruptedRename).toBeDefined();
+      expect(corruptedCopy).toBeDefined();
 
       // Verify migrationWarnings contains recovery message
       const warnings = getSettingsWarnings(result);
       expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(true);
-      expect(warnings.some((w) => w.includes('renamed'))).toBe(true);
+      expect(warnings.some((w) => w.includes('reset'))).toBe(true);
 
       vi.restoreAllMocks();
     });
@@ -1954,20 +1956,20 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
-      // Verify the corrupted file was renamed
-      const renameCalls = (fs.renameSync as Mock).mock.calls;
+      // Verify the corrupted file was copied to .corrupted
+      const copyCalls = (fs.copyFileSync as Mock).mock.calls;
       expect(
-        renameCalls.some(
+        copyCalls.some(
           (call: unknown[]) =>
             call[0] === USER_SETTINGS_PATH &&
-            String(call[1]).includes('.corrupted.'),
+            String(call[1]).includes('.corrupted'),
         ),
       ).toBe(true);
 
       vi.restoreAllMocks();
     });
 
-    it('should start with empty settings when rename of corrupted file fails', () => {
+    it('should start with empty settings when copy of corrupted file fails', () => {
       const invalidJsonContent = 'invalid json';
 
       (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
@@ -1983,8 +1985,8 @@ describe('Settings Loading and Merging', () => {
         },
       );
 
-      // Simulate rename failure (e.g., permission denied)
-      (fs.renameSync as Mock).mockImplementation(() => {
+      // Simulate copy failure (e.g., permission denied)
+      (fs.copyFileSync as Mock).mockImplementation(() => {
         throw new Error('EACCES: permission denied');
       });
 
@@ -1992,10 +1994,9 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
-      // Verify the warning message does NOT say "renamed" since rename failed,
-      // but instead tells user to fix the file manually.
+      // Verify the warning message when rename+fallback both fail
       const warnings = getSettingsWarnings(result);
-      expect(warnings.some((w) => w.includes('fix the JSON'))).toBe(true);
+      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(true);
       expect(warnings.some((w) => w.includes('renamed to'))).toBe(false);
 
       vi.restoreAllMocks();

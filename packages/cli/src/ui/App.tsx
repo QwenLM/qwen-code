@@ -34,18 +34,33 @@ export const App = () => {
             corruptedPath={settings.corruptedPath}
             wasRecovered={settings.wasRecovered}
             onExit={() => {
-              try {
-                const settingsPath = settings.corruptedPath!.replace(
-                  /\.corrupted$/,
-                  '',
-                );
-                fs.copyFileSync(settings.corruptedPath!, settingsPath);
-              } catch {
-                /* ignore */
+              if (
+                settings.corruptedPath &&
+                fs.existsSync(settings.corruptedPath)
+              ) {
+                try {
+                  const settingsPath = settings.corruptedPath.replace(
+                    /\.corrupted$/,
+                    '',
+                  );
+                  fs.copyFileSync(settings.corruptedPath, settingsPath);
+                } catch {
+                  /* ignore */
+                }
               }
               process.exit(1);
             }}
             onContinue={() => {
+              if (
+                settings.corruptedPath &&
+                fs.existsSync(settings.corruptedPath)
+              ) {
+                try {
+                  fs.unlinkSync(settings.corruptedPath);
+                } catch {
+                  /* ignore */
+                }
+              }
               setDismissed(true);
             }}
           />
