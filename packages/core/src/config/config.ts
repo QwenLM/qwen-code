@@ -528,6 +528,27 @@ export interface SandboxConfig {
  * Settings shared across multi-agent collaboration features
  * (Arena, Team, Swarm).
  */
+/**
+ * General-purpose worktree settings (Phase D-2). Distinct from
+ * {@link AgentsCollabSettings.arena.worktreeBaseDir}, which only governs
+ * Arena multi-model worktrees.
+ */
+export interface WorktreeSettings {
+  /**
+   * Directories under the main repository to symlink into every
+   * general-purpose worktree on creation (the `enter_worktree` tool,
+   * `agent isolation: "worktree"`, and the `--worktree` startup flag).
+   *
+   * Paths must be relative to the repo root; absolute paths and any
+   * entry containing `..` are rejected by the service. Entries that
+   * resolve to git-internal paths (`.git`, `.qwen`) are also rejected
+   * — symlinking those would either break git inside the worktree or
+   * create a worktrees-inside-worktrees loop. Missing source dirs and
+   * pre-existing destinations are silently skipped.
+   */
+  symlinkDirectories?: readonly string[];
+}
+
 export interface AgentsCollabSettings {
   /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
   displayMode?: string;
@@ -718,6 +739,8 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
+  /** General-purpose worktree settings (Phase D-2). */
+  worktree?: WorktreeSettings;
   /** Enable managed auto-memory background extraction and dream. Defaults to true. */
   enableManagedAutoMemory?: boolean;
   /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
@@ -823,6 +846,20 @@ const DEFAULT_BARE_CORE_TOOLS = [
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
+  /**
+   * One-shot notice produced by `setupStartupWorktree` (Phase D-1) when the
+   * CLI was launched with `--worktree`. The active entry point (TUI XOR
+   * headless) reads it via {@link consumePendingStartupWorktreeNotice} on
+   * the model's first prompt and skips Phase C's `restoreWorktreeContext`
+   * for that turn — startup wins over the resumed-session sidecar. ACP is
+   * gated out earlier in `gemini.tsx` (mutex with `--worktree`) so it
+   * never reaches this slot.
+   *
+   * @invariant At most one consumer per process. If a future entry path
+   * sets this slot without ever consuming, the string persists until
+   * process exit (which dies with the process — no leak).
+   */
+  private pendingStartupWorktreeNotice: string | null = null;
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   /**
@@ -963,6 +1000,7 @@ export class Config {
     | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
   private readonly agentsSettings: AgentsCollabSettings;
+  private readonly worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
@@ -1188,6 +1226,7 @@ export class Config {
     this.eventEmitter = params.eventEmitter;
     this.arenaAgentClient = ArenaAgentClient.create();
     this.agentsSettings = params.agents ?? {};
+    this.worktreeSettings = params.worktree ?? {};
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -2279,6 +2318,29 @@ export class Config {
     return this.targetDir;
   }
 
+  /**
+   * Stashes a one-shot context message that the next user prompt will
+   * inject into the model (see {@link pendingStartupWorktreeNotice}). Called
+   * from `gemini.tsx` right after `loadCliConfig` when `--worktree` produced
+   * a valid worktree. Pass `null` to clear (rarely needed).
+   */
+  setPendingStartupWorktreeNotice(notice: string | null): void {
+    this.pendingStartupWorktreeNotice = notice;
+  }
+
+  /**
+   * Reads and clears the pending startup-worktree notice. Returns `null`
+   * when nothing is stashed (the common case). Each entry point (TUI /
+   * headless / ACP) calls this on the model's first prompt; a non-null
+   * return means the entry point should NOT additionally call
+   * `restoreWorktreeContext()` for that prompt — startup overrides resume.
+   */
+  consumePendingStartupWorktreeNotice(): string | null {
+    const v = this.pendingStartupWorktreeNotice;
+    this.pendingStartupWorktreeNotice = null;
+    return v;
+  }
+
   getProjectRoot(): string {
     return this.targetDir;
   }
@@ -2627,6 +2689,18 @@ export class Config {
 
   getAgentsSettings(): AgentsCollabSettings {
     return this.agentsSettings;
+  }
+
+  /**
+   * Convenience accessor for `worktree.symlinkDirectories` — returns an
+   * empty array when the setting is unset, so callers can pass the
+   * result directly into the GitWorktreeService loop without nullchecks.
+   *
+   * (No general `getWorktreeSettings()` getter yet — add one when a
+   * second field on `WorktreeSettings` justifies the broader API.)
+   */
+  getWorktreeSymlinkDirectories(): readonly string[] {
+    return this.worktreeSettings.symlinkDirectories ?? [];
   }
 
   /**
