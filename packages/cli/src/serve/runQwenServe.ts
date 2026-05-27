@@ -1087,6 +1087,8 @@ export async function runQwenServe(
             const finish = (err?: Error | null) => {
               if (settled) return;
               settled = true;
+              process.removeListener('SIGINT', onSignal);
+              process.removeListener('SIGTERM', onSignal);
               void shutdownTelemetry()
                 .catch((telemetryErr) => {
                   writeStderrLine(
@@ -1098,9 +1100,6 @@ export async function runQwenServe(
                   );
                 })
                 .finally(() => {
-                  // Drain finished (or timed out) — safe to detach now.
-                  process.removeListener('SIGINT', onSignal);
-                  process.removeListener('SIGTERM', onSignal);
                   // Server.close error takes precedence (operator-visible
                   // listener problem); fall back to the bridge error
                   // captured during shutdown if any.

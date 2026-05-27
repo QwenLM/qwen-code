@@ -89,11 +89,11 @@ const DAEMON_TRACESTATE_META_KEY = 'qwen.telemetry.tracestate';
 
 const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
   captureContext: () => undefined,
-  async runWithContext(_captured, fn) {
-    return await fn();
+  runWithContext(_captured, fn) {
+    return fn();
   },
-  async withSpan(_operation, _attributes, fn) {
-    return await fn();
+  withSpan(_operation, _attributes, fn) {
+    return fn();
   },
   event() {},
   injectPromptContext(request) {
@@ -101,7 +101,14 @@ const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
     if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
       return request;
     }
-    const nextMeta = { ...(meta as Record<string, unknown>) };
+    const record = meta as Record<string, unknown>;
+    if (
+      !(DAEMON_TRACEPARENT_META_KEY in record) &&
+      !(DAEMON_TRACESTATE_META_KEY in record)
+    ) {
+      return request;
+    }
+    const nextMeta = { ...record };
     delete nextMeta[DAEMON_TRACEPARENT_META_KEY];
     delete nextMeta[DAEMON_TRACESTATE_META_KEY];
     return { ...request, _meta: nextMeta };
@@ -2089,10 +2096,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
-      const normalized: PromptRequest = telemetry.injectPromptContext({
-        ...req,
-        sessionId,
-      });
       const result = entry.promptQueue.then(() =>
         telemetry.runWithContext(
           capturedContext,
@@ -2105,6 +2108,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
                 'qwen-code.daemon.prompt.queue_wait_ms': Date.now() - queuedAt,
               },
               async () => {
+                const normalized: PromptRequest = telemetry.injectPromptContext(
+                  {
+                    ...req,
+                    sessionId,
+                  },
+                );
                 // If the caller aborted while we were queued behind earlier
                 // prompts, don't even start this one.
                 if (signal?.aborted) {
