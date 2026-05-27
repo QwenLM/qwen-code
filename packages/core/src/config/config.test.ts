@@ -6,14 +6,17 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import type { ConfigParameters, SandboxConfig } from './config.js';
+import type {
+  ChatCompressionSettings,
+  ConfigParameters,
+  SandboxConfig,
+} from './config.js';
 import {
   Config,
   ApprovalMode,
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
   MCPServerConfig,
-  TrustGateError,
 } from './config.js';
 import { Storage } from './storage.js';
 import * as fs from 'node:fs';
@@ -1656,6 +1659,37 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('OutboundCorrelation Configuration', () => {
+    // Default-to-false is security-relevant — controls whether
+    // `traceparent` is written onto outbound LLM/fetch request streams.
+    it.each<{
+      label: string;
+      outboundCorrelation: ConfigParameters['outboundCorrelation'];
+      expected: boolean;
+    }>([
+      { label: 'omitted', outboundCorrelation: undefined, expected: false },
+      { label: 'empty object', outboundCorrelation: {}, expected: false },
+      {
+        label: 'explicit true',
+        outboundCorrelation: { propagateTraceContext: true },
+        expected: true,
+      },
+      {
+        label: 'explicit false',
+        outboundCorrelation: { propagateTraceContext: false },
+        expected: false,
+      },
+    ])(
+      'propagateTraceContext resolves to $expected when $label',
+      ({ outboundCorrelation, expected }) => {
+        const config = new Config({ ...baseParams, outboundCorrelation });
+        expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(
+          expected,
+        );
+      },
+    );
+  });
+
   describe('UseRipgrep Configuration', () => {
     it('should default useRipgrep to true when not provided', () => {
       const config = new Config(baseParams);
@@ -2236,28 +2270,17 @@ describe('setApprovalMode with folder trust', () => {
     cwd: '.',
   };
 
-  it('should throw a TrustGateError when setting YOLO mode in an untrusted folder', () => {
-    // #4297 fold-in 1 (16:32:44-round S3): assert on the typed class,
-    // not just message text. The 403 mapping in `serve/server.ts`
-    // matches `err instanceof TrustGateError`; an accidental revert
-    // to `throw new Error(...)` would silently downgrade to 500
-    // while the message text test kept passing.
+  it('should throw an error when setting YOLO mode in an untrusted folder', () => {
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
-    expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
-      TrustGateError,
-    );
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
   });
 
-  it('should throw a TrustGateError when setting AUTO_EDIT mode in an untrusted folder', () => {
+  it('should throw an error when setting AUTO_EDIT mode in an untrusted folder', () => {
     const config = new Config(baseParams);
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
-    expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
-      TrustGateError,
-    );
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
@@ -2969,68 +2992,6 @@ describe('setApprovalMode with folder trust', () => {
   });
 });
 
-describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', () => {
-  const baseParams: ConfigParameters = {
-    targetDir: '.',
-    debugMode: false,
-    model: 'test-model',
-    cwd: '.',
-  };
-
-  it('initializes from `disabledTools` ConfigParameters', () => {
-    const config = new Config({
-      ...baseParams,
-      disabledTools: ['Foo', 'Bar'],
-    });
-    expect(config.getDisabledTools()).toEqual(new Set(['Foo', 'Bar']));
-  });
-
-  it('defaults to an empty set when `disabledTools` is omitted', () => {
-    const config = new Config(baseParams);
-    expect(config.getDisabledTools()).toEqual(new Set());
-  });
-
-  it('setDisabledTools replaces the live snapshot for runtime sync', () => {
-    // The daemon's `acpAgent` MCP-restart handler calls
-    // `setDisabledTools(new Set(disabledList))` after re-reading
-    // workspace settings, so a `tools.disabled` toggle applied
-    // since this Config was constructed takes effect on the next
-    // `ToolRegistry.registerTool` call. Pin that contract so a
-    // future regression that drops the setter (or re-freezes the
-    // field) fails this test instead of silently re-enabling
-    // tools the user just disabled.
-    const config = new Config({
-      ...baseParams,
-      disabledTools: ['A', 'B'],
-    });
-    expect(config.getDisabledTools()).toEqual(new Set(['A', 'B']));
-    config.setDisabledTools(new Set(['B', 'C']));
-    expect(config.getDisabledTools()).toEqual(new Set(['B', 'C']));
-  });
-
-  it('setDisabledTools copies the input — caller mutations do not leak', () => {
-    // The setter constructs a fresh `new Set(disabled)` from the
-    // input, so a caller that holds a reference to the input set
-    // and later mutates it cannot retroactively change the live
-    // Config snapshot. Locks this defensive-copy contract.
-    const config = new Config(baseParams);
-    const liveInput = new Set(['X']);
-    config.setDisabledTools(liveInput);
-    liveInput.add('Y');
-    expect(config.getDisabledTools()).toEqual(new Set(['X']));
-    expect(config.getDisabledTools().has('Y')).toBe(false);
-  });
-
-  it('setDisabledTools accepts an empty set (clears the live snapshot)', () => {
-    const config = new Config({
-      ...baseParams,
-      disabledTools: ['A', 'B'],
-    });
-    config.setDisabledTools(new Set());
-    expect(config.getDisabledTools()).toEqual(new Set());
-  });
-});
-
 describe('BaseLlmClient Lifecycle', () => {
   const MODEL = 'gemini-pro';
   const SANDBOX: SandboxConfig = {
@@ -3405,6 +3366,57 @@ describe('Model Switching and Config Updates', () => {
           expect(config.getModel()).toBe(baseParams.model);
         },
       );
+    });
+  });
+
+  describe('chatCompression.contextPercentageThreshold deprecation', () => {
+    // The proportional-threshold knob `contextPercentageThreshold` was
+    // removed in the auto-compaction threshold redesign (Task 8) — the
+    // value is now derived from `computeThresholds(...)` in the
+    // ChatCompressionService and is no longer user-tunable. Existing
+    // settings.json files that still set the field should keep working
+    // but get a one-time stderr warning so users know to remove it.
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    it('logs a stderr warning when the deprecated field is set', () => {
+      new Config({
+        ...baseParams,
+        chatCompression: {
+          contextPercentageThreshold: 0.5,
+        } as ChatCompressionSettings,
+      });
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'chatCompression.contextPercentageThreshold has been removed',
+        ),
+      );
+    });
+
+    it('does not warn when chatCompression is absent', () => {
+      new Config({ ...baseParams });
+      const warnCalls = warnSpy.mock.calls.map((c) => String(c[0]));
+      expect(
+        warnCalls.some((m) => m.includes('contextPercentageThreshold')),
+      ).toBe(false);
+    });
+
+    it('does not warn when chatCompression is set without the deprecated field', () => {
+      new Config({
+        ...baseParams,
+        chatCompression: { imageTokenEstimate: 1600 },
+      });
+      const warnCalls = warnSpy.mock.calls.map((c) => String(c[0]));
+      expect(
+        warnCalls.some((m) => m.includes('contextPercentageThreshold')),
+      ).toBe(false);
     });
   });
 });

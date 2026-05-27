@@ -4,11 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  SlashCommand,
-  CommandContext,
-  CommandCompletionItem,
-} from './types.js';
+import type { SlashCommand, CommandContext, CommandCompletionItem } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import * as fs from 'node:fs';
@@ -62,9 +58,7 @@ function findExistingWorkspaceDirectory(
  * Returns directory path completions for the given partial argument.
  * Supports comma-separated paths by completing only the last segment.
  */
-export function getDirPathCompletions(
-  partialArg: string,
-): CommandCompletionItem[] {
+export function getDirPathCompletions(partialArg: string): CommandCompletionItem[] {
   const lastComma = partialArg.lastIndexOf(',');
   const prefix = lastComma >= 0 ? partialArg.substring(0, lastComma + 1) : '';
   const partial =

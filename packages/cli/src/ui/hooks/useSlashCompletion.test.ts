@@ -1125,12 +1125,10 @@ describe('useSlashCompletion', () => {
 
   describe('isDirectory propagation', () => {
     it('should propagate isDirectory from CommandCompletionItem to Suggestion', async () => {
-      const mockCompletionFn = vi
-        .fn()
-        .mockResolvedValue([
-          { value: '/tmp/workspace/', isDirectory: true },
-          { value: '/tmp/file.txt' },
-        ]);
+      const mockCompletionFn = vi.fn().mockResolvedValue([
+        { value: '/tmp/workspace/', isDirectory: true },
+        { value: '/tmp/file.txt' },
+      ]);
 
       const slashCommands = [
         createTestCommand({

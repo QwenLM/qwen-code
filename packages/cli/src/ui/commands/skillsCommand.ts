@@ -63,7 +63,8 @@ export const skillsCommand: SlashCommand = {
       const sortedSkills = [...skills].sort(
         (a, b) =>
           normalizeSkillPriority(b.priority) -
-            normalizeSkillPriority(a.priority) || a.name.localeCompare(b.name),
+            normalizeSkillPriority(a.priority) ||
+          a.name.localeCompare(b.name),
       );
       const skillsListItem: HistoryItemSkillsList = {
         type: MessageType.SKILLS_LIST,
