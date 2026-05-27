@@ -166,6 +166,9 @@ function applyDaemonTranscriptEvent(
 
   switch (event.type) {
     case 'user.text.delta':
+      if (!next.activeUserBlockId) {
+        next.lastFollowupSuggestion = undefined;
+      }
       appendTextDelta(next, 'user', 'activeUserBlockId', event.text, event);
       break;
     case 'assistant.text.delta':
@@ -258,6 +261,17 @@ function applyDaemonTranscriptEvent(
       // Idempotent — safe if the daemon also later emits terminal
       // tool_call_update frames.
       propagateCancellationToInFlightTools(next);
+      break;
+    case 'followup.suggestion':
+      // Sidechannel: latest assist hint replaces any prior one for the
+      // session. No transcript block — adapters render the suggestion
+      // as ghost-text in their input placeholder via the sidechannel
+      // selector. Self-invalidated by the adapter on next sendPrompt
+      // (no wire round-trip).
+      next.lastFollowupSuggestion = {
+        suggestion: event.suggestion,
+        promptId: event.promptId,
+      };
       break;
     case 'session.replay_complete':
       // Sidechannel signal only — consumers read it off the event
@@ -791,6 +805,12 @@ function cloneTranscriptState(
       state.lastResyncRequired !== undefined
         ? { ...state.lastResyncRequired }
         : undefined,
+    // Share the reference — the reducer assigns a new object when
+    // updating (never mutates in-place), so reference stability across
+    // unrelated dispatches lets `useSyncExternalStore` subscribers
+    // (e.g. `useDaemonFollowupSuggestion`) skip re-renders for events
+    // that don't touch the suggestion.
+    lastFollowupSuggestion: state.lastFollowupSuggestion,
   };
 }
 
@@ -1093,6 +1113,19 @@ export function selectApprovalMode(
   state: DaemonTranscriptState,
 ): string | undefined {
   return state.approvalMode;
+}
+
+/**
+ * Most recent follow-up suggestion observed for the session, mirrored
+ * from `followup.suggestion` events. Adapters render the `suggestion`
+ * as ghost-text in their input placeholder. Returns `undefined` until
+ * the daemon emits at least one suggestion, or after the consumer
+ * clears it via `clearFollowupSuggestion` (typically on sendPrompt).
+ */
+export function selectLastFollowupSuggestion(
+  state: DaemonTranscriptState,
+): { suggestion: string; promptId: string } | undefined {
+  return state.lastFollowupSuggestion;
 }
 
 /**

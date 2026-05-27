@@ -77,6 +77,12 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       );
     case 'prompt.cancelled':
       return terminalLine('cancelled', 'prompt cancelled', '33');
+    case 'followup.suggestion':
+      // Daemon assist push — useful in debug-style terminal tails but not
+      // rendered as a first-class UI affordance here (terminals don't have
+      // a notion of input-placeholder ghost text). Web / TUI adapters
+      // consume the typed event directly.
+      return terminalLine('suggestion', event.suggestion, '2');
     case 'workspace.memory.changed':
       return terminalLine(
         'memory',

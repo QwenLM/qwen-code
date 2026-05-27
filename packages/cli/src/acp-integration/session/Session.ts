@@ -34,8 +34,11 @@ import {
   DiscoveredMCPTool,
   StreamEventType,
   ToolConfirmationOutcome,
+  generatePromptSuggestion,
+  logPromptSuggestion,
   logToolCall,
   logUserPrompt,
+  PromptSuggestionEvent,
   getErrorStatus,
   UserPromptEvent,
   readManyFiles,
@@ -264,6 +267,13 @@ export class Session implements SessionContext {
    * process termination is slow.
    */
   private pendingPromptCompletion: Promise<void> | null = null;
+  /**
+   * Per-turn AbortController for the fire-and-forget follow-up suggestion
+   * generation. Aborted on the top of the next `prompt()` and on
+   * `cancelPendingPrompt()` so a stale suggestion never lands after the
+   * user has moved on. Null when no suggestion generation is in flight.
+   */
+  private followupAbort: AbortController | null = null;
   private turn: number = 0;
   private readonly runtimeBaseDir: string;
 
@@ -469,6 +479,11 @@ export class Session implements SessionContext {
     const hadPrompt = !!this.pendingPrompt;
     const hadCron = !!this.cronAbortController;
 
+    if (this.followupAbort) {
+      this.followupAbort.abort();
+      this.followupAbort = null;
+    }
+
     if (!hadPrompt && !hadCron) {
       throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
     }
@@ -505,6 +520,15 @@ export class Session implements SessionContext {
     this.pendingPrompt?.abort();
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
+
+    // Abort the previous turn's in-flight follow-up suggestion
+    // generation (if any). Mirrors `pendingPrompt?.abort()` above —
+    // a fresh prompt arriving means any pending suggestion would be
+    // stale before it could ever render.
+    if (this.followupAbort) {
+      this.followupAbort.abort();
+      this.followupAbort = null;
+    }
 
     // Abort any in-progress cron execution (user prompt takes priority)
     if (this.cronAbortController) {
@@ -548,10 +572,107 @@ export class Session implements SessionContext {
       this.#startCronSchedulerIfNeeded();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
+      // Fire-and-forget follow-up suggestion generation. Best-effort UX
+      // hint — must not block the prompt response. See
+      // `#maybeEmitFollowupSuggestion` for guards and cancellation.
+      this.#maybeEmitFollowupSuggestion(result);
       return result;
     } finally {
       resolveCompletion();
     }
+  }
+
+  /**
+   * Generate a server-side follow-up suggestion for the just-completed
+   * turn and push it to attached clients via the daemon's
+   * `qwen/notify/session/prompt-suggestion` extNotification. Mirrors
+   * the CLI's `AppContainer.tsx` integration: same `generatePromptSuggestion`
+   * call, same `enableCacheSharing` flag forwarding, same curated
+   * history slice (`getHistory(true).slice(-40)`).
+   *
+   * Differences from the CLI:
+   *   - Triggers only on `stopReason === 'end_turn'` (the daemon
+   *     equivalent of "the assistant finished cleanly"). Cancelled /
+   *     errored turns don't get a suggestion.
+   *   - Aborted via `this.followupAbort`, which is reset on the next
+   *     `prompt()` and on `cancelPendingPrompt()`.
+   *   - Filter-reason logging only — accept / dismiss telemetry stays
+   *     client-side (the CLI hook owns it).
+   *
+   * Fire-and-forget by design: an unawaited IIFE that swallows its own
+   * errors. A failed suggestion is invisible to the user; a thrown
+   * error here would propagate up through `prompt()` and break the
+   * primary response path.
+   */
+  #maybeEmitFollowupSuggestion(result: PromptResponse): void {
+    if (result.stopReason !== 'end_turn') return;
+    if (this.settings.merged.ui?.enableFollowupSuggestions !== true) return;
+    if (this.config.getApprovalMode() === ApprovalMode.PLAN) return;
+
+    const chat = this.config.getGeminiClient()?.getChat();
+    if (!chat) return;
+
+    const ac = new AbortController();
+    this.followupAbort = ac;
+    const promptId =
+      this.config.getSessionId() + '########' + String(this.turn);
+
+    void (async () => {
+      try {
+        const fullHistory = chat.getHistory(true);
+        const lastEntry = fullHistory[fullHistory.length - 1];
+        if (!lastEntry || lastEntry.role !== 'model') {
+          debugLogger.debug(
+            'Skipping followup suggestion: last history entry is not model',
+          );
+          return;
+        }
+        const conversationHistory =
+          fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
+
+        const r = await generatePromptSuggestion(
+          this.config,
+          conversationHistory,
+          ac.signal,
+          {
+            enableCacheSharing:
+              this.settings.merged.ui?.enableCacheSharing === true,
+          },
+        );
+        if (ac.signal.aborted) return;
+        if (r.suggestion) {
+          await this.client.extNotification(
+            'qwen/notify/session/prompt-suggestion',
+            {
+              v: 1,
+              sessionId: this.sessionId,
+              suggestion: r.suggestion,
+              promptId,
+            },
+          );
+        } else if (r.filterReason) {
+          // Mirror the CLI's suppression analytics path so server-side
+          // generations are observable in the same telemetry stream.
+          logPromptSuggestion(
+            this.config,
+            new PromptSuggestionEvent({
+              outcome: 'suppressed',
+              reason: r.filterReason,
+            }),
+          );
+        }
+      } catch (error) {
+        if (ac.signal.aborted) {
+          debugLogger.debug('Follow-up suggestion generation aborted');
+        } else {
+          debugLogger.warn('Follow-up suggestion generation failed', error);
+        }
+      } finally {
+        if (this.followupAbort === ac) {
+          this.followupAbort = null;
+        }
+      }
+    })();
   }
 
   async #executePrompt(

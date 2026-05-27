@@ -33,6 +33,22 @@ vi.mock('../../nonInteractiveCliCommands.js', () => ({
   handleSlashCommand: vi.fn(),
 }));
 
+// Partial-mock `@qwen-code/qwen-code-core` so the daemon follow-up
+// suggestion tests below can spy on `generatePromptSuggestion` /
+// `logPromptSuggestion` without spinning up a real LLM client. Other
+// existing tests still get the real `CompressionStatus`, `ApprovalMode`,
+// `AuthType`, etc. via the spread.
+vi.mock('@qwen-code/qwen-code-core', async () => {
+  const actual = await vi.importActual<
+    typeof import('@qwen-code/qwen-code-core')
+  >('@qwen-code/qwen-code-core');
+  return {
+    ...actual,
+    generatePromptSuggestion: vi.fn(),
+    logPromptSuggestion: vi.fn(),
+  };
+});
+
 function chatRecord(overrides: Record<string, unknown>): ChatRecord {
   return {
     uuid: 'record',
@@ -2992,6 +3008,197 @@ describe('Session', () => {
         expect(reminder).toBeTruthy();
         expect(reminder!.text).not.toContain('builtin-helper');
       });
+    });
+  });
+
+  describe('follow-up suggestion (daemon assist push)', () => {
+    let generateMock: ReturnType<typeof vi.fn>;
+    let logMock: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      generateMock = vi.mocked(core.generatePromptSuggestion);
+      logMock = vi.mocked(core.logPromptSuggestion);
+      generateMock.mockReset();
+      logMock.mockReset();
+      // Enable the feature by default in this describe block; individual
+      // tests override `mockSettings.merged.ui` to exercise the disabled
+      // path.
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {
+        enableFollowupSuggestions: true,
+      };
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'hi back' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+    });
+
+    it('fires prompt-suggestion extNotification after end_turn when enabled', async () => {
+      generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          'qwen/notify/session/prompt-suggestion',
+          {
+            v: 1,
+            sessionId: 'test-session-id',
+            suggestion: 'Run the tests next?',
+            promptId: 'test-session-id########1',
+          },
+        );
+      });
+
+      // The generator received an AbortSignal so the daemon can cancel
+      // mid-flight if the next prompt arrives first.
+      expect(generateMock).toHaveBeenCalledWith(
+        mockConfig,
+        expect.any(Array),
+        expect.any(AbortSignal),
+        expect.objectContaining({ enableCacheSharing: expect.any(Boolean) }),
+      );
+    });
+
+    it('does not emit when the feature is disabled', async () => {
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {
+        enableFollowupSuggestions: false,
+      };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      // Give the (skipped) IIFE a chance to run.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(generateMock).not.toHaveBeenCalled();
+      expect(
+        (
+          mockClient.extNotification as ReturnType<typeof vi.fn>
+        ).mock.calls.find(
+          ([method]) => method === 'qwen/notify/session/prompt-suggestion',
+        ),
+      ).toBeUndefined();
+    });
+
+    it('does not emit in PLAN approval mode', async () => {
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      generateMock.mockResolvedValue({ suggestion: 'something' });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      await new Promise((r) => setTimeout(r, 10));
+      expect(generateMock).not.toHaveBeenCalled();
+    });
+
+    it('logs filterReason via PromptSuggestionEvent when generation is suppressed', async () => {
+      generateMock.mockResolvedValue({
+        suggestion: null,
+        filterReason: 'meta',
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(logMock).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({ outcome: 'suppressed', reason: 'meta' }),
+        );
+      });
+      // No extNotification when suggestion is filtered.
+      expect(
+        (
+          mockClient.extNotification as ReturnType<typeof vi.fn>
+        ).mock.calls.find(
+          ([method]) => method === 'qwen/notify/session/prompt-suggestion',
+        ),
+      ).toBeUndefined();
+    });
+
+    it('aborts the in-flight generator when a new prompt arrives', async () => {
+      let capturedSignal: AbortSignal | undefined;
+      generateMock
+        .mockImplementationOnce(
+          async (
+            _config: unknown,
+            _history: unknown,
+            signal: AbortSignal,
+          ): Promise<{ suggestion: string | null }> => {
+            capturedSignal = signal;
+            return new Promise((resolve) => {
+              signal.addEventListener('abort', () =>
+                resolve({ suggestion: null }),
+              );
+            });
+          },
+        )
+        .mockResolvedValue({ suggestion: null });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'first' }],
+      });
+      // Wait for the IIFE to actually call generateMock and capture the
+      // signal — without this, the second prompt can race past the
+      // first IIFE's microtask.
+      await vi.waitFor(() => expect(capturedSignal).toBeDefined());
+      expect(capturedSignal!.aborted).toBe(false);
+
+      // Send a second prompt. The followupAbort on the first turn
+      // should fire synchronously at the top of `prompt()`.
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'second' }],
+      });
+
+      expect(capturedSignal!.aborted).toBe(true);
+    });
+
+    it('aborts the in-flight generator when cancelPendingPrompt is called', async () => {
+      let capturedSignal: AbortSignal | undefined;
+      generateMock
+        .mockImplementationOnce(
+          async (
+            _config: unknown,
+            _history: unknown,
+            signal: AbortSignal,
+          ): Promise<{ suggestion: string | null }> => {
+            capturedSignal = signal;
+            return new Promise((resolve) => {
+              signal.addEventListener('abort', () =>
+                resolve({ suggestion: null }),
+              );
+            });
+          },
+        )
+        .mockResolvedValue({ suggestion: null });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'go' }],
+      });
+      await vi.waitFor(() => expect(capturedSignal).toBeDefined());
+
+      // followupAbort cleanup now runs unconditionally before the
+      // prompt/cron guard — inject a fake pendingPrompt so the call
+      // doesn't throw, but the real assertion is the signal abort.
+      (session as unknown as { pendingPrompt: AbortController }).pendingPrompt =
+        new AbortController();
+
+      await session.cancelPendingPrompt();
+      expect(capturedSignal!.aborted).toBe(true);
     });
   });
 });

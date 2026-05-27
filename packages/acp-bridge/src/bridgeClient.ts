@@ -146,6 +146,7 @@ function resolutionToAcpResponse(
  */
 const MAX_EARLY_EVENT_SESSIONS = 64;
 const MAX_EARLY_EVENTS_PER_SESSION = 32;
+const MAX_SUGGESTION_LENGTH = 500;
 const EARLY_EVENT_TTL_MS = 60_000;
 
 /**
@@ -481,34 +482,43 @@ export class BridgeClient implements Client {
   private readonly inFlightRestoreIds = new Set<string>();
 
   /**
-   * PR 14b: handle child→bridge ACP `extNotification` calls. Two methods
-   * are recognized — `qwen/notify/session/mcp-budget-event` (PR 14b,
-   * McpClientManager budget events) and `qwen/notify/session/model-update`
-   * (A1 #4511, in-session model switch) — each translated into a
-   * session-scoped SSE frame. Unknown methods, unknown event kinds,
-   * and missing sessionIds are dropped silently for forward-compat
-   * (a future child can add new notification methods without breaking
-   * this handler; an older daemon can ignore them cleanly).
-   *
-   * Codex review fix #1: when the sessionId IS present but the
-   * `byId`-resolvable entry is not yet registered (the child fired
-   * the event during its own `newSession` handler, before
-   * `connection.newSession` returned to `doSpawn`), buffer the frame
-   * and replay it on `drainEarlyEvents`.
+   * Handle child→bridge ACP `extNotification` calls. Three methods are
+   * recognized — `qwen/notify/session/model-update` (A1 #4511),
+   * `qwen/notify/session/prompt-suggestion` (followup assist), and
+   * `qwen/notify/session/mcp-budget-event` (PR 14b) — each translated
+   * into a session-scoped SSE frame. Unknown methods are dropped
+   * silently for forward-compat.
    */
   async extNotification(
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
-    // A1 (#4511): demux an in-session model switch to a `model_switched`
-    // bus event. `current_model_update` is not an ACP SessionUpdate variant,
-    // so the agent emits it over this side-channel; the bridge promotes it
-    // here — except while the bridge itself is driving the change (the HTTP
-    // path also flows through Session.setModel), where it publishes
-    // `model_switched` authoritatively and this notification is suppressed to
-    // avoid a double publish.
     if (method === 'qwen/notify/session/model-update') {
       this.handleInSessionModelUpdate(params);
+      return;
+    }
+    if (method === 'qwen/notify/session/prompt-suggestion') {
+      const sessionId = params['sessionId'];
+      const suggestion = params['suggestion'];
+      const promptId = params['promptId'];
+      if (
+        typeof sessionId !== 'string' ||
+        typeof suggestion !== 'string' ||
+        suggestion.length === 0 ||
+        suggestion.length > MAX_SUGGESTION_LENGTH ||
+        typeof promptId !== 'string'
+      ) {
+        writeStderrLine(
+          `[demux] session=${typeof sessionId === 'string' ? sessionId : '<missing>'} type=prompt_suggestion action=dropped reason=malformed`,
+        );
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry) return;
+      entry.events.publish({
+        type: 'followup_suggestion',
+        data: { sessionId, suggestion, promptId },
+      });
       return;
     }
     if (method !== 'qwen/notify/session/mcp-budget-event') return;

@@ -20,6 +20,7 @@ export {
   daemonTranscriptToUnifiedMessages,
   useDaemonActions,
   useDaemonConnection,
+  useDaemonFollowupSuggestion,
   useDaemonPendingPermissions,
   useDaemonSession,
   useDaemonTranscriptBlocks,
@@ -31,6 +32,7 @@ export type {
   DaemonConnectionStatus,
   DaemonSessionContextValue,
   DaemonSessionProviderProps,
+  UseDaemonFollowupSuggestionReturn,
 } from './daemon/index';
 
 // Context

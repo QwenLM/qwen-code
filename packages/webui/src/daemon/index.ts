@@ -19,3 +19,7 @@ export {
   type DaemonSessionProviderProps,
 } from './DaemonSessionProvider.js';
 export { daemonTranscriptToUnifiedMessages } from './transcriptAdapter.js';
+export {
+  useDaemonFollowupSuggestion,
+  type UseDaemonFollowupSuggestionReturn,
+} from './useDaemonFollowupSuggestion.js';

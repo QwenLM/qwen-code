@@ -2486,4 +2486,119 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.awaitingResync).toBe(false);
     });
   });
+
+  describe('followup_suggestion (daemon assist push)', () => {
+    it('recognizes followup_suggestion frames as known events', () => {
+      const event = {
+        id: 3,
+        v: 1,
+        type: 'followup_suggestion',
+        data: {
+          sessionId: 's-1',
+          suggestion: 'Run the build?',
+          promptId: 's-1########3',
+        },
+      } satisfies DaemonEvent;
+      const known = asKnownDaemonEvent(event);
+      expect(known?.type).toBe('followup_suggestion');
+      if (known?.type === 'followup_suggestion') {
+        expect(known.data.sessionId).toBe('s-1');
+        expect(known.data.suggestion).toBe('Run the build?');
+        expect(known.data.promptId).toBe('s-1########3');
+      }
+    });
+
+    it('rejects malformed followup_suggestion payloads', () => {
+      // Missing fields → predicate rejects → asKnownDaemonEvent
+      // returns undefined → reducer counts via unrecognizedKnownEventCount.
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'followup_suggestion',
+          data: { suggestion: 'x', promptId: 'p' },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'followup_suggestion',
+          data: { sessionId: 's', promptId: 'p' },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'followup_suggestion',
+          data: { sessionId: 's', suggestion: 'x' },
+        }),
+      ).toBeUndefined();
+      // Empty suggestion is protocol garbage — the daemon filters
+      // rejected suggestions server-side and only emits when accepted.
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'followup_suggestion',
+          data: { sessionId: 's', suggestion: '', promptId: 'p' },
+        }),
+      ).toBeUndefined();
+      // Wrong types.
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'followup_suggestion',
+          data: { sessionId: 's', suggestion: 42, promptId: 'p' },
+        }),
+      ).toBeUndefined();
+    });
+
+    it('reducer stores lastFollowupSuggestion and overwrites on a fresh event', () => {
+      const state = reduceDaemonSessionEvents([
+        {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: { sessionId: 's-1', phase: 'prompting' },
+        },
+        {
+          id: 2,
+          v: 1,
+          type: 'followup_suggestion',
+          data: {
+            sessionId: 's-1',
+            suggestion: 'First',
+            promptId: 's-1########1',
+          },
+        },
+        {
+          id: 3,
+          v: 1,
+          type: 'followup_suggestion',
+          data: {
+            sessionId: 's-1',
+            suggestion: 'Second',
+            promptId: 's-1########2',
+          },
+        },
+      ]);
+      expect(state.lastFollowupSuggestion).toEqual({
+        sessionId: 's-1',
+        suggestion: 'Second',
+        promptId: 's-1########2',
+      });
+      // Non-terminal — does not touch alive / pendingPermissions.
+      expect(state.alive).toBe(true);
+      expect(state.terminalEvent).toBeUndefined();
+      expect(state.lastEventId).toBe(3);
+    });
+
+    it('malformed payload routes to unrecognizedKnownEventCount', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'followup_suggestion',
+        data: { sessionId: 's-1', suggestion: 'incomplete' }, // missing promptId
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.lastFollowupSuggestion).toBeUndefined();
+    });
+  });
 });

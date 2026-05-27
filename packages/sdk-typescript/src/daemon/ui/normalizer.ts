@@ -158,6 +158,9 @@ export function normalizeDaemonEvent(
     case 'prompt_cancelled':
       return [{ ...base, type: 'prompt.cancelled' }];
 
+    case 'followup_suggestion':
+      return normalizeFollowupSuggestion(event, base);
+
     case 'replay_complete': {
       const replayedCount = numberField(event.data, 'replayedCount') ?? 0;
       const lastReplayedEventId = numberField(event.data, 'lastEventId');
@@ -263,6 +266,27 @@ function normalizeStateResyncRequired(
       reason,
       lastDeliveredId,
       earliestAvailableId,
+    },
+  ];
+}
+
+function normalizeFollowupSuggestion(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const sessionId = getString(event.data, 'sessionId');
+  const suggestion = getString(event.data, 'suggestion');
+  const promptId = getString(event.data, 'promptId');
+  if (!sessionId || !suggestion || !promptId) {
+    return fallbackDebug(event, base, 'malformed followup_suggestion payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'followup.suggestion',
+      sessionId,
+      suggestion,
+      promptId,
     },
   ];
 }
