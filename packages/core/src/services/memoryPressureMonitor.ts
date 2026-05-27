@@ -85,6 +85,7 @@ export function validateMemoryPressureConfig(c: MemoryPressureConfig): void {
 }
 
 const debugLogger = createDebugLogger('MEMORY_PRESSURE');
+const MIN_CGROUP_MEMORY_LIMIT = 64 * 1024 * 1024;
 
 // Monitor
 
@@ -101,7 +102,6 @@ export class MemoryPressureMonitor extends EventEmitter {
   private consecutiveCleanupFailures = 0;
   private consecutiveIneffectiveCleanups = 0;
   private readonly effectiveMemoryLimit: number;
-  private readonly heapSizeLimit: number;
 
   constructor(coreConfig: Config, pressureConfig?: MemoryPressureConfig) {
     super();
@@ -109,10 +109,10 @@ export class MemoryPressureMonitor extends EventEmitter {
     this.config = { ...(pressureConfig ?? DEFAULT_PRESSURE_CONFIG) };
     validateMemoryPressureConfig(this.config);
     this.effectiveMemoryLimit = this.computeEffectiveMemoryLimit();
-    this.heapSizeLimit = getHeapStatistics().heap_size_limit;
+    const heapSizeLimit = getHeapStatistics().heap_size_limit;
     debugLogger.info(
       `Effective memory limit: ${formatMiB(this.effectiveMemoryLimit)} MiB; ` +
-        `V8 heap limit: ${formatMiB(this.heapSizeLimit)} MiB`,
+        `V8 heap limit: ${formatMiB(heapSizeLimit)} MiB`,
     );
     if (this.effectiveMemoryLimit <= 0) {
       debugLogger.warn(
@@ -199,8 +199,8 @@ export class MemoryPressureMonitor extends EventEmitter {
 
     const rssRatio =
       this.effectiveMemoryLimit > 0 ? mem.rss / this.effectiveMemoryLimit : 0;
-    const heapRatio =
-      this.heapSizeLimit > 0 ? mem.heapUsed / this.heapSizeLimit : 0;
+    const heapSizeLimit = getHeapStatistics().heap_size_limit;
+    const heapRatio = heapSizeLimit > 0 ? mem.heapUsed / heapSizeLimit : 0;
     const ratio = Math.max(rssRatio, heapRatio);
 
     if (ratio >= this.config.criticalRatio) return 'critical';
@@ -240,10 +240,12 @@ export class MemoryPressureMonitor extends EventEmitter {
 
   private executeCleanup(recommendation: CleanupRecommendation): void {
     if (this.cleanupInProgress) {
-      if (
-        cleanupActionRank(recommendation.action) >
-        cleanupActionRank(this.activeCleanupAction)
-      ) {
+      const recommendationRank = cleanupActionRank(recommendation.action);
+      const activeRank = cleanupActionRank(this.activeCleanupAction);
+      const queuedRank = this.queuedCleanupRecommendation
+        ? cleanupActionRank(this.queuedCleanupRecommendation.action)
+        : 0;
+      if (recommendationRank > activeRank && recommendationRank > queuedRank) {
         this.queuedCleanupRecommendation = recommendation;
         debugLogger.debug(
           `Queued escalated cleanup "${recommendation.action}" while ` +
@@ -254,45 +256,53 @@ export class MemoryPressureMonitor extends EventEmitter {
       }
       return;
     }
+    let memBefore: number;
+    try {
+      memBefore = process.memoryUsage().rss;
+    } catch (err) {
+      this.recordCleanupFailure(recommendation, err);
+      return;
+    }
+
     this.cleanupInProgress = true;
     this.activeCleanupAction = recommendation.action;
     this.lastCleanupAction = recommendation.action;
     this.lastCleanupTime = Date.now();
 
-    const memBefore = process.memoryUsage().rss;
-
     void this.runCleanupSteps(recommendation.steps)
       .then(() => {
         this.consecutiveCleanupFailures = 0;
-        const memAfter = process.memoryUsage().rss;
-        // RSS can lag behind object graph cleanup, so this is diagnostic
-        // logging only and does not drive failure detection.
         setImmediate(() => {
           try {
+            const memAfter = process.memoryUsage().rss;
             this.logCleanupResult(memBefore, memAfter, recommendation);
           } catch (err) {
             debugLogger.error(
               `Cleanup measurement failed: ${getErrorMessage(err)}`,
             );
+          } finally {
+            this.finishCleanupAndRunQueued();
           }
         });
       })
       .catch((err) => {
         this.recordCleanupFailure(recommendation, err);
-      })
-      .finally(() => {
-        this.cleanupInProgress = false;
-        this.activeCleanupAction = 'none';
-        const queuedRecommendation = this.queuedCleanupRecommendation;
-        this.queuedCleanupRecommendation = undefined;
-        if (queuedRecommendation) {
-          try {
-            this.executeCleanup(queuedRecommendation);
-          } catch (err) {
-            this.recordCleanupFailure(queuedRecommendation, err);
-          }
-        }
+        this.finishCleanupAndRunQueued();
       });
+  }
+
+  private finishCleanupAndRunQueued(): void {
+    this.cleanupInProgress = false;
+    this.activeCleanupAction = 'none';
+    const queuedRecommendation = this.queuedCleanupRecommendation;
+    this.queuedCleanupRecommendation = undefined;
+    if (queuedRecommendation) {
+      try {
+        this.executeCleanup(queuedRecommendation);
+      } catch (err) {
+        this.recordCleanupFailure(queuedRecommendation, err);
+      }
+    }
   }
 
   private logCleanupResult(
@@ -466,6 +476,13 @@ export class MemoryPressureMonitor extends EventEmitter {
       if (!Number.isFinite(limit) || limit <= 0) {
         debugLogger.warn(
           `Ignoring out-of-range cgroup memory limit from ${filePath}: ${raw}`,
+        );
+        return undefined;
+      }
+      if (limit < MIN_CGROUP_MEMORY_LIMIT) {
+        debugLogger.warn(
+          `Ignoring unrealistically small cgroup memory limit from ` +
+            `${filePath}: ${raw}`,
         );
         return undefined;
       }
