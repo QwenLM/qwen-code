@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { logSkillLaunch } from '../telemetry/index.js';
 import { SkillTool, type SkillParams } from './skill.js';
 import type { PartListUnion } from '@google/genai';
 import type { ToolResultDisplay } from './tools.js';
@@ -36,6 +37,7 @@ vi.mock('../telemetry/index.js', () => ({
     constructor(
       public skill_name: string,
       public success: boolean,
+      public prompt_id: string,
     ) {}
   },
 }));
@@ -605,6 +607,51 @@ describe('SkillTool', () => {
 
       expect(result.returnDisplay).toBe(
         'Specialized skill for reviewing code quality',
+      );
+    });
+
+    it('propagates prompt_id to SkillLaunchEvent when setPromptId is called', async () => {
+      const params: SkillParams = {
+        skill: 'code-review',
+      };
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation(params);
+      (
+        invocation as unknown as { setPromptId: (id: string) => void }
+      ).setPromptId('prompt-abc-123');
+      await invocation.execute();
+
+      expect(logSkillLaunch).toHaveBeenCalled();
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'code-review',
+          success: true,
+          prompt_id: 'prompt-abc-123',
+        }),
+      );
+    });
+
+    it('records empty prompt_id when setPromptId is never called (direct invocation)', async () => {
+      const params: SkillParams = {
+        skill: 'code-review',
+      };
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(logSkillLaunch).toHaveBeenCalled();
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'code-review',
+          success: true,
+          prompt_id: '',
+        }),
       );
     });
   });

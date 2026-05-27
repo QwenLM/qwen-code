@@ -591,7 +591,7 @@ describe('loggers', () => {
     });
 
     it('forwards the event to QwenLogger and emits an OTLP record', () => {
-      const event = new SkillLaunchEvent('test-skill', true);
+      const event = new SkillLaunchEvent('test-skill', true, 'prompt-id-42');
 
       logSkillLaunch(mockConfig, event);
 
@@ -609,13 +609,14 @@ describe('loggers', () => {
           'event.name': EVENT_SKILL_LAUNCH,
           skill_name: 'test-skill',
           success: true,
+          prompt_id: 'prompt-id-42',
         }),
       );
     });
 
     it('forwards to QwenLogger even when OTLP SDK is not initialized', () => {
       vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
-      const event = new SkillLaunchEvent('another-skill', false);
+      const event = new SkillLaunchEvent('another-skill', false, 'prompt-id-7');
 
       logSkillLaunch(mockConfig, event);
 

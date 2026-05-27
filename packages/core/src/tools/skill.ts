@@ -340,6 +340,14 @@ ${skillDescriptions}
 }
 
 class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
+  // Populated by the scheduler via setPromptId duck-typing (see
+  // CoreToolScheduler.buildInvocation). Empty when not set so
+  // SkillLaunchEvent always has a typed string for telemetry, but the
+  // empty-string case is itself a signal that the call originated outside
+  // a normal scheduled tool invocation (e.g. direct buildAndExecute in
+  // tests) and should be excluded from prompt_id-based joins downstream.
+  private promptId = '';
+
   constructor(
     private readonly config: Config,
     private readonly skillManager: SkillManager,
@@ -350,6 +358,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       | null = null,
   ) {
     super(params);
+  }
+
+  setPromptId(promptId: string): void {
+    this.promptId = promptId;
   }
 
   getDescription(): string {
@@ -385,7 +397,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
           if (content !== null) {
             logSkillLaunch(
               this.config,
-              new SkillLaunchEvent(this.params.skill, true),
+              new SkillLaunchEvent(this.params.skill, true, this.promptId),
             );
             this.onSkillLoaded(this.params.skill);
             return {
@@ -398,7 +410,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         // Log failed skill launch
         logSkillLaunch(
           this.config,
-          new SkillLaunchEvent(this.params.skill, false),
+          new SkillLaunchEvent(this.params.skill, false, this.promptId),
         );
 
         // Get parse errors if any
@@ -425,7 +437,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // Log successful skill launch
       logSkillLaunch(
         this.config,
-        new SkillLaunchEvent(this.params.skill, true),
+        new SkillLaunchEvent(this.params.skill, true, this.promptId),
       );
       this.onSkillLoaded(this.params.skill);
 
@@ -481,7 +493,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // Log failed skill launch
       logSkillLaunch(
         this.config,
-        new SkillLaunchEvent(this.params.skill, false),
+        new SkillLaunchEvent(this.params.skill, false, this.promptId),
       );
 
       return {
