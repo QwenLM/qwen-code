@@ -220,8 +220,6 @@ jobs:
           timeout --kill-after=10s "${QWEN_TIMEOUT}m" qwen \
             --auth-type openai \
             --approval-mode yolo \
-            --exclude-tools write_file \
-            --exclude-tools edit \
             "${MODEL_ARGS[@]}" \
             --prompt "$PROMPT" \
             --output-format stream-json \
