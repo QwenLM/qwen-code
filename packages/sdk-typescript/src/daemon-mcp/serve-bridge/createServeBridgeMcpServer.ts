@@ -45,6 +45,7 @@ export function createServeBridgeMcpServer(
     defaultSessionId: undefined,
     workspaceCwd: opts.workspaceCwd,
     eventStreams: new Map(),
+    allowGlobalScope: opts.allowGlobalScope ?? false,
   };
 
   const tools = allTools(state);

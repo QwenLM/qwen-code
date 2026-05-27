@@ -88,6 +88,7 @@ function makeMockState(opts?: {
     defaultSessionId: opts?.defaultSessionId,
     workspaceCwd: '/tmp/test-workspace',
     eventStreams: new Map(),
+    allowGlobalScope: false,
   };
 
   return { state, calls };
@@ -433,6 +434,7 @@ describe('serve-bridge', () => {
         sessionId: 'test-session',
         abortCtrl: new AbortController(),
         activeCollector: null,
+        lastActivityMs: Date.now(),
       };
       state.eventStreams.set('test-session', fakeStream);
 

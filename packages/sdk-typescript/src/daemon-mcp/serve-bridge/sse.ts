@@ -78,8 +78,8 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
             if (typeof text === 'string' && text) {
               collector.texts.push(text);
             }
-            // _meta signals end of the current message
-            if ('_meta' in content) {
+            // _meta is emitted at the update level (sibling of sessionUpdate/content)
+            if ('_meta' in update) {
               collector.resolve();
             }
           }

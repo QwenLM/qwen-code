@@ -140,6 +140,11 @@ export function workspaceWriteTools(state: BridgeState): any[] {
         mode: z.enum(['append', 'replace']).optional().describe('Write mode (default: append).'),
       },
       handler(async (args) => {
+        if (args.scope === 'global' && !state.allowGlobalScope) {
+          return formatToolError(
+            'Global scope is disabled for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.',
+          );
+        }
         return formatJsonResult(
           await state.client.writeWorkspaceMemory({
             scope: args.scope,
@@ -172,7 +177,19 @@ export function workspaceWriteTools(state: BridgeState): any[] {
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
+function validateGlobalScope(state: BridgeState, scope: string | undefined): any | null {
+  if (scope === 'global' && !state.allowGlobalScope) {
+    return formatToolError(
+      'Global scope is disabled for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.',
+    );
+  }
+  return null;
+}
+
 async function handleAgentsManage(state: BridgeState, args: any): Promise<any> {
+  const scopeErr = validateGlobalScope(state, args.scope);
+  if (scopeErr) return scopeErr;
+
   switch (args.action) {
     case 'list':
       return formatJsonResult(await state.client.listWorkspaceAgents());

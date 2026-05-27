@@ -26,6 +26,7 @@ const server = createServeBridgeMcpServer({
   daemonUrl: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
   token: process.env['QWEN_DAEMON_TOKEN'],
   workspaceCwd: process.env['QWEN_WORKSPACE_CWD'],
+  allowGlobalScope: process.env['QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE'] === 'true',
 });
 
 const transport = new StdioServerTransport();

@@ -38,6 +38,8 @@ export interface ServeBridgeMcpServerOptions {
   token?: string;
   /** Workspace CWD for auto-session creation. */
   workspaceCwd?: string;
+  /** Allow tools to write to global scope (memory, agents). Defaults to false for security. */
+  allowGlobalScope?: boolean;
 }
 
 /**
@@ -77,4 +79,6 @@ export interface BridgeState {
   workspaceCwd: string | undefined;
   /** Persistent SSE connections keyed by sessionId. */
   eventStreams: Map<string, SessionEventStream>;
+  /** Whether global scope writes are allowed (default: false). */
+  allowGlobalScope: boolean;
 }
