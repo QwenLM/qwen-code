@@ -612,19 +612,19 @@ export class Session implements SessionContext {
     const chat = this.config.getGeminiClient()?.getChat();
     if (!chat) return;
 
-    const fullHistory = chat.getHistory(true);
-    const lastEntry = fullHistory[fullHistory.length - 1];
-    if (!lastEntry || lastEntry.role !== 'model') return;
-
     const ac = new AbortController();
     this.followupAbort = ac;
     const promptId =
       this.config.getSessionId() + '########' + String(this.turn);
-    const conversationHistory =
-      fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
 
     void (async () => {
       try {
+        const fullHistory = chat.getHistory(true);
+        const lastEntry = fullHistory[fullHistory.length - 1];
+        if (!lastEntry || lastEntry.role !== 'model') return;
+        const conversationHistory =
+          fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
+
         const r = await generatePromptSuggestion(
           this.config,
           conversationHistory,

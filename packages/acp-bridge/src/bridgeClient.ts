@@ -504,6 +504,7 @@ export class BridgeClient implements Client {
         typeof sessionId !== 'string' ||
         typeof suggestion !== 'string' ||
         suggestion.length === 0 ||
+        suggestion.length > 500 ||
         typeof promptId !== 'string'
       ) {
         writeStderrLine(

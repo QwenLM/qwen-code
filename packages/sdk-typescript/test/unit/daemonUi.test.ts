@@ -5181,6 +5181,9 @@ describe('permission_resolved voterClientId (A4)', () => {
   });
 
   it('distinguishes the prompt originator (request) from the voter (resolved) when they differ', () => {
+    // The whole point of A4: client A submits the prompt that triggers the
+    // permission request; a DIFFERENT client B casts the resolving vote.
+    // The request carries A as originator; the resolution carries B as voter.
     const [request] = normalizeDaemonEvent({
       id: 1,
       v: 1,
@@ -5211,6 +5214,7 @@ describe('permission_resolved voterClientId (A4)', () => {
       type: 'permission.resolved',
       voterClientId: 'client_B',
     });
+    // The voter is NOT the prompt originator — the disambiguation A4 enables.
     expect((resolved as { voterClientId?: string }).voterClientId).not.toBe(
       (request as { originatorClientId?: string }).originatorClientId,
     );
