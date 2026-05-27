@@ -44,6 +44,7 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
+import { handleTasksSlashCommand } from './utils/tasksCommand';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
@@ -446,6 +447,17 @@ export function App({
           const cmd = match[1];
           if (cmd === 'help') {
             setShowHelpDialog(true);
+            return true;
+          }
+          if (
+            handleTasksSlashCommand({
+              cmd,
+              promptBlocked,
+              getTasks: actions.getTasks,
+              dispatch: store.dispatch,
+              reportError,
+            })
+          ) {
             return true;
           }
           if (cmd === 'theme') {

@@ -110,6 +110,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   workspacePreflight: 'qwen/status/workspace/preflight',
   sessionContext: 'qwen/status/session/context',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
+  sessionTasks: 'qwen/status/session/tasks',
 } as const;
 
 /**
@@ -365,6 +366,83 @@ export interface ServeSessionSupportedCommandsStatus {
   sessionId: string;
   availableCommands: AvailableCommand[];
   availableSkills: string[];
+}
+
+export type ServeSessionTaskLifecycleStatus =
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export type ServeSessionProcessTaskLifecycleStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface ServeSessionAgentTaskStatus {
+  kind: 'agent';
+  id: string;
+  label: string;
+  description: string;
+  status: ServeSessionTaskLifecycleStatus;
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  outputFile?: string;
+  subagentType?: string;
+  isBackgrounded: boolean;
+  error?: string;
+  resumeBlockedReason?: string;
+}
+
+export interface ServeSessionShellTaskStatus {
+  kind: 'shell';
+  id: string;
+  label: string;
+  description: string;
+  status: ServeSessionProcessTaskLifecycleStatus;
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  outputFile?: string;
+  command: string;
+  cwd: string;
+  pid?: number;
+  exitCode?: number;
+  error?: string;
+}
+
+export interface ServeSessionMonitorTaskStatus {
+  kind: 'monitor';
+  id: string;
+  label: string;
+  description: string;
+  status: ServeSessionProcessTaskLifecycleStatus;
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  command: string;
+  pid?: number;
+  eventCount: number;
+  lastEventTime: number;
+  droppedLines: number;
+  exitCode?: number;
+  error?: string;
+  ownerAgentId?: string;
+}
+
+export type ServeSessionTaskStatus =
+  | ServeSessionAgentTaskStatus
+  | ServeSessionShellTaskStatus
+  | ServeSessionMonitorTaskStatus;
+
+export interface ServeSessionTasksStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  now: number;
+  tasks: ServeSessionTaskStatus[];
 }
 
 /**

@@ -20,6 +20,7 @@ import type {
   DaemonCapabilities,
   DaemonSessionContextStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTasksStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspacePreflightStatus,
@@ -496,12 +497,21 @@ describe('DaemonClient', () => {
         ],
         availableSkills: ['review'],
       };
+      const tasks: DaemonSessionTasksStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        now: 1_700_000_000_000,
+        tasks: [],
+      };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/with%2Fslash/context')) {
           return jsonResponse(200, context);
         }
         if (req.url.endsWith('/session/with%2Fslash/supported-commands')) {
           return jsonResponse(200, supportedCommands);
+        }
+        if (req.url.endsWith('/session/with%2Fslash/tasks')) {
+          return jsonResponse(200, tasks);
         }
         return jsonResponse(500, { error: `unexpected ${req.url}` });
       });
@@ -513,11 +523,16 @@ describe('DaemonClient', () => {
       await expect(
         client.sessionSupportedCommands('with/slash', 'client-1'),
       ).resolves.toEqual(supportedCommands);
+      await expect(
+        client.sessionTasks('with/slash', 'client-1'),
+      ).resolves.toEqual(tasks);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
+        ['GET', 'http://daemon/session/with%2Fslash/tasks'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
         'client-1',
         'client-1',
       ]);

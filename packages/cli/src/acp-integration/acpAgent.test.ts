@@ -141,6 +141,12 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   SessionService: vi.fn(),
   SESSION_TITLE_MAX_LENGTH: 200,
   tokenLimit: vi.fn().mockReturnValue(128_000),
+  buildBackgroundEntryLabel: vi.fn(
+    (entry: { description: string; subagentType?: string }) =>
+      entry.subagentType
+        ? `${entry.subagentType}: ${entry.description}`
+        : entry.description,
+  ),
   SessionStartSource: {
     Startup: 'startup',
     Resume: 'resume',
@@ -1409,6 +1415,76 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('status ext methods expose live session context and supported commands', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
+    const dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(5_000);
+    Object.assign(innerConfig, {
+      getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+        getAll: vi.fn().mockReturnValue([
+          {
+            kind: 'agent',
+            id: 'agent-1',
+            agentId: 'agent-1',
+            description: 'Investigate streaming',
+            status: 'paused',
+            startTime: 1_000,
+            outputFile: '/tmp/agent-1.jsonl',
+            outputOffset: 12,
+            notified: false,
+            abortController: new AbortController(),
+            subagentType: 'reviewer',
+            isBackgrounded: true,
+            resumeBlockedReason: 'approval required',
+            pendingMessages: ['secret queue'],
+          },
+        ]),
+      }),
+      getBackgroundShellRegistry: vi.fn().mockReturnValue({
+        getAll: vi.fn().mockReturnValue([
+          {
+            kind: 'shell',
+            id: 'shell-1',
+            shellId: 'shell-1',
+            description: 'npm test',
+            status: 'completed',
+            startTime: 3_000,
+            endTime: 4_500,
+            outputFile: '/tmp/shell-1.log',
+            outputPath: '/tmp/shell-1.log',
+            outputOffset: 8,
+            notified: true,
+            abortController: new AbortController(),
+            command: 'npm test',
+            cwd: '/tmp',
+            pid: 123,
+            exitCode: 0,
+          },
+        ]),
+      }),
+      getMonitorRegistry: vi.fn().mockReturnValue({
+        getAll: vi.fn().mockReturnValue([
+          {
+            kind: 'monitor',
+            id: 'monitor-1',
+            monitorId: 'monitor-1',
+            description: 'watch logs',
+            status: 'failed',
+            startTime: 2_000,
+            endTime: 2_500,
+            outputFile: '/tmp/monitor-1.log',
+            outputOffset: 0,
+            notified: false,
+            abortController: new AbortController(),
+            command: 'tail -f app.log',
+            pid: 456,
+            eventCount: 3,
+            lastEventTime: 2_400,
+            droppedLines: 1,
+            error: 'boom',
+            ownerAgentId: 'agent-1',
+            idleTimer: {},
+          },
+        ]),
+      }),
+    });
     vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValueOnce({
       availableCommands: [
         {
@@ -1442,6 +1518,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       SERVE_STATUS_EXT_METHODS.sessionSupportedCommands,
       { sessionId },
     );
+    const tasks = await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
+      sessionId,
+    });
 
     expect(context).toMatchObject({
       v: 1,
@@ -1464,8 +1543,65 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
       availableSkills: ['review'],
     });
+    expect(tasks).toEqual({
+      v: 1,
+      sessionId,
+      now: 5_000,
+      tasks: [
+        {
+          kind: 'agent',
+          id: 'agent-1',
+          label: 'reviewer: Investigate streaming',
+          description: 'Investigate streaming',
+          status: 'paused',
+          startTime: 1_000,
+          runtimeMs: 4_000,
+          outputFile: '/tmp/agent-1.jsonl',
+          subagentType: 'reviewer',
+          isBackgrounded: true,
+          resumeBlockedReason: 'approval required',
+        },
+        {
+          kind: 'monitor',
+          id: 'monitor-1',
+          label: 'watch logs',
+          description: 'watch logs',
+          status: 'failed',
+          startTime: 2_000,
+          endTime: 2_500,
+          runtimeMs: 500,
+          command: 'tail -f app.log',
+          pid: 456,
+          eventCount: 3,
+          lastEventTime: 2_400,
+          droppedLines: 1,
+          error: 'boom',
+          ownerAgentId: 'agent-1',
+        },
+        {
+          kind: 'shell',
+          id: 'shell-1',
+          label: 'npm test',
+          description: 'npm test',
+          status: 'completed',
+          startTime: 3_000,
+          endTime: 4_500,
+          runtimeMs: 1_500,
+          outputFile: '/tmp/shell-1.log',
+          command: 'npm test',
+          cwd: '/tmp',
+          pid: 123,
+          exitCode: 0,
+        },
+      ],
+    });
+    expect(JSON.stringify(tasks)).not.toContain('abortController');
+    expect(JSON.stringify(tasks)).not.toContain('outputOffset');
+    expect(JSON.stringify(tasks)).not.toContain('pendingMessages');
+    expect(JSON.stringify(tasks)).not.toContain('idleTimer');
     expect(buildAvailableCommandsSnapshot).toHaveBeenCalledWith(innerConfig);
 
+    dateNowSpy.mockRestore();
     mockConnectionState.resolve();
     await agentPromise;
   });

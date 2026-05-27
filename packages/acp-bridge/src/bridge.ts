@@ -37,6 +37,7 @@ import {
   createIdleWorkspaceSkillsStatus,
   mapDomainErrorToErrorKind,
   type ServePreflightCell,
+  type ServeSessionTasksStatus,
   type ServeStatusCell,
 } from './status.js';
 import {
@@ -2879,6 +2880,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return requestSessionStatus(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionSupportedCommands,
+      );
+    },
+
+    async getSessionTasksStatus(sessionId) {
+      return requestSessionStatus<ServeSessionTasksStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionTasks,
       );
     },
 

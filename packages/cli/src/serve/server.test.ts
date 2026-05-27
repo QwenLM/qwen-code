@@ -72,6 +72,7 @@ import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionSupportedCommandsStatus,
+  ServeSessionTasksStatus,
   ServeWorkspaceEnvStatus,
   ServeWorkspaceMcpStatus,
   ServeWorkspaceMcpToolsStatus,
@@ -125,6 +126,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_preflight',
   'session_context',
   'session_supported_commands',
+  'session_tasks',
   'session_close',
   'session_metadata',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
@@ -255,6 +257,7 @@ interface FakeBridgeOpts {
   sessionSupportedCommandsImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
+  sessionTasksImpl?: (sessionId: string) => Promise<ServeSessionTasksStatus>;
   setModelImpl?: (
     sessionId: string,
     req: SetSessionModelRequest,
@@ -354,6 +357,7 @@ interface FakeBridge extends HttpAcpBridge {
   workspacePreflightCalls: number;
   sessionContextCalls: string[];
   sessionSupportedCommandsCalls: string[];
+  sessionTasksCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
     req: SetSessionModelRequest;
@@ -423,6 +427,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   let workspacePreflightCalls = 0;
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
+  const sessionTasksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
@@ -539,6 +544,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       availableCommands: [],
       availableSkills: [],
     }));
+  const sessionTasksImpl =
+    opts.sessionTasksImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      now: 1_700_000_000_000,
+      tasks: [],
+    }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
   const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
   const setApprovalModeImpl =
@@ -622,6 +635,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     workspaceMcpToolsCalls,
     sessionContextCalls,
     sessionSupportedCommandsCalls,
+    sessionTasksCalls,
     setModelCalls,
     setApprovalModeCalls,
     generateSessionRecapCalls,
@@ -757,6 +771,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionSupportedCommandsStatus(sessionId) {
       sessionSupportedCommandsCalls.push(sessionId);
       return sessionSupportedCommandsImpl(sessionId);
+    },
+    async getSessionTasksStatus(sessionId) {
+      sessionTasksCalls.push(sessionId);
+      return sessionTasksImpl(sessionId);
     },
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
@@ -1480,7 +1498,7 @@ describe('createServeApp', () => {
       expect(bridge.workspacePreflightCalls).toBe(1);
     });
 
-    it('returns session context and supported commands from the bridge', async () => {
+    it('returns read-only session snapshots from the bridge', async () => {
       const context: ServeSessionContextStatus = {
         v: 1,
         sessionId: 's-1',
@@ -1500,9 +1518,30 @@ describe('createServeApp', () => {
         ],
         availableSkills: ['review'],
       };
+      const tasks: ServeSessionTasksStatus = {
+        v: 1,
+        sessionId: 's-1',
+        now: 1_700_000_000_000,
+        tasks: [
+          {
+            kind: 'shell',
+            id: 'sh-1',
+            label: 'npm test',
+            description: 'npm test',
+            status: 'running',
+            startTime: 1_699_999_999_000,
+            runtimeMs: 1_000,
+            outputFile: '/tmp/sh-1.log',
+            command: 'npm test',
+            cwd: WS_BOUND,
+            pid: 123,
+          },
+        ],
+      };
       const bridge = fakeBridge({
         sessionContextImpl: async () => context,
         sessionSupportedCommandsImpl: async () => commands,
+        sessionTasksImpl: async () => tasks,
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -1516,13 +1555,19 @@ describe('createServeApp', () => {
       const commandsRes = await request(app)
         .get('/session/s-1/supported-commands')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const tasksRes = await request(app)
+        .get('/session/s-1/tasks')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(200);
       expect(contextRes.body).toEqual(context);
       expect(commandsRes.status).toBe(200);
       expect(commandsRes.body).toEqual(commands);
+      expect(tasksRes.status).toBe(200);
+      expect(tasksRes.body).toEqual(tasks);
       expect(bridge.sessionContextCalls).toEqual(['s-1']);
       expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
+      expect(bridge.sessionTasksCalls).toEqual(['s-1']);
     });
 
     it('maps missing sessions on read-only session routes to 404', async () => {
@@ -1531,6 +1576,9 @@ describe('createServeApp', () => {
           throw new SessionNotFoundError(sessionId);
         },
         sessionSupportedCommandsImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+        sessionTasksImpl: async (sessionId) => {
           throw new SessionNotFoundError(sessionId);
         },
       });
@@ -1546,11 +1594,16 @@ describe('createServeApp', () => {
       const commandsRes = await request(app)
         .get('/session/missing/supported-commands')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const tasksRes = await request(app)
+        .get('/session/missing/tasks')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(404);
       expect(contextRes.body.sessionId).toBe('missing');
       expect(commandsRes.status).toBe(404);
       expect(commandsRes.body.sessionId).toBe('missing');
+      expect(tasksRes.status).toBe(404);
+      expect(tasksRes.body.sessionId).toBe('missing');
     });
   });
 

@@ -737,6 +737,83 @@ export interface DaemonSessionSupportedCommandsStatus {
   availableSkills: string[];
 }
 
+export type DaemonSessionTaskLifecycleStatus =
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export type DaemonSessionProcessTaskLifecycleStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface DaemonSessionAgentTaskStatus {
+  kind: 'agent';
+  id: string;
+  label: string;
+  description: string;
+  status: DaemonSessionTaskLifecycleStatus;
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  outputFile?: string;
+  subagentType?: string;
+  isBackgrounded: boolean;
+  error?: string;
+  resumeBlockedReason?: string;
+}
+
+export interface DaemonSessionShellTaskStatus {
+  kind: 'shell';
+  id: string;
+  label: string;
+  description: string;
+  status: DaemonSessionProcessTaskLifecycleStatus;
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  outputFile?: string;
+  command: string;
+  cwd: string;
+  pid?: number;
+  exitCode?: number;
+  error?: string;
+}
+
+export interface DaemonSessionMonitorTaskStatus {
+  kind: 'monitor';
+  id: string;
+  label: string;
+  description: string;
+  status: DaemonSessionProcessTaskLifecycleStatus;
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  command: string;
+  pid?: number;
+  eventCount: number;
+  lastEventTime: number;
+  droppedLines: number;
+  exitCode?: number;
+  error?: string;
+  ownerAgentId?: string;
+}
+
+export type DaemonSessionTaskStatus =
+  | DaemonSessionAgentTaskStatus
+  | DaemonSessionShellTaskStatus
+  | DaemonSessionMonitorTaskStatus;
+
+export interface DaemonSessionTasksStatus {
+  v: 1;
+  sessionId: string;
+  now: number;
+  tasks: DaemonSessionTaskStatus[];
+}
+
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;

@@ -125,7 +125,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'session_set_model', 'client_identity', 'client_heartbeat',
  'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
  'workspace_providers', 'workspace_env', 'workspace_preflight',
- 'session_context', 'session_supported_commands',
+ 'session_context', 'session_supported_commands', 'session_tasks',
  'session_close', 'session_metadata', 'mcp_guardrails',
  'mcp_guardrail_events',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
@@ -243,6 +243,7 @@ Capability tags:
 - `workspace_preflight` → `GET /workspace/preflight`
 - `session_context` → `GET /session/:id/context`
 - `session_supported_commands` → `GET /session/:id/supported-commands`
+- `session_tasks` → `GET /session/:id/tasks`
 
 Common status cell:
 
@@ -872,6 +873,36 @@ caller named the path. Success responses and audit events include
 `availableCommands` is the same command snapshot used by the
 `available_commands_update` SSE notification. `availableSkills` lists skill
 names only; clients must not expect skill bodies or paths over this route.
+
+### `GET /session/:id/tasks`
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "now": 1700000000000,
+  "tasks": [
+    {
+      "kind": "agent",
+      "id": "agent-1",
+      "label": "reviewer: check failure",
+      "description": "check failure",
+      "status": "running",
+      "startTime": 1699999999000,
+      "runtimeMs": 1000,
+      "outputFile": "/tmp/agent-1.jsonl",
+      "isBackgrounded": true,
+      "subagentType": "reviewer"
+    }
+  ]
+}
+```
+
+This route is a read-only out-of-band snapshot. It is intentionally not a
+prompt and can be queried while the session is streaming. The response only
+contains whitelisted metadata from the agent, shell, and monitor task
+registries; controllers, timers, offsets, pending messages, and raw registry
+objects are never exposed.
 
 ### `POST /session`
 

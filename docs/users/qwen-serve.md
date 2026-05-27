@@ -77,7 +77,8 @@ The `workspaceCwd` field surfaces the bound workspace so clients can pre-flight 
 The daemon also exposes read-only runtime snapshots for client UIs:
 `GET /workspace/mcp`, `GET /workspace/skills`, `GET /workspace/providers`,
 `GET /workspace/env`, `GET /workspace/preflight`,
-`GET /session/:id/context`, and `GET /session/:id/supported-commands`.
+`GET /session/:id/context`, `GET /session/:id/supported-commands`, and
+`GET /session/:id/tasks`.
 
 `GET /workspace/mcp`, `GET /workspace/skills`, and `GET /workspace/providers`
 report the live ACP runtime and do not start the ACP child when idle; an
