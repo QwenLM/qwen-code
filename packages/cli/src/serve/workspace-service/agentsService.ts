@@ -156,6 +156,14 @@ export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
       if (params.approvalMode) config.approvalMode = params.approvalMode;
       if (params.runConfig) config.runConfig = params.runConfig;
 
+      // Collision preflight: reject if agent already exists at the target level.
+      const existing = await subagentManager
+        .loadSubagent(params.name, level)
+        .catch(() => null);
+      if (existing) {
+        throw new Error(`agent_already_exists: ${params.name}`);
+      }
+
       await subagentManager.createSubagent(config, { level });
 
       const created = await subagentManager.loadSubagent(params.name, level);
@@ -164,8 +172,8 @@ export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
       }
 
       publishWorkspaceEvent({
-        type: 'agent_created',
-        data: { agentName: params.name },
+        type: 'agent_changed',
+        data: { change: 'created', name: params.name, level },
         originatorClientId: ctx.originatorClientId,
       });
 
@@ -215,8 +223,8 @@ export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
       }
 
       publishWorkspaceEvent({
-        type: 'agent_updated',
-        data: { agentName },
+        type: 'agent_changed',
+        data: { change: 'updated', name: agentName, level: existing.level },
         originatorClientId: ctx.originatorClientId,
       });
 
@@ -242,8 +250,8 @@ export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
       }
 
       publishWorkspaceEvent({
-        type: 'agent_deleted',
-        data: { agentName },
+        type: 'agent_changed',
+        data: { change: 'deleted', name: agentName },
         originatorClientId: ctx.originatorClientId,
       });
 

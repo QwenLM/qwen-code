@@ -160,7 +160,7 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
 
       if (result.changed) {
         publishWorkspaceEvent({
-          type: 'memory_written',
+          type: 'memory_changed',
           data: {
             scope: params.scope,
             filePath: result.filePath,
@@ -200,8 +200,8 @@ export function createMemoryService(deps: MemoryServiceDeps): MemoryService {
       }
 
       publishWorkspaceEvent({
-        type: 'memory_deleted',
-        data: { key, filePath },
+        type: 'memory_changed',
+        data: { change: 'deleted', key, filePath },
         originatorClientId: ctx.originatorClientId,
       });
 

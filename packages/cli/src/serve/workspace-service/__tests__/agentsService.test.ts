@@ -251,6 +251,11 @@ describe('AgentsService', () => {
 
     it('allows mutation when clientId is undefined', async () => {
       const deps = makeDeps();
+      const manager = deps.subagentManager as unknown as MockManager;
+      // collision preflight returns null, post-create reload returns config
+      (manager.loadSubagent as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(makeSubagentConfig());
       const svc = createAgentsService(deps);
       const ctx = makeCtx({ originatorClientId: undefined });
 
@@ -266,6 +271,10 @@ describe('AgentsService', () => {
 
     it('allows mutation when clientId is in knownClientIds', async () => {
       const deps = makeDeps();
+      const manager = deps.subagentManager as unknown as MockManager;
+      (manager.loadSubagent as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(makeSubagentConfig());
       const svc = createAgentsService(deps);
       const ctx = makeCtx({ originatorClientId: 'client-1' });
 
@@ -280,6 +289,12 @@ describe('AgentsService', () => {
 
     it('delegates to subagentManager.createSubagent with correct config', async () => {
       const deps = makeDeps();
+      const manager = deps.subagentManager as unknown as MockManager;
+      (manager.loadSubagent as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(
+          makeSubagentConfig({ name: 'new-agent', level: 'user' }),
+        );
       const svc = createAgentsService(deps);
       const ctx = makeCtx();
 
@@ -305,10 +320,17 @@ describe('AgentsService', () => {
       );
     });
 
-    it('publishes agent_created event after successful creation', async () => {
+    it('publishes agent_changed event after successful creation', async () => {
       const deps = makeDeps();
       const svc = createAgentsService(deps);
       const ctx = makeCtx({ originatorClientId: 'client-1' });
+
+      // loadSubagent is called twice: once for collision preflight (return null),
+      // once for post-create reload (return config).
+      const manager = deps.subagentManager as unknown as MockManager;
+      (manager.loadSubagent as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(null) // collision preflight
+        .mockResolvedValueOnce(makeSubagentConfig()); // post-create reload
 
       await svc.createAgent(ctx, {
         name: 'test-agent',
@@ -317,8 +339,8 @@ describe('AgentsService', () => {
       });
 
       expect(deps.publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'agent_created',
-        data: { agentName: 'test-agent' },
+        type: 'agent_changed',
+        data: { change: 'created', name: 'test-agent', level: 'project' },
         originatorClientId: 'client-1',
       });
     });
@@ -328,6 +350,12 @@ describe('AgentsService', () => {
       const svc = createAgentsService(deps);
       const ctx = makeCtx({ originatorClientId: undefined });
 
+      // loadSubagent: collision preflight (null) + post-create reload
+      const manager = deps.subagentManager as unknown as MockManager;
+      (manager.loadSubagent as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(makeSubagentConfig());
+
       await svc.createAgent(ctx, {
         name: 'test-agent',
         description: 'desc',
@@ -335,13 +363,37 @@ describe('AgentsService', () => {
       });
 
       expect(deps.publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'agent_created',
-        data: { agentName: 'test-agent' },
+        type: 'agent_changed',
+        data: { change: 'created', name: 'test-agent', level: 'project' },
       });
+    });
+
+    it('throws when agent already exists at target level', async () => {
+      const deps = makeDeps();
+      const svc = createAgentsService(deps);
+      // loadSubagent returns an existing config for collision preflight
+      const manager = deps.subagentManager as unknown as MockManager;
+      (manager.loadSubagent as ReturnType<typeof vi.fn>).mockResolvedValue(
+        makeSubagentConfig(),
+      );
+
+      await expect(
+        svc.createAgent(makeCtx(), {
+          name: 'test-agent',
+          description: 'desc',
+          systemPrompt: 'prompt',
+        }),
+      ).rejects.toThrow('agent_already_exists');
+
+      expect(manager.createSubagent).not.toHaveBeenCalled();
     });
 
     it('defaults level to project when not specified', async () => {
       const deps = makeDeps();
+      const manager = deps.subagentManager as unknown as MockManager;
+      (manager.loadSubagent as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(makeSubagentConfig());
       const svc = createAgentsService(deps);
 
       await svc.createAgent(makeCtx(), {
@@ -414,7 +466,7 @@ describe('AgentsService', () => {
       );
     });
 
-    it('publishes agent_updated event after successful update', async () => {
+    it('publishes agent_changed event after successful update', async () => {
       const deps = makeDeps();
       const svc = createAgentsService(deps);
       const ctx = makeCtx({ originatorClientId: 'client-2' });
@@ -422,8 +474,8 @@ describe('AgentsService', () => {
       await svc.updateAgent(ctx, 'test-agent', { description: 'updated' });
 
       expect(deps.publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'agent_updated',
-        data: { agentName: 'test-agent' },
+        type: 'agent_changed',
+        data: { change: 'updated', name: 'test-agent', level: 'project' },
         originatorClientId: 'client-2',
       });
     });
@@ -481,7 +533,7 @@ describe('AgentsService', () => {
       expect(result.deleted).toBe(false);
     });
 
-    it('publishes agent_deleted event after successful deletion', async () => {
+    it('publishes agent_changed event after successful deletion', async () => {
       const deps = makeDeps();
       const svc = createAgentsService(deps);
       const ctx = makeCtx({ originatorClientId: 'client-1' });
@@ -489,8 +541,8 @@ describe('AgentsService', () => {
       await svc.deleteAgent(ctx, 'test-agent');
 
       expect(deps.publishWorkspaceEvent).toHaveBeenCalledWith({
-        type: 'agent_deleted',
-        data: { agentName: 'test-agent' },
+        type: 'agent_changed',
+        data: { change: 'deleted', name: 'test-agent' },
         originatorClientId: 'client-1',
       });
     });

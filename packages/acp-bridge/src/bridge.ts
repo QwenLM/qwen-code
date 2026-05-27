@@ -2949,13 +2949,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const timeout = invokeOpts?.timeoutMs ?? initTimeoutMs;
       const response = await withTimeout(
         Promise.race([
-          info.connection.extMethod(method, { ...params, cwd: boundWorkspace }),
+          info.connection.extMethod(method, params ?? {}),
           getChannelClosedReject(info),
         ]),
         timeout,
         method,
       );
-      return response as any;
+      return response as T;
     },
 
     async getWorkspaceMcpToolsStatus(serverName) {
