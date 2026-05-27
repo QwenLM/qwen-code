@@ -66,6 +66,7 @@ export const App = () => {
                   /* ignore */
                 }
               }
+              settings.corruptionDialogDismissed = true;
               setDismissed(true);
             }}
           />

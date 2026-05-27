@@ -420,6 +420,7 @@ export class LoadedSettings {
   readonly migrationWarnings: string[];
   readonly corruptedPath: string | undefined;
   readonly wasRecovered: boolean;
+  corruptionDialogDismissed: boolean = false;
 
   private _merged: Settings;
 
