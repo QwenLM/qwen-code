@@ -412,7 +412,7 @@ export async function withInteractionSpan<T>(
             'interaction.duration_ms': duration,
             'qwen-code.turn_status': terminalStatus,
           });
-          if (terminalStatus !== 'error') {
+          if (terminalStatus === 'ok') {
             span.setStatus({ code: SpanStatusCode.OK });
           }
           span.end();
