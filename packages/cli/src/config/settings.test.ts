@@ -2068,9 +2068,18 @@ describe('Settings Loading and Merging', () => {
         (mockFsExistsSync as Mock).mockImplementation(
           (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
         );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'] =
+          '/test/path.corrupted';
+        process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] = '1';
 
         const result = loadSettings(MOCK_WORKSPACE_DIR);
         expect(result.corruptedPath).toBeUndefined();
+        // env vars remain because only workspace scope is active — not user
+        expect(process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH']).toBe(
+          '/test/path.corrupted',
+        );
+        expect(process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED']).toBe('1');
       });
 
       it('should map wasRecovered="0" to false', () => {
