@@ -97,7 +97,6 @@ export function formatTasksSnapshot(
 
 export function handleTasksSlashCommand(input: {
   cmd: string;
-  promptBlocked: boolean;
   getTasks: () => Promise<DaemonSessionTasksStatus>;
   dispatch: LocalStatusDispatcher;
   reportError: ErrorReporter;

@@ -50,12 +50,9 @@ describe('handleTasksSlashCommand', () => {
     const getTasks = vi.fn().mockResolvedValue(snapshot);
     const dispatch = vi.fn();
     const reportError = vi.fn();
-    const sendPrompt = vi.fn();
-    const enqueue = vi.fn();
 
     const handled = handleTasksSlashCommand({
       cmd: 'tasks',
-      promptBlocked: true,
       getTasks,
       dispatch,
       reportError,
@@ -68,14 +65,11 @@ describe('handleTasksSlashCommand', () => {
       { type: 'status', text: 'No background tasks.' },
     ]);
     expect(reportError).not.toHaveBeenCalled();
-    expect(sendPrompt).not.toHaveBeenCalled();
-    expect(enqueue).not.toHaveBeenCalled();
   });
 
   it('does not claim non-tasks commands', () => {
     const handled = handleTasksSlashCommand({
       cmd: 'help',
-      promptBlocked: true,
       getTasks: vi.fn(),
       dispatch: vi.fn(),
       reportError: vi.fn(),

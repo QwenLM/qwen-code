@@ -452,7 +452,6 @@ export function App({
           if (
             handleTasksSlashCommand({
               cmd,
-              promptBlocked,
               getTasks: actions.getTasks,
               dispatch: store.dispatch,
               reportError,
