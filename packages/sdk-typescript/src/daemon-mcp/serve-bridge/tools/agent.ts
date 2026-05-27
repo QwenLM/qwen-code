@@ -34,6 +34,13 @@ export function agentTools(state: BridgeState): any[] {
           );
         }
 
+        // Guard against concurrent prompts on the same session
+        if (stream.activeCollector) {
+          throw new Error(
+            'Another prompt is already in progress for this session. Wait for it to complete or call prompt_cancel first.',
+          );
+        }
+
         // Install a new collector to capture this prompt's response chunks.
         stream.lastActivityMs = Date.now();
         const collector = createPromptCollector();

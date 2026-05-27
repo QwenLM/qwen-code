@@ -85,9 +85,17 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
           }
         }
       }
-    } catch {
-      // SSE disconnected or aborted — expected on session close
+    } catch (err) {
+      // Log unexpected SSE disconnections (skip AbortError from intentional close)
+      if (!(err instanceof Error && err.name === 'AbortError')) {
+        const detail = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `[serve-bridge] SSE stream ended unexpectedly for session ${sessionId}: ${detail}\n`,
+        );
+      }
     } finally {
+      // Resolve any pending collector so prompt doesn't hang on disconnect
+      stream.activeCollector?.resolve();
       state.eventStreams.delete(sessionId);
     }
   })();

@@ -60,8 +60,11 @@ export function sessionTools(state: BridgeState): any[] {
         workspace_cwd: z.string().optional().describe('Workspace path.'),
       },
       handler(async (args) => {
+        if (state.defaultSessionId) {
+          stopEventStream(state, state.defaultSessionId);
+        }
         const result = await state.client.loadSession(args.session_id, {
-          workspaceCwd: args.workspace_cwd,
+          workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
         });
         state.defaultSessionId = result.sessionId;
         startEventStream(state, result.sessionId);
@@ -77,8 +80,11 @@ export function sessionTools(state: BridgeState): any[] {
         workspace_cwd: z.string().optional().describe('Workspace path.'),
       },
       handler(async (args) => {
+        if (state.defaultSessionId) {
+          stopEventStream(state, state.defaultSessionId);
+        }
         const result = await state.client.resumeSession(args.session_id, {
-          workspaceCwd: args.workspace_cwd,
+          workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
         });
         state.defaultSessionId = result.sessionId;
         startEventStream(state, result.sessionId);
