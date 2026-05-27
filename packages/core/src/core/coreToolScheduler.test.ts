@@ -7259,7 +7259,7 @@ describe('CoreToolScheduler tool output truncation', () => {
     static readonly Name = 'largeOutputTool';
 
     constructor(
-      private readonly output: string,
+      private readonly output: PartListUnion,
       private readonly display: ToolResultDisplay = 'large output completed',
     ) {
       super(
@@ -7299,7 +7299,7 @@ describe('CoreToolScheduler tool output truncation', () => {
   }
 
   function createLargeOutputScheduler(
-    output: string,
+    output: PartListUnion,
     options: {
       threshold?: number;
       truncateLines?: number;
@@ -7387,6 +7387,15 @@ describe('CoreToolScheduler tool output truncation', () => {
     return response?.output ?? '';
   }
 
+  beforeEach(() => {
+    vi.mocked(fsPromises.chmod).mockReset();
+    vi.mocked(fsPromises.mkdir).mockReset();
+    vi.mocked(fsPromises.writeFile).mockReset();
+    vi.mocked(fsPromises.chmod).mockResolvedValue(undefined);
+    vi.mocked(fsPromises.mkdir).mockResolvedValue(undefined);
+    vi.mocked(fsPromises.writeFile).mockResolvedValue(undefined);
+  });
+
   it('truncates large model-facing tool output before it enters history', async () => {
     const largeOutput = 'A'.repeat(5000);
     const { scheduler, onAllToolCallsComplete } =
@@ -7445,6 +7454,7 @@ describe('CoreToolScheduler tool output truncation', () => {
 
     expect(output).toBe(smallOutput);
     expect(output).not.toContain('[CONTENT TRUNCATED]');
+    expect(fsPromises.writeFile).not.toHaveBeenCalled();
   });
 
   it('does not fail a successful tool call when output truncation fails', async () => {
@@ -7685,6 +7695,42 @@ describe('CoreToolScheduler tool output truncation', () => {
 
     expect(output).toContain('The full output has been saved to:');
     expect(completedCalls[0].response.resultDisplay).toBe(structuredDisplay);
+  });
+
+  it('passes non-string Part output through without truncation', async () => {
+    const partOutput: Part[] = [
+      {
+        inlineData: {
+          mimeType: 'image/png',
+          data: 'iVBORw0KGgo=',
+        },
+      },
+    ];
+    const { scheduler, onAllToolCallsComplete } = createLargeOutputScheduler(
+      partOutput,
+      { threshold: 1 },
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'part-output-1',
+          name: LargeOutputTool.Name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-part-output-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    const responsePart = completedCalls[0].response.responseParts[0];
+
+    expect(responsePart.functionResponse?.parts).toEqual(partOutput);
+    expect(completedCalls[0].response.contentLength).toBeUndefined();
+    expect(fsPromises.writeFile).not.toHaveBeenCalled();
   });
 });
 

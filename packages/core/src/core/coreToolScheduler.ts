@@ -2897,6 +2897,12 @@ export class CoreToolScheduler {
                   : String(truncationError)),
             );
           }
+        } else if (typeof content !== 'string') {
+          debugLogger.debug(
+            `Skipping tool output truncation for ${toolName} ` +
+              `(callId=${scheduledCall.request.callId}, prompt_id=${scheduledCall.request.prompt_id}): ` +
+              'non-string content',
+          );
         }
 
         if (postToolUseAdditionalContext) {
