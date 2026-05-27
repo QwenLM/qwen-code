@@ -127,7 +127,7 @@ export function isResponse(m: unknown): m is JsonRpcResponse {
  */
 export function logSafe(s: string): string {
   // eslint-disable-next-line no-control-regex
-  return s.replace(/[\u0000-\u001f\u007f]/g, ' ');
+  return s.replace(/[\u0000-\u001f\u007f\u0080-\u009f]/g, ' ');
 }
 
 export function success(id: JsonRpcId, result: unknown): JsonRpcSuccess {

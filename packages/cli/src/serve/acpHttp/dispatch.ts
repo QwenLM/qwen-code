@@ -318,15 +318,13 @@ export class AcpDispatcher {
       );
       return false;
     }
-    if (id !== undefined) {
-      conn.sendConn(
-        error(
-          id,
-          RPC.INVALID_PARAMS,
-          `Session ${sessionId} is not owned by this connection`,
-        ),
-      );
-    }
+    conn.sendConn(
+      error(
+        id,
+        RPC.INVALID_PARAMS,
+        `Session ${sessionId} is not owned by this connection`,
+      ),
+    );
     return false;
   }
 
@@ -446,6 +444,16 @@ export class AcpDispatcher {
           // standard client can drive `session/set_config_option`. Sourced
           // from the child's own session state (already ACP-shaped).
           const configOptions = await this.configOptionsFor(session.sessionId);
+          if (conn.destroyed) {
+            void this.bridge
+              .killSession(session.sessionId, { requireZeroAttaches: true })
+              .catch((err) =>
+                writeStderrLine(
+                  `qwen serve: /acp orphan killSession(${logSafe(session.sessionId)}) failed: ${logSafe(errMsg(err))}`,
+                ),
+              );
+            return;
+          }
           this.replyConn(conn, id, {
             sessionId: session.sessionId,
             ...(configOptions ? { configOptions } : {}),
