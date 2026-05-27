@@ -146,6 +146,7 @@ function resolutionToAcpResponse(
  */
 const MAX_EARLY_EVENT_SESSIONS = 64;
 const MAX_EARLY_EVENTS_PER_SESSION = 32;
+const MAX_SUGGESTION_LENGTH = 500;
 const EARLY_EVENT_TTL_MS = 60_000;
 
 /**
@@ -504,7 +505,7 @@ export class BridgeClient implements Client {
         typeof sessionId !== 'string' ||
         typeof suggestion !== 'string' ||
         suggestion.length === 0 ||
-        suggestion.length > 500 ||
+        suggestion.length > MAX_SUGGESTION_LENGTH ||
         typeof promptId !== 'string'
       ) {
         writeStderrLine(

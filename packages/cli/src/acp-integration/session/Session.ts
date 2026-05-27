@@ -621,7 +621,12 @@ export class Session implements SessionContext {
       try {
         const fullHistory = chat.getHistory(true);
         const lastEntry = fullHistory[fullHistory.length - 1];
-        if (!lastEntry || lastEntry.role !== 'model') return;
+        if (!lastEntry || lastEntry.role !== 'model') {
+          debugLogger.debug(
+            'Skipping followup suggestion: last history entry is not model',
+          );
+          return;
+        }
         const conversationHistory =
           fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
 
