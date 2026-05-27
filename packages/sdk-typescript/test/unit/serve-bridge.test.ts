@@ -457,6 +457,7 @@ describe('serve-bridge', () => {
 
       await cancelTool.handler({}, {});
       expect(collector.resolved).toBe(true);
+      expect(collector.interrupted).toBe(true);
     });
   });
 
@@ -521,6 +522,28 @@ describe('serve-bridge', () => {
 
       const result = await approvalTool.handler(
         { mode: 'yolo', session_id: 'test-session' },
+        {},
+      );
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('restricted for security');
+    });
+
+    it('should reject auto-edit approval mode without allowGlobalScope', async () => {
+      const { state } = makeMockState({
+        defaultSessionId: 'test-session',
+      });
+      state.allowGlobalScope = false;
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const tools = workspaceWriteTools(state);
+      const approvalTool = tools.find(
+        (t: { name: string }) => t.name === 'session_set_approval_mode',
+      );
+
+      const result = await approvalTool.handler(
+        { mode: 'auto-edit', session_id: 'test-session' },
         {},
       );
       expect(result.isError).toBe(true);
