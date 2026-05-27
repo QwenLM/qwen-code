@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import {
   context as otelContext,
   propagation,
+  ROOT_CONTEXT,
   SpanKind,
   SpanStatusCode,
   trace,
@@ -190,6 +191,7 @@ export function emitDaemonLog(
   try {
     logs.getLogger(SERVICE_NAME).emit({
       body,
+      timestamp: new Date(),
       attributes: {
         'event.name': EVENT_DAEMON_ERROR,
         ...attributes,
@@ -242,6 +244,10 @@ export function injectDaemonTraceContext<T extends object>(request: T): T {
     // Telemetry must not affect prompt forwarding.
   }
 
+  if (!currentMeta && !nextMeta[DAEMON_TRACEPARENT_META_KEY]) {
+    return request;
+  }
+
   return {
     ...request,
     _meta: nextMeta,
@@ -265,7 +271,7 @@ export function extractDaemonTraceContext(
   if (typeof tracestate === 'string' && tracestate.length > 0) {
     carrier['tracestate'] = tracestate;
   }
-  const extracted = propagation.extract(otelContext.active(), carrier);
+  const extracted = propagation.extract(ROOT_CONTEXT, carrier);
   if (trace.getSpanContext(extracted)) return extracted;
 
   const parts = traceparent.split('-');
@@ -283,7 +289,7 @@ export function extractDaemonTraceContext(
     return undefined;
   }
   return trace.setSpan(
-    otelContext.active(),
+    ROOT_CONTEXT,
     trace.wrapSpanContext({
       traceId,
       spanId,
