@@ -580,6 +580,54 @@ describe('HookRunner', () => {
       );
     });
 
+    it('should not append empty UserPromptSubmit additional context', async () => {
+      const firstProcess = createMockProcess(
+        0,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext: '',
+          },
+        }),
+      );
+      const secondProcess = createMockProcess(0, 'result');
+      mockSpawn
+        .mockImplementationOnce(() => firstProcess)
+        .mockImplementationOnce(() => secondProcess);
+
+      const hookConfigs: HookConfig[] = [
+        {
+          type: HookType.Command,
+          command: 'echo first',
+          source: HooksConfigSource.Project,
+        },
+        {
+          type: HookType.Command,
+          command: 'echo second',
+          source: HooksConfigSource.Project,
+        },
+      ];
+      const input: UserPromptSubmitInput = {
+        ...createMockInput({
+          hook_event_name: HookEventName.UserPromptSubmit,
+        }),
+        prompt: 'Base prompt',
+      };
+
+      await hookRunner.executeHooksSequential(
+        hookConfigs,
+        HookEventName.UserPromptSubmit,
+        input,
+      );
+
+      const secondInputJson = secondProcess.stdin.write.mock.calls[0]?.[0];
+      expect(typeof secondInputJson).toBe('string');
+      const secondInput = JSON.parse(secondInputJson as string) as {
+        prompt?: string;
+      };
+      expect(secondInput.prompt).toBe('Base prompt');
+    });
+
     it('should truncate UserPromptExpansion context before sanitizing it for chaining', async () => {
       const unsafeContext =
         '<tag>' +

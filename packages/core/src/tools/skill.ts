@@ -24,6 +24,7 @@ const debugLogger = createDebugLogger('SKILL');
 
 export interface SkillParams {
   skill: string;
+  args?: string;
 }
 
 // Re-export for backward compatibility
@@ -66,7 +67,11 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       properties: {
         skill: {
           type: 'string',
-          description: 'The skill name (no arguments). E.g., "pdf" or "xlsx"',
+          description: 'The skill or command name. E.g., "pdf" or "xlsx"',
+        },
+        args: {
+          type: 'string',
+          description: 'Optional arguments for model-invocable slash commands.',
         },
       },
       required: ['skill'],
@@ -230,6 +235,7 @@ How to invoke:
   - \`skill: "pdf"\` - invoke the pdf skill
   - \`skill: "xlsx"\` - invoke the xlsx skill
   - \`skill: "ms-office-suite:pdf"\` - invoke using fully qualified name
+  - \`skill: "mcp-prompt", args: "topic"\` - invoke a model-invocable command with arguments
 
 Important:
 - When a skill is relevant, you must invoke this tool IMMEDIATELY as your first action
@@ -259,6 +265,9 @@ ${skillDescriptions}
       params.skill.trim() === ''
     ) {
       return 'Parameter "skill" must be a non-empty string.';
+    }
+    if (params.args !== undefined && typeof params.args !== 'string') {
+      return 'Parameter "args" must be a string when provided.';
     }
 
     // Check file-based skills
@@ -387,7 +396,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       if (!skill) {
         // Try model-invocable command executor (e.g. MCP prompts)
         if (this.commandExecutor) {
-          const commandResult = await this.commandExecutor(this.params.skill);
+          const commandResult = await this.commandExecutor(
+            this.params.skill,
+            this.params.args ?? '',
+          );
           if (
             commandResult &&
             typeof commandResult === 'object' &&

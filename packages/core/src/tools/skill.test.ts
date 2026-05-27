@@ -272,11 +272,19 @@ describe('SkillTool', () => {
             description: string;
             enum?: string[];
           };
+          args: {
+            type: string;
+            description: string;
+          };
         };
       };
       expect(properties.properties.skill.type).toBe('string');
       expect(properties.properties.skill.description).toBe(
-        'The skill name (no arguments). E.g., "pdf" or "xlsx"',
+        'The skill or command name. E.g., "pdf" or "xlsx"',
+      );
+      expect(properties.properties.args.type).toBe('string');
+      expect(properties.properties.args.description).toBe(
+        'Optional arguments for model-invocable slash commands.',
       );
       expect(properties.properties.skill.enum).toBeUndefined();
     });
@@ -295,11 +303,19 @@ describe('SkillTool', () => {
             description: string;
             enum?: string[];
           };
+          args: {
+            type: string;
+            description: string;
+          };
         };
       };
       expect(properties.properties.skill.type).toBe('string');
       expect(properties.properties.skill.description).toBe(
-        'The skill name (no arguments). E.g., "pdf" or "xlsx"',
+        'The skill or command name. E.g., "pdf" or "xlsx"',
+      );
+      expect(properties.properties.args.type).toBe('string');
+      expect(properties.properties.args.description).toBe(
+        'Optional arguments for model-invocable slash commands.',
       );
       expect(properties.properties.skill.enum).toBeUndefined();
     });
@@ -314,6 +330,14 @@ describe('SkillTool', () => {
     it('should reject empty skill', () => {
       const result = skillTool.validateToolParams({ skill: '' });
       expect(result).toBe('Parameter "skill" must be a non-empty string.');
+    });
+
+    it('should reject non-string args', () => {
+      const result = skillTool.validateToolParams({
+        skill: 'code-review',
+        args: 123 as unknown as string,
+      });
+      expect(result).toBe('Parameter "args" must be a string when provided.');
     });
 
     it('should reject non-existent skill', () => {
@@ -739,10 +763,10 @@ describe('SkillTool', () => {
 
       const invocation = (
         skillTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'mcp-prompt-a' });
+      ).createInvocation({ skill: 'mcp-prompt-a', args: 'with args' });
       const result = await invocation.execute();
 
-      expect(executor).toHaveBeenCalledWith('mcp-prompt-a');
+      expect(executor).toHaveBeenCalledWith('mcp-prompt-a', 'with args');
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Prompt content from MCP');
       expect(result.returnDisplay).toBe('Executed command: mcp-prompt-a');
