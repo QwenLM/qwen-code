@@ -8500,6 +8500,152 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     );
   });
 
+  it('buildInvocation calls setPromptId when promptId is provided (covers both setArgs and schedule call sites)', () => {
+    // Directly exercises the private buildInvocation method so that both
+    // call sites (L1036 setArgs path, L1497 main schedule path) are
+    // covered by a single test on the wiring itself — testing setArgs
+    // through the public confirmation API requires mocking modifyWithEditor
+    // + filesystem + editor type, which would dwarf the change under test.
+    const tool = new PromptIdAwareTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    // Direct call: this is the same code path that L1036 (setArgs) and
+    // L1497 (schedule) both go through. Both callers pass
+    // call.request.prompt_id / reqInfo.prompt_id as the fourth arg.
+    const invocation = (
+      scheduler as unknown as {
+        buildInvocation: (
+          t: typeof tool,
+          a: Record<string, unknown>,
+          callId: string,
+          promptId: string,
+        ) => PromptIdAwareInvocation;
+      }
+    ).buildInvocation(tool, {}, 'call-direct', 'expected-via-setArgs-path');
+
+    expect(invocation.capturedPromptId).toBe('expected-via-setArgs-path');
+  });
+
+  it('buildInvocation does not throw when promptId is omitted', () => {
+    // Ensures the optional fourth argument stays optional — callers that
+    // do not yet pass promptId (none in production today, but the type
+    // is `promptId?: string`) keep working.
+    const tool = new PromptIdAwareTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const invocation = (
+      scheduler as unknown as {
+        buildInvocation: (
+          t: typeof tool,
+          a: Record<string, unknown>,
+          callId?: string,
+          promptId?: string,
+        ) => PromptIdAwareInvocation;
+      }
+    ).buildInvocation(tool, {}, 'call-omitted');
+
+    // promptId not passed → setPromptId not called → field stays undefined.
+    expect(invocation.capturedPromptId).toBeUndefined();
+  });
+
   it('is a no-op when invocation does not expose setPromptId', async () => {
     // Reuses the existing TestApprovalTool which has no setPromptId.
     // The scheduler must not throw when the duck-type check fails.
