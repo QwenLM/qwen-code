@@ -142,41 +142,22 @@ export interface ServeOptions {
   /**
    * F2 (#4175 commit 5). Whether the daemon advertises the
    * `mcp_workspace_pool` + `mcp_pool_restart` capability tags.
-   * Defaults to `true` (the F2 pool is always on except under the
-   * env-var kill switch). Operators set this to `false` when
-   * `QWEN_SERVE_NO_MCP_POOL=1` is in scope so SDK clients pre-flighting
-   * on the tags don't speculatively send `?entryIndex=` queries the
-   * legacy single-entry path can't honor. The tag advertisement is
-   * orthogonal to ACP child behavior — the child reads its own env
-   * var copy independently — but they're driven from the same source
-   * via `runQwenServe.ts`.
    */
   mcpPoolActive?: boolean;
   /**
    * T2.4 (issue #4514). Cross-origin allowlist for browser webui
-   * deployments. Each entry is either the `*` literal (any origin
-   * allowed, advertised loudly in the boot breadcrumb) or a canonical
-   * URL origin (`<scheme>://<host>[:<port>]`, no trailing slash / path /
-   * userinfo / query). When at least one pattern is configured, the
-   * daemon installs `allowOriginCors` instead of `denyBrowserOriginCors`
-   * — matched cross-origin requests get proper CORS response headers
-   * (`Access-Control-Allow-Origin: <echoed>`, `Vary: Origin`,
-   * standard methods / headers / max-age, exposed `Retry-After`),
-   * unmatched cross-origin requests still get a 403 with the same error
-   * envelope as today.
-   *
-   * Empty / undefined preserves the default wall (any `Origin` header →
-   * 403 from `denyBrowserOriginCors`). Boot validates each entry through
-   * `parseAllowOriginPatterns` in
-   * `packages/cli/src/serve/auth.ts`; malformed entries throw
-   * `InvalidAllowOriginPatternError` and refuse to start.
-   *
-   * Loopback self-hits are unaffected — the demo-page Origin-strip
-   * shim (`server.ts` near `cachedSelfOrigins`) runs first and removes
-   * the `Origin` header for self-loopback addresses, so neither the
-   * old wall nor the new allowlist needs to know about them.
+   * deployments.
    */
   allowOrigins?: string[];
+  /**
+   * Issue #4514 T2.9. Server-side wallclock cap on a single
+   * `POST /session/:id/prompt` from receipt to completion.
+   */
+  promptDeadlineMs?: number;
+  /**
+   * Issue #4514 T2.9. Per-SSE-connection idle deadline.
+   */
+  writerIdleTimeoutMs?: number;
 }
 
 /**

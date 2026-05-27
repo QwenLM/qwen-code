@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   extractContextFilename,
   InvalidPolicyConfigError,
+  runQwenServe,
   validatePolicyConfig,
 } from './runQwenServe.js';
+import type { HttpAcpBridge } from './httpAcpBridge.js';
 
 /**
  * #4297 fold-in 7 (deepseek S1, addresses #3262690842). Lock the
@@ -171,5 +176,89 @@ describe('validatePolicyConfig (#4335 boot validation)', () => {
     expect(() => validatePolicyConfig({ consensusQuorum: 0 })).toThrow(
       /consensusQuorum/,
     );
+  });
+});
+
+/**
+ * Integration test: verify daemon logger is initialized and written to
+ * during `runQwenServe` boot + shutdown. Uses a fake bridge to avoid
+ * spawning real `qwen --acp` child processes.
+ */
+describe('runQwenServe daemon logger wiring', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('creates a daemon log file at boot and flushes on shutdown', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-dl-')));
+    const workspace = tmpDir;
+    const debugDir = path.join(tmpDir, 'debug');
+
+    // Minimal fake bridge satisfying the shape runQwenServe expects.
+    const fakeBridge: HttpAcpBridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+      getSession: vi.fn(),
+      getAllSessions: vi.fn().mockReturnValue([]),
+      publishWorkspaceEvent: vi.fn(),
+      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+      resume: vi.fn(),
+    } as unknown as HttpAcpBridge;
+
+    // Point daemon logger at our temp debug dir
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+
+    try {
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace,
+          maxSessions: 1,
+        },
+        { bridge: fakeBridge },
+      );
+
+      // Daemon log directory should exist
+      const daemonDir = path.join(debugDir, 'daemon');
+      expect(fs.existsSync(daemonDir)).toBe(true);
+
+      // Find the log file (pattern: serve-<pid>-<hash>.log)
+      const logFiles = fs
+        .readdirSync(daemonDir)
+        .filter((f) => f.endsWith('.log'));
+      expect(logFiles.length).toBeGreaterThanOrEqual(1);
+
+      const logContent = fs.readFileSync(
+        path.join(daemonDir, logFiles[0]!),
+        'utf8',
+      );
+      // Should contain the "daemon started" boot line
+      expect(logContent).toContain('daemon started');
+      expect(logContent).toContain(`pid=${process.pid}`);
+      expect(logContent).toContain(`workspace=${workspace}`);
+
+      // Close the handle (graceful shutdown)
+      await handle.close();
+
+      // The log should still be readable after shutdown
+      const finalContent = fs.readFileSync(
+        path.join(daemonDir, logFiles[0]!),
+        'utf8',
+      );
+      expect(finalContent).toContain('daemon started');
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
   });
 });

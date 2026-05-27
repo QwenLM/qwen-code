@@ -1,0 +1,25 @@
+.message {
+  margin-left: 22px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+
+.info {
+  background: var(--info-bg);
+  border: 1px solid var(--info-border);
+  color: var(--accent-color);
+}
+
+.error {
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
+  color: var(--error-color);
+}
+
+.warning {
+  background: var(--warning-bg);
+  border: 1px solid var(--warning-border);
+  color: var(--warning-color);
+}

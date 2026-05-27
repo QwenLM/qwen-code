@@ -31,10 +31,12 @@ import type {
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
   HeartbeatResult,
@@ -227,6 +229,20 @@ export interface PromptRequest {
   prompt: PromptContentBlock[];
   /** Optional ACP _meta passthrough. */
   _meta?: Record<string, unknown> | null;
+  /**
+   * Issue #4514 T2.9. Per-prompt wallclock cap (positive integer ms).
+   * The effective deadline is `min(server flag, this)` — the request
+   * can shorten, never extend. When omitted, the server's
+   * `--prompt-deadline-ms` flag governs alone (unlimited when both
+   * are unset). On expiry the daemon returns 504 +
+   * `errorKind: 'prompt_deadline_exceeded'`.
+   *
+   * Daemons without T2.9 (no `prompt_absolute_deadline` capability
+   * tag) silently ignore the field — pre-flight
+   * `caps.features.includes('prompt_absolute_deadline')` before
+   * relying on it.
+   */
+  deadlineMs?: number;
   [key: string]: unknown;
 }
 
@@ -442,6 +458,21 @@ export class DaemonClient {
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /workspace/mcp');
         return (await res.json()) as DaemonWorkspaceMcpStatus;
+      },
+    );
+  }
+
+  async workspaceMcpTools(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpToolsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/tools`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/mcp/:server/tools');
+        }
+        return (await res.json()) as DaemonWorkspaceMcpToolsStatus;
       },
     );
   }
@@ -784,6 +815,19 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace/preflight');
         }
         return (await res.json()) as DaemonWorkspacePreflightStatus;
+      },
+    );
+  }
+
+  async workspaceTools(): Promise<DaemonWorkspaceToolsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/tools`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/tools');
+        }
+        return (await res.json()) as DaemonWorkspaceToolsStatus;
       },
     );
   }

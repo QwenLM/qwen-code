@@ -1253,6 +1253,7 @@ describe('Session', () => {
         });
         mockClient.sessionUpdate = vi
           .fn()
+          .mockResolvedValueOnce(undefined) // emitUserMessage
           .mockRejectedValueOnce(new Error('client disconnected'));
         mockChat.sendMessageStream = vi
           .fn()
@@ -1322,6 +1323,7 @@ describe('Session', () => {
         });
         mockClient.sessionUpdate = vi
           .fn()
+          .mockResolvedValueOnce(undefined) // emitUserMessage
           .mockRejectedValueOnce(new Error('client disconnected'));
         mockChat.sendMessageStream = vi
           .fn()

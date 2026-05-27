@@ -439,6 +439,44 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('GETs /workspace/mcp/:server/tools with URL encoding', async () => {
+      const toolsStatus = {
+        v: 1,
+        serverName: 'my server',
+        tools: [{ name: 'tool-a', description: 'A tool' }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, toolsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceMcpTools('my server')).resolves.toEqual(
+        toolsStatus,
+      );
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/mcp/my%20server/tools'],
+      ]);
+    });
+
+    it('GETs /workspace/tools and returns the tools envelope', async () => {
+      const toolsStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        acpChannelLive: false,
+        tools: [{ name: 'Bash', enabled: true }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, toolsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceTools()).resolves.toEqual(toolsStatus);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/tools'],
+      ]);
+    });
+
     it('GETs session status routes with encoded session ids', async () => {
       const context: DaemonSessionContextStatus = {
         v: 1,

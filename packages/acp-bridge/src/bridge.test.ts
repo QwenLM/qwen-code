@@ -27,6 +27,7 @@ import {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   RestoreInProgressError,
   SessionNotFoundError,
   McpServerNotFoundError,
@@ -2490,6 +2491,65 @@ describe('createHttpAcpBridge', () => {
       await expect(bridge.cancelSession('unknown')).rejects.toBeInstanceOf(
         SessionNotFoundError,
       );
+    });
+
+    it('treats idle agent cancel as success', async () => {
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({
+          cancelImpl: () => {
+            throw {
+              code: -32603,
+              message: 'Internal error',
+              data: { details: 'Not currently generating' },
+            };
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.cancelSession(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
+
+      await bridge.shutdown();
+    });
+
+    it('treats idle agent cancel wording variants as success', async () => {
+      const variants: unknown[] = [
+        new Error(`${NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE} (session idle)`),
+        {
+          code: -32603,
+          message: 'Internal error',
+          data: { details: 'not currently generating' },
+        },
+      ];
+
+      for (const err of variants) {
+        const handles: ChannelHandle[] = [];
+        const factory: ChannelFactory = async () => {
+          const h = makeChannel({
+            cancelImpl: () => {
+              throw err;
+            },
+          });
+          handles.push(h);
+          return h.channel;
+        };
+        const bridge = makeBridge({ channelFactory: factory });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        await expect(
+          bridge.cancelSession(session.sessionId),
+        ).resolves.toBeUndefined();
+        expect(handles[0]?.agent.cancelCalls).toHaveLength(1);
+
+        await bridge.shutdown();
+      }
     });
   });
 
@@ -7099,5 +7159,164 @@ describe('createHttpAcpBridge — F3 multi-client permission coordination', () =
         permissionConsensusQuorum: 1.5,
       }),
     ).toThrow(/positive integer/);
+  });
+});
+
+// ============================================================
+// BridgeOptions.onDiagnosticLine — verify the tee callback
+// receives writeServeDebugLine output when QWEN_SERVE_DEBUG=1.
+// ============================================================
+describe('onDiagnosticLine', () => {
+  const originalDebug = process.env['QWEN_SERVE_DEBUG'];
+  afterEach(() => {
+    if (originalDebug === undefined) delete process.env['QWEN_SERVE_DEBUG'];
+    else process.env['QWEN_SERVE_DEBUG'] = originalDebug;
+  });
+
+  it('receives writeServeDebugLine output when QWEN_SERVE_DEBUG=1', async () => {
+    process.env['QWEN_SERVE_DEBUG'] = '1';
+    const captured: Array<{ line: string; level?: string }> = [];
+
+    // Thread scope → two distinct sessions sharing one channel.
+    let capturedConn: InstanceType<typeof AgentSideConnection> | undefined;
+    const factory: ChannelFactory = async () => {
+      const { clientStream, agentStream } = createInMemoryChannel();
+      const fakeAgent = new FakeAgent();
+      const conn = new AgentSideConnection(() => fakeAgent, agentStream);
+      capturedConn = conn;
+      return {
+        stream: clientStream,
+        exited: new Promise<
+          | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+          | undefined
+        >(() => {}),
+        kill: async () => {},
+        killSync: () => {},
+      };
+    };
+
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      channelFactory: factory,
+      onDiagnosticLine: (line, level) => captured.push({ line, level }),
+    });
+
+    const sessionA = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const sessionB = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(sessionA.sessionId).not.toBe(sessionB.sessionId);
+
+    // Issue a permission request on session A via the agent side.
+    const subAbort = new AbortController();
+    const iter = bridge.subscribeEvents(sessionA.sessionId, {
+      signal: subAbort.signal,
+    });
+
+    // Fire requestPermission from the agent side (same pattern as
+    // setupForPermission in the permission_request tests above).
+    void (
+      capturedConn as unknown as {
+        requestPermission(p: unknown): Promise<unknown>;
+      }
+    ).requestPermission({
+      sessionId: sessionA.sessionId,
+      toolCall: { toolCallId: 'tc-diag', title: 'test-tool' },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ],
+    });
+
+    // Read the permission_request event to get the requestId.
+    const it2 = iter[Symbol.asyncIterator]();
+    const next = await it2.next();
+    expect(next.done).toBe(false);
+    const payload = next.value!.data as { requestId: string };
+
+    // Vote using session B's sessionId → cross-session rejection path
+    // which triggers teeServeDebugLine (bridge.ts line ~2253).
+    const accepted = bridge.respondToSessionPermission(
+      sessionB.sessionId,
+      payload.requestId,
+      { outcome: { outcome: 'cancelled' } },
+    );
+    expect(accepted).toBe(false);
+
+    // Verify the onDiagnosticLine callback received the debug line.
+    expect(captured.some((e) => e.line.includes('qwen serve debug: '))).toBe(
+      true,
+    );
+    expect(
+      captured.some((e) => e.line.includes('rejected permission vote')),
+    ).toBe(true);
+    expect(
+      captured.every((e) => e.level === undefined || e.level === 'info'),
+    ).toBe(true);
+
+    subAbort.abort();
+    await bridge.shutdown();
+  });
+
+  it('does not invoke callback when QWEN_SERVE_DEBUG is off', async () => {
+    delete process.env['QWEN_SERVE_DEBUG'];
+    const captured: Array<{ line: string; level?: string }> = [];
+
+    let capturedConn: InstanceType<typeof AgentSideConnection> | undefined;
+    const factory: ChannelFactory = async () => {
+      const { clientStream, agentStream } = createInMemoryChannel();
+      const fakeAgent = new FakeAgent();
+      const conn = new AgentSideConnection(() => fakeAgent, agentStream);
+      capturedConn = conn;
+      return {
+        stream: clientStream,
+        exited: new Promise<
+          | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+          | undefined
+        >(() => {}),
+        kill: async () => {},
+        killSync: () => {},
+      };
+    };
+
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      channelFactory: factory,
+      onDiagnosticLine: (line, level) => captured.push({ line, level }),
+    });
+
+    const sessionA = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const sessionB = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const subAbort = new AbortController();
+    const iter = bridge.subscribeEvents(sessionA.sessionId, {
+      signal: subAbort.signal,
+    });
+
+    void (
+      capturedConn as unknown as {
+        requestPermission(p: unknown): Promise<unknown>;
+      }
+    ).requestPermission({
+      sessionId: sessionA.sessionId,
+      toolCall: { toolCallId: 'tc-diag2', title: 'test-tool' },
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ],
+    });
+
+    const it2 = iter[Symbol.asyncIterator]();
+    const next = await it2.next();
+    const payload = next.value!.data as { requestId: string };
+
+    // Same cross-session vote — but QWEN_SERVE_DEBUG is off.
+    bridge.respondToSessionPermission(sessionB.sessionId, payload.requestId, {
+      outcome: { outcome: 'cancelled' },
+    });
+
+    // Callback must NOT have been invoked.
+    expect(captured).toHaveLength(0);
+
+    subAbort.abort();
+    await bridge.shutdown();
   });
 });
