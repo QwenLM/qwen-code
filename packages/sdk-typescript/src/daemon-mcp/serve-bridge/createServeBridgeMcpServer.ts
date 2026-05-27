@@ -12,8 +12,15 @@ import { DaemonClient } from '../../daemon/DaemonClient.js';
 import { createSdkMcpServer } from '../createSdkMcpServer.js';
 import type { McpSdkServerConfigWithInstance } from '../createSdkMcpServer.js';
 import type { ServeBridgeMcpServerOptions, BridgeState } from './types.js';
-import { startSessionCleanup } from './types.js';
+import { startSessionCleanup, stopEventStream } from './types.js';
 import { allTools } from './tools/index.js';
+
+/** Strip trailing slashes without regex (avoids CodeQL ReDoS flag). */
+function stripTrailingSlashes(url: string): string {
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 0x2f) end--;
+  return end === url.length ? url : url.slice(0, end);
+}
 
 /**
  * Create an MCP server that proxies `qwen serve` HTTP endpoints as MCP tools.
@@ -40,7 +47,7 @@ export function createServeBridgeMcpServer(
       baseUrl: opts.daemonUrl,
       token: opts.token,
     }),
-    daemonUrl: opts.daemonUrl.replace(/\/+$/, ''),
+    daemonUrl: stripTrailingSlashes(opts.daemonUrl),
     token: opts.token,
     defaultSessionId: undefined,
     workspaceCwd: opts.workspaceCwd,
@@ -59,10 +66,13 @@ export function createServeBridgeMcpServer(
     tools,
   });
 
-  // Stop cleanup timer when server closes
+  // Stop cleanup timer and abort all active SSE streams when server closes
   const originalClose = server.instance.close.bind(server.instance);
   server.instance.close = async () => {
     stopCleanup();
+    for (const sessionId of [...state.eventStreams.keys()]) {
+      stopEventStream(state, sessionId);
+    }
     return originalClose();
   };
 

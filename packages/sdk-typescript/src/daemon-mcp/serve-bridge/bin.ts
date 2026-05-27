@@ -11,7 +11,7 @@
  * Usage:
  *   QWEN_DAEMON_URL=http://127.0.0.1:4170 \
  *   QWEN_DAEMON_TOKEN=<token> \
- *   node dist/mcp/serve-bridge/bin.js
+ *   node dist/daemon-mcp/serve-bridge/bin.js
  *
  * Environment variables:
  *   QWEN_DAEMON_URL   - Daemon base URL (default: http://127.0.0.1:4170)

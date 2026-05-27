@@ -55,21 +55,27 @@ export function agentTools(state: BridgeState): any[] {
           // Wait for the collector to be resolved by _meta event (with timeout).
           const COLLECT_TIMEOUT_MS = 30000;
           let timedOut = false;
+          let timeoutId: ReturnType<typeof setTimeout>;
           await Promise.race([
             collector.promise,
-            new Promise<void>((r) =>
-              setTimeout(() => {
+            new Promise<void>((r) => {
+              timeoutId = setTimeout(() => {
                 timedOut = true;
                 r();
-              }, COLLECT_TIMEOUT_MS),
-            ),
+              }, COLLECT_TIMEOUT_MS);
+            }),
           ]);
+          clearTimeout(timeoutId!);
 
-          if (timedOut && collector.texts.length === 0) {
-            throw new Error(
-              `Timed out waiting for agent response (${COLLECT_TIMEOUT_MS / 1000}s). ` +
-                'The agent may still be processing. Check session_context for status.',
-            );
+          if (timedOut) {
+            const partialText = collector.texts.join('');
+            return formatJsonResult({
+              session_id: sessionId,
+              stop_reason: 'timeout',
+              response: partialText || '(no text received)',
+              warning:
+                'Agent response may be incomplete. _meta event not received within 30s.',
+            });
           }
 
           const responseText =
@@ -98,6 +104,9 @@ export function agentTools(state: BridgeState): any[] {
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
         await state.client.cancel(sessionId);
+        // Resolve active collector so the prompt handler returns immediately
+        const stream = state.eventStreams.get(sessionId);
+        stream?.activeCollector?.resolve();
         return formatJsonResult({ ok: true, sessionId });
       }),
     ),

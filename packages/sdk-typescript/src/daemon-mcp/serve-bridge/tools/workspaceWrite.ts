@@ -23,6 +23,9 @@ export function workspaceWriteTools(state: BridgeState): any[] {
         expected_hash: z.string().optional().describe('Expected SHA-256 hash for replace mode (required for replace).'),
       },
       handler(async (args) => {
+        if (args.mode === 'replace' && !args.expected_hash) {
+          return formatToolError('expected_hash is required for replace mode.');
+        }
         const req =
           args.mode === 'create'
             ? {
@@ -37,7 +40,7 @@ export function workspaceWriteTools(state: BridgeState): any[] {
                 path: args.path,
                 content: args.content,
                 mode: 'replace' as const,
-                expectedHash: (args.expected_hash ?? '') as `sha256:${string}`,
+                expectedHash: args.expected_hash as `sha256:${string}`,
               };
         return formatJsonResult(await state.client.writeWorkspaceFile(req));
       }),
@@ -52,16 +55,16 @@ export function workspaceWriteTools(state: BridgeState): any[] {
         new_text: z.string().describe('Replacement text.'),
         expected_hash: z.string().describe('Expected SHA-256 hash of the current file.'),
       },
-      handler(async (args) => {
-        return formatJsonResult(
+      handler(async (args) =>
+        formatJsonResult(
           await state.client.editWorkspaceFile({
             path: args.path,
             oldText: args.old_text,
             newText: args.new_text,
             expectedHash: args.expected_hash as `sha256:${string}`,
           }),
-        );
-      }),
+        ),
+      ),
     ),
 
     tool(
@@ -75,9 +78,7 @@ export function workspaceWriteTools(state: BridgeState): any[] {
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
         return formatJsonResult(
-          await state.client.setSessionApprovalMode(sessionId, args.mode, {
-            persist: args.persist,
-          }),
+          await state.client.setSessionApprovalMode(sessionId, args.mode, { persist: args.persist }),
         );
       }),
     ),
@@ -89,11 +90,11 @@ export function workspaceWriteTools(state: BridgeState): any[] {
         tool_name: z.string().describe('Name of the tool to toggle.'),
         enabled: z.boolean().describe('Whether to enable (true) or disable (false) the tool.'),
       },
-      handler(async (args) => {
-        return formatJsonResult(
+      handler(async (args) =>
+        formatJsonResult(
           await state.client.setWorkspaceToolEnabled(args.tool_name, args.enabled),
-        );
-      }),
+        ),
+      ),
     ),
 
     tool(
@@ -102,11 +103,11 @@ export function workspaceWriteTools(state: BridgeState): any[] {
       {
         force: z.boolean().optional().describe('Overwrite existing QWEN.md if present.'),
       },
-      handler(async (args) => {
-        return formatJsonResult(
+      handler(async (args) =>
+        formatJsonResult(
           await state.client.initWorkspace({ force: args.force }),
-        );
-      }),
+        ),
+      ),
     ),
 
     tool(
@@ -115,20 +116,20 @@ export function workspaceWriteTools(state: BridgeState): any[] {
       {
         server_name: z.string().describe('Name of the MCP server to restart.'),
       },
-      handler(async (args) => {
-        return formatJsonResult(
+      handler(async (args) =>
+        formatJsonResult(
           await state.client.restartMcpServer(args.server_name),
-        );
-      }),
+        ),
+      ),
     ),
 
     tool(
       'workspace_memory_read',
       'Read workspace memory (QWEN.md hierarchy).',
       {},
-      handler(async () => {
-        return formatJsonResult(await state.client.workspaceMemory());
-      }),
+      handler(async () =>
+        formatJsonResult(await state.client.workspaceMemory()),
+      ),
     ),
 
     tool(
@@ -169,9 +170,7 @@ export function workspaceWriteTools(state: BridgeState): any[] {
         disallowed_tools: z.array(z.string()).optional().describe('Disallowed tool names.'),
         model: z.string().optional().describe('Model ID for the agent.'),
       },
-      handler(async (args) => {
-        return handleAgentsManage(state, args);
-      }),
+      handler(async (args) => handleAgentsManage(state, args)),
     ),
   ];
 }
@@ -201,6 +200,8 @@ async function handleAgentsManage(state: BridgeState, args: any): Promise<any> {
       return handleAgentUpdate(state, args);
     case 'delete':
       return handleAgentDelete(state, args);
+    default:
+      return formatToolError(`Unknown action: ${args.action}`);
   }
 }
 

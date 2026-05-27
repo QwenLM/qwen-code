@@ -11,40 +11,6 @@
 import type { BridgeState } from './types.js';
 
 /**
- * Build authorization headers for raw fetch calls.
- */
-export function authHeaders(state: BridgeState): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (state.token) {
-    headers['Authorization'] = `Bearer ${state.token}`;
-  }
-  return headers;
-}
-
-/**
- * Raw fetch helper for daemon endpoints not exposed by DaemonClient.
- * Throws on non-OK responses with the response body as message.
- */
-export async function daemonFetch(
-  state: BridgeState,
-  path: string,
-  query?: Record<string, string>,
-): Promise<unknown> {
-  const url = new URL(`${state.daemonUrl}${path}`);
-  if (query) {
-    for (const [k, v] of Object.entries(query)) {
-      if (v !== undefined) url.searchParams.set(k, v);
-    }
-  }
-  const res = await fetch(url.toString(), { headers: authHeaders(state) });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`${res.status} ${path}: ${text || res.statusText}`);
-  }
-  return await res.json();
-}
-
-/**
  * Resolve the session ID from explicit arg or default state.
  * Returns the session ID or throws a descriptive error.
  */

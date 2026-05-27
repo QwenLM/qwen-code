@@ -36,15 +36,15 @@ export function sessionTools(state: BridgeState): any[] {
           .describe('Session scope.'),
       },
       handler(async (args) => {
-        // Stop SSE for previous default session to prevent connection leak
-        if (state.defaultSessionId) {
-          stopEventStream(state, state.defaultSessionId);
-        }
         const session = await state.client.createOrAttachSession({
           workspaceCwd: args.workspace_cwd ?? state.workspaceCwd,
           modelServiceId: args.model_service_id,
           sessionScope: args.session_scope,
         });
+        // Stop old SSE only after new session is confirmed
+        if (state.defaultSessionId && state.defaultSessionId !== session.sessionId) {
+          stopEventStream(state, state.defaultSessionId);
+        }
         state.defaultSessionId = session.sessionId;
         // Start persistent SSE connection for this session
         startEventStream(state, session.sessionId);
@@ -103,9 +103,9 @@ export function sessionTools(state: BridgeState): any[] {
       },
       handler(async (args) => {
         const sessionId = resolveSessionId(state, args.session_id);
-        // Stop persistent SSE before closing session
-        stopEventStream(state, sessionId);
+        // Close HTTP session first, then stop SSE
         await state.client.closeSession(sessionId);
+        stopEventStream(state, sessionId);
         if (state.defaultSessionId === sessionId) {
           state.defaultSessionId = undefined;
         }

@@ -9,7 +9,7 @@
  *
  * Implementation is split across:
  * - ./sse.ts — SSE stream lifecycle (startEventStream, stopEventStream, createPromptCollector)
- * - ./helpers.ts — Utility functions (handler, resolveSessionId, authHeaders, daemonFetch)
+ * - ./helpers.ts — Utility functions (handler, resolveSessionId)
  */
 
 import type { DaemonClient } from '../../daemon/DaemonClient.js';
@@ -22,8 +22,6 @@ export {
   startSessionCleanup,
 } from './sse.js';
 export {
-  authHeaders,
-  daemonFetch,
   resolveSessionId,
   handler,
 } from './helpers.js';

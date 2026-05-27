@@ -16,8 +16,6 @@ import { createServeBridgeMcpServer } from '../../src/daemon-mcp/serve-bridge/cr
 import {
   resolveSessionId,
   handler,
-  daemonFetch,
-  authHeaders,
 } from '../../src/daemon-mcp/serve-bridge/types.js';
 import type {
   BridgeState,
@@ -138,21 +136,6 @@ describe('serve-bridge', () => {
     });
   });
 
-  describe('authHeaders', () => {
-    it('should return Authorization header when token exists', () => {
-      const { state } = makeMockState({ token: 'my-token' });
-      const headers = authHeaders(state);
-      expect(headers['Authorization']).toBe('Bearer my-token');
-    });
-
-    it('should return empty object when no token', () => {
-      const { state } = makeMockState({ token: undefined });
-      state.token = undefined;
-      const headers = authHeaders(state);
-      expect(headers).toEqual({});
-    });
-  });
-
   describe('handler', () => {
     it('should pass args through and return result', async () => {
       const fn = vi
@@ -182,64 +165,6 @@ describe('serve-bridge', () => {
         content: [{ type: 'text', text: 'string error' }],
         isError: true,
       });
-    });
-  });
-
-  describe('daemonFetch', () => {
-    it('should call the correct URL with auth headers', async () => {
-      const mockFetch = vi
-        .fn()
-        .mockResolvedValue(
-          new Response(JSON.stringify({ ok: true }), { status: 200 }),
-        );
-      const originalFetch = globalThis.fetch;
-      globalThis.fetch = mockFetch;
-
-      try {
-        const { state } = makeMockState({ token: 'abc' });
-        const result = await daemonFetch(state, '/health');
-        expect(mockFetch).toHaveBeenCalledWith('http://127.0.0.1:4170/health', {
-          headers: { Authorization: 'Bearer abc' },
-        });
-        expect(result).toEqual({ ok: true });
-      } finally {
-        globalThis.fetch = originalFetch;
-      }
-    });
-
-    it('should append query parameters', async () => {
-      const mockFetch = vi
-        .fn()
-        .mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
-      const originalFetch = globalThis.fetch;
-      globalThis.fetch = mockFetch;
-
-      try {
-        const { state } = makeMockState({ token: 'abc' });
-        await daemonFetch(state, '/stat', { path: 'test.txt' });
-        const calledUrl = mockFetch.mock.calls[0][0];
-        expect(calledUrl).toContain('/stat');
-        expect(calledUrl).toContain('path=test.txt');
-      } finally {
-        globalThis.fetch = originalFetch;
-      }
-    });
-
-    it('should throw on non-OK response', async () => {
-      const mockFetch = vi
-        .fn()
-        .mockResolvedValue(new Response('Not Found', { status: 404 }));
-      const originalFetch = globalThis.fetch;
-      globalThis.fetch = mockFetch;
-
-      try {
-        const { state } = makeMockState({ token: 'abc' });
-        await expect(
-          daemonFetch(state, '/stat', { path: 'x' }),
-        ).rejects.toThrow('404');
-      } finally {
-        globalThis.fetch = originalFetch;
-      }
     });
   });
 
