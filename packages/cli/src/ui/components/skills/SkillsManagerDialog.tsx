@@ -323,9 +323,14 @@ export function SkillsManagerDialog({
     // /skills and pressing Esc would silently drop orphaned entries and
     // the user's prior disable setting would vanish if the skill later
     // reappears (branch switch, extension reinstall).
-    const unlockedLower = new Set(unlockedSkills.map((s) => lower(s.name)));
+    //
+    // Use `allSkills` (not `unlockedSkills`) as the "known" set so that
+    // skills disabled at a higher scope (locked) are NOT treated as
+    // orphans and re-emitted — that would violate invariant #2 (locked
+    // names never appear in the workspace write).
+    const allKnownLower = new Set(allSkills.map((s) => lower(s.name)));
     for (const prev of previousStrings) {
-      if (!unlockedLower.has(lower(prev))) {
+      if (!allKnownLower.has(lower(prev))) {
         nextDisabled.push(prev);
       }
     }
@@ -402,6 +407,7 @@ export function SkillsManagerDialog({
     return 'ok';
   }, [
     addItem,
+    allSkills,
     reloadCommands,
     selectedKeys,
     settings,
