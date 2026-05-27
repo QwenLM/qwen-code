@@ -2033,7 +2033,13 @@ describe('Settings Loading and Merging', () => {
         (mockFsExistsSync as Mock).mockImplementation(
           (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
         );
-        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+    describe('corruption env var propagation', () => {
+      afterEach(() => {
+        delete process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'];
+        delete process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'];
+      });
+
+      it('should propagate corruptedPath/wasRecovered from env vars', () => {
         process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'] =
           '/test/path.corrupted';
         process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] = '1';
