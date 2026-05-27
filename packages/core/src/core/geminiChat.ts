@@ -108,20 +108,10 @@ function isCompressionFailureStatus(status: CompressionStatus): boolean {
 
 function shouldStopAfterHardRescue(
   shouldForceFromHard: boolean,
-  compressionInfo: ChatCompressionInfo,
   hardLimit: number,
   localPromptTokensAfterCompression: number,
 ): boolean {
-  if (!shouldForceFromHard) {
-    return false;
-  }
-  if (compressionInfo.compressionStatus !== CompressionStatus.COMPRESSED) {
-    return localPromptTokensAfterCompression >= hardLimit;
-  }
-  return (
-    compressionInfo.newTokenCount >= hardLimit ||
-    localPromptTokensAfterCompression >= hardLimit
-  );
+  return shouldForceFromHard && localPromptTokensAfterCompression >= hardLimit;
 }
 
 function getHardRescueFailureMessage(
@@ -196,6 +186,11 @@ interface TryCompressOptions {
    * `getHistory(true)` clone per send. (review #4168 R1.3 / R1.4)
    */
   precomputedEffectiveTokens?: number;
+  /**
+   * Delay writing the compression checkpoint until the caller has run any
+   * post-compression guards that may roll the in-memory chat state back.
+   */
+  deferChatCompressionRecord?: boolean;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -1391,10 +1386,12 @@ export class GeminiChat {
     });
 
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
-      this.chatRecordingService?.recordChatCompression({
-        info,
-        compressedHistory: newHistory,
-      });
+      if (!options?.deferChatCompressionRecord) {
+        this.chatRecordingService?.recordChatCompression({
+          info,
+          compressedHistory: newHistory,
+        });
+      }
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
@@ -1582,6 +1579,7 @@ export class GeminiChat {
         {
           pendingUserMessage: userContent,
           precomputedEffectiveTokens: effectiveTokens,
+          deferChatCompressionRecord: shouldForceFromHard,
           // Hard-rescue is force=true to bypass the cheap-gate breaker
           // but it's an AUTOMATIC trigger. Explicit trigger='auto' tells
           // the service to skip the manual-only orphan-strip that would
@@ -1604,7 +1602,6 @@ export class GeminiChat {
       if (
         shouldStopAfterHardRescue(
           shouldForceFromHard,
-          compressionInfo,
           hard,
           localPromptTokensAfterCompression,
         )
@@ -1635,6 +1632,15 @@ export class GeminiChat {
             `${this.consecutiveFailures}. ${message}`,
         );
         throw new Error(message);
+      }
+      if (
+        shouldForceFromHard &&
+        compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+      ) {
+        this.chatRecordingService?.recordChatCompression({
+          info: compressionInfo,
+          compressedHistory: this.getHistoryShallow(),
+        });
       }
 
       // Add user content to history ONCE before any attempts.
