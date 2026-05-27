@@ -8,6 +8,7 @@ import { useState } from 'react';
 import { Box, useIsScreenReaderEnabled } from 'ink';
 import { useUIState } from './contexts/UIStateContext.js';
 import { useSettings } from './contexts/SettingsContext.js';
+import { CORRUPTED_SUFFIX } from '../config/settings.js';
 import { StreamingContext } from './contexts/StreamingContext.js';
 import { QuittingDisplay } from './components/QuittingDisplay.js';
 import { SettingsCorruptedDialog } from './components/SettingsCorruptedDialog.js';
@@ -39,9 +40,9 @@ export const App = () => {
                 fs.existsSync(settings.corruptedPath)
               ) {
                 try {
-                  const settingsPath = settings.corruptedPath.replace(
-                    /\.corrupted$/,
-                    '',
+                  const settingsPath = settings.corruptedPath.slice(
+                    0,
+                    -CORRUPTED_SUFFIX.length,
                   );
                   fs.copyFileSync(settings.corruptedPath, settingsPath);
                   fs.unlinkSync(settings.corruptedPath);

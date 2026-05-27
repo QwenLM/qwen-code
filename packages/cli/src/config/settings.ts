@@ -812,6 +812,8 @@ export function loadEnvironment(settings: Settings): void {
   }
 }
 
+export const CORRUPTED_SUFFIX = '.corrupted';
+
 /**
  * Load and merge settings from all scopes:
  * System Defaults → User (~/.qwen/settings.json) → Workspace → System.
@@ -873,7 +875,7 @@ export function loadSettings(
         let rawSettings: unknown;
         // Carry corruption state through to the final return so it
         // can be attached after the migration pipeline runs.
-        const corruptedPath = `${filePath}.corrupted`;
+        const corruptedPath = `${filePath}${CORRUPTED_SUFFIX}`;
         let corruptedSaved = false;
         let recoveredFromBackup = false;
         let recoveredFromEnvVar: boolean | null = null;
