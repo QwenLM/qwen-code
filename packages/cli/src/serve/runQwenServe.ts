@@ -765,6 +765,11 @@ export async function runQwenServe(
       );
     });
 
+  // Create the status provider once — shared between bridge and workspace
+  // service so both answer env/preflight cells from the same daemon-local
+  // implementation.
+  const statusProvider = createDaemonStatusProvider();
+
   const bridge =
     deps.bridge ??
     createAcpSessionBridge({
@@ -787,14 +792,17 @@ export async function runQwenServe(
         ? { permissionConsensusQuorum }
         : {}),
       permissionAudit: permissionAuditPublisher,
-      // Inject the daemon-host status provider so the bridge can pull
-      // env / preflight cells through a typed seam instead of
-      // importing daemon-host helpers directly.
-      statusProvider: createDaemonStatusProvider(),
-      // Inject the WorkspaceFileSystem adapter so agent ACP
-      // `writeTextFile` / `readTextFile` calls go through the
-      // defensive fs layer (trust gate + atomic write + symlink
-      // resolution + audit emit).
+      // #4175 PR 22b/2: inject the daemon-host status provider so the
+      // bridge can pull env / preflight cells through a typed seam
+      // instead of importing daemon-host helpers directly. Production
+      // implementation wraps `buildEnvStatusFromProcess` and the
+      // (lifted) `buildDaemonPreflightCells` body.
+      statusProvider,
+      // F1 follow-up (#4319): inject the WorkspaceFileSystem adapter so
+      // agent ACP `writeTextFile` / `readTextFile` calls go through
+      // PR 18's defensive fs layer (trust gate + atomic write + symlink
+      // resolution + audit emit) instead of `BridgeClient`'s inline
+      // raw-fs proxy. Closes the `ws.ts:613` follow-up thread.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
       ...(contextFilenameForInit !== undefined
         ? { contextFilename: contextFilenameForInit }
@@ -832,11 +840,6 @@ export async function runQwenServe(
   // owns workspace-scoped status queries, tool toggle, init, and MCP
   // restart — routes in server.ts delegate here instead of reaching
   // into the bridge for workspace concerns.
-  // Construct the statusProvider once — shared between bridge and workspace
-  // service so both answer env/preflight cells from the same daemon-local
-  // implementation.
-  const statusProviderForWs = createDaemonStatusProvider();
-
   const workspaceService = createDaemonWorkspaceService({
     boundWorkspace,
     contextFilename: contextFilenameForInit ?? 'QWEN.md',
@@ -851,7 +854,7 @@ export async function runQwenServe(
     deviceFlowRegistry: undefined,
     subagentManager: undefined,
     // Daemon-host status provider for env + preflight cells.
-    statusProvider: statusProviderForWs,
+    statusProvider,
     // Channel liveness check — proxied through bridge.sessionCount.
     isChannelLive: () => bridge.sessionCount > 0,
     persistDisabledTools: persistDisabledToolsFn,

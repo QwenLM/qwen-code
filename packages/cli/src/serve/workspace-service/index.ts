@@ -184,6 +184,7 @@ export function createDaemonWorkspaceService(
       // 1. Daemon cells from statusProvider.getDaemonPreflightCells() — always local
       // 2. ACP cells from queryWorkspaceStatus (live ACP child) or idle placeholders
       const acpChannelLive = isChannelLive?.() ?? false;
+      const idleCells = createIdleAcpPreflightCells();
 
       // Get daemon cells (local, no ACP query).
       let daemonCells: ServeWorkspacePreflightStatus['cells'] = [];
@@ -197,15 +198,14 @@ export function createDaemonWorkspaceService(
       }
 
       // Get ACP cells — either from live child or idle placeholders.
-      let acpCells: ServeWorkspacePreflightStatus['cells'] =
-        createIdleAcpPreflightCells();
+      let acpCells: ServeWorkspacePreflightStatus['cells'] = idleCells;
       let errors: ServeWorkspacePreflightStatus['errors'] | undefined;
 
       if (acpChannelLive) {
         try {
           const acpResult = await queryWorkspaceStatus(
             SERVE_STATUS_EXT_METHODS.workspacePreflight,
-            () => ({ cells: createIdleAcpPreflightCells() }),
+            () => ({ cells: idleCells }),
           );
           // The ACP response may contain only ACP-locality cells.
           if (acpResult && 'cells' in acpResult) {
@@ -219,7 +219,7 @@ export function createDaemonWorkspaceService(
           }
         } catch (err) {
           // ACP query failed — fall back to idle placeholders and report error.
-          acpCells = createIdleAcpPreflightCells();
+          acpCells = idleCells;
           errors = [
             {
               kind: 'preflight',

@@ -34,6 +34,8 @@ import type {
   WorkspaceRequestContext,
 } from './types.js';
 
+import { validateClientId as validateClientIdShared } from './validation.js';
+
 // ---------------------------------------------------------------------------
 // Dependencies
 // ---------------------------------------------------------------------------
@@ -58,16 +60,15 @@ export interface AgentsServiceDeps {
 // ---------------------------------------------------------------------------
 
 export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
-  const { subagentManager, boundWorkspace, publishWorkspaceEvent, knownClientIds } = deps;
+  const {
+    subagentManager,
+    boundWorkspace,
+    publishWorkspaceEvent,
+    knownClientIds,
+  } = deps;
 
   function validateClientId(ctx: WorkspaceRequestContext): void {
-    const clientId = ctx.originatorClientId;
-    if (clientId === undefined) return;
-    if (!knownClientIds().has(clientId)) {
-      throw new Error(
-        `Client id "${clientId}" is not registered for this workspace`,
-      );
-    }
+    validateClientIdShared(ctx, knownClientIds);
   }
 
   function toSummary(config: SubagentConfig): ServeWorkspaceAgentSummary {
@@ -111,7 +112,9 @@ export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
   }
 
   return {
-    async listAgents(ctx: WorkspaceRequestContext): Promise<ServeWorkspaceAgentsStatus> {
+    async listAgents(
+      _ctx: WorkspaceRequestContext,
+    ): Promise<ServeWorkspaceAgentsStatus> {
       const agents = await subagentManager.listSubagents({ force: true });
       return {
         v: STATUS_SCHEMA_VERSION,
@@ -144,10 +147,12 @@ export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
         level,
       };
       if (params.tools) config.tools = params.tools;
-      if (params.disallowedTools) config.disallowedTools = params.disallowedTools;
+      if (params.disallowedTools)
+        config.disallowedTools = params.disallowedTools;
       if (params.model) config.model = params.model;
       if (params.color) config.color = params.color;
-      if (params.background !== undefined) config.background = params.background;
+      if (params.background !== undefined)
+        config.background = params.background;
       if (params.approvalMode) config.approvalMode = params.approvalMode;
       if (params.runConfig) config.runConfig = params.runConfig;
 
@@ -161,7 +166,7 @@ export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
       publishWorkspaceEvent({
         type: 'agent_created',
         data: { agentName: params.name },
-        ...(ctx.originatorClientId ? { originatorClientId: ctx.originatorClientId } : {}),
+        originatorClientId: ctx.originatorClientId,
       });
 
       return toDetail(created);
@@ -184,19 +189,27 @@ export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
       }
 
       const updates: Partial<SubagentConfig> = {};
-      if (params.description !== undefined) updates.description = params.description;
-      if (params.systemPrompt !== undefined) updates.systemPrompt = params.systemPrompt;
+      if (params.description !== undefined)
+        updates.description = params.description;
+      if (params.systemPrompt !== undefined)
+        updates.systemPrompt = params.systemPrompt;
       if (params.tools !== undefined) updates.tools = params.tools;
-      if (params.disallowedTools !== undefined) updates.disallowedTools = params.disallowedTools;
+      if (params.disallowedTools !== undefined)
+        updates.disallowedTools = params.disallowedTools;
       if (params.model !== undefined) updates.model = params.model;
       if (params.color !== undefined) updates.color = params.color;
-      if (params.background !== undefined) updates.background = params.background;
-      if (params.approvalMode !== undefined) updates.approvalMode = params.approvalMode;
+      if (params.background !== undefined)
+        updates.background = params.background;
+      if (params.approvalMode !== undefined)
+        updates.approvalMode = params.approvalMode;
       if (params.runConfig !== undefined) updates.runConfig = params.runConfig;
 
       await subagentManager.updateSubagent(agentName, updates, existing.level);
 
-      const updated = await subagentManager.loadSubagent(agentName, existing.level);
+      const updated = await subagentManager.loadSubagent(
+        agentName,
+        existing.level,
+      );
       if (!updated) {
         throw new Error('Agent update succeeded but reload failed');
       }
@@ -204,7 +217,7 @@ export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
       publishWorkspaceEvent({
         type: 'agent_updated',
         data: { agentName },
-        ...(ctx.originatorClientId ? { originatorClientId: ctx.originatorClientId } : {}),
+        originatorClientId: ctx.originatorClientId,
       });
 
       return toDetail(updated);
@@ -231,7 +244,7 @@ export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
       publishWorkspaceEvent({
         type: 'agent_deleted',
         data: { agentName },
-        ...(ctx.originatorClientId ? { originatorClientId: ctx.originatorClientId } : {}),
+        originatorClientId: ctx.originatorClientId,
       });
 
       return { deleted: true };
