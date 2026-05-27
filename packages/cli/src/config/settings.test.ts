@@ -1990,10 +1990,11 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
-      // Verify the warning message when rename+fallback both fail
+      // Corruption warning no longer goes through migrationWarnings —
+      // copy failed so corruptedPath is undefined too
       const warnings = getSettingsWarnings(result);
-      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(true);
-      expect(warnings.some((w) => w.includes('renamed to'))).toBe(false);
+      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
+      expect(result.corruptedPath).toBeUndefined();
 
       vi.restoreAllMocks();
     });
@@ -2014,16 +2015,11 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       const warnings = getSettingsWarnings(result);
 
-      // Warnings must be non-empty so getSettingsWarnings() returns
-      // corruption info consumable by the interactive Notifications component.
-      // (before relaunchAppInChildProcess) actually emits something.
-      expect(warnings.length).toBeGreaterThan(0);
-      // Each warning should be a human-readable string suitable for stderr
-      for (const w of warnings) {
-        expect(typeof w).toBe('string');
-        expect(w.length).toBeGreaterThan(0);
-      }
-      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(true);
+      // Corruption warning no longer goes through migrationWarnings —
+      // it is emitted via settings.corruptedPath check in gemini.tsx
+      // early stderr path instead. Verify corruptedPath is set.
+      expect(result.corruptedPath).toBeDefined();
+      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
 
       vi.restoreAllMocks();
     });
