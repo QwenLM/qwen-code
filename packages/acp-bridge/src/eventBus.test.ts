@@ -649,9 +649,14 @@ describe('EventBus', () => {
       }
       expect(out[0]?.type).toBe('state_resync_required');
       expect(out[0]?.id).toBeUndefined();
-      const data = out[0]?.data as { reason: string; lastDeliveredId: number };
+      const data = out[0]?.data as {
+        reason: string;
+        lastDeliveredId: number;
+        earliestAvailableId: number;
+      };
       expect(data.reason).toBe('epoch_reset');
       expect(data.lastDeliveredId).toBe(5);
+      expect(data.earliestAvailableId).toBe(1);
       expect(out[1]?.type).toBe('replay_complete');
       expect(out[1]?.data).toMatchObject({ replayedCount: 0 });
       expect(out[2]?.type).toBe('foo');
