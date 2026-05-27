@@ -306,16 +306,11 @@ exit /b 1
 
 :ValidateVersion
 if /i "!VERSION!"=="latest" exit /b 0
-rem Accept bare semver (1.2.3) or with v prefix (v1.2.3).
-rem Optional pre-release/build suffix must start with '.' or '-' to match the shell installer.
-echo(!VERSION!| findstr /R /C:"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul
-if %ERRORLEVEL% EQU 0 exit /b 0
-echo(!VERSION!| findstr /R /C:"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[.-][A-Za-z0-9][A-Za-z0-9.-]*$" >nul
-if %ERRORLEVEL% EQU 0 exit /b 0
-echo(!VERSION!| findstr /R /C:"^v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul
-if %ERRORLEVEL% EQU 0 exit /b 0
-echo(!VERSION!| findstr /R /C:"^v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[.-][A-Za-z0-9][A-Za-z0-9.-]*$" >nul
-if %ERRORLEVEL% EQU 0 exit /b 0
+set "QWEN_VERSION_VALUE=!VERSION!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = $env:QWEN_VERSION_VALUE; if ($value -match '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$') { exit 0 }; exit 1"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_VERSION_VALUE="
+if %PS_STATUS% EQU 0 exit /b 0
 echo ERROR: --version must be 'latest' or a semver string.
 exit /b 1
 

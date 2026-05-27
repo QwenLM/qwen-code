@@ -17,11 +17,16 @@ export enum PackageManager {
   BUN = 'bun',
   BUNX = 'bunx',
   HOMEBREW = 'homebrew',
+  STANDALONE = 'standalone',
   NPX = 'npx',
   UNKNOWN = 'unknown',
 }
 
 const debugLogger = createDebugLogger('INSTALLATION_INFO');
+const STANDALONE_UNIX_INSTALLER =
+  'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh';
+const STANDALONE_WINDOWS_INSTALLER =
+  'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1';
 
 export interface InstallationInfo {
   packageManager: PackageManager;
@@ -74,6 +79,14 @@ export function getInstallationInfo(
         isGlobal: false,
         updateMessage: 'Running via pnpx, update not applicable.',
       };
+    }
+
+    const standaloneInfo = getStandaloneInstallInfo(
+      realPath,
+      isAutoUpdateEnabled,
+    );
+    if (standaloneInfo) {
+      return standaloneInfo;
     }
 
     // Check for Homebrew
@@ -174,5 +187,70 @@ export function getInstallationInfo(
   } catch (error) {
     debugLogger.error('Failed to detect installation info:', error);
     return { packageManager: PackageManager.UNKNOWN, isGlobal: false };
+  }
+}
+
+function getStandaloneInstallInfo(
+  realPath: string,
+  isAutoUpdateEnabled: boolean,
+): InstallationInfo | null {
+  const installDir = standaloneInstallDirForCliPath(realPath);
+  if (!installDir || !isStandaloneInstallDir(installDir)) {
+    return null;
+  }
+
+  const updateCommand =
+    process.platform === 'win32'
+      ? `powershell -ExecutionPolicy Bypass -c "irm ${STANDALONE_WINDOWS_INSTALLER} | iex"`
+      : `curl -fsSL ${STANDALONE_UNIX_INSTALLER} | bash`;
+  const updatePrefix = isAutoUpdateEnabled
+    ? 'Standalone install detected. Automatic in-place updates are not supported yet.'
+    : 'Standalone install detected.';
+
+  return {
+    packageManager: PackageManager.STANDALONE,
+    isGlobal: true,
+    updateMessage: `${updatePrefix} Please rerun the standalone installer to update: ${updateCommand}`,
+  };
+}
+
+function standaloneInstallDirForCliPath(realPath: string): string | null {
+  const suffix = '/lib/cli.js';
+  if (!realPath.endsWith(suffix)) {
+    return null;
+  }
+  return realPath.slice(0, -suffix.length);
+}
+
+function isStandaloneInstallDir(installDir: string): boolean {
+  try {
+    const manifestPath = path.join(installDir, 'manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      return false;
+    }
+
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+      name?: unknown;
+      target?: unknown;
+    };
+    if (
+      manifest.name !== '@qwen-code/qwen-code' ||
+      typeof manifest.target !== 'string'
+    ) {
+      return false;
+    }
+
+    const qwenBin =
+      process.platform === 'win32'
+        ? path.join(installDir, 'bin', 'qwen.cmd')
+        : path.join(installDir, 'bin', 'qwen');
+    const nodeBin =
+      process.platform === 'win32'
+        ? path.join(installDir, 'node', 'node.exe')
+        : path.join(installDir, 'node', 'bin', 'node');
+
+    return fs.existsSync(qwenBin) && fs.existsSync(nodeBin);
+  } catch {
+    return false;
   }
 }

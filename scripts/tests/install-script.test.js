@@ -242,15 +242,14 @@ describe('installation scripts', () => {
     expect(script).toContain(
       '[IO.File]::WriteAllText($env:QWEN_NORMALIZED_VERSION_FILE',
     );
+    expect(script).toContain('set "QWEN_VERSION_VALUE=!VERSION!"');
     expect(script).toContain(
-      'findstr /R /C:"^[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*$"',
-    );
-    expect(script).toContain(
-      'findstr /R /C:"^[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*[.-][A-Za-z0-9][A-Za-z0-9.-]*$"',
+      "$value -match '^v?[0-9]+\\.[0-9]+\\.[0-9]+([.-][A-Za-z0-9]+)*$'",
     );
     expect(script).not.toContain(
       'findstr /R /C:"^[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*[A-Za-z0-9.-]*$"',
     );
+    expect(script).not.toContain('[A-Za-z0-9][A-Za-z0-9.-]*$');
     expect(script).not.toContain('rmdir /S /Q "!SUMMARY_INSTALL_DIR!"');
     expect(script).not.toContain('del /F /Q "!INSTALLED_BIN!"');
   });
@@ -1393,6 +1392,53 @@ describe('standalone release packaging', () => {
     expect(fetchedOptions[0].redirect).toBe('manual');
   });
 
+  it('does not follow remote archive body redirects', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
+      await import(installationReleaseVerificationScriptUrl);
+    const checksumContent = placeholderChecksumContent(
+      EXPECTED_STANDALONE_ARCHIVE_NAMES,
+    );
+    const redirectedAsset = EXPECTED_STANDALONE_ARCHIVE_NAMES[0];
+
+    await expect(
+      verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+        fetchImpl: async (url) => {
+          if (url.endsWith('/SHA256SUMS')) {
+            return new Response(checksumContent);
+          }
+          if (url.endsWith(`/${redirectedAsset}`)) {
+            return new Response(null, {
+              status: 302,
+              headers: {
+                Location: 'https://169.254.169.254/latest/meta-data/',
+              },
+            });
+          }
+          const assetName = EXPECTED_STANDALONE_ARCHIVE_NAMES.find((name) =>
+            url.endsWith(`/${name}`),
+          );
+          return new Response(`${assetName}\n`);
+        },
+      }),
+    ).rejects.toThrow(/Redirect responses are not allowed/);
+  });
+
+  it('rejects private release base URLs at the verification entry point', async () => {
+    const { verifyReleaseBaseUrl } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+
+    await expect(
+      verifyReleaseBaseUrl('https://127.0.0.1/releases/'),
+    ).rejects.toThrow(/must not target a private network/);
+    await expect(
+      verifyReleaseBaseUrl('https://169.254.169.254/latest/meta-data/'),
+    ).rejects.toThrow(/must not target a private network/);
+    await expect(
+      verifyReleaseBaseUrl('https://sub.localhost./releases/'),
+    ).rejects.toThrow(/must not target a private network/);
+  });
+
   it('downloads release archive bodies instead of relying on HEAD probes', async () => {
     const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
       await import(installationReleaseVerificationScriptUrl);
@@ -1978,6 +2024,8 @@ describe('isPrivateOrReservedHost', () => {
     );
     expect(isPrivateOrReservedHost('localhost')).toBe(true);
     expect(isPrivateOrReservedHost('sub.localhost')).toBe(true);
+    expect(isPrivateOrReservedHost('localhost.')).toBe(true);
+    expect(isPrivateOrReservedHost('sub.localhost.')).toBe(true);
     expect(isPrivateOrReservedHost('LOCALHOST')).toBe(true);
   });
 
@@ -2032,6 +2080,7 @@ describe('isPrivateOrReservedHost', () => {
     expect(isPrivateOrReservedHost('8.8.8.8')).toBe(false);
     expect(isPrivateOrReservedHost('142.250.80.46')).toBe(false);
     expect(isPrivateOrReservedHost('example.com')).toBe(false);
+    expect(isPrivateOrReservedHost('example.com.')).toBe(false);
   });
 });
 

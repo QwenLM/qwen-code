@@ -339,7 +339,10 @@ function standaloneArchiveName(qwenTarget) {
 }
 
 function isPrivateOrReservedHost(hostname) {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const normalized = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '');
   if (!normalized) {
     return true;
   }

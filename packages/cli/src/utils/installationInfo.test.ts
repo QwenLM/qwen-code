@@ -26,6 +26,7 @@ vi.mock('fs', async (importOriginal) => {
     ...actualFs,
     realpathSync: vi.fn(),
     existsSync: vi.fn(),
+    readFileSync: vi.fn(),
   };
 });
 
@@ -40,6 +41,7 @@ vi.mock('child_process', async (importOriginal) => {
 const mockedIsGitRepository = vi.mocked(isGitRepository);
 const mockedRealPathSync = vi.mocked(fs.realpathSync);
 const mockedExistsSync = vi.mocked(fs.existsSync);
+const mockedReadFileSync = vi.mocked(fs.readFileSync);
 const mockedExecSync = vi.mocked(childProcess.execSync);
 
 describe('getInstallationInfo', () => {
@@ -128,6 +130,38 @@ describe('getInstallationInfo', () => {
     expect(info.packageManager).toBe(PackageManager.BUNX);
     expect(info.isGlobal).toBe(false);
     expect(info.updateMessage).toBe('Running via bunx, update not applicable.');
+  });
+
+  it('should detect standalone installs and avoid npm auto-update', () => {
+    const installDir = '/Users/test/.local/lib/qwen-code';
+    const cliPath = `${installDir}/lib/cli.js`;
+    process.argv[1] = cliPath;
+    mockedRealPathSync.mockReturnValue(cliPath);
+    mockedExistsSync.mockImplementation((candidate) =>
+      [
+        path.join(installDir, 'manifest.json'),
+        path.join(installDir, 'bin', 'qwen'),
+        path.join(installDir, 'node', 'bin', 'node'),
+      ].includes(String(candidate)),
+    );
+    mockedReadFileSync.mockImplementation((candidate) => {
+      if (candidate === path.join(installDir, 'manifest.json')) {
+        return JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          target: 'linux-x64',
+        });
+      }
+      throw new Error(`Unexpected read: ${candidate}`);
+    });
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.STANDALONE);
+    expect(info.isGlobal).toBe(true);
+    expect(info.updateCommand).toBeUndefined();
+    expect(info.updateMessage).toContain('Standalone install detected');
+    expect(info.updateMessage).toContain('install-qwen-standalone.sh');
+    expect(info.updateMessage).not.toContain('npm install');
   });
 
   it('should detect Homebrew installation via execSync', () => {
