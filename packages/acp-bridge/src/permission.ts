@@ -95,6 +95,9 @@ export interface PermissionVote {
   /** True when the request originated on a loopback connection.
    * `local-only` requires this. */
   readonly fromLoopback: boolean;
+  /** Opaque metadata forwarded from the voter's response body to
+   * the resolution (e.g. AskUserQuestion answers). */
+  readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -131,7 +134,11 @@ export type PermissionVoteOutcome =
  * a timeout expires.
  */
 export type PermissionResolution =
-  | { readonly kind: 'option'; readonly optionId: string }
+  | {
+      readonly kind: 'option';
+      readonly optionId: string;
+      readonly metadata?: Readonly<Record<string, unknown>>;
+    }
   | {
       readonly kind: 'cancelled';
       readonly reason: 'timeout' | 'session_closed' | 'agent_cancelled';

@@ -1,7 +1,7 @@
 .question {
-  margin: 8px 0 12px 22px;
+  margin: 8px 0 12px 12px;
   padding: 12px 16px;
-  border-left: 3px solid var(--border-color);
+  border: 1px solid var(--border-color);
   font-family: var(--font-mono);
   font-size: 13px;
 }
@@ -34,6 +34,7 @@
   margin-bottom: 10px;
   border-bottom: 1px solid var(--border-color);
   padding-bottom: 6px;
+  flex-wrap: wrap;
 }
 
 .tab {
@@ -53,6 +54,14 @@
   border-color: var(--accent-color);
 }
 
+.tabCheck {
+  color: var(--success-color, #4caf50);
+}
+
+.tabActive .tabCheck {
+  color: #fff;
+}
+
 .header {
   font-size: 13px;
   font-weight: bold;
@@ -64,6 +73,11 @@
   font-size: 13px;
   color: var(--text-primary);
   margin-bottom: 12px;
+}
+
+.multiHint {
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 .options {
@@ -81,9 +95,13 @@
   cursor: pointer;
 }
 
-.optionActive .optionLabel {
+.optionActive .optionLabel,
+.optionSelected .optionLabel {
   font-weight: bold;
+  color: var(--accent-color);
   text-decoration: underline;
+  text-decoration-color: var(--accent-color);
+  text-underline-offset: 3px;
 }
 
 .pointer {
@@ -91,6 +109,18 @@
   flex-shrink: 0;
   color: var(--accent-color);
   font-weight: bold;
+}
+
+.checkbox {
+  font-size: 14px;
+  font-weight: bold;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  min-width: 24px;
+}
+
+.optionSelected .checkbox {
+  color: var(--accent-color);
 }
 
 .optionNum {
@@ -120,21 +150,12 @@
   padding-left: 16px;
 }
 
-.optionSelected .optionLabel {
-  color: var(--accent-color);
-}
-
-.check {
-  color: var(--accent-color);
-  margin-left: 8px;
-}
-
 .customInput {
   flex: 1;
   padding: 2px 6px;
   background: transparent;
   border: none;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--accent-color);
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 13px;
@@ -143,6 +164,33 @@
 
 .customInput:focus {
   border-bottom-color: var(--accent-color);
+}
+
+.submitTab {
+  margin-top: 4px;
+}
+
+.summary {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: var(--bg-secondary, rgba(255, 255, 255, 0.03));
+}
+
+.summaryRow {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.summaryLabel {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.summaryValue {
+  color: var(--accent-color);
+  font-weight: bold;
 }
 
 .actions {

@@ -345,6 +345,23 @@ const MAX_DISPLAY_NAME_LENGTH = 256;
  */
 const MAX_ECHO_CONTENT_BLOCKS = 256;
 
+function extractPermissionResponseMetadata(
+  response: unknown,
+): Readonly<Record<string, unknown>> | undefined {
+  if (response === null || typeof response !== 'object') return undefined;
+  // Keep this extension deliberately narrow. Today the only non-ACP field
+  // expected by the agent is AskUserQuestion's `answers` payload.
+  const answers = (response as { readonly answers?: unknown }).answers;
+  if (
+    answers !== null &&
+    typeof answers === 'object' &&
+    !Array.isArray(answers)
+  ) {
+    return { answers };
+  }
+  return undefined;
+}
+
 /**
  * Echo a user prompt to the session bus so multi-client SSE subscribers
  * see the input alongside the agent response. Iterates content blocks
@@ -2464,6 +2481,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         response.outcome.outcome === 'selected'
           ? response.outcome.optionId
           : CANCEL_VOTE_SENTINEL;
+      const voterMetadata = extractPermissionResponseMetadata(response);
       const outcome = permissionMediator.vote({
         requestId,
         sessionId,
@@ -2471,6 +2489,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         optionId,
         receivedAtMs: Date.now(),
         fromLoopback: context?.fromLoopback ?? false,
+        ...(voterMetadata ? { metadata: voterMetadata } : {}),
       });
       switch (outcome.kind) {
         case 'resolved':

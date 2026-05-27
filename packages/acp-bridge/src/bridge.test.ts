@@ -21,6 +21,7 @@ import type {
   LoadSessionResponse,
   PromptResponse,
   ResumeSessionResponse,
+  RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
   InvalidClientIdError,
@@ -2887,6 +2888,126 @@ describe('createHttpAcpBridge', () => {
       expect(response.outcome.outcome).toBe('selected');
       expect(response.outcome.optionId).toBe('allow');
       expect(bridge.pendingPermissionCount).toBe(0);
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
+    it('forwards permission vote metadata back to the agent response', async () => {
+      const { bridge, session, conn } = await setupForPermission();
+
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+
+      const respPromise = (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: {
+          toolCallId: 'tc-ask',
+          title: 'AskUserQuestion: Ask user 1 question',
+        },
+        options: [
+          { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
+          { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+        ],
+      });
+
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      expect(next.done).toBe(false);
+      const payload = next.value!.data as { requestId: string };
+
+      const responseWithAnswers = {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: {
+          name: 'Alice',
+          grade: 'Primary',
+        },
+        ignored: 'not forwarded',
+      } satisfies RequestPermissionResponse & {
+        answers: Record<string, string>;
+        ignored: string;
+      };
+      const accepted = bridge.respondToPermission(
+        payload.requestId,
+        responseWithAnswers,
+      );
+      expect(accepted).toBe(true);
+
+      const response = await respPromise;
+      expect(response).toMatchObject({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: {
+          name: 'Alice',
+          grade: 'Primary',
+        },
+      });
+      expect(response).not.toHaveProperty('ignored');
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
+    it('forwards session-scoped permission answers without arbitrary metadata', async () => {
+      const { bridge, session, conn } = await setupForPermission();
+
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+
+      const respPromise = (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: {
+          toolCallId: 'tc-ask-scoped',
+          title: 'AskUserQuestion: Ask user 1 question',
+        },
+        options: [
+          { optionId: 'proceed_once', name: 'Submit', kind: 'allow_once' },
+          { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+        ],
+      });
+
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      expect(next.done).toBe(false);
+      const payload = next.value!.data as { requestId: string };
+
+      const responseWithAnswers = {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: {
+          name: 'Alice',
+        },
+        ignored: 'not forwarded',
+      } satisfies RequestPermissionResponse & {
+        answers: Record<string, string>;
+        ignored: string;
+      };
+      const accepted = bridge.respondToSessionPermission(
+        session.sessionId,
+        payload.requestId,
+        responseWithAnswers,
+        { clientId: session.clientId },
+      );
+      expect(accepted).toBe(true);
+
+      const response = await respPromise;
+      expect(response).toMatchObject({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: {
+          name: 'Alice',
+        },
+      });
+      expect(response).not.toHaveProperty('ignored');
 
       subAbort.abort();
       await bridge.shutdown();

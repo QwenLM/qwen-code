@@ -715,7 +715,11 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     );
     this.resolveEntry(
       pending,
-      { kind: 'option', optionId: vote.optionId },
+      {
+        kind: 'option',
+        optionId: vote.optionId,
+        ...(vote.metadata ? { metadata: vote.metadata } : {}),
+      },
       {
         type: 'first-responder',
         resolverClientId: vote.clientId,
@@ -776,7 +780,11 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     );
     this.resolveEntry(
       pending,
-      { kind: 'option', optionId: vote.optionId },
+      {
+        kind: 'option',
+        optionId: vote.optionId,
+        ...(vote.metadata ? { metadata: vote.metadata } : {}),
+      },
       {
         type: 'designated-originator',
         originatorClientId: pending.originatorClientId,
@@ -884,7 +892,11 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       );
       this.resolveEntry(
         pending,
-        { kind: 'option', optionId: vote.optionId },
+        {
+          kind: 'option',
+          optionId: vote.optionId,
+          ...(vote.metadata ? { metadata: vote.metadata } : {}),
+        },
         {
           type: 'consensus-quorum',
           resolvedOptionId: vote.optionId,
@@ -979,7 +991,11 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     );
     this.resolveEntry(
       pending,
-      { kind: 'option', optionId: vote.optionId },
+      {
+        kind: 'option',
+        optionId: vote.optionId,
+        ...(vote.metadata ? { metadata: vote.metadata } : {}),
+      },
       {
         type: 'local-only-loopback',
         resolverClientId: vote.clientId,

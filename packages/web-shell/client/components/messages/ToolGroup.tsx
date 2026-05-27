@@ -139,6 +139,10 @@ function getToolResultSummary(tool: ACPToolCall): string {
     return lines[0] || '';
   }
 
+  if (name === 'ask_user_question') {
+    return text;
+  }
+
   const firstLine = lines[0] || '';
   return truncateText(firstLine, 80);
 }
