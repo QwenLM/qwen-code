@@ -2743,15 +2743,19 @@ export class McpClientManager {
         /* best effort */
       }
       this.pooledConnections.delete(name);
+      this.toolRegistry.removeMcpToolsByServer(name);
+      this.stopHealthCheck(name);
     }
     const existingClient = this.clients.get(name);
     if (existingClient) {
+      this.stopHealthCheck(name);
       try {
         await existingClient.disconnect();
       } catch {
         /* best effort */
       }
       this.clients.delete(name);
+      this.toolRegistry.removeMcpToolsByServer(name);
       // Do NOT releaseSlotName here — the budget slot carries over to
       // the new entry being spawned. Releasing + not re-reserving would
       // leave the running server unaccounted in the budget.
@@ -2807,9 +2811,11 @@ export class McpClientManager {
       } else if (this.budgetMode !== 'off') {
         this.releaseSlotName(name);
       }
-      // Clean up any partial state
+      // Clean up any partial state (including tools from partial discover)
       this.pooledConnections.delete(name);
       this.clients.delete(name);
+      this.toolRegistry.removeMcpToolsByServer(name);
+      this.stopHealthCheck(name);
 
       const message = err instanceof Error ? err.message : String(err);
       const isTimeout = message.includes('timed out');

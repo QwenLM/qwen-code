@@ -2527,9 +2527,15 @@ class QwenAgent implements Agent {
           );
         }
         try {
+          // Strip security-sensitive fields — runtime-added servers must
+          // not bypass permission gates via trust:true from HTTP body
+          const { trust: _stripped, ...safeConfig } = config as Record<
+            string,
+            unknown
+          >;
           const result = await manager.addRuntimeMcpServer(
             name,
-            config as MCPServerConfig,
+            safeConfig as MCPServerConfig,
             originatorClientId,
           );
           return result as unknown as Record<string, unknown>;
