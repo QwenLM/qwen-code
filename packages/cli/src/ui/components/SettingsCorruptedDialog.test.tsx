@@ -157,7 +157,7 @@ describe('SettingsCorruptedDialog', () => {
   });
 
   it('should call onContinue when pressing Enter on CONTINUE option', async () => {
-    const { stdin, unmount } = render(
+    const { stdin, lastFrame, unmount } = render(
       <KeypressProvider kittyProtocolEnabled={false}>
         <SettingsCorruptedDialog
           corruptedPath={mockCorruptedPath}
@@ -170,6 +170,13 @@ describe('SettingsCorruptedDialog', () => {
 
     await wait();
     stdin.write(TerminalKeys.DOWN_ARROW as string);
+    await wait();
+    await waitFor(() => {
+      const lines = lastFrame().split('\n');
+      const continueLine = lines.find((l) => l.includes('Continue with'));
+      expect(continueLine).toBeTruthy();
+      expect(continueLine).toContain('>');
+    });
     await wait();
     stdin.write(TerminalKeys.ENTER as string);
     await wait();
