@@ -48,44 +48,73 @@ class ComputerUseInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Returns 'ask' on first use so the scheduler surfaces the install
-   * confirmation dialog BEFORE execute() is called. Returns 'allow' once the
-   * install state file exists (subsequent invocations after first-time setup).
+   * Always returns 'ask' so every desktop action surfaces through the
+   * standard tool-permission dialog. The PermissionManager rule system
+   * handles "always allow" per tool via ProceedAlwaysTool — that's the
+   * single source of truth for repeat-approval behavior.
+   *
+   * Earlier this returned 'allow' once the install-state file existed,
+   * which conflated install approval with per-action approval and
+   * effectively granted blanket permission for all 9 computer_use__*
+   * tools (including mutating actions like click / type_text / drag)
+   * after the first install confirmation. See PR #4590 review for the
+   * full discussion.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const approved = await isPackageSpecApproved(
-      homedir(),
-      resolveComputerUsePackageSpec(),
-    );
-    return approved ? 'allow' : 'ask';
+    return 'ask';
   }
 
   /**
-   * Builds the install-approval confirmation dialog.
+   * Builds the confirmation dialog. Two variants:
    *
-   * onConfirm writes the install state file so that runBootstrap() inside
-   * execute() sees isPackageSpecApproved === true and skips its own prompt.
-   * On Cancel the install state is NOT written; execute() will use the
-   * env-var fallback (QWEN_COMPUTER_USE_AUTO_APPROVE) which defaults to
-   * refusing — producing a clear error message.
+   * 1. Install not yet approved → show install info (download size,
+   *    permission flow to follow). onConfirm writes the install state
+   *    so runBootstrap() inside execute() skips its env-var fallback
+   *    prompt for headless contexts.
+   *
+   * 2. Install already approved → show per-action info (which tool +
+   *    which args) so the user can decide whether THIS specific action
+   *    is OK to perform.
+   *
+   * Both variants set permissionRules so the standard "Always allow"
+   * outcomes (ProceedAlwaysTool / ProceedAlwaysUser / ProceedAlwaysProject)
+   * add a rule via PermissionManager — subsequent calls of the SAME
+   * tool then skip the dialog. Different tools each need their own
+   * "always allow" choice; install approval no longer grants blanket
+   * access.
+   *
+   * On Cancel: install state is NOT written; execute() / runBootstrap()
+   * will use the env-var fallback (QWEN_COMPUTER_USE_AUTO_APPROVE),
+   * which defaults to refusing — producing a clear error message.
    */
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const permissionRules = [`computer_use__${this.upstreamName}`];
+    const installApproved = await isPackageSpecApproved(
+      homedir(),
+      resolveComputerUsePackageSpec(),
+    );
+
+    const prompt = installApproved
+      ? `Tool: computer_use__${this.upstreamName}\n\nArgs: ${safeJsonStringify(this.params)}\n\nThis will act on your desktop via the Computer Use binary.`
+      : `Tool: computer_use__${this.upstreamName}\n\n${INSTALL_REASON}`;
 
     const details: ToolCallConfirmationDetails = {
       type: 'info',
       title: `Allow Computer Use (${this.upstreamName})`,
-      prompt: `Tool: computer_use__${this.upstreamName}\n\n` + INSTALL_REASON,
+      prompt,
       permissionRules,
       onConfirm: async (
         outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
       ) => {
-        // Any non-Cancel outcome means the user approved.
-        // Write the install state so execute() / runBootstrap() can proceed
-        // without re-prompting.
+        // Any non-Cancel outcome means the user approved THIS call.
+        // Write install state (idempotent if already exists) so the
+        // bootstrap state machine in runBootstrap() can skip its env-var
+        // fallback prompt path. PermissionManager handles per-tool
+        // "always allow" via the permissionRules above — install state
+        // is no longer a blanket permission grant.
         if (outcome !== ToolConfirmationOutcome.Cancel) {
           await saveInstallState(homedir(), {
             approvedPackageSpec: resolveComputerUsePackageSpec(),

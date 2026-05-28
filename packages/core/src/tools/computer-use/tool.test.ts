@@ -251,7 +251,11 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     expect(permission).toBe('ask');
   });
 
-  it('getDefaultPermission returns allow when install state exists', async () => {
+  it('getDefaultPermission returns ask even when install state exists (no blanket grant)', async () => {
+    // Regression guard: install state is NOT a permission grant. Earlier
+    // implementations conflated the two and granted blanket approval for
+    // all desktop actions after a single install confirmation. See PR
+    // #4590 review (DragonnZhang).
     const packageSpec = resolveComputerUsePackageSpec();
     await saveInstallState(tmpHome, {
       approvedPackageSpec: packageSpec,
@@ -264,10 +268,10 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     );
     const invocation = tool.build({});
     const permission = await invocation.getDefaultPermission();
-    expect(permission).toBe('allow');
+    expect(permission).toBe('ask');
   });
 
-  it('getConfirmationDetails returns info dialog with install reason', async () => {
+  it('getConfirmationDetails returns install info when install state is absent', async () => {
     const tool = new ComputerUseTool(
       'list_apps',
       COMPUTER_USE_SCHEMAS.list_apps,
@@ -281,8 +285,39 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     if (details.type === 'info') {
       expect(details.title).toContain('list_apps');
       expect(details.prompt).toContain('computer_use__list_apps');
+      // Install variant mentions the ~50MB download
       expect(details.prompt).toContain('50MB');
       expect(details.permissionRules).toContain('computer_use__list_apps');
+    }
+  });
+
+  it('getConfirmationDetails returns per-action info once install is approved', async () => {
+    // After install approval, the dialog should switch from install-info
+    // to a compact per-action prompt naming THIS specific action — so the
+    // user can decide on each mutating call (click / type_text / drag /
+    // set_value / press_key / scroll / perform_secondary_action).
+    const packageSpec = resolveComputerUsePackageSpec();
+    await saveInstallState(tmpHome, {
+      approvedPackageSpec: packageSpec,
+      approvedAtIso: new Date().toISOString(),
+    });
+
+    const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
+    const invocation = tool.build({ app: 'TextEdit', element_index: '5' });
+    const details = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+
+    expect(details.type).toBe('info');
+    if (details.type === 'info') {
+      expect(details.title).toContain('click');
+      expect(details.prompt).toContain('computer_use__click');
+      // Per-action variant shows args and does NOT mention the install size
+      expect(details.prompt).toContain('TextEdit');
+      expect(details.prompt).not.toContain('50MB');
+      // Same per-tool permission rule — user can ProceedAlwaysTool to skip
+      // future confirmations for THIS tool only (not all 9).
+      expect(details.permissionRules).toContain('computer_use__click');
     }
   });
 
