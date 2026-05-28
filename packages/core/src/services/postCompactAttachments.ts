@@ -264,3 +264,36 @@ export async function buildFileRestorationBlocks(
 
   return blocks;
 }
+
+/**
+ * Compose the image-restoration block: a single user Content whose first
+ * part is a text header listing each image's source (turn index + tool
+ * call + args), followed by the inlineData parts in chronological order.
+ *
+ * Returns null if there are no images so callers can skip it cleanly.
+ */
+export function buildImageRestorationBlock(
+  images: ExtractedImage[],
+): Content | null {
+  if (images.length === 0) return null;
+
+  const lines = [
+    'Recent visual snapshots preserved from before context was compacted (most recent last). Each image corresponds to a tool result or user-pasted image earlier in the conversation:',
+    '',
+  ];
+  for (const img of images) {
+    if (img.sourceToolName) {
+      const argsStr = JSON.stringify(img.sourceToolArgs ?? {});
+      lines.push(
+        `- turn ${img.turnIndex}: ${img.sourceToolName} args=${argsStr}`,
+      );
+    } else {
+      lines.push(`- turn ${img.turnIndex}: user-provided image`);
+    }
+  }
+
+  return {
+    role: 'user',
+    parts: [{ text: lines.join('\n') }, ...images.map((img) => img.part)],
+  };
+}

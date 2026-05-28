@@ -404,3 +404,59 @@ describe('buildFileRestorationBlocks', () => {
     expect(embed11).toBeUndefined();
   });
 });
+
+import {
+  buildImageRestorationBlock,
+  type ExtractedImage,
+} from './postCompactAttachments.js';
+
+describe('buildImageRestorationBlock', () => {
+  it('returns null when no images are provided', () => {
+    expect(buildImageRestorationBlock([])).toBeNull();
+  });
+
+  it('emits a single user Content with metadata header + image parts', () => {
+    const images: ExtractedImage[] = [
+      {
+        part: { inlineData: { mimeType: 'image/png', data: 'aaaa' } },
+        turnIndex: 5,
+        sourceToolName: 'computer_use__get_app_state',
+        sourceToolArgs: { app: 'Safari' },
+      },
+      {
+        part: { inlineData: { mimeType: 'image/png', data: 'bbbb' } },
+        turnIndex: 11,
+        sourceToolName: 'computer_use__get_app_state',
+        sourceToolArgs: { app: 'Mail' },
+      },
+    ];
+    const block = buildImageRestorationBlock(images);
+    expect(block).not.toBeNull();
+    expect(block!.role).toBe('user');
+    expect(block!.parts).toHaveLength(3); // 1 text header + 2 images
+
+    const header = (block!.parts![0] as { text: string }).text;
+    expect(header).toContain('Recent visual snapshots');
+    expect(header).toContain('turn 5');
+    expect(header).toContain('computer_use__get_app_state');
+    expect(header).toContain('"app":"Safari"');
+    expect(header).toContain('turn 11');
+    expect(header).toContain('"app":"Mail"');
+
+    expect(block!.parts![1].inlineData?.data).toBe('aaaa');
+    expect(block!.parts![2].inlineData?.data).toBe('bbbb');
+  });
+
+  it('handles images without source-tool metadata (user paste)', () => {
+    const images: ExtractedImage[] = [
+      {
+        part: { inlineData: { mimeType: 'image/png', data: 'pasted' } },
+        turnIndex: 3,
+      },
+    ];
+    const block = buildImageRestorationBlock(images);
+    const header = (block!.parts![0] as { text: string }).text;
+    expect(header).toContain('turn 3');
+    expect(header).toContain('user-provided'); // labeled instead of tool name
+  });
+});
