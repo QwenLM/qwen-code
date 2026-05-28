@@ -12,7 +12,6 @@ import type {
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
-import { detachDaemonClient } from './clientLifecycle.js';
 import { mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
@@ -33,15 +32,12 @@ interface RefBox<T> {
 }
 
 export interface CreateDaemonSessionActionsArgs {
-  baseUrl: string;
-  token?: string;
   store: DaemonTranscriptStore;
   sessionRef: RefBox<DaemonSessionClient | undefined>;
   activePromptsRef: RefBox<Map<string, ActivePrompt>>;
   pendingSessionLoadRef: RefBox<PendingSessionLoad | undefined>;
   pendingSessionLoadIdRef: RefBox<number>;
   heartbeatSupportedRef: RefBox<boolean>;
-  clientIdRef: RefBox<string | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>;
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>;
@@ -52,15 +48,12 @@ export interface CreateDaemonSessionActionsArgs {
 }
 
 export function createDaemonSessionActions({
-  baseUrl,
-  token,
   store,
   sessionRef,
   activePromptsRef,
   pendingSessionLoadRef,
   pendingSessionLoadIdRef,
   heartbeatSupportedRef,
-  clientIdRef,
   passiveAssistantDoneTimerRef,
   setConnection,
   setPromptStatus,
@@ -322,19 +315,13 @@ export function createDaemonSessionActions({
 
     async releaseSession(sessionId) {
       try {
-        const session = sessionRef.current;
-        if (session && session.sessionId === sessionId) {
-          await withActionTimeout(session.close(), 'Release session timed out');
-        }
+        const session = requireSessionForAction(
+          store,
+          sessionRef.current,
+          'Release session failed',
+        );
         await withActionTimeout(
-          detachDaemonClient({
-            baseUrl,
-            token,
-            sessionId,
-            clientId: clientIdRef.current,
-          }).catch((err) =>
-            console.warn('[releaseSession] detach failed:', err),
-          ),
+          session.client.closeSession(sessionId),
           'Release session timed out',
         );
       } catch (error) {
@@ -434,19 +421,19 @@ export function createDaemonSessionActions({
         sessionRef.current,
         'Shell command failed',
       );
-      const sessionId = session.sessionId;
+      const shellKey = `${session.sessionId}:shell`;
       setPromptStatus('waiting');
       const ctrl = new AbortController();
-      activePromptsRef.current.set(sessionId, { controller: ctrl });
+      activePromptsRef.current.set(shellKey, { controller: ctrl });
       try {
         return await session.shellCommand(command, ctrl.signal);
       } catch (error) {
         throw dispatchActionError(store, 'Shell command failed', error);
       } finally {
-        if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
-          activePromptsRef.current.delete(sessionId);
+        if (activePromptsRef.current.get(shellKey)?.controller === ctrl) {
+          activePromptsRef.current.delete(shellKey);
         }
-        if (sessionRef.current?.sessionId === sessionId) {
+        if (sessionRef.current?.sessionId === session.sessionId) {
           setPromptStatus('idle');
         }
       }

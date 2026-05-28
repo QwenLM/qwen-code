@@ -697,15 +697,12 @@ export function DaemonSessionProvider({
   const actions = useMemo<DaemonSessionActions>(
     () =>
       createDaemonSessionActions({
-        baseUrl: resolvedBaseUrl!,
-        token: resolvedToken,
         store,
         sessionRef,
         activePromptsRef,
         pendingSessionLoadRef,
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
-        clientIdRef,
         passiveAssistantDoneTimerRef,
         setConnection,
         setPromptStatus,
@@ -714,7 +711,7 @@ export function DaemonSessionProvider({
         setRestoreSessionNonce,
         setNewSessionNonce,
       }),
-    [resolvedBaseUrl, store, resolvedToken],
+    [store],
   );
   return (
     <DaemonStoreContext.Provider value={store}>
