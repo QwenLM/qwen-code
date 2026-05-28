@@ -868,9 +868,7 @@ export function createServeApp(
             status,
             durationMs,
           };
-          if (status >= 500) {
-            daemonLog.error('request completed', null, ctx);
-          } else if (status >= 400) {
+          if (status >= 400) {
             daemonLog.warn('request completed', ctx);
           } else {
             daemonLog.info('request completed', ctx);
@@ -1398,6 +1396,12 @@ export function createServeApp(
         );
       }
       if (!res.writable) {
+        if (daemonLog) {
+          daemonLog.warn('session reaped (client disconnected before response)', {
+            sessionId: session.sessionId,
+            attached: session.attached,
+          });
+        }
         if (!session.attached) {
           // `requireZeroAttaches: true` closes the BQ9tV race: if
           // a second client called `spawnOrAttach` for the same
@@ -1669,14 +1673,19 @@ export function createServeApp(
       .then(
         () => {
           if (daemonLog) {
-            daemonLog.info('prompt turn completed', { sessionId, promptId });
+            daemonLog.info('prompt turn completed', {
+              sessionId,
+              promptId,
+              clientId,
+            });
           }
         },
         (err) => {
           if (daemonLog) {
+            const errName = err instanceof Error ? err.name : undefined;
             daemonLog.warn(
-              `prompt turn failed: ${err instanceof Error ? err.message : String(err)}`,
-              { sessionId, promptId },
+              `prompt turn failed: ${errName ? `[${errName}] ` : ''}${err instanceof Error ? err.message : String(err)}`,
+              { sessionId, promptId, clientId },
             );
           }
         },
@@ -1687,7 +1696,7 @@ export function createServeApp(
       .catch(() => {});
 
     if (daemonLog) {
-      daemonLog.info('prompt enqueued', { sessionId, promptId });
+      daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
     }
     res.status(202).json({ promptId, lastEventId });
   });
