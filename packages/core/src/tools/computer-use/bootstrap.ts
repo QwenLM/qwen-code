@@ -10,36 +10,31 @@
  * On first invocation of any computer_use__* tool:
  *   1. If not yet approved: prompt the user to install (one-time).
  *   2. Start the client (lazy npx spawn, may take ~60s first time).
- *   3. On macOS only: probe permissions by calling get_app_state on
- *      Finder. If a permission error surfaces, spawn the upstream
- *      doctor (which opens the system settings + onboarding window),
- *      then poll until permissions grant or 10 min timeout.
- *
- * IMPLEMENTER NOTE (Task 10 investigation — Task 11 will wire this up):
- *   Investigation: qwen-code's BaseDeclarativeTool / BaseToolInvocation
- *   confirmation pathway (shouldConfirmExecute / getConfirmationDetails /
- *   onConfirm) runs BEFORE execute() is called — it is a pre-execution
- *   dialog driven by the coreToolScheduler, not something that can be
- *   triggered from inside execute(). Therefore, promptInstallApproval
- *   CANNOT use the standard ToolCallConfirmationDetails path when called
- *   mid-execution in bootstrap. Task 11 will wire it up via
- *   ComputerUseTool.getDefaultPermission() returning 'ask' on first use,
- *   surfacing the install prompt through getConfirmationDetails() /
- *   ToolAskUserQuestionConfirmationDetails before execute() is reached,
- *   and passing the result into runBootstrap via a BootstrapDeps override.
- *   Until then, the default promptInstallApproval uses stderr + the
- *   QWEN_COMPUTER_USE_AUTO_APPROVE=1 env-var fallback.
+ *   3. On macOS only: probe permissions via the upstream `doctor` CLI
+ *      (NOT via get_app_state, which has the side-effect of activating
+ *      the target app — earlier rounds probed Finder this way and
+ *      caused Finder to pop to the foreground at session start). The
+ *      doctor command:
+ *        - reads TCC + runtime preflight, prints
+ *          "Permissions: accessibility=granted, screenRecording=missing"
+ *          to stdout, then exits cleanly
+ *        - launches the onboarding window via LaunchServices when any
+ *          permission is missing — LaunchServices dedups so repeated
+ *          invocations just bring the existing window to front
+ *      We parse stdout for the probe result and rely on doctor's own
+ *      window launching for the UX trigger — no separate spawnDoctor
+ *      call needed.
  */
 
-import { spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import type { ComputerUseClient } from './client.js';
 import { isPackageSpecApproved, saveInstallState } from './install-state.js';
-import {
-  detectPermissionError,
-  type PermissionErrorKind,
-} from './permission-detector.js';
+import { type PermissionErrorKind } from './permission-detector.js';
 import { resolveComputerUsePackageSpec } from './constants.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface BootstrapContext {
   signal: AbortSignal;
@@ -55,69 +50,88 @@ export interface BootstrapDeps {
   platform: NodeJS.Platform;
   /**
    * Prompt the user to approve installing the upstream binary. Returns
-   * true if approved. Implementation may use the qwen-code confirm
-   * tool path or a stdin fallback.
-   *
-   * Task 11 will replace the default with getConfirmationDetails()-based
-   * pre-execution prompting. See module JSDoc above for details.
+   * true if approved. Default uses stderr + the
+   * QWEN_COMPUTER_USE_AUTO_APPROVE=1 env-var fallback; the interactive
+   * confirmation dialog is wired through ComputerUseTool's
+   * getConfirmationDetails(), which runs BEFORE execute() reaches
+   * runBootstrap (so by the time we get here the install-state file
+   * already exists for interactive sessions and this fallback is the
+   * headless / SDK path only).
    */
   promptInstallApproval: (packageSpec: string) => Promise<boolean>;
   /**
-   * Spawn `open-computer-use doctor` (detached). The binary handles
-   * opening the system settings window itself.
+   * Probe permissions by running the upstream doctor CLI and parsing
+   * its stdout summary. The probe itself triggers the onboarding window
+   * when permissions are missing — no separate spawnDoctor needed.
    */
-  spawnDoctor: () => void;
-  /**
-   * Probe the upstream MCP server for permission state by issuing a
-   * lightweight tool call. Returns 'ok' on success or the kind of
-   * permission error on failure.
-   */
-  probePermissions: (
-    client: ComputerUseClient,
-  ) => Promise<PermissionProbeResult>;
-  /** Poll interval for the permission watcher. Default 2000ms. */
+  probePermissions: (packageSpec: string) => Promise<PermissionProbeResult>;
+  /** Poll interval for the permission watcher. Default 5000ms. */
   pollIntervalMs?: number;
   /** Total poll timeout. Default 10 min. */
   pollTimeoutMs?: number;
 }
 
 /**
- * Probe Finder's app state to determine what macOS permissions are available.
+ * Parse the doctor stdout summary into a probe result.
  *
- * Exported for testing. In production it is wired into defaultDeps().
+ * Doctor prints a single line of the form:
+ *   "Permissions: accessibility=granted, screenRecording=missing"
  *
- * Two-phase detection:
- *   1. If get_app_state returns an MCP error, detectPermissionError classifies
- *      it — Accessibility missing throws 'permissionDenied' upstream, so we
- *      see isError=true.
- *   2. If get_app_state succeeds (isError=false) but returns NO image content
- *      part, Screen Recording is missing. The upstream binary silently sets
- *      screenshotPNGData=nil and the MCP layer omits the image block entirely.
- *      We treat absence of any image block as 'screenRecording'.
- *
- * Note on transient false-positives: a screenshot-capture timeout (rare) can
- * also produce no image — but the next 2s poll iteration will succeed once
- * the timeout clears, so a transient false-positive resolves itself without
- * user action.
+ * Exported separately from probePermissionsViaDoctor so unit tests can
+ * exercise the parse logic without spawning a real npx process.
  */
-export async function probeFinderPermissions(
-  client: ComputerUseClient,
-): Promise<PermissionProbeResult> {
-  // Use Finder as a known-running, always-installed macOS app.
-  // get_app_state hits AccessibilitySnapshot which is the first
-  // path that throws permissionDenied.
-  const result = await client.callTool('get_app_state', { app: 'Finder' });
-  const kind = detectPermissionError(result);
-  if (kind !== 'none') return kind;
-  // get_app_state succeeded with no error, but check if a screenshot
-  // came back. The upstream binary silently omits the image content
-  // part when ScreenCaptureKit can't capture — most commonly Screen
-  // Recording permission missing (also possible on capture timeout,
-  // but a granted-SR retry will succeed on the next 2s poll iteration,
-  // so a transient false-positive resolves itself).
-  const hasImage = result.content.some((part) => part.type === 'image');
-  if (!hasImage) return 'screenRecording';
+export function parseDoctorStdout(stdout: string): PermissionProbeResult {
+  const accessibilityGranted = /accessibility\s*=\s*granted/i.test(stdout);
+  const screenRecordingGranted = /screenrecording\s*=\s*granted/i.test(stdout);
+  if (!accessibilityGranted) return 'accessibility';
+  if (!screenRecordingGranted) return 'screenRecording';
   return 'ok';
+}
+
+/**
+ * Probe macOS permissions by spawning the upstream doctor CLI.
+ *
+ * Doctor runs `PermissionDiagnostics.current()` (reads TCC SQLite +
+ * runtime preflight via AXIsProcessTrusted() / CGPreflightScreenCaptureAccess()),
+ * prints the summary to stdout, and — only if any permissions are
+ * missing — launches the onboarding window via LaunchServices. The
+ * doctor process exits in both cases.
+ *
+ * Key UX property: when permissions are already granted, doctor exits
+ * silently without opening any window. Unlike the previous get_app_state
+ * probe, NO target app is activated by the probe itself.
+ *
+ * Cost: each invocation spawns `npx`. With the binary cached this is
+ * ~200-500ms total. Steady-state runs (permissions OK) pay this once
+ * per fresh client start; the polling loop pays it every pollIntervalMs
+ * only while permissions are missing (i.e., during initial setup).
+ *
+ * Returns:
+ *   - 'ok'             → both permissions granted
+ *   - 'accessibility'  → Accessibility missing
+ *   - 'screenRecording' → AX granted, Screen Recording missing
+ *   - 'other'          → spawn / parse failed; skip probe and let the
+ *                        real tool call surface any permission error
+ */
+export async function probePermissionsViaDoctor(
+  packageSpec: string,
+): Promise<PermissionProbeResult> {
+  try {
+    const { stdout } = await execFileAsync(
+      'npx',
+      ['-y', packageSpec, 'doctor'],
+      {
+        timeout: 30000,
+        env: process.env as NodeJS.ProcessEnv,
+      },
+    );
+    return parseDoctorStdout(stdout);
+  } catch {
+    // Spawn failed (npx missing, network down on first run, timeout, etc.)
+    // OR doctor exited non-zero. Skip probe; the next real tool call
+    // will surface any permission error via upstream's normal error path.
+    return 'other';
+  }
 }
 
 /** Production defaults — instantiated lazily so tests can override per call. */
@@ -128,8 +142,6 @@ function defaultDeps(): BootstrapDeps {
     packageSpec,
     platform: process.platform,
     promptInstallApproval: async (spec) => {
-      // v0 fallback: stderr prompt + auto-approve env var. Replace with
-      // qwen-code's standard confirm pathway in Task 11.
       process.stderr.write(
         `\n[Computer Use] First-time install\n` +
           `  Package: ${spec}\n` +
@@ -138,18 +150,9 @@ function defaultDeps(): BootstrapDeps {
           `  On macOS you'll be guided through Accessibility and Screen Recording permissions next.\n` +
           `Set QWEN_COMPUTER_USE_AUTO_APPROVE=1 to skip this prompt.\n`,
       );
-      // For headless / SDK contexts the default is to refuse —
-      // explicit user opt-in required.
       return process.env['QWEN_COMPUTER_USE_AUTO_APPROVE'] === '1';
     },
-    spawnDoctor: () => {
-      const child = spawn('npx', ['-y', packageSpec, 'doctor'], {
-        detached: true,
-        stdio: 'ignore',
-      });
-      child.unref();
-    },
-    probePermissions: probeFinderPermissions,
+    probePermissions: probePermissionsViaDoctor,
   };
 }
 
@@ -159,7 +162,7 @@ export async function runBootstrap(
   depsOverride?: Partial<BootstrapDeps>,
 ): Promise<void> {
   const deps: BootstrapDeps = { ...defaultDeps(), ...depsOverride };
-  const pollIntervalMs = deps.pollIntervalMs ?? 2000;
+  const pollIntervalMs = deps.pollIntervalMs ?? 5000;
   const pollTimeoutMs = deps.pollTimeoutMs ?? 10 * 60_000;
 
   // Step 1: install approval gate.
@@ -189,9 +192,8 @@ export async function runBootstrap(
   //
   // Only probe on a fresh client start. Once the upstream binary is
   // running with permissions verified, TCC state is stable for the
-  // process lifetime — re-probing on every tool call would call
-  // get_app_state on Finder and repeatedly bring Finder to the
-  // foreground (user-visible regression observed in real sessions).
+  // process lifetime — re-probing on every tool call would needlessly
+  // spawn extra doctor processes.
   //
   // Trade-off on mid-session permission revocation: upstream returns
   // permissionDenied as an MCP result with isError=true (not a thrown
@@ -202,26 +204,29 @@ export async function runBootstrap(
   // every subsequent tool call with no automatic recovery — the user
   // must restart qwen-code to re-enter the permission flow. This is
   // an acceptable trade-off: TCC revocation mid-session is extremely
-  // rare, whereas re-probing on every tool call caused 51+ visible
-  // foreground switches per session in real use.
+  // rare.
   if (wasAlreadyStarted) return;
   if (deps.platform !== 'darwin') return;
 
-  const probe = await deps.probePermissions(client);
+  const probe = await deps.probePermissions(deps.packageSpec);
   if (probe === 'ok' || probe === 'other') {
-    // 'other' means an error happened that isn't permission-related.
-    // We don't block bootstrap on that — let the actual tool call surface it.
+    // 'other' means doctor failed for an unexpected reason; we don't
+    // block bootstrap on that — let the actual tool call surface it.
     return;
   }
 
+  // probe == 'accessibility' | 'screenRecording' | 'unknown_permission':
+  // doctor has ALREADY launched the onboarding window from its own
+  // process. We just inform the user and enter the poll loop.
   ctx.updateOutput?.(
     `Computer Use needs macOS permissions (${probe}). ` +
-      `An onboarding window will open — please grant Accessibility and Screen Recording, then this will continue automatically.`,
+      `The onboarding window is opening — please grant Accessibility and Screen Recording, then this will continue automatically.`,
   );
-  deps.spawnDoctor();
 
-  // Track last probe kind so we can detect transitions between permissions
-  // (e.g. 'accessibility' → 'screenRecording') and re-spawn the doctor window.
+  // Track the last probe kind so we can emit a fresh message on
+  // transition (e.g. accessibility → screenRecording). LaunchServices
+  // dedup ensures each subsequent doctor poll re-focuses the existing
+  // window — no separate spawnDoctor call needed.
   let lastProbeKind: PermissionProbeResult = probe;
 
   const startedAt = Date.now();
@@ -235,17 +240,13 @@ export async function runBootstrap(
       );
     }
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    const next = await deps.probePermissions(client);
+    const next = await deps.probePermissions(deps.packageSpec);
     if (next === 'ok' || next === 'other') return;
 
-    // Re-spawn doctor when permission kind shifts — upstream onboarding
-    // window has typically auto-closed after the first permission was
-    // granted, so a fresh spawn brings the next prompt back into view.
     if (next !== lastProbeKind) {
       ctx.updateOutput?.(
-        `Now waiting for ${next} permission. Please complete this step in the onboarding window — bringing it to the front now.`,
+        `Now waiting for ${next} permission. The onboarding window remains open — please grant this permission to continue.`,
       );
-      deps.spawnDoctor();
       lastProbeKind = next;
     }
 

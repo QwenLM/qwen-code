@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   runBootstrap,
-  probeFinderPermissions,
+  parseDoctorStdout,
   type BootstrapDeps,
 } from './bootstrap.js';
 
@@ -37,7 +37,6 @@ describe('runBootstrap', () => {
       packageSpec: 'open-computer-use@^0.3.0',
       platform: 'darwin',
       promptInstallApproval: vi.fn(async () => true),
-      spawnDoctor: vi.fn(),
       probePermissions: vi.fn(async () => 'ok' as const),
     };
   });
@@ -47,7 +46,6 @@ describe('runBootstrap', () => {
   });
 
   it('starts the client when binary is approved + permissions ok', async () => {
-    // Pre-seed install state to skip the prompt
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
       approvedPackageSpec: 'open-computer-use@^0.3.0',
@@ -104,7 +102,7 @@ describe('runBootstrap', () => {
     expect(state?.approvedPackageSpec).toBe('open-computer-use@^0.3.0');
   });
 
-  it('spawns doctor and polls when permissions are missing', async () => {
+  it('polls probePermissions when permissions are missing then granted', async () => {
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
       approvedPackageSpec: 'open-computer-use@^0.3.0',
@@ -126,8 +124,13 @@ describe('runBootstrap', () => {
       deps,
     );
 
-    expect(deps.spawnDoctor).toHaveBeenCalledOnce();
+    // probe is called by bootstrap (each call is a doctor invocation in
+    // production, but here it's a mock). Doctor itself launches the
+    // onboarding window when needed — no separate spawnDoctor step.
     expect(probeCount).toBeGreaterThanOrEqual(3);
+    expect(deps.probePermissions).toHaveBeenCalledWith(
+      'open-computer-use@^0.3.0',
+    );
   });
 
   it('throws after pollTimeoutMs when permissions never grant', async () => {
@@ -166,10 +169,10 @@ describe('runBootstrap', () => {
       deps,
     );
 
-    expect(deps.spawnDoctor).not.toHaveBeenCalled();
+    expect(deps.probePermissions).not.toHaveBeenCalled();
   });
 
-  it('re-spawns doctor when permission kind changes mid-poll', async () => {
+  it('emits a fresh updateOutput message when permission kind changes mid-poll', async () => {
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
       approvedPackageSpec: 'open-computer-use@^0.3.0',
@@ -198,26 +201,24 @@ describe('runBootstrap', () => {
       deps,
     );
 
-    // spawnDoctor must be called exactly twice:
-    //   1. initial spawn for 'accessibility'
-    //   2. re-spawn on transition to 'screenRecording'
-    expect(deps.spawnDoctor).toHaveBeenCalledTimes(2);
-    // A re-open message must have been emitted naming 'screenRecording'
+    // The transition (accessibility → screenRecording) must emit a
+    // user-facing message naming the new permission kind. LaunchServices
+    // dedups doctor's window so we don't need a separate spawn step.
     expect(messages.some((m) => m.includes('screenRecording'))).toBe(true);
+    expect(messages.some((m) => m.includes('accessibility'))).toBe(true);
   });
 
-  it('skips permission probe when client is already started (no Finder spam on every tool call)', async () => {
-    // Regression: probePermissions used to fire on every runBootstrap call,
-    // which meant every computer_use__* tool invocation re-probed Finder
-    // via get_app_state — repeatedly bringing Finder to the foreground.
-    // The fix only probes on a fresh client start.
+  it('skips permission probe when client is already started (no probe spam per tool call)', async () => {
+    // Regression: bootstrap used to call probePermissions on EVERY
+    // tool call (which in the previous Finder-based probe popped Finder
+    // to the foreground each time). The wasAlreadyStarted check makes
+    // probe fire only on a fresh client start.
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
       approvedPackageSpec: 'open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
 
-    // Pre-started client: simulate a second tool call within the same session.
     const startSpy = vi.fn(async () => {});
     const client = {
       isStarted: vi.fn(() => true), // already started
@@ -232,53 +233,46 @@ describe('runBootstrap', () => {
       deps,
     );
 
-    // start() must not be called again (client was already started)
     expect(startSpy).not.toHaveBeenCalled();
-    // probePermissions must NOT be called — this is the regression guard
     expect(deps.probePermissions).not.toHaveBeenCalled();
-    // spawnDoctor likewise stays quiet
-    expect(deps.spawnDoctor).not.toHaveBeenCalled();
   });
 });
 
-describe('probeFinderPermissions', () => {
-  it("returns 'accessibility' when result has isError=true with AX permission text", async () => {
-    const fakeClient = {
-      callTool: vi.fn(async () => ({
-        isError: true,
-        content: [
-          { type: 'text', text: 'Accessibility permission is required.' },
-        ],
-      })),
-    };
-    const result = await probeFinderPermissions(fakeClient as never);
-    expect(result).toBe('accessibility');
+describe('parseDoctorStdout', () => {
+  it("returns 'ok' when doctor reports both permissions granted", () => {
+    const stdout =
+      'Permissions: accessibility=granted, screenRecording=granted\n';
+    expect(parseDoctorStdout(stdout)).toBe('ok');
   });
 
-  it("returns 'screenRecording' when result is success but has no image content", async () => {
-    const fakeClient = {
-      callTool: vi.fn(async () => ({
-        isError: false,
-        content: [
-          { type: 'text', text: '<AXApplication>Finder</AXApplication>' },
-        ],
-      })),
-    };
-    const result = await probeFinderPermissions(fakeClient as never);
-    expect(result).toBe('screenRecording');
+  it("returns 'accessibility' when accessibility is missing", () => {
+    const stdout =
+      'Permissions: accessibility=missing, screenRecording=granted\n';
+    expect(parseDoctorStdout(stdout)).toBe('accessibility');
   });
 
-  it("returns 'ok' when result has both text and image content", async () => {
-    const fakeClient = {
-      callTool: vi.fn(async () => ({
-        isError: false,
-        content: [
-          { type: 'text', text: '<AXApplication>Finder</AXApplication>' },
-          { type: 'image', data: 'base64data==', mimeType: 'image/png' },
-        ],
-      })),
-    };
-    const result = await probeFinderPermissions(fakeClient as never);
-    expect(result).toBe('ok');
+  it("returns 'screenRecording' when only Screen Recording is missing", () => {
+    const stdout =
+      'Permissions: accessibility=granted, screenRecording=missing\n';
+    expect(parseDoctorStdout(stdout)).toBe('screenRecording');
+  });
+
+  it("prefers 'accessibility' when both are missing (driven by doctor's onboarding order)", () => {
+    const stdout =
+      'Permissions: accessibility=missing, screenRecording=missing\n';
+    expect(parseDoctorStdout(stdout)).toBe('accessibility');
+  });
+
+  it('parses case-insensitively and tolerates whitespace around `=`', () => {
+    const stdout =
+      'Permissions: Accessibility = Granted, ScreenRecording = Granted\n';
+    expect(parseDoctorStdout(stdout)).toBe('ok');
+  });
+
+  it("returns 'accessibility' when stdout is empty (defensive: treat unknown as missing)", () => {
+    // Defensive: if doctor produces no parseable output, assume the
+    // worst (permissions missing) — better to over-prompt than to
+    // silently proceed and have the tool call fail later.
+    expect(parseDoctorStdout('')).toBe('accessibility');
   });
 });
