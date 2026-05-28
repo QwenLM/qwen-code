@@ -34,7 +34,7 @@ Lift history (#4175 Mode B daemon roadmap):
   this interface.
 - `status` (PR 22b/1) — wire-contract status types for
   `/workspace/{mcp,skills,providers,env,preflight}` and
-  `/session/:id/{context,supported-commands}` routes, the
+  `/session/:id/{context,supported-commands,tasks}` routes, the
   `STATUS_SCHEMA_VERSION` / `SERVE_*_EXT_METHODS` constants,
   `BridgeTimeoutError` / `MissingCliEntryError` /
   `BridgeChannelClosedError` typed exceptions, and the

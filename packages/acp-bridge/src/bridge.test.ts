@@ -405,6 +405,14 @@ describe('createHttpAcpBridge', () => {
                 state: {},
               };
             }
+            if (method === 'qwen/status/session/tasks') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                now: 1_700_000_000_000,
+                tasks: [],
+              };
+            }
             return {
               v: 1,
               sessionId: params['sessionId'],
@@ -432,11 +440,72 @@ describe('createHttpAcpBridge', () => {
       availableCommands: [],
       availableSkills: [],
     });
+    await expect(
+      bridge.getSessionTasksStatus(session.sessionId),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      tasks: [],
+    });
     expect(handles[0]?.agent.extMethodCalls.map((c) => c.method)).toEqual([
       'qwen/status/session/context',
       'qwen/status/session/supported_commands',
+      'qwen/status/session/tasks',
     ]);
 
+    await bridge.shutdown();
+  });
+
+  it('requests session tasks status without waiting for the prompt queue', async () => {
+    let releasePrompt: (() => void) | undefined;
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          promptImpl: async () => {
+            await new Promise<void>((resolve) => {
+              releasePrompt = resolve;
+            });
+            return { stopReason: 'end_turn' };
+          },
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/status/session/tasks') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                now: 1_700_000_000_000,
+                tasks: [],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'never resolves until released' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(handles[0]?.agent.promptCalls).toHaveLength(1);
+    });
+
+    await expect(
+      bridge.getSessionTasksStatus(session.sessionId),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      tasks: [],
+    });
+    expect(handles[0]?.agent.promptCalls).toHaveLength(1);
+    expect(handles[0]?.agent.extMethodCalls.map((c) => c.method)).toEqual([
+      'qwen/status/session/tasks',
+    ]);
+
+    releasePrompt?.();
+    await prompt;
     await bridge.shutdown();
   });
 
@@ -450,6 +519,9 @@ describe('createHttpAcpBridge', () => {
     ).rejects.toBeInstanceOf(SessionNotFoundError);
     await expect(
       bridge.getSessionSupportedCommandsStatus('missing'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(
+      bridge.getSessionTasksStatus('missing'),
     ).rejects.toBeInstanceOf(SessionNotFoundError);
   });
 

@@ -20,6 +20,7 @@ import type {
   DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTasksStatus,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceFile,
   DaemonWorkspaceFileBytes,
@@ -946,6 +947,22 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonSessionSupportedCommandsStatus;
+      },
+    );
+  }
+
+  async sessionTasks(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionTasksStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/tasks`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/tasks');
+        }
+        return (await res.json()) as DaemonSessionTasksStatus;
       },
     );
   }

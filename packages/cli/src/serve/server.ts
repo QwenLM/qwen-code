@@ -367,6 +367,7 @@ function emitPromptDeadline504(
  *   - `GET  /workspace/:id/sessions`
  *   - `GET  /session/:id/context`
  *   - `GET  /session/:id/supported-commands`
+ *   - `GET  /session/:id/tasks`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
  *   - `POST /session/:id/heartbeat`
@@ -1423,6 +1424,24 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/supported-commands',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/tasks', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    try {
+      res.status(200).json(await bridge.getSessionTasksStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/tasks',
         sessionId,
       });
     }

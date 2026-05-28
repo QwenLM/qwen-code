@@ -19,6 +19,7 @@ import type {
   DaemonSessionState,
   DaemonSession,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTasksStatus,
   HeartbeatResult,
   PermissionResponse,
   PromptResult,
@@ -256,6 +257,10 @@ export class DaemonSessionClient {
       this.sessionId,
       this.clientId,
     );
+  }
+
+  async tasks(): Promise<DaemonSessionTasksStatus> {
+    return await this.client.sessionTasks(this.sessionId, this.clientId);
   }
 
   async respondToPermission(

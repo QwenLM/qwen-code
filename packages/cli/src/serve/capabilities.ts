@@ -81,6 +81,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
+  session_tasks: { since: 'v1' },
   session_close: { since: 'v1' },
   session_metadata: { since: 'v1' },
   // Issue #4175 PR 14. Daemon supports the MCP client guardrail

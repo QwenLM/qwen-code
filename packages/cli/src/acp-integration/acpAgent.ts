@@ -88,6 +88,7 @@ import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import {
   formatAcpModelId,
   parseAcpBaseModelId,
@@ -113,6 +114,7 @@ import {
   type ServePreflightKind,
   type ServeSessionContextStatus,
   type ServeSessionSupportedCommandsStatus,
+  type ServeSessionTasksStatus,
   type ServeStatus,
   type ServeStatusCell,
   type ServeWorkspaceMcpServerStatus,
@@ -2011,6 +2013,11 @@ class QwenAgent implements Agent {
     };
   }
 
+  private buildSessionTasksStatus(sessionId: string): ServeSessionTasksStatus {
+    const session = this.sessionOrThrow(sessionId);
+    return buildSessionTasksStatus(sessionId, session.getConfig());
+  }
+
   async extMethod(
     method: string,
     params: Record<string, unknown>,
@@ -2078,6 +2085,19 @@ class QwenAgent implements Agent {
         return (await this.buildSessionSupportedCommandsStatus(
           sessionId,
         )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionTasks: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return this.buildSessionTasksStatus(sessionId) as unknown as Record<
+          string,
+          unknown
+        >;
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
         // #4175 Wave 4 PR 17. Single-server MCP restart with budget

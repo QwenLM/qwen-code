@@ -12,6 +12,7 @@ import {
   createDaemonTranscriptStore,
   normalizeDaemonEvent,
   type DaemonSessionSummary,
+  type DaemonSessionTasksStatus,
   type DaemonApprovalMode,
   type DaemonApprovalModeResult,
   type DaemonWorkspaceMcpStatus,
@@ -128,6 +129,7 @@ export interface DaemonActions {
   newSession(): Promise<void>;
   closeSession(): Promise<void>;
   refreshCommands(): Promise<void>;
+  getTasks(): Promise<DaemonSessionTasksStatus>;
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
   loadMcpTools(serverName: string): Promise<WebShellMcpToolsStatus>;
   restartMcpServer(serverName: string): Promise<DaemonMcpRestartResult>;
@@ -787,6 +789,12 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
         const commandStatus = await session.supportedCommands();
         const { commands, skills } = mapSupportedCommands(commandStatus);
         setConnection((cur) => ({ ...cur, commands, skills }));
+      },
+
+      async getTasks(): Promise<DaemonSessionTasksStatus> {
+        const session = sessionRef.current;
+        if (!session) throw new Error('Not connected');
+        return session.tasks();
       },
 
       async loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus> {

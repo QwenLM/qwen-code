@@ -20,6 +20,7 @@ import type { PermissionPolicy } from './permission.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionSupportedCommandsStatus,
+  ServeSessionTasksStatus,
   ServeWorkspaceEnvStatus,
   ServeWorkspaceMcpToolsStatus,
   ServeWorkspaceMcpStatus,
@@ -314,6 +315,9 @@ export interface HttpAcpBridge {
   getSessionSupportedCommandsStatus(
     sessionId: string,
   ): Promise<ServeSessionSupportedCommandsStatus>;
+
+  /** Read the live background task snapshot for a live session. */
+  getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
 
   /**
    * Switch the active model service for a session. Throws
