@@ -191,3 +191,76 @@ export async function readFileSizeAdaptive(
 
   return { kind: 'embed', content: decoded };
 }
+
+/**
+ * Compose the file-restoration section of a post-compact history. Reads
+ * each file from disk, classifies as embed/reference/missing/binary, and
+ * produces:
+ *  - One reference block listing all large files (path only), if any.
+ *  - One embed block per small file with full content.
+ *  - Nothing for missing/binary files.
+ *
+ * Total embedded chars are capped at POST_COMPACT_TOKEN_BUDGET ×
+ * CHARS_PER_TOKEN. Files that would push over the budget are downgraded
+ * to references.
+ */
+export async function buildFileRestorationBlocks(
+  filePaths: string[],
+): Promise<Content[]> {
+  const references: string[] = [];
+  const embeds: Array<{ path: string; content: string }> = [];
+
+  let usedChars = 0;
+  const budgetChars = POST_COMPACT_TOKEN_BUDGET * CHARS_PER_TOKEN;
+
+  for (const filePath of filePaths) {
+    const result = await readFileSizeAdaptive(
+      filePath,
+      POST_COMPACT_MAX_TOKENS_PER_FILE,
+    );
+    if (result.kind === 'missing' || result.kind === 'binary') continue;
+    if (result.kind === 'reference') {
+      references.push(filePath);
+      continue;
+    }
+    // embed — check global budget; downgrade to reference if over.
+    if (usedChars + result.content.length > budgetChars) {
+      references.push(filePath);
+      continue;
+    }
+    embeds.push({ path: filePath, content: result.content });
+    usedChars += result.content.length;
+  }
+
+  const blocks: Content[] = [];
+
+  if (references.length > 0) {
+    const lines = [
+      'The following files were recently accessed before context was compacted. They are listed as reference only because they are large. Use `read_file` to view current content for any file you need:',
+      '',
+      ...references.map((p) => `- ${p}`),
+    ];
+    blocks.push({
+      role: 'user',
+      parts: [{ text: lines.join('\n') }],
+    });
+  }
+
+  for (const { path, content } of embeds) {
+    blocks.push({
+      role: 'user',
+      parts: [
+        {
+          text:
+            `Recently accessed file (full current content embedded):\n\n` +
+            `## ${path}\n\n` +
+            '```\n' +
+            content +
+            '\n```',
+        },
+      ],
+    });
+  }
+
+  return blocks;
+}

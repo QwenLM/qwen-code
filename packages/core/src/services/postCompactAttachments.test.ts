@@ -284,3 +284,87 @@ describe('readFileSizeAdaptive', () => {
     }
   });
 });
+
+import { buildFileRestorationBlocks } from './postCompactAttachments.js';
+
+describe('buildFileRestorationBlocks', () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'pca-'));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('produces an empty array when no files are provided', async () => {
+    const blocks = await buildFileRestorationBlocks([]);
+    expect(blocks).toEqual([]);
+  });
+
+  it('produces a single user message listing references for all large files', async () => {
+    const big1 = join(tmpDir, 'big1.txt');
+    const big2 = join(tmpDir, 'big2.txt');
+    writeFileSync(big1, 'x'.repeat(30_000));
+    writeFileSync(big2, 'y'.repeat(30_000));
+
+    const blocks = await buildFileRestorationBlocks([big1, big2]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].role).toBe('user');
+    const text = (blocks[0].parts?.[0] as { text?: string }).text ?? '';
+    expect(text).toContain(big1);
+    expect(text).toContain(big2);
+    expect(text).toContain('reference only');
+    // Must instruct the model on how to view the actual content.
+    expect(text).toMatch(/use.*read_file|call.*read_file/i);
+  });
+
+  it('produces one extra user message per embedded small file with its full content', async () => {
+    const small = join(tmpDir, 'small.txt');
+    writeFileSync(small, 'console.log("hi");');
+
+    const blocks = await buildFileRestorationBlocks([small]);
+    expect(blocks.length).toBeGreaterThanOrEqual(1);
+    const embedBlock = blocks.find((b) =>
+      (b.parts?.[0] as { text?: string }).text?.includes('console.log("hi")'),
+    );
+    expect(embedBlock).toBeDefined();
+    expect(embedBlock?.role).toBe('user');
+  });
+
+  it('omits the reference block entirely when no large files are present', async () => {
+    const small = join(tmpDir, 'small.txt');
+    writeFileSync(small, 'tiny');
+
+    const blocks = await buildFileRestorationBlocks([small]);
+    const allText = blocks
+      .flatMap((b) => b.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+    expect(allText).not.toMatch(/reference only/i);
+  });
+
+  it('skips missing files silently', async () => {
+    const blocks = await buildFileRestorationBlocks([
+      join(tmpDir, 'does-not-exist.txt'),
+    ]);
+    expect(blocks).toEqual([]);
+  });
+
+  it('respects POST_COMPACT_TOKEN_BUDGET across embedded files', async () => {
+    const f1 = join(tmpDir, 'a.txt');
+    const f2 = join(tmpDir, 'b.txt');
+    const f3 = join(tmpDir, 'c.txt');
+    writeFileSync(f1, 'a'.repeat(3_000));
+    writeFileSync(f2, 'b'.repeat(3_000));
+    writeFileSync(f3, 'c'.repeat(3_000));
+
+    const blocks = await buildFileRestorationBlocks([f1, f2, f3]);
+    const allText = blocks
+      .flatMap((b) => b.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('');
+    expect(allText).toContain('a'.repeat(3_000));
+    expect(allText).toContain('b'.repeat(3_000));
+    expect(allText).toContain('c'.repeat(3_000));
+  });
+});
