@@ -31,10 +31,17 @@ export interface PlatformActions {
   onOpenFileExternal?: (path: string) => void
 
   /**
-   * Open a URL in the default browser (Electron: shell.openExternal)
-   * Web: window.open or navigation
+   * Open a URL using the platform's primary link target.
+   * Electron Desktop may route this to the built-in browser; web viewers may
+   * use window.open or navigation.
    */
   onOpenUrl?: (url: string) => void
+
+  /**
+   * Open a URL in the system/default browser, bypassing any in-app browser
+   * preference.
+   */
+  onOpenUrlExternal?: (url: string) => void
 
   /**
    * Open a code preview in a new window (Electron: opens Monaco window)

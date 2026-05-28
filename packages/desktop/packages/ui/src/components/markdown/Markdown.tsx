@@ -1,5 +1,6 @@
 import * as React from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
+import { useTranslation } from 'react-i18next'
 import rehypeKatex from 'rehype-katex'
 import rehypeRaw from 'rehype-raw'
 import remarkGfm from 'remark-gfm'
@@ -21,6 +22,7 @@ import { resolveMarkdownLinkTarget } from './link-target'
 import remarkCollapsibleSections from './remarkCollapsibleSections'
 import { CollapsibleSection } from './CollapsibleSection'
 import { useCollapsibleMarkdown } from './CollapsibleMarkdownContext'
+import { usePlatform } from '../../context/PlatformContext'
 import { wrapWithSafeProxy } from './safe-components'
 import { MARKDOWN_MATH_OPTIONS } from './math-options'
 
@@ -100,6 +102,166 @@ function stableHash(input: string): string {
   return (hash >>> 0).toString(36)
 }
 
+interface MarkdownLinkProps {
+  href?: string
+  children?: React.ReactNode
+  onUrlClick?: (url: string) => void
+  onFileClick?: (path: string) => void
+}
+
+function getFallbackLinkText(children: React.ReactNode): string {
+  return React.Children.toArray(children)
+    .map((child) => (typeof child === 'string' ? child : ''))
+    .join('')
+    .trim()
+}
+
+function MarkdownLink({
+  href,
+  children,
+  onUrlClick,
+  onFileClick,
+}: MarkdownLinkProps) {
+  const { t } = useTranslation()
+  const { onOpenUrlExternal } = usePlatform()
+  const hasClickHandler = !!onUrlClick || !!onFileClick
+  const [menu, setMenu] = React.useState<{
+    x: number
+    y: number
+  } | null>(null)
+
+  const resolveTarget = React.useCallback(() => {
+    const target = href?.trim() || getFallbackLinkText(children)
+    if (!target) return null
+    return resolveMarkdownLinkTarget(target)
+  }, [href, children])
+
+  const openResolvedTarget = React.useCallback(
+    (preferExternal = false) => {
+      const resolvedTarget = resolveTarget()
+      if (!resolvedTarget) return
+
+      if (resolvedTarget.kind === 'file') {
+        onFileClick?.(resolvedTarget.path)
+        return
+      }
+
+      if (preferExternal && onOpenUrlExternal) {
+        onOpenUrlExternal(resolvedTarget.url)
+        return
+      }
+
+      onUrlClick?.(resolvedTarget.url)
+    },
+    [onFileClick, onOpenUrlExternal, onUrlClick, resolveTarget],
+  )
+
+  React.useEffect(() => {
+    if (!menu) return
+
+    const close = () => setMenu(null)
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close()
+    }
+
+    window.addEventListener('pointerdown', close)
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('blur', close)
+
+    return () => {
+      window.removeEventListener('pointerdown', close)
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('blur', close)
+    }
+  }, [menu])
+
+  const handleClick = (event: React.MouseEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
+    openResolvedTarget(false)
+  }
+
+  const handleContextMenu = (event: React.MouseEvent) => {
+    const resolvedTarget = resolveTarget()
+    if (resolvedTarget?.kind !== 'url' || !onUrlClick || !onOpenUrlExternal) {
+      return
+    }
+
+    event.preventDefault()
+    setMenu({ x: event.clientX, y: event.clientY })
+  }
+
+  const openBuiltIn = () => {
+    setMenu(null)
+    openResolvedTarget(false)
+  }
+
+  const openExternal = () => {
+    setMenu(null)
+    openResolvedTarget(true)
+  }
+
+  return (
+    <>
+      <a
+        href={hasClickHandler ? undefined : href}
+        onClick={handleClick}
+        onContextMenu={handleContextMenu}
+        onKeyDown={(event) => {
+          if (!hasClickHandler) return
+          if (event.key !== 'Enter' && event.key !== ' ') return
+
+          event.preventDefault()
+          openResolvedTarget(false)
+        }}
+        role={hasClickHandler ? 'link' : undefined}
+        tabIndex={hasClickHandler ? 0 : undefined}
+        className="text-accent hover:underline cursor-pointer"
+      >
+        {children}
+      </a>
+      {menu && (
+        <div
+          role="menu"
+          className={cn(
+            'fixed min-w-48 rounded-[8px] bg-background p-1 text-xs',
+            'text-foreground shadow-minimal',
+          )}
+          style={{
+            left: menu.x,
+            top: menu.y,
+            zIndex: 'var(--z-dropdown)',
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className={cn(
+              'flex w-full items-center rounded-[4px] px-2 py-1.5',
+              'text-left hover:bg-foreground/[0.03]',
+            )}
+            onClick={openBuiltIn}
+          >
+            {t('link.openInBuiltInBrowser')}
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className={cn(
+              'flex w-full items-center rounded-[4px] px-2 py-1.5',
+              'text-left hover:bg-foreground/[0.03]',
+            )}
+            onClick={openExternal}
+          >
+            {t('link.openInDefaultBrowser')}
+          </button>
+        </div>
+      )}
+    </>
+  )
+}
+
 function createComponents(
   mode: RenderMode,
   onUrlClick?: (url: string) => void,
@@ -159,35 +321,14 @@ function createComponents(
     },
     // Links: Make clickable with callbacks
     a: ({ href, children }) => {
-      const handleClick = (e: React.MouseEvent) => {
-        e.preventDefault()
-
-        // Some AI outputs include raw HTML anchors with empty href but path text content.
-        // Fallback to the anchor text when href is missing/empty.
-        const fallbackText = React.Children.toArray(children)
-          .map((child) => (typeof child === 'string' ? child : ''))
-          .join('')
-          .trim()
-
-        const target = (href?.trim() || fallbackText)
-        if (!target) return
-
-        const resolvedTarget = resolveMarkdownLinkTarget(target)
-        if (resolvedTarget.kind === 'file' && onFileClick) {
-          onFileClick(resolvedTarget.path)
-        } else if (resolvedTarget.kind === 'url' && onUrlClick) {
-          onUrlClick(resolvedTarget.url)
-        }
-      }
-
       return (
-        <a
+        <MarkdownLink
           href={href}
-          onClick={handleClick}
-          className="text-accent hover:underline cursor-pointer"
+          onUrlClick={onUrlClick}
+          onFileClick={onFileClick}
         >
           {children}
-        </a>
+        </MarkdownLink>
       )
     },
   }

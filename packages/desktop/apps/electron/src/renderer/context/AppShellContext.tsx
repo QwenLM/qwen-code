@@ -107,7 +107,8 @@ export interface AppShellContextType {
     response: CredentialResponse
   ) => void
 
-  // File/URL handlers - these can open in tabs or external apps
+  // File/URL handlers - these can open in previews, the built-in browser,
+  // or external apps.
   onOpenFile: (path: string) => void
   onOpenUrl: (url: string) => void
 

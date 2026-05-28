@@ -445,6 +445,8 @@
   "hints.syncCalendar": "Szinkronizáld a {source:Calendar} eseményeket a {source:Linear} projekt határidőivel",
   "hints.transcribeVoiceMemo": "Írd át a {file:hangfeljegyzést}, és alakítsd {source:Notion} feladatokká",
   "labels.addNewLabel": "Új címke hozzáadása {{prefill}}",
+  "link.openInBuiltInBrowser": "Megnyitás a beépített böngészőben",
+  "link.openInDefaultBrowser": "Megnyitás az alapértelmezett böngészőben",
   "menu.aboutCraftAgents": "A {{appName}}-ről",
   "menu.addPanelMenu": "Panel hozzáadása",
   "menu.allDocumentation": "Összes dokumentáció",

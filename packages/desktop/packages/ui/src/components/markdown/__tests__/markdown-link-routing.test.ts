@@ -1,5 +1,19 @@
-import { describe, it, expect } from 'bun:test'
+import * as React from 'react'
+import { beforeAll, describe, it, expect, mock } from 'bun:test'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { classifyMarkdownLinkTarget, resolveMarkdownLinkTarget } from '../link-target'
+import type { MarkdownProps } from '../Markdown'
+
+mock.module('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
+mock.module('pdfjs-dist', () => ({ GlobalWorkerOptions: { workerSrc: '' }, getDocument: () => ({}) }))
+mock.module('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }))
+
+let Markdown: (props: MarkdownProps) => React.ReactElement
+
+beforeAll(async () => {
+  const mod = await import('../Markdown')
+  Markdown = mod.Markdown
+})
 
 describe('resolveMarkdownLinkTarget', () => {
   it('resolves absolute unix file paths as file targets', () => {
@@ -74,5 +88,20 @@ describe('classifyMarkdownLinkTarget', () => {
 
   it('classifies mailto links as url', () => {
     expect(classifyMarkdownLinkTarget('mailto:test@example.com')).toBe('url')
+  })
+})
+
+describe('Markdown link rendering', () => {
+  it('omits native href navigation when URL clicks are handled by the app', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(Markdown, {
+        children: 'https://example.com',
+        onUrlClick: () => {},
+      }),
+    )
+
+    expect(html).toContain('role="link"')
+    expect(html).toContain('tabindex="0"')
+    expect(html).not.toContain('href=')
   })
 })

@@ -1864,7 +1864,55 @@ export default function App() {
   }, [])
 
   const handleOpenFile = linkInterceptor.handleOpenFile
-  const handleOpenUrl = linkInterceptor.handleOpenUrl
+  const handleOpenUrlExternal = linkInterceptor.handleOpenUrl
+
+  const handleOpenUrlInBuiltInBrowser = useCallback((url: string) => {
+    const open = async () => {
+      const trimmedUrl = url.trim()
+      const hasExplicitScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmedUrl)
+      const hasSchemeSeparator = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmedUrl)
+      const hostPattern =
+        /^(localhost|\d{1,3}(?:\.\d{1,3}){3}|[\w-]+(?:\.[\w-]+)+)(?::\d+)?(?:\/|$)/i
+      const looksLikeHost = hostPattern.test(trimmedUrl)
+      const shouldUseBuiltInBrowser = hasSchemeSeparator
+        ? /^https?:\/\//i.test(trimmedUrl)
+        : !hasExplicitScheme || looksLikeHost
+
+      if (!shouldUseBuiltInBrowser) {
+        handleOpenUrlExternal(url)
+        return
+      }
+
+      let instanceId: string | null = null
+      try {
+        const browserPaneApi = window.electronAPI?.browserPane
+        if (!browserPaneApi) {
+          handleOpenUrlExternal(url)
+          return
+        }
+
+        instanceId = await browserPaneApi.create({ show: true })
+        await browserPaneApi.navigate(instanceId, trimmedUrl)
+        await browserPaneApi.focus(instanceId)
+      } catch (error) {
+        if (instanceId) {
+          console.warn(
+            '[App] Failed to finish opening URL in built-in browser:',
+            error,
+          )
+          return
+        }
+
+        console.warn(
+          '[App] Failed to open URL in built-in browser, falling back to default browser:',
+          error,
+        )
+        handleOpenUrlExternal(url)
+      }
+    }
+
+    void open()
+  }, [handleOpenUrlExternal])
 
   const handleOpenSettings = useCallback(() => {
     navigate(routes.view.settings())
@@ -2086,7 +2134,7 @@ export default function App() {
     onRespondToCredential: handleRespondToCredential,
     // File/URL handlers
     onOpenFile: handleOpenFile,
-    onOpenUrl: handleOpenUrl,
+    onOpenUrl: handleOpenUrlInBuiltInBrowser,
     // Workspace
     onSelectWorkspace: handleSelectWorkspace,
     onRefreshWorkspaces: handleRefreshWorkspaces,
@@ -2131,7 +2179,7 @@ export default function App() {
     handleRespondToPermission,
     handleRespondToCredential,
     handleOpenFile,
-    handleOpenUrl,
+    handleOpenUrlInBuiltInBrowser,
     handleSelectWorkspace,
     handleRefreshWorkspaces,
     handleOpenSettings,
@@ -2149,7 +2197,8 @@ export default function App() {
   // NOTE: Must be defined before early returns to maintain consistent hook order
   const platformActions = useMemo(() => ({
     onOpenFile: handleOpenFile,
-    onOpenUrl: handleOpenUrl,
+    onOpenUrl: handleOpenUrlInBuiltInBrowser,
+    onOpenUrlExternal: handleOpenUrlExternal,
     // Bypass link interceptor — opens file directly in system editor.
     // Used by overlay header badges (when already viewing a file, "Open" should launch editor).
     onOpenFileExternal: linkInterceptor.openFileExternal,
@@ -2169,7 +2218,12 @@ export default function App() {
     onSetTrafficLightsVisible: (visible: boolean) => {
       window.electronAPI.setTrafficLightsVisible(visible)
     },
-  }), [handleOpenFile, handleOpenUrl, linkInterceptor.openFileExternal])
+  }), [
+    handleOpenFile,
+    handleOpenUrlExternal,
+    handleOpenUrlInBuiltInBrowser,
+    linkInterceptor.openFileExternal,
+  ])
 
   // Loading state - show splash screen
   if (appState === 'loading') {

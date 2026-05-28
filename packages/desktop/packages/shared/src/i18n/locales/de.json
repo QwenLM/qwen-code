@@ -445,6 +445,8 @@
   "hints.syncCalendar": "{source:Kalender}-Ereignisse mit {source:Linear}-Projektfristen synchronisieren",
   "hints.transcribeVoiceMemo": "Eine {file:Sprachnotiz} transkribieren und in {source:Notion}-Aufgaben umwandeln",
   "labels.addNewLabel": "Neues Label {{prefill}} hinzufügen",
+  "link.openInBuiltInBrowser": "Im integrierten Browser öffnen",
+  "link.openInDefaultBrowser": "Im Standardbrowser öffnen",
   "menu.aboutCraftAgents": "Über {{appName}}",
   "menu.addPanelMenu": "Panel hinzufügen",
   "menu.allDocumentation": "Gesamte Dokumentation",

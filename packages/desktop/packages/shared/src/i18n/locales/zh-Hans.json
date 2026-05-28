@@ -445,6 +445,8 @@
   "hints.syncCalendar": "同步 {source:Calendar} 事件与 {source:Linear} 项目截止日期",
   "hints.transcribeVoiceMemo": "转录 {file:voice memo} 并转为 {source:Notion} 任务",
   "labels.addNewLabel": "添加新标签 {{prefill}}",
+  "link.openInBuiltInBrowser": "在内置浏览器中打开",
+  "link.openInDefaultBrowser": "在默认浏览器中打开",
   "menu.aboutCraftAgents": "关于 {{appName}}",
   "menu.addPanelMenu": "添加面板",
   "menu.allDocumentation": "全部文档",
