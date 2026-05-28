@@ -205,6 +205,40 @@ describe('runBootstrap', () => {
     // A re-open message must have been emitted naming 'screenRecording'
     expect(messages.some((m) => m.includes('screenRecording'))).toBe(true);
   });
+
+  it('skips permission probe when client is already started (no Finder spam on every tool call)', async () => {
+    // Regression: probePermissions used to fire on every runBootstrap call,
+    // which meant every computer_use__* tool invocation re-probed Finder
+    // via get_app_state — repeatedly bringing Finder to the foreground.
+    // The fix only probes on a fresh client start.
+    const { saveInstallState } = await import('./install-state.js');
+    await saveInstallState(tmpHome, {
+      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedAtIso: '2026-05-28T10:00:00Z',
+    });
+
+    // Pre-started client: simulate a second tool call within the same session.
+    const startSpy = vi.fn(async () => {});
+    const client = {
+      isStarted: vi.fn(() => true), // already started
+      start: startSpy,
+      callTool: vi.fn(),
+      stop: vi.fn(),
+    };
+
+    await runBootstrap(
+      client as never,
+      { signal: new AbortController().signal },
+      deps,
+    );
+
+    // start() must not be called again (client was already started)
+    expect(startSpy).not.toHaveBeenCalled();
+    // probePermissions must NOT be called — this is the regression guard
+    expect(deps.probePermissions).not.toHaveBeenCalled();
+    // spawnDoctor likewise stays quiet
+    expect(deps.spawnDoctor).not.toHaveBeenCalled();
+  });
 });
 
 describe('probeFinderPermissions', () => {

@@ -178,12 +178,26 @@ export async function runBootstrap(
     });
   }
 
-  // Step 2: spawn (idempotent).
-  if (!client.isStarted()) {
+  // Step 2: spawn (idempotent). Remember whether THIS call performed
+  // the spawn — used below to decide whether to re-probe permissions.
+  const wasAlreadyStarted = client.isStarted();
+  if (!wasAlreadyStarted) {
     await client.start(ctx.updateOutput);
   }
 
   // Step 3: macOS permission probe + guide.
+  //
+  // Only probe on a fresh client start. Once the upstream binary is
+  // running with permissions verified, TCC state is stable for the
+  // process lifetime — re-probing on every tool call would call
+  // get_app_state on Finder and repeatedly bring Finder to the
+  // foreground (user-visible regression observed in real sessions).
+  //
+  // If the user revokes permissions mid-session, the actual tool call
+  // will surface upstream's permissionDenied error and the next
+  // reconnect-driven start (stop → start in client.callTool's
+  // transport-closed retry) will trigger a fresh probe.
+  if (wasAlreadyStarted) return;
   if (deps.platform !== 'darwin') return;
 
   const probe = await deps.probePermissions(client);
