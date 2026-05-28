@@ -680,6 +680,63 @@ describe('CoreToolScheduler', () => {
     expect(completedCalls[0].status).toBe('error');
   });
 
+  it('fires PermissionDenied hooks for AUTO classifier unavailable blocks', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockRejectedValueOnce(new Error('classifier timed out'));
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'should not execute',
+      returnDisplay: 'should not execute',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+          execute,
+        }),
+      ],
+    ]);
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        hookSystem,
+        disableHooks: false,
+      });
+    const abortController = new AbortController();
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'auto-unavailable',
+          name: ToolNames.SHELL,
+          args: { command: 'rm -rf /tmp/example' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-auto-unavailable',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalledWith(
+      ToolNames.SHELL,
+      { command: 'rm -rf /tmp/example' },
+      'auto-unavailable',
+      'classifier_unavailable',
+      abortController.signal,
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('skips PermissionDenied hooks when hooks are disabled', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })
