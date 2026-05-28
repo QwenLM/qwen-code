@@ -402,10 +402,18 @@ export class ChatCompressionService {
 
       // Best-effort token math using *only* model-reported token counts.
       //
-      // Note: compressionInputTokenCount includes the compression prompt and
-      // the extra "reason in your <analysis> block" instruction (approx. 1000 tokens), and
-      // compressionOutputTokenCount reflects the summary tokens only since
-      // thinking is disabled.
+      // Note: compressionInputTokenCount includes the entire compression
+      // system prompt (the <state_snapshot> instructions, ~900 tokens) PLUS
+      // the short kick-off user turn ("First, reason in your <analysis>
+      // block. Then, produce the <state_snapshot> XML.", ~20 tokens) — the
+      // "approx. 1000 tokens" subtracted below is for that combined fixed
+      // overhead, not for any single instruction.
+      // compressionOutputTokenCount reflects the raw model response (i.e.
+      // <analysis> + <state_snapshot>); the <analysis> block is stripped
+      // by postProcessSummary before the summary enters history, so the
+      // real cost in newHistory is slightly lower than this count
+      // suggests. We accept that inaccuracy in favor of avoiding local
+      // token estimation.
       // We accept these inaccuracies to avoid local token estimation.
       if (
         typeof compressionInputTokenCount === 'number' &&

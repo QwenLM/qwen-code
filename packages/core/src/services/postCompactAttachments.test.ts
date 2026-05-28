@@ -539,7 +539,10 @@ describe('buildImageRestorationBlock', () => {
   });
 });
 
-import { composePostCompactHistory } from './postCompactAttachments.js';
+import {
+  composePostCompactHistory,
+  postProcessSummary,
+} from './postCompactAttachments.js';
 
 describe('composePostCompactHistory', () => {
   let tmpDir: string;
@@ -666,15 +669,13 @@ describe('composePostCompactHistory', () => {
 });
 
 describe('postProcessSummary', () => {
-  it('returns body + trailer when no <analysis> block is present', async () => {
-    const { postProcessSummary } = await import('./postCompactAttachments.js');
+  it('returns body + trailer when no <analysis> block is present', () => {
     const out = postProcessSummary('<state_snapshot>body</state_snapshot>');
     expect(out).toContain('<state_snapshot>body</state_snapshot>');
     expect(out).toMatch(/resume.*prior task/i);
   });
 
-  it('strips <analysis> wrappers (greedy across newlines)', async () => {
-    const { postProcessSummary } = await import('./postCompactAttachments.js');
+  it('strips <analysis> wrappers (greedy across newlines)', () => {
     const out = postProcessSummary(
       '<analysis>\nlots of\nmulti-line\nreasoning\n</analysis>\n\n<state_snapshot>body</state_snapshot>',
     );
@@ -683,8 +684,7 @@ describe('postProcessSummary', () => {
     expect(out).toContain('<state_snapshot>body</state_snapshot>');
   });
 
-  it('strips multiple <analysis> blocks if the model emits more than one', async () => {
-    const { postProcessSummary } = await import('./postCompactAttachments.js');
+  it('strips multiple <analysis> blocks if the model emits more than one', () => {
     const out = postProcessSummary(
       '<analysis>first</analysis>\n<state_snapshot>body</state_snapshot>\n<analysis>second</analysis>',
     );
@@ -693,8 +693,7 @@ describe('postProcessSummary', () => {
     expect(out).not.toContain('second');
   });
 
-  it('falls back to the raw summary when stripping leaves nothing', async () => {
-    const { postProcessSummary } = await import('./postCompactAttachments.js');
+  it('falls back to the raw summary when stripping leaves nothing', () => {
     // Pathological case: model produced only an <analysis> block. We should
     // NOT return only the trailer — that would lose the entire model
     // response. Fall back to the raw text so caller has something to

@@ -391,6 +391,15 @@ const RESUME_TRAILER =
  * lose the entire model response.
  */
 export function postProcessSummary(rawSummary: string): string {
+  // NOTE on the regex:
+  //  - `[\s\S]*?` (non-greedy) handles newlines inside the block AND
+  //    stops at the first `</analysis>` — so multiple non-overlapping
+  //    blocks each get stripped via the `/g` flag.
+  //  - It matches the exact tag `<analysis>` only. If the prompt ever
+  //    evolves to use attributes (e.g. `<analysis type="...">`) or
+  //    nested `<analysis>` tags, this pattern will leak content. The
+  //    compression prompt is under our control, so we keep the
+  //    pattern strict rather than over-engineering.
   const stripped = rawSummary
     .replace(/<analysis>[\s\S]*?<\/analysis>\s*/g, '')
     .trim();

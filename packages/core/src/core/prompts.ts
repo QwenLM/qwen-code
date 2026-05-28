@@ -437,8 +437,19 @@ When you encounter an obstacle, do not use destructive actions as a shortcut to 
 
 /**
  * Provides the system prompt for the history compression process.
- * This prompt instructs the model to produce a 9-section summary with
- * verbatim preservation of user messages and clear resumption instructions.
+ *
+ * Asks the summary model to wrap its chain-of-thought in an `<analysis>`
+ * block (stripped before the result enters history) and then emit a
+ * `<state_snapshot>` XML envelope with 9 sub-sections aligned to
+ * claude-code's compaction format: primary_request_and_intent,
+ * key_technical_concepts, files_and_code_sections, errors_and_fixes,
+ * problem_solving, all_user_messages, pending_tasks, current_work,
+ * next_step.
+ *
+ * The resume trailer ("do not acknowledge the summary, ..." etc.) is
+ * NOT in this prompt — it is appended once by `postProcessSummary` in
+ * `postCompactAttachments.ts` so the summary model does not re-generate
+ * it every compaction.
  */
 export function getCompressionPrompt(): string {
   return `
