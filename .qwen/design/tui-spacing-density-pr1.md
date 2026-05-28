@@ -55,14 +55,15 @@ use fewer visible rows:
 
 ## Measurement
 
-The automated spacing assertions use 100-column fixtures for the changed rules:
+The automated spacing assertions and terminal evidence use 100-column fixtures
+for the changed rules:
 
 | Scenario | Width | Baseline rows | PR1 rows | Delta | Evidence |
 | --- | ---: | ---: | ---: | ---: | --- |
 | Simple assistant reply | 100 | 2 | 1 | -1 | leading history spacer removed |
 | Tool header with one-line result | 100 | 3 | 2 | -1 | header and result are adjacent |
-| Two-tool expanded group | 100 | 5 | 4 | -1 | inter-tool separator removed |
-| Three-tool expanded group | 100 | 7 | 5 | -2 | one removed separator between each adjacent tool |
+| Three-tool expanded group with rendered results | 100 | 16 | 11 | -5 | one header/result spacer removed per tool result and one inter-tool separator removed between adjacent tools |
+| Full representative fixture | 100 | 26 | 19 | -7 | same rendered content captured in tmux |
 
 The snapshot diffs also cover the existing 80-column fixtures to confirm the
 same row-count deltas in the current component test harness.
