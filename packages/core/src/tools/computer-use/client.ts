@@ -10,6 +10,7 @@ import type {
   CallToolResult,
   ListToolsResult,
 } from '@modelcontextprotocol/sdk/types.js';
+import { resolveComputerUsePackageSpec } from './constants.js';
 
 /**
  * Singleton stdio MCP client for the upstream open-computer-use binary.
@@ -50,10 +51,14 @@ export class ComputerUseClient {
    */
   static shared(): ComputerUseClient {
     if (!ComputerUseClient.singleton) {
+      // Use the single source of truth for the package spec
+      // (PINNED_OPEN_COMPUTER_USE_VERSION in constants.ts). The previous
+      // inline `?? 'open-computer-use@latest'` fallback meant the actual
+      // MCP server could run a newer upstream than the schemas.ts pin
+      // was generated against — DragonnZhang flagged the schema-drift
+      // window in PR #4590 review.
       ComputerUseClient.singleton = new ComputerUseClient({
-        packageSpec:
-          process.env['QWEN_COMPUTER_USE_PACKAGE'] ??
-          'open-computer-use@latest',
+        packageSpec: resolveComputerUsePackageSpec(),
       });
     }
     return ComputerUseClient.singleton;
