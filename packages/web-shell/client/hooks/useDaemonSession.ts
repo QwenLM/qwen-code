@@ -454,8 +454,9 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               ) {
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 const stopReason =
-                  (event.data as { stopReason?: string })?.stopReason ??
-                  'end_turn';
+                  (
+                    event.data as import('@qwen-code/sdk/daemon').DaemonTurnCompleteData
+                  ).stopReason ?? 'end_turn';
                 store.dispatch({ type: 'assistant.done', reason: stopReason });
               } else if (
                 !activePromptsRef.current.has(activeSession.sessionId) &&

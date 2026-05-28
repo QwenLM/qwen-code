@@ -223,17 +223,24 @@ export class DaemonSessionClient {
     }
 
     return new Promise<PromptResult>((resolve, reject) => {
-      this._pendingPrompts.set(accepted.promptId, { resolve, reject });
-      signal?.addEventListener(
-        'abort',
-        () => {
-          if (this._pendingPrompts.delete(accepted.promptId)) {
-            this.client.cancel(this.sessionId, this.clientId).catch(() => {});
-            reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-          }
+      const onAbort = () => {
+        if (this._pendingPrompts.delete(accepted.promptId)) {
+          this.client.cancel(this.sessionId, this.clientId).catch(() => {});
+          reject(signal!.reason ?? new DOMException('Aborted', 'AbortError'));
+        }
+      };
+      const cleanup = () => signal?.removeEventListener('abort', onAbort);
+      this._pendingPrompts.set(accepted.promptId, {
+        resolve: (r) => {
+          cleanup();
+          resolve(r);
         },
-        { once: true },
-      );
+        reject: (e) => {
+          cleanup();
+          reject(e);
+        },
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 
