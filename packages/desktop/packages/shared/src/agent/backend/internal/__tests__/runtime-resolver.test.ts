@@ -138,6 +138,37 @@ describe('resolveBackendRuntimePaths', () => {
     }
   });
 
+  it('resolves a vendored desktop CLI in standalone dev checkouts', () => {
+    const root = mkdtempSync(join(tmpdir(), 'craft-runtime-'));
+    const originalCwd = process.cwd();
+    const cliPath = join(
+      root,
+      'apps',
+      'electron',
+      'vendor',
+      'qwen-code',
+      'dist',
+      'cli.js',
+    );
+    mkdirSync(join(root, 'apps', 'electron', 'vendor', 'qwen-code', 'dist'), {
+      recursive: true,
+    });
+    writeFileSync(cliPath, '');
+
+    try {
+      process.chdir(root);
+      const resolved = resolveBackendRuntimePaths({
+        appRootPath: root,
+        isPackaged: false,
+      });
+
+      expect(resolved.qwenCliPath).toBe(cliPath);
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('uses bundled Node instead of Bun as the Node runtime', () => {
     const root = makeRuntimeFixture();
     const bunName = process.platform === 'win32' ? 'bun.exe' : 'bun';

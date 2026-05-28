@@ -169,6 +169,9 @@ function resolveQwenCliPath(
     join(hostRuntime.appRootPath, packagedCliRelative),
     join(hostRuntime.appRootPath, packagedRootCliRelative),
     join(hostRuntime.appRootPath, packagedIndexRelative),
+    join(hostRuntime.appRootPath, 'apps', 'electron', packagedCliRelative),
+    join(hostRuntime.appRootPath, 'apps', 'electron', packagedRootCliRelative),
+    join(hostRuntime.appRootPath, 'apps', 'electron', packagedIndexRelative),
     ...(hostRuntime.resourcesPath
       ? [
           join(hostRuntime.resourcesPath, 'app', packagedCliRelative),

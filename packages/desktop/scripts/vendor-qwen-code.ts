@@ -1,13 +1,25 @@
 import { spawn } from 'bun';
-import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const desktopRoot = join(import.meta.dir, '..');
-const repoRoot = join(desktopRoot, '..', '..');
+const defaultRepoRoot = join(desktopRoot, '..', '..');
 const electronDir = join(desktopRoot, 'apps', 'electron');
 const vendorDir = join(electronDir, 'vendor', 'qwen-code');
-const localDistDir = join(repoRoot, 'dist');
+
+interface DesktopPackageJson {
+  qwenCodeRuntime?: {
+    version?: string;
+  };
+}
 
 function npmCommand(): string {
   return process.platform === 'win32' ? 'npm.cmd' : 'npm';
@@ -27,6 +39,35 @@ async function run(cmd: string[], cwd: string): Promise<void> {
   }
 }
 
+function isQwenSourceRoot(root: string): boolean {
+  return (
+    existsSync(join(root, 'packages', 'cli', 'package.json')) &&
+    existsSync(join(root, 'package.json'))
+  );
+}
+
+function resolveLocalSourceRootOverride(): string | undefined {
+  const root = process.env.QWEN_CODE_ROOT?.trim();
+  if (root) return resolve(root);
+
+  const path = process.env.QWEN_CODE_PATH?.trim();
+  if (path) return resolve(path);
+
+  return undefined;
+}
+
+function readDefaultQwenCodeVersion(): string | undefined {
+  try {
+    const pkg = JSON.parse(
+      readFileSync(join(desktopRoot, 'package.json'), 'utf-8'),
+    ) as DesktopPackageJson;
+    const version = pkg.qwenCodeRuntime?.version?.trim();
+    return version || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function verifyVendoredCli(): void {
   const hasRootCli = existsSync(join(vendorDir, 'cli.js'));
   const hasDistCli = existsSync(join(vendorDir, 'dist', 'cli.js'));
@@ -37,14 +78,21 @@ function verifyVendoredCli(): void {
   }
 }
 
-async function vendorLocalCheckout(): Promise<void> {
-  console.log('Building Qwen Code CLI from the current checkout...');
+async function vendorLocalCheckout(repoRoot: string): Promise<void> {
+  if (!isQwenSourceRoot(repoRoot)) {
+    throw new Error(
+      `Qwen Code source checkout not found at ${repoRoot}. Set QWEN_CODE_VERSION, QWEN_CODE_TARBALL, or QWEN_CODE_ROOT.`,
+    );
+  }
+
+  console.log(`Building Qwen Code CLI from ${repoRoot}...`);
 
   const npm = npmCommand();
   await run([npm, 'run', 'build'], repoRoot);
   await run([npm, 'run', 'bundle'], repoRoot);
   await run([npm, 'run', 'prepare:package'], repoRoot);
 
+  const localDistDir = join(repoRoot, 'dist');
   if (!existsSync(join(localDistDir, 'cli.js'))) {
     throw new Error(
       `Local Qwen Code bundle not found at ${join(localDistDir, 'cli.js')}.`,
@@ -88,14 +136,58 @@ async function vendorNpmVersion(version: string): Promise<void> {
   }
 }
 
+async function vendorTarball(tarballPath: string): Promise<void> {
+  const source = resolve(tarballPath);
+  if (!existsSync(source)) {
+    throw new Error(`Qwen Code tarball not found: ${source}`);
+  }
+
+  console.log(`Vendoring Qwen Code from tarball ${source}...`);
+
+  rmSync(vendorDir, { recursive: true, force: true });
+  mkdirSync(vendorDir, { recursive: true });
+
+  const tar = process.platform === 'win32' ? 'tar.exe' : 'tar';
+  await run(
+    [tar, '-xzf', source, '-C', vendorDir, '--strip-components=1'],
+    desktopRoot,
+  );
+
+  verifyVendoredCli();
+  console.log(`Vendored Qwen Code tarball into ${vendorDir}`);
+}
+
 async function main(): Promise<void> {
+  const tarballPath = process.env.QWEN_CODE_TARBALL?.trim();
+  if (tarballPath) {
+    await vendorTarball(tarballPath);
+    return;
+  }
+
   const npmVersion = process.env.QWEN_CODE_VERSION?.trim();
   if (npmVersion) {
     await vendorNpmVersion(npmVersion);
     return;
   }
 
-  await vendorLocalCheckout();
+  const sourceRootOverride = resolveLocalSourceRootOverride();
+  if (sourceRootOverride) {
+    await vendorLocalCheckout(sourceRootOverride);
+    return;
+  }
+
+  if (isQwenSourceRoot(defaultRepoRoot)) {
+    await vendorLocalCheckout(defaultRepoRoot);
+    return;
+  }
+
+  const defaultVersion = readDefaultQwenCodeVersion();
+  if (defaultVersion) {
+    await vendorNpmVersion(defaultVersion);
+    return;
+  }
+
+  await vendorLocalCheckout(defaultRepoRoot);
 }
 
 main().catch((error) => {

@@ -5,6 +5,9 @@
   "description": "Qwen-backed agent for Craft documents",
   "type": "module",
   "private": true,
+  "qwenCodeRuntime": {
+    "version": "0.15.11"
+  },
   "trustedDependencies": [
     "@sentry/cli",
     "electron",
@@ -20,6 +23,11 @@
     "!apps/online-docs"
   ],
   "scripts": {
+    "dev": "bun run electron:dev",
+    "dist": "bun run electron:dist",
+    "dist:mac": "bun run electron:dist:mac",
+    "dist:win": "bun run electron:dist:win",
+    "dist:linux": "bun run electron:dist:linux",
     "test": "bun test && for f in $(find . -name '*.isolated.ts' -not -path './node_modules/*'); do bun test \"$f\" || exit 1; done",
     "typecheck": "bun run typecheck:shared",
     "typecheck:shared": "cd packages/shared && bun run tsc --noEmit",
