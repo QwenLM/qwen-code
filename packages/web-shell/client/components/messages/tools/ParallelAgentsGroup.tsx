@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
+import { useI18n } from '../../../i18n';
 import { StatusIcon, truncateText } from './toolDisplay';
 import { SubAgentPanel } from './SubAgentPanel';
 import { ToolApproval } from '../ToolApproval';
@@ -52,6 +53,7 @@ export function ParallelAgentsGroup({
   pendingApproval,
   onConfirm,
 }: ParallelAgentsGroupProps) {
+  const { t } = useI18n();
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const doneCount = agents.filter(
@@ -66,10 +68,10 @@ export function ParallelAgentsGroup({
   return (
     <div className={styles.group}>
       <div className={styles.header}>
-        <span>Parallel agents</span>
+        <span>{t('parallelAgents.title')}</span>
         <span className={styles.headerDot}>·</span>
         <span className={styles.headerCount}>
-          {doneCount}/{total} done
+          {t('parallelAgents.done', { done: doneCount, total })}
         </span>
       </div>
       <div className={styles.list}>

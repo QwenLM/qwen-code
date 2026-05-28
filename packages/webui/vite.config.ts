@@ -38,7 +38,7 @@ export default defineConfig(({ command }) => ({
     dts({
       include: ['src'],
       outDir: 'dist',
-      rollupTypes: false,
+      rollupTypes: true,
       insertTypesEntry: true,
       aliasesExclude: [/^@qwen-code\//],
     }),

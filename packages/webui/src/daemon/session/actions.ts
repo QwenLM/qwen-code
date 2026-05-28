@@ -325,6 +325,10 @@ export function createDaemonSessionActions({
     },
 
     async newSession() {
+      for (const [, active] of activePromptsRef.current) {
+        active.controller.abort();
+      }
+      activePromptsRef.current.clear();
       setPromptStatus('idle');
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       if (pendingSessionLoadRef.current) {

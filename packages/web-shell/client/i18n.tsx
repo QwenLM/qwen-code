@@ -320,6 +320,8 @@ const EN: Messages = {
   'resume.pressSearch': 'Press / to search',
   'resume.search': 'Search',
   'resume.title': 'Resume Session',
+  'parallelAgents.title': 'Parallel agents',
+  'parallelAgents.done': (v) => `${v?.done ?? 0}/${v?.total ?? 0} done`,
   'skills.empty': 'No skills available.',
   'skills.footer': (v) =>
     v?.name
@@ -663,6 +665,8 @@ const ZH: Messages = {
   'resume.pressSearch': '按 / 搜索',
   'resume.search': '搜索',
   'resume.title': '恢复会话',
+  'parallelAgents.title': '并行 Agent',
+  'parallelAgents.done': (v) => `${v?.done ?? 0}/${v?.total ?? 0} 完成`,
   'skills.empty': '没有可用 skill。',
   'skills.footer': (v) =>
     v?.name
