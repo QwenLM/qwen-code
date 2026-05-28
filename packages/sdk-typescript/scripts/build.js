@@ -125,6 +125,19 @@ await esbuild.build({
   treeShaking: true,
 });
 
+// Build serve-bridge CLI bin entry
+await esbuild.build({
+  entryPoints: [join(rootDir, 'src', 'daemon-mcp', 'serve-bridge', 'bin.ts')],
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  target: 'node22',
+  outfile: join(rootDir, 'dist', 'daemon-mcp', 'serve-bridge', 'bin.js'),
+  external: ['@modelcontextprotocol/sdk'],
+  sourcemap: false,
+  banner: { js: '#!/usr/bin/env node' },
+});
+
 // Copy LICENSE from root directory to dist
 const licenseSource = join(rootDir, '..', '..', 'LICENSE');
 const licenseTarget = join(rootDir, 'dist', 'LICENSE');

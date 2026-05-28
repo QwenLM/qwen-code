@@ -19,6 +19,9 @@
     },
     "./package.json": "./package.json"
   },
+  "bin": {
+    "qwen-serve-mcp": "./dist/daemon-mcp/serve-bridge/bin.js"
+  },
   "files": [
     "dist",
     "README.md"
