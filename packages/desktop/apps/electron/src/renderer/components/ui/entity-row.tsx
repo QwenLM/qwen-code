@@ -28,7 +28,10 @@ import {
   ContextMenuTrigger,
   StyledContextMenuContent,
 } from '@/components/ui/styled-context-menu'
-import { DropdownMenuProvider, ContextMenuProvider } from '@/components/ui/menu-context'
+import {
+  DropdownMenuProvider,
+  ContextMenuProvider,
+} from '@/components/ui/menu-context'
 import { cn } from '@/lib/utils'
 
 export interface EntityRowProps {
@@ -53,6 +56,8 @@ export interface EntityRowProps {
   badges?: React.ReactNode
   /** Right-aligned content in the badge row (timestamp, child toggle) */
   trailing?: React.ReactNode
+  /** Interactive controls rendered outside the main row button on the right. */
+  controls?: React.ReactNode
   /** Content rendered below the main button (e.g. expanded child list) */
   children?: React.ReactNode
   /** Absolutely-positioned overlay (e.g. match count badge) */
@@ -99,6 +104,7 @@ export function EntityRow({
   subtitle,
   badges,
   trailing,
+  controls,
   children,
   overlay,
   isSelected = false,
@@ -132,12 +138,15 @@ export function EntityRow({
       <button
         {...(buttonProps as React.ButtonHTMLAttributes<HTMLButtonElement>)}
         className={cn(
-          "entity-row-btn flex w-full items-start gap-2 pl-2 pr-4 py-3 text-left text-sm outline-none rounded-[8px]",
-          "transition-[background-color] duration-75",
-          (isSelected || isInMultiSelect)
-            ? "bg-foreground/3"
-            : "hover:bg-foreground/2",
-          (buttonProps as Record<string, unknown>)?.className as string | undefined,
+          'entity-row-btn flex w-full items-start gap-2 pl-2 py-3 text-left text-sm outline-none rounded-[8px]',
+          'transition-[background-color] duration-75',
+          controls ? 'pr-24' : 'pr-4',
+          isSelected || isInMultiSelect
+            ? 'bg-foreground/3'
+            : 'hover:bg-foreground/2',
+          (buttonProps as Record<string, unknown>)?.className as
+            | string
+            | undefined,
         )}
         onMouseDown={onMouseDown}
         onClick={!onMouseDown ? onClick : undefined}
@@ -152,23 +161,37 @@ export function EntityRow({
                   {icon}
                 </div>
               )}
-              <div className={cn("font-sans truncate min-w-0", titleClassName)}>
+              <div className={cn('font-sans truncate min-w-0', titleClassName)}>
                 {title}
               </div>
-              {titleSuffix && <div className="shrink-0 flex items-center">{titleSuffix}</div>}
+              {titleSuffix && (
+                <div className="shrink-0 flex items-center">{titleSuffix}</div>
+              )}
               <div className="shrink-0 ml-auto relative -mr-1">
-                <span className={cn(menuOpen || contextMenuOpen ? "invisible" : "group-hover:invisible")}>
+                <span
+                  className={cn(
+                    menuOpen || contextMenuOpen
+                      ? 'invisible'
+                      : 'group-hover:invisible',
+                  )}
+                >
                   {titleTrailing}
                 </span>
                 {menuContent && !hideMoreButton && (
                   <div
                     className={cn(
-                      "absolute inset-0 flex items-center justify-end overflow-visible",
-                      menuOpen || contextMenuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+                      'absolute inset-0 flex items-center justify-end overflow-visible',
+                      menuOpen || contextMenuOpen
+                        ? 'opacity-100'
+                        : 'opacity-0 group-hover:opacity-100',
                     )}
                     onMouseDown={(e) => e.stopPropagation()}
                   >
-                    <DropdownMenu modal={true} open={menuOpen} onOpenChange={setMenuOpen}>
+                    <DropdownMenu
+                      modal={true}
+                      open={menuOpen}
+                      onOpenChange={setMenuOpen}
+                    >
                       <DropdownMenuTrigger asChild>
                         <div className="p-1 rounded-[6px] hover:bg-foreground/10 data-[state=open]:bg-foreground/10 cursor-pointer">
                           <MoreHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
@@ -191,10 +214,19 @@ export function EntityRow({
                   {icon}
                 </div>
               )}
-              <div className={cn("font-medium font-sans line-clamp-2 min-w-0 -mb-[2px]", titleClassName)}>
+              <div
+                className={cn(
+                  'font-medium font-sans line-clamp-2 min-w-0 -mb-[2px]',
+                  titleClassName,
+                )}
+              >
                 {title}
               </div>
-              {titleSuffix && <div className="shrink-0 self-center flex items-center">{titleSuffix}</div>}
+              {titleSuffix && (
+                <div className="shrink-0 self-center flex items-center">
+                  {titleSuffix}
+                </div>
+              )}
             </div>
           )}
 
@@ -202,7 +234,10 @@ export function EntityRow({
           {subtitle && (
             <div className="flex items-start gap-[10px] w-full text-[12px] text-foreground/55 min-w-0 -mt-1">
               {icon && (
-                <div className="shrink-0 flex items-center gap-[10px] [&>*]:w-3 [&>*]:h-3 invisible" aria-hidden="true">
+                <div
+                  className="shrink-0 flex items-center gap-[10px] [&>*]:w-3 [&>*]:h-3 invisible"
+                  aria-hidden="true"
+                >
                   {icon}
                 </div>
               )}
@@ -217,7 +252,10 @@ export function EntityRow({
             <div className="flex items-center gap-[10px] text-xs text-foreground/70 w-full -mb-[2px] min-w-0">
               {/* Invisible spacer matching icon container width */}
               {icon && (
-                <div className="shrink-0 flex items-center gap-[10px] [&>*]:w-3 [&>*]:h-3 invisible" aria-hidden="true">
+                <div
+                  className="shrink-0 flex items-center gap-[10px] [&>*]:w-3 [&>*]:h-3 invisible"
+                  aria-hidden="true"
+                >
                   {icon}
                 </div>
               )}
@@ -225,8 +263,10 @@ export function EntityRow({
                 <div
                   className="flex-1 flex items-center gap-1 min-w-0 overflow-x-auto scrollbar-hide"
                   style={{
-                    maskImage: 'linear-gradient(to right, black calc(100% - 16px), transparent 100%)',
-                    WebkitMaskImage: 'linear-gradient(to right, black calc(100% - 16px), transparent 100%)',
+                    maskImage:
+                      'linear-gradient(to right, black calc(100% - 16px), transparent 100%)',
+                    WebkitMaskImage:
+                      'linear-gradient(to right, black calc(100% - 16px), transparent 100%)',
                   }}
                 >
                   {badges}
@@ -242,6 +282,16 @@ export function EntityRow({
         </div>
       </button>
 
+      {controls && (
+        <div
+          className="absolute right-3 top-1/2 z-20 flex -translate-y-1/2 items-center gap-3"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {controls}
+        </div>
+      )}
+
       {/* Children rendered below the button */}
       {children}
 
@@ -252,22 +302,26 @@ export function EntityRow({
       {menuContent && !hideMoreButton && !titleTrailing && (
         <div
           className={cn(
-            "absolute right-2 top-2 transition-opacity z-10",
-            menuOpen || contextMenuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+            'absolute right-2 top-2 transition-opacity z-10',
+            menuOpen || contextMenuOpen
+              ? 'opacity-100'
+              : 'opacity-0 group-hover:opacity-100',
           )}
           onMouseDown={(e) => e.stopPropagation()}
         >
           <div className="flex items-center rounded-[8px] overflow-hidden border border-transparent hover:border-border/50">
-            <DropdownMenu modal={true} open={menuOpen} onOpenChange={setMenuOpen}>
+            <DropdownMenu
+              modal={true}
+              open={menuOpen}
+              onOpenChange={setMenuOpen}
+            >
               <DropdownMenuTrigger asChild>
                 <div className="p-1.5 hover:bg-foreground/10 data-[state=open]:bg-foreground/10 cursor-pointer">
                   <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
                 </div>
               </DropdownMenuTrigger>
               <StyledDropdownMenuContent align="end">
-                <DropdownMenuProvider>
-                  {menuContent}
-                </DropdownMenuProvider>
+                <DropdownMenuProvider>{menuContent}</DropdownMenuProvider>
               </StyledDropdownMenuContent>
             </DropdownMenu>
           </div>
@@ -292,13 +346,9 @@ export function EntityRow({
       {/* Wrap with ContextMenu if menu content is provided */}
       {resolvedContextMenu ? (
         <ContextMenu modal={true} onOpenChange={setContextMenuOpen}>
-          <ContextMenuTrigger asChild>
-            {innerContent}
-          </ContextMenuTrigger>
+          <ContextMenuTrigger asChild>{innerContent}</ContextMenuTrigger>
           <StyledContextMenuContent>
-            <ContextMenuProvider>
-              {resolvedContextMenu}
-            </ContextMenuProvider>
+            <ContextMenuProvider>{resolvedContextMenu}</ContextMenuProvider>
           </StyledContextMenuContent>
         </ContextMenu>
       ) : (

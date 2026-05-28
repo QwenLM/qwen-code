@@ -96,7 +96,16 @@ export function registerLlmConnectionsHandlers(
 
   server.handle(
     RPC_CHANNELS.settings.LIST_QWEN_PROVIDERS,
-    async (): Promise<QwenProviderCatalog> => {
+    async (_ctx, sessionId?: string): Promise<QwenProviderCatalog> => {
+      if (sessionId) {
+        try {
+          return await sessionManager.listSessionQwenProviders(sessionId);
+        } catch (error) {
+          deps.platform.logger?.warn(
+            `Qwen provider list via active session failed: ${error instanceof Error ? error.message : error}`,
+          );
+        }
+      }
       return listQwenProvidersViaAcp({
         hostRuntime: buildBackendHostRuntimeContext(deps.platform),
       });
@@ -108,12 +117,35 @@ export function registerLlmConnectionsHandlers(
     async (
       _ctx,
       params: QwenProviderConnectParams,
+      sessionId?: string,
     ): Promise<QwenProviderConnectResult> => {
       try {
-        const result = await connectQwenProviderViaAcp(
-          { hostRuntime: buildBackendHostRuntimeContext(deps.platform) },
-          params,
-        );
+        const scopedParams: QwenProviderConnectParams = {
+          ...params,
+          scope: 'user',
+        };
+        let result: QwenProviderConnectResult;
+        if (sessionId) {
+          try {
+            result = await sessionManager.connectSessionQwenProvider(
+              sessionId,
+              scopedParams,
+            );
+          } catch (error) {
+            deps.platform.logger?.warn(
+              `Qwen provider connect via active session failed: ${error instanceof Error ? error.message : error}`,
+            );
+            result = await connectQwenProviderViaAcp(
+              { hostRuntime: buildBackendHostRuntimeContext(deps.platform) },
+              scopedParams,
+            );
+          }
+        } else {
+          result = await connectQwenProviderViaAcp(
+            { hostRuntime: buildBackendHostRuntimeContext(deps.platform) },
+            scopedParams,
+          );
+        }
         if (!result.success) return result;
 
         const existing = ensureQwenConnection();
@@ -242,9 +274,8 @@ export function registerLlmConnectionsHandlers(
 
   server.handle(
     RPC_CHANNELS.llmConnections.LIST,
-    async (): Promise<LlmConnection[]> => {
-      return getLlmConnections().map(attachRuntimeModelState);
-    },
+    async (): Promise<LlmConnection[]> =>
+      getLlmConnections().map(attachRuntimeModelState),
   );
 
   server.handle(
@@ -272,9 +303,7 @@ export function registerLlmConnectionsHandlers(
 
   server.handle(
     RPC_CHANNELS.llmConnections.GET_API_KEY,
-    async (): Promise<string | null> => {
-      return null;
-    },
+    async (): Promise<string | null> => null,
   );
 
   server.handle(

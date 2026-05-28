@@ -206,6 +206,7 @@ export interface AvailableCommandsSnapshot {
     body?: string;
     filePath?: string;
     level?: string;
+    modelInvocable?: boolean;
   }>;
 }
 
@@ -252,7 +253,9 @@ export async function buildAvailableCommandsSnapshot(
           name: skill.name,
           description: skill.description,
           body: skill.body,
+          filePath: skill.filePath,
           level: skill.level,
+          modelInvocable: skill.disableModelInvocation !== true,
         });
       }
     }
@@ -264,7 +267,12 @@ export async function buildAvailableCommandsSnapshot(
     if (command.kind !== CommandKind.SKILL || !command.skillDetail) {
       continue;
     }
-    skillDetailsByName.set(command.skillDetail.name, command.skillDetail);
+    const existing = skillDetailsByName.get(command.skillDetail.name);
+    skillDetailsByName.set(command.skillDetail.name, {
+      ...existing,
+      ...command.skillDetail,
+      modelInvocable: command.modelInvocable === true,
+    });
   }
   const availableSkillDetails =
     skillDetailsByName.size > 0

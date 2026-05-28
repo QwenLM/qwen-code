@@ -6,11 +6,11 @@
  * provider-agnostic AgentEvent stream.
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { homedir, platform, tmpdir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
-import { Readable, Writable } from 'node:stream';
+import { spawn, type ChildProcess } from 'node:child_process'
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { homedir, platform, tmpdir } from 'node:os'
+import { isAbsolute, join, resolve } from 'node:path'
+import { Readable, Writable } from 'node:stream'
 
 import {
   ClientSideConnection,
@@ -22,7 +22,7 @@ import {
   type ModelInfo,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
-} from '@agentclientprotocol/sdk';
+} from '@agentclientprotocol/sdk'
 import type {
   AgentEvent,
   AskUserQuestionItem,
@@ -31,21 +31,21 @@ import type {
   IntermediateMessageKind,
   Message,
   MessageTextElement,
-} from '@craft-agent/core/types';
-import { utf16IndexToByteOffset } from '@craft-agent/core/utils';
-import type { FileAttachment } from '../utils/files.ts';
-import type { ModelDefinition } from '../config/models.ts';
-import { getProxyEnvVars } from '../config/proxy-env.ts';
-import { getCoAuthorPreference } from '../config/preferences.ts';
-import { getSessionPlansPath } from '../sessions/storage.ts';
-import { getSystemPrompt } from '../prompts/system.ts';
+} from '@craft-agent/core/types'
+import { utf16IndexToByteOffset } from '@craft-agent/core/utils'
+import type { FileAttachment } from '../utils/files.ts'
+import type { ModelDefinition } from '../config/models.ts'
+import { getProxyEnvVars } from '../config/proxy-env.ts'
+import { getCoAuthorPreference } from '../config/preferences.ts'
+import { getSessionPlansPath } from '../sessions/storage.ts'
+import { getSystemPrompt } from '../prompts/system.ts'
 import {
   resolveFileMentions,
   resolveSourceMentions,
-} from '../mentions/index.ts';
-import { isParentTaskTool } from '../utils/toolNames.ts';
+} from '../mentions/index.ts'
+import { isParentTaskTool } from '../utils/toolNames.ts'
 
-import { BaseAgent } from './base-agent.ts';
+import { BaseAgent } from './base-agent.ts'
 import type {
   BackendConfig,
   BackendSessionMessagesResult,
@@ -57,18 +57,18 @@ import type {
   BackendHostRuntimeContext,
   PermissionRequestType,
   SdkMcpServerConfig,
-} from './backend/types.ts';
-import { AbortReason } from './backend/types.ts';
-import { getBackendRuntime } from './backend/internal/driver-types.ts';
-import { withElectronRunAsNodeEnv } from './backend/internal/electron-run-as-node.ts';
-import { resolveBackendRuntimePaths } from './backend/internal/runtime-resolver.ts';
-import { EventQueue } from './backend/event-queue.ts';
-import type { PermissionMode } from './mode-manager.ts';
+} from './backend/types.ts'
+import { AbortReason } from './backend/types.ts'
+import { getBackendRuntime } from './backend/internal/driver-types.ts'
+import { withElectronRunAsNodeEnv } from './backend/internal/electron-run-as-node.ts'
+import { resolveBackendRuntimePaths } from './backend/internal/runtime-resolver.ts'
+import { EventQueue } from './backend/event-queue.ts'
+import type { PermissionMode } from './mode-manager.ts'
 import {
   LLM_QUERY_TIMEOUT_MS,
   type LLMQueryRequest,
   type LLMQueryResult,
-} from './llm-tool.ts';
+} from './llm-tool.ts'
 import type {
   PermissionResponseOptions,
   PermissionRuleType,
@@ -84,86 +84,90 @@ import type {
   QwenProviderConnectResult,
   QwenSettingValue,
   QwenSettingsScope,
+  QwenSkillDeleteRequest,
+  QwenSkillDeleteResult,
   QwenSkillInstallRequest,
   QwenSkillInstallResult,
-} from '../protocol/dto.ts';
+  QwenSkillSetEnabledRequest,
+  QwenSkillSetEnabledResult,
+} from '../protocol/dto.ts'
 import type {
   QwenMemoryPaths,
   QwenMemorySettings,
-} from '../config/qwen-settings.ts';
-import { normalizeQwenMemorySettings } from '../config/qwen-settings.ts';
+} from '../config/qwen-settings.ts'
+import { normalizeQwenMemorySettings } from '../config/qwen-settings.ts'
 
-type JsonRecord = Record<string, unknown>;
+type JsonRecord = Record<string, unknown>
 
 type AcpPermissionOption = {
-  optionId?: string;
-  name?: string;
-  kind?: string;
-};
+  optionId?: string
+  name?: string
+  kind?: string
+}
 
 type PendingPermission = {
   resolve: (
     response: RequestPermissionResponse & { answers?: Record<string, string> },
-  ) => void;
-  options: AcpPermissionOption[];
-};
+  ) => void
+  options: AcpPermissionOption[]
+}
 
 type MiniCollector = {
-  chunks: string[];
-  inputTokens?: number;
-  outputTokens?: number;
-};
+  chunks: string[]
+  inputTokens?: number
+  outputTokens?: number
+}
 
 type ExtractedUsage = {
-  inputTokens: number;
-  contextTokens: number;
-  outputTokens?: number;
-};
+  inputTokens: number
+  contextTokens: number
+  outputTokens?: number
+}
 
 type HistoryCollector = {
-  updates: JsonRecord[];
-};
+  updates: JsonRecord[]
+}
 
 type SlashCommandInvocation = {
-  rawCommand: string;
-  timestamp: number;
-};
+  rawCommand: string
+  timestamp: number
+}
 
-const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const DEFAULT_INITIALIZE_TIMEOUT_MS = 60_000;
-const INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS = false;
-const SHARED_ACP_IDLE_TTL_MS = 5 * 60_000;
+const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue'
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+const DEFAULT_INITIALIZE_TIMEOUT_MS = 60_000
+const INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS = false
+const SHARED_ACP_IDLE_TTL_MS = 5 * 60_000
 
 type QwenAcpSubscriber = {
-  onSessionUpdate(params: unknown): void;
+  onSessionUpdate(params: unknown): void
   onPermissionRequest(
     params: RequestPermissionRequest,
-  ): Promise<RequestPermissionResponse>;
-  onExtMethod(method: string, params: JsonRecord): Promise<JsonRecord>;
-  onProcessExit(code: number | null, signal: NodeJS.Signals | null): void;
-  onDebug(message: string): void;
-};
+  ): Promise<RequestPermissionResponse>
+  onExtMethod(method: string, params: JsonRecord): Promise<JsonRecord>
+  onProcessExit(code: number | null, signal: NodeJS.Signals | null): void
+  onDebug(message: string): void
+}
 
 type QwenAcpProcessOptions = {
-  key: string;
-  command: string;
-  args: string[];
-  cwd: string;
-  envOverrides?: Record<string, string>;
-};
+  key: string
+  command: string
+  args: string[]
+  cwd: string
+  envOverrides?: Record<string, string>
+}
 
 type QwenAcpLease = {
-  connection: ClientSideConnection;
-  commandDescription: string;
-  recentStderr(): string;
-  isActive(): boolean;
-  registerSession(sessionId: string): void;
-  unregisterSession(sessionId: string): void;
-  release(): void;
-};
+  connection: ClientSideConnection
+  commandDescription: string
+  recentStderr(): string
+  isActive(): boolean
+  registerSession(sessionId: string): void
+  unregisterSession(sessionId: string): void
+  release(): void
+}
 
-const sharedAcpProcesses = new Map<string, SharedQwenAcpProcess>();
+const sharedAcpProcesses = new Map<string, SharedQwenAcpProcess>()
 
 function stableStringifyRecord(
   value: Record<string, string | undefined>,
@@ -172,70 +176,70 @@ function stableStringifyRecord(
     Object.keys(value)
       .sort()
       .reduce<Record<string, string>>((acc, key) => {
-        const item = value[key];
-        if (item !== undefined) acc[key] = item;
-        return acc;
+        const item = value[key]
+        if (item !== undefined) acc[key] = item
+        return acc
       }, {}),
-  );
+  )
 }
 
 function buildSharedAcpProcessKey(args: {
-  command: string;
-  spawnArgs: string[];
-  workspaceRootPath: string;
-  envOverrides?: Record<string, string>;
+  command: string
+  spawnArgs: string[]
+  workspaceRootPath: string
+  envOverrides?: Record<string, string>
 }): string {
   return [
     args.command,
     args.spawnArgs.join('\u0000'),
     args.workspaceRootPath,
     stableStringifyRecord(args.envOverrides ?? {}),
-  ].join('\u0001');
+  ].join('\u0001')
 }
 
 async function acquireSharedQwenAcpProcess(
   options: QwenAcpProcessOptions,
   subscriber: QwenAcpSubscriber,
 ): Promise<QwenAcpLease> {
-  let processEntry = sharedAcpProcesses.get(options.key);
+  let processEntry = sharedAcpProcesses.get(options.key)
   if (!processEntry) {
-    processEntry = new SharedQwenAcpProcess(options);
-    sharedAcpProcesses.set(options.key, processEntry);
+    processEntry = new SharedQwenAcpProcess(options)
+    sharedAcpProcesses.set(options.key, processEntry)
   }
-  return processEntry.acquire(subscriber);
+  return processEntry.acquire(subscriber)
 }
 
 class SharedQwenAcpProcess {
-  private child: ChildProcess | null = null;
-  private connection: ClientSideConnection | null = null;
-  private startPromise: Promise<void> | null = null;
-  private initialized = false;
-  private subscribers = new Set<QwenAcpSubscriber>();
-  private sessionOwners = new Map<string, QwenAcpSubscriber>();
-  private refCount = 0;
-  private idleTimer: ReturnType<typeof setTimeout> | undefined;
-  private stderrBuffer: string[] = [];
-  private stderrBufferBytes = 0;
-  private readonly commandDescription: string;
-  private static readonly STDERR_BUFFER_MAX_BYTES = 8 * 1024;
+  private child: ChildProcess | null = null
+  private connection: ClientSideConnection | null = null
+  private startPromise: Promise<void> | null = null
+  private initialized = false
+  private subscribers = new Set<QwenAcpSubscriber>()
+  private sessionOwners = new Map<string, QwenAcpSubscriber>()
+  private refCount = 0
+  private idleTimer: ReturnType<typeof setTimeout> | undefined
+  private stderrBuffer: string[] = []
+  private stderrBufferBytes = 0
+  private readonly commandDescription: string
+  private static readonly STDERR_BUFFER_MAX_BYTES = 8 * 1024
 
   constructor(private readonly options: QwenAcpProcessOptions) {
-    this.commandDescription = `${options.command} ${options.args.join(' ')}`;
+    this.commandDescription = `${options.command} ${options.args.join(' ')}`
   }
 
   async acquire(subscriber: QwenAcpSubscriber): Promise<QwenAcpLease> {
-    this.refCount += 1;
+    this.refCount += 1
     if (this.idleTimer) {
-      clearTimeout(this.idleTimer);
-      this.idleTimer = undefined;
+      clearTimeout(this.idleTimer)
+      this.idleTimer = undefined
     }
-    this.subscribers.add(subscriber);
+    this.subscribers.add(subscriber)
 
     try {
-      await this.ensureStarted();
+      await this.ensureStarted()
     } catch (error) {
-      this.releaseSubscriber(subscriber);
-      throw error;
+      this.releaseSubscriber(subscriber)
+      throw error
     }
 
     const lease: QwenAcpLease = {
@@ -244,47 +248,47 @@ class SharedQwenAcpProcess {
       recentStderr: () => this.stderrBuffer.join(''),
       isActive: () => this.isActive(),
       registerSession: (sessionId) => {
-        this.sessionOwners.set(sessionId, subscriber);
+        this.sessionOwners.set(sessionId, subscriber)
       },
       unregisterSession: (sessionId) => {
         if (this.sessionOwners.get(sessionId) === subscriber) {
-          this.sessionOwners.delete(sessionId);
+          this.sessionOwners.delete(sessionId)
         }
       },
       release: () => this.releaseSubscriber(subscriber),
-    };
-    return lease;
+    }
+    return lease
   }
 
   private async ensureStarted(): Promise<void> {
-    if (this.isActive()) return;
+    if (this.isActive()) return
     if (this.startPromise) {
-      await this.startPromise;
-      return;
+      await this.startPromise
+      return
     }
 
-    this.startPromise = this.start();
+    this.startPromise = this.start()
     try {
-      await this.startPromise;
+      await this.startPromise
     } finally {
-      this.startPromise = null;
+      this.startPromise = null
     }
   }
 
   private async start(): Promise<void> {
-    this.debug(`Spawning shared Qwen ACP process: ${this.commandDescription}`);
-    this.stderrBuffer = [];
-    this.stderrBufferBytes = 0;
+    this.debug(`Spawning shared Qwen ACP process: ${this.commandDescription}`)
+    this.stderrBuffer = []
+    this.stderrBufferBytes = 0
 
     const child = spawn(this.options.command, this.options.args, {
       cwd: this.options.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: this.buildEnv(),
       shell: false,
-    });
+    })
 
-    this.child = child;
-    this.initialized = false;
+    this.child = child
+    this.initialized = false
 
     const connection = new ClientSideConnection(
       () => this.createAcpClient(),
@@ -292,26 +296,26 @@ class SharedQwenAcpProcess {
         Writable.toWeb(child.stdin!) as unknown as WritableStream<Uint8Array>,
         Readable.toWeb(child.stdout!) as unknown as ReadableStream<Uint8Array>,
       ),
-    );
-    this.connection = connection;
+    )
+    this.connection = connection
 
     child.stderr?.on('data', (data: Buffer) => {
-      const text = data.toString();
-      this.recordStderr(text);
-      const trimmed = text.trim();
-      if (trimmed) this.debug(`[qwen stderr] ${trimmed}`);
-    });
-    child.on('exit', (code, signal) => this.handleExit(code, signal));
+      const text = data.toString()
+      this.recordStderr(text)
+      const trimmed = text.trim()
+      if (trimmed) this.debug(`[qwen stderr] ${trimmed}`)
+    })
+    child.on('exit', (code, signal) => this.handleExit(code, signal))
     child.on('error', (error) => {
-      this.debug(`Qwen ACP process error: ${error.message}`);
-    });
+      this.debug(`Qwen ACP process error: ${error.message}`)
+    })
 
     void connection.closed.then(() => {
-      if (this.connection !== connection) return;
+      if (this.connection !== connection) return
       if (this.child === child && !child.killed && child.exitCode === null) {
-        child.kill();
+        child.kill()
       }
-    });
+    })
 
     try {
       await this.withTimeout(
@@ -321,11 +325,11 @@ class SharedQwenAcpProcess {
         }),
         'initialize',
         qwenInitializeTimeoutMs(),
-      );
-      this.initialized = true;
+      )
+      this.initialized = true
     } catch (error) {
-      this.kill();
-      throw error;
+      this.kill()
+      throw error
     }
   }
 
@@ -334,45 +338,45 @@ class SharedQwenAcpProcess {
       ...process.env,
       ...getProxyEnvVars(),
       ...this.options.envOverrides,
-    };
-    delete env.CRAFT_SESSION_DIR;
+    }
+    delete env.CRAFT_SESSION_DIR
     return withElectronRunAsNodeEnv(
       env,
       this.options.command,
       this.options.args,
-    );
+    )
   }
 
   private createAcpClient(): Client {
     return {
       requestPermission: async (params) => {
-        const sessionId = asString(toRecord(params).sessionId);
-        const owner = sessionId ? this.sessionOwners.get(sessionId) : undefined;
-        if (owner) return owner.onPermissionRequest(params);
+        const sessionId = asString(toRecord(params).sessionId)
+        const owner = sessionId ? this.sessionOwners.get(sessionId) : undefined
+        if (owner) return owner.onPermissionRequest(params)
 
         this.debug(
           `Qwen permission request had no owner for session ${sessionId ?? 'unknown'}`,
-        );
-        return { outcome: { outcome: 'cancelled' } };
+        )
+        return { outcome: { outcome: 'cancelled' } }
       },
       sessionUpdate: async (params) => {
         for (const subscriber of [...this.subscribers]) {
-          subscriber.onSessionUpdate(params);
+          subscriber.onSessionUpdate(params)
         }
       },
       extMethod: async (method, params) => {
-        const record = toRecord(params);
-        const sessionId = asString(record.sessionId);
-        const owner = sessionId ? this.sessionOwners.get(sessionId) : undefined;
-        if (owner) return owner.onExtMethod(method, record);
+        const record = toRecord(params)
+        const sessionId = asString(record.sessionId)
+        const owner = sessionId ? this.sessionOwners.get(sessionId) : undefined
+        if (owner) return owner.onExtMethod(method, record)
 
         for (const subscriber of [...this.subscribers]) {
-          const result = await subscriber.onExtMethod(method, record);
-          if (Object.keys(result).length > 0) return result;
+          const result = await subscriber.onExtMethod(method, record)
+          if (Object.keys(result).length > 0) return result
         }
-        return method === MID_TURN_QUEUE_DRAIN_METHOD ? { messages: [] } : {};
+        return method === MID_TURN_QUEUE_DRAIN_METHOD ? { messages: [] } : {}
       },
-    };
+    }
   }
 
   private ensureConnection(): ClientSideConnection {
@@ -381,9 +385,9 @@ class SharedQwenAcpProcess {
       this.connection.signal.aborted ||
       !this.isActive()
     ) {
-      throw new Error('Qwen ACP process is not running');
+      throw new Error('Qwen ACP process is not running')
     }
-    return this.connection;
+    return this.connection
   }
 
   private isActive(): boolean {
@@ -394,63 +398,63 @@ class SharedQwenAcpProcess {
       this.connection &&
       !this.connection.signal.aborted &&
       this.initialized
-    );
+    )
   }
 
   private releaseSubscriber(subscriber: QwenAcpSubscriber): void {
     if (this.subscribers.delete(subscriber)) {
-      this.refCount = Math.max(0, this.refCount - 1);
+      this.refCount = Math.max(0, this.refCount - 1)
     }
     for (const [sessionId, owner] of [...this.sessionOwners]) {
-      if (owner === subscriber) this.sessionOwners.delete(sessionId);
+      if (owner === subscriber) this.sessionOwners.delete(sessionId)
     }
     if (this.refCount === 0 && !this.idleTimer) {
       this.idleTimer = setTimeout(() => {
-        if (this.refCount > 0) return;
-        sharedAcpProcesses.delete(this.options.key);
-        this.kill();
-      }, SHARED_ACP_IDLE_TTL_MS);
+        if (this.refCount > 0) return
+        sharedAcpProcesses.delete(this.options.key)
+        this.kill()
+      }, SHARED_ACP_IDLE_TTL_MS)
     }
   }
 
   private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
     this.debug(
       `Qwen ACP process exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`,
-    );
-    this.initialized = false;
-    this.child = null;
-    this.connection = null;
-    sharedAcpProcesses.delete(this.options.key);
+    )
+    this.initialized = false
+    this.child = null
+    this.connection = null
+    sharedAcpProcesses.delete(this.options.key)
     for (const subscriber of [...this.subscribers]) {
-      subscriber.onProcessExit(code, signal);
+      subscriber.onProcessExit(code, signal)
     }
   }
 
   private kill(): void {
-    this.connection = null;
+    this.connection = null
     if (this.child && !this.child.killed) {
-      this.child.kill();
+      this.child.kill()
     }
-    this.child = null;
-    this.initialized = false;
+    this.child = null
+    this.initialized = false
   }
 
   private recordStderr(chunk: string): void {
-    if (!chunk) return;
+    if (!chunk) return
     const effective =
       chunk.length > SharedQwenAcpProcess.STDERR_BUFFER_MAX_BYTES
         ? chunk.slice(
             chunk.length - SharedQwenAcpProcess.STDERR_BUFFER_MAX_BYTES,
           )
-        : chunk;
-    this.stderrBuffer.push(effective);
-    this.stderrBufferBytes += effective.length;
+        : chunk
+    this.stderrBuffer.push(effective)
+    this.stderrBufferBytes += effective.length
     while (
       this.stderrBufferBytes > SharedQwenAcpProcess.STDERR_BUFFER_MAX_BYTES &&
       this.stderrBuffer.length > 1
     ) {
-      const dropped = this.stderrBuffer.shift()!;
-      this.stderrBufferBytes -= dropped.length;
+      const dropped = this.stderrBuffer.shift()!
+      this.stderrBufferBytes -= dropped.length
     }
   }
 
@@ -459,50 +463,50 @@ class SharedQwenAcpProcess {
     method: string,
     timeoutMs: number,
   ): Promise<T> {
-    if (timeoutMs <= 0) return promise;
+    if (timeoutMs <= 0) return promise
 
-    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeout = setTimeout(() => {
-        reject(new Error(`Qwen ACP request timed out: ${method}`));
-      }, timeoutMs);
-    });
+        reject(new Error(`Qwen ACP request timed out: ${method}`))
+      }, timeoutMs)
+    })
 
     return Promise.race([promise, timeoutPromise]).finally(() => {
-      if (timeout) clearTimeout(timeout);
-    });
+      if (timeout) clearTimeout(timeout)
+    })
   }
 
   private debug(message: string): void {
     for (const subscriber of [...this.subscribers]) {
-      subscriber.onDebug(message);
+      subscriber.onDebug(message)
     }
   }
 }
 
 type QwenSettingsAcpOptions = {
-  hostRuntime: BackendHostRuntimeContext;
-  cwd?: string;
-  envOverrides?: Record<string, string>;
-  timeoutMs?: number;
-  debug?: (message: string) => void;
-};
+  hostRuntime: BackendHostRuntimeContext
+  cwd?: string
+  envOverrides?: Record<string, string>
+  timeoutMs?: number
+  debug?: (message: string) => void
+}
 
 function buildQwenAcpSpawnCommand(
   qwenCliPath: string,
   nodePath: string,
 ): { command: string; args: string[] } {
-  const args = ['--acp', '--channel=desktop'];
+  const args = ['--acp', '--channel=desktop']
 
   if (qwenCliPath.endsWith('.js')) {
-    return { command: nodePath, args: [qwenCliPath, ...args] };
+    return { command: nodePath, args: [qwenCliPath, ...args] }
   }
 
-  return { command: qwenCliPath, args };
+  return { command: qwenCliPath, args }
 }
 
 function qwenSettingsCwd(hostRuntime: BackendHostRuntimeContext): string {
-  return hostRuntime.appRootPath || homedir() || process.cwd();
+  return hostRuntime.appRootPath || homedir() || process.cwd()
 }
 
 function qwenAcpWithTimeout<T>(
@@ -510,18 +514,18 @@ function qwenAcpWithTimeout<T>(
   method: string,
   timeoutMs: number,
 ): Promise<T> {
-  if (timeoutMs <= 0) return promise;
+  if (timeoutMs <= 0) return promise
 
-  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
-      reject(new Error(`Qwen ACP request timed out: ${method}`));
-    }, timeoutMs);
-  });
+      reject(new Error(`Qwen ACP request timed out: ${method}`))
+    }, timeoutMs)
+  })
 
   return Promise.race([promise, timeoutPromise]).finally(() => {
-    if (timeout) clearTimeout(timeout);
-  });
+    if (timeout) clearTimeout(timeout)
+  })
 }
 
 async function callQwenSettingsAcpMethod(
@@ -529,23 +533,23 @@ async function callQwenSettingsAcpMethod(
   method: string,
   params: JsonRecord = {},
 ): Promise<JsonRecord> {
-  const resolvedPaths = resolveBackendRuntimePaths(options.hostRuntime);
-  const qwenCliPath = resolvedPaths.qwenCliPath;
+  const resolvedPaths = resolveBackendRuntimePaths(options.hostRuntime)
+  const qwenCliPath = resolvedPaths.qwenCliPath
   if (!qwenCliPath) {
     throw new Error(
       'Qwen Code CLI not found. Build the current qwen-code checkout with npm run build && npm run bundle, or set QWEN_CODE_CLI to a dist/cli.js path.',
-    );
+    )
   }
 
-  const nodePath = resolvedPaths.nodeRuntimePath || process.execPath;
-  const { command, args } = buildQwenAcpSpawnCommand(qwenCliPath, nodePath);
-  const cwd = options.cwd || qwenSettingsCwd(options.hostRuntime);
+  const nodePath = resolvedPaths.nodeRuntimePath || process.execPath
+  const { command, args } = buildQwenAcpSpawnCommand(qwenCliPath, nodePath)
+  const cwd = options.cwd || qwenSettingsCwd(options.hostRuntime)
   const key = buildSharedAcpProcessKey({
     command,
     spawnArgs: args,
     workspaceRootPath: cwd,
     envOverrides: options.envOverrides,
-  });
+  })
 
   const lease = await acquireSharedQwenAcpProcess(
     {
@@ -563,7 +567,7 @@ async function callQwenSettingsAcpMethod(
       onProcessExit: () => {},
       onDebug: options.debug ?? (() => {}),
     },
-  );
+  )
 
   try {
     return toRecord(
@@ -572,9 +576,9 @@ async function callQwenSettingsAcpMethod(
         method,
         options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
       ),
-    );
+    )
   } finally {
-    lease.release();
+    lease.release()
   }
 }
 
@@ -584,8 +588,8 @@ export async function getQwenMemorySettingsViaAcp(
   const response = await callQwenSettingsAcpMethod(
     options,
     'qwen/settings/getMemory',
-  );
-  return normalizeQwenMemorySettings(response.settings);
+  )
+  return normalizeQwenMemorySettings(response.settings)
 }
 
 export async function setQwenMemorySettingsViaAcp(
@@ -596,8 +600,8 @@ export async function setQwenMemorySettingsViaAcp(
     options,
     'qwen/settings/setMemory',
     { updates },
-  );
-  return normalizeQwenMemorySettings(response.settings);
+  )
+  return normalizeQwenMemorySettings(response.settings)
 }
 
 export async function getQwenSettingsPathViaAcp(
@@ -606,29 +610,29 @@ export async function getQwenSettingsPathViaAcp(
   const response = await callQwenSettingsAcpMethod(
     options,
     'qwen/settings/getPath',
-  );
-  const settingsPath = asString(response.path);
-  if (!settingsPath) throw new Error('Qwen ACP did not return settings path');
-  return settingsPath;
+  )
+  const settingsPath = asString(response.path)
+  if (!settingsPath) throw new Error('Qwen ACP did not return settings path')
+  return settingsPath
 }
 
 export async function getQwenMemoryPathsViaAcp(
   options: QwenSettingsAcpOptions & { projectRoot?: string },
 ): Promise<QwenMemoryPaths> {
-  const cwd = options.cwd || qwenSettingsCwd(options.hostRuntime);
+  const cwd = options.cwd || qwenSettingsCwd(options.hostRuntime)
   const response = await callQwenSettingsAcpMethod(
     { ...options, cwd },
     'qwen/settings/getMemoryPaths',
     { cwd, projectRoot: options.projectRoot ?? cwd },
-  );
-  const paths = toRecord(response.paths);
-  const userMemoryFile = asString(paths.userMemoryFile);
-  const projectMemoryFile = asString(paths.projectMemoryFile);
-  const autoMemoryDir = asString(paths.autoMemoryDir);
+  )
+  const paths = toRecord(response.paths)
+  const userMemoryFile = asString(paths.userMemoryFile)
+  const projectMemoryFile = asString(paths.projectMemoryFile)
+  const autoMemoryDir = asString(paths.autoMemoryDir)
   if (!userMemoryFile || !projectMemoryFile || !autoMemoryDir) {
-    throw new Error('Qwen ACP did not return memory paths');
+    throw new Error('Qwen ACP did not return memory paths')
   }
-  return { userMemoryFile, projectMemoryFile, autoMemoryDir };
+  return { userMemoryFile, projectMemoryFile, autoMemoryDir }
 }
 
 export async function listQwenProvidersViaAcp(
@@ -637,12 +641,18 @@ export async function listQwenProvidersViaAcp(
   const response = await callQwenSettingsAcpMethod(
     options,
     'qwen/providers/list',
-  );
+  )
+  return normalizeQwenProviderCatalog(response)
+}
+
+function normalizeQwenProviderCatalog(
+  response: JsonRecord,
+): QwenProviderCatalog {
   return {
     providers: Array.isArray(response.providers)
       ? (response.providers as QwenProviderCatalog['providers'])
       : [],
-  };
+  }
 }
 
 export async function connectQwenProviderViaAcp(
@@ -653,12 +663,18 @@ export async function connectQwenProviderViaAcp(
     options,
     'qwen/providers/connect',
     params as unknown as JsonRecord,
-  );
-  const error = asString(response.error);
-  const providerId = asString(response.providerId);
-  const providerLabel = asString(response.providerLabel);
-  const authType = asString(response.authType);
-  const modelId = asString(response.modelId);
+  )
+  return normalizeQwenProviderConnectResult(response)
+}
+
+function normalizeQwenProviderConnectResult(
+  response: JsonRecord,
+): QwenProviderConnectResult {
+  const error = asString(response.error)
+  const providerId = asString(response.providerId)
+  const providerLabel = asString(response.providerLabel)
+  const authType = asString(response.authType)
+  const modelId = asString(response.modelId)
   return {
     success: response.success === true,
     ...(error ? { error } : {}),
@@ -666,21 +682,21 @@ export async function connectQwenProviderViaAcp(
     ...(providerLabel ? { providerLabel } : {}),
     ...(authType ? { authType } : {}),
     ...(modelId ? { modelId } : {}),
-  };
+  }
 }
 
 function isRecord(value: unknown): value is JsonRecord {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
+  return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
 function asString(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
+  return typeof value === 'string' ? value : undefined
 }
 
 export function extractQwenParentToolUseId(
   update: Record<string, unknown>,
 ): string | undefined {
-  const meta = toRecord(update._meta);
+  const meta = toRecord(update._meta)
   return (
     asString(update.parentToolCallId) ||
     asString(update.parentToolUseId) ||
@@ -688,46 +704,46 @@ export function extractQwenParentToolUseId(
     asString(meta.parentToolCallId) ||
     asString(meta.parentToolUseId) ||
     asString(meta.parent_tool_use_id)
-  );
+  )
 }
 
 export function resolveQwenParentToolUseId(args: {
-  update: Record<string, unknown>;
-  toolUseId?: string;
-  activeParentToolUseIds?: ReadonlySet<string>;
+  update: Record<string, unknown>
+  toolUseId?: string
+  activeParentToolUseIds?: ReadonlySet<string>
 }): string | undefined {
-  const explicitParentToolUseId = extractQwenParentToolUseId(args.update);
+  const explicitParentToolUseId = extractQwenParentToolUseId(args.update)
   if (explicitParentToolUseId && explicitParentToolUseId !== args.toolUseId) {
-    return explicitParentToolUseId;
+    return explicitParentToolUseId
   }
 
-  const activeParentToolUseIds = args.activeParentToolUseIds;
+  const activeParentToolUseIds = args.activeParentToolUseIds
   if (activeParentToolUseIds?.size === 1) {
-    const [activeParentToolUseId] = activeParentToolUseIds;
+    const [activeParentToolUseId] = activeParentToolUseIds
     if (activeParentToolUseId !== args.toolUseId) {
-      return activeParentToolUseId;
+      return activeParentToolUseId
     }
   }
 
-  return undefined;
+  return undefined
 }
 
 function asNumber(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0)
-    return value;
-  if (typeof value !== 'string') return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+    return value
+  if (typeof value !== 'string') return undefined
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
 }
 
 function asBoolean(value: unknown): boolean | undefined {
-  return typeof value === 'boolean' ? value : undefined;
+  return typeof value === 'boolean' ? value : undefined
 }
 
 function parseAskUserQuestions(
   value: unknown,
 ): AskUserQuestionItem[] | undefined {
-  if (!Array.isArray(value)) return undefined;
+  if (!Array.isArray(value)) return undefined
 
   const questions = value
     .filter(isRecord)
@@ -740,7 +756,7 @@ function parseAskUserQuestions(
               description: asString(option.description) || '',
             }))
             .filter((option) => option.label)
-        : [];
+        : []
 
       return {
         question: asString(question.question) || '',
@@ -749,46 +765,46 @@ function parseAskUserQuestions(
         ...(asBoolean(question.multiSelect) !== undefined
           ? { multiSelect: asBoolean(question.multiSelect) }
           : {}),
-      };
+      }
     })
     .filter(
       (question) =>
         question.question && question.header && question.options.length > 0,
-    );
+    )
 
-  return questions.length > 0 ? questions : undefined;
+  return questions.length > 0 ? questions : undefined
 }
 
 function firstNumber(...values: unknown[]): number | undefined {
   for (const value of values) {
-    const number = asNumber(value);
-    if (number !== undefined) return number;
+    const number = asNumber(value)
+    if (number !== undefined) return number
   }
-  return undefined;
+  return undefined
 }
 
 function firstBoolean(...values: unknown[]): boolean | undefined {
   for (const value of values) {
-    const bool = asBoolean(value);
-    if (bool !== undefined) return bool;
+    const bool = asBoolean(value)
+    if (bool !== undefined) return bool
   }
-  return undefined;
+  return undefined
 }
 
 function toQwenModelDefinition(value: unknown): ModelDefinition | null {
-  const model = toRecord(value as ModelInfo);
-  const id = asString(model.modelId);
-  if (!id) return null;
-  const name = asString(model.name) || id;
-  const meta = toRecord(model._meta);
-  const generationConfig = toRecord(model.generationConfig);
-  const metaGenerationConfig = toRecord(meta.generationConfig);
-  const extraBody = toRecord(generationConfig.extra_body);
-  const metaExtraBody = toRecord(metaGenerationConfig.extra_body);
-  const capabilities = toRecord(model.capabilities);
-  const limits = toRecord(capabilities.limits);
-  const metaCapabilities = toRecord(meta.capabilities);
-  const metaLimits = toRecord(metaCapabilities.limits);
+  const model = toRecord(value as ModelInfo)
+  const id = asString(model.modelId)
+  if (!id) return null
+  const name = asString(model.name) || id
+  const meta = toRecord(model._meta)
+  const generationConfig = toRecord(model.generationConfig)
+  const metaGenerationConfig = toRecord(meta.generationConfig)
+  const extraBody = toRecord(generationConfig.extra_body)
+  const metaExtraBody = toRecord(metaGenerationConfig.extra_body)
+  const capabilities = toRecord(model.capabilities)
+  const limits = toRecord(capabilities.limits)
+  const metaCapabilities = toRecord(meta.capabilities)
+  const metaLimits = toRecord(metaCapabilities.limits)
   const contextWindow = firstNumber(
     meta.contextLimit,
     meta.contextWindowSize,
@@ -802,7 +818,7 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
     generationConfig.contextWindow,
     metaLimits.max_context_window_tokens,
     limits.max_context_window_tokens,
-  );
+  )
   const supportsThinking = firstBoolean(
     meta.supportsThinking,
     meta.supportsReasoning,
@@ -820,7 +836,7 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
     generationConfig.enable_thinking,
     extraBody.enableThinking,
     extraBody.enable_thinking,
-  );
+  )
 
   return {
     id,
@@ -830,74 +846,73 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
     provider: 'qwen',
     ...(contextWindow !== undefined ? { contextWindow } : {}),
     ...(supportsThinking !== undefined ? { supportsThinking } : {}),
-  };
+  }
 }
 
 function toRecord(value: unknown): JsonRecord {
-  return isRecord(value) ? value : {};
+  return isRecord(value) ? value : {}
 }
 
 function toAvailableSlashCommands(value: unknown): AvailableSlashCommand[] {
-  if (!Array.isArray(value)) return [];
+  if (!Array.isArray(value)) return []
 
-  const seen = new Set<string>();
-  const commands: AvailableSlashCommand[] = [];
+  const seen = new Set<string>()
+  const commands: AvailableSlashCommand[] = []
 
   for (const item of value) {
-    const record = toRecord(item);
-    const rawName = asString(record.name)?.trim().replace(/^\/+/, '');
-    if (!rawName || seen.has(rawName)) continue;
+    const record = toRecord(item)
+    const rawName = asString(record.name)?.trim().replace(/^\/+/, '')
+    if (!rawName || seen.has(rawName)) continue
 
-    seen.add(rawName);
+    seen.add(rawName)
     const input =
-      record.input === null || isRecord(record.input)
-        ? record.input
-        : undefined;
+      record.input === null || isRecord(record.input) ? record.input : undefined
 
     commands.push({
       name: rawName,
       description: asString(record.description),
       ...(input !== undefined && { input }),
-    });
+    })
   }
 
-  return commands;
+  return commands
 }
 
 function toAvailableSkills(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
+  if (!Array.isArray(value)) return undefined
 
-  const seen = new Set<string>();
-  const skills: string[] = [];
+  const seen = new Set<string>()
+  const skills: string[] = []
 
   for (const item of value) {
-    const name = asString(item)?.trim().replace(/^\/+/, '');
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
-    skills.push(name);
+    const name = asString(item)?.trim().replace(/^\/+/, '')
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    skills.push(name)
   }
 
-  return skills.length > 0 ? skills : undefined;
+  return skills.length > 0 ? skills : undefined
 }
 
 function toAvailableSkillDetails(
   value: unknown,
 ): AvailableSkillDetail[] | undefined {
-  if (!Array.isArray(value)) return undefined;
+  if (!Array.isArray(value)) return undefined
 
-  const seen = new Set<string>();
-  const details: AvailableSkillDetail[] = [];
+  const seen = new Set<string>()
+  const details: AvailableSkillDetail[] = []
 
   for (const item of value) {
-    const record = toRecord(item);
-    const name = asString(record.name)?.trim().replace(/^\/+/, '');
-    if (!name || seen.has(name)) continue;
-    seen.add(name);
+    const record = toRecord(item)
+    const name = asString(record.name)?.trim().replace(/^\/+/, '')
+    if (!name || seen.has(name)) continue
+    seen.add(name)
 
-    const description = asString(record.description);
-    const body = asString(record.body);
-    const filePath = asString(record.filePath);
-    const level = asString(record.level);
+    const description = asString(record.description)
+    const body = asString(record.body)
+    const filePath = asString(record.filePath)
+    const level = asString(record.level)
+    const modelInvocable = asBoolean(record.modelInvocable)
 
     details.push({
       name,
@@ -905,34 +920,35 @@ function toAvailableSkillDetails(
       ...(body !== undefined && { body }),
       ...(filePath !== undefined && { filePath }),
       ...(level !== undefined && { level }),
-    });
+      ...(modelInvocable !== undefined && { modelInvocable }),
+    })
   }
 
-  return details.length > 0 ? details : undefined;
+  return details.length > 0 ? details : undefined
 }
 
 function formatDebugNames(values: string[] | undefined, max = 40): string {
-  if (!values || values.length === 0) return 'none';
-  const visible = values.slice(0, max).join(', ');
+  if (!values || values.length === 0) return 'none'
+  const visible = values.slice(0, max).join(', ')
   return values.length > max
     ? `${visible}, ... +${values.length - max} more`
-    : visible;
+    : visible
 }
 
 function parseQwenTimestamp(value: unknown): number | undefined {
-  const raw = asString(value);
-  if (!raw) return undefined;
-  const timestamp = Date.parse(raw);
-  return Number.isFinite(timestamp) ? timestamp : undefined;
+  const raw = asString(value)
+  if (!raw) return undefined
+  const timestamp = Date.parse(raw)
+  return Number.isFinite(timestamp) ? timestamp : undefined
 }
 
 function sanitizeQwenCwd(cwd: string): string {
-  const normalizedCwd = platform() === 'win32' ? cwd.toLowerCase() : cwd;
-  return normalizedCwd.replace(/[^a-zA-Z0-9]/g, '-');
+  const normalizedCwd = platform() === 'win32' ? cwd.toLowerCase() : cwd
+  return normalizedCwd.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
 function resolveQwenRuntimeDir(dir: string): string {
-  if (dir === '~') return homedir();
+  if (dir === '~') return homedir()
   if (dir.startsWith('~/') || dir.startsWith('~\\')) {
     return join(
       homedir(),
@@ -940,28 +956,28 @@ function resolveQwenRuntimeDir(dir: string): string {
         .slice(2)
         .split(/[/\\]+/)
         .filter(Boolean),
-    );
+    )
   }
-  return isAbsolute(dir) ? dir : resolve(dir);
+  return isAbsolute(dir) ? dir : resolve(dir)
 }
 
 function getQwenRuntimeDir(): string {
-  const envDir = process.env.QWEN_RUNTIME_DIR;
-  if (envDir) return resolveQwenRuntimeDir(envDir);
+  const envDir = process.env.QWEN_RUNTIME_DIR
+  if (envDir) return resolveQwenRuntimeDir(envDir)
 
-  const homeDir = homedir();
-  return homeDir ? join(homeDir, '.qwen') : join(tmpdir(), '.qwen');
+  const homeDir = homedir()
+  return homeDir ? join(homeDir, '.qwen') : join(tmpdir(), '.qwen')
 }
 
 function getQwenTranscriptPath(sessionId: string, cwd: string): string {
-  const projectId = sanitizeQwenCwd(resolve(cwd));
+  const projectId = sanitizeQwenCwd(resolve(cwd))
   return join(
     getQwenRuntimeDir(),
     'projects',
     projectId,
     'chats',
     `${sessionId}.jsonl`,
-  );
+  )
 }
 
 function qwenSkillNameFromTextElement(
@@ -972,15 +988,15 @@ function qwenSkillNameFromTextElement(
     element.label ||
     element.placeholder ||
     ''
-  ).trim();
-  if (!raw) return undefined;
+  ).trim()
+  if (!raw) return undefined
 
-  const bracketMatch = /^\[skill:([^\]]+)\]$/.exec(raw);
-  const normalized = (bracketMatch?.[1] ?? raw).trim();
+  const bracketMatch = /^\[skill:([^\]]+)\]$/.exec(raw)
+  const normalized = (bracketMatch?.[1] ?? raw).trim()
   const withoutPlugin = normalized.startsWith('.agents:')
     ? normalized.slice('.agents:'.length).trim()
-    : normalized;
-  return withoutPlugin.split(':').pop()?.trim() || withoutPlugin;
+    : normalized
+  return withoutPlugin.split(':').pop()?.trim() || withoutPlugin
 }
 
 function rangesOverlapBytes(
@@ -990,18 +1006,18 @@ function rangesOverlapBytes(
   return (
     a.byte_range.start < b.byte_range.end &&
     b.byte_range.start < a.byte_range.end
-  );
+  )
 }
 
 function qwenTranscriptPlaceholderFromSourceElement(
   sourceElement: MessageTextElement,
 ): string | undefined {
   if (sourceElement.type === 'skill') {
-    const skillName = qwenSkillNameFromTextElement(sourceElement);
-    return skillName ? `@${skillName}` : undefined;
+    const skillName = qwenSkillNameFromTextElement(sourceElement)
+    return skillName ? `@${skillName}` : undefined
   }
 
-  return sourceElement.placeholder || undefined;
+  return sourceElement.placeholder || undefined
 }
 
 function findNonOverlappingPlaceholderStart(
@@ -1009,7 +1025,7 @@ function findNonOverlappingPlaceholderStart(
   placeholder: string,
   elements: MessageTextElement[],
 ): number {
-  let start = content.indexOf(placeholder);
+  let start = content.indexOf(placeholder)
   while (start >= 0) {
     const candidate: MessageTextElement = {
       type: 'context',
@@ -1018,31 +1034,31 @@ function findNonOverlappingPlaceholderStart(
         end: utf16IndexToByteOffset(content, start + placeholder.length),
       },
       placeholder,
-    };
+    }
     if (!elements.some((existing) => rangesOverlapBytes(existing, candidate)))
-      return start;
-    start = content.indexOf(placeholder, start + placeholder.length);
+      return start
+    start = content.indexOf(placeholder, start + placeholder.length)
   }
-  return -1;
+  return -1
 }
 
 function buildQwenTranscriptTextElements(
   content: string,
   sourceElements?: MessageTextElement[],
 ): MessageTextElement[] | undefined {
-  const elements: MessageTextElement[] = [];
+  const elements: MessageTextElement[] = []
 
   for (const sourceElement of sourceElements ?? []) {
     const placeholder =
-      qwenTranscriptPlaceholderFromSourceElement(sourceElement);
-    if (!placeholder) continue;
+      qwenTranscriptPlaceholderFromSourceElement(sourceElement)
+    if (!placeholder) continue
 
     const start = findNonOverlappingPlaceholderStart(
       content,
       placeholder,
       elements,
-    );
-    if (start < 0) continue;
+    )
+    if (start < 0) continue
 
     const element: MessageTextElement = {
       type: sourceElement.type,
@@ -1054,47 +1070,47 @@ function buildQwenTranscriptTextElements(
       ...(sourceElement.label ? { label: sourceElement.label } : {}),
       ...(sourceElement.target ? { target: sourceElement.target } : {}),
       ...(sourceElement.metadata ? { metadata: sourceElement.metadata } : {}),
-    };
+    }
 
     if (sourceElement.type === 'skill') {
-      const skillName = qwenSkillNameFromTextElement(sourceElement);
+      const skillName = qwenSkillNameFromTextElement(sourceElement)
       if (skillName) {
-        element.target = skillName;
-        element.label = sourceElement.label || skillName;
+        element.target = skillName
+        element.label = sourceElement.label || skillName
       }
     }
 
-    elements.push(element);
+    elements.push(element)
   }
 
-  elements.sort((a, b) => a.byte_range.start - b.byte_range.start);
-  return elements.length > 0 ? elements : undefined;
+  elements.sort((a, b) => a.byte_range.start - b.byte_range.start)
+  return elements.length > 0 ? elements : undefined
 }
 
 function toQwenTranscriptTextElements(
   value: unknown,
 ): MessageTextElement[] | undefined {
-  if (!Array.isArray(value)) return undefined;
+  if (!Array.isArray(value)) return undefined
 
   const byteOffset = (offset: unknown): number | undefined => {
     if (typeof offset === 'number' && Number.isFinite(offset) && offset >= 0)
-      return offset;
-    if (typeof offset !== 'string') return undefined;
-    const parsed = Number(offset);
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
-  };
+      return offset
+    if (typeof offset !== 'string') return undefined
+    const parsed = Number(offset)
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined
+  }
 
   const elements = value
     .filter(isRecord)
     .map((element): MessageTextElement | null => {
       const type = asString(element.type) as
         | MessageTextElement['type']
-        | undefined;
-      const byteRange = toRecord(element.byte_range);
-      const start = byteOffset(byteRange.start);
-      const end = byteOffset(byteRange.end);
-      const placeholder = asString(element.placeholder);
-      if (!type || start == null || end == null || !placeholder) return null;
+        | undefined
+      const byteRange = toRecord(element.byte_range)
+      const start = byteOffset(byteRange.start)
+      const end = byteOffset(byteRange.end)
+      const placeholder = asString(element.placeholder)
+      if (!type || start == null || end == null || !placeholder) return null
       if (
         ![
           'source',
@@ -1105,7 +1121,7 @@ function toQwenTranscriptTextElements(
           'folder',
         ].includes(type)
       )
-        return null;
+        return null
       return {
         type,
         byte_range: { start, end },
@@ -1115,106 +1131,106 @@ function toQwenTranscriptTextElements(
           ? { target: asString(element.target) }
           : {}),
         ...(isRecord(element.metadata) ? { metadata: element.metadata } : {}),
-      };
+      }
     })
-    .filter((element): element is MessageTextElement => !!element);
+    .filter((element): element is MessageTextElement => !!element)
 
-  return elements.length > 0 ? elements : undefined;
+  return elements.length > 0 ? elements : undefined
 }
 
 function jsonStringify(value: unknown): string {
   try {
-    return JSON.stringify(value, null, 2);
+    return JSON.stringify(value, null, 2)
   } catch {
-    return String(value);
+    return String(value)
   }
 }
 
 function parseJsonText(value: string): unknown | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
+  const trimmed = value.trim()
+  if (!trimmed) return null
   try {
-    return JSON.parse(trimmed);
+    return JSON.parse(trimmed)
   } catch {
-    return null;
+    return null
   }
 }
 
 function isJsonCodeFence(value: string): boolean {
-  return /^```(?:json|JSON)?\s*\r?\n/.test(value.trim());
+  return /^```(?:json|JSON)?\s*\r?\n/.test(value.trim())
 }
 
 function isDoctorOutput(value: unknown): boolean {
-  const record = toRecord(value);
-  return Array.isArray(record.checks) && isRecord(record.summary);
+  const record = toRecord(value)
+  return Array.isArray(record.checks) && isRecord(record.summary)
 }
 
 function formatJsonMarkdown(value: unknown): string {
-  return `\`\`\`json\n${jsonStringify(value)}\n\`\`\``;
+  return `\`\`\`json\n${jsonStringify(value)}\n\`\`\``
 }
 
 function normalizeQwenAssistantText(
   text: string,
   options: { forceJsonFence?: boolean } = {},
 ): string {
-  const trimmed = text.trim();
-  if (!trimmed || isJsonCodeFence(trimmed)) return text;
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return text;
+  const trimmed = text.trim()
+  if (!trimmed || isJsonCodeFence(trimmed)) return text
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return text
 
-  const parsed = parseJsonText(text);
-  if (!parsed) return text;
-  if (!options.forceJsonFence && !isDoctorOutput(parsed)) return text;
+  const parsed = parseJsonText(text)
+  if (!parsed) return text
+  if (!options.forceJsonFence && !isDoctorOutput(parsed)) return text
 
-  return formatJsonMarkdown(parsed);
+  return formatJsonMarkdown(parsed)
 }
 
 function formatQwenSlashOutputHistoryItem(
   item: JsonRecord,
 ): string | undefined {
-  const text = asString(item.text);
+  const text = asString(item.text)
   if (text?.trim()) {
-    return normalizeQwenAssistantText(text, { forceJsonFence: true });
+    return normalizeQwenAssistantText(text, { forceJsonFence: true })
   }
 
   if (item.type === 'doctor') {
     return formatJsonMarkdown({
       checks: Array.isArray(item.checks) ? item.checks : [],
       summary: toRecord(item.summary),
-    });
+    })
   }
 
-  return undefined;
+  return undefined
 }
 
 function isSlashCommandPrompt(
   message: string,
   attachments?: FileAttachment[],
 ): boolean {
-  if (attachments && attachments.length > 0) return false;
-  return /^\/[A-Za-z][\w-]*(?:\s|$)/.test(message.trim());
+  if (attachments && attachments.length > 0) return false
+  return /^\/[A-Za-z][\w-]*(?:\s|$)/.test(message.trim())
 }
 
 function qwenInitializeTimeoutMs(): number {
   const raw =
     process.env.QWEN_ACP_INITIALIZE_TIMEOUT_MS ||
-    process.env.QWEN_INITIALIZE_TIMEOUT_MS;
-  const parsed = raw ? Number(raw) : Number.NaN;
+    process.env.QWEN_INITIALIZE_TIMEOUT_MS
+  const parsed = raw ? Number(raw) : Number.NaN
   return Number.isFinite(parsed) && parsed > 0
     ? parsed
-    : DEFAULT_INITIALIZE_TIMEOUT_MS;
+    : DEFAULT_INITIALIZE_TIMEOUT_MS
 }
 
 function mapPermissionModeToQwen(mode: PermissionMode): string {
   switch (mode) {
     case 'allow-all':
-      return 'yolo';
+      return 'yolo'
     case 'safe':
-      return 'plan';
+      return 'plan'
     case 'auto-edit':
-      return 'auto-edit';
+      return 'auto-edit'
     case 'ask':
     default:
-      return 'default';
+      return 'default'
   }
 }
 
@@ -1223,15 +1239,15 @@ function mapQwenModeToPermissionMode(
 ): PermissionMode | undefined {
   switch (mode) {
     case 'plan':
-      return 'safe';
+      return 'safe'
     case 'yolo':
-      return 'allow-all';
+      return 'allow-all'
     case 'auto-edit':
-      return 'auto-edit';
+      return 'auto-edit'
     case 'default':
-      return 'ask';
+      return 'ask'
     default:
-      return undefined;
+      return undefined
   }
 }
 
@@ -1242,13 +1258,13 @@ function mapPlanStatus(
     case 'completed':
     case 'complete':
     case 'done':
-      return 'completed';
+      return 'completed'
     case 'in_progress':
     case 'in-progress':
     case 'running':
-      return 'in_progress';
+      return 'in_progress'
     default:
-      return 'pending';
+      return 'pending'
   }
 }
 
@@ -1256,8 +1272,8 @@ function normalizeToolName(
   toolName: string | undefined,
   kind?: string,
 ): string {
-  const raw = (toolName || kind || 'tool').trim();
-  const lower = raw.toLowerCase();
+  const raw = (toolName || kind || 'tool').trim()
+  const lower = raw.toLowerCase()
 
   const mappings: Record<string, string> = {
     read_file: 'Read',
@@ -1276,42 +1292,42 @@ function normalizeToolName(
     web_fetch: 'WebFetch',
     todo_write: 'TodoWrite',
     exit_plan_mode: 'ExitPlanMode',
-  };
+  }
 
-  if (mappings[lower]) return mappings[lower];
+  if (mappings[lower]) return mappings[lower]
 
   switch (kind) {
     case 'read':
-      return 'Read';
+      return 'Read'
     case 'edit':
     case 'delete':
     case 'move':
-      return 'Edit';
+      return 'Edit'
     case 'search':
-      return 'Grep';
+      return 'Grep'
     case 'execute':
-      return 'Bash';
+      return 'Bash'
     case 'fetch':
-      return 'WebFetch';
+      return 'WebFetch'
     case 'switch_mode':
-      return 'ExitPlanMode';
+      return 'ExitPlanMode'
     default:
-      return raw;
+      return raw
   }
 }
 
 function displayNameForTool(toolName: string, kind?: string): string {
-  if (toolName === 'Bash') return 'Run Command';
-  if (toolName === 'Read') return 'Read File';
-  if (toolName === 'Write') return 'Write File';
-  if (toolName === 'Edit') return 'Edit File';
-  if (toolName === 'LS') return 'List Directory';
-  if (toolName === 'Glob') return 'Search Files';
-  if (toolName === 'Grep') return 'Search Content';
-  if (toolName === 'WebFetch') return 'Fetch URL';
-  if (toolName === 'ExitPlanMode') return 'Switch Mode';
-  if (kind === 'think') return 'Think';
-  return toolName;
+  if (toolName === 'Bash') return 'Run Command'
+  if (toolName === 'Read') return 'Read File'
+  if (toolName === 'Write') return 'Write File'
+  if (toolName === 'Edit') return 'Edit File'
+  if (toolName === 'LS') return 'List Directory'
+  if (toolName === 'Glob') return 'Search Files'
+  if (toolName === 'Grep') return 'Search Content'
+  if (toolName === 'WebFetch') return 'Fetch URL'
+  if (toolName === 'ExitPlanMode') return 'Switch Mode'
+  if (kind === 'think') return 'Think'
+  return toolName
 }
 
 function permissionTypeForKind(
@@ -1319,84 +1335,84 @@ function permissionTypeForKind(
 ): PermissionRequestType | undefined {
   switch (kind) {
     case 'execute':
-      return 'bash';
+      return 'bash'
     case 'edit':
     case 'delete':
     case 'move':
-      return 'file_write';
+      return 'file_write'
     case 'fetch':
-      return 'api_mutation';
+      return 'api_mutation'
     case 'switch_mode':
-      return 'admin_approval';
+      return 'admin_approval'
     default:
-      return 'mcp_mutation';
+      return 'mcp_mutation'
   }
 }
 
 export class QwenAgent extends BaseAgent {
-  protected backendName = 'Qwen Code';
+  protected backendName = 'Qwen Code'
 
-  private acpLease: QwenAcpLease | null = null;
-  private connection: ClientSideConnection | null = null;
+  private acpLease: QwenAcpLease | null = null
+  private connection: ClientSideConnection | null = null
 
-  private qwenSessionId: string | null = null;
-  private ensureQwenSessionPromise: Promise<void> | null = null;
-  private eventQueue = new EventQueue();
-  private _isProcessing = false;
-  private abortReason?: AbortReason;
-  private persistedQwenSessionId: string | null = null;
-  private activePromptRunId: number | null = null;
-  private promptRunCounter = 0;
-  private permissionRequestCounter = 0;
-  private toolIdCounter = 0;
-  private planUpdateCounter = 0;
-  private hasInitialModeOverride = false;
-  private pendingModeOverride: PermissionMode | null = null;
+  private qwenSessionId: string | null = null
+  private ensureQwenSessionPromise: Promise<void> | null = null
+  private eventQueue = new EventQueue()
+  private _isProcessing = false
+  private abortReason?: AbortReason
+  private persistedQwenSessionId: string | null = null
+  private activePromptRunId: number | null = null
+  private promptRunCounter = 0
+  private permissionRequestCounter = 0
+  private toolIdCounter = 0
+  private planUpdateCounter = 0
+  private hasInitialModeOverride = false
+  private pendingModeOverride: PermissionMode | null = null
 
-  private pendingPermissions = new Map<string, PendingPermission>();
-  private miniCollectors = new Map<string, MiniCollector>();
-  private historyCollectors = new Map<string, HistoryCollector>();
-  private ensureProcessPromise: Promise<void> | null = null;
-  private suppressedSessionUpdates = new Set<string>();
-  private pendingAvailableCommandsUpdates = new Map<string, JsonRecord>();
+  private pendingPermissions = new Map<string, PendingPermission>()
+  private miniCollectors = new Map<string, MiniCollector>()
+  private historyCollectors = new Map<string, HistoryCollector>()
+  private ensureProcessPromise: Promise<void> | null = null
+  private suppressedSessionUpdates = new Set<string>()
+  private pendingAvailableCommandsUpdates = new Map<string, JsonRecord>()
   private latestAvailableCommandsSnapshot: AvailableCommandsSnapshot | null =
-    null;
+    null
   private availableCommandsWaiters: Array<
     (snapshot: AvailableCommandsSnapshot | null) => void
-  > = [];
-  private availableModelIds: Set<string> | null = null;
-  private availableModelsById = new Map<string, ModelDefinition>();
-  private firstAvailableModelId: string | undefined;
+  > = []
+  private availableModelIds: Set<string> | null = null
+  private availableModelsById = new Map<string, ModelDefinition>()
+  private firstAvailableModelId: string | undefined
 
-  private sourceMcpServers: Record<string, SdkMcpServerConfig> = {};
-  private currentTurnId: string | undefined;
-  private currentAssistantText = '';
-  private currentThoughtText = '';
-  private currentAssistantParentToolUseId: string | undefined;
-  private currentThoughtParentToolUseId: string | undefined;
-  private currentIsSlashCommand = false;
-  private toolNames = new Map<string, string>();
-  private toolInputs = new Map<string, Record<string, unknown>>();
-  private activeParentToolUseIds = new Set<string>();
-  private midTurnMessageQueue: string[] = [];
+  private sourceMcpServers: Record<string, SdkMcpServerConfig> = {}
+  private currentTurnId: string | undefined
+  private currentAssistantText = ''
+  private currentThoughtText = ''
+  private currentAssistantParentToolUseId: string | undefined
+  private currentThoughtParentToolUseId: string | undefined
+  private currentIsSlashCommand = false
+  private toolNames = new Map<string, string>()
+  private toolInputs = new Map<string, Record<string, unknown>>()
+  private activeParentToolUseIds = new Set<string>()
+  private midTurnMessageQueue: string[] = []
 
   constructor(config: BackendConfig) {
-    super(config, config.model || '');
-    this._supportsBranching = false;
-    this.persistedQwenSessionId = config.session?.sdkSessionId || null;
+    super(config, config.model || '')
+    this._supportsBranching = false
+    this.persistedQwenSessionId = config.session?.sdkSessionId || null
     this.pendingModeOverride =
       config.session?.permissionMode && !config.session?.sdkSessionId
         ? config.session.permissionMode
-        : null;
-    this.hasInitialModeOverride = this.pendingModeOverride !== null;
+        : null
+    this.hasInitialModeOverride = this.pendingModeOverride !== null
 
     if (!config.isHeadless) {
-      this.startConfigWatcher();
+      this.startConfigWatcher()
     }
   }
 
   getRecentStderr(): string {
-    return this.acpLease?.recentStderr() ?? '';
+    return this.acpLease?.recentStderr() ?? ''
   }
 
   override getSessionId(): string | null {
@@ -1405,72 +1421,72 @@ export class QwenAgent extends BaseAgent {
       this.persistedQwenSessionId ??
       this.config.session?.sdkSessionId ??
       null
-    );
+    )
   }
 
   override setSessionId(sessionId: string | null): void {
-    super.setSessionId(sessionId);
-    if (this.qwenSessionId) this.unregisterAcpSession(this.qwenSessionId);
-    this.qwenSessionId = sessionId;
-    this.persistedQwenSessionId = sessionId;
-    if (sessionId) this.registerAcpSession(sessionId);
+    super.setSessionId(sessionId)
+    if (this.qwenSessionId) this.unregisterAcpSession(this.qwenSessionId)
+    this.qwenSessionId = sessionId
+    this.persistedQwenSessionId = sessionId
+    if (sessionId) this.registerAcpSession(sessionId)
   }
 
   override clearHistory(): void {
-    super.clearHistory();
-    if (this.qwenSessionId) this.unregisterAcpSession(this.qwenSessionId);
-    this.qwenSessionId = null;
-    this.persistedQwenSessionId = null;
-    this.pendingAvailableCommandsUpdates.clear();
-    this.latestAvailableCommandsSnapshot = null;
-    this.resolveAvailableCommandsWaiters(null);
-    this.config.onSdkSessionIdCleared?.();
+    super.clearHistory()
+    if (this.qwenSessionId) this.unregisterAcpSession(this.qwenSessionId)
+    this.qwenSessionId = null
+    this.persistedQwenSessionId = null
+    this.pendingAvailableCommandsUpdates.clear()
+    this.latestAvailableCommandsSnapshot = null
+    this.resolveAvailableCommandsWaiters(null)
+    this.config.onSdkSessionIdCleared?.()
   }
 
   protected override extractSkillPaths(message: string): {
-    skillPaths: Map<string, string>;
-    cleanMessage: string;
-    missingSkills: string[];
+    skillPaths: Map<string, string>
+    cleanMessage: string
+    missingSkills: string[]
   } {
     const withQwenSkills = message.replace(
       /\[skill:([^\]]+)\]/g,
       (_match, rawSkill: string) => {
-        const normalized = rawSkill.trim();
+        const normalized = rawSkill.trim()
         const skillName = normalized.startsWith('.agents:')
           ? normalized.slice('.agents:'.length).trim()
-          : normalized;
-        return skillName ? `@${skillName}` : '';
+          : normalized
+        return skillName ? `@${skillName}` : ''
       },
-    );
-    const withSources = resolveSourceMentions(withQwenSkills);
+    )
+    const withSources = resolveSourceMentions(withQwenSkills)
     const workDir =
-      this.config.session?.workingDirectory ?? this.workingDirectory;
-    const cleanMessage = resolveFileMentions(withSources, workDir).trim();
+      this.config.session?.workingDirectory ?? this.workingDirectory
+    const cleanMessage = resolveFileMentions(withSources, workDir).trim()
 
     if (withQwenSkills !== message) {
       this.debug(
         '[extractSkillPaths] Qwen skill mentions are passed to ACP as @skill references',
-      );
+      )
     }
 
     return {
       skillPaths: new Map(),
       cleanMessage: cleanMessage || message.trim(),
       missingSkills: [],
-    };
+    }
   }
 
   override updateWorkingDirectory(path: string): void {
-    super.updateWorkingDirectory(path);
+    super.updateWorkingDirectory(path)
     if (this.qwenSessionId) {
-      this.unregisterAcpSession(this.qwenSessionId);
-      this.qwenSessionId = null;
-      this.persistedQwenSessionId = null;
-      this.pendingAvailableCommandsUpdates.clear();
-      this.latestAvailableCommandsSnapshot = null;
-      this.resolveAvailableCommandsWaiters(null);
-      this.config.onSdkSessionIdCleared?.();
-      this.debug('Qwen ACP session cleared after working directory change');
+      this.unregisterAcpSession(this.qwenSessionId)
+      this.qwenSessionId = null
+      this.persistedQwenSessionId = null
+      this.pendingAvailableCommandsUpdates.clear()
+      this.latestAvailableCommandsSnapshot = null
+      this.resolveAvailableCommandsWaiters(null)
+      this.config.onSdkSessionIdCleared?.()
+      this.debug('Qwen ACP session cleared after working directory change')
     }
   }
 
@@ -1479,156 +1495,155 @@ export class QwenAgent extends BaseAgent {
     attachments?: FileAttachment[],
     options?: ChatOptions,
   ): AsyncGenerator<AgentEvent> {
-    let message = messageParam;
-    const promptRunId = ++this.promptRunCounter;
-    this.activePromptRunId = promptRunId;
-    this._isProcessing = true;
-    this.abortReason = undefined;
-    this.eventQueue.reset();
-    this.currentAssistantText = '';
-    this.currentThoughtText = '';
-    this.currentAssistantParentToolUseId = undefined;
-    this.currentThoughtParentToolUseId = undefined;
-    this.currentIsSlashCommand = isSlashCommandPrompt(message, attachments);
-    this.currentTurnId = `qwen-turn-${promptRunId}`;
-    this.toolNames.clear();
-    this.toolInputs.clear();
-    this.activeParentToolUseIds.clear();
-    this.midTurnMessageQueue = [];
+    let message = messageParam
+    const promptRunId = ++this.promptRunCounter
+    this.activePromptRunId = promptRunId
+    this._isProcessing = true
+    this.abortReason = undefined
+    this.eventQueue.reset()
+    this.currentAssistantText = ''
+    this.currentThoughtText = ''
+    this.currentAssistantParentToolUseId = undefined
+    this.currentThoughtParentToolUseId = undefined
+    this.currentIsSlashCommand = isSlashCommandPrompt(message, attachments)
+    this.currentTurnId = `qwen-turn-${promptRunId}`
+    this.toolNames.clear()
+    this.toolInputs.clear()
+    this.activeParentToolUseIds.clear()
+    this.midTurnMessageQueue = []
 
     this.emitAutomationEvent('UserPromptSubmit', {
       hook_event_name: 'UserPromptSubmit',
       prompt: message,
-    });
+    })
 
     try {
-      await this.ensureProcess();
+      await this.ensureProcess()
 
       try {
-        await this.ensureQwenSession();
+        await this.ensureQwenSession()
       } catch (error) {
         if (this.persistedQwenSessionId || this.config.session?.sdkSessionId) {
           this.debug(
             `Qwen resume failed, starting a fresh session: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          this.qwenSessionId = null;
-          this.persistedQwenSessionId = null;
-          this.config.onSdkSessionIdCleared?.();
-          const recoveryContext = this.buildRecoveryContext();
+          )
+          this.qwenSessionId = null
+          this.persistedQwenSessionId = null
+          this.config.onSdkSessionIdCleared?.()
+          const recoveryContext = this.buildRecoveryContext()
           if (recoveryContext && !isSlashCommandPrompt(message, attachments)) {
-            message = recoveryContext + message;
+            message = recoveryContext + message
           }
-          await this.ensureQwenSession();
+          await this.ensureQwenSession()
         } else {
-          throw error;
+          throw error
         }
       }
 
-      const sessionId = this.qwenSessionId;
-      if (!sessionId) throw new Error('Qwen ACP session was not created');
+      const sessionId = this.qwenSessionId
+      if (!sessionId) throw new Error('Qwen ACP session was not created')
 
-      const prompt = this.buildPromptBlocks(message, attachments);
-      let transcriptTextElementsPersisted = false;
+      const prompt = this.buildPromptBlocks(message, attachments)
+      let transcriptTextElementsPersisted = false
       const persistTranscriptTextElements = () => {
-        if (transcriptTextElementsPersisted) return;
-        transcriptTextElementsPersisted = true;
+        if (transcriptTextElementsPersisted) return
+        transcriptTextElementsPersisted = true
         this.persistQwenTranscriptTextElements(
           sessionId,
           this.resolvedCwd(),
           options?.textElements,
-        );
-      };
+        )
+      }
       const promptPromise = this.callAcp(
         'session/prompt',
         (connection) => connection.prompt({ sessionId, prompt }),
         0,
-      );
+      )
 
       promptPromise
         .then((result) => {
-          if (this.activePromptRunId !== promptRunId) return;
-          const stopReason = asString(toRecord(result).stopReason);
-          persistTranscriptTextElements();
-          this.flushThoughtText();
-          this.flushAssistantText();
-          this.eventQueue.enqueue({ type: 'complete' });
-          this.eventQueue.complete();
+          if (this.activePromptRunId !== promptRunId) return
+          const stopReason = asString(toRecord(result).stopReason)
+          persistTranscriptTextElements()
+          this.flushThoughtText()
+          this.flushAssistantText()
+          this.eventQueue.enqueue({ type: 'complete' })
+          this.eventQueue.complete()
           this.debug(
             `Qwen prompt complete${stopReason ? ` (${stopReason})` : ''}`,
-          );
+          )
         })
         .catch((error) => {
-          if (this.activePromptRunId !== promptRunId) return;
+          if (this.activePromptRunId !== promptRunId) return
           if (this.abortReason) {
-            persistTranscriptTextElements();
-            this.eventQueue.complete();
-            return;
+            persistTranscriptTextElements()
+            this.eventQueue.complete()
+            return
           }
-          const message =
-            error instanceof Error ? error.message : String(error);
-          persistTranscriptTextElements();
-          this.eventQueue.enqueue({ type: 'error', message });
-          this.eventQueue.enqueue({ type: 'complete' });
-          this.eventQueue.complete();
-        });
+          const message = error instanceof Error ? error.message : String(error)
+          persistTranscriptTextElements()
+          this.eventQueue.enqueue({ type: 'error', message })
+          this.eventQueue.enqueue({ type: 'complete' })
+          this.eventQueue.complete()
+        })
 
       for await (const event of this.eventQueue.drain()) {
-        yield event;
+        yield event
         if (event.type === 'tool_result') {
-          const pendingRestart = this.consumePendingSourceActivationRestart();
+          const pendingRestart = this.consumePendingSourceActivationRestart()
           if (pendingRestart) {
             yield {
               type: 'source_activated',
               sourceSlug: pendingRestart.sourceSlug,
               originalMessage: pendingRestart.userMessage,
-            };
-            this.forceAbort(AbortReason.SourceActivated);
-            return;
+            }
+            this.forceAbort(AbortReason.SourceActivated)
+            return
           }
         }
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      yield { type: 'error', message };
-      yield { type: 'complete' };
+      const message = error instanceof Error ? error.message : String(error)
+      yield { type: 'error', message }
+      yield { type: 'complete' }
     } finally {
       if (this.activePromptRunId === promptRunId) {
-        this.activePromptRunId = null;
+        this.activePromptRunId = null
       }
-      this._isProcessing = false;
-      this.currentTurnId = undefined;
-      this.currentAssistantText = '';
-      this.currentThoughtText = '';
-      this.currentIsSlashCommand = false;
-      this.midTurnMessageQueue = [];
+      this._isProcessing = false
+      this.currentTurnId = undefined
+      this.currentAssistantText = ''
+      this.currentThoughtText = ''
+      this.currentIsSlashCommand = false
+      this.midTurnMessageQueue = []
     }
   }
 
   isProcessing(): boolean {
-    return this._isProcessing;
+    return this._isProcessing
   }
 
   enqueueMidTurnMessage(message: string): boolean {
-    const trimmed = message.trim();
-    if (!trimmed || !this._isProcessing || this.abortReason) return false;
+    const trimmed = message.trim()
+    if (!trimmed || !this._isProcessing || this.abortReason) return false
 
-    this.midTurnMessageQueue.push(trimmed);
+    this.midTurnMessageQueue.push(trimmed)
     this.debug(
       `Queued mid-turn user message for Qwen ACP injection (${this.midTurnMessageQueue.length} pending)`,
-    );
-    return true;
+    )
+    return true
   }
 
   async abort(reason?: string): Promise<void> {
-    this.debug(`Qwen abort requested${reason ? `: ${reason}` : ''}`);
-    this.emitAutomationEvent('Stop', { hook_event_name: 'Stop' });
-    this.abortReason = AbortReason.UserStop;
-    this._isProcessing = false;
-    this.activePromptRunId = null;
-    this.midTurnMessageQueue = [];
-    this.cancelPendingPermissions();
+    this.debug(`Qwen abort requested${reason ? `: ${reason}` : ''}`)
+    this.emitAutomationEvent('Stop', { hook_event_name: 'Stop' })
+    this.abortReason = AbortReason.UserStop
+    this._isProcessing = false
+    this.activePromptRunId = null
+    this.midTurnMessageQueue = []
+    this.cancelPendingPermissions()
 
-    const sessionId = this.qwenSessionId;
+    const sessionId = this.qwenSessionId
     if (sessionId && this.connection) {
       await this.callAcp(
         'session/cancel',
@@ -1637,23 +1652,23 @@ export class QwenAgent extends BaseAgent {
       ).catch((error) => {
         this.debug(
           `Qwen cancel failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+        )
+      })
     }
 
-    this.eventQueue.complete();
+    this.eventQueue.complete()
   }
 
   forceAbort(reason: AbortReason): void {
-    this.emitAutomationEvent('Stop', { hook_event_name: 'Stop' });
-    this.abortReason = reason;
-    this._isProcessing = false;
-    this.activePromptRunId = null;
-    this.midTurnMessageQueue = [];
-    this.cancelPendingPermissions();
-    this.eventQueue.complete();
+    this.emitAutomationEvent('Stop', { hook_event_name: 'Stop' })
+    this.abortReason = reason
+    this._isProcessing = false
+    this.activePromptRunId = null
+    this.midTurnMessageQueue = []
+    this.cancelPendingPermissions()
+    this.eventQueue.complete()
 
-    const sessionId = this.qwenSessionId;
+    const sessionId = this.qwenSessionId
     if (sessionId && this.connection) {
       void this.callAcp(
         'session/cancel',
@@ -1662,8 +1677,8 @@ export class QwenAgent extends BaseAgent {
       ).catch((error) => {
         this.debug(
           `Qwen force cancel failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+        )
+      })
     }
   }
 
@@ -1673,10 +1688,10 @@ export class QwenAgent extends BaseAgent {
     alwaysAllow?: boolean,
     options?: PermissionResponseOptions,
   ): void {
-    const pending = this.pendingPermissions.get(requestId);
-    if (!pending) return;
+    const pending = this.pendingPermissions.get(requestId)
+    if (!pending) return
 
-    this.pendingPermissions.delete(requestId);
+    this.pendingPermissions.delete(requestId)
     pending.resolve(
       this.createPermissionResponse(
         pending.options,
@@ -1684,26 +1699,26 @@ export class QwenAgent extends BaseAgent {
         !!alwaysAllow,
         options?.answers,
       ),
-    );
+    )
   }
 
   override setPermissionMode(mode: PermissionMode): void {
-    this.hasInitialModeOverride = true;
-    this.pendingModeOverride = mode;
-    super.setPermissionMode(mode);
-    void this.forwardPermissionMode(mode);
+    this.hasInitialModeOverride = true
+    this.pendingModeOverride = mode
+    super.setPermissionMode(mode)
+    void this.forwardPermissionMode(mode)
   }
 
   override cyclePermissionMode(): PermissionMode {
-    this.hasInitialModeOverride = true;
-    const mode = super.cyclePermissionMode();
-    this.pendingModeOverride = mode;
-    void this.forwardPermissionMode(mode);
-    return mode;
+    this.hasInitialModeOverride = true
+    const mode = super.cyclePermissionMode()
+    this.pendingModeOverride = mode
+    void this.forwardPermissionMode(mode)
+    return mode
   }
 
   async getPermissionSettings(): Promise<QwenPermissionSettings> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = await this.callAcp(
       'qwen/permissions/getSettings',
       (connection) =>
@@ -1711,8 +1726,8 @@ export class QwenAgent extends BaseAgent {
           cwd: this.resolvedCwd(),
         }),
       10_000,
-    );
-    return result as unknown as QwenPermissionSettings;
+    )
+    return result as unknown as QwenPermissionSettings
   }
 
   async setPermissionRules(
@@ -1720,7 +1735,7 @@ export class QwenAgent extends BaseAgent {
     ruleType: PermissionRuleType,
     rules: string[],
   ): Promise<QwenPermissionSettings> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = await this.callAcp(
       'qwen/permissions/setRules',
       (connection) =>
@@ -1731,12 +1746,12 @@ export class QwenAgent extends BaseAgent {
           rules,
         }),
       10_000,
-    );
-    return result as unknown as QwenPermissionSettings;
+    )
+    return result as unknown as QwenPermissionSettings
   }
 
   async getCoreSettings(): Promise<QwenCoreSettingsSnapshot> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = await this.callAcp(
       'qwen/settings/getCore',
       (connection) =>
@@ -1744,8 +1759,37 @@ export class QwenAgent extends BaseAgent {
           cwd: this.resolvedCwd(),
         }),
       10_000,
-    );
-    return result as unknown as QwenCoreSettingsSnapshot;
+    )
+    return result as unknown as QwenCoreSettingsSnapshot
+  }
+
+  async listProviders(): Promise<QwenProviderCatalog> {
+    await this.ensureProcess()
+    const result = await this.callAcp(
+      'qwen/providers/list',
+      (connection) =>
+        connection.extMethod('qwen/providers/list', {
+          cwd: this.resolvedCwd(),
+        }),
+      10_000,
+    )
+    return normalizeQwenProviderCatalog(toRecord(result))
+  }
+
+  async connectProvider(
+    params: QwenProviderConnectParams,
+  ): Promise<QwenProviderConnectResult> {
+    await this.ensureProcess()
+    const result = await this.callAcp(
+      'qwen/providers/connect',
+      (connection) =>
+        connection.extMethod('qwen/providers/connect', {
+          cwd: this.resolvedCwd(),
+          ...params,
+        } as unknown as JsonRecord),
+      30_000,
+    )
+    return normalizeQwenProviderConnectResult(toRecord(result))
   }
 
   async setCoreSetting(
@@ -1753,7 +1797,7 @@ export class QwenAgent extends BaseAgent {
     key: QwenCoreSettingKey,
     value: QwenSettingValue,
   ): Promise<QwenCoreSettingsSnapshot> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = await this.callAcp(
       'qwen/settings/setCoreValue',
       (connection) =>
@@ -1764,8 +1808,8 @@ export class QwenAgent extends BaseAgent {
           value,
         }),
       10_000,
-    );
-    return result as unknown as QwenCoreSettingsSnapshot;
+    )
+    return result as unknown as QwenCoreSettingsSnapshot
   }
 
   async setMcpServer(
@@ -1773,7 +1817,7 @@ export class QwenAgent extends BaseAgent {
     name: string,
     server: QwenMcpServerConfig,
   ): Promise<QwenCoreSettingsSnapshot> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = await this.callAcp(
       'qwen/settings/setMcpServer',
       (connection) =>
@@ -1784,15 +1828,15 @@ export class QwenAgent extends BaseAgent {
           server,
         }),
       10_000,
-    );
-    return result as unknown as QwenCoreSettingsSnapshot;
+    )
+    return result as unknown as QwenCoreSettingsSnapshot
   }
 
   async removeMcpServer(
     scope: QwenSettingsScope,
     name: string,
   ): Promise<QwenCoreSettingsSnapshot> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = await this.callAcp(
       'qwen/settings/removeMcpServer',
       (connection) =>
@@ -1802,8 +1846,8 @@ export class QwenAgent extends BaseAgent {
           name,
         }),
       10_000,
-    );
-    return result as unknown as QwenCoreSettingsSnapshot;
+    )
+    return result as unknown as QwenCoreSettingsSnapshot
   }
 
   async setHook(
@@ -1812,7 +1856,7 @@ export class QwenAgent extends BaseAgent {
     index: number | undefined,
     hook: QwenHookDefinition,
   ): Promise<QwenCoreSettingsSnapshot> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = await this.callAcp(
       'qwen/settings/setHook',
       (connection) =>
@@ -1824,8 +1868,8 @@ export class QwenAgent extends BaseAgent {
           hook,
         }),
       10_000,
-    );
-    return result as unknown as QwenCoreSettingsSnapshot;
+    )
+    return result as unknown as QwenCoreSettingsSnapshot
   }
 
   async removeHook(
@@ -1833,7 +1877,7 @@ export class QwenAgent extends BaseAgent {
     event: QwenHookEvent,
     index: number,
   ): Promise<QwenCoreSettingsSnapshot> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = await this.callAcp(
       'qwen/settings/removeHook',
       (connection) =>
@@ -1844,8 +1888,8 @@ export class QwenAgent extends BaseAgent {
           index,
         }),
       10_000,
-    );
-    return result as unknown as QwenCoreSettingsSnapshot;
+    )
+    return result as unknown as QwenCoreSettingsSnapshot
   }
 
   async setExtensionSetting(
@@ -1854,7 +1898,7 @@ export class QwenAgent extends BaseAgent {
     scope: QwenSettingsScope,
     value: QwenSettingValue,
   ): Promise<QwenCoreSettingsSnapshot> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = await this.callAcp(
       'qwen/settings/setExtensionSetting',
       (connection) =>
@@ -1866,14 +1910,14 @@ export class QwenAgent extends BaseAgent {
           value,
         }),
       10_000,
-    );
-    return result as unknown as QwenCoreSettingsSnapshot;
+    )
+    return result as unknown as QwenCoreSettingsSnapshot
   }
 
   async installSkill(
     request: QwenSkillInstallRequest,
   ): Promise<QwenSkillInstallResult> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = await this.callAcp(
       'qwen/skills/install',
       (connection) =>
@@ -1885,9 +1929,9 @@ export class QwenAgent extends BaseAgent {
           },
         }),
       30_000,
-    );
-    const record = toRecord(result);
-    const installedSkill = toRecord(record.skill);
+    )
+    const record = toRecord(result)
+    const installedSkill = toRecord(record.skill)
     return {
       id: asString(record.id) ?? asString(installedSkill.id) ?? request.id,
       slug:
@@ -1899,17 +1943,74 @@ export class QwenAgent extends BaseAgent {
         asString(installedSkill.installedPath) ??
         asString(installedSkill.installed_path),
       message: asString(record.message),
-    };
+    }
+  }
+
+  async deleteSkill(
+    request: QwenSkillDeleteRequest,
+  ): Promise<QwenSkillDeleteResult> {
+    await this.ensureProcess()
+    const result = await this.callAcp(
+      'qwen/skills/delete',
+      (connection) =>
+        connection.extMethod('qwen/skills/delete', {
+          cwd: this.resolvedCwd(),
+          skill: {
+            ...request,
+            scope: request.scope ?? 'global',
+          },
+        }),
+      10_000,
+    )
+    const record = toRecord(result)
+    const deletedSkill = toRecord(record.skill)
+    return {
+      slug:
+        asString(record.slug) ?? asString(deletedSkill.slug) ?? request.slug,
+      deleted: asBoolean(record.deleted) ?? true,
+      message: asString(record.message),
+    }
+  }
+
+  async setSkillEnabled(
+    request: QwenSkillSetEnabledRequest,
+  ): Promise<QwenSkillSetEnabledResult> {
+    await this.ensureProcess()
+    const result = await this.callAcp(
+      'qwen/skills/setEnabled',
+      (connection) =>
+        connection.extMethod('qwen/skills/setEnabled', {
+          cwd: this.resolvedCwd(),
+          skill: {
+            ...request,
+            scope: request.scope ?? 'global',
+          },
+        }),
+      10_000,
+    )
+    const record = toRecord(result)
+    const updatedSkill = toRecord(record.skill)
+    return {
+      slug:
+        asString(record.slug) ?? asString(updatedSkill.slug) ?? request.slug,
+      enabled: asBoolean(record.enabled) ?? request.enabled,
+      installedPath:
+        asString(record.installedPath) ??
+        asString(record.installed_path) ??
+        asString(updatedSkill.installedPath) ??
+        asString(updatedSkill.installed_path),
+      message: asString(record.message),
+    }
   }
 
   override setModel(model: string): void {
     if (!this.isKnownAvailableModel(model)) {
-      this.debug(`Ignoring Qwen model switch for unavailable model: ${model}`);
-      return;
+      this.debug(`Ignoring Qwen model switch for unavailable model: ${model}`)
+      return
     }
-    super.setModel(model);
-    this.applyCurrentModelContextWindow(model);
-    void this.forwardModel(model);
+    super.setModel(model)
+    this.applyCurrentModelContextWindow(model)
+    void this.forwardModel(model)
   }
 
   override async setSourceServers(
@@ -1917,19 +2018,19 @@ export class QwenAgent extends BaseAgent {
     apiServers: Record<string, unknown>,
     intendedSlugs?: string[],
   ): Promise<void> {
-    this.sourceMcpServers = mcpServers;
-    await super.setSourceServers(mcpServers, apiServers, intendedSlugs);
+    this.sourceMcpServers = mcpServers
+    await super.setSourceServers(mcpServers, apiServers, intendedSlugs)
   }
 
   async runMiniCompletion(prompt: string): Promise<string | null> {
-    const result = await this.queryLlm({ prompt });
-    return result.text.trim() || null;
+    const result = await this.queryLlm({ prompt })
+    return result.text.trim() || null
   }
 
   async listSessions(
     options: BackendSessionListOptions = {},
   ): Promise<BackendSessionListResult> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const response = await this.callAcp(
       'session/list',
       (connection) =>
@@ -1942,7 +2043,7 @@ export class QwenAgent extends BaseAgent {
               : undefined,
         }),
       60_000,
-    );
+    )
 
     return {
       nextCursor: response.nextCursor ?? undefined,
@@ -1977,14 +2078,14 @@ export class QwenAgent extends BaseAgent {
             ? session._meta['titleSource']
             : undefined,
       })),
-    };
+    }
   }
 
   async deleteBackendSession(
     sessionId: string,
     options: { cwd?: string } = {},
   ): Promise<boolean> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = toRecord(
       await this.callAcp(
         'ext/deleteSession',
@@ -1995,22 +2096,22 @@ export class QwenAgent extends BaseAgent {
           }),
         30_000,
       ),
-    );
-    return result.success !== false;
+    )
+    return result.success !== false
   }
 
   async rewindToUserTurn(
     targetTurnIndex: number,
   ): Promise<BackendRewindResult> {
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
-      throw new Error('targetTurnIndex must be a non-negative integer');
+      throw new Error('targetTurnIndex must be a non-negative integer')
     }
 
-    await this.ensureProcess();
-    await this.ensureQwenSession();
+    await this.ensureProcess()
+    await this.ensureQwenSession()
 
-    const sessionId = this.qwenSessionId;
-    if (!sessionId) throw new Error('Qwen ACP session was not created');
+    const sessionId = this.qwenSessionId
+    if (!sessionId) throw new Error('Qwen ACP session was not created')
 
     const result = toRecord(
       await this.callAcp(
@@ -2023,18 +2124,18 @@ export class QwenAgent extends BaseAgent {
           }),
         30_000,
       ),
-    );
+    )
 
     if (result.success !== true) {
-      throw new Error('Qwen ACP rewindSession did not report success');
+      throw new Error('Qwen ACP rewindSession did not report success')
     }
 
     const resultTargetTurnIndex = Number.isInteger(result.targetTurnIndex)
       ? (result.targetTurnIndex as number)
-      : undefined;
+      : undefined
     const resultApiTruncateIndex = Number.isInteger(result.apiTruncateIndex)
       ? (result.apiTruncateIndex as number)
-      : undefined;
+      : undefined
 
     return {
       historyBeforeRewind: Array.isArray(result.historyBeforeRewind)
@@ -2042,7 +2143,7 @@ export class QwenAgent extends BaseAgent {
         : undefined,
       targetTurnIndex: resultTargetTurnIndex,
       apiTruncateIndex: resultApiTruncateIndex,
-    };
+    }
   }
 
   async renameBackendSession(
@@ -2050,7 +2151,7 @@ export class QwenAgent extends BaseAgent {
     title: string,
     options: { cwd?: string } = {},
   ): Promise<boolean> {
-    await this.ensureProcess();
+    await this.ensureProcess()
     const result = toRecord(
       await this.callAcp(
         'ext/renameSession',
@@ -2062,44 +2163,44 @@ export class QwenAgent extends BaseAgent {
           }),
         30_000,
       ),
-    );
-    return result.success !== false;
+    )
+    return result.success !== false
   }
 
   async loadSessionMessages(
     sessionId: string,
     options: { cwd?: string } = {},
   ): Promise<BackendSessionMessagesResult> {
-    const cwd = options.cwd || this.resolvedCwd();
-    await this.ensureProcess();
+    const cwd = options.cwd || this.resolvedCwd()
+    await this.ensureProcess()
 
     const buildResultFromUpdates = (
       updates: JsonRecord[],
     ): BackendSessionMessagesResult => {
-      const messages = this.buildHistoryMessages(sessionId, updates, cwd);
+      const messages = this.buildHistoryMessages(sessionId, updates, cwd)
       const availableCommandsSnapshot =
-        this.extractAvailableCommandsSnapshot(updates);
+        this.extractAvailableCommandsSnapshot(updates)
       const mergedMessages = this.mergeSlashCommandInvocationMessages(
         sessionId,
         messages,
         cwd,
-      );
+      )
       const messagesWithTranscriptTelemetry =
         this.mergeQwenTranscriptTelemetryMessages(
           sessionId,
           mergedMessages,
           cwd,
-        );
+        )
       const messagesWithTextElements = this.applyQwenTranscriptTextElements(
         messagesWithTranscriptTelemetry,
         sessionId,
         cwd,
-      );
+      )
       return {
         messages: messagesWithTextElements,
         ...(availableCommandsSnapshot ?? {}),
-      };
-    };
+      }
+    }
 
     try {
       const response = toRecord(
@@ -2112,21 +2213,21 @@ export class QwenAgent extends BaseAgent {
             }),
           30_000,
         ),
-      );
+      )
       const updates = Array.isArray(response.updates)
         ? response.updates.filter(isRecord)
-        : undefined;
+        : undefined
       if (updates) {
-        return buildResultFromUpdates(updates);
+        return buildResultFromUpdates(updates)
       }
     } catch (error) {
       this.debug(
         `Qwen loadSessionMessages extension unavailable; falling back to session/load for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      )
     }
 
-    const collector: HistoryCollector = { updates: [] };
-    this.historyCollectors.set(sessionId, collector);
+    const collector: HistoryCollector = { updates: [] }
+    this.historyCollectors.set(sessionId, collector)
 
     try {
       await this.callAcp(
@@ -2138,64 +2239,64 @@ export class QwenAgent extends BaseAgent {
             mcpServers: this.buildAcpMcpServers(),
           }),
         60_000,
-      );
+      )
 
-      return buildResultFromUpdates(collector.updates);
+      return buildResultFromUpdates(collector.updates)
     } finally {
-      this.historyCollectors.delete(sessionId);
+      this.historyCollectors.delete(sessionId)
     }
   }
 
   async refreshAvailableCommands(): Promise<AvailableCommandsSnapshot | null> {
     this.debug(
       `Qwen slash command refresh requested (session=${this.qwenSessionId ?? this.persistedQwenSessionId ?? 'none'}, cwd=${this.resolvedCwd()})`,
-    );
-    const hadLiveSessionBeforeRefresh = !!this.qwenSessionId;
-    await this.ensureProcess();
-    await this.ensureQwenSession();
+    )
+    const hadLiveSessionBeforeRefresh = !!this.qwenSessionId
+    await this.ensureProcess()
+    await this.ensureQwenSession()
 
     if (this.latestAvailableCommandsSnapshot) {
       this.debug(
         `Qwen slash command refresh using latest snapshot: commands=${this.latestAvailableCommandsSnapshot.availableCommands.length} ` +
           `skills=${this.latestAvailableCommandsSnapshot.availableSkills?.length ?? 0} ` +
           `names=${formatDebugNames(this.latestAvailableCommandsSnapshot.availableCommands.map((command) => command.name))}`,
-      );
-      return this.latestAvailableCommandsSnapshot;
+      )
+      return this.latestAvailableCommandsSnapshot
     }
 
     if (hadLiveSessionBeforeRefresh) {
       const reloadedSnapshot =
-        await this.reloadCurrentSessionForAvailableCommands();
+        await this.reloadCurrentSessionForAvailableCommands()
       if (reloadedSnapshot) {
         this.debug(
           `Qwen slash command refresh reused current session after reload: commands=${reloadedSnapshot.availableCommands.length} ` +
             `skills=${reloadedSnapshot.availableSkills?.length ?? 0} ` +
             `names=${formatDebugNames(reloadedSnapshot.availableCommands.map((command) => command.name))}`,
-        );
-        return reloadedSnapshot;
+        )
+        return reloadedSnapshot
       }
     }
 
     this.debug(
       'Qwen slash command refresh waiting for available_commands_update',
-    );
-    const snapshot = await this.waitForAvailableCommandsSnapshot();
+    )
+    const snapshot = await this.waitForAvailableCommandsSnapshot()
     this.debug(
       snapshot
         ? `Qwen slash command refresh received after wait: commands=${snapshot.availableCommands.length} skills=${snapshot.availableSkills?.length ?? 0} names=${formatDebugNames(snapshot.availableCommands.map((command) => command.name))}`
         : 'Qwen slash command refresh timed out waiting for available_commands_update',
-    );
-    return snapshot;
+    )
+    return snapshot
   }
 
   async queryLlm(request: LLMQueryRequest): Promise<LLMQueryResult> {
-    await this.ensureProcess();
-    const sessionId = await this.createEphemeralSession();
-    const collector: MiniCollector = { chunks: [] };
-    this.miniCollectors.set(sessionId, collector);
+    await this.ensureProcess()
+    const sessionId = await this.createEphemeralSession()
+    const collector: MiniCollector = { chunks: [] }
+    this.miniCollectors.set(sessionId, collector)
 
     try {
-      const model = request.model;
+      const model = request.model
       if (model) {
         await this.callAcp(
           'session/set_config_option',
@@ -2209,11 +2310,11 @@ export class QwenAgent extends BaseAgent {
         ).catch((error) => {
           this.debug(
             `Qwen mini model switch failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
+          )
+        })
       }
 
-      const prompt = this.buildQueryPrompt(request);
+      const prompt = this.buildQueryPrompt(request)
       await this.callAcp(
         'session/prompt',
         (connection) =>
@@ -2222,32 +2323,32 @@ export class QwenAgent extends BaseAgent {
             prompt: [{ type: 'text', text: prompt }],
           }),
         LLM_QUERY_TIMEOUT_MS,
-      );
+      )
 
       return {
         text: collector.chunks.join('').trim(),
         model: request.model || this._model || undefined,
         inputTokens: collector.inputTokens,
         outputTokens: collector.outputTokens,
-      };
+      }
     } finally {
-      this.miniCollectors.delete(sessionId);
+      this.miniCollectors.delete(sessionId)
       await this.deleteBackendSession(sessionId).catch((error) => {
         this.debug(
           `Qwen mini session cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
-      this.unregisterAcpSession(sessionId);
+        )
+      })
+      this.unregisterAcpSession(sessionId)
     }
   }
 
   override destroy(): void {
-    super.destroy();
-    this.killSubprocess();
-    this.pendingPermissions.clear();
-    this.miniCollectors.clear();
-    this.historyCollectors.clear();
-    this.ensureProcessPromise = null;
+    super.destroy()
+    this.killSubprocess()
+    this.pendingPermissions.clear()
+    this.miniCollectors.clear()
+    this.historyCollectors.clear()
+    this.ensureProcessPromise = null
   }
 
   // ============================================================
@@ -2260,44 +2361,44 @@ export class QwenAgent extends BaseAgent {
       this.connection &&
       !this.connection.signal.aborted
     )
-      return;
+      return
 
     if (this.ensureProcessPromise) {
-      await this.ensureProcessPromise;
-      return;
+      await this.ensureProcessPromise
+      return
     }
 
-    this.ensureProcessPromise = this.startProcess();
+    this.ensureProcessPromise = this.startProcess()
     try {
-      await this.ensureProcessPromise;
+      await this.ensureProcessPromise
     } finally {
-      this.ensureProcessPromise = null;
+      this.ensureProcessPromise = null
     }
   }
 
   private async startProcess(): Promise<void> {
-    this.connection = null;
-    this.acpLease?.release();
-    this.acpLease = null;
+    this.connection = null
+    this.acpLease?.release()
+    this.acpLease = null
 
-    const runtime = getBackendRuntime(this.config);
-    const qwenCliPath = runtime.paths?.qwenCli;
+    const runtime = getBackendRuntime(this.config)
+    const qwenCliPath = runtime.paths?.qwenCli
     if (!qwenCliPath) {
       throw new Error(
         'Qwen Code CLI not found. Build the current qwen-code checkout with npm run build && npm run bundle, or set QWEN_CODE_CLI to a dist/cli.js path.',
-      );
+      )
     }
 
-    const nodePath = runtime.paths?.node || process.execPath;
-    const { command, args } = this.buildSpawnCommand(qwenCliPath, nodePath);
-    const cwd = this.config.workspace.rootPath || this.resolvedCwd();
-    const commandDescription = `${command} ${args.join(' ')}`;
+    const nodePath = runtime.paths?.node || process.execPath
+    const { command, args } = this.buildSpawnCommand(qwenCliPath, nodePath)
+    const cwd = this.config.workspace.rootPath || this.resolvedCwd()
+    const commandDescription = `${command} ${args.join(' ')}`
     const key = buildSharedAcpProcessKey({
       command,
       spawnArgs: args,
       workspaceRootPath: cwd,
       envOverrides: this.config.envOverrides,
-    });
+    })
 
     try {
       this.acpLease = await acquireSharedQwenAcpProcess(
@@ -2315,22 +2416,22 @@ export class QwenAgent extends BaseAgent {
           onProcessExit: (code, signal) => this.handleProcessExit(code, signal),
           onDebug: (message) => this.debug(message),
         },
-      );
-      this.connection = this.acpLease.connection;
+      )
+      this.connection = this.acpLease.connection
     } catch (error) {
       const originalMessage =
-        error instanceof Error ? error.message : String(error);
-      const recentStderr = this.getRecentStderr().trim();
+        error instanceof Error ? error.message : String(error)
+      const recentStderr = this.getRecentStderr().trim()
       const message = [
         originalMessage,
         `Qwen command: ${commandDescription}`,
         recentStderr ? `Recent Qwen stderr:\n${recentStderr}` : undefined,
       ]
         .filter(Boolean)
-        .join('\n');
-      const wrapped = new Error(message);
-      (wrapped as Error & { cause?: unknown }).cause = error;
-      throw wrapped;
+        .join('\n')
+      const wrapped = new Error(message)
+      ;(wrapped as Error & { cause?: unknown }).cause = error
+      throw wrapped
     }
   }
 
@@ -2338,13 +2439,13 @@ export class QwenAgent extends BaseAgent {
     qwenCliPath: string,
     nodePath: string,
   ): { command: string; args: string[] } {
-    const args = ['--acp', '--channel=desktop'];
+    const args = ['--acp', '--channel=desktop']
 
     if (qwenCliPath.endsWith('.js')) {
-      return { command: nodePath, args: [qwenCliPath, ...args] };
+      return { command: nodePath, args: [qwenCliPath, ...args] }
     }
 
-    return { command: qwenCliPath, args };
+    return { command: qwenCliPath, args }
   }
 
   private async handleExtMethod(
@@ -2352,31 +2453,31 @@ export class QwenAgent extends BaseAgent {
     params: JsonRecord,
   ): Promise<JsonRecord> {
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
-      return {};
+      return {}
     }
 
-    const sessionId = asString(params.sessionId);
-    const managedSessionId = this.config.session?.id;
+    const sessionId = asString(params.sessionId)
+    const managedSessionId = this.config.session?.id
     const isCurrentSession =
       !!sessionId &&
-      (sessionId === this.qwenSessionId || sessionId === managedSessionId);
+      (sessionId === this.qwenSessionId || sessionId === managedSessionId)
     if (!isCurrentSession) {
       if (sessionId) {
         this.debug(
           `Ignored mid-turn queue drain for non-current session ${sessionId}`,
-        );
+        )
       }
-      return {};
+      return {}
     }
 
-    const messages = this.midTurnMessageQueue.splice(0);
+    const messages = this.midTurnMessageQueue.splice(0)
     if (messages.length > 0) {
       this.debug(
         `Drained ${messages.length} mid-turn user message(s) to Qwen ACP`,
-      );
-      this.config.onMidTurnMessagesDrained?.(messages);
+      )
+      this.config.onMidTurnMessagesDrained?.(messages)
     }
-    return { messages };
+    return { messages }
   }
 
   private getAcpConnection(): ClientSideConnection {
@@ -2385,9 +2486,9 @@ export class QwenAgent extends BaseAgent {
       this.connection.signal.aborted ||
       !this.acpLease?.isActive()
     ) {
-      throw new Error('Qwen ACP process is not running');
+      throw new Error('Qwen ACP process is not running')
     }
-    return this.connection;
+    return this.connection
   }
 
   private callAcp<T>(
@@ -2395,11 +2496,7 @@ export class QwenAgent extends BaseAgent {
     execute: (connection: ClientSideConnection) => Promise<T>,
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
-    return this.withTimeout(
-      execute(this.getAcpConnection()),
-      method,
-      timeoutMs,
-    );
+    return this.withTimeout(execute(this.getAcpConnection()), method, timeoutMs)
   }
 
   private withTimeout<T>(
@@ -2407,35 +2504,35 @@ export class QwenAgent extends BaseAgent {
     method: string,
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
-    if (timeoutMs <= 0) return promise;
+    if (timeoutMs <= 0) return promise
 
-    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeout = setTimeout(() => {
-        reject(new Error(`Qwen ACP request timed out: ${method}`));
-      }, timeoutMs);
-    });
+        reject(new Error(`Qwen ACP request timed out: ${method}`))
+      }, timeoutMs)
+    })
 
     return Promise.race([promise, timeoutPromise]).finally(() => {
-      if (timeout) clearTimeout(timeout);
-    });
+      if (timeout) clearTimeout(timeout)
+    })
   }
 
   private handleProcessExit(
     code: number | null,
     signal: NodeJS.Signals | null,
   ): void {
-    const message = `Qwen ACP process exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
-    this.debug(message);
-    this.acpLease = null;
-    this.connection = null;
+    const message = `Qwen ACP process exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`
+    this.debug(message)
+    this.acpLease = null
+    this.connection = null
 
-    this.cancelPendingPermissions();
+    this.cancelPendingPermissions()
 
     if (this._isProcessing && !this.abortReason) {
-      this.eventQueue.enqueue({ type: 'error', message });
-      this.eventQueue.enqueue({ type: 'complete' });
-      this.eventQueue.complete();
+      this.eventQueue.enqueue({ type: 'error', message })
+      this.eventQueue.enqueue({ type: 'complete' })
+      this.eventQueue.complete()
     }
   }
 
@@ -2445,19 +2542,19 @@ export class QwenAgent extends BaseAgent {
       ...this.miniCollectors.keys(),
       ...this.historyCollectors.keys(),
     ]) {
-      if (sessionId) this.unregisterAcpSession(sessionId);
+      if (sessionId) this.unregisterAcpSession(sessionId)
     }
-    this.connection = null;
-    this.acpLease?.release();
-    this.acpLease = null;
+    this.connection = null
+    this.acpLease?.release()
+    this.acpLease = null
   }
 
   private registerAcpSession(sessionId: string): void {
-    this.acpLease?.registerSession(sessionId);
+    this.acpLease?.registerSession(sessionId)
   }
 
   private unregisterAcpSession(sessionId: string): void {
-    this.acpLease?.unregisterSession(sessionId);
+    this.acpLease?.unregisterSession(sessionId)
   }
 
   // ============================================================
@@ -2468,24 +2565,24 @@ export class QwenAgent extends BaseAgent {
     if (this.qwenSessionId) {
       this.debug(
         `Qwen ACP session reuse: using live session ${this.qwenSessionId}`,
-      );
-      this.registerAcpSession(this.qwenSessionId);
-      await this.applySessionSettings(this.qwenSessionId);
-      this.flushPendingAvailableCommandsUpdate(this.qwenSessionId);
-      return;
+      )
+      this.registerAcpSession(this.qwenSessionId)
+      await this.applySessionSettings(this.qwenSessionId)
+      this.flushPendingAvailableCommandsUpdate(this.qwenSessionId)
+      return
     }
 
     if (this.ensureQwenSessionPromise) {
-      this.debug('Qwen ACP session reuse: waiting for in-flight session setup');
-      await this.ensureQwenSessionPromise;
-      return;
+      this.debug('Qwen ACP session reuse: waiting for in-flight session setup')
+      await this.ensureQwenSessionPromise
+      return
     }
 
-    this.ensureQwenSessionPromise = this.createOrLoadQwenSession();
+    this.ensureQwenSessionPromise = this.createOrLoadQwenSession()
     try {
-      await this.ensureQwenSessionPromise;
+      await this.ensureQwenSessionPromise
     } finally {
-      this.ensureQwenSessionPromise = null;
+      this.ensureQwenSessionPromise = null
     }
   }
 
@@ -2493,23 +2590,23 @@ export class QwenAgent extends BaseAgent {
     if (this.qwenSessionId) {
       this.debug(
         `Qwen ACP session reuse: using live session ${this.qwenSessionId}`,
-      );
-      this.registerAcpSession(this.qwenSessionId);
-      await this.applySessionSettings(this.qwenSessionId);
-      this.flushPendingAvailableCommandsUpdate(this.qwenSessionId);
-      return;
+      )
+      this.registerAcpSession(this.qwenSessionId)
+      await this.applySessionSettings(this.qwenSessionId)
+      this.flushPendingAvailableCommandsUpdate(this.qwenSessionId)
+      return
     }
 
-    const cwd = this.resolvedCwd();
-    const mcpServers = this.buildAcpMcpServers();
+    const cwd = this.resolvedCwd()
+    const mcpServers = this.buildAcpMcpServers()
     const existingSessionId =
-      this.persistedQwenSessionId ?? this.config.session?.sdkSessionId;
+      this.persistedQwenSessionId ?? this.config.session?.sdkSessionId
 
     if (existingSessionId) {
       this.debug(
         `Qwen ACP session reuse: loading persisted session ${existingSessionId}`,
-      );
-      this.suppressedSessionUpdates.add(existingSessionId);
+      )
+      this.suppressedSessionUpdates.add(existingSessionId)
       try {
         const result = toRecord(
           await this.callAcp(
@@ -2522,24 +2619,24 @@ export class QwenAgent extends BaseAgent {
               }),
             60_000,
           ),
-        );
-        this.qwenSessionId = existingSessionId;
-        this.persistedQwenSessionId = existingSessionId;
-        this.registerAcpSession(existingSessionId);
-        this.recordSessionModels(result);
-        this.recordSessionModes(result);
-        this.config.onSdkSessionIdUpdate?.(existingSessionId);
-        await this.applySessionSettings(existingSessionId);
-        this.flushPendingAvailableCommandsUpdate(existingSessionId);
-        return;
+        )
+        this.qwenSessionId = existingSessionId
+        this.persistedQwenSessionId = existingSessionId
+        this.registerAcpSession(existingSessionId)
+        this.recordSessionModels(result)
+        this.recordSessionModes(result)
+        this.config.onSdkSessionIdUpdate?.(existingSessionId)
+        await this.applySessionSettings(existingSessionId)
+        this.flushPendingAvailableCommandsUpdate(existingSessionId)
+        return
       } finally {
-        this.suppressedSessionUpdates.delete(existingSessionId);
+        this.suppressedSessionUpdates.delete(existingSessionId)
       }
     }
 
     this.debug(
       'Qwen ACP session reuse: no existing session id, creating a new ACP session',
-    );
+    )
     const result = toRecord(
       await this.callAcp(
         'session/new',
@@ -2550,38 +2647,38 @@ export class QwenAgent extends BaseAgent {
           }),
         60_000,
       ),
-    );
+    )
 
-    const sessionId = asString(result.sessionId);
+    const sessionId = asString(result.sessionId)
     if (!sessionId) {
-      throw new Error('Qwen ACP did not return a sessionId');
+      throw new Error('Qwen ACP did not return a sessionId')
     }
 
-    this.qwenSessionId = sessionId;
-    this.persistedQwenSessionId = sessionId;
-    this.registerAcpSession(sessionId);
-    this.recordSessionModels(result);
-    this.recordSessionModes(result);
-    this.config.onSdkSessionIdUpdate?.(sessionId);
-    await this.applySessionSettings(sessionId);
-    this.flushPendingAvailableCommandsUpdate(sessionId);
+    this.qwenSessionId = sessionId
+    this.persistedQwenSessionId = sessionId
+    this.registerAcpSession(sessionId)
+    this.recordSessionModels(result)
+    this.recordSessionModes(result)
+    this.config.onSdkSessionIdUpdate?.(sessionId)
+    await this.applySessionSettings(sessionId)
+    this.flushPendingAvailableCommandsUpdate(sessionId)
   }
 
   private async reloadCurrentSessionForAvailableCommands(): Promise<AvailableCommandsSnapshot | null> {
-    const sessionId = this.qwenSessionId;
-    if (!sessionId) return null;
+    const sessionId = this.qwenSessionId
+    if (!sessionId) return null
 
     if (this._isProcessing) {
       this.debug(
         `Qwen slash command refresh did not reload session ${sessionId} because a prompt is active`,
-      );
-      return null;
+      )
+      return null
     }
 
     this.debug(
       `Qwen slash command refresh reloading existing ACP session ${sessionId} to request available_commands_update`,
-    );
-    this.suppressedSessionUpdates.add(sessionId);
+    )
+    this.suppressedSessionUpdates.add(sessionId)
     try {
       const result = toRecord(
         await this.callAcp(
@@ -2594,15 +2691,15 @@ export class QwenAgent extends BaseAgent {
             }),
           60_000,
         ),
-      );
-      this.recordSessionModels(result);
-      this.recordSessionModes(result);
-      await this.applySessionSettings(sessionId);
+      )
+      this.recordSessionModels(result)
+      this.recordSessionModes(result)
+      await this.applySessionSettings(sessionId)
     } finally {
-      this.suppressedSessionUpdates.delete(sessionId);
-      this.flushPendingAvailableCommandsUpdate(sessionId);
+      this.suppressedSessionUpdates.delete(sessionId)
+      this.flushPendingAvailableCommandsUpdate(sessionId)
     }
-    return this.latestAvailableCommandsSnapshot;
+    return this.latestAvailableCommandsSnapshot
   }
 
   private async createEphemeralSession(): Promise<string> {
@@ -2616,35 +2713,33 @@ export class QwenAgent extends BaseAgent {
           }),
         60_000,
       ),
-    );
-    const sessionId = asString(result.sessionId);
+    )
+    const sessionId = asString(result.sessionId)
     if (!sessionId) {
-      throw new Error(
-        'Qwen ACP did not return a sessionId for mini completion',
-      );
+      throw new Error('Qwen ACP did not return a sessionId for mini completion')
     }
-    this.registerAcpSession(sessionId);
-    this.recordSessionModels(result);
-    return sessionId;
+    this.registerAcpSession(sessionId)
+    this.recordSessionModels(result)
+    return sessionId
   }
 
   private recordSessionModels(result: JsonRecord): void {
-    const modelState = toRecord(result.models);
+    const modelState = toRecord(result.models)
     const availableModels = Array.isArray(modelState.availableModels)
       ? modelState.availableModels
           .map(toQwenModelDefinition)
           .filter((model): model is ModelDefinition => !!model)
-      : [];
-    const currentModelId = asString(modelState.currentModelId);
-    this.availableModelIds = new Set(availableModels.map((model) => model.id));
+      : []
+    const currentModelId = asString(modelState.currentModelId)
+    this.availableModelIds = new Set(availableModels.map((model) => model.id))
     this.availableModelsById = new Map(
       availableModels.map((model) => [model.id, model]),
-    );
-    this.firstAvailableModelId = availableModels[0]?.id;
+    )
+    this.firstAvailableModelId = availableModels[0]?.id
     const selectableCurrentModelId =
       currentModelId && this.availableModelIds.has(currentModelId)
         ? currentModelId
-        : undefined;
+        : undefined
 
     if (
       (!this._model || !this.isKnownAvailableModel(this._model)) &&
@@ -2652,13 +2747,13 @@ export class QwenAgent extends BaseAgent {
     ) {
       super.setModel(
         selectableCurrentModelId || this.firstAvailableModelId || '',
-      );
+      )
     }
 
-    this.applyCurrentModelContextWindow();
+    this.applyCurrentModelContextWindow()
 
     if (availableModels.length > 0) {
-      this.config.onAvailableModelsUpdate?.(availableModels, currentModelId);
+      this.config.onAvailableModelsUpdate?.(availableModels, currentModelId)
     }
   }
 
@@ -2667,7 +2762,7 @@ export class QwenAgent extends BaseAgent {
       !this.availableModelIds ||
       this.availableModelIds.size === 0 ||
       this.availableModelIds.has(model)
-    );
+    )
   }
 
   private getCurrentModelContextWindow(
@@ -2675,26 +2770,26 @@ export class QwenAgent extends BaseAgent {
   ): number | undefined {
     return model
       ? this.availableModelsById.get(model)?.contextWindow
-      : undefined;
+      : undefined
   }
 
   private applyCurrentModelContextWindow(model = this._model): void {
-    const contextWindow = this.getCurrentModelContextWindow(model);
+    const contextWindow = this.getCurrentModelContextWindow(model)
     if (contextWindow) {
-      this.usageTracker.setContextWindow(contextWindow);
+      this.usageTracker.setContextWindow(contextWindow)
     }
   }
 
   private recordSessionModes(result: JsonRecord): void {
-    if (this.pendingModeOverride) return;
+    if (this.pendingModeOverride) return
 
-    const modeState = toRecord(result.modes);
-    const currentModeId = asString(modeState.currentModeId);
-    const mode = mapQwenModeToPermissionMode(currentModeId);
+    const modeState = toRecord(result.modes)
+    const currentModeId = asString(modeState.currentModeId)
+    const mode = mapQwenModeToPermissionMode(currentModeId)
 
-    if (!mode || mode === this.getPermissionMode()) return;
+    if (!mode || mode === this.getPermissionMode()) return
 
-    this.applyAcpPermissionMode(mode);
+    this.applyAcpPermissionMode(mode)
   }
 
   private async forwardModel(
@@ -2702,10 +2797,10 @@ export class QwenAgent extends BaseAgent {
     sessionId = this.qwenSessionId,
     options: { persistDefault?: boolean } = {},
   ): Promise<void> {
-    if (!model || !sessionId) return;
+    if (!model || !sessionId) return
     if (!this.isKnownAvailableModel(model)) {
-      this.debug(`Skipping Qwen model forward for unavailable model: ${model}`);
-      return;
+      this.debug(`Skipping Qwen model forward for unavailable model: ${model}`)
+      return
     }
 
     try {
@@ -2718,7 +2813,7 @@ export class QwenAgent extends BaseAgent {
               modelId: model,
             }),
           10_000,
-        );
+        )
       } else {
         await this.callAcp(
           'session/set_config_option',
@@ -2729,12 +2824,12 @@ export class QwenAgent extends BaseAgent {
               value: model,
             }),
           10_000,
-        );
+        )
       }
     } catch (error) {
       this.debug(
         `Qwen session/set_model failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      )
       await this.callAcp(
         'session/set_config_option',
         (connection) =>
@@ -2747,18 +2842,18 @@ export class QwenAgent extends BaseAgent {
       ).catch((fallbackError) => {
         this.debug(
           `Qwen model config fallback failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
-        );
-      });
+        )
+      })
     }
   }
 
   private async applySessionSettings(sessionId: string): Promise<void> {
     if (this.hasInitialModeOverride) {
-      await this.forwardPermissionMode(this.getPermissionMode(), sessionId);
+      await this.forwardPermissionMode(this.getPermissionMode(), sessionId)
     }
 
     if (this._model) {
-      await this.forwardModel(this._model, sessionId);
+      await this.forwardModel(this._model, sessionId)
     }
   }
 
@@ -2766,8 +2861,7 @@ export class QwenAgent extends BaseAgent {
     mode: PermissionMode,
     sessionId = this.qwenSessionId,
   ): Promise<void> {
-    if (!sessionId || !this.connection || this.connection.signal.aborted)
-      return;
+    if (!sessionId || !this.connection || this.connection.signal.aborted) return
     try {
       await this.callAcp(
         'session/set_mode',
@@ -2777,16 +2871,16 @@ export class QwenAgent extends BaseAgent {
             modeId: mapPermissionModeToQwen(mode),
           }),
         10_000,
-      );
+      )
       if (this.pendingModeOverride === mode) {
-        this.pendingModeOverride = null;
+        this.pendingModeOverride = null
       }
     } catch (error) {
       this.debug(
         `Qwen mode switch failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      )
       if (this.pendingModeOverride === mode) {
-        this.pendingModeOverride = null;
+        this.pendingModeOverride = null
       }
     }
   }
@@ -2797,39 +2891,39 @@ export class QwenAgent extends BaseAgent {
       this.workingDirectory ||
       this.config.workspace.rootPath ||
       process.cwd()
-    );
+    )
   }
 
   private extractQwenRecordText(record: JsonRecord): string {
-    const message = toRecord(record.message);
+    const message = toRecord(record.message)
     const parts = Array.isArray(message.parts)
       ? message.parts.filter(isRecord)
-      : [];
+      : []
     return parts
       .map((part) => asString(part.text))
       .filter((text): text is string => !!text)
-      .join('\n\n');
+      .join('\n\n')
   }
 
   private getQwenTranscriptPatchContent(record: JsonRecord): string {
     if (record.type === 'system' && record.subtype === 'slash_command') {
-      const payload = toRecord(record.systemPayload);
+      const payload = toRecord(record.systemPayload)
       if (payload.phase === 'invocation') {
-        return asString(payload.rawCommand) || '';
+        return asString(payload.rawCommand) || ''
       }
     }
-    return this.extractQwenRecordText(record);
+    return this.extractQwenRecordText(record)
   }
 
   private isPatchableQwenUserRecord(
     record: JsonRecord,
     sessionId: string,
   ): boolean {
-    if (record.sessionId !== sessionId) return false;
-    if (record.type === 'user') return true;
+    if (record.sessionId !== sessionId) return false
+    if (record.type === 'user') return true
     if (record.type !== 'system' || record.subtype !== 'slash_command')
-      return false;
-    return toRecord(record.systemPayload).phase === 'invocation';
+      return false
+    return toRecord(record.systemPayload).phase === 'invocation'
   }
 
   private persistQwenTranscriptTextElements(
@@ -2837,67 +2931,67 @@ export class QwenAgent extends BaseAgent {
     cwd: string,
     sourceElements?: MessageTextElement[],
   ): void {
-    const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
-    if (!existsSync(transcriptPath)) return;
+    const transcriptPath = getQwenTranscriptPath(sessionId, cwd)
+    if (!existsSync(transcriptPath)) return
 
-    let fileContent: string;
+    let fileContent: string
     try {
-      fileContent = readFileSync(transcriptPath, 'utf8');
+      fileContent = readFileSync(transcriptPath, 'utf8')
     } catch (error) {
       this.debug(
         `Failed to read Qwen transcript for text elements: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return;
+      )
+      return
     }
 
-    const hadTrailingNewline = fileContent.endsWith('\n');
-    const lines = fileContent.split(/\r?\n/);
-    if (lines[lines.length - 1] === '') lines.pop();
+    const hadTrailingNewline = fileContent.endsWith('\n')
+    const lines = fileContent.split(/\r?\n/)
+    if (lines[lines.length - 1] === '') lines.pop()
 
     for (let index = lines.length - 1; index >= 0; index -= 1) {
-      const line = lines[index];
-      if (!line?.trim()) continue;
+      const line = lines[index]
+      if (!line?.trim()) continue
 
-      let record: JsonRecord;
+      let record: JsonRecord
       try {
-        record = JSON.parse(line) as JsonRecord;
+        record = JSON.parse(line) as JsonRecord
       } catch {
-        continue;
+        continue
       }
 
-      if (!this.isPatchableQwenUserRecord(record, sessionId)) continue;
+      if (!this.isPatchableQwenUserRecord(record, sessionId)) continue
 
-      const content = this.getQwenTranscriptPatchContent(record);
+      const content = this.getQwenTranscriptPatchContent(record)
       const textElements = buildQwenTranscriptTextElements(
         content,
         sourceElements,
-      );
-      if (!textElements) return;
+      )
+      if (!textElements) return
 
-      const existing = JSON.stringify(record.textElements ?? null);
-      const next = JSON.stringify(textElements);
-      if (existing === next) return;
+      const existing = JSON.stringify(record.textElements ?? null)
+      const next = JSON.stringify(textElements)
+      if (existing === next) return
 
-      record.textElements = textElements;
-      lines[index] = JSON.stringify(record);
+      record.textElements = textElements
+      lines[index] = JSON.stringify(record)
 
-      const tmpPath = `${transcriptPath}.craft-text-elements-${process.pid}-${Date.now()}.tmp`;
+      const tmpPath = `${transcriptPath}.craft-text-elements-${process.pid}-${Date.now()}.tmp`
       try {
         writeFileSync(
           tmpPath,
           lines.join('\n') + (hadTrailingNewline ? '\n' : ''),
           'utf8',
-        );
-        renameSync(tmpPath, transcriptPath);
+        )
+        renameSync(tmpPath, transcriptPath)
         this.debug(
           `Wrote ${textElements.length} text element(s) into Qwen transcript ${transcriptPath}`,
-        );
+        )
       } catch (error) {
         this.debug(
           `Failed to write Qwen transcript text elements: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        )
       }
-      return;
+      return
     }
   }
 
@@ -2905,40 +2999,40 @@ export class QwenAgent extends BaseAgent {
     sessionId: string,
     cwd: string,
   ): Array<{ content: string; textElements: MessageTextElement[] }> {
-    const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
-    if (!existsSync(transcriptPath)) return [];
+    const transcriptPath = getQwenTranscriptPath(sessionId, cwd)
+    if (!existsSync(transcriptPath)) return []
 
-    let fileContent: string;
+    let fileContent: string
     try {
-      fileContent = readFileSync(transcriptPath, 'utf8');
+      fileContent = readFileSync(transcriptPath, 'utf8')
     } catch {
-      return [];
+      return []
     }
 
     const records: Array<{
-      content: string;
-      textElements: MessageTextElement[];
-    }> = [];
+      content: string
+      textElements: MessageTextElement[]
+    }> = []
     for (const line of fileContent.split(/\r?\n/)) {
-      if (!line.trim()) continue;
+      if (!line.trim()) continue
 
-      let record: JsonRecord;
+      let record: JsonRecord
       try {
-        record = JSON.parse(line) as JsonRecord;
+        record = JSON.parse(line) as JsonRecord
       } catch {
-        continue;
+        continue
       }
 
-      if (!this.isPatchableQwenUserRecord(record, sessionId)) continue;
-      const textElements = toQwenTranscriptTextElements(record.textElements);
-      if (!textElements) continue;
+      if (!this.isPatchableQwenUserRecord(record, sessionId)) continue
+      const textElements = toQwenTranscriptTextElements(record.textElements)
+      if (!textElements) continue
 
-      const content = this.getQwenTranscriptPatchContent(record);
-      if (!content) continue;
-      records.push({ content, textElements });
+      const content = this.getQwenTranscriptPatchContent(record)
+      if (!content) continue
+      records.push({ content, textElements })
     }
 
-    return records;
+    return records
   }
 
   private applyQwenTranscriptTextElements(
@@ -2946,23 +3040,23 @@ export class QwenAgent extends BaseAgent {
     sessionId: string,
     cwd: string,
   ): Message[] {
-    const records = this.readQwenTranscriptTextElements(sessionId, cwd);
-    if (records.length === 0) return messages;
+    const records = this.readQwenTranscriptTextElements(sessionId, cwd)
+    if (records.length === 0) return messages
 
-    const remaining = [...records];
+    const remaining = [...records]
     for (const message of messages) {
-      if (message.role !== 'user' || message.textElements?.length) continue;
+      if (message.role !== 'user' || message.textElements?.length) continue
 
       const index = remaining.findIndex(
         (record) => record.content === message.content,
-      );
-      if (index < 0) continue;
+      )
+      if (index < 0) continue
 
-      message.textElements = remaining[index]!.textElements;
-      remaining.splice(index, 1);
+      message.textElements = remaining[index]!.textElements
+      remaining.splice(index, 1)
     }
 
-    return messages;
+    return messages
   }
 
   private buildAcpMcpServers(): McpServer[] {
@@ -2974,18 +3068,18 @@ export class QwenAgent extends BaseAgent {
           url: this.config.poolServerUrl,
           headers: [],
         },
-      ];
+      ]
     }
 
     return Object.entries(this.sourceMcpServers).map(([name, config]) => {
       if (config.type === 'stdio') {
-        const env = new Map<string, string>();
+        const env = new Map<string, string>()
         for (const [key, value] of Object.entries(config.env ?? {})) {
-          env.set(key, value);
+          env.set(key, value)
         }
         for (const key of config.envVars ?? []) {
-          const value = process.env[key];
-          if (value !== undefined) env.set(key, value);
+          const value = process.env[key]
+          if (value !== undefined) env.set(key, value)
         }
         return {
           name,
@@ -2995,18 +3089,18 @@ export class QwenAgent extends BaseAgent {
             name: envName,
             value,
           })),
-        };
+        }
       }
 
-      const headers = new Map<string, string>();
+      const headers = new Map<string, string>()
       for (const [key, value] of Object.entries(config.headers ?? {})) {
-        headers.set(key, value);
+        headers.set(key, value)
       }
       if (config.bearerTokenEnvVar && process.env[config.bearerTokenEnvVar]) {
         headers.set(
           'Authorization',
           `Bearer ${process.env[config.bearerTokenEnvVar]}`,
-        );
+        )
       }
 
       return {
@@ -3017,8 +3111,8 @@ export class QwenAgent extends BaseAgent {
           name: headerName,
           value,
         })),
-      };
-    });
+      }
+    })
   }
 
   // ============================================================
@@ -3030,39 +3124,39 @@ export class QwenAgent extends BaseAgent {
     attachments?: FileAttachment[],
   ): ContentBlock[] {
     if (isSlashCommandPrompt(message, attachments)) {
-      return [{ type: 'text', text: message.trim() }];
+      return [{ type: 'text', text: message.trim() }]
     }
 
-    const textParts: string[] = [];
+    const textParts: string[] = []
     const context = INCLUDE_CRAFT_CONTEXT_IN_QWEN_PROMPTS
       ? this.buildCraftContext()
-      : '';
+      : ''
 
     for (const attachment of attachments ?? []) {
       if (attachment.mimeType?.startsWith('image/') && attachment.base64) {
-        continue;
+        continue
       }
       const filePath =
-        attachment.storedPath || attachment.markdownPath || attachment.path;
+        attachment.storedPath || attachment.markdownPath || attachment.path
       if (filePath) {
         textParts.push(
           `[Attached file: ${attachment.name}]\n[Stored at: ${filePath}]`,
-        );
+        )
       } else if (attachment.text) {
         textParts.push(
           `[Attached text: ${attachment.name}]\n${attachment.text}`,
-        );
+        )
       }
     }
 
-    textParts.push(message);
-    const text = textParts.filter(Boolean).join('\n\n');
+    textParts.push(message)
+    const text = textParts.filter(Boolean).join('\n\n')
     const blocks: ContentBlock[] = [
       {
         type: 'text',
         text: context ? `${text}\n\n` : text,
       },
-    ];
+    ]
 
     if (context) {
       blocks.push({
@@ -3076,7 +3170,7 @@ export class QwenAgent extends BaseAgent {
           source: 'craft-agent',
           hiddenFromPromptDisplay: true,
         },
-      });
+      })
     }
 
     for (const attachment of attachments ?? []) {
@@ -3085,11 +3179,11 @@ export class QwenAgent extends BaseAgent {
           type: 'image',
           data: attachment.base64,
           mimeType: attachment.mimeType,
-        });
+        })
       }
     }
 
-    return blocks;
+    return blocks
   }
 
   private buildCraftContext(): string {
@@ -3101,9 +3195,9 @@ export class QwenAgent extends BaseAgent {
       this.config.systemPromptPreset,
       this.backendName,
       getCoAuthorPreference(),
-    );
+    )
 
-    const sourceContext = this.sourceManager.formatSourceState();
+    const sourceContext = this.sourceManager.formatSourceState()
     const contextParts = this.promptBuilder.buildContextParts(
       {
         plansFolderPath: getSessionPlansPath(
@@ -3112,23 +3206,23 @@ export class QwenAgent extends BaseAgent {
         ),
       },
       sourceContext,
-    );
+    )
 
-    return [systemPrompt, ...contextParts].filter(Boolean).join('\n\n');
+    return [systemPrompt, ...contextParts].filter(Boolean).join('\n\n')
   }
 
   private buildQueryPrompt(request: LLMQueryRequest): string {
-    const parts: string[] = [];
+    const parts: string[] = []
     if (request.systemPrompt) {
-      parts.push(`System instructions:\n${request.systemPrompt}`);
+      parts.push(`System instructions:\n${request.systemPrompt}`)
     }
     if (request.outputSchema) {
       parts.push(
         `Return a JSON value that conforms to this schema:\n${jsonStringify(request.outputSchema)}`,
-      );
+      )
     }
-    parts.push(request.prompt);
-    return parts.join('\n\n');
+    parts.push(request.prompt)
+    return parts.join('\n\n')
   }
 
   // ============================================================
@@ -3136,59 +3230,59 @@ export class QwenAgent extends BaseAgent {
   // ============================================================
 
   private handleSessionUpdate(params: unknown): void {
-    const record = toRecord(params);
-    const sessionId = asString(record.sessionId);
-    const update = toRecord(record.update);
-    if (!sessionId || !update.sessionUpdate) return;
+    const record = toRecord(params)
+    const sessionId = asString(record.sessionId)
+    const update = toRecord(record.update)
+    if (!sessionId || !update.sessionUpdate) return
 
-    const collector = this.miniCollectors.get(sessionId);
+    const collector = this.miniCollectors.get(sessionId)
     if (collector) {
-      this.collectMiniUpdate(collector, update);
-      return;
+      this.collectMiniUpdate(collector, update)
+      return
     }
 
-    const historyCollector = this.historyCollectors.get(sessionId);
+    const historyCollector = this.historyCollectors.get(sessionId)
     if (historyCollector) {
-      historyCollector.updates.push(update);
-      return;
+      historyCollector.updates.push(update)
+      return
     }
 
     if (update.sessionUpdate === 'available_commands_update') {
-      this.handleOrStoreAvailableCommandsUpdate(sessionId, update);
-      return;
+      this.handleOrStoreAvailableCommandsUpdate(sessionId, update)
+      return
     }
 
-    if (this.suppressedSessionUpdates.has(sessionId)) return;
-    if (sessionId !== this.qwenSessionId || !this._isProcessing) return;
+    if (this.suppressedSessionUpdates.has(sessionId)) return
+    if (sessionId !== this.qwenSessionId || !this._isProcessing) return
 
-    this.captureUsage(update);
+    this.captureUsage(update)
 
     switch (update.sessionUpdate) {
       case 'agent_message_chunk':
-        this.flushThoughtText();
-        this.handleAgentMessageChunk(update);
-        break;
+        this.flushThoughtText()
+        this.handleAgentMessageChunk(update)
+        break
       case 'agent_thought_chunk':
-        this.flushAssistantText(true);
-        this.handleAgentThoughtChunk(update);
-        break;
+        this.flushAssistantText(true)
+        this.handleAgentThoughtChunk(update)
+        break
       case 'tool_call':
-        this.flushPendingTextAsIntermediate();
-        this.handleToolCall(update);
-        break;
+        this.flushPendingTextAsIntermediate()
+        this.handleToolCall(update)
+        break
       case 'tool_call_update':
-        this.flushPendingTextAsIntermediate();
-        this.handleToolCallUpdate(update);
-        break;
+        this.flushPendingTextAsIntermediate()
+        this.handleToolCallUpdate(update)
+        break
       case 'plan':
-        this.flushPendingTextAsIntermediate();
-        this.handlePlanUpdate(update);
-        break;
+        this.flushPendingTextAsIntermediate()
+        this.handlePlanUpdate(update)
+        break
       case 'current_mode_update':
-        this.handleModeUpdate(update);
-        break;
+        this.handleModeUpdate(update)
+        break
       default:
-        break;
+        break
     }
   }
 
@@ -3196,12 +3290,12 @@ export class QwenAgent extends BaseAgent {
     collector: MiniCollector,
     update: JsonRecord,
   ): void {
-    this.captureUsageInto(collector, update);
-    if (update.sessionUpdate !== 'agent_message_chunk') return;
-    const content = toRecord(update.content);
-    if (content.type !== 'text') return;
-    const text = asString(content.text);
-    if (text) collector.chunks.push(text);
+    this.captureUsageInto(collector, update)
+    if (update.sessionUpdate !== 'agent_message_chunk') return
+    const content = toRecord(update.content)
+    if (content.type !== 'text') return
+    const text = asString(content.text)
+    if (text) collector.chunks.push(text)
   }
 
   private buildHistoryMessages(
@@ -3209,20 +3303,20 @@ export class QwenAgent extends BaseAgent {
     updates: JsonRecord[],
     _cwd: string,
   ): Message[] {
-    const messages: Message[] = [];
-    const toolMessages = new Map<string, Message>();
-    const activeParentToolUseIds = new Set<string>();
-    let idCounter = 0;
-    let fallbackTimestamp = Date.now();
+    const messages: Message[] = []
+    const toolMessages = new Map<string, Message>()
+    const activeParentToolUseIds = new Set<string>()
+    let idCounter = 0
+    let fallbackTimestamp = Date.now()
 
-    const nextId = () => `qwen-${sessionId}-${++idCounter}`;
+    const nextId = () => `qwen-${sessionId}-${++idCounter}`
     const timestampFor = (update: JsonRecord): number => {
-      const meta = toRecord(update._meta);
-      const timestamp = asNumber(meta.timestamp) ?? asNumber(update.timestamp);
-      if (timestamp != null) return timestamp;
-      fallbackTimestamp += 1;
-      return fallbackTimestamp;
-    };
+      const meta = toRecord(update._meta)
+      const timestamp = asNumber(meta.timestamp) ?? asNumber(update.timestamp)
+      if (timestamp != null) return timestamp
+      fallbackTimestamp += 1
+      return fallbackTimestamp
+    }
 
     const appendTextMessage = (
       role: 'user' | 'assistant',
@@ -3232,10 +3326,10 @@ export class QwenAgent extends BaseAgent {
       intermediateKind?: IntermediateMessageKind,
       parentToolUseId?: string,
     ) => {
-      if (!text) return;
+      if (!text) return
       const messageText =
-        role === 'assistant' ? normalizeQwenAssistantText(text) : text;
-      const previous = messages[messages.length - 1];
+        role === 'assistant' ? normalizeQwenAssistantText(text) : text
+      const previous = messages[messages.length - 1]
       if (
         previous &&
         previous.role === role &&
@@ -3245,15 +3339,15 @@ export class QwenAgent extends BaseAgent {
         previous.intermediateKind === intermediateKind &&
         previous.parentToolUseId === parentToolUseId
       ) {
-        const nextContent = previous.content + text;
+        const nextContent = previous.content + text
         previous.content =
           role === 'assistant'
             ? normalizeQwenAssistantText(nextContent)
-            : nextContent;
-        return;
+            : nextContent
+        return
       }
 
-      const content = messageText;
+      const content = messageText
       messages.push({
         id: nextId(),
         role,
@@ -3262,35 +3356,35 @@ export class QwenAgent extends BaseAgent {
         isIntermediate,
         intermediateKind,
         parentToolUseId,
-      });
-    };
+      })
+    }
 
     const markTrailingAssistantAsCommentary = () => {
-      const previous = messages[messages.length - 1];
+      const previous = messages[messages.length - 1]
       if (
         previous &&
         previous.role === 'assistant' &&
         !previous.toolUseId &&
         !previous.isIntermediate
       ) {
-        previous.isIntermediate = true;
-        previous.intermediateKind = 'commentary';
+        previous.isIntermediate = true
+        previous.intermediateKind = 'commentary'
       }
-    };
+    }
 
     for (const update of updates) {
-      const timestamp = timestampFor(update);
-      const content = toRecord(update.content);
-      const text = content.type === 'text' ? asString(content.text) : undefined;
+      const timestamp = timestampFor(update)
+      const content = toRecord(update.content)
+      const text = content.type === 'text' ? asString(content.text) : undefined
       const parentToolUseId = resolveQwenParentToolUseId({
         update,
         activeParentToolUseIds,
-      });
+      })
 
       switch (update.sessionUpdate) {
         case 'user_message_chunk':
-          appendTextMessage('user', text || '', timestamp);
-          break;
+          appendTextMessage('user', text || '', timestamp)
+          break
 
         case 'agent_message_chunk':
           appendTextMessage(
@@ -3300,8 +3394,8 @@ export class QwenAgent extends BaseAgent {
             undefined,
             undefined,
             parentToolUseId,
-          );
-          break;
+          )
+          break
 
         case 'agent_thought_chunk':
           appendTextMessage(
@@ -3311,25 +3405,25 @@ export class QwenAgent extends BaseAgent {
             true,
             'thought',
             parentToolUseId,
-          );
-          break;
+          )
+          break
 
         case 'tool_call': {
-          markTrailingAssistantAsCommentary();
+          markTrailingAssistantAsCommentary()
           const toolUseId =
-            asString(update.toolCallId) || `qwen-history-tool-${++idCounter}`;
-          const rawInput = toRecord(update.rawInput);
-          const meta = toRecord(update._meta);
-          const kind = asString(update.kind);
+            asString(update.toolCallId) || `qwen-history-tool-${++idCounter}`
+          const rawInput = toRecord(update.rawInput)
+          const meta = toRecord(update._meta)
+          const kind = asString(update.kind)
           const toolName = normalizeToolName(
             asString(meta.toolName) || asString(update.title),
             kind,
-          );
+          )
           const toolParentUseId = resolveQwenParentToolUseId({
             update,
             toolUseId,
             activeParentToolUseIds,
-          });
+          })
           const toolMessage: Message = {
             id: nextId(),
             role: 'tool',
@@ -3342,40 +3436,40 @@ export class QwenAgent extends BaseAgent {
             toolIntent: asString(update.title),
             toolDisplayName: displayNameForTool(toolName, kind),
             parentToolUseId: toolParentUseId,
-          };
-          messages.push(toolMessage);
-          toolMessages.set(toolUseId, toolMessage);
-          if (isParentTaskTool(toolName)) {
-            activeParentToolUseIds.add(toolUseId);
           }
-          break;
+          messages.push(toolMessage)
+          toolMessages.set(toolUseId, toolMessage)
+          if (isParentTaskTool(toolName)) {
+            activeParentToolUseIds.add(toolUseId)
+          }
+          break
         }
 
         case 'tool_call_update': {
-          markTrailingAssistantAsCommentary();
+          markTrailingAssistantAsCommentary()
           const toolUseId =
-            asString(update.toolCallId) || `qwen-history-tool-${++idCounter}`;
-          const existing = toolMessages.get(toolUseId);
-          const meta = toRecord(update._meta);
+            asString(update.toolCallId) || `qwen-history-tool-${++idCounter}`
+          const existing = toolMessages.get(toolUseId)
+          const meta = toRecord(update._meta)
           const toolName = normalizeToolName(
             asString(meta.toolName) || existing?.toolName,
             asString(update.kind),
-          );
+          )
           const toolParentUseId = resolveQwenParentToolUseId({
             update,
             toolUseId,
             activeParentToolUseIds,
-          });
-          const result = this.formatToolResult(update);
-          const isError = update.status === 'failed';
+          })
+          const result = this.formatToolResult(update)
+          const isError = update.status === 'failed'
 
           if (existing) {
-            existing.toolName = existing.toolName || toolName;
-            existing.toolResult = result;
-            existing.toolStatus = isError ? 'error' : 'completed';
-            existing.isError = isError;
+            existing.toolName = existing.toolName || toolName
+            existing.toolResult = result
+            existing.toolStatus = isError ? 'error' : 'completed'
+            existing.isError = isError
             existing.parentToolUseId =
-              existing.parentToolUseId || toolParentUseId;
+              existing.parentToolUseId || toolParentUseId
           } else {
             const toolMessage: Message = {
               id: nextId(),
@@ -3388,19 +3482,19 @@ export class QwenAgent extends BaseAgent {
               toolStatus: isError ? 'error' : 'completed',
               isError,
               parentToolUseId: toolParentUseId,
-            };
-            messages.push(toolMessage);
-            toolMessages.set(toolUseId, toolMessage);
+            }
+            messages.push(toolMessage)
+            toolMessages.set(toolUseId, toolMessage)
           }
           if (isParentTaskTool(toolName)) {
-            activeParentToolUseIds.delete(toolUseId);
+            activeParentToolUseIds.delete(toolUseId)
           }
-          break;
+          break
         }
 
         case 'plan': {
-          markTrailingAssistantAsCommentary();
-          const entries = Array.isArray(update.entries) ? update.entries : [];
+          markTrailingAssistantAsCommentary()
+          const entries = Array.isArray(update.entries) ? update.entries : []
           const todos = entries
             .filter(isRecord)
             .map((entry) => ({
@@ -3408,7 +3502,7 @@ export class QwenAgent extends BaseAgent {
               status: mapPlanStatus(entry.status),
               activeForm: asString(entry.content) || '',
             }))
-            .filter((todo) => todo.content);
+            .filter((todo) => todo.content)
           messages.push({
             id: nextId(),
             role: 'tool',
@@ -3420,16 +3514,16 @@ export class QwenAgent extends BaseAgent {
             toolResult: 'Todo list updated',
             toolStatus: 'completed',
             toolDisplayName: 'Todo List Updated',
-          });
-          break;
+          })
+          break
         }
 
         default:
-          break;
+          break
       }
     }
 
-    return messages;
+    return messages
   }
 
   private mergeQwenTranscriptTelemetryMessages(
@@ -3440,18 +3534,18 @@ export class QwenAgent extends BaseAgent {
     const transcriptMessages = this.loadQwenTranscriptTelemetryMessages(
       sessionId,
       cwd,
-    );
-    if (transcriptMessages.length === 0) return messages;
+    )
+    if (transcriptMessages.length === 0) return messages
 
     const seenToolUseIds = new Set(
       messages
         .map((message) => message.toolUseId)
         .filter((toolUseId): toolUseId is string => !!toolUseId),
-    );
+    )
 
     const additions = transcriptMessages.filter((candidate) => {
       if (candidate.toolUseId && seenToolUseIds.has(candidate.toolUseId)) {
-        return false;
+        return false
       }
       if (
         candidate.role !== 'tool' &&
@@ -3462,89 +3556,89 @@ export class QwenAgent extends BaseAgent {
             Math.abs(message.timestamp - candidate.timestamp) <= 1_000,
         )
       ) {
-        return false;
+        return false
       }
-      return true;
-    });
-    if (additions.length === 0) return messages;
+      return true
+    })
+    if (additions.length === 0) return messages
 
     return [...messages, ...additions]
       .map((message, index) => ({ message, index }))
       .sort((a, b) => {
-        const timestampDelta = a.message.timestamp - b.message.timestamp;
-        return timestampDelta !== 0 ? timestampDelta : a.index - b.index;
+        const timestampDelta = a.message.timestamp - b.message.timestamp
+        return timestampDelta !== 0 ? timestampDelta : a.index - b.index
       })
-      .map(({ message }) => message);
+      .map(({ message }) => message)
   }
 
   private loadQwenTranscriptTelemetryMessages(
     sessionId: string,
     cwd: string,
   ): Message[] {
-    const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
-    if (!existsSync(transcriptPath)) return [];
+    const transcriptPath = getQwenTranscriptPath(sessionId, cwd)
+    if (!existsSync(transcriptPath)) return []
 
-    let fileContent: string;
+    let fileContent: string
     try {
-      fileContent = readFileSync(transcriptPath, 'utf8');
+      fileContent = readFileSync(transcriptPath, 'utf8')
     } catch (error) {
       this.debug(
         `Failed to read Qwen transcript telemetry from ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return [];
+      )
+      return []
     }
 
-    const messages: Message[] = [];
-    const parentToolUseIdsBySubagent = new Map<string, string>();
-    const parentToolMessages = new Map<string, Message>();
-    let fallbackParentToolUseId: string | undefined;
-    let idCounter = 0;
+    const messages: Message[] = []
+    const parentToolUseIdsBySubagent = new Map<string, string>()
+    const parentToolMessages = new Map<string, Message>()
+    let fallbackParentToolUseId: string | undefined
+    let idCounter = 0
 
-    const nextId = () => `qwen-${sessionId}-transcript-${++idCounter}`;
+    const nextId = () => `qwen-${sessionId}-transcript-${++idCounter}`
     const completeOpenParentTools = () => {
       for (const parent of parentToolMessages.values()) {
-        if (parent.toolStatus !== 'executing') continue;
-        parent.toolStatus = 'completed';
-        parent.toolResult = parent.toolResult ?? 'Completed';
+        if (parent.toolStatus !== 'executing') continue
+        parent.toolStatus = 'completed'
+        parent.toolResult = parent.toolResult ?? 'Completed'
       }
-    };
+    }
 
     for (const line of fileContent.split(/\r?\n/)) {
-      if (!line.trim()) continue;
+      if (!line.trim()) continue
 
-      let record: JsonRecord;
+      let record: JsonRecord
       try {
-        record = JSON.parse(line) as JsonRecord;
+        record = JSON.parse(line) as JsonRecord
       } catch {
-        continue;
+        continue
       }
 
-      if (record.sessionId !== sessionId) continue;
-      const timestamp = parseQwenTimestamp(record.timestamp) ?? Date.now();
+      if (record.sessionId !== sessionId) continue
+      const timestamp = parseQwenTimestamp(record.timestamp) ?? Date.now()
 
       if (record.type === 'user') {
-        completeOpenParentTools();
-        const content = this.extractQwenRecordText(record);
-        if (!content) continue;
+        completeOpenParentTools()
+        const content = this.extractQwenRecordText(record)
+        if (!content) continue
         messages.push({
           id: nextId(),
           role: 'user',
           content,
           timestamp,
-        });
-        continue;
+        })
+        continue
       }
 
       if (record.type === 'assistant') {
-        const message = toRecord(record.message);
+        const message = toRecord(record.message)
         const parts = Array.isArray(message.parts)
           ? message.parts.filter(isRecord)
-          : [];
+          : []
 
         for (const part of parts) {
-          const text = asString(part.text);
+          const text = asString(part.text)
           if (text) {
-            const isThought = part.thought === true;
+            const isThought = part.thought === true
             messages.push({
               id: nextId(),
               role: 'assistant',
@@ -3556,17 +3650,17 @@ export class QwenAgent extends BaseAgent {
                     intermediateKind: 'thought' as const,
                   }
                 : {}),
-            });
+            })
           }
 
-          const functionCall = toRecord(part.functionCall);
-          const functionName = asString(functionCall.name);
-          if (!functionName) continue;
+          const functionCall = toRecord(part.functionCall)
+          const functionName = asString(functionCall.name)
+          if (!functionName) continue
 
-          const toolName = normalizeToolName(functionName);
+          const toolName = normalizeToolName(functionName)
           const toolUseId =
-            asString(functionCall.id) || `qwen-transcript-tool-${++idCounter}`;
-          const rawInput = toRecord(functionCall.args);
+            asString(functionCall.id) || `qwen-transcript-tool-${++idCounter}`
+          const rawInput = toRecord(functionCall.args)
           const toolMessage: Message = {
             id: nextId(),
             role: 'tool',
@@ -3578,19 +3672,19 @@ export class QwenAgent extends BaseAgent {
             toolStatus: 'executing',
             toolIntent: asString(rawInput.description),
             toolDisplayName: displayNameForTool(toolName),
-          };
-          messages.push(toolMessage);
+          }
+          messages.push(toolMessage)
 
           if (isParentTaskTool(toolName)) {
-            fallbackParentToolUseId = toolUseId;
-            parentToolMessages.set(toolUseId, toolMessage);
-            const subagentType = asString(rawInput.subagent_type);
+            fallbackParentToolUseId = toolUseId
+            parentToolMessages.set(toolUseId, toolMessage)
+            const subagentType = asString(rawInput.subagent_type)
             if (subagentType) {
-              parentToolUseIdsBySubagent.set(subagentType, toolUseId);
+              parentToolUseIdsBySubagent.set(subagentType, toolUseId)
             }
           }
         }
-        continue;
+        continue
       }
 
       const telemetryMessage = this.buildQwenTranscriptTelemetryMessage({
@@ -3599,45 +3693,45 @@ export class QwenAgent extends BaseAgent {
         nextId,
         parentToolUseIdsBySubagent,
         fallbackParentToolUseId,
-      });
-      if (telemetryMessage) messages.push(telemetryMessage);
+      })
+      if (telemetryMessage) messages.push(telemetryMessage)
     }
 
     if (!(this._isProcessing && sessionId === this.qwenSessionId)) {
-      completeOpenParentTools();
+      completeOpenParentTools()
     }
 
-    return messages;
+    return messages
   }
 
   private buildQwenTranscriptTelemetryMessage(args: {
-    record: JsonRecord;
-    timestamp: number;
-    nextId: () => string;
-    parentToolUseIdsBySubagent: ReadonlyMap<string, string>;
-    fallbackParentToolUseId?: string;
+    record: JsonRecord
+    timestamp: number
+    nextId: () => string
+    parentToolUseIdsBySubagent: ReadonlyMap<string, string>
+    fallbackParentToolUseId?: string
   }): Message | undefined {
-    const { record, timestamp, nextId, parentToolUseIdsBySubagent } = args;
+    const { record, timestamp, nextId, parentToolUseIdsBySubagent } = args
     if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
-      return undefined;
+      return undefined
     }
 
-    const payload = toRecord(record.systemPayload);
-    const uiEvent = toRecord(payload.uiEvent);
-    if (uiEvent['event.name'] !== 'qwen-code.tool_call') return undefined;
+    const payload = toRecord(record.systemPayload)
+    const uiEvent = toRecord(payload.uiEvent)
+    if (uiEvent['event.name'] !== 'qwen-code.tool_call') return undefined
 
-    const toolName = normalizeToolName(asString(uiEvent.function_name));
+    const toolName = normalizeToolName(asString(uiEvent.function_name))
     const toolUseId =
-      asString(record.uuid) || `qwen-transcript-tool-${nextId()}`;
-    const input = toRecord(uiEvent.function_args);
-    const isError = uiEvent.success === false || uiEvent.status === 'error';
-    const error = asString(uiEvent.error);
-    const contentLength = asNumber(uiEvent.content_length);
+      asString(record.uuid) || `qwen-transcript-tool-${nextId()}`
+    const input = toRecord(uiEvent.function_args)
+    const isError = uiEvent.success === false || uiEvent.status === 'error'
+    const error = asString(uiEvent.error)
+    const contentLength = asNumber(uiEvent.content_length)
     const toolResult = isError
       ? error || 'Tool failed'
       : contentLength != null
         ? `Completed (${contentLength} bytes)`
-        : 'Completed';
+        : 'Completed'
 
     return {
       id: nextId(),
@@ -3656,7 +3750,7 @@ export class QwenAgent extends BaseAgent {
         args.fallbackParentToolUseId,
       ),
       ...(isError ? { isError } : {}),
-    };
+    }
   }
 
   private resolveQwenTranscriptTelemetryParent(
@@ -3664,23 +3758,22 @@ export class QwenAgent extends BaseAgent {
     parentToolUseIdsBySubagent: ReadonlyMap<string, string>,
     fallbackParentToolUseId?: string,
   ): string | undefined {
-    const subagentName = asString(uiEvent.subagent_name);
+    const subagentName = asString(uiEvent.subagent_name)
     if (subagentName) {
-      const parentToolUseId = parentToolUseIdsBySubagent.get(subagentName);
-      if (parentToolUseId) return parentToolUseId;
+      const parentToolUseId = parentToolUseIdsBySubagent.get(subagentName)
+      if (parentToolUseId) return parentToolUseId
     }
 
-    const promptId = asString(uiEvent.prompt_id);
-    const promptSubagentName = promptId?.match(/#([^#]+?)-[^#]+#/)?.[1];
+    const promptId = asString(uiEvent.prompt_id)
+    const promptSubagentName = promptId?.match(/#([^#]+?)-[^#]+#/)?.[1]
     if (promptSubagentName) {
-      const parentToolUseId =
-        parentToolUseIdsBySubagent.get(promptSubagentName);
-      if (parentToolUseId) return parentToolUseId;
+      const parentToolUseId = parentToolUseIdsBySubagent.get(promptSubagentName)
+      if (parentToolUseId) return parentToolUseId
     }
 
     return parentToolUseIdsBySubagent.size === 1
       ? [...parentToolUseIdsBySubagent.values()][0]
-      : fallbackParentToolUseId;
+      : fallbackParentToolUseId
   }
 
   private mergeSlashCommandInvocationMessages(
@@ -3691,27 +3784,27 @@ export class QwenAgent extends BaseAgent {
     const slashMessages = this.loadSlashCommandInvocationMessages(
       sessionId,
       cwd,
-    );
-    if (slashMessages.length === 0) return messages;
+    )
+    if (slashMessages.length === 0) return messages
 
     const additions = slashMessages.filter(
       (slashMessage) =>
         !messages.some((message) =>
           this.isSameSlashCommandInvocationMessage(message, slashMessage),
         ),
-    );
-    if (additions.length === 0) return messages;
+    )
+    if (additions.length === 0) return messages
 
     return [...messages, ...additions]
       .map((message, index) => ({ message, index }))
       .sort((a, b) => {
-        const timestampDelta = a.message.timestamp - b.message.timestamp;
-        if (timestampDelta !== 0) return timestampDelta;
-        if (a.message.role === 'user' && b.message.role !== 'user') return -1;
-        if (a.message.role !== 'user' && b.message.role === 'user') return 1;
-        return a.index - b.index;
+        const timestampDelta = a.message.timestamp - b.message.timestamp
+        if (timestampDelta !== 0) return timestampDelta
+        if (a.message.role === 'user' && b.message.role !== 'user') return -1
+        if (a.message.role !== 'user' && b.message.role === 'user') return 1
+        return a.index - b.index
       })
-      .map(({ message }) => message);
+      .map(({ message }) => message)
   }
 
   private isSameSlashCommandInvocationMessage(
@@ -3721,153 +3814,153 @@ export class QwenAgent extends BaseAgent {
     const messageContent =
       message.role === 'assistant'
         ? normalizeQwenAssistantText(message.content).trim()
-        : message.content.trim();
+        : message.content.trim()
 
     return (
       message.role === slashMessage.role &&
       messageContent === slashMessage.content.trim() &&
       Math.abs(message.timestamp - slashMessage.timestamp) <= 10_000
-    );
+    )
   }
 
   private loadSlashCommandInvocationMessages(
     sessionId: string,
     cwd: string,
   ): Message[] {
-    const transcriptPath = getQwenTranscriptPath(sessionId, cwd);
-    if (!existsSync(transcriptPath)) return [];
+    const transcriptPath = getQwenTranscriptPath(sessionId, cwd)
+    if (!existsSync(transcriptPath)) return []
 
-    const invocations = new Map<string, SlashCommandInvocation>();
-    const seenResults = new Set<string>();
-    const messages: Message[] = [];
-    let idCounter = 0;
+    const invocations = new Map<string, SlashCommandInvocation>()
+    const seenResults = new Set<string>()
+    const messages: Message[] = []
+    let idCounter = 0
 
     try {
-      const lines = readFileSync(transcriptPath, 'utf8').split(/\r?\n/);
+      const lines = readFileSync(transcriptPath, 'utf8').split(/\r?\n/)
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
+        const trimmed = line.trim()
+        if (!trimmed) continue
 
-        let record: JsonRecord;
+        let record: JsonRecord
         try {
-          record = toRecord(JSON.parse(trimmed));
+          record = toRecord(JSON.parse(trimmed))
         } catch {
-          continue;
+          continue
         }
 
         if (record.type !== 'system' || record.subtype !== 'slash_command')
-          continue;
+          continue
 
-        const payload = toRecord(record.systemPayload);
-        const rawCommand = asString(payload.rawCommand)?.trim();
-        if (!rawCommand) continue;
+        const payload = toRecord(record.systemPayload)
+        const rawCommand = asString(payload.rawCommand)?.trim()
+        if (!rawCommand) continue
 
-        const phase = asString(payload.phase);
-        const timestamp = parseQwenTimestamp(record.timestamp) ?? Date.now();
+        const phase = asString(payload.phase)
+        const timestamp = parseQwenTimestamp(record.timestamp) ?? Date.now()
         if (phase === 'invocation') {
-          const uuid = asString(record.uuid);
-          if (uuid) invocations.set(uuid, { rawCommand, timestamp });
-          continue;
+          const uuid = asString(record.uuid)
+          if (uuid) invocations.set(uuid, { rawCommand, timestamp })
+          continue
         }
 
-        if (phase !== 'result') continue;
+        if (phase !== 'result') continue
 
         const outputItems = Array.isArray(payload.outputHistoryItems)
           ? payload.outputHistoryItems
-          : [];
+          : []
         const outputTexts = outputItems
           .filter(isRecord)
           .map(formatQwenSlashOutputHistoryItem)
-          .filter((text): text is string => !!text?.trim());
-        if (outputTexts.length === 0) continue;
+          .filter((text): text is string => !!text?.trim())
+        if (outputTexts.length === 0) continue
 
-        const parentUuid = asString(record.parentUuid);
-        const resultKey = parentUuid || `${rawCommand}:${timestamp}`;
-        if (seenResults.has(resultKey)) continue;
-        seenResults.add(resultKey);
+        const parentUuid = asString(record.parentUuid)
+        const resultKey = parentUuid || `${rawCommand}:${timestamp}`
+        if (seenResults.has(resultKey)) continue
+        seenResults.add(resultKey)
 
-        const invocation = parentUuid ? invocations.get(parentUuid) : undefined;
-        const userContent = invocation?.rawCommand || rawCommand;
+        const invocation = parentUuid ? invocations.get(parentUuid) : undefined
+        const userContent = invocation?.rawCommand || rawCommand
         messages.push({
           id: `qwen-${sessionId}-slash-${++idCounter}`,
           role: 'user',
           content: userContent,
           timestamp: invocation?.timestamp ?? timestamp,
-        });
+        })
         messages.push({
           id: `qwen-${sessionId}-slash-${++idCounter}`,
           role: 'assistant',
           content: outputTexts.join('\n\n'),
           timestamp,
-        });
+        })
       }
     } catch (error) {
       this.debug(
         `Failed to read Qwen slash command history from ${transcriptPath}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return [];
+      )
+      return []
     }
 
-    return messages;
+    return messages
   }
 
   private handleAgentMessageChunk(update: JsonRecord): void {
-    const content = toRecord(update.content);
-    if (content.type !== 'text') return;
-    const text = asString(content.text);
-    if (!text) return;
+    const content = toRecord(update.content)
+    if (content.type !== 'text') return
+    const text = asString(content.text)
+    if (!text) return
     const parentToolUseId = resolveQwenParentToolUseId({
       update,
       activeParentToolUseIds: this.activeParentToolUseIds,
-    });
+    })
     if (
       this.currentAssistantText &&
       this.currentAssistantParentToolUseId !== parentToolUseId
     ) {
-      this.flushAssistantText(true);
+      this.flushAssistantText(true)
     }
-    this.currentAssistantParentToolUseId = parentToolUseId;
-    this.currentAssistantText += text;
+    this.currentAssistantParentToolUseId = parentToolUseId
+    this.currentAssistantText += text
     this.eventQueue.enqueue({
       type: 'text_delta',
       text,
       turnId: this.currentTurnId,
       parentToolUseId,
-    });
+    })
   }
 
   private handleAgentThoughtChunk(update: JsonRecord): void {
-    const content = toRecord(update.content);
-    if (content.type !== 'text') return;
-    const text = asString(content.text);
-    if (!text) return;
+    const content = toRecord(update.content)
+    if (content.type !== 'text') return
+    const text = asString(content.text)
+    if (!text) return
     const parentToolUseId = resolveQwenParentToolUseId({
       update,
       activeParentToolUseIds: this.activeParentToolUseIds,
-    });
+    })
     if (
       this.currentThoughtText &&
       this.currentThoughtParentToolUseId !== parentToolUseId
     ) {
-      this.flushThoughtText();
+      this.flushThoughtText()
     }
-    this.currentThoughtParentToolUseId = parentToolUseId;
-    this.currentThoughtText += text;
+    this.currentThoughtParentToolUseId = parentToolUseId
+    this.currentThoughtText += text
     this.eventQueue.enqueue({
       type: 'text_delta',
       text,
       turnId: this.currentTurnId,
       parentToolUseId,
-    });
+    })
   }
 
   private flushPendingTextAsIntermediate(): void {
-    this.flushThoughtText();
-    this.flushAssistantText(true);
+    this.flushThoughtText()
+    this.flushAssistantText(true)
   }
 
   private flushThoughtText(): void {
-    if (!this.currentThoughtText) return;
+    if (!this.currentThoughtText) return
     this.eventQueue.enqueue({
       type: 'text_complete',
       text: this.currentThoughtText,
@@ -3875,16 +3968,16 @@ export class QwenAgent extends BaseAgent {
       intermediateKind: 'thought',
       turnId: this.currentTurnId,
       parentToolUseId: this.currentThoughtParentToolUseId,
-    });
-    this.currentThoughtText = '';
-    this.currentThoughtParentToolUseId = undefined;
+    })
+    this.currentThoughtText = ''
+    this.currentThoughtParentToolUseId = undefined
   }
 
   private flushAssistantText(isIntermediate?: boolean): void {
-    if (!this.currentAssistantText) return;
+    if (!this.currentAssistantText) return
     const text = normalizeQwenAssistantText(this.currentAssistantText, {
       forceJsonFence: this.currentIsSlashCommand,
-    });
+    })
     this.eventQueue.enqueue({
       type: 'text_complete',
       text,
@@ -3892,30 +3985,30 @@ export class QwenAgent extends BaseAgent {
       ...(isIntermediate ? { intermediateKind: 'commentary' as const } : {}),
       turnId: this.currentTurnId,
       parentToolUseId: this.currentAssistantParentToolUseId,
-    });
-    this.currentAssistantText = '';
-    this.currentAssistantParentToolUseId = undefined;
+    })
+    this.currentAssistantText = ''
+    this.currentAssistantParentToolUseId = undefined
   }
 
   private handleToolCall(update: JsonRecord): void {
     const toolUseId =
-      asString(update.toolCallId) || `qwen-tool-${++this.toolIdCounter}`;
-    const rawInput = toRecord(update.rawInput);
-    const meta = toRecord(update._meta);
-    const kind = asString(update.kind);
+      asString(update.toolCallId) || `qwen-tool-${++this.toolIdCounter}`
+    const rawInput = toRecord(update.rawInput)
+    const meta = toRecord(update._meta)
+    const kind = asString(update.kind)
     const toolName = normalizeToolName(
       asString(meta.toolName) || asString(update.title),
       kind,
-    );
-    const title = asString(update.title);
+    )
+    const title = asString(update.title)
     const parentToolUseId = resolveQwenParentToolUseId({
       update,
       toolUseId,
       activeParentToolUseIds: this.activeParentToolUseIds,
-    });
+    })
 
-    this.toolNames.set(toolUseId, toolName);
-    this.toolInputs.set(toolUseId, rawInput);
+    this.toolNames.set(toolUseId, toolName)
+    this.toolInputs.set(toolUseId, rawInput)
 
     this.eventQueue.enqueue({
       type: 'tool_start',
@@ -3926,27 +4019,27 @@ export class QwenAgent extends BaseAgent {
       displayName: displayNameForTool(toolName, kind),
       turnId: this.currentTurnId,
       parentToolUseId,
-    });
+    })
 
     if (isParentTaskTool(toolName)) {
-      this.activeParentToolUseIds.add(toolUseId);
+      this.activeParentToolUseIds.add(toolUseId)
     }
   }
 
   private handleToolCallUpdate(update: JsonRecord): void {
     const toolUseId =
-      asString(update.toolCallId) || `qwen-tool-${++this.toolIdCounter}`;
-    const meta = toRecord(update._meta);
+      asString(update.toolCallId) || `qwen-tool-${++this.toolIdCounter}`
+    const meta = toRecord(update._meta)
     const toolName =
       this.toolNames.get(toolUseId) ||
-      normalizeToolName(asString(meta.toolName), asString(update.kind));
+      normalizeToolName(asString(meta.toolName), asString(update.kind))
     const parentToolUseId = resolveQwenParentToolUseId({
       update,
       toolUseId,
       activeParentToolUseIds: this.activeParentToolUseIds,
-    });
-    const result = this.formatToolResult(update);
-    const isError = update.status === 'failed';
+    })
+    const result = this.formatToolResult(update)
+    const isError = update.status === 'failed'
 
     this.eventQueue.enqueue({
       type: 'tool_result',
@@ -3957,15 +4050,15 @@ export class QwenAgent extends BaseAgent {
       input: this.toolInputs.get(toolUseId),
       turnId: this.currentTurnId,
       parentToolUseId,
-    });
+    })
 
     if (isParentTaskTool(toolName)) {
-      this.activeParentToolUseIds.delete(toolUseId);
+      this.activeParentToolUseIds.delete(toolUseId)
     }
   }
 
   private handlePlanUpdate(update: JsonRecord): void {
-    const entries = Array.isArray(update.entries) ? update.entries : [];
+    const entries = Array.isArray(update.entries) ? update.entries : []
     const todos = entries
       .filter(isRecord)
       .map((entry) => ({
@@ -3973,10 +4066,10 @@ export class QwenAgent extends BaseAgent {
         status: mapPlanStatus(entry.status),
         activeForm: asString(entry.content) || '',
       }))
-      .filter((todo) => todo.content);
+      .filter((todo) => todo.content)
 
-    const toolUseId = `qwen-plan-${++this.planUpdateCounter}`;
-    const input = { todos };
+    const toolUseId = `qwen-plan-${++this.planUpdateCounter}`
+    const input = { todos }
     this.eventQueue.enqueue({
       type: 'tool_start',
       toolName: 'TodoWrite',
@@ -3984,7 +4077,7 @@ export class QwenAgent extends BaseAgent {
       input,
       displayName: 'Todo List Updated',
       turnId: this.currentTurnId,
-    });
+    })
     this.eventQueue.enqueue({
       type: 'tool_result',
       toolUseId,
@@ -3993,88 +4086,86 @@ export class QwenAgent extends BaseAgent {
       isError: false,
       input,
       turnId: this.currentTurnId,
-    });
+    })
   }
 
   private handleModeUpdate(update: JsonRecord): void {
-    const modeId = asString(update.modeId) || asString(update.currentModeId);
-    const mode = mapQwenModeToPermissionMode(modeId);
-    if (!mode || mode === this.getPermissionMode()) return;
-    this.applyAcpPermissionMode(mode);
+    const modeId = asString(update.modeId) || asString(update.currentModeId)
+    const mode = mapQwenModeToPermissionMode(modeId)
+    if (!mode || mode === this.getPermissionMode()) return
+    this.applyAcpPermissionMode(mode)
   }
 
   private applyAcpPermissionMode(mode: PermissionMode): void {
     if (this.pendingModeOverride) {
-      if (mode !== this.pendingModeOverride) return;
-      this.pendingModeOverride = null;
+      if (mode !== this.pendingModeOverride) return
+      this.pendingModeOverride = null
     }
 
-    if (mode === this.getPermissionMode()) return;
-    this.permissionManager.setPermissionMode(mode);
-    this.onPermissionModeChange?.(mode);
+    if (mode === this.getPermissionMode()) return
+    this.permissionManager.setPermissionMode(mode)
+    this.onPermissionModeChange?.(mode)
   }
 
   private parseAvailableCommandsUpdate(
     update: JsonRecord,
   ): AvailableCommandsSnapshot | null {
-    const availableCommands = toAvailableSlashCommands(
-      update.availableCommands,
-    );
-    const meta = toRecord(update._meta);
+    const availableCommands = toAvailableSlashCommands(update.availableCommands)
+    const meta = toRecord(update._meta)
     const availableSkillDetails = toAvailableSkillDetails(
       meta.availableSkillDetails,
-    );
+    )
     const availableSkills =
       toAvailableSkills(meta.availableSkills) ??
-      availableSkillDetails?.map((skill) => skill.name);
+      availableSkillDetails?.map((skill) => skill.name)
 
     if (
       availableCommands.length === 0 &&
       (!availableSkills || availableSkills.length === 0)
     ) {
-      return null;
+      return null
     }
 
     return {
       availableCommands,
       ...(availableSkills ? { availableSkills } : {}),
       ...(availableSkillDetails ? { availableSkillDetails } : {}),
-    };
+    }
   }
 
   private extractAvailableCommandsSnapshot(
     updates: JsonRecord[],
   ): AvailableCommandsSnapshot | null {
-    let latest: AvailableCommandsSnapshot | null = null;
+    let latest: AvailableCommandsSnapshot | null = null
     for (const update of updates) {
-      if (update.sessionUpdate !== 'available_commands_update') continue;
-      const snapshot = this.parseAvailableCommandsUpdate(update);
-      if (snapshot) latest = snapshot;
+      if (update.sessionUpdate !== 'available_commands_update') continue
+      const snapshot = this.parseAvailableCommandsUpdate(update)
+      if (snapshot) latest = snapshot
     }
 
     if (latest) {
-      this.latestAvailableCommandsSnapshot = latest;
-      this.resolveAvailableCommandsWaiters(latest);
+      this.latestAvailableCommandsSnapshot = latest
+      this.resolveAvailableCommandsWaiters(latest)
       this.debug(
         `Qwen loadSessionMessages captured available commands: commands=${latest.availableCommands.length} ` +
           `skills=${latest.availableSkills?.length ?? 0} ` +
           `skillDetails=${latest.availableSkillDetails?.length ?? 0} ` +
           `names=${formatDebugNames(latest.availableCommands.map((command) => command.name))} ` +
           `skillNames=${formatDebugNames(latest.availableSkills)}`,
-      );
+      )
     }
 
-    return latest;
+    return latest
   }
 
   private handleAvailableCommandsUpdate(update: JsonRecord): void {
-    const snapshot = this.parseAvailableCommandsUpdate(update);
+    const snapshot = this.parseAvailableCommandsUpdate(update)
 
     if (!snapshot) {
       this.debug(
         'Qwen available_commands_update ignored because it contained no commands or skills',
-      );
-      return;
+      )
+      return
     }
 
     this.debug(
@@ -4083,10 +4174,10 @@ export class QwenAgent extends BaseAgent {
         `skillDetails=${snapshot.availableSkillDetails?.length ?? 0} ` +
         `names=${formatDebugNames(snapshot.availableCommands.map((command) => command.name))} ` +
         `skillNames=${formatDebugNames(snapshot.availableSkills)}`,
-    );
+    )
 
-    this.latestAvailableCommandsSnapshot = snapshot;
-    this.resolveAvailableCommandsWaiters(snapshot);
+    this.latestAvailableCommandsSnapshot = snapshot
+    this.resolveAvailableCommandsWaiters(snapshot)
 
     this.eventQueue.enqueue({
       type: 'available_commands_update',
@@ -4095,7 +4186,7 @@ export class QwenAgent extends BaseAgent {
       ...(snapshot.availableSkillDetails
         ? { availableSkillDetails: snapshot.availableSkillDetails }
         : {}),
-    });
+    })
   }
 
   private handleOrStoreAvailableCommandsUpdate(
@@ -4108,140 +4199,140 @@ export class QwenAgent extends BaseAgent {
     ) {
       this.debug(
         `Qwen available_commands_update received for active session ${sessionId}`,
-      );
-      this.handleAvailableCommandsUpdate(update);
-      return;
+      )
+      this.handleAvailableCommandsUpdate(update)
+      return
     }
 
     this.debug(
       `Qwen available_commands_update buffered: updateSession=${sessionId} ` +
         `currentSession=${this.qwenSessionId ?? 'none'} ` +
         `suppressed=${this.suppressedSessionUpdates.has(sessionId)}`,
-    );
-    this.pendingAvailableCommandsUpdates.set(sessionId, update);
+    )
+    this.pendingAvailableCommandsUpdates.set(sessionId, update)
   }
 
   private flushPendingAvailableCommandsUpdate(sessionId: string): void {
-    const update = this.pendingAvailableCommandsUpdates.get(sessionId);
-    if (!update) return;
-    this.pendingAvailableCommandsUpdates.delete(sessionId);
+    const update = this.pendingAvailableCommandsUpdates.get(sessionId)
+    if (!update) return
+    this.pendingAvailableCommandsUpdates.delete(sessionId)
     this.debug(
       `Qwen available_commands_update flushing buffered update for session ${sessionId}`,
-    );
-    this.handleAvailableCommandsUpdate(update);
+    )
+    this.handleAvailableCommandsUpdate(update)
   }
 
   private waitForAvailableCommandsSnapshot(
     timeoutMs = 2_000,
   ): Promise<AvailableCommandsSnapshot | null> {
     if (this.latestAvailableCommandsSnapshot) {
-      return Promise.resolve(this.latestAvailableCommandsSnapshot);
+      return Promise.resolve(this.latestAvailableCommandsSnapshot)
     }
 
     return new Promise((resolve) => {
-      let settled = false;
+      let settled = false
       const waiter = (snapshot: AvailableCommandsSnapshot | null) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
         this.availableCommandsWaiters = this.availableCommandsWaiters.filter(
           (item) => item !== waiter,
-        );
-        resolve(snapshot);
-      };
+        )
+        resolve(snapshot)
+      }
       const timeout = setTimeout(() => {
         this.debug(
           `Qwen slash command refresh wait timed out after ${timeoutMs}ms`,
-        );
-        waiter(null);
-      }, timeoutMs);
-      this.availableCommandsWaiters.push(waiter);
-    });
+        )
+        waiter(null)
+      }, timeoutMs)
+      this.availableCommandsWaiters.push(waiter)
+    })
   }
 
   private resolveAvailableCommandsWaiters(
     snapshot: AvailableCommandsSnapshot | null,
   ): void {
-    const waiters = this.availableCommandsWaiters.splice(0);
+    const waiters = this.availableCommandsWaiters.splice(0)
     if (waiters.length > 0) {
       this.debug(
         `Qwen resolving ${waiters.length} slash command refresh waiter(s)`,
-      );
+      )
     }
     for (const resolve of waiters) {
-      resolve(snapshot);
+      resolve(snapshot)
     }
   }
 
   private formatToolResult(update: JsonRecord): string {
-    const content = Array.isArray(update.content) ? update.content : [];
-    const parts: string[] = [];
+    const content = Array.isArray(update.content) ? update.content : []
+    const parts: string[] = []
 
     for (const item of content) {
-      if (!isRecord(item)) continue;
+      if (!isRecord(item)) continue
       if (item.type === 'content') {
-        const inner = toRecord(item.content);
+        const inner = toRecord(item.content)
         if (inner.type === 'text' && typeof inner.text === 'string') {
-          parts.push(inner.text);
+          parts.push(inner.text)
         } else {
-          parts.push(jsonStringify(inner));
+          parts.push(jsonStringify(inner))
         }
       } else if (item.type === 'diff') {
-        const path = asString(item.path) || 'file';
-        parts.push(`Updated ${path}`);
+        const path = asString(item.path) || 'file'
+        parts.push(`Updated ${path}`)
       } else if (item.type === 'terminal') {
-        parts.push(jsonStringify(item));
+        parts.push(jsonStringify(item))
       }
     }
 
-    if (parts.length > 0) return parts.join('\n\n');
+    if (parts.length > 0) return parts.join('\n\n')
     if ('rawOutput' in update)
       return typeof update.rawOutput === 'string'
         ? update.rawOutput
-        : jsonStringify(update.rawOutput);
-    return update.status === 'failed' ? 'Tool failed' : 'Tool completed';
+        : jsonStringify(update.rawOutput)
+    return update.status === 'failed' ? 'Tool failed' : 'Tool completed'
   }
 
   private captureUsage(update: JsonRecord): void {
-    const usage = this.extractUsage(update);
-    if (!usage) return;
-    const contextWindow = this.getCurrentModelContextWindow();
+    const usage = this.extractUsage(update)
+    if (!usage) return
+    const contextWindow = this.getCurrentModelContextWindow()
     this.eventQueue.enqueue({
       type: 'usage_update',
       usage: {
         inputTokens: usage.contextTokens,
         ...(contextWindow ? { contextWindow } : {}),
       },
-    });
+    })
   }
 
   private captureUsageInto(collector: MiniCollector, update: JsonRecord): void {
-    const usage = this.extractUsage(update);
-    if (!usage) return;
-    collector.inputTokens = usage.inputTokens;
-    collector.outputTokens = usage.outputTokens;
+    const usage = this.extractUsage(update)
+    if (!usage) return
+    collector.inputTokens = usage.inputTokens
+    collector.outputTokens = usage.outputTokens
   }
 
   private extractUsage(update: JsonRecord): ExtractedUsage | null {
-    const meta = toRecord(update._meta);
-    const usage = toRecord(meta.usage);
-    if (Object.keys(usage).length === 0) return null;
+    const meta = toRecord(update._meta)
+    const usage = toRecord(meta.usage)
+    if (Object.keys(usage).length === 0) return null
 
     const inputTokens =
       asNumber(usage.inputTokens) ??
       asNumber(usage.promptTokens) ??
       asNumber(usage.promptTokenCount) ??
-      0;
+      0
     const outputTokens =
       asNumber(usage.outputTokens) ??
       asNumber(usage.completionTokens) ??
-      asNumber(usage.candidatesTokenCount);
+      asNumber(usage.candidatesTokenCount)
     const totalTokens =
-      asNumber(usage.totalTokens) ?? asNumber(usage.totalTokenCount);
+      asNumber(usage.totalTokens) ?? asNumber(usage.totalTokenCount)
     const contextTokens =
-      totalTokens !== undefined && totalTokens > 0 ? totalTokens : inputTokens;
+      totalTokens !== undefined && totalTokens > 0 ? totalTokens : inputTokens
 
-    return { inputTokens, contextTokens, outputTokens };
+    return { inputTokens, contextTokens, outputTokens }
   }
 
   // ============================================================
@@ -4251,36 +4342,36 @@ export class QwenAgent extends BaseAgent {
   private handlePermissionRequest(
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
-    const record = toRecord(params);
-    const toolCall = toRecord(record.toolCall);
+    const record = toRecord(params)
+    const toolCall = toRecord(record.toolCall)
     const options = Array.isArray(record.options)
       ? (record.options.filter(isRecord) as AcpPermissionOption[])
-      : [];
+      : []
 
-    const kind = asString(toolCall.kind);
-    const rawInput = toRecord(toolCall.rawInput);
-    const title = asString(toolCall.title) || 'Qwen Code requests permission';
+    const kind = asString(toolCall.kind)
+    const rawInput = toRecord(toolCall.rawInput)
+    const title = asString(toolCall.title) || 'Qwen Code requests permission'
     const toolName = normalizeToolName(
       asString(toRecord(toolCall._meta).toolName) || title,
       kind,
-    );
-    const command = asString(rawInput.command) || asString(rawInput.cmd);
-    const questions = parseAskUserQuestions(rawInput.questions);
-    const isAskUserQuestion = toolName === 'ask_user_question' || !!questions;
+    )
+    const command = asString(rawInput.command) || asString(rawInput.cmd)
+    const questions = parseAskUserQuestions(rawInput.questions)
+    const isAskUserQuestion = toolName === 'ask_user_question' || !!questions
     const metadata = isRecord(rawInput.metadata)
       ? { source: asString(rawInput.metadata.source) }
-      : undefined;
+      : undefined
 
     if (!this.onPermissionRequest) {
-      const autoAllow = this.getPermissionMode() === 'allow-all';
+      const autoAllow = this.getPermissionMode() === 'allow-all'
       return Promise.resolve(
         this.createPermissionResponse(options, autoAllow, autoAllow),
-      );
+      )
     }
 
     return new Promise<RequestPermissionResponse>((resolve) => {
-      const requestId = `qwen-permission-${++this.permissionRequestCounter}`;
-      this.pendingPermissions.set(requestId, { resolve, options });
+      const requestId = `qwen-permission-${++this.permissionRequestCounter}`
+      this.pendingPermissions.set(requestId, { resolve, options })
 
       try {
         this.onPermissionRequest?.({
@@ -4295,31 +4386,31 @@ export class QwenAgent extends BaseAgent {
           impact: this.permissionImpact(toolCall),
           questions,
           metadata,
-        });
+        })
       } catch (error) {
         this.debug(
           `Qwen permission callback failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        this.pendingPermissions.delete(requestId);
-        resolve(this.createPermissionResponse(options, false, false));
+        )
+        this.pendingPermissions.delete(requestId)
+        resolve(this.createPermissionResponse(options, false, false))
       }
-    });
+    })
   }
 
   private permissionImpact(toolCall: JsonRecord): string | undefined {
-    const content = Array.isArray(toolCall.content) ? toolCall.content : [];
+    const content = Array.isArray(toolCall.content) ? toolCall.content : []
     for (const item of content) {
-      if (!isRecord(item)) continue;
+      if (!isRecord(item)) continue
       if (item.type === 'diff') {
-        return `Will modify ${asString(item.path) || 'a file'}`;
+        return `Will modify ${asString(item.path) || 'a file'}`
       }
       if (item.type === 'content') {
-        const inner = toRecord(item.content);
-        const text = asString(inner.text);
-        if (text) return text.slice(0, 500);
+        const inner = toRecord(item.content)
+        const text = asString(inner.text)
+        if (text) return text.slice(0, 500)
       }
     }
-    return undefined;
+    return undefined
   }
 
   private selectPermissionOption(
@@ -4330,20 +4421,20 @@ export class QwenAgent extends BaseAgent {
       const always = options.find(
         (option) =>
           option.kind === 'allow_always' || option.optionId?.includes('always'),
-      );
-      if (always?.optionId) return always.optionId;
+      )
+      if (always?.optionId) return always.optionId
     }
 
     const once = options.find(
       (option) =>
         option.optionId === 'proceed_once' || option.kind === 'allow_once',
-    );
-    if (once?.optionId) return once.optionId;
+    )
+    if (once?.optionId) return once.optionId
 
     const firstAllow = options.find(
       (option) => option.kind !== 'reject_once' && option.optionId,
-    );
-    return firstAllow?.optionId || 'proceed_once';
+    )
+    return firstAllow?.optionId || 'proceed_once'
   }
 
   private createPermissionResponse(
@@ -4353,7 +4444,7 @@ export class QwenAgent extends BaseAgent {
     answers?: Record<string, string>,
   ): RequestPermissionResponse & { answers?: Record<string, string> } {
     if (!allowed) {
-      return { outcome: { outcome: 'cancelled' } };
+      return { outcome: { outcome: 'cancelled' } }
     }
 
     return {
@@ -4362,21 +4453,21 @@ export class QwenAgent extends BaseAgent {
         optionId: this.selectPermissionOption(options, alwaysAllow),
       },
       ...(answers ? { answers } : {}),
-    };
+    }
   }
 
   private cancelPendingPermissions(): void {
     for (const [, pending] of this.pendingPermissions) {
       pending.resolve(
         this.createPermissionResponse(pending.options, false, false),
-      );
+      )
     }
-    this.pendingPermissions.clear();
+    this.pendingPermissions.clear()
   }
 
   protected override debug(message: string): void {
-    this.onDebug?.(`[QwenAgent] ${message}`);
+    this.onDebug?.(`[QwenAgent] ${message}`)
   }
 }
 
-export { QwenAgent as QwenBackend };
+export { QwenAgent as QwenBackend }

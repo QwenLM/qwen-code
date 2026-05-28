@@ -13,7 +13,13 @@ function generatePanelId(): string {
   return `panel-${++nextPanelId}-${Date.now()}`
 }
 
-export type PanelType = 'session' | 'source' | 'settings' | 'skills' | 'other'
+export type PanelType =
+  | 'session'
+  | 'source'
+  | 'settings'
+  | 'skills'
+  | 'skillMarketplace'
+  | 'other'
 export type PanelLaneId = 'main'
 export type OpenIntent = 'implicit' | 'explicit'
 
@@ -29,7 +35,14 @@ export const PANEL_LANE_POLICIES: Record<PanelLaneId, PanelLanePolicy> = {
   main: {
     id: 'main',
     order: 0,
-    allowedTypes: ['session', 'source', 'settings', 'skills', 'other'],
+    allowedTypes: [
+      'session',
+      'source',
+      'settings',
+      'skills',
+      'skillMarketplace',
+      'other',
+    ],
     locked: false,
     singleton: false,
   },
@@ -52,7 +65,7 @@ export const focusedPanelIndexAtom = atom((get) => {
   const stack = get(panelStackAtom)
   const focusedId = get(focusedPanelIdAtom)
   if (!focusedId) return 0
-  const idx = stack.findIndex(p => p.id === focusedId)
+  const idx = stack.findIndex((p) => p.id === focusedId)
   return idx === -1 ? 0 : idx
 })
 
@@ -75,6 +88,8 @@ export function getPanelTypeFromRoute(route: ViewRoute): PanelType {
       return 'settings'
     case 'skills':
       return 'skills'
+    case 'skillMarketplace':
+      return 'skillMarketplace'
     default:
       return 'other'
   }
@@ -84,7 +99,11 @@ export function getDefaultLaneForType(_type: PanelType): PanelLaneId {
   return 'main'
 }
 
-function createEntry(route: ViewRoute, proportion: number, id?: string): PanelStackEntry {
+function createEntry(
+  route: ViewRoute,
+  proportion: number,
+  id?: string,
+): PanelStackEntry {
   const panelType = getPanelTypeFromRoute(route)
   return {
     id: id ?? generatePanelId(),
@@ -100,9 +119,9 @@ function normalizeProportions(stack: PanelStackEntry[]): PanelStackEntry[] {
   const total = stack.reduce((sum, p) => sum + p.proportion, 0)
   if (total <= 0) {
     const equal = 1 / stack.length
-    return stack.map(p => ({ ...p, proportion: equal }))
+    return stack.map((p) => ({ ...p, proportion: equal }))
   }
-  return stack.map(p => ({ ...p, proportion: p.proportion / total }))
+  return stack.map((p) => ({ ...p, proportion: p.proportion / total }))
 }
 
 export function parseSessionIdFromRoute(route: ViewRoute): string | null {
@@ -122,15 +141,26 @@ export const focusedSessionIdAtom = atom((get) => {
 
 export const pushPanelAtom = atom(
   null,
-  (get, set, { route, afterIndex }: {
-    route: ViewRoute
-    afterIndex?: number
-    targetLaneId?: PanelLaneId
-    intent?: OpenIntent
-  }) => {
+  (
+    get,
+    set,
+    {
+      route,
+      afterIndex,
+    }: {
+      route: ViewRoute
+      afterIndex?: number
+      targetLaneId?: PanelLaneId
+      intent?: OpenIntent
+    },
+  ) => {
     const stack = get(panelStackAtom)
     let insertAt = stack.length
-    if (afterIndex !== undefined && afterIndex >= 0 && afterIndex < stack.length) {
+    if (
+      afterIndex !== undefined &&
+      afterIndex >= 0 &&
+      afterIndex < stack.length
+    ) {
       insertAt = afterIndex + 1
     }
 
@@ -144,50 +174,65 @@ export const pushPanelAtom = atom(
     const normalized = normalizeProportions(newStack)
     set(panelStackAtom, normalized)
     set(focusedPanelIdAtom, newEntry.id)
-  }
+  },
 )
 
-export const closePanelAtom = atom(
-  null,
-  (get, set, id: string) => {
-    const stack = get(panelStackAtom)
-    const idx = stack.findIndex(p => p.id === id)
-    if (idx === -1) return
-    const remaining = [...stack.slice(0, idx), ...stack.slice(idx + 1)]
+export const closePanelAtom = atom(null, (get, set, id: string) => {
+  const stack = get(panelStackAtom)
+  const idx = stack.findIndex((p) => p.id === id)
+  if (idx === -1) return
+  const remaining = [...stack.slice(0, idx), ...stack.slice(idx + 1)]
 
-    set(panelStackAtom, normalizeProportions(remaining))
+  set(panelStackAtom, normalizeProportions(remaining))
 
-    if (get(focusedPanelIdAtom) === id) {
-      const newIdx = Math.min(idx, remaining.length - 1)
-      set(focusedPanelIdAtom, remaining[newIdx]?.id ?? null)
-    }
+  if (get(focusedPanelIdAtom) === id) {
+    const newIdx = Math.min(idx, remaining.length - 1)
+    set(focusedPanelIdAtom, remaining[newIdx]?.id ?? null)
   }
-)
+})
 
 export const reconcilePanelStackAtom = atom(
   null,
-  (get, set, { entries, focusedIndex }: {
-    entries: { route: ViewRoute; proportion: number }[]
-    focusedIndex?: number
-  }): boolean => {
+  (
+    get,
+    set,
+    {
+      entries,
+      focusedIndex,
+    }: {
+      entries: { route: ViewRoute; proportion: number }[]
+      focusedIndex?: number
+    },
+  ): boolean => {
     if (entries.length === 0) return false
 
     const current = get(panelStackAtom)
     const used = new Set<string>()
 
     const requestedFocusIndex = Math.min(focusedIndex ?? 0, entries.length - 1)
-    const requestedFocusRoute = entries[requestedFocusIndex]?.route ?? entries[0].route
+    const requestedFocusRoute =
+      entries[requestedFocusIndex]?.route ?? entries[0].route
 
     const newStack = entries.map((target, i) => {
       const positional = current[i]
 
-      if (positional && positional.route === target.route && !used.has(positional.id)) {
+      if (
+        positional &&
+        positional.route === target.route &&
+        !used.has(positional.id)
+      ) {
         used.add(positional.id)
-        const updated = createEntry(target.route, target.proportion, positional.id)
+        const updated = createEntry(
+          target.route,
+          target.proportion,
+          positional.id,
+        )
         return { ...updated, proportion: target.proportion }
       }
 
-      const any = current.find(c => c.route === target.route && !used.has(c.id))
+      const any = current.find(
+        (c) => c.route === target.route && !used.has(c.id),
+      )
       if (any) {
         used.add(any.id)
         const updated = createEntry(target.route, target.proportion, any.id)
@@ -196,7 +241,11 @@ export const reconcilePanelStackAtom = atom(
 
       if (positional && !used.has(positional.id)) {
         used.add(positional.id)
-        const updated = createEntry(target.route, target.proportion, positional.id)
+        const updated = createEntry(
+          target.route,
+          target.proportion,
+          positional.id,
+        )
         return { ...updated, proportion: target.proportion }
       }
 
@@ -207,12 +256,13 @@ export const reconcilePanelStackAtom = atom(
 
     if (
       normalized.length === current.length &&
-      normalized.every((p, i) =>
-        p.id === current[i].id &&
-        p.route === current[i].route &&
-        p.laneId === current[i].laneId &&
-        p.panelType === current[i].panelType &&
-        Math.abs(p.proportion - current[i].proportion) < 0.001
+      normalized.every(
+        (p, i) =>
+          p.id === current[i].id &&
+          p.route === current[i].route &&
+          p.laneId === current[i].laneId &&
+          p.panelType === current[i].panelType &&
+          Math.abs(p.proportion - current[i].proportion) < 0.001,
       )
     ) {
       const targetFocusId =
@@ -234,17 +284,26 @@ export const reconcilePanelStackAtom = atom(
     set(focusedPanelIdAtom, focusId)
 
     return true
-  }
+  },
 )
 
 export const resizePanelsAtom = atom(
   null,
-  (get, set, { leftIndex, rightIndex, leftProportion, rightProportion }: {
-    leftIndex: number
-    rightIndex: number
-    leftProportion: number
-    rightProportion: number
-  }) => {
+  (
+    get,
+    set,
+    {
+      leftIndex,
+      rightIndex,
+      leftProportion,
+      rightProportion,
+    }: {
+      leftIndex: number
+      rightIndex: number
+      leftProportion: number
+      rightProportion: number
+    },
+  ) => {
     const stack = get(panelStackAtom)
     if (leftIndex < 0 || rightIndex >= stack.length) return
     const newStack = stack.map((p, i) => {
@@ -253,7 +312,7 @@ export const resizePanelsAtom = atom(
       return p
     })
     set(panelStackAtom, newStack)
-  }
+  },
 )
 
 export const updateFocusedPanelRouteAtom = atom(
@@ -269,37 +328,34 @@ export const updateFocusedPanelRouteAtom = atom(
     }
 
     const focusedId = get(focusedPanelIdAtom)
-    const focused = stack.find(p => p.id === focusedId) ?? stack[0]
+    const focused = stack.find((p) => p.id === focusedId) ?? stack[0]
 
     const updated = stack.map((p) =>
       p.id === focused.id
-        ? { ...createEntry(route, p.proportion, p.id), proportion: p.proportion }
-        : p
+        ? {
+            ...createEntry(route, p.proportion, p.id),
+            proportion: p.proportion,
+          }
+        : p,
     )
 
     set(panelStackAtom, updated)
     set(focusedPanelIdAtom, focused.id)
-  }
+  },
 )
 
-export const focusNextPanelAtom = atom(
-  null,
-  (get, set) => {
-    const stack = get(panelStackAtom)
-    if (stack.length <= 1) return
-    const currentIdx = get(focusedPanelIndexAtom)
-    const nextIdx = (currentIdx + 1) % stack.length
-    set(focusedPanelIdAtom, stack[nextIdx].id)
-  }
-)
+export const focusNextPanelAtom = atom(null, (get, set) => {
+  const stack = get(panelStackAtom)
+  if (stack.length <= 1) return
+  const currentIdx = get(focusedPanelIndexAtom)
+  const nextIdx = (currentIdx + 1) % stack.length
+  set(focusedPanelIdAtom, stack[nextIdx].id)
+})
 
-export const focusPrevPanelAtom = atom(
-  null,
-  (get, set) => {
-    const stack = get(panelStackAtom)
-    if (stack.length <= 1) return
-    const currentIdx = get(focusedPanelIndexAtom)
-    const prevIdx = (currentIdx - 1 + stack.length) % stack.length
-    set(focusedPanelIdAtom, stack[prevIdx].id)
-  }
-)
+export const focusPrevPanelAtom = atom(null, (get, set) => {
+  const stack = get(panelStackAtom)
+  if (stack.length <= 1) return
+  const currentIdx = get(focusedPanelIndexAtom)
+  const prevIdx = (currentIdx - 1 + stack.length) % stack.length
+  set(focusedPanelIdAtom, stack[prevIdx].id)
+})

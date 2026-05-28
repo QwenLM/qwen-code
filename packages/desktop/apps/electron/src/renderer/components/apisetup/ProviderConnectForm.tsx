@@ -35,6 +35,7 @@ type ProviderGroup = 'alibaba' | 'third-party' | 'custom';
 
 interface ProviderConnectFormProps {
   onConnected: (result: QwenProviderConnectResult) => void;
+  activeSessionId?: string | null;
   onCancel?: () => void;
   showHeader?: boolean;
   className?: string;
@@ -49,9 +50,7 @@ const PROVIDER_GROUP_ICONS: Record<ProviderGroup, ReactNode> = {
 };
 
 function isProviderGroup(value: string | undefined): value is ProviderGroup {
-  return (
-    value === 'alibaba' || value === 'third-party' || value === 'custom'
-  );
+  return value === 'alibaba' || value === 'third-party' || value === 'custom';
 }
 
 function parseModelIds(value: string): string[] {
@@ -75,8 +74,47 @@ function defaultBaseUrl(provider: QwenProviderSummary): string {
   return provider.baseUrlPlaceholder ?? '';
 }
 
+function initialModelIds(provider: QwenProviderSummary): string[] {
+  const existingModelIds = provider.existingConfig?.modelIds ?? [];
+  return existingModelIds.length > 0
+    ? existingModelIds
+    : provider.defaultModelIds;
+}
+
+function AnimatedSection({
+  children,
+  className,
+  subtle = false,
+}: {
+  children: ReactNode;
+  className?: string;
+  subtle?: boolean;
+}) {
+  const [entered, setEntered] = useState(false);
+
+  useEffect(() => {
+    setEntered(false);
+    const frame = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(frame);
+  }, []);
+
+  return (
+    <div
+      className={cn(
+        'transition-[opacity,transform] ease-out motion-reduce:translate-y-0 motion-reduce:opacity-100 motion-reduce:transition-none',
+        subtle ? 'duration-100' : 'duration-150',
+        entered ? 'translate-y-0 opacity-100' : 'translate-y-1 opacity-0',
+        className,
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
 export function ProviderConnectForm({
   onConnected,
+  activeSessionId,
   onCancel,
   showHeader = true,
   className,
@@ -113,7 +151,9 @@ export function ProviderConnectForm({
     setLoading(true);
     setLoadError(null);
     try {
-      const result = await window.electronAPI.listQwenProviders();
+      const result = await window.electronAPI.listQwenProviders(
+        activeSessionId ?? undefined,
+      );
       setCatalog(result);
     } catch (error) {
       setLoadError(
@@ -124,7 +164,7 @@ export function ProviderConnectForm({
     } finally {
       setLoading(false);
     }
-  }, [t]);
+  }, [activeSessionId, t]);
 
   useEffect(() => {
     void loadCatalog();
@@ -156,13 +196,17 @@ export function ProviderConnectForm({
   );
 
   const selectProvider = useCallback((provider: QwenProviderSummary) => {
+    const existingConfig = provider.existingConfig;
+    const contextWindowSize = existingConfig?.advancedConfig?.contextWindowSize;
     setSelectedProviderId(provider.id);
-    setProtocol(defaultProtocol(provider));
-    setBaseUrl(defaultBaseUrl(provider));
-    setApiKey('');
-    setModelIdsText(provider.defaultModelIds.join(', '));
-    setEnableThinking(false);
-    setContextWindowSize('');
+    setProtocol(existingConfig?.protocol ?? defaultProtocol(provider));
+    setBaseUrl(existingConfig?.baseUrl ?? defaultBaseUrl(provider));
+    setApiKey(existingConfig?.apiKey ?? '');
+    setModelIdsText(initialModelIds(provider).join(', '));
+    setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
+    setContextWindowSize(
+      typeof contextWindowSize === 'number' ? String(contextWindowSize) : '',
+    );
     setFormError(null);
   }, []);
 
@@ -188,6 +232,7 @@ export function ProviderConnectForm({
         baseUrl,
         apiKey: apiKey.trim(),
         modelIds,
+        scope: 'user',
         ...(selectedProvider.showAdvancedConfig
           ? {
               advancedConfig: {
@@ -199,7 +244,10 @@ export function ProviderConnectForm({
             }
           : {}),
       };
-      const result = await window.electronAPI.connectQwenProvider(params);
+      const result = await window.electronAPI.connectQwenProvider(
+        params,
+        activeSessionId ?? undefined,
+      );
       if (!result.success) {
         setFormError(result.error || t('providerConnect.errors.connectFailed'));
         return;
@@ -221,6 +269,7 @@ export function ProviderConnectForm({
     }
   }, [
     apiKey,
+    activeSessionId,
     baseUrl,
     contextWindowSize,
     enableThinking,
@@ -260,7 +309,10 @@ export function ProviderConnectForm({
 
   if (!selectedProvider) {
     return (
-      <div className={cn('space-y-5', className)}>
+      <AnimatedSection
+        key="provider-list"
+        className={cn('space-y-5', className)}
+      >
         {showHeader && (
           <div className="space-y-1">
             <h2 className="text-lg font-semibold">
@@ -296,7 +348,7 @@ export function ProviderConnectForm({
           </p>
         )}
 
-        <div className="space-y-3">
+        <AnimatedSection key={selectedGroup} subtle className="space-y-3">
           {providersByGroup[selectedGroup].map((provider) => (
             <button
               key={provider.id}
@@ -315,7 +367,7 @@ export function ProviderConnectForm({
               </div>
             </button>
           ))}
-        </div>
+        </AnimatedSection>
 
         {onCancel && (
           <div className="flex justify-end">
@@ -324,7 +376,7 @@ export function ProviderConnectForm({
             </Button>
           </div>
         )}
-      </div>
+      </AnimatedSection>
     );
   }
 
@@ -336,7 +388,10 @@ export function ProviderConnectForm({
   const showBaseUrlInput = !fixedBaseUrl || baseUrlOptions.length > 0;
 
   return (
-    <div className={cn('space-y-5', className)}>
+    <AnimatedSection
+      key={selectedProvider.id}
+      className={cn('space-y-5', className)}
+    >
       <div className="flex items-start gap-3">
         <Button
           type="button"
@@ -495,6 +550,6 @@ export function ProviderConnectForm({
           {t('auth.connect')}
         </Button>
       </div>
-    </div>
+    </AnimatedSection>
   );
 }

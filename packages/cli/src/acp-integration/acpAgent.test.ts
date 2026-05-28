@@ -14,6 +14,9 @@ import {
   afterAll,
   type MockInstance,
 } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 // Mock cleanup module before importing anything else
 const { mockRunExitCleanup } = vi.hoisted(() => ({
@@ -142,6 +145,10 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
           ? (provider.baseUrl[0]?.url ?? selectedBaseUrl ?? '')
           : (selectedBaseUrl ?? ''),
   ),
+  resolveOwnsModel: vi.fn(
+    (provider: { envKey: string }) => (model: { envKey?: string }) =>
+      model.envKey === provider.envKey,
+  ),
   buildInstallPlan: vi.fn((provider, inputs) => ({
     providerId: provider.id,
     authType: inputs.protocol ?? provider.protocol,
@@ -188,6 +195,22 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   Storage: {
     getGlobalQwenDir: vi.fn(() => '/tmp/qwen-global-test'),
   },
+  parse: vi.fn((yaml: string) => {
+    const record: Record<string, unknown> = {};
+    for (const line of yaml.split('\n')) {
+      const match = line.match(/^([^:#]+):\s*(.*)$/);
+      if (!match) continue;
+      const value = match[2].trim();
+      record[match[1].trim()] =
+        value === 'true' ? true : value === 'false' ? false : value;
+    }
+    return record;
+  }),
+  stringify: vi.fn((record: Record<string, unknown>) =>
+    Object.entries(record)
+      .map(([key, value]) => `${key}: ${String(value)}`)
+      .join('\n'),
+  ),
   SESSION_TITLE_MAX_LENGTH: 200,
   tokenLimit: vi.fn().mockReturnValue(128_000),
   SessionStartSource: {
@@ -261,6 +284,7 @@ import {
   tokenLimit,
   buildInstallPlan,
   applyProviderInstallPlan,
+  Storage,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
@@ -1709,6 +1733,282 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('qwen/providers/list includes existing provider settings', async () => {
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { DEEPSEEK_API_KEY: 'sk-existing' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'deepseek-chat',
+              baseUrl: 'https://api.deepseek.com',
+              envKey: 'DEEPSEEK_API_KEY',
+            },
+            {
+              id: 'other-model',
+              baseUrl: 'https://api.other.com',
+              envKey: 'OTHER_API_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual({
+      providers: [
+        expect.objectContaining({
+          id: 'deepseek',
+          existingConfig: {
+            protocol: 'openai',
+            baseUrl: 'https://api.deepseek.com',
+            apiKey: 'sk-existing',
+            modelIds: ['deepseek-chat'],
+          },
+        }),
+      ],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/skills/install installs a global skill through ACP', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.mocked(Storage.getGlobalQwenDir).mockReturnValue(tempHome);
+
+    const refreshCache = vi.fn().mockResolvedValue(undefined);
+    const parseSkillContent = vi.fn(
+      (_content: string, filePath: string, level: string) => ({
+        name: 'pptx',
+        description: 'Create slide decks',
+        level,
+        filePath,
+        skillRoot: path.dirname(filePath),
+        body: 'Create slide decks',
+      }),
+    );
+    mockConfig = {
+      ...mockConfig,
+      getSkillManager: vi.fn().mockReturnValue({
+        parseSkillContent,
+        refreshCache,
+      }),
+    } as unknown as Config;
+
+    const skillContent =
+      '---\nname: pptx\ndescription: Create slide decks\n---\nCreate slide decks\n';
+    const editingContent = '# Editing guide\n';
+    const toArrayBuffer = (text: string): ArrayBuffer =>
+      new TextEncoder().encode(text).buffer as ArrayBuffer;
+    const githubApiUrl =
+      'https://api.github.com/repos/anthropics/skills/contents/skills/pptx?ref=main';
+    const skillDownloadUrl =
+      'https://raw.githubusercontent.com/anthropics/skills/main/skills/pptx/SKILL.md';
+    const editingDownloadUrl =
+      'https://raw.githubusercontent.com/anthropics/skills/main/skills/pptx/editing.md';
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === githubApiUrl) {
+        return {
+          ok: true,
+          status: 200,
+          json: vi.fn().mockResolvedValue([
+            {
+              name: 'SKILL.md',
+              path: 'skills/pptx/SKILL.md',
+              type: 'file',
+              download_url: skillDownloadUrl,
+            },
+            {
+              name: 'editing.md',
+              path: 'skills/pptx/editing.md',
+              type: 'file',
+              download_url: editingDownloadUrl,
+            },
+          ]),
+        };
+      }
+      if (url === skillDownloadUrl) {
+        return {
+          ok: true,
+          status: 200,
+          arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer(skillContent)),
+        };
+      }
+      if (url === editingDownloadUrl) {
+        return {
+          ok: true,
+          status: 200,
+          arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer(editingContent)),
+        };
+      }
+      return {
+        ok: false,
+        status: 404,
+        arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer('')),
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const settings = makeSessionSettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      const installedPath = path.join(tempHome, 'skills', 'pptx', 'SKILL.md');
+      await expect(
+        agent.extMethod('qwen/skills/install', {
+          skill: {
+            id: 'pptx',
+            slug: 'pptx',
+            name: 'PPTX',
+            sourceUrl:
+              'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+          },
+        }),
+      ).resolves.toMatchObject({
+        id: 'pptx',
+        slug: 'pptx',
+        installed: true,
+        installedPath,
+      });
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        githubApiUrl,
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Accept: 'application/vnd.github+json',
+          }),
+        }),
+      );
+      expect(fetchMock).toHaveBeenCalledWith(skillDownloadUrl);
+      expect(fetchMock).toHaveBeenCalledWith(editingDownloadUrl);
+      expect(parseSkillContent).toHaveBeenCalledWith(
+        expect.stringContaining('name: pptx'),
+        installedPath,
+        'user',
+      );
+      expect(refreshCache).toHaveBeenCalledTimes(1);
+      await expect(fs.readFile(installedPath, 'utf8')).resolves.toContain(
+        'name: pptx',
+      );
+      await expect(
+        fs.readFile(
+          path.join(tempHome, 'skills', 'pptx', 'editing.md'),
+          'utf8',
+        ),
+      ).resolves.toBe(editingContent);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+      vi.unstubAllGlobals();
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('qwen/skills setEnabled and delete manage global skills through ACP', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.mocked(Storage.getGlobalQwenDir).mockReturnValue(tempHome);
+
+    const skillDir = path.join(tempHome, 'skills', 'pptx');
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(
+      skillFile,
+      '---\nname: pptx\ndescription: Create slide decks\n---\nBody\n',
+      'utf8',
+    );
+
+    const refreshCache = vi.fn().mockResolvedValue(undefined);
+    const parseSkillContent = vi.fn(
+      (_content: string, filePath: string, level: string) => ({
+        name: 'pptx',
+        description: 'Create slide decks',
+        level,
+        filePath,
+        skillRoot: path.dirname(filePath),
+        body: 'Body',
+      }),
+    );
+    mockConfig = {
+      ...mockConfig,
+      getSkillManager: vi.fn().mockReturnValue({
+        parseSkillContent,
+        refreshCache,
+      }),
+    } as unknown as Config;
+
+    const settings = makeSessionSettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await expect(
+        agent.extMethod('qwen/skills/setEnabled', {
+          skill: { slug: 'pptx', enabled: false },
+        }),
+      ).resolves.toMatchObject({
+        slug: 'pptx',
+        enabled: false,
+        installedPath: skillFile,
+      });
+      await expect(fs.readFile(skillFile, 'utf8')).resolves.toContain(
+        'disable-model-invocation: true',
+      );
+
+      await expect(
+        agent.extMethod('qwen/skills/setEnabled', {
+          skill: { slug: 'pptx', enabled: true },
+        }),
+      ).resolves.toMatchObject({
+        slug: 'pptx',
+        enabled: true,
+      });
+      await expect(fs.readFile(skillFile, 'utf8')).resolves.not.toContain(
+        'disable-model-invocation',
+      );
+
+      await expect(
+        agent.extMethod('qwen/skills/delete', {
+          skill: { slug: 'pptx' },
+        }),
+      ).resolves.toMatchObject({
+        slug: 'pptx',
+        deleted: true,
+      });
+      await expect(fs.stat(skillDir)).rejects.toThrow();
+      expect(refreshCache).toHaveBeenCalledTimes(3);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
   });
 
   it('bootstraps ACP config without initializing Gemini chat', async () => {

@@ -10,26 +10,26 @@
  */
 export interface SkillMetadata {
   /** Display name for the skill */
-  name: string;
+  name: string
   /** Brief description shown in skill list */
-  description: string;
+  description: string
   /** Optional file patterns that trigger this skill */
-  globs?: string[];
+  globs?: string[]
   /** Optional tools to always allow when skill is active */
-  alwaysAllow?: string[];
+  alwaysAllow?: string[]
   /**
    * Optional icon - emoji or URL only.
    * - Emoji: rendered directly in UI (e.g., "🔧")
    * - URL: auto-downloaded to icon.{ext} file
    * Note: Relative paths and inline SVG are NOT supported.
    */
-  icon?: string;
+  icon?: string
   /** Optional source slugs to auto-enable when this skill is invoked */
-  requiredSources?: string[];
+  requiredSources?: string[]
 }
 
 /** Source of a loaded skill */
-export type SkillSource = 'global' | 'workspace' | 'project' | 'provider';
+export type SkillSource = 'global' | 'workspace' | 'project' | 'provider'
 
 /**
  * Plugin name for project-level and global skills.
@@ -38,22 +38,26 @@ export type SkillSource = 'global' | 'workspace' | 'project' | 'provider';
  * directory. Both `{project}/.agents/` and `~/.agents/` share the basename
  * `.agents`, so skills from either tier resolve to `.agents:skillSlug`.
  */
-export const AGENTS_PLUGIN_NAME = '.agents';
+export const AGENTS_PLUGIN_NAME = '.agents'
 
 /**
  * A loaded skill with parsed content
  */
 export interface LoadedSkill {
   /** Directory name (slug) */
-  slug: string;
+  slug: string
   /** Parsed metadata from YAML frontmatter */
-  metadata: SkillMetadata;
+  metadata: SkillMetadata
   /** Full SKILL.md content (without frontmatter) */
-  content: string;
+  content: string
   /** Absolute path to icon file if exists */
-  iconPath?: string;
+  iconPath?: string
   /** Absolute path to skill directory */
-  path: string;
+  path: string
   /** Where this skill was loaded from */
-  source: SkillSource;
+  source: SkillSource
+  /** Whether this skill is currently model-invocable. Omitted for legacy local skills. */
+  enabled?: boolean
+  /** Provider-native storage level, when advertised by the provider runtime. */
+  providerLevel?: string
 }

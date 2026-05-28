@@ -32,11 +32,14 @@ import {
   getMCPServerStatus,
   MCPDiscoveryState,
   MCPServerStatus,
+  resolveOwnsModel,
   ExtensionManager,
   ExtensionSettingScope,
   updateSetting,
   SessionEndReason,
   restoreWorktreeContext,
+  parse as parseYaml,
+  stringify as stringifyYaml,
 } from '@qwen-code/qwen-code-core';
 import type {
   ApprovalMode,
@@ -44,6 +47,7 @@ import type {
   ConversationRecord,
   DeviceAuthorizationData,
   ProviderConfig,
+  ProviderModelConfig,
   ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -240,6 +244,42 @@ type QwenMemoryPaths = {
   autoMemoryDir: string;
 };
 
+type QwenSkillInstallRequest = {
+  id: string;
+  slug: string;
+  name: string;
+  description?: string;
+  sourceUrl: string;
+  scope: 'global';
+};
+
+type QwenSkillDeleteRequest = {
+  slug: string;
+  scope: 'global';
+};
+
+type QwenSkillSetEnabledRequest = {
+  slug: string;
+  enabled: boolean;
+  scope: 'global';
+};
+
+type DownloadedSkillFile = {
+  relativePath: string;
+  content: Uint8Array;
+};
+
+type DownloadedSkill = {
+  skillContent: string;
+  files: DownloadedSkillFile[];
+};
+
+type GitHubBlobSkillUrl = {
+  owner: string;
+  repo: string;
+  ref: string;
+  filePath: string;
+};
 
 type QwenSettingsScope = 'user' | 'workspace';
 type QwenSettingValue = string | number | boolean | string[] | undefined;
@@ -440,6 +480,275 @@ function readRequiredString(value: unknown, fieldName: string): string {
   return stringValue;
 }
 
+function readSkillInstallRequest(
+  params: Record<string, unknown>,
+): QwenSkillInstallRequest {
+  const skillParams = toRecord(params['skill']);
+  const input = Object.keys(skillParams).length > 0 ? skillParams : params;
+  const slug = readRequiredString(input['slug'], 'skill.slug');
+  if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
+    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
+  }
+
+  const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
+  if (scope !== 'global') {
+    throw RequestError.invalidParams(
+      undefined,
+      'Only global skill installation is supported',
+    );
+  }
+
+  const description = readOptionalString(
+    input['description'],
+    'skill.description',
+  );
+  return {
+    id: readOptionalString(input['id'], 'skill.id') ?? slug,
+    slug,
+    name: readOptionalString(input['name'], 'skill.name') ?? slug,
+    ...(description ? { description } : {}),
+    sourceUrl: readRequiredString(input['sourceUrl'], 'skill.sourceUrl'),
+    scope,
+  };
+}
+
+function readSkillSlugRequest(
+  params: Record<string, unknown>,
+): QwenSkillDeleteRequest {
+  const skillParams = toRecord(params['skill']);
+  const input = Object.keys(skillParams).length > 0 ? skillParams : params;
+  const slug = readRequiredString(input['slug'], 'skill.slug');
+  if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
+    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
+  }
+
+  const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
+  if (scope !== 'global') {
+    throw RequestError.invalidParams(
+      undefined,
+      'Only global skill management is supported',
+    );
+  }
+
+  return { slug, scope };
+}
+
+function readSkillSetEnabledRequest(
+  params: Record<string, unknown>,
+): QwenSkillSetEnabledRequest {
+  const request = readSkillSlugRequest(params);
+  const skillParams = toRecord(params['skill']);
+  const input = Object.keys(skillParams).length > 0 ? skillParams : params;
+  if (typeof input['enabled'] !== 'boolean') {
+    throw RequestError.invalidParams(
+      undefined,
+      'Invalid skill.enabled: expected boolean',
+    );
+  }
+  return {
+    ...request,
+    enabled: input['enabled'],
+  };
+}
+
+function splitSkillMarkdown(content: string): {
+  frontmatter: string;
+  body: string;
+} {
+  const normalized = content.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+  const match = normalized.match(/^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/);
+  if (!match) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Invalid skill file: missing YAML frontmatter',
+    );
+  }
+  return {
+    frontmatter: match[1],
+    body: match[2],
+  };
+}
+
+function setSkillFrontmatterEnabled(content: string, enabled: boolean): string {
+  const { frontmatter, body } = splitSkillMarkdown(content);
+  const parsed = parseYaml(frontmatter);
+  if (enabled) {
+    delete parsed['disable-model-invocation'];
+  } else {
+    parsed['disable-model-invocation'] = true;
+  }
+
+  const nextFrontmatter = stringifyYaml(parsed);
+  return `---\n${nextFrontmatter}\n---\n${body}`;
+}
+
+function parseGitHubBlobSkillUrl(sourceUrl: string): GitHubBlobSkillUrl | null {
+  const parsed = new URL(sourceUrl);
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw RequestError.invalidParams(
+      undefined,
+      'Skill sourceUrl must be an HTTP(S) URL',
+    );
+  }
+
+  if (parsed.hostname !== 'github.com') return null;
+  const parts = parsed.pathname.split('/').filter(Boolean);
+  if (parts.length < 5 || parts[2] !== 'blob') return null;
+
+  const owner = parts[0];
+  const repo = parts[1];
+  const ref = parts[3];
+  const filePathParts = parts.slice(4);
+  if (!owner || !repo || !ref || filePathParts.length === 0) return null;
+
+  return {
+    owner,
+    repo,
+    ref,
+    filePath: filePathParts.join('/'),
+  };
+}
+
+function toRawGitHubUrl(githubUrl: GitHubBlobSkillUrl): string {
+  return `https://raw.githubusercontent.com/${githubUrl.owner}/${githubUrl.repo}/${githubUrl.ref}/${githubUrl.filePath}`;
+}
+
+function encodeGitHubPath(filePath: string): string {
+  if (!filePath || filePath === '.') return '';
+  return filePath.split('/').map(encodeURIComponent).join('/');
+}
+
+async function fetchBytes(url: string): Promise<Uint8Array> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Failed to download skill (${response.status})`,
+    );
+  }
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+async function downloadSingleSkillFile(
+  sourceUrl: string,
+): Promise<DownloadedSkill> {
+  const githubUrl = parseGitHubBlobSkillUrl(sourceUrl);
+  const fetchUrl = githubUrl ? toRawGitHubUrl(githubUrl) : sourceUrl;
+  const content = await fetchBytes(fetchUrl);
+  return {
+    skillContent: Buffer.from(content).toString('utf8'),
+    files: [{ relativePath: 'SKILL.md', content }],
+  };
+}
+
+async function fetchGitHubDirectoryItems(
+  githubUrl: GitHubBlobSkillUrl,
+  directoryPath: string,
+): Promise<unknown[]> {
+  const encodedPath = encodeGitHubPath(directoryPath);
+  const apiUrl = `https://api.github.com/repos/${githubUrl.owner}/${githubUrl.repo}/contents/${encodedPath}?ref=${encodeURIComponent(githubUrl.ref)}`;
+  const response = await fetch(apiUrl, {
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'qwen-code',
+    },
+  });
+  if (!response.ok) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Failed to list GitHub skill files (${response.status})`,
+    );
+  }
+
+  const data = await response.json();
+  if (!Array.isArray(data)) {
+    throw RequestError.invalidParams(
+      undefined,
+      'GitHub skill URL must point to a directory-backed SKILL.md file',
+    );
+  }
+  return data;
+}
+
+async function downloadGitHubSkillDirectory(
+  githubUrl: GitHubBlobSkillUrl,
+  directoryPath: string,
+  relativeRoot = '',
+): Promise<DownloadedSkillFile[]> {
+  const items = await fetchGitHubDirectoryItems(githubUrl, directoryPath);
+  const files: DownloadedSkillFile[] = [];
+
+  for (const item of items) {
+    const record = toRecord(item);
+    const name = readRequiredString(record['name'], 'github.name');
+    const itemPath = readRequiredString(record['path'], 'github.path');
+    const type = readRequiredString(record['type'], 'github.type');
+    const relativePath = relativeRoot
+      ? path.posix.join(relativeRoot, name)
+      : name;
+
+    if (type === 'dir') {
+      files.push(
+        ...(await downloadGitHubSkillDirectory(
+          githubUrl,
+          itemPath,
+          relativePath,
+        )),
+      );
+      continue;
+    }
+
+    if (type !== 'file') continue;
+    const downloadUrl = readRequiredString(
+      record['download_url'],
+      'github.download_url',
+    );
+    files.push({
+      relativePath,
+      content: await fetchBytes(downloadUrl),
+    });
+  }
+
+  return files;
+}
+
+async function downloadSkill(sourceUrl: string): Promise<DownloadedSkill> {
+  const githubUrl = parseGitHubBlobSkillUrl(sourceUrl);
+  if (!githubUrl || path.posix.basename(githubUrl.filePath) !== 'SKILL.md') {
+    return downloadSingleSkillFile(sourceUrl);
+  }
+
+  const skillDirectory = path.posix.dirname(githubUrl.filePath);
+  const files = await downloadGitHubSkillDirectory(githubUrl, skillDirectory);
+  const skillFile = files.find((file) => file.relativePath === 'SKILL.md');
+  if (!skillFile) {
+    throw RequestError.invalidParams(
+      undefined,
+      'GitHub skill directory does not contain SKILL.md',
+    );
+  }
+
+  return {
+    skillContent: Buffer.from(skillFile.content).toString('utf8'),
+    files,
+  };
+}
+
+function resolveSkillInstallPath(
+  skillDir: string,
+  relativePath: string,
+): string {
+  const root = path.resolve(skillDir);
+  const target = path.resolve(skillDir, relativePath);
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid skill file path: ${relativePath}`,
+    );
+  }
+  return target;
+}
+
 function readStringArray(value: unknown, fieldName: string): string[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) {
@@ -547,14 +856,120 @@ function resolveProviderDocumentationUrl(
   return undefined;
 }
 
+function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
+  const record = toRecord(value);
+  return typeof record['id'] === 'string';
+}
+
+function readSettingsEnv(
+  settings: LoadedSettings,
+  envKey: string | undefined,
+): string | undefined {
+  if (!envKey) return undefined;
+  const env = toRecord((settings.merged as Record<string, unknown>)['env']);
+  const value = env[envKey];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function readProviderModels(
+  settings: LoadedSettings,
+  protocol: string,
+): ProviderModelConfig[] {
+  const modelProviders = toRecord(
+    (settings.merged as Record<string, unknown>)['modelProviders'],
+  );
+  const models = modelProviders[protocol];
+  return Array.isArray(models) ? models.filter(isProviderModelConfig) : [];
+}
+
+function findExistingProviderModels(
+  config: ProviderConfig,
+  settings: LoadedSettings,
+):
+  | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
+  | undefined {
+  const ownsModel = resolveOwnsModel(config);
+  if (!ownsModel) return undefined;
+  const protocols = config.protocolOptions?.length
+    ? config.protocolOptions
+    : [config.protocol];
+  for (const protocol of protocols) {
+    const models = readProviderModels(settings, protocol).filter(ownsModel);
+    if (models.length > 0) return { protocol, models };
+  }
+  return undefined;
+}
+
+function resolveProviderEnvKey(
+  config: ProviderConfig,
+  protocol: ProviderConfig['protocol'],
+  baseUrl: string,
+): string | undefined {
+  try {
+    return typeof config.envKey === 'function'
+      ? config.envKey(protocol, baseUrl)
+      : config.envKey;
+  } catch {
+    return undefined;
+  }
+}
+
+function readExistingAdvancedConfig(
+  model: ProviderModelConfig | undefined,
+): Record<string, unknown> | undefined {
+  const generationConfig = toRecord(model?.generationConfig);
+  const extraBody = toRecord(generationConfig['extra_body']);
+  const advancedConfig: Record<string, unknown> = {};
+  if (typeof extraBody['enable_thinking'] === 'boolean') {
+    advancedConfig['enableThinking'] = extraBody['enable_thinking'];
+  }
+  if (typeof generationConfig['contextWindowSize'] === 'number') {
+    advancedConfig['contextWindowSize'] = generationConfig['contextWindowSize'];
+  }
+  return Object.keys(advancedConfig).length > 0 ? advancedConfig : undefined;
+}
+
+function readExistingProviderConfig(
+  config: ProviderConfig,
+  settings: LoadedSettings,
+): Record<string, unknown> | undefined {
+  const existing = findExistingProviderModels(config, settings);
+  const firstModel = existing?.models[0];
+  const protocol = existing?.protocol ?? config.protocol;
+  const baseUrl =
+    typeof firstModel?.baseUrl === 'string'
+      ? firstModel.baseUrl
+      : resolveBaseUrl(config);
+  const envKey =
+    typeof firstModel?.envKey === 'string'
+      ? firstModel.envKey
+      : resolveProviderEnvKey(config, protocol, baseUrl);
+  const apiKey = readSettingsEnv(settings, envKey);
+  const hasExistingConfig = !!apiKey || !!existing;
+
+  if (!hasExistingConfig) return undefined;
+
+  const advancedConfig = readExistingAdvancedConfig(firstModel);
+
+  return {
+    protocol,
+    baseUrl,
+    ...(apiKey ? { apiKey } : {}),
+    ...(existing ? { modelIds: existing.models.map((model) => model.id) } : {}),
+    ...(advancedConfig ? { advancedConfig } : {}),
+  };
+}
+
 function serializeProviderConfig(
   config: ProviderConfig,
+  settings: LoadedSettings,
 ): Record<string, unknown> {
   const defaultProtocol = config.protocolOptions?.[0] ?? config.protocol;
   const defaultBaseUrl =
     config.baseUrl === undefined
       ? getDefaultBaseUrlForProtocol(defaultProtocol)
       : resolveBaseUrl(config);
+  const existingConfig = readExistingProviderConfig(config, settings);
 
   return {
     id: config.id,
@@ -573,6 +988,7 @@ function serializeProviderConfig(
     documentationUrl: resolveProviderDocumentationUrl(config, defaultBaseUrl),
     uiGroup: config.uiGroup ?? 'third-party',
     uiLabels: config.uiLabels,
+    ...(existingConfig ? { existingConfig } : {}),
   };
 }
 
@@ -633,6 +1049,16 @@ function readProviderSetupInputs(
     modelIds: resolvedModelIds,
     ...(advancedConfig ? { advancedConfig } : {}),
   };
+}
+
+function readProviderConnectScope(value: unknown): SettingScope | undefined {
+  if (value === undefined) return undefined;
+  if (value === 'user') return SettingScope.User;
+  if (value === 'workspace') return SettingScope.Workspace;
+  throw RequestError.invalidParams(
+    undefined,
+    'Invalid scope for provider connect',
+  );
 }
 
 function getNestedSettingValue(
@@ -2559,6 +2985,133 @@ class QwenAgent implements Agent {
     };
   }
 
+  private async installSkillFromUrl(
+    request: QwenSkillInstallRequest,
+  ): Promise<Record<string, unknown>> {
+    const skillManager = this.config.getSkillManager();
+    if (!skillManager) {
+      throw RequestError.invalidParams(
+        undefined,
+        'SkillManager is not available',
+      );
+    }
+
+    const download = await downloadSkill(request.sourceUrl);
+    const skillDir = path.join(
+      Storage.getGlobalQwenDir(),
+      'skills',
+      request.slug,
+    );
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    const parsed = skillManager.parseSkillContent(
+      download.skillContent,
+      skillFile,
+      'user',
+    );
+    if (parsed.name !== request.slug) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Skill name "${parsed.name}" does not match requested slug "${request.slug}"`,
+      );
+    }
+
+    for (const file of download.files) {
+      const targetPath = resolveSkillInstallPath(skillDir, file.relativePath);
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, file.content);
+    }
+    await skillManager.refreshCache();
+
+    return {
+      id: request.id,
+      slug: parsed.name,
+      installed: true,
+      installedPath: skillFile,
+      sourceUrl: request.sourceUrl,
+    };
+  }
+
+  private async deleteGlobalSkill(
+    request: QwenSkillDeleteRequest,
+  ): Promise<Record<string, unknown>> {
+    const skillManager = this.config.getSkillManager();
+    if (!skillManager) {
+      throw RequestError.invalidParams(
+        undefined,
+        'SkillManager is not available',
+      );
+    }
+
+    const skillDir = path.join(
+      Storage.getGlobalQwenDir(),
+      'skills',
+      request.slug,
+    );
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    const content = await fs.readFile(skillFile, 'utf8').catch(() => {
+      throw RequestError.invalidParams(
+        undefined,
+        `Global skill not found: ${request.slug}`,
+      );
+    });
+    const parsed = skillManager.parseSkillContent(content, skillFile, 'user');
+    if (parsed.name !== request.slug) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Skill name "${parsed.name}" does not match requested slug "${request.slug}"`,
+      );
+    }
+
+    await fs.rm(skillDir, { recursive: true, force: true });
+    await skillManager.refreshCache();
+    return {
+      slug: request.slug,
+      deleted: true,
+    };
+  }
+
+  private async setGlobalSkillEnabled(
+    request: QwenSkillSetEnabledRequest,
+  ): Promise<Record<string, unknown>> {
+    const skillManager = this.config.getSkillManager();
+    if (!skillManager) {
+      throw RequestError.invalidParams(
+        undefined,
+        'SkillManager is not available',
+      );
+    }
+
+    const skillDir = path.join(
+      Storage.getGlobalQwenDir(),
+      'skills',
+      request.slug,
+    );
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    const content = await fs.readFile(skillFile, 'utf8').catch(() => {
+      throw RequestError.invalidParams(
+        undefined,
+        `Global skill not found: ${request.slug}`,
+      );
+    });
+    const parsed = skillManager.parseSkillContent(content, skillFile, 'user');
+    if (parsed.name !== request.slug) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Skill name "${parsed.name}" does not match requested slug "${request.slug}"`,
+      );
+    }
+
+    const nextContent = setSkillFrontmatterEnabled(content, request.enabled);
+    skillManager.parseSkillContent(nextContent, skillFile, 'user');
+    await fs.writeFile(skillFile, nextContent, 'utf8');
+    await skillManager.refreshCache();
+    return {
+      slug: request.slug,
+      enabled: request.enabled,
+      installedPath: skillFile,
+    };
+  }
+
   async extMethod(
     method: string,
     params: Record<string, unknown>,
@@ -2569,7 +3122,9 @@ class QwenAgent implements Agent {
     switch (method) {
       case 'qwen/providers/list': {
         return {
-          providers: ALL_PROVIDERS.map(serializeProviderConfig),
+          providers: ALL_PROVIDERS.map((provider) =>
+            serializeProviderConfig(provider, this.settings),
+          ),
         };
       }
       case 'qwen/providers/connect': {
@@ -2586,9 +3141,10 @@ class QwenAgent implements Agent {
         }
 
         const inputs = readProviderSetupInputs(providerConfig, params);
+        const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);
         await applyProviderInstallPlan(plan, {
-          settings: createLoadedSettingsAdapter(this.settings),
+          settings: createLoadedSettingsAdapter(this.settings, persistScope),
           reloadModelProviders: (modelProviders) =>
             this.config.reloadModelProvidersConfig(modelProviders),
           syncAuthState: (authType, modelId) =>
@@ -2605,6 +3161,15 @@ class QwenAgent implements Agent {
           authType: plan.authType,
           modelId: plan.modelSelection?.modelId,
         };
+      }
+      case 'qwen/skills/install': {
+        return this.installSkillFromUrl(readSkillInstallRequest(params));
+      }
+      case 'qwen/skills/delete': {
+        return this.deleteGlobalSkill(readSkillSlugRequest(params));
+      }
+      case 'qwen/skills/setEnabled': {
+        return this.setGlobalSkillEnabled(readSkillSetEnabledRequest(params));
       }
       case 'qwen/settings/getMemory': {
         return {

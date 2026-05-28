@@ -115,13 +115,20 @@ export function parseDeepLink(url: string): DeepLinkTarget | null {
 
     // Compound route prefixes
     const COMPOUND_ROUTE_PREFIXES = [
-      'allSessions', 'flagged', 'state', 'sources', 'settings', 'skills'
+      'allSessions',
+      'flagged',
+      'state',
+      'sources',
+      'settings',
+      'skills',
+      'skillMarketplace',
     ]
 
     // craftagents://allSessions/..., craftagents://settings/..., etc. (compound routes)
     if (COMPOUND_ROUTE_PREFIXES.includes(host)) {
       // Reconstruct the full compound route from host + pathname
-      const viewRoute = pathParts.length > 0 ? `${host}/${pathParts.join('/')}` : host
+      const viewRoute =
+        pathParts.length > 0 ? `${host}/${pathParts.join('/')}` : host
       return {
         workspaceId: undefined,
         view: viewRoute,
@@ -260,7 +267,9 @@ export async function handleDeepLink(
       const focusedWindow = windowManager.getFocusedWindow()
       mainLog.info('[DeepLink] focusedWindow:', focusedWindow?.id)
       if (focusedWindow) {
-        wsId = windowManager.getWorkspaceForWindow(focusedWindow.webContents.id) ?? undefined
+        wsId =
+          windowManager.getWorkspaceForWindow(focusedWindow.webContents.id) ??
+          undefined
         mainLog.info('[DeepLink] wsId from focused window:', wsId)
       }
       if (!wsId) {
@@ -300,7 +309,8 @@ export async function handleDeepLink(
     window = windowManager.focusOrCreateWindow(target.workspaceId)
   } else {
     // No workspace - use focused window or last active
-    window = windowManager.getFocusedWindow() ?? windowManager.getLastActiveWindow()
+    window =
+      windowManager.getFocusedWindow() ?? windowManager.getLastActiveWindow()
 
     if (!window) {
       // No windows at all - can't navigate without a workspace
@@ -324,19 +334,33 @@ export async function handleDeepLink(
       action: target.action,
       actionParams: target.actionParams,
     }
-    const wsId = target.workspaceId ?? windowManager.getWorkspaceForWindow(window.webContents.id)
+    const wsId =
+      target.workspaceId ??
+      windowManager.getWorkspaceForWindow(window.webContents.id)
     const resolvedClientId = resolveClientId?.(window.webContents.id)
 
     // Prefer the resolved target window client. Only use preferredClientId as
     // fallback when no resolver was provided (legacy call sites).
-    const clientId = resolvedClientId ?? (!resolveClientId ? preferredClientId : undefined)
+    const clientId =
+      resolvedClientId ?? (!resolveClientId ? preferredClientId : undefined)
 
     if (sink && clientId) {
-      sink(RPC_CHANNELS.deeplink.NAVIGATE, { to: 'client', clientId }, navigation)
+      sink(
+        RPC_CHANNELS.deeplink.NAVIGATE,
+        { to: 'client', clientId },
+        navigation,
+      )
     } else if (sink && wsId) {
-      sink(RPC_CHANNELS.deeplink.NAVIGATE, { to: 'workspace', workspaceId: wsId }, navigation)
+      sink(
+        RPC_CHANNELS.deeplink.NAVIGATE,
+        { to: 'workspace', workspaceId: wsId },
+        navigation,
+      )
     }
   }
 
-  return { success: true, windowId: window.isDestroyed() ? -1 : window.webContents.id }
+  return {
+    success: true,
+    windowId: window.isDestroyed() ? -1 : window.webContents.id,
+  }
 }

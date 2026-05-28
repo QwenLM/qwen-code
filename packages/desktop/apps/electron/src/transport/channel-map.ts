@@ -5,15 +5,15 @@
  * the method→channel mapping used by buildClientApi().
  */
 
-import { RPC_CHANNELS } from '../shared/types';
-import type { ChannelMap } from './build-api';
+import { RPC_CHANNELS } from '../shared/types'
+import type { ChannelMap } from './build-api'
 
 function invoke(channel: string, transform?: (result: unknown) => unknown) {
-  return { type: 'invoke' as const, channel, ...(transform && { transform }) };
+  return { type: 'invoke' as const, channel, ...(transform && { transform }) }
 }
 
 function listener(channel: string) {
-  return { type: 'listener' as const, channel };
+  return { type: 'listener' as const, channel }
 }
 
 export const CHANNEL_MAP = {
@@ -235,6 +235,7 @@ export const CHANNEL_MAP = {
   getSkills: invoke(RPC_CHANNELS.skills.GET),
   getSkillFiles: invoke(RPC_CHANNELS.skills.GET_FILES),
   deleteSkill: invoke(RPC_CHANNELS.skills.DELETE),
+  setSkillEnabled: invoke(RPC_CHANNELS.skills.SET_ENABLED),
   listSkillMarketplace: invoke(RPC_CHANNELS.skills.MARKETPLACE_LIST),
   installSkillFromMarketplace: invoke(RPC_CHANNELS.skills.MARKETPLACE_INSTALL),
   openSkillInEditor: invoke(RPC_CHANNELS.skills.OPEN_EDITOR),
@@ -429,4 +430,4 @@ export const CHANNEL_MAP = {
   startWhatsAppConnect: invoke(RPC_CHANNELS.messaging.WA_START_CONNECT),
   submitWhatsAppPhone: invoke(RPC_CHANNELS.messaging.WA_SUBMIT_PHONE),
   onWhatsAppEvent: listener(RPC_CHANNELS.messaging.WA_UI_EVENT),
-} satisfies ChannelMap;
+} satisfies ChannelMap

@@ -19,6 +19,7 @@ import * as React from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAtomValue } from 'jotai'
 import { useTranslation } from 'react-i18next'
+import { Store } from 'lucide-react'
 import { Panel } from './Panel'
 import { MultiSelectPanel } from './MultiSelectPanel'
 import { useAppShellContext } from '@/context/AppShellContext'
@@ -30,10 +31,20 @@ import {
   isSourcesNavigation,
   isSettingsNavigation,
   isSkillsNavigation,
+  isSkillMarketplaceNavigation,
   isAutomationsNavigation,
 } from '@/contexts/NavigationContext'
-import { useSessionSelection, useIsMultiSelectActive, useSelectedIds, useSelectionCount } from '@/hooks/useSession'
-import { sourceSelection, skillSelection, automationSelection } from '@/hooks/useEntitySelection'
+import {
+  useSessionSelection,
+  useIsMultiSelectActive,
+  useSelectedIds,
+  useSelectionCount,
+} from '@/hooks/useSession'
+import {
+  sourceSelection,
+  skillSelection,
+  automationSelection,
+} from '@/hooks/useEntitySelection'
 import { extractLabelId } from '@craft-agent/shared/labels'
 import type { SessionStatusId } from '@/config/session-status-config'
 import { SourceInfoPage, ChatPage, DraftChatPage } from '@/pages'
@@ -42,7 +53,10 @@ import { getSettingsPageComponent } from '@/pages/settings/settings-pages'
 import { AutomationInfoPage } from '../automations/AutomationInfoPage'
 import type { ExecutionEntry } from '../automations/types'
 import { automationsAtom } from '@/atoms/automations'
-import { SendResourceToWorkspaceDialog, type SendResourceType } from './SendResourceToWorkspaceDialog'
+import {
+  SendResourceToWorkspaceDialog,
+  type SendResourceType,
+} from './SendResourceToWorkspaceDialog'
 
 export interface MainContentPanelProps {
   /** Whether both sidebar and navigator are hidden (focus mode / CMD+.) */
@@ -92,7 +106,9 @@ export function MainContentPanel({
   const automations = useAtomValue(automationsAtom)
 
   // Execution history for the selected automation
-  const selectedAutomationId = isAutomationsNavigation(navState) ? navState.details?.automationId : undefined
+  const selectedAutomationId = isAutomationsNavigation(navState)
+    ? navState.details?.automationId
+    : undefined
   const [executions, setExecutions] = useState<ExecutionEntry[]>([])
 
   useEffect(() => {
@@ -103,54 +119,65 @@ export function MainContentPanel({
     let stale = false
 
     // Initial fetch
-    getAutomationHistory(selectedAutomationId).then(entries => {
+    getAutomationHistory(selectedAutomationId).then((entries) => {
       if (!stale) setExecutions(entries)
     })
 
     // Re-fetch on automation changes (live updates when automations fire)
     const cleanup = window.electronAPI.onAutomationsChanged(() => {
       if (!stale) {
-        getAutomationHistory(selectedAutomationId).then(entries => {
+        getAutomationHistory(selectedAutomationId).then((entries) => {
           if (!stale) setExecutions(entries)
         })
       }
     })
 
-    return () => { stale = true; cleanup() }
+    return () => {
+      stale = true
+      cleanup()
+    }
   }, [selectedAutomationId, getAutomationHistory])
 
   // Source multi-select state
   const isSourceMultiSelectActive = sourceSelection.useIsMultiSelectActive()
   const sourceSelectionCount = sourceSelection.useSelectionCount()
   const selectedSourceIds = sourceSelection.useSelectedIds()
-  const { clearMultiSelect: clearSourceSelection } = sourceSelection.useSelection()
+  const { clearMultiSelect: clearSourceSelection } =
+    sourceSelection.useSelection()
 
   // Skill multi-select state
   const isSkillMultiSelectActive = skillSelection.useIsMultiSelectActive()
   const skillSelectionCount = skillSelection.useSelectionCount()
   const selectedSkillIds = skillSelection.useSelectedIds()
-  const { clearMultiSelect: clearSkillSelection } = skillSelection.useSelection()
+  const { clearMultiSelect: clearSkillSelection } =
+    skillSelection.useSelection()
 
   // Automation multi-select state
-  const isAutomationMultiSelectActive = automationSelection.useIsMultiSelectActive()
+  const isAutomationMultiSelectActive =
+    automationSelection.useIsMultiSelectActive()
   const automationSelectionCount = automationSelection.useSelectionCount()
   const selectedAutomationIds = automationSelection.useSelectedIds()
-  const { clearMultiSelect: clearAutomationSelection } = automationSelection.useSelection()
+  const { clearMultiSelect: clearAutomationSelection } =
+    automationSelection.useSelection()
 
   // Send to Workspace dialog state (shared across resource types)
   const [sendDialogOpen, setSendDialogOpen] = useState(false)
-  const [sendResourceType, setSendResourceType] = useState<SendResourceType>('source')
+  const [sendResourceType, setSendResourceType] =
+    useState<SendResourceType>('source')
   const [sendResourceIds, setSendResourceIds] = useState<string[]>([])
   const [sendResourceLabel, setSendResourceLabel] = useState('')
   const hasOtherWorkspaces = workspaces.length > 1
 
-  const openSendDialog = useCallback((type: SendResourceType, ids: Set<string>) => {
-    const count = ids.size
-    setSendResourceType(type)
-    setSendResourceIds([...ids])
-    setSendResourceLabel(`${count} ${type}${count !== 1 ? 's' : ''}`)
-    setSendDialogOpen(true)
-  }, [])
+  const openSendDialog = useCallback(
+    (type: SendResourceType, ids: Set<string>) => {
+      const count = ids.size
+      setSendResourceType(type)
+      setSendResourceIds([...ids])
+      setSendResourceLabel(`${count} ${type}${count !== 1 ? 's' : ''}`)
+      setSendDialogOpen(true)
+    },
+    [],
+  )
 
   const selectedMetas = useMemo(() => {
     const metas: SessionMeta[] = []
@@ -164,14 +191,16 @@ export function MainContentPanel({
   const activeStatusId = useMemo((): SessionStatusId | null => {
     if (selectedMetas.length === 0) return null
     const first = (selectedMetas[0].sessionStatus || 'todo') as SessionStatusId
-    const allSame = selectedMetas.every(meta => (meta.sessionStatus || 'todo') === first)
+    const allSame = selectedMetas.every(
+      (meta) => (meta.sessionStatus || 'todo') === first,
+    )
     return allSame ? first : null
   }, [selectedMetas])
 
   const appliedLabelIds = useMemo(() => {
     if (selectedMetas.length === 0) return new Set<string>()
     const toLabelSet = (meta: SessionMeta) =>
-      new Set((meta.labels || []).map(entry => extractLabelId(entry)))
+      new Set((meta.labels || []).map((entry) => extractLabelId(entry)))
     const [first, ...rest] = selectedMetas.map(toLabelSet)
     const intersection = new Set(first)
     for (const labelSet of rest) {
@@ -183,35 +212,47 @@ export function MainContentPanel({
   }, [selectedMetas])
 
   // Batch operations for multi-select
-  const handleBatchSetStatus = useCallback((status: SessionStatusId) => {
-    selectedIds.forEach(sessionId => {
-      onSessionStatusChange(sessionId, status)
-    })
-  }, [selectedIds, onSessionStatusChange])
+  const handleBatchSetStatus = useCallback(
+    (status: SessionStatusId) => {
+      selectedIds.forEach((sessionId) => {
+        onSessionStatusChange(sessionId, status)
+      })
+    },
+    [selectedIds, onSessionStatusChange],
+  )
 
   const handleBatchArchive = useCallback(() => {
-    selectedIds.forEach(sessionId => {
+    selectedIds.forEach((sessionId) => {
       onArchiveSession(sessionId)
     })
     clearMultiSelect()
   }, [selectedIds, onArchiveSession, clearMultiSelect])
 
-  const handleBatchToggleLabel = useCallback((labelId: string) => {
-    if (!onSessionLabelsChange) return
-    const allHaveLabel = selectedMetas.every(meta =>
-      (meta.labels || []).some(entry => extractLabelId(entry) === labelId)
-    )
+  const handleBatchToggleLabel = useCallback(
+    (labelId: string) => {
+      if (!onSessionLabelsChange) return
+      const allHaveLabel = selectedMetas.every((meta) =>
+        (meta.labels || []).some((entry) => extractLabelId(entry) === labelId),
+      )
 
-    selectedMetas.forEach(meta => {
-      const labels = meta.labels || []
-      const hasLabel = labels.some(entry => extractLabelId(entry) === labelId)
-      const filtered = labels.filter(entry => extractLabelId(entry) !== labelId)
-      const nextLabels = allHaveLabel
-        ? filtered
-        : (hasLabel ? labels : [...labels, labelId])
-      onSessionLabelsChange(meta.id, nextLabels)
-    })
-  }, [selectedMetas, onSessionLabelsChange])
+      selectedMetas.forEach((meta) => {
+        const labels = meta.labels || []
+        const hasLabel = labels.some(
+          (entry) => extractLabelId(entry) === labelId,
+        )
+        const filtered = labels.filter(
+          (entry) => extractLabelId(entry) !== labelId,
+        )
+        const nextLabels = allHaveLabel
+          ? filtered
+          : hasLabel
+            ? labels
+            : [...labels, labelId]
+        onSessionLabelsChange(meta.id, nextLabels)
+      })
+    },
+    [selectedMetas, onSessionLabelsChange],
+  )
 
   // Wrap content with StoplightProvider so PanelHeaders auto-compensate in focused mode.
   // Also renders the Send to Workspace dialog (portal-based, so it overlays regardless of position).
@@ -236,7 +277,7 @@ export function MainContentPanel({
     return wrapWithStoplight(
       <Panel variant="grow" className={className}>
         <SettingsPageComponent />
-      </Panel>
+      </Panel>,
     )
   }
 
@@ -248,10 +289,14 @@ export function MainContentPanel({
           <MultiSelectPanel
             count={sourceSelectionCount}
             entityType="source"
-            onSendToWorkspace={hasOtherWorkspaces ? () => openSendDialog('source', selectedSourceIds) : undefined}
+            onSendToWorkspace={
+              hasOtherWorkspaces
+                ? () => openSendDialog('source', selectedSourceIds)
+                : undefined
+            }
             onClearSelection={clearSourceSelection}
           />
-        </Panel>
+        </Panel>,
       )
     }
     if (navState.details) {
@@ -261,16 +306,16 @@ export function MainContentPanel({
             sourceSlug={navState.details.sourceSlug}
             workspaceId={activeWorkspaceId || ''}
           />
-        </Panel>
+        </Panel>,
       )
     }
     // No source selected - empty state
     return wrapWithStoplight(
       <Panel variant="grow" className={className}>
         <div className="flex items-center justify-center h-full text-muted-foreground">
-          <p className="text-sm">{t("sourcesList.noSourcesConfigured")}</p>
+          <p className="text-sm">{t('sourcesList.noSourcesConfigured')}</p>
         </div>
-      </Panel>
+      </Panel>,
     )
   }
 
@@ -282,10 +327,14 @@ export function MainContentPanel({
           <MultiSelectPanel
             count={skillSelectionCount}
             entityType="skill"
-            onSendToWorkspace={hasOtherWorkspaces ? () => openSendDialog('skill', selectedSkillIds) : undefined}
+            onSendToWorkspace={
+              hasOtherWorkspaces
+                ? () => openSendDialog('skill', selectedSkillIds)
+                : undefined
+            }
             onClearSelection={clearSkillSelection}
           />
-        </Panel>
+        </Panel>,
       )
     }
     if (navState.details?.type === 'skill') {
@@ -296,16 +345,32 @@ export function MainContentPanel({
             workspaceId={activeWorkspaceId || ''}
             workingDirectory={activeSessionWorkingDirectory}
           />
-        </Panel>
+        </Panel>,
       )
     }
     // No skill selected - empty state
     return wrapWithStoplight(
       <Panel variant="grow" className={className}>
         <div className="flex items-center justify-center h-full text-muted-foreground">
-          <p className="text-sm">{t("skillsList.noSkillsConfigured")}</p>
+          <p className="text-sm">{t('skillsList.noSkillsConfigured')}</p>
         </div>
-      </Panel>
+      </Panel>,
+    )
+  }
+
+  // Skill marketplace navigator
+  if (isSkillMarketplaceNavigation(navState)) {
+    return wrapWithStoplight(
+      <Panel variant="grow" className={className}>
+        <div className="flex h-full items-center justify-center text-muted-foreground">
+          <div className="flex flex-col items-center gap-2">
+            <Store className="h-5 w-5" />
+            <p className="text-sm">
+              {t('skillMarketplace.title', 'Skill Market')}
+            </p>
+          </div>
+        </div>
+      </Panel>,
     )
   }
 
@@ -317,14 +382,20 @@ export function MainContentPanel({
           <MultiSelectPanel
             count={automationSelectionCount}
             entityType="automation"
-            onSendToWorkspace={hasOtherWorkspaces ? () => openSendDialog('automation', selectedAutomationIds) : undefined}
+            onSendToWorkspace={
+              hasOtherWorkspaces
+                ? () => openSendDialog('automation', selectedAutomationIds)
+                : undefined
+            }
             onClearSelection={clearAutomationSelection}
           />
-        </Panel>
+        </Panel>,
       )
     }
     if (navState.details) {
-      const automation = automations.find(h => h.id === navState.details!.automationId)
+      const automation = automations.find(
+        (h) => h.id === navState.details!.automationId,
+      )
       if (automation) {
         return wrapWithStoplight(
           <Panel variant="grow" className={className}>
@@ -332,22 +403,38 @@ export function MainContentPanel({
               automation={automation}
               executions={executions}
               testResult={automationTestResults?.[automation.id]}
-              onTest={onTestAutomation ? () => onTestAutomation(automation.id) : undefined}
-              onToggleEnabled={onToggleAutomation ? () => onToggleAutomation(automation.id) : undefined}
-              onDuplicate={onDuplicateAutomation ? () => onDuplicateAutomation(automation.id) : undefined}
-              onDelete={onDeleteAutomation ? () => onDeleteAutomation(automation.id) : undefined}
+              onTest={
+                onTestAutomation
+                  ? () => onTestAutomation(automation.id)
+                  : undefined
+              }
+              onToggleEnabled={
+                onToggleAutomation
+                  ? () => onToggleAutomation(automation.id)
+                  : undefined
+              }
+              onDuplicate={
+                onDuplicateAutomation
+                  ? () => onDuplicateAutomation(automation.id)
+                  : undefined
+              }
+              onDelete={
+                onDeleteAutomation
+                  ? () => onDeleteAutomation(automation.id)
+                  : undefined
+              }
               onReplay={onReplayAutomation}
             />
-          </Panel>
+          </Panel>,
         )
       }
     }
     return wrapWithStoplight(
       <Panel variant="grow" className={className}>
         <div className="flex items-center justify-center h-full text-muted-foreground">
-          <p className="text-sm">{t("automations.noAutomationsConfigured")}</p>
+          <p className="text-sm">{t('automations.noAutomationsConfigured')}</p>
         </div>
-      </Panel>
+      </Panel>,
     )
   }
 
@@ -368,7 +455,7 @@ export function MainContentPanel({
             onArchive={handleBatchArchive}
             onClearSelection={clearMultiSelect}
           />
-        </Panel>
+        </Panel>,
       )
     }
 
@@ -376,14 +463,14 @@ export function MainContentPanel({
       return wrapWithStoplight(
         <Panel variant="grow" className={className}>
           <ChatPage sessionId={navState.details.sessionId} />
-        </Panel>
+        </Panel>,
       )
     }
     // New-chat draft: no session is created until the first message is sent.
     return wrapWithStoplight(
       <Panel variant="grow" className={className}>
         <DraftChatPage />
-      </Panel>
+      </Panel>,
     )
   }
 
@@ -391,8 +478,8 @@ export function MainContentPanel({
   return wrapWithStoplight(
     <Panel variant="grow" className={className}>
       <div className="flex items-center justify-center h-full text-muted-foreground">
-        <p className="text-sm">{t("session.selectConversation")}</p>
+        <p className="text-sm">{t('session.selectConversation')}</p>
       </div>
-    </Panel>
+    </Panel>,
   )
 }

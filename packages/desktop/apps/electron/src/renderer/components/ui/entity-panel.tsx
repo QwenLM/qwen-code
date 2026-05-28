@@ -17,7 +17,9 @@ export interface EntityPanelItem {
   title: React.ReactNode
   badges?: React.ReactNode
   trailing?: React.ReactNode
+  controls?: React.ReactNode
   menu?: React.ReactNode
+  hideMoreButton?: boolean
   dataAttributes?: Record<string, string | undefined>
 }
 
@@ -54,11 +56,16 @@ export function EntityPanel<T>({
     selectionStore,
   })
 
-  useAction('navigator.clearSelection', () => {
-    interactions.selection.clear()
-  }, {
-    enabled: () => interactions.selection.isMultiSelectActive,
-  }, [interactions.selection])
+  useAction(
+    'navigator.clearSelection',
+    () => {
+      interactions.selection.clear()
+    },
+    {
+      enabled: () => interactions.selection.isMultiSelectActive,
+    },
+    [interactions.selection],
+  )
 
   return (
     <EntityList
@@ -77,6 +84,7 @@ export function EntityPanel<T>({
             title={mapped.title}
             badges={mapped.badges}
             trailing={mapped.trailing}
+            controls={mapped.controls}
             isSelected={selectedId === getId(item)}
             isInMultiSelect={rowProps.isInMultiSelect}
             showSeparator={!isFirst}
@@ -88,6 +96,7 @@ export function EntityPanel<T>({
             }}
             buttonProps={rowProps.buttonProps}
             menuContent={mapped.menu}
+            hideMoreButton={mapped.hideMoreButton}
             dataAttributes={mapped.dataAttributes}
           />
         )

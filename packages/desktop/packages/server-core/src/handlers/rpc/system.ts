@@ -3,10 +3,21 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { execSync } from 'child_process'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
-import { getWorkspaceByNameOrId, getGitBashPath, setGitBashPath, clearGitBashPath } from '@craft-agent/shared/config'
+import {
+  getWorkspaceByNameOrId,
+  getGitBashPath,
+  setGitBashPath,
+  clearGitBashPath,
+} from '@craft-agent/shared/config'
 import { isSafeExternalUrl } from '@craft-agent/shared/utils/url-safety'
-import { isUsableGitBashPath, validateGitBashPath } from '@craft-agent/server-core/services'
-import { validateFilePath, getWorkspaceAllowedDirs } from '@craft-agent/server-core/handlers'
+import {
+  isUsableGitBashPath,
+  validateGitBashPath,
+} from '@craft-agent/server-core/services'
+import {
+  validateFilePath,
+  getWorkspaceAllowedDirs,
+} from '@craft-agent/server-core/handlers'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 import {
@@ -53,9 +64,13 @@ const COMPOUND_ROUTE_PREFIXES = new Set([
   'sources',
   'settings',
   'skills',
+  'skillMarketplace',
 ])
 
-function collectDeepLinkParams(parsed: URL, pathId?: string): Record<string, string> | undefined {
+function collectDeepLinkParams(
+  parsed: URL,
+  pathId?: string,
+): Record<string, string> | undefined {
   const params: Record<string, string> = {}
   if (pathId) params.id = pathId
 
@@ -67,7 +82,9 @@ function collectDeepLinkParams(parsed: URL, pathId?: string): Record<string, str
   return Object.keys(params).length > 0 ? params : undefined
 }
 
-function parseInternalCraftAgentsDeepLink(parsed: URL): ParsedInternalDeepLink | null {
+function parseInternalCraftAgentsDeepLink(
+  parsed: URL,
+): ParsedInternalDeepLink | null {
   if (parsed.protocol !== 'craftagents:') return null
 
   const host = parsed.hostname
@@ -85,7 +102,8 @@ function parseInternalCraftAgentsDeepLink(parsed: URL): ParsedInternalDeepLink |
   }
 
   if (COMPOUND_ROUTE_PREFIXES.has(host)) {
-    const viewRoute = pathParts.length > 0 ? `${host}/${pathParts.join('/')}` : host
+    const viewRoute =
+      pathParts.length > 0 ? `${host}/${pathParts.join('/')}` : host
     return { navigation: { view: viewRoute } }
   }
 
@@ -134,14 +152,20 @@ function parseInternalCraftAgentsDeepLink(parsed: URL): ParsedInternalDeepLink |
 }
 
 /** Guard: reject filesystem-path actions on remote workspaces where local paths are meaningless. */
-function assertLocalWorkspace(ctx: { workspaceId: string | null }, action: string): void {
+function assertLocalWorkspace(
+  ctx: { workspaceId: string | null },
+  action: string,
+): void {
   const ws = getWorkspaceByNameOrId(ctx.workspaceId ?? '')
   if (ws?.remoteServer) {
     throw new Error(`${action} is not available for remote workspaces`)
   }
 }
 
-export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps): void {
+export function registerSystemCoreHandlers(
+  server: RpcServer,
+  deps: HandlerDeps,
+): void {
   const windowManager = deps.windowManager
 
   // Get system theme preference (dark = true, light = false)
@@ -170,12 +194,14 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
 
   // Release notes
   server.handle(RPC_CHANNELS.releaseNotes.GET, async () => {
-    const { getCombinedReleaseNotes } = require('@craft-agent/shared/release-notes') as typeof import('@craft-agent/shared/release-notes')
+    const { getCombinedReleaseNotes } =
+      require('@craft-agent/shared/release-notes') as typeof import('@craft-agent/shared/release-notes')
     return getCombinedReleaseNotes()
   })
 
   server.handle(RPC_CHANNELS.releaseNotes.GET_LATEST_VERSION, async () => {
-    const { getLatestReleaseVersion } = require('@craft-agent/shared/release-notes') as typeof import('@craft-agent/shared/release-notes')
+    const { getLatestReleaseVersion } =
+      require('@craft-agent/shared/release-notes') as typeof import('@craft-agent/shared/release-notes')
     return getLatestReleaseVersion()
   })
 
@@ -205,7 +231,13 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
     const commonPaths = [
       'C:\\Program Files\\Git\\bin\\bash.exe',
       'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
-      join(process.env.LOCALAPPDATA || '', 'Programs', 'Git', 'bin', 'bash.exe'),
+      join(
+        process.env.LOCALAPPDATA || '',
+        'Programs',
+        'Git',
+        'bin',
+        'bash.exe',
+      ),
       join(process.env.PROGRAMFILES || '', 'Git', 'bin', 'bash.exe'),
     ]
 
@@ -233,7 +265,11 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
         timeout: 5000,
       }).trim()
       const firstPath = result.split('\n')[0]?.trim()
-      if (firstPath && firstPath.toLowerCase().includes('git') && await isUsableGitBashPath(firstPath)) {
+      if (
+        firstPath &&
+        firstPath.toLowerCase().includes('git') &&
+        (await isUsableGitBashPath(firstPath))
+      ) {
         process.env.QWEN_CODE_GIT_BASH_PATH = firstPath
         setGitBashPath(firstPath)
         return { found: true, path: firstPath, platform }
@@ -261,16 +297,19 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
     return result.filePaths[0]
   })
 
-  server.handle(RPC_CHANNELS.gitbash.SET_PATH, async (_ctx, bashPath: string) => {
-    const validation = await validateGitBashPath(bashPath)
-    if (!validation.valid) {
-      return { success: false, error: validation.error }
-    }
+  server.handle(
+    RPC_CHANNELS.gitbash.SET_PATH,
+    async (_ctx, bashPath: string) => {
+      const validation = await validateGitBashPath(bashPath)
+      if (!validation.valid) {
+        return { success: false, error: validation.error }
+      }
 
-    setGitBashPath(validation.path)
-    process.env.QWEN_CODE_GIT_BASH_PATH = validation.path
-    return { success: true }
-  })
+      setGitBashPath(validation.path)
+      process.env.QWEN_CODE_GIT_BASH_PATH = validation.path
+      return { success: true }
+    },
+  )
 
   // Debug logging from renderer -> main log file (fire-and-forget, no response)
   server.handle(RPC_CHANNELS.debug.LOG, async (_ctx, ...args: unknown[]) => {
@@ -287,38 +326,59 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
         const deepLink = parseInternalCraftAgentsDeepLink(parsed)
 
         if (deepLink?.handledNoop) {
-          deps.platform.logger.info('[OPEN_URL] Ignoring auth-callback deep link in OPEN_URL handler')
+          deps.platform.logger.info(
+            '[OPEN_URL] Ignoring auth-callback deep link in OPEN_URL handler',
+          )
           return
         }
 
         if (deepLink?.navigation?.view || deepLink?.navigation?.action) {
-          const target = deepLink.workspaceId && deepLink.workspaceId !== ctx.workspaceId
-            ? { to: 'workspace' as const, workspaceId: deepLink.workspaceId }
-            : { to: 'client' as const, clientId: ctx.clientId }
+          const target =
+            deepLink.workspaceId && deepLink.workspaceId !== ctx.workspaceId
+              ? { to: 'workspace' as const, workspaceId: deepLink.workspaceId }
+              : { to: 'client' as const, clientId: ctx.clientId }
 
-          deps.platform.logger.info('[OPEN_URL] Routing craftagents:// URL internally via deeplink:navigate')
-          server.push(RPC_CHANNELS.deeplink.NAVIGATE, target, deepLink.navigation)
+          deps.platform.logger.info(
+            '[OPEN_URL] Routing craftagents:// URL internally via deeplink:navigate',
+          )
+          server.push(
+            RPC_CHANNELS.deeplink.NAVIGATE,
+            target,
+            deepLink.navigation,
+          )
           return
         }
 
         // For links requiring window management (e.g. window=focused/full), or
         // unknown deep-link shapes, fall back to the client protocol handler.
-        deps.platform.logger.info('[OPEN_URL] Falling back to client openExternal for craftagents:// URL')
-        const deepLinkResult = await requestClientOpenExternal(server, ctx.clientId, url)
+        deps.platform.logger.info(
+          '[OPEN_URL] Falling back to client openExternal for craftagents:// URL',
+        )
+        const deepLinkResult = await requestClientOpenExternal(
+          server,
+          ctx.clientId,
+          url,
+        )
         if (!deepLinkResult.opened) {
-          deps.platform.logger.error(`[OPEN_URL] Client capability failed: ${deepLinkResult.error}`)
+          deps.platform.logger.error(
+            `[OPEN_URL] Client capability failed: ${deepLinkResult.error}`,
+          )
           throw new Error(`Cannot open URL on client: ${deepLinkResult.error}`)
         }
         return
       }
 
       if (!isSafeExternalUrl(url)) {
-        throw new Error(`Refused to open URL with blocked scheme: ${parsed.protocol}`)
+        throw new Error(
+          `Refused to open URL with blocked scheme: ${parsed.protocol}`,
+        )
       }
 
       const result = await requestClientOpenExternal(server, ctx.clientId, url)
       if (!result.opened) {
-        deps.platform.logger.error(`[OPEN_URL] Client capability failed: ${result.error}`)
+        deps.platform.logger.error(
+          `[OPEN_URL] Client capability failed: ${result.error}`,
+        )
         throw new Error(`Cannot open URL on client: ${result.error}`)
       }
     } catch (error) {
@@ -332,9 +392,14 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
     assertLocalWorkspace(ctx, 'Open file')
     try {
       // Expand ~ before resolve() — resolve() treats ~ as a literal path component
-      const expanded = path.startsWith('~') ? path.replace(/^~/, homedir()) : path
+      const expanded = path.startsWith('~')
+        ? path.replace(/^~/, homedir())
+        : path
       const absolutePath = resolve(expanded)
-      const safePath = await validateFilePath(absolutePath, getWorkspaceAllowedDirs(ctx.workspaceId))
+      const safePath = await validateFilePath(
+        absolutePath,
+        getWorkspaceAllowedDirs(ctx.workspaceId),
+      )
       const result = await requestClientOpenPath(server, ctx.clientId, safePath)
       if (result.error) throw new Error(result.error)
     } catch (error) {
@@ -344,17 +409,25 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
     }
   })
 
-  server.handle(RPC_CHANNELS.shell.SHOW_IN_FOLDER, async (ctx, path: string) => {
-    assertLocalWorkspace(ctx, 'Show in folder')
-    try {
-      const expanded = path.startsWith('~') ? path.replace(/^~/, homedir()) : path
-      const absolutePath = resolve(expanded)
-      const safePath = await validateFilePath(absolutePath, getWorkspaceAllowedDirs(ctx.workspaceId))
-      await requestClientShowInFolder(server, ctx.clientId, safePath)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error'
-      deps.platform.logger.error('showInFolder error:', message)
-      throw new Error(`Failed to show in folder: ${message}`)
-    }
-  })
+  server.handle(
+    RPC_CHANNELS.shell.SHOW_IN_FOLDER,
+    async (ctx, path: string) => {
+      assertLocalWorkspace(ctx, 'Show in folder')
+      try {
+        const expanded = path.startsWith('~')
+          ? path.replace(/^~/, homedir())
+          : path
+        const absolutePath = resolve(expanded)
+        const safePath = await validateFilePath(
+          absolutePath,
+          getWorkspaceAllowedDirs(ctx.workspaceId),
+        )
+        await requestClientShowInFolder(server, ctx.clientId, safePath)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error'
+        deps.platform.logger.error('showInFolder error:', message)
+        throw new Error(`Failed to show in folder: ${message}`)
+      }
+    },
+  )
 }

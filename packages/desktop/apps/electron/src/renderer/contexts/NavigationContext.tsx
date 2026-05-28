@@ -53,7 +53,10 @@ import { parsePermissionMode } from '@craft-agent/shared/agent/mode-types'
 import { contentBadgesToTextElements } from '@craft-agent/core/utils'
 import { NAVIGATE_EVENT, type NavigateOptions } from '../lib/navigate'
 import { normalizePanelRouteForReconcile } from './navigation-reconcile'
-import { buildSemanticHistoryKey, canRunInitialRestore } from './navigation-history'
+import {
+  buildSemanticHistoryKey,
+  canRunInitialRestore,
+} from './navigation-history'
 import * as storage from '@/lib/local-storage'
 import type {
   DeepLinkNavigation,
@@ -69,6 +72,7 @@ import {
   isSourcesNavigation,
   isSettingsNavigation,
   isSkillsNavigation,
+  isSkillMarketplaceNavigation,
   isAutomationsNavigation,
   DEFAULT_NAVIGATION_STATE,
 } from '../../shared/types'
@@ -77,7 +81,12 @@ import {
   isVisibleSettingsSubpage,
   type SettingsSubpage,
 } from '../../shared/settings-registry'
-import { compareSessionsByActivityDesc, sessionMetaMapAtom, updateSessionMetaAtom, type SessionMeta } from '@/atoms/sessions'
+import {
+  compareSessionsByActivityDesc,
+  sessionMetaMapAtom,
+  updateSessionMetaAtom,
+  type SessionMeta,
+} from '@/atoms/sessions'
 import { sourcesAtom } from '@/atoms/sources'
 import { skillsAtom } from '@/atoms/skills'
 import {
@@ -98,7 +107,14 @@ export type { Route }
 
 // Re-export navigation state types for consumers
 export type { NavigationState, SessionFilter }
-export { isSessionsNavigation, isSourcesNavigation, isSettingsNavigation, isSkillsNavigation, isAutomationsNavigation }
+export {
+  isSessionsNavigation,
+  isSourcesNavigation,
+  isSettingsNavigation,
+  isSkillsNavigation,
+  isSkillMarketplaceNavigation,
+  isAutomationsNavigation,
+}
 
 // =============================================================================
 // Context
@@ -129,7 +145,9 @@ interface NavigationContextValue {
   navigateToSession: (sessionId: string) => void
 }
 
-export const NavigationContext = createContext<NavigationContextValue | null>(null)
+export const NavigationContext = createContext<NavigationContextValue | null>(
+  null,
+)
 
 interface NavigationProviderProps {
   children: ReactNode
@@ -140,7 +158,10 @@ interface NavigationProviderProps {
   /** Switch to a workspace by slug (called on popstate when ?ws= changes) */
   onSwitchWorkspaceBySlug?: (slug: string) => void
   /** Session creation handler */
-  onCreateSession: (workspaceId: string, options?: import('../../shared/types').CreateSessionOptions) => Promise<Session>
+  onCreateSession: (
+    workspaceId: string,
+    options?: import('../../shared/types').CreateSessionOptions,
+  ) => Promise<Session>
   /** Input change handler for pre-filling chat input */
   onInputChange?: (sessionId: string, value: string) => void
   /** Get draft input text for a session (reads from ref, no re-render) */
@@ -157,7 +178,10 @@ interface NavigationProviderProps {
   consumeWorkspaceSwitchRoute?: (workspaceId: string) => ViewRoute | null
 }
 
-function applyFocusedRouteToSearchParams(params: URLSearchParams, route: ViewRoute): void {
+function applyFocusedRouteToSearchParams(
+  params: URLSearchParams,
+  route: ViewRoute,
+): void {
   params.set('route', route)
 
   const panelsParam = params.get('panels')
@@ -173,9 +197,8 @@ function applyFocusedRouteToSearchParams(params: URLSearchParams, route: ViewRou
 
   const currentEntry = panelEntries[focusedIndex]
   const colonIdx = currentEntry.lastIndexOf(':')
-  panelEntries[focusedIndex] = colonIdx > 0
-    ? `${route}:${currentEntry.slice(colonIdx + 1)}`
-    : route
+  panelEntries[focusedIndex] =
+    colonIdx > 0 ? `${route}:${currentEntry.slice(colonIdx + 1)}` : route
 
   params.set('panels', panelEntries.join(','))
   params.set('fi', String(focusedIndex))
@@ -199,7 +222,10 @@ export function NavigationProvider({
 
   // Read session metadata directly from atom (reactive to session changes)
   const sessionMetaMap = useAtomValue(sessionMetaMapAtom)
-  const sessionMetas = useMemo(() => Array.from(sessionMetaMap.values()), [sessionMetaMap])
+  const sessionMetas = useMemo(
+    () => Array.from(sessionMetaMap.values()),
+    [sessionMetaMap],
+  )
   const updateSessionMeta = useSetAtom(updateSessionMetaAtom)
   const setNewSessionDraft = useSetAtom(newSessionDraftAtom)
 
@@ -221,14 +247,18 @@ export function NavigationProvider({
   const focusedRoute = useAtomValue(focusedPanelRouteAtom)
 
   // Right sidebar is independent of panels (not per-panel state)
-  const [rightSidebar, setRightSidebar] = useState<RightSidebarPanel | undefined>()
+  const [rightSidebar, setRightSidebar] = useState<
+    RightSidebarPanel | undefined
+  >()
   const rightSidebarRef = useRef<RightSidebarPanel | undefined>(rightSidebar)
-  useEffect(() => { rightSidebarRef.current = rightSidebar }, [rightSidebar])
+  useEffect(() => {
+    rightSidebarRef.current = rightSidebar
+  }, [rightSidebar])
 
   // NavigationState derived from the focused panel's route
   const navigationState: NavigationState = useMemo(() => {
     const base = focusedRoute
-      ? parseRouteToNavigationState(focusedRoute) ?? DEFAULT_NAVIGATION_STATE
+      ? (parseRouteToNavigationState(focusedRoute) ?? DEFAULT_NAVIGATION_STATE)
       : DEFAULT_NAVIGATION_STATE
     return rightSidebar ? { ...base, rightSidebar } : base
   }, [focusedRoute, rightSidebar])
@@ -241,9 +271,9 @@ export function NavigationProvider({
   const [canGoForward, setCanGoForward] = useState(false)
 
   // Sequence numbers stored in history.state for tracking position
-  const historySeqRef = useRef(0)                // Current history position
-  const historyMaxSeqRef = useRef(0)              // Highest pushed seq (for canGoForward)
-  const nextHistorySeqRef = useRef(1)             // Next seq to assign on pushState
+  const historySeqRef = useRef(0) // Current history position
+  const historyMaxSeqRef = useRef(0) // Highest pushed seq (for canGoForward)
+  const nextHistorySeqRef = useRef(1) // Next seq to assign on pushState
 
   // Suppress pushState in atom subscriptions during restore/reconciliation
   const suppressPushRef = useRef(false)
@@ -279,7 +309,7 @@ export function NavigationProvider({
     const sidebarKey = buildRightSidebarParam(rightSidebarRef.current) ?? ''
     return buildSemanticHistoryKey({
       workspaceSlug,
-      panelRoutes: panels.map(p => p.route),
+      panelRoutes: panels.map((p) => p.route),
       focusedPanelIndex: focusedIdx,
       sidebarParam: sidebarKey,
     })
@@ -297,65 +327,76 @@ export function NavigationProvider({
    *
    * Also persists the URL per-workspace in localStorage for workspace switch restoration.
    */
-  const syncUrl = useCallback((push: boolean = false) => {
-    const panels = store.get(panelStackAtom)
-    const focusedIdx = store.get(focusedPanelIndexAtom)
-    if (panels.length === 0) return
+  const syncUrl = useCallback(
+    (push: boolean = false) => {
+      const panels = store.get(panelStackAtom)
+      const focusedIdx = store.get(focusedPanelIndexAtom)
+      if (panels.length === 0) return
 
-    const focusedPanel = panels[focusedIdx] ?? panels[0]
-    const url = new URL(window.location.href)
+      const focusedPanel = panels[focusedIdx] ?? panels[0]
+      const url = new URL(window.location.href)
 
-    // ?ws= workspace slug
-    if (workspaceSlug) {
-      url.searchParams.set('ws', workspaceSlug)
-    }
+      // ?ws= workspace slug
+      if (workspaceSlug) {
+        url.searchParams.set('ws', workspaceSlug)
+      }
 
-    // ?route= is the focused panel's route
-    url.searchParams.set('route', focusedPanel.route)
+      // ?route= is the focused panel's route
+      url.searchParams.set('route', focusedPanel.route)
 
-    // ?panels= encodes ALL panels in stack order
-    if (panels.length > 1) {
-      const encoded = panels.map(p => `${p.route}:${p.proportion.toFixed(4)}`).join(',')
-      url.searchParams.set('panels', encoded)
-    } else {
-      url.searchParams.delete('panels')
-    }
+      // ?panels= encodes ALL panels in stack order
+      if (panels.length > 1) {
+        const encoded = panels
+          .map((p) => `${p.route}:${p.proportion.toFixed(4)}`)
+          .join(',')
+        url.searchParams.set('panels', encoded)
+      } else {
+        url.searchParams.delete('panels')
+      }
 
-    // ?fi= is focused panel index (for multi-panel layouts)
-    if (panels.length > 1) {
-      url.searchParams.set('fi', String(focusedIdx))
-    } else {
-      url.searchParams.delete('fi')
-    }
+      // ?fi= is focused panel index (for multi-panel layouts)
+      if (panels.length > 1) {
+        url.searchParams.set('fi', String(focusedIdx))
+      } else {
+        url.searchParams.delete('fi')
+      }
 
-    // ?sidebar=
-    const sidebarParam = buildRightSidebarParam(rightSidebarRef.current)
-    if (sidebarParam) {
-      url.searchParams.set('sidebar', sidebarParam)
-    } else {
-      url.searchParams.delete('sidebar')
-    }
+      // ?sidebar=
+      const sidebarParam = buildRightSidebarParam(rightSidebarRef.current)
+      if (sidebarParam) {
+        url.searchParams.set('sidebar', sidebarParam)
+      } else {
+        url.searchParams.delete('sidebar')
+      }
 
-    const urlStr = url.toString()
+      const urlStr = url.toString()
 
-    if (push) {
-      const seq = nextHistorySeqRef.current++
-      history.pushState({ seq }, '', urlStr)
-      historySeqRef.current = seq
-      historyMaxSeqRef.current = seq // Forward history discarded by browser
-      updateCanGoBackForward()
-    } else {
-      history.replaceState({ ...history.state, seq: historySeqRef.current }, '', urlStr)
-    }
+      if (push) {
+        const seq = nextHistorySeqRef.current++
+        history.pushState({ seq }, '', urlStr)
+        historySeqRef.current = seq
+        historyMaxSeqRef.current = seq // Forward history discarded by browser
+        updateCanGoBackForward()
+      } else {
+        history.replaceState(
+          { ...history.state, seq: historySeqRef.current },
+          '',
+          urlStr,
+        )
+      }
 
-    // Persist per-workspace URL for workspace switch restoration
-    if (workspaceSlug) {
-      storage.set(storage.KEYS.workspaceUrl, url.search, workspaceSlug)
-    }
-  }, [store, workspaceSlug, updateCanGoBackForward])
+      // Persist per-workspace URL for workspace switch restoration
+      if (workspaceSlug) {
+        storage.set(storage.KEYS.workspaceUrl, url.search, workspaceSlug)
+      }
+    },
+    [store, workspaceSlug, updateCanGoBackForward],
+  )
 
   const syncUrlRef = useRef(syncUrl)
-  useEffect(() => { syncUrlRef.current = syncUrl }, [syncUrl])
+  useEffect(() => {
+    syncUrlRef.current = syncUrl
+  }, [syncUrl])
 
   const maybePushHistoryForSemanticChange = useCallback(() => {
     const currentSemanticKey = getSemanticHistoryKey()
@@ -379,14 +420,20 @@ export function NavigationProvider({
 
   // Panel stack changes: push history on add/remove/route change (NOT resize)
   useEffect(() => {
-    let prevRoutes = store.get(panelStackAtom).map(p => p.route)
+    let prevRoutes = store.get(panelStackAtom).map((p) => p.route)
     const unsub = store.sub(panelStackAtom, () => {
       if (suppressPushRef.current || !initialRouteRestoredRef.current) return
-      const currRoutes = store.get(panelStackAtom).map(p => p.route)
-      if (currRoutes.length !== prevRoutes.length || !currRoutes.every((r, i) => r === prevRoutes[i])) {
+      const currRoutes = store.get(panelStackAtom).map((p) => p.route)
+      if (
+        currRoutes.length !== prevRoutes.length ||
+        !currRoutes.every((r, i) => r === prevRoutes[i])
+      ) {
         if (!pendingPushRef.current) {
           pendingPushRef.current = true
-          queueMicrotask(() => { pendingPushRef.current = false; maybePushHistoryForSemanticChange() })
+          queueMicrotask(() => {
+            pendingPushRef.current = false
+            maybePushHistoryForSemanticChange()
+          })
         }
       }
       prevRoutes = currRoutes
@@ -403,7 +450,10 @@ export function NavigationProvider({
       if (newFocusId !== prevFocusId) {
         if (!pendingPushRef.current) {
           pendingPushRef.current = true
-          queueMicrotask(() => { pendingPushRef.current = false; maybePushHistoryForSemanticChange() })
+          queueMicrotask(() => {
+            pendingPushRef.current = false
+            maybePushHistoryForSemanticChange()
+          })
         }
         prevFocusId = newFocusId
       }
@@ -455,40 +505,56 @@ export function NavigationProvider({
       if (panelsParam) {
         // Canonical format: ?panels= contains ALL panels, ?fi= is focused index.
         // We intentionally no longer support older mixed route/panels formats.
-        entries = panelsParam.split(',').filter(Boolean).map(entry => {
-          const colonIdx = entry.lastIndexOf(':')
-          if (colonIdx > 0) {
-            const proportion = parseFloat(entry.slice(colonIdx + 1))
-            if (!isNaN(proportion) && proportion > 0 && proportion < 1) {
-              const rawRoute = entry.slice(0, colonIdx) as ViewRoute
-              const route = normalizePanelRouteForReconcile(rawRoute, (state) => resolveAutoSelectionRef.current(state))
-              return { route, proportion }
+        entries = panelsParam
+          .split(',')
+          .filter(Boolean)
+          .map((entry) => {
+            const colonIdx = entry.lastIndexOf(':')
+            if (colonIdx > 0) {
+              const proportion = parseFloat(entry.slice(colonIdx + 1))
+              if (!isNaN(proportion) && proportion > 0 && proportion < 1) {
+                const rawRoute = entry.slice(0, colonIdx) as ViewRoute
+                const route = normalizePanelRouteForReconcile(
+                  rawRoute,
+                  (state) => resolveAutoSelectionRef.current(state),
+                )
+                return { route, proportion }
+              }
             }
-          }
-          const rawRoute = entry as ViewRoute
-          const route = normalizePanelRouteForReconcile(rawRoute, (state) => resolveAutoSelectionRef.current(state))
-          return { route, proportion: 0 }
-        })
+            const rawRoute = entry as ViewRoute
+            const route = normalizePanelRouteForReconcile(rawRoute, (state) =>
+              resolveAutoSelectionRef.current(state),
+            )
+            return { route, proportion: 0 }
+          })
 
-        const hasProportions = entries.some(e => e.proportion > 0)
+        const hasProportions = entries.some((e) => e.proportion > 0)
         if (!hasProportions) {
           const equal = 1 / entries.length
-          entries.forEach(e => { e.proportion = equal })
+          entries.forEach((e) => {
+            e.proportion = equal
+          })
         } else {
           const total = entries.reduce((s, e) => s + e.proportion, 0)
           if (total > 0 && Math.abs(total - 1) > 0.001) {
-            entries.forEach(e => { e.proportion = e.proportion / total })
+            entries.forEach((e) => {
+              e.proportion = e.proportion / total
+            })
           }
         }
 
-        focusedIndex = focusedIndexParam != null ? (parseInt(focusedIndexParam, 10) || 0) : 0
+        focusedIndex =
+          focusedIndexParam != null ? parseInt(focusedIndexParam, 10) || 0 : 0
       } else if (initialRoute) {
         // Single panel from ?route=
         const navState = parseRouteToNavigationState(initialRoute)
         if (navState) {
-          const finalRoute = ('details' in navState && navState.details)
-            ? (initialRoute as ViewRoute)
-            : (buildRouteFromNavigationState(resolveAutoSelectionRef.current(navState)) as ViewRoute)
+          const finalRoute =
+            'details' in navState && navState.details
+              ? (initialRoute as ViewRoute)
+              : (buildRouteFromNavigationState(
+                  resolveAutoSelectionRef.current(navState),
+                ) as ViewRoute)
           entries = [{ route: finalRoute, proportion: 1 }]
         }
       }
@@ -497,12 +563,14 @@ export function NavigationProvider({
         store.set(reconcilePanelStackAtom, { entries, focusedIndex })
       }
     },
-    [store]
+    [store],
   )
 
   // Keep ref fresh for use in event handlers / effects that capture stale closures
   const reconcileFromUrlParamsRef = useRef(reconcileFromUrlParams)
-  useEffect(() => { reconcileFromUrlParamsRef.current = reconcileFromUrlParams }, [reconcileFromUrlParams])
+  useEffect(() => {
+    reconcileFromUrlParamsRef.current = reconcileFromUrlParams
+  }, [reconcileFromUrlParams])
 
   // =========================================================================
   // EMPTY SESSION CLEANUP (reactive — covers navigate, close tab, etc.)
@@ -526,7 +594,8 @@ export function NavigationProvider({
       for (const prevId of prevVisibleSessionIdsRef.current) {
         if (!currentIds.has(prevId)) {
           const meta = store.get(sessionMetaMapAtom).get(prevId)
-          const isEmpty = meta && !meta.lastFinalMessageId && !meta.name && !meta.isProcessing
+          const isEmpty =
+            meta && !meta.lastFinalMessageId && !meta.name && !meta.isProcessing
           const hasDraft = getDraft?.(prevId)?.trim()
           if (isEmpty && !hasDraft) {
             onAutoDeleteEmptySession(prevId)
@@ -550,9 +619,15 @@ export function NavigationProvider({
         // Only persist if the session belongs to this workspace (prevents cross-workspace
         // pollution during workspace switch, when workspaceId changed but navigationState
         // still reflects the old workspace's focused panel)
-        const meta = store.get(sessionMetaMapAtom).get(navigationState.details.sessionId)
+        const meta = store
+          .get(sessionMetaMapAtom)
+          .get(navigationState.details.sessionId)
         if (meta && meta.workspaceId === workspaceId) {
-          storage.set(storage.KEYS.lastSelectedSessionId, navigationState.details.sessionId, workspaceId)
+          storage.set(
+            storage.KEYS.lastSelectedSessionId,
+            navigationState.details.sessionId,
+            workspaceId,
+          )
         }
       }
     }
@@ -568,11 +643,11 @@ export function NavigationProvider({
     (filter: SessionFilter): SessionMeta[] => {
       // First filter out hidden sessions - they should never appear in any view
       const visibleSessions = sessionMetas.filter(
-        s => !s.hidden && (
-          !workspaceId ||
-          s.workspaceId === workspaceId ||
-          (remoteWorkspaceId && s.workspaceId === remoteWorkspaceId)
-        )
+        (s) =>
+          !s.hidden &&
+          (!workspaceId ||
+            s.workspaceId === workspaceId ||
+            (remoteWorkspaceId && s.workspaceId === remoteWorkspaceId)),
       )
 
       return visibleSessions.filter((session) => {
@@ -584,12 +659,18 @@ export function NavigationProvider({
           case 'archived':
             return session.isArchived === true
           case 'state':
-            return session.sessionStatus === filter.stateId && session.isArchived !== true
+            return (
+              session.sessionStatus === filter.stateId &&
+              session.isArchived !== true
+            )
           case 'label': {
             if (session.isArchived === true) return false
             if (!session.labels?.length) return false
             if (filter.labelId === '__all__') return true
-            return session.labels.some(l => l === filter.labelId || l.startsWith(`${filter.labelId}::`))
+            return session.labels.some(
+              (l) =>
+                l === filter.labelId || l.startsWith(`${filter.labelId}::`),
+            )
           }
           case 'view':
             if (session.isArchived === true) return false
@@ -599,7 +680,7 @@ export function NavigationProvider({
         }
       })
     },
-    [sessionMetas, workspaceId, remoteWorkspaceId]
+    [sessionMetas, workspaceId, remoteWorkspaceId],
   )
 
   const getFirstSessionId = useCallback(
@@ -607,7 +688,7 @@ export function NavigationProvider({
       const filtered = filterSessionsByFilter(filter)
       return [...filtered].sort(compareSessionsByActivityDesc)[0]?.id ?? null
     },
-    [filterSessionsByFilter]
+    [filterSessionsByFilter],
   )
 
   const getLastSelectedSessionId = useCallback(
@@ -616,13 +697,15 @@ export function NavigationProvider({
       const storedId = storage.get<string | null>(
         storage.KEYS.lastSelectedSessionId,
         null,
-        workspaceId
+        workspaceId,
       )
       if (!storedId) return null
       const filtered = filterSessionsByFilter(filter)
-      return filtered.some(session => session.id === storedId) ? storedId : null
+      return filtered.some((session) => session.id === storedId)
+        ? storedId
+        : null
     },
-    [workspaceId, filterSessionsByFilter]
+    [workspaceId, filterSessionsByFilter],
   )
 
   const getFirstSourceSlug = useCallback(
@@ -630,18 +713,17 @@ export function NavigationProvider({
       if (!filter) {
         return sources[0]?.config.slug ?? null
       }
-      const filtered = sources.filter(s => s.config.type === filter.sourceType)
+      const filtered = sources.filter(
+        (s) => s.config.type === filter.sourceType,
+      )
       return filtered[0]?.config.slug ?? null
     },
-    [sources]
+    [sources],
   )
 
-  const getFirstSkillSlug = useCallback(
-    (): string | null => {
-      return skills[0]?.slug ?? null
-    },
-    [skills]
-  )
+  const getFirstSkillSlug = useCallback((): string | null => {
+    return skills[0]?.slug ?? null
+  }, [skills])
 
   // =========================================================================
   // AUTO-SELECTION (pure computation, no side effects)
@@ -653,69 +735,109 @@ export function NavigationProvider({
    * first available item. Returns the final state (no side effects).
    */
   const resolveAutoSelection = useCallback(
-    (newState: NavigationState, options?: { skipAutoSelect?: boolean }): NavigationState => {
+    (
+      newState: NavigationState,
+      options?: { skipAutoSelect?: boolean },
+    ): NavigationState => {
       let nextState = newState
 
       // Validate session exists in current workspace (local or remote ID)
       if (isSessionsNavigation(nextState) && nextState.details) {
         const freshMetaMap = store.get(sessionMetaMapAtom)
         const meta = freshMetaMap.get(nextState.details.sessionId)
-        const matchesWorkspace = !workspaceId
-          || meta?.workspaceId === workspaceId
-          || (remoteWorkspaceId && meta?.workspaceId === remoteWorkspaceId)
+        const matchesWorkspace =
+          !workspaceId ||
+          meta?.workspaceId === workspaceId ||
+          (remoteWorkspaceId && meta?.workspaceId === remoteWorkspaceId)
         if (!meta || !matchesWorkspace) {
           nextState = { ...nextState, details: null }
         }
       }
 
       // Sessions: auto-select last/first session
-      if (isSessionsNavigation(nextState) && !nextState.details && !options?.skipAutoSelect) {
+      if (
+        isSessionsNavigation(nextState) &&
+        !nextState.details &&
+        !options?.skipAutoSelect
+      ) {
         const lastSelectedSessionId = getLastSelectedSessionId(nextState.filter)
-        const fallbackSessionId = lastSelectedSessionId ?? getFirstSessionId(nextState.filter)
+        const fallbackSessionId =
+          lastSelectedSessionId ?? getFirstSessionId(nextState.filter)
         if (fallbackSessionId) {
-          return { ...nextState, details: { type: 'session', sessionId: fallbackSessionId } }
+          return {
+            ...nextState,
+            details: { type: 'session', sessionId: fallbackSessionId },
+          }
         }
         return nextState
       }
 
       // Sources: auto-select first source
-      if (isSourcesNavigation(nextState) && !nextState.details && !options?.skipAutoSelect) {
+      if (
+        isSourcesNavigation(nextState) &&
+        !nextState.details &&
+        !options?.skipAutoSelect
+      ) {
         const firstSourceSlug = getFirstSourceSlug(nextState.filter)
         if (firstSourceSlug) {
-          return { ...nextState, details: { type: 'source', sourceSlug: firstSourceSlug } }
+          return {
+            ...nextState,
+            details: { type: 'source', sourceSlug: firstSourceSlug },
+          }
         }
         return nextState
       }
 
       // Skills: auto-select first skill
-      if (isSkillsNavigation(nextState) && !nextState.details && !options?.skipAutoSelect) {
+      if (
+        isSkillsNavigation(nextState) &&
+        !nextState.details &&
+        !options?.skipAutoSelect
+      ) {
         const firstSkillSlug = getFirstSkillSlug()
         if (firstSkillSlug) {
-          return { ...nextState, details: { type: 'skill', skillSlug: firstSkillSlug } }
+          return {
+            ...nextState,
+            details: { type: 'skill', skillSlug: firstSkillSlug },
+          }
         }
         return nextState
       }
 
       return nextState
     },
-    [store, workspaceId, remoteWorkspaceId, getLastSelectedSessionId, getFirstSessionId, getFirstSourceSlug, getFirstSkillSlug]
+    [
+      store,
+      workspaceId,
+      remoteWorkspaceId,
+      getLastSelectedSessionId,
+      getFirstSessionId,
+      getFirstSourceSlug,
+      getFirstSkillSlug,
+    ],
   )
 
   // Ref keeps resolveAutoSelection fresh for reconcileFromUrlParams (defined earlier in the file)
   const resolveAutoSelectionRef = useRef(resolveAutoSelection)
-  useEffect(() => { resolveAutoSelectionRef.current = resolveAutoSelection }, [resolveAutoSelection])
+  useEffect(() => {
+    resolveAutoSelectionRef.current = resolveAutoSelection
+  }, [resolveAutoSelection])
 
   // =========================================================================
   // ACTION NAVIGATION
   // =========================================================================
 
   const handleActionNavigation = useCallback(
-    async (parsed: ParsedRoute, options?: { newPanel?: boolean; targetLaneId?: 'main' }) => {
+    async (
+      parsed: ParsedRoute,
+      options?: { newPanel?: boolean; targetLaneId?: 'main' },
+    ) => {
       if (!workspaceId) return
 
       switch (parsed.name) {
         case 'new-session': {
-          const createOptions: import('../../shared/types').CreateSessionOptions = {}
+          const createOptions: import('../../shared/types').CreateSessionOptions =
+            {}
           if (parsed.params.mode) {
             const parsedMode = parsePermissionMode(parsed.params.mode)
             if (parsedMode) {
@@ -723,13 +845,19 @@ export function NavigationProvider({
             }
           }
           if (parsed.params.workdir) {
-            createOptions.workingDirectory = parsed.params.workdir as 'user_default' | 'none' | string
+            createOptions.workingDirectory = parsed.params.workdir as
+              | 'user_default'
+              | 'none'
+              | string
           }
           if (parsed.params.model) {
             createOptions.model = parsed.params.model
           }
           if (parsed.params.systemPrompt) {
-            createOptions.systemPromptPreset = parsed.params.systemPrompt as 'default' | 'mini' | string
+            createOptions.systemPromptPreset = parsed.params.systemPrompt as
+              | 'default'
+              | 'mini'
+              | string
           }
           if (parsed.params.name) {
             createOptions.name = parsed.params.name
@@ -745,10 +873,12 @@ export function NavigationProvider({
           }
 
           // Determine navigation filter
-          const filter: import('../../shared/types').SessionFilter =
-            parsed.params.status ? { kind: 'state', stateId: parsed.params.status } :
-            parsed.params.label ? { kind: 'label', labelId: parsed.params.label } :
-            { kind: 'allSessions' }
+          const filter: import('../../shared/types').SessionFilter = parsed
+            .params.status
+            ? { kind: 'state', stateId: parsed.params.status }
+            : parsed.params.label
+              ? { kind: 'label', labelId: parsed.params.label }
+              : { kind: 'allSessions' }
 
           // Parse badges from params
           let badges: ContentBadge[] | undefined
@@ -760,21 +890,33 @@ export function NavigationProvider({
             }
           }
 
-          const shouldSend = parsed.params.input && parsed.params.send === 'true'
+          const shouldSend =
+            parsed.params.input && parsed.params.send === 'true'
           if (shouldSend) {
             const session = await onCreateSession(workspaceId, createOptions)
 
             if (parsed.params.name) {
-              await window.electronAPI.sessionCommand(session.id, { type: 'rename', name: parsed.params.name })
+              await window.electronAPI.sessionCommand(session.id, {
+                type: 'rename',
+                name: parsed.params.name,
+              })
             }
 
             if (parsed.params.status) {
-              updateSessionMeta(session.id, { sessionStatus: parsed.params.status })
-              await window.electronAPI.sessionCommand(session.id, { type: 'setSessionStatus', state: parsed.params.status })
+              updateSessionMeta(session.id, {
+                sessionStatus: parsed.params.status,
+              })
+              await window.electronAPI.sessionCommand(session.id, {
+                type: 'setSessionStatus',
+                state: parsed.params.status,
+              })
             }
             if (parsed.params.label) {
               updateSessionMeta(session.id, { labels: [parsed.params.label] })
-              await window.electronAPI.sessionCommand(session.id, { type: 'setLabels', labels: [parsed.params.label] })
+              await window.electronAPI.sessionCommand(session.id, {
+                type: 'setLabels',
+                labels: [parsed.params.label],
+              })
             }
 
             if (options?.newPanel) {
@@ -801,9 +943,12 @@ export function NavigationProvider({
                 undefined,
                 badges
                   ? {
-                    textElements: contentBadgesToTextElements(parsed.params.input!, badges),
-                  }
-                  : undefined
+                      textElements: contentBadgesToTextElements(
+                        parsed.params.input!,
+                        badges,
+                      ),
+                    }
+                  : undefined,
               )
             }, 100)
             break
@@ -835,7 +980,9 @@ export function NavigationProvider({
             filter,
             details: null,
           }
-          const draftRoute = buildRouteFromNavigationState(draftState) as ViewRoute
+          const draftRoute = buildRouteFromNavigationState(
+            draftState,
+          ) as ViewRoute
           if (options?.newPanel) {
             pushPanel({
               route: draftRoute,
@@ -850,7 +997,10 @@ export function NavigationProvider({
 
         case 'rename-session':
           if (parsed.id && parsed.params.name) {
-            await window.electronAPI.sessionCommand(parsed.id, { type: 'rename', name: parsed.params.name })
+            await window.electronAPI.sessionCommand(parsed.id, {
+              type: 'rename',
+              name: parsed.params.name,
+            })
           }
           break
 
@@ -862,13 +1012,17 @@ export function NavigationProvider({
 
         case 'flag-session':
           if (parsed.id) {
-            await window.electronAPI.sessionCommand(parsed.id, { type: 'flag' })
+            await window.electronAPI.sessionCommand(parsed.id, {
+              type: 'flag',
+            })
           }
           break
 
         case 'unflag-session':
           if (parsed.id) {
-            await window.electronAPI.sessionCommand(parsed.id, { type: 'unflag' })
+            await window.electronAPI.sessionCommand(parsed.id, {
+              type: 'unflag',
+            })
           }
           break
 
@@ -888,13 +1042,16 @@ export function NavigationProvider({
           if (parsed.id && parsed.params.mode) {
             const parsedMode = parsePermissionMode(parsed.params.mode)
             if (!parsedMode) {
-              console.warn('[Navigation] Invalid permission mode:', parsed.params.mode)
+              console.warn(
+                '[Navigation] Invalid permission mode:',
+                parsed.params.mode,
+              )
               break
             }
-            await window.electronAPI.sessionCommand(
-              parsed.id,
-              { type: 'setPermissionMode', mode: parsedMode }
-            )
+            await window.electronAPI.sessionCommand(parsed.id, {
+              type: 'setPermissionMode',
+              mode: parsedMode,
+            })
           }
           break
 
@@ -908,7 +1065,14 @@ export function NavigationProvider({
           console.warn('[Navigation] Unknown action:', parsed.name)
       }
     },
-    [workspaceId, onCreateSession, pushPanel, setNewSessionDraft, store, updateSessionMeta]
+    [
+      workspaceId,
+      onCreateSession,
+      pushPanel,
+      setNewSessionDraft,
+      store,
+      updateSessionMeta,
+    ],
   )
 
   // =========================================================================
@@ -961,13 +1125,19 @@ export function NavigationProvider({
       if (newNavState && isSettingsNavigation(newNavState)) {
         const isBareSettingsRoute = route === 'settings'
         if (isBareSettingsRoute) {
-          const savedSubpage = storage.get<string>(storage.KEYS.lastSettingsSubpage, 'app')
+          const savedSubpage = storage.get<string>(
+            storage.KEYS.lastSettingsSubpage,
+            'app',
+          )
           if (
             isValidSettingsSubpage(savedSubpage) &&
             isVisibleSettingsSubpage(savedSubpage) &&
             savedSubpage !== 'app'
           ) {
-            newNavState = { ...newNavState, subpage: savedSubpage as SettingsSubpage }
+            newNavState = {
+              ...newNavState,
+              subpage: savedSubpage as SettingsSubpage,
+            }
           }
         } else if (isVisibleSettingsSubpage(newNavState.subpage)) {
           storage.set(storage.KEYS.lastSettingsSubpage, newNavState.subpage)
@@ -982,11 +1152,21 @@ export function NavigationProvider({
       if (newNavState) {
         // Resolve auto-selection (pure — no side effects)
         const resolvedState = resolveAutoSelection(newNavState, options)
-        const finalRoute = buildRouteFromNavigationState(resolvedState) as ViewRoute
+        const finalRoute = buildRouteFromNavigationState(
+          resolvedState,
+        ) as ViewRoute
 
         // Persist last selected session for auto-select on next visit
-        if (isSessionsNavigation(resolvedState) && resolvedState.details && workspaceId) {
-          storage.set(storage.KEYS.lastSelectedSessionId, resolvedState.details.sessionId, workspaceId)
+        if (
+          isSessionsNavigation(resolvedState) &&
+          resolvedState.details &&
+          workspaceId
+        ) {
+          storage.set(
+            storage.KEYS.lastSelectedSessionId,
+            resolvedState.details.sessionId,
+            workspaceId,
+          )
         }
 
         // Update the focused panel's route (atom update is synchronous)
@@ -994,7 +1174,14 @@ export function NavigationProvider({
         store.set(updateFocusedPanelRouteAtom, finalRoute)
       }
     },
-    [isReady, handleActionNavigation, resolveAutoSelection, store, pushPanel, workspaceId]
+    [
+      isReady,
+      handleActionNavigation,
+      resolveAutoSelection,
+      store,
+      pushPanel,
+      workspaceId,
+    ],
   )
 
   // =========================================================================
@@ -1050,7 +1237,13 @@ export function NavigationProvider({
 
     window.addEventListener('popstate', handlePopState)
     return () => window.removeEventListener('popstate', handlePopState)
-  }, [workspaceSlug, onSwitchWorkspaceBySlug, updateCanGoBackForward, getSemanticHistoryKey, isSessionsReady])
+  }, [
+    workspaceSlug,
+    onSwitchWorkspaceBySlug,
+    updateCanGoBackForward,
+    getSemanticHistoryKey,
+    isSessionsReady,
+  ])
 
   // =========================================================================
   // WORKSPACE SWITCH
@@ -1076,11 +1269,17 @@ export function NavigationProvider({
     if (isPopstateSwitchRef.current) {
       // Popstate-triggered: URL is already correct, just reconcile from it
       isPopstateSwitchRef.current = false
-      reconcileFromUrlParamsRef.current(new URLSearchParams(window.location.search))
+      reconcileFromUrlParamsRef.current(
+        new URLSearchParams(window.location.search),
+      )
       lastSemanticHistoryKeyRef.current = getSemanticHistoryKey()
     } else {
       // UI-triggered: load stored URL for the new workspace, push history entry
-      const savedSearch = storage.get<string>(storage.KEYS.workspaceUrl, '', workspaceSlug)
+      const savedSearch = storage.get<string>(
+        storage.KEYS.workspaceUrl,
+        '',
+        workspaceSlug,
+      )
       const pendingRoute = consumeWorkspaceSwitchRoute?.(workspaceId) ?? null
 
       const url = new URL(window.location.href)
@@ -1117,19 +1316,30 @@ export function NavigationProvider({
       suppressPushRef.current = false
       lastSemanticHistoryKeyRef.current = getSemanticHistoryKey()
     })
-  }, [workspaceId, workspaceSlug, store, updateCanGoBackForward, getSemanticHistoryKey, isSessionsReady, consumeWorkspaceSwitchRoute])
+  }, [
+    workspaceId,
+    workspaceSlug,
+    store,
+    updateCanGoBackForward,
+    getSemanticHistoryKey,
+    isSessionsReady,
+    consumeWorkspaceSwitchRoute,
+  ])
 
   // =========================================================================
   // INITIAL ROUTE RESTORATION (CMD+R reload)
   // =========================================================================
 
   useEffect(() => {
-    if (!canRunInitialRestore({
-      isReady,
-      isSessionsReady,
-      workspaceId,
-      initialRouteRestored: initialRouteRestoredRef.current,
-    })) return
+    if (
+      !canRunInitialRestore({
+        isReady,
+        isSessionsReady,
+        workspaceId,
+        initialRouteRestored: initialRouteRestoredRef.current,
+      })
+    )
+      return
     initialRouteRestoredRef.current = true
 
     // Suppress pushState during initial restoration
@@ -1155,7 +1365,14 @@ export function NavigationProvider({
       suppressPushRef.current = false
       lastSemanticHistoryKeyRef.current = getSemanticHistoryKey()
     })
-  }, [isReady, isSessionsReady, workspaceId, navigate, store, getSemanticHistoryKey])
+  }, [
+    isReady,
+    isSessionsReady,
+    workspaceId,
+    navigate,
+    store,
+    getSemanticHistoryKey,
+  ])
 
   // =========================================================================
   // PENDING NAVIGATION
@@ -1188,35 +1405,37 @@ export function NavigationProvider({
   useEffect(() => {
     if (!workspaceId) return
 
-    const cleanup = window.electronAPI.onDeepLinkNavigate((nav: DeepLinkNavigation) => {
-      let route: string | null = null
+    const cleanup = window.electronAPI.onDeepLinkNavigate(
+      (nav: DeepLinkNavigation) => {
+        let route: string | null = null
 
-      if (nav.view) {
-        route = nav.view
-      } else if (nav.action) {
-        route = `action/${nav.action}`
-        if (nav.actionParams?.id) {
-          route += `/${nav.actionParams.id}`
+        if (nav.view) {
+          route = nav.view
+        } else if (nav.action) {
+          route = `action/${nav.action}`
+          if (nav.actionParams?.id) {
+            route += `/${nav.actionParams.id}`
+          }
+          const otherParams = { ...nav.actionParams }
+          delete otherParams.id
+          if (Object.keys(otherParams).length > 0) {
+            const params = new URLSearchParams(otherParams)
+            route += `?${params.toString()}`
+          }
         }
-        const otherParams = { ...nav.actionParams }
-        delete otherParams.id
-        if (Object.keys(otherParams).length > 0) {
-          const params = new URLSearchParams(otherParams)
-          route += `?${params.toString()}`
-        }
-      }
 
-      if (route) {
-        const navState = parseRouteToNavigationState(route)
-        if (!navState && !route.startsWith('action/')) {
-          toast.error(t('toast.invalidLink'), {
-            description: t('toast.invalidLinkDesc'),
-          })
-          return
+        if (route) {
+          const navState = parseRouteToNavigationState(route)
+          if (!navState && !route.startsWith('action/')) {
+            toast.error(t('toast.invalidLink'), {
+              description: t('toast.invalidLinkDesc'),
+            })
+            return
+          }
+          navigate(route as Route)
         }
-        navigate(route as Route)
-      }
-    })
+      },
+    )
 
     return cleanup
   }, [workspaceId, navigate])
@@ -1227,7 +1446,11 @@ export function NavigationProvider({
 
   useEffect(() => {
     const handleNavigateEvent = (event: Event) => {
-      const customEvent = event as CustomEvent<{ route: Route; newPanel?: boolean; targetLaneId?: 'main' }>
+      const customEvent = event as CustomEvent<{
+        route: Route
+        newPanel?: boolean
+        targetLaneId?: 'main'
+      }>
       if (customEvent.detail?.route) {
         const { route: r, newPanel, targetLaneId } = customEvent.detail
         navigate(r, newPanel ? { newPanel, targetLaneId } : undefined)
@@ -1244,70 +1467,87 @@ export function NavigationProvider({
   // SIDEBAR HELPERS
   // =========================================================================
 
-  const updateRightSidebar = useCallback((panel: RightSidebarPanel | undefined) => {
-    setRightSidebar(panel)
-    // pushState handled by the rightSidebar change effect
-  }, [])
+  const updateRightSidebar = useCallback(
+    (panel: RightSidebarPanel | undefined) => {
+      setRightSidebar(panel)
+      // pushState handled by the rightSidebar change effect
+    },
+    [],
+  )
 
-  const toggleRightSidebar = useCallback((panel?: RightSidebarPanel) => {
-    const currentSidebar = rightSidebarRef.current
-    const newPanel = panel || (currentSidebar && currentSidebar.type !== 'none'
-      ? { type: 'none' as const }
-      : { type: 'none' as const })
-    updateRightSidebar(newPanel)
-  }, [updateRightSidebar])
+  const toggleRightSidebar = useCallback(
+    (panel?: RightSidebarPanel) => {
+      const currentSidebar = rightSidebarRef.current
+      const newPanel =
+        panel ||
+        (currentSidebar && currentSidebar.type !== 'none'
+          ? { type: 'none' as const }
+          : { type: 'none' as const })
+      updateRightSidebar(newPanel)
+    },
+    [updateRightSidebar],
+  )
 
   // =========================================================================
   // PRESERVE-FILTER NAVIGATION HELPERS
   // =========================================================================
 
-  const navigateToSource = useCallback((sourceSlug?: string) => {
-    if (isSourcesNavigation(navigationState) && navigationState.filter?.kind === 'type') {
-      switch (navigationState.filter.sourceType) {
-        case 'api':
-          navigate(routes.view.sourcesApi(sourceSlug))
-          return
-        case 'mcp':
-          navigate(routes.view.sourcesMcp(sourceSlug))
-          return
-        case 'local':
-          navigate(routes.view.sourcesLocal(sourceSlug))
-          return
+  const navigateToSource = useCallback(
+    (sourceSlug?: string) => {
+      if (
+        isSourcesNavigation(navigationState) &&
+        navigationState.filter?.kind === 'type'
+      ) {
+        switch (navigationState.filter.sourceType) {
+          case 'api':
+            navigate(routes.view.sourcesApi(sourceSlug))
+            return
+          case 'mcp':
+            navigate(routes.view.sourcesMcp(sourceSlug))
+            return
+          case 'local':
+            navigate(routes.view.sourcesLocal(sourceSlug))
+            return
+        }
       }
-    }
-    navigate(routes.view.sources(sourceSlug ? { sourceSlug } : undefined))
-  }, [navigationState, navigate])
+      navigate(routes.view.sources(sourceSlug ? { sourceSlug } : undefined))
+    },
+    [navigationState, navigate],
+  )
 
-  const navigateToSession = useCallback((sessionId: string) => {
-    if (!isSessionsNavigation(navigationState)) {
-      navigate(routes.view.allSessions(sessionId))
-      return
-    }
+  const navigateToSession = useCallback(
+    (sessionId: string) => {
+      if (!isSessionsNavigation(navigationState)) {
+        navigate(routes.view.allSessions(sessionId))
+        return
+      }
 
-    const filter = navigationState.filter
-    switch (filter.kind) {
-      case 'allSessions':
-        navigate(routes.view.allSessions(sessionId))
-        break
-      case 'flagged':
-        navigate(routes.view.flagged(sessionId))
-        break
-      case 'archived':
-        navigate(routes.view.archived(sessionId))
-        break
-      case 'state':
-        navigate(routes.view.state(filter.stateId, sessionId))
-        break
-      case 'label':
-        navigate(routes.view.label(filter.labelId, sessionId))
-        break
-      case 'view':
-        navigate(routes.view.view(filter.viewId, sessionId))
-        break
-      default:
-        navigate(routes.view.allSessions(sessionId))
-    }
-  }, [navigationState, navigate])
+      const filter = navigationState.filter
+      switch (filter.kind) {
+        case 'allSessions':
+          navigate(routes.view.allSessions(sessionId))
+          break
+        case 'flagged':
+          navigate(routes.view.flagged(sessionId))
+          break
+        case 'archived':
+          navigate(routes.view.archived(sessionId))
+          break
+        case 'state':
+          navigate(routes.view.state(filter.stateId, sessionId))
+          break
+        case 'label':
+          navigate(routes.view.label(filter.labelId, sessionId))
+          break
+        case 'view':
+          navigate(routes.view.view(filter.viewId, sessionId))
+          break
+        default:
+          navigate(routes.view.allSessions(sessionId))
+      }
+    },
+    [navigationState, navigate],
+  )
 
   // =========================================================================
   // AUTO-SELECT ON SESSION LOAD
@@ -1318,10 +1558,14 @@ export function NavigationProvider({
     if (!isReady || !workspaceId) return
     // Don't auto-select when panel stack is empty (user closed all panels)
     if (store.get(panelStackAtom).length === 0) return
-    if (!isSessionsNavigation(navigationState) || navigationState.details) return
+    if (!isSessionsNavigation(navigationState) || navigationState.details)
+      return
 
-    const lastSelectedSessionId = getLastSelectedSessionId(navigationState.filter)
-    const fallbackSessionId = lastSelectedSessionId ?? getFirstSessionId(navigationState.filter)
+    const lastSelectedSessionId = getLastSelectedSessionId(
+      navigationState.filter,
+    )
+    const fallbackSessionId =
+      lastSelectedSessionId ?? getFirstSessionId(navigationState.filter)
     if (!fallbackSessionId) return
 
     navigateToSession(fallbackSessionId)

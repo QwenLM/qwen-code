@@ -41,22 +41,24 @@ export interface BrandConfig {
 // Brand presets
 // ---------------------------------------------------------------------------
 
+const QWEN_CODE_BRAND: BrandConfig = {
+  id: 'qwen-code',
+  appName: 'Qwen Code',
+  appId: 'com.alibaba.qwen-code',
+  productName: 'Qwen Code',
+  artifactPrefix: 'Qwen-Code',
+  copyright: 'Copyright © 2026 Alibaba Group.',
+  coAuthorLine: 'Co-Authored-By: Qwen Code <agents-noreply@craft.do>',
+  selfReferName: 'Qwen Code',
+  viewerUrl: 'https://agents.craft.do',
+  credits: '',
+  creditsShort: '',
+  creditsEntries: [],
+}
+
 const BRANDS: Record<string, BrandConfig> = {
-  'qwen-code': {
-    id: 'qwen-code',
-    appName: 'Qwen Code',
-    appId: 'com.alibaba.qwen-code',
-    productName: 'Qwen Code',
-    artifactPrefix: 'Qwen-Code',
-    copyright: 'Copyright © 2026 Alibaba Group.',
-    coAuthorLine: 'Co-Authored-By: Qwen Code <agents-noreply@craft.do>',
-    selfReferName: 'Qwen Code',
-    viewerUrl: 'https://agents.craft.do',
-    credits: '',
-    creditsShort: '',
-    creditsEntries: [],
-  },
-  'modelstudio': {
+  'qwen-code': QWEN_CODE_BRAND,
+  modelstudio: {
     id: 'modelstudio',
     appName: 'ModelStudio Desktop',
     appId: 'com.alibaba.modelstudio-desktop',
@@ -69,15 +71,23 @@ const BRANDS: Record<string, BrandConfig> = {
     credits: 'Architecture: craft-agents-oss v0.8.12 | Agent: Qwen Code',
     creditsShort: 'Based on craft-agents-oss & Qwen Code',
     creditsEntries: [
-      { name: 'Qwen Code', role: 'AI Agent Engine', url: 'https://github.com/QwenLM/qwen-code' },
-      { name: 'Craft Agents OSS', role: 'Desktop Architecture (v0.8.12)', url: 'https://github.com/craft-ai-agents/craft-agents-oss' },
+      {
+        name: 'Qwen Code',
+        role: 'AI Agent Engine',
+        url: 'https://github.com/QwenLM/qwen-code',
+      },
+      {
+        name: 'Craft Agents OSS',
+        role: 'Desktop Architecture (v0.8.12)',
+        url: 'https://github.com/craft-ai-agents/craft-agents-oss',
+      },
     ],
   },
 }
 
 /** Active brand, selected by CRAFT_BRAND env var (default: "qwen-code"). */
 export const BRAND: BrandConfig =
-  BRANDS[process.env.CRAFT_BRAND || 'qwen-code'] ?? BRANDS['qwen-code']
+  BRANDS[process.env.CRAFT_BRAND || 'qwen-code'] ?? QWEN_CODE_BRAND
 
 // ---------------------------------------------------------------------------
 // App version (renderer-safe — avoids the version barrel which pulls in Node deps)
@@ -98,10 +108,12 @@ export const CRAFT_LOGO = [
   '██████     ██████████ ██████████ ████████   ██████████',
   '██████████ ████████   ██████████ ███████      ██████  ',
   '  ████████ ████  ████ ████  ████ █████        ██████  ',
-] as const;
+] as const
 
 /** Logo as a single string for HTML templates */
-export const CRAFT_LOGO_HTML = CRAFT_LOGO.map((line) => line.trimEnd()).join('\n');
+export const CRAFT_LOGO_HTML = CRAFT_LOGO.map((line) => line.trimEnd()).join(
+  '\n',
+)
 
 /** Session viewer base URL */
-export const VIEWER_URL = BRAND.viewerUrl;
+export const VIEWER_URL = BRAND.viewerUrl

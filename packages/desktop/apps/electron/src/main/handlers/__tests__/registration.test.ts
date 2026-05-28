@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test'
+import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 
@@ -140,6 +141,10 @@ async function getExpectedChannels(): Promise<Set<string>> {
     ...skills.HANDLED_CHANNELS,
     ...sources.HANDLED_CHANNELS,
     ...statuses.HANDLED_CHANNELS,
+    RPC_CHANNELS.transfer.START,
+    RPC_CHANNELS.transfer.CHUNK,
+    RPC_CHANNELS.transfer.COMMIT,
+    RPC_CHANNELS.transfer.ABORT,
     ...coreSystem.CORE_HANDLED_CHANNELS,
     ...coreWorkspace.CORE_HANDLED_CHANNELS,
     ...onboarding.HANDLED_CHANNELS,
@@ -162,11 +167,11 @@ describe('RPC handler registration', () => {
 
     registerAllRpcHandlers(createMockServer(), createMockDeps())
 
-    const appChannels = registeredChannels.filter(ch => ch.includes(':'))
+    const appChannels = registeredChannels.filter((ch) => ch.includes(':'))
     const actual = new Set(appChannels)
 
-    const missing = [...expected].filter(ch => !actual.has(ch)).sort()
-    const unexpected = [...actual].filter(ch => !expected.has(ch)).sort()
+    const missing = [...expected].filter((ch) => !actual.has(ch)).sort()
+    const unexpected = [...actual].filter((ch) => !expected.has(ch)).sort()
 
     expect(missing).toEqual([])
     expect(unexpected).toEqual([])
@@ -185,13 +190,15 @@ describe('RPC handler registration', () => {
   })
 
   it('keeps onboarding channels in registration coverage', async () => {
-    const { HANDLED_CHANNELS } = await import('@craft-agent/server-core/handlers/rpc/onboarding')
+    const { HANDLED_CHANNELS } = await import(
+      '@craft-agent/server-core/handlers/rpc/onboarding'
+    )
     const { registerAllRpcHandlers } = await import('../index')
 
     registerAllRpcHandlers(createMockServer(), createMockDeps())
 
     const actual = new Set(registeredChannels)
-    const missingOnboarding = HANDLED_CHANNELS.filter(ch => !actual.has(ch))
+    const missingOnboarding = HANDLED_CHANNELS.filter((ch) => !actual.has(ch))
 
     expect(missingOnboarding).toEqual([])
   })
