@@ -2937,7 +2937,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return requestWorkspaceStatus(method, idle);
     },
 
-    async invokeWorkspaceCommand(method, params, invokeOpts) {
+    async invokeWorkspaceCommand<T>(method, params, invokeOpts) {
       const info = liveChannelInfo();
       if (!info) throw new SessionNotFoundError(`workspace-command:${method}`);
       const timeout = invokeOpts?.timeoutMs ?? initTimeoutMs;
