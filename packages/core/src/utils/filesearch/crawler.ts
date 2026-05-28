@@ -1036,7 +1036,12 @@ async function crawlWithGitLsFiles(
 
   // Avoid `-z` with `-t`: record shape for `ls-files -t` + `-z` is not stable across Git
   // versions; newline-delimited output is fine here (index paths cannot contain newlines).
-  const trackedArgs = ['--literal-pathspecs', 'ls-files', '--cached'];
+  const trackedArgs = [
+    '--literal-pathspecs',
+    'ls-files',
+    '--cached',
+    '--recurse-submodules',
+  ];
   trackedArgs.push('-t');
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     trackedArgs.push(relativeToGitRoot);

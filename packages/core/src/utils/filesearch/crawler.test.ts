@@ -848,6 +848,63 @@ describe('crawler', () => {
       );
     });
 
+    it('should recurse into tracked submodules on the git path', async () => {
+      tmpDir = await createTmpDir({});
+      const parentRepo = path.join(tmpDir, 'parent');
+      const submoduleSource = path.join(tmpDir, 'submodule-source');
+
+      await fs.mkdir(parentRepo);
+      await fs.mkdir(submoduleSource);
+      await fs.writeFile(path.join(submoduleSource, 'inner.txt'), 'submodule');
+      await initGitRepo(submoduleSource);
+
+      await fs.writeFile(path.join(parentRepo, 'root.txt'), 'root');
+      await initGitRepo(parentRepo);
+      await runExecFile(
+        'git',
+        [
+          '-c',
+          'protocol.file.allow=always',
+          'submodule',
+          'add',
+          submoduleSource,
+          'vendor/lib',
+        ],
+        parentRepo,
+      );
+      await runExecFile(
+        'git',
+        [
+          '-c',
+          'user.name=Qwen Test',
+          '-c',
+          'user.email=qwen-test@example.com',
+          'commit',
+          '--no-gpg-sign',
+          '-m',
+          'add submodule',
+        ],
+        parentRepo,
+      );
+
+      const ignore = loadIgnoreRules({
+        projectRoot: parentRepo,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: parentRepo,
+        cwd: parentRepo,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('vendor/lib/inner.txt');
+    });
+
     it('should resolve the git root from a subdirectory crawl', async () => {
       tmpDir = await createTmpDir({
         src: ['file2.js'],
