@@ -33,7 +33,7 @@ export const SESSION_PERSISTENT_FIELDS = [
   // Read tracking
   'lastReadMessageId', 'hasUnread',
   // Config
-  'enabledSourceSlugs', 'permissionMode', 'previousPermissionMode', 'workingDirectory',
+  'enabledSourceSlugs', 'workingDirectory',
   // Connection/runtime
   'thinkingLevel',
   // Sharing
@@ -111,9 +111,9 @@ export interface SessionConfig {
   lastMessageAt?: number;
   /** Whether this session is flagged */
   isFlagged?: boolean;
-  /** Permission mode for this session */
+  /** Legacy/runtime-only permission mode. New JSONL headers do not persist this field. */
   permissionMode?: PermissionMode;
-  /** Previous permission mode (used to preserve modeTransition context across restarts) */
+  /** Legacy/runtime-only previous permission mode. New JSONL headers do not persist this field. */
   previousPermissionMode?: PermissionMode;
   /** User-controlled session status - determines inbox vs completed */
   sessionStatus?: SessionStatus;
@@ -224,9 +224,9 @@ export interface SessionHeader {
   lastMessageAt?: number;
   /** Whether this session is flagged */
   isFlagged?: boolean;
-  /** Permission mode for this session */
+  /** Legacy/runtime-only permission mode. New JSONL headers do not persist this field. */
   permissionMode?: PermissionMode;
-  /** Previous permission mode (used to preserve modeTransition context across restarts) */
+  /** Legacy/runtime-only previous permission mode. New JSONL headers do not persist this field. */
   previousPermissionMode?: PermissionMode;
   /** User-controlled session status - determines inbox vs completed */
   sessionStatus?: SessionStatus;
@@ -319,9 +319,9 @@ export interface SessionMetadata {
   sessionStatus?: SessionStatus;
   /** Labels applied to this session (bare IDs or "id::value" entries) */
   labels?: string[];
-  /** Permission mode for this session */
+  /** Legacy/runtime-only permission mode. New session metadata does not persist this field. */
   permissionMode?: PermissionMode;
-  /** Previous permission mode (used to preserve modeTransition context across restarts) */
+  /** Legacy/runtime-only previous permission mode. New session metadata does not persist this field. */
   previousPermissionMode?: PermissionMode;
   /** Number of plan files for this session */
   planCount?: number;

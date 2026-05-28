@@ -69,6 +69,8 @@ export interface AppShellContextType {
   onSessionLabelsChange?: (sessionId: string, labels: string[]) => void
   /** Enabled permission modes for Shift+Tab cycling */
   enabledModes?: PermissionMode[]
+  /** App-wide permission mode shared by every session */
+  globalPermissionMode: PermissionMode
   /** Dynamic todo states from workspace config (provided by AppShell, defaults to empty) */
   sessionStatuses?: SessionStatusConfig[]
 
@@ -253,9 +255,13 @@ export function useSessionOptionsFor(sessionId: string): {
   setPermissionMode: (mode: PermissionMode) => void
   isSafeModeActive: () => boolean
 } {
-  const { sessionOptions, onSessionOptionsChange } = useAppShellContext()
+  const { sessionOptions, globalPermissionMode, onSessionOptionsChange } = useAppShellContext()
 
-  const options = sessionOptions.get(sessionId) ?? defaultSessionOptions
+  const options = {
+    ...defaultSessionOptions,
+    ...sessionOptions.get(sessionId),
+    permissionMode: globalPermissionMode,
+  }
 
   const setOption = useCallback(<K extends keyof SessionOptions>(
     key: K,

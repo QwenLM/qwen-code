@@ -1,12 +1,44 @@
 import { beforeEach, describe, expect, it, mock } from 'bun:test'
 import { RPC_CHANNELS } from '../../../shared/types'
-import type { RpcServer } from '@craft-agent/server-core/transport'
+import type { HandlerFn, RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 
-type HandlerFn = (ctx: { clientId: string }, ...args: any[]) => Promise<any> | any
+const requestContext = {
+  clientId: 'client-1',
+  workspaceId: null,
+  webContentsId: null,
+}
 
 const getDefaultThinkingLevelMock = mock(() => 'think')
 const setDefaultThinkingLevelMock = mock((_level: string) => true)
+const getQwenCoreSettingsViaAcpMock = mock(async () => ({
+  user: {
+    path: '',
+    values: { 'tools.approvalMode': 'yolo' },
+    mcpServers: [],
+    hooks: [],
+  },
+  workspace: { path: '', values: {}, mcpServers: [], hooks: [] },
+  merged: {
+    values: {},
+    mcpServers: [],
+    hooks: [],
+    extensions: [],
+  },
+  workspaceTrusted: true,
+}))
+const setQwenCoreSettingViaAcpMock = mock(async () => ({
+  user: { path: '', values: {}, mcpServers: [], hooks: [] },
+  workspace: { path: '', values: {}, mcpServers: [], hooks: [] },
+  merged: {
+    values: { 'tools.approvalMode': 'yolo' },
+    mcpServers: [],
+    hooks: [],
+    extensions: [],
+  },
+  workspaceTrusted: true,
+}))
+const applyGlobalPermissionModeMock = mock(async (_mode: string) => {})
 
 mock.module('@craft-agent/shared/config', () => ({
   getPreferencesPath: () => '/tmp/preferences.json',
@@ -17,6 +49,16 @@ mock.module('@craft-agent/shared/config', () => ({
   getWorkspaceByNameOrId: () => null,
   getDefaultThinkingLevel: getDefaultThinkingLevelMock,
   setDefaultThinkingLevel: setDefaultThinkingLevelMock,
+  isProtectedWorkspace: () => false,
+}))
+
+mock.module('@craft-agent/shared/agent', () => ({
+  getQwenCoreSettingsViaAcp: getQwenCoreSettingsViaAcpMock,
+  setQwenCoreSettingViaAcp: setQwenCoreSettingViaAcpMock,
+  getQwenMemorySettingsViaAcp: mock(async () => ({})),
+  setQwenMemorySettingsViaAcp: mock(async () => ({})),
+  getQwenSettingsPathViaAcp: mock(async () => ''),
+  getQwenMemoryPathsViaAcp: mock(async () => ({})),
 }))
 
 describe('settings default thinking RPC handlers', () => {
@@ -26,6 +68,9 @@ describe('settings default thinking RPC handlers', () => {
     handlers.clear()
     getDefaultThinkingLevelMock.mockClear()
     setDefaultThinkingLevelMock.mockClear()
+    getQwenCoreSettingsViaAcpMock.mockClear()
+    setQwenCoreSettingViaAcpMock.mockClear()
+    applyGlobalPermissionModeMock.mockClear()
 
     const server: RpcServer = {
       handle(channel, handler) {
@@ -38,7 +83,9 @@ describe('settings default thinking RPC handlers', () => {
     }
 
     const deps: HandlerDeps = {
-      sessionManager: {} as HandlerDeps['sessionManager'],
+      sessionManager: {
+        applyGlobalPermissionMode: applyGlobalPermissionModeMock,
+      } as unknown as HandlerDeps['sessionManager'],
       platform: {
         appRootPath: '',
         resourcesPath: '',
@@ -74,7 +121,7 @@ describe('settings default thinking RPC handlers', () => {
     const getHandler = handlers.get(RPC_CHANNELS.settings.GET_DEFAULT_THINKING_LEVEL)
     expect(getHandler).toBeTruthy()
 
-    const result = await getHandler!({ clientId: 'client-1' })
+    const result = await getHandler!(requestContext)
     expect(result).toBe('think')
     expect(getDefaultThinkingLevelMock).toHaveBeenCalledTimes(1)
   })
@@ -83,7 +130,7 @@ describe('settings default thinking RPC handlers', () => {
     const setHandler = handlers.get(RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL)
     expect(setHandler).toBeTruthy()
 
-    const result = await setHandler!({ clientId: 'client-1' }, 'max')
+    const result = await setHandler!(requestContext, 'max')
     expect(result).toEqual({ success: true })
     expect(setDefaultThinkingLevelMock).toHaveBeenCalledWith('max')
     expect(setDefaultThinkingLevelMock).toHaveBeenCalledTimes(1)
@@ -93,7 +140,34 @@ describe('settings default thinking RPC handlers', () => {
     const setHandler = handlers.get(RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL)
     expect(setHandler).toBeTruthy()
 
-    await expect(setHandler!({ clientId: 'client-1' }, 'ultra')).rejects.toThrow('Invalid thinking level')
+    await expect(setHandler!(requestContext, 'ultra')).rejects.toThrow('Invalid thinking level')
     expect(setDefaultThinkingLevelMock).not.toHaveBeenCalled()
+  })
+
+  it('returns global permission mode through Qwen ACP', async () => {
+    const getHandler = handlers.get(RPC_CHANNELS.settings.GET_GLOBAL_PERMISSION_MODE)
+    expect(getHandler).toBeTruthy()
+
+    const result = await getHandler!(requestContext)
+    expect(result).toBe('allow-all')
+    expect(getQwenCoreSettingsViaAcpMock).toHaveBeenCalledTimes(1)
+    expect(applyGlobalPermissionModeMock).toHaveBeenCalledWith('allow-all', {
+      changedBy: 'restore',
+    })
+  })
+
+  it('persists global permission mode through Qwen ACP', async () => {
+    const setHandler = handlers.get(RPC_CHANNELS.settings.SET_GLOBAL_PERMISSION_MODE)
+    expect(setHandler).toBeTruthy()
+
+    const result = await setHandler!(requestContext, 'yolo')
+    expect(result).toEqual({ success: true })
+    const call = setQwenCoreSettingViaAcpMock.mock.calls[0] as unknown[]
+    expect(call.slice(1)).toEqual([
+      'user',
+      'tools.approvalMode',
+      'yolo',
+    ])
+    expect(applyGlobalPermissionModeMock).toHaveBeenCalledWith('allow-all')
   })
 })

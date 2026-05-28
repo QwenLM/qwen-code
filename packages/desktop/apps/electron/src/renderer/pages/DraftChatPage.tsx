@@ -32,6 +32,8 @@ export default function DraftChatPage() {
     skills,
     labels,
     enabledModes,
+    globalPermissionMode,
+    onSessionOptionsChange,
     rightSidebarButton,
     leadingAction,
     isCompactMode,
@@ -76,7 +78,7 @@ export default function DraftChatPage() {
   const [inputValue, setInputValue] = React.useState(draft.input)
   const [attachmentsValue, setAttachmentsValue] = React.useState<FileAttachment[]>([])
   const [permissionMode, setPermissionMode] = React.useState<PermissionMode>(
-    draft.createOptions.permissionMode ?? workspaceSettings?.permissionMode ?? defaultSessionOptions.permissionMode
+    draft.createOptions.permissionMode ?? globalPermissionMode
   )
   const [thinkingLevel, setThinkingLevel] = React.useState<ThinkingLevel>(
     draft.createOptions.thinkingLevel ?? workspaceSettings?.thinkingLevel ?? defaultSessionOptions.thinkingLevel
@@ -113,7 +115,7 @@ export default function DraftChatPage() {
 
     setInputValue(draft.input)
     setAttachmentsValue([])
-    setPermissionMode(draft.createOptions.permissionMode ?? defaultSessionOptions.permissionMode)
+    setPermissionMode(draft.createOptions.permissionMode ?? globalPermissionMode)
     setThinkingLevel(draft.createOptions.thinkingLevel ?? defaultSessionOptions.thinkingLevel)
     setModel(draft.createOptions.model)
     setLlmConnection(draft.createOptions.llmConnection)
@@ -131,7 +133,7 @@ export default function DraftChatPage() {
     setSourcesTouched(false)
     setSessionStatusTouched(false)
     setLabelsTouched(false)
-  }, [draft.nonce, draft.input, draft.createOptions, filterStatus, filterLabel])
+  }, [draft.nonce, draft.input, draft.createOptions, filterStatus, filterLabel, globalPermissionMode])
 
   const handleInputChange = React.useCallback((nextValue: string) => {
     setInputValue(nextValue)
@@ -146,7 +148,7 @@ export default function DraftChatPage() {
 
   React.useEffect(() => {
     if (draft.createOptions.permissionMode === undefined && !permissionModeTouched) {
-      setPermissionMode(workspaceSettings?.permissionMode ?? defaultSessionOptions.permissionMode)
+      setPermissionMode(globalPermissionMode)
     }
     if (draft.createOptions.thinkingLevel === undefined && !thinkingLevelTouched) {
       setThinkingLevel(workspaceSettings?.thinkingLevel ?? defaultSessionOptions.thinkingLevel)
@@ -161,6 +163,7 @@ export default function DraftChatPage() {
     workspaceSettings,
     draft.createOptions,
     permissionModeTouched,
+    globalPermissionMode,
     thinkingLevelTouched,
     workingDirectoryTouched,
     sourcesTouched,
@@ -335,6 +338,9 @@ export default function DraftChatPage() {
           onPermissionModeChange={(nextMode) => {
             setPermissionMode(nextMode)
             setPermissionModeTouched(true)
+            onSessionOptionsChange(NEW_SESSION_DRAFT_ID, {
+              permissionMode: nextMode,
+            })
           }}
           enabledModes={enabledModes}
           inputValue={inputValue}

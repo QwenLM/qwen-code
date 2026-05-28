@@ -240,7 +240,7 @@ describe('Qwen native history loading', () => {
     expect(imported?.sdkCwd).toBeUndefined();
     expect(imported?.workingDirectory).toBeUndefined();
     expect(imported?.name).toBeUndefined();
-    expect(imported?.permissionMode).toBe('allow-all');
+    expect(imported?.permissionMode).toBeUndefined();
     expect(imported?.llmConnection).toBeUndefined();
     expect(imported?.connectionLocked).toBeUndefined();
     expect(imported?.createdAt).toBeUndefined();

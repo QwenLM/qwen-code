@@ -190,6 +190,8 @@ export const RPC_CHANNELS = {
     CONNECT_QWEN_PROVIDER: 'settings:connectQwenProvider',
     GET_DEFAULT_THINKING_LEVEL: 'settings:getDefaultThinkingLevel',
     SET_DEFAULT_THINKING_LEVEL: 'settings:setDefaultThinkingLevel',
+    GET_GLOBAL_PERMISSION_MODE: 'settings:getGlobalPermissionMode',
+    SET_GLOBAL_PERMISSION_MODE: 'settings:setGlobalPermissionMode',
     GET_NETWORK_PROXY: 'settings:getNetworkProxy',
     SET_NETWORK_PROXY: 'settings:setNetworkProxy',
     GET_SERVER_CONFIG: 'settings:getServerConfig',

@@ -95,7 +95,17 @@ export interface ISessionManager {
   // Session configuration
   // ---------------------------------------------------------------------------
 
-  setSessionPermissionMode(sessionId: string, mode: PermissionMode): void
+  applyGlobalPermissionMode(
+    mode: PermissionMode,
+    options?: {
+      changedBy?: 'user' | 'system' | 'restore' | 'automation' | 'unknown'
+    },
+  ): Promise<void>
+  setGlobalPermissionMode(mode: PermissionMode): Promise<void>
+  setSessionPermissionMode(
+    sessionId: string,
+    mode: PermissionMode,
+  ): Promise<void>
   setSessionThinkingLevel(sessionId: string, level: ThinkingLevel): void
   updateWorkingDirectory(sessionId: string, path: string): void
   setSessionSources(sessionId: string, sourceSlugs: string[]): Promise<void>

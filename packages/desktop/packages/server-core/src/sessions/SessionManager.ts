@@ -1222,6 +1222,8 @@ function managedToSession(
     messageCount: m.messageCount,
     lastFinalMessageId: m.lastFinalMessageId,
     // Runtime-only fields
+    permissionMode: m.permissionMode,
+    previousPermissionMode: m.previousPermissionMode,
     workspaceId: m.workspace.id,
     workspaceName: m.workspace.name,
     messages: [],
@@ -1252,6 +1254,20 @@ function compareManagedSessionsByActivityDesc(
   if (byCreatedAt !== 0) return byCreatedAt
 
   return a.id.localeCompare(b.id)
+}
+
+function mapPermissionModeToQwenApprovalMode(mode: PermissionMode): string {
+  switch (mode) {
+    case 'allow-all':
+      return 'yolo'
+    case 'safe':
+      return 'plan'
+    case 'auto-edit':
+      return 'auto-edit'
+    case 'ask':
+    default:
+      return 'default'
+  }
 }
 
 // Performance: Batch IPC delta events to reduce renderer load
@@ -1325,6 +1341,8 @@ export class SessionManager implements ISessionManager {
   private taskOutputIndex: Map<string, string> = new Map()
   /** Monotonic clock to ensure strictly increasing message timestamps */
   private lastTimestamp = 0
+  private currentGlobalPermissionMode: PermissionMode =
+    loadConfigDefaults().workspaceDefaults.permissionMode
 
   constructor(options: SessionManagerOptions = {}) {
     this.createExternalSessionAgentOverride = options.createExternalSessionAgent
@@ -2089,6 +2107,7 @@ export class SessionManager implements ISessionManager {
   private loadSessionsFromDisk(): void {
     try {
       const workspaces = getWorkspaces()
+      const globalPermissionMode = this.currentGlobalPermissionMode
       let totalSessions = 0
 
       // Iterate over each workspace and load its sessions
@@ -2106,6 +2125,7 @@ export class SessionManager implements ISessionManager {
           const managed = createManagedSession(meta, workspace, {
             enabledSourceSlugs: undefined, // Loaded with messages
             workingDirectory: meta.workingDirectory ?? wsDefaultWorkingDir,
+            permissionMode: globalPermissionMode,
           })
 
           // Migration: clear orphaned llmConnection references (e.g., after connection was deleted)
@@ -2123,9 +2143,9 @@ export class SessionManager implements ISessionManager {
             }
           }
 
-          // Initialize mode-manager state for restored sessions even before agent creation.
-          // This keeps diagnostics/effective mode aligned with persisted session metadata.
-          setPermissionMode(meta.id, managed.permissionMode ?? 'ask', {
+          // Initialize mode-manager state for restored sessions even before
+          // agent creation. The app-wide mode is authoritative.
+          setPermissionMode(meta.id, globalPermissionMode, {
             changedBy: 'restore',
           })
           if (managed.previousPermissionMode) {
@@ -2207,10 +2227,7 @@ export class SessionManager implements ISessionManager {
     const workspaceConfig = loadWorkspaceConfig(workspace.rootPath)
     const sessionListCwd =
       workspaceConfig?.defaults?.workingDirectory || workspace.rootPath
-    const defaultPermissionMode =
-      workspaceConfig?.defaults?.permissionMode ??
-      loadConfigDefaults().workspaceDefaults.permissionMode ??
-      'ask'
+    const defaultPermissionMode = this.currentGlobalPermissionMode
     const backendContext = resolveBackendContext({
       workspaceDefaultConnectionSlug:
         workspaceConfig?.defaults?.defaultLlmConnection,
@@ -2976,7 +2993,6 @@ export class SessionManager implements ISessionManager {
       createdAt,
       lastUsedAt: Math.max(timestamp, inMemoryLastMessageAt),
       lastMessageAt: inMemoryLastMessageAt,
-      permissionMode: defaultPermissionMode,
       ...(model ? { model } : {}),
       thinkingLevel: defaultThinkingLevel,
       messages: shouldPersistInspectedMessages
@@ -3012,6 +3028,7 @@ export class SessionManager implements ISessionManager {
       createdAt,
       lastUsedAt: Math.max(timestamp, inMemoryLastMessageAt),
       lastMessageAt: inMemoryLastMessageAt,
+      permissionMode: defaultPermissionMode,
       preview: info.preview ?? undefined,
       ...(connectionSlug !== QWEN_CODE_CONNECTION_SLUG &&
       typeof info.messageCount === 'number'
@@ -3030,14 +3047,13 @@ export class SessionManager implements ISessionManager {
       this.markExternalMessagesLoadedThrough(imported)
     }
     this.sessions.set(imported.id, imported)
-    setPermissionMode(imported.id, imported.permissionMode ?? 'ask', {
+    setPermissionMode(imported.id, defaultPermissionMode, {
       changedBy: 'restore',
     })
 
     const automationSystem = this.automationSystems.get(workspace.rootPath)
     if (automationSystem) {
       automationSystem.setInitialSessionMetadata(imported.id, {
-        permissionMode: imported.permissionMode,
         labels: imported.labels,
         isFlagged: imported.isFlagged,
         sessionStatus: imported.sessionStatus,
@@ -3140,7 +3156,6 @@ export class SessionManager implements ISessionManager {
         | 'enabledSourceSlugs'
         | 'workingDirectory'
         | 'sdkCwd'
-        | 'permissionMode'
         | 'sharedUrl'
         | 'sharedId'
         | 'model'
@@ -3880,17 +3895,15 @@ export class SessionManager implements ISessionManager {
       throw new Error(`Workspace ${workspaceId} not found`)
     }
 
-    // Get new session defaults from workspace config (with global fallback)
-    // Options.permissionMode overrides the workspace default (used by EditPopover for auto-execute)
+    // Permission mode is app-wide. A caller-provided mode becomes the new
+    // global mode before the session is created.
     const workspaceRootPath = workspace.rootPath
     const wsConfig = loadWorkspaceConfig(workspaceRootPath)
-    const globalDefaults = loadConfigDefaults()
 
-    // Read permission mode from workspace config, fallback to global defaults
-    const defaultPermissionMode =
-      options?.permissionMode ??
-      wsConfig?.defaults?.permissionMode ??
-      globalDefaults.workspaceDefaults.permissionMode
+    if (options?.permissionMode) {
+      await this.setGlobalPermissionMode(options.permissionMode)
+    }
+    const defaultPermissionMode = this.currentGlobalPermissionMode
 
     const userDefaultWorkingDir =
       wsConfig?.defaults?.workingDirectory || undefined
@@ -4140,7 +4153,6 @@ export class SessionManager implements ISessionManager {
     const storedSession = await createStoredSession(workspaceRootPath, {
       name: options?.name,
       slugHint: options?.slugHint,
-      permissionMode: sessionPermissionMode,
       workingDirectory: resolvedWorkingDir,
       hidden: options?.hidden,
       sessionStatus: options?.sessionStatus,
@@ -4303,7 +4315,6 @@ export class SessionManager implements ISessionManager {
     const automationSystem = this.automationSystems.get(workspaceRootPath)
     if (automationSystem) {
       automationSystem.setInitialSessionMetadata(storedSession.id, {
-        permissionMode: storedSession.permissionMode,
         labels: storedSession.labels,
         isFlagged: storedSession.isFlagged,
         sessionStatus: storedSession.sessionStatus,
@@ -5312,34 +5323,19 @@ export class SessionManager implements ISessionManager {
 
       // Set up mode change handlers
       managed.agent.onPermissionModeChange = (mode) => {
-        if (managed.permissionMode === mode) {
+        if (managed.permissionMode === mode && this.currentGlobalPermissionMode === mode) {
           return
         }
 
-        managed.permissionMode = mode
-        const diagnostics = getPermissionModeDiagnostics(managed.id)
-        managed.previousPermissionMode = diagnostics.previousPermissionMode
-        this.persistSession(managed)
-        sessionLog.info('Permission mode changed (agent callback)', {
-          sessionId: managed.id,
-          permissionMode: mode,
-          modeVersion: diagnostics.modeVersion,
-          changedBy: diagnostics.lastChangedBy,
-          changedAt: diagnostics.lastChangedAt,
-        })
-        this.sendEvent(
-          {
-            type: 'permission_mode_changed',
+        void this.setGlobalPermissionMode(mode, {
+          preferredSessionId: managed.id,
+        }).catch((error) => {
+          sessionLog.warn('Failed to apply agent permission mode globally', {
             sessionId: managed.id,
-            permissionMode: managed.permissionMode,
-            modeVersion: diagnostics.modeVersion,
-            changedBy: diagnostics.lastChangedBy,
-            changedAt: diagnostics.lastChangedAt,
-            previousPermissionMode: diagnostics.previousPermissionMode,
-            transitionDisplay: diagnostics.transitionDisplay,
-          },
-          managed.workspace.id,
-        )
+            permissionMode: mode,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
       }
 
       // Wire up onPlanSubmitted to add plan message to conversation
@@ -5879,8 +5875,8 @@ export class SessionManager implements ISessionManager {
       // which detect filesystem changes and update all affected sessions.
       // See setupConfigWatcher() for the full reload logic.
 
-      // Apply session-scoped permission mode to the newly created agent
-      // This ensures the UI toggle state is reflected in the agent before first message
+      // Apply app-wide permission mode to the newly created agent.
+      managed.permissionMode = this.currentGlobalPermissionMode
       if (managed.permissionMode) {
         setPermissionMode(managed.id, managed.permissionMode, {
           changedBy: 'restore',
@@ -5892,6 +5888,7 @@ export class SessionManager implements ISessionManager {
           )
         }
         managed.agent!.setPermissionMode(managed.permissionMode)
+        void this.persistQwenApprovalMode(managed.permissionMode, managed.id)
         const diagnostics = getPermissionModeDiagnostics(managed.id)
         sessionLog.info('Applied permission mode to agent', {
           sessionId: managed.id,
@@ -6167,7 +6164,7 @@ export class SessionManager implements ISessionManager {
     }
 
     if (managed.permissionMode === 'safe') {
-      this.setSessionPermissionMode(sessionId, 'allow-all')
+      await this.setSessionPermissionMode(sessionId, 'allow-all')
     }
 
     await this.sendMessage(sessionId, PLAN_APPROVAL_MESSAGE)
@@ -9026,75 +9023,144 @@ export class SessionManager implements ISessionManager {
     }
   }
 
+  async applyGlobalPermissionMode(
+    mode: PermissionMode,
+    options: {
+      changedBy?: 'user' | 'system' | 'restore' | 'automation' | 'unknown'
+    } = {},
+  ): Promise<void> {
+    this.currentGlobalPermissionMode = mode
+    const changedBy = options.changedBy ?? 'user'
+    for (const managed of this.sessions.values()) {
+      this.applyPermissionModeToManagedSession(managed, mode, changedBy)
+    }
+  }
+
   /**
-   * Set the permission mode for a session
+   * Set the app-wide permission mode. Every live session follows this value.
    */
-  setSessionPermissionMode(sessionId: string, mode: PermissionMode): void {
-    const managed = this.sessions.get(sessionId)
-    if (managed) {
-      const previousManagedMode = managed.permissionMode ?? 'ask'
-      const diagnosticsBefore = getPermissionModeDiagnostics(sessionId)
-      const previousEffectiveMode = diagnosticsBefore.permissionMode
+  async setGlobalPermissionMode(
+    mode: PermissionMode,
+    options: {
+      changedBy?: 'user' | 'system' | 'restore' | 'automation' | 'unknown'
+      preferredSessionId?: string
+    } = {},
+  ): Promise<void> {
+    await this.applyGlobalPermissionMode(
+      mode,
+      options.changedBy ? { changedBy: options.changedBy } : {},
+    )
+    await this.persistQwenApprovalMode(mode, options.preferredSessionId)
+  }
 
-      // No-op only when BOTH managed state and mode-manager state already match.
-      // If managed state matches but diagnostics drifted, heal authoritative mode state.
-      if (previousManagedMode === mode && previousEffectiveMode === mode) {
-        return
-      }
+  /**
+   * Existing session-scoped command entry point. Mode is app-wide now, so this
+   * fans out to every session while preserving the old RPC shape.
+   */
+  async setSessionPermissionMode(
+    sessionId: string,
+    mode: PermissionMode,
+  ): Promise<void> {
+    await this.setGlobalPermissionMode(mode, { preferredSessionId: sessionId })
+  }
 
-      if (previousManagedMode === mode && previousEffectiveMode !== mode) {
-        sessionLog.warn(
-          'Permission mode drift detected on same-mode update; reconciling authoritative mode state',
-          {
-            sessionId,
-            managedMode: previousManagedMode,
-            diagnosticsMode: previousEffectiveMode,
-            targetMode: mode,
-            modeVersion: diagnosticsBefore.modeVersion,
-            changedBy: diagnosticsBefore.lastChangedBy,
-          },
-        )
-      }
+  private applyPermissionModeToManagedSession(
+    managed: ManagedSession,
+    mode: PermissionMode,
+    changedBy: 'user' | 'system' | 'restore' | 'automation' | 'unknown',
+  ): boolean {
+    const sessionId = managed.id
+    const previousManagedMode = managed.permissionMode ?? 'ask'
+    const diagnosticsBefore = getPermissionModeDiagnostics(sessionId)
+    const previousEffectiveMode = diagnosticsBefore.permissionMode
 
-      // Update in-memory managed mode first
-      managed.permissionMode = mode
+    // No-op only when BOTH managed state and mode-manager state already match.
+    // If managed state matches but diagnostics drifted, heal authoritative mode state.
+    if (previousManagedMode === mode && previousEffectiveMode === mode) {
+      return false
+    }
 
-      // Reconcile mode-manager state for this specific session.
-      if (previousEffectiveMode !== mode) {
-        const changedBy = previousManagedMode === mode ? 'restore' : 'user'
-        setPermissionMode(sessionId, mode, { changedBy })
-      }
+    if (previousManagedMode === mode && previousEffectiveMode !== mode) {
+      sessionLog.warn(
+        'Permission mode drift detected on same-mode update; reconciling authoritative mode state',
+        {
+          sessionId,
+          managedMode: previousManagedMode,
+          diagnosticsMode: previousEffectiveMode,
+          targetMode: mode,
+          modeVersion: diagnosticsBefore.modeVersion,
+          changedBy: diagnosticsBefore.lastChangedBy,
+        },
+      )
+    }
 
-      const diagnostics = getPermissionModeDiagnostics(sessionId)
-      managed.previousPermissionMode = diagnostics.previousPermissionMode
-      sessionLog.info('Permission mode changed', {
-        sessionId,
+    managed.permissionMode = mode
+
+    if (previousEffectiveMode !== mode) {
+      setPermissionMode(sessionId, mode, {
+        changedBy: previousManagedMode === mode ? 'restore' : changedBy,
+      })
+    }
+
+    const diagnostics = getPermissionModeDiagnostics(sessionId)
+    managed.previousPermissionMode = diagnostics.previousPermissionMode
+    sessionLog.info('Permission mode changed', {
+      sessionId,
+      permissionMode: mode,
+      modeVersion: diagnostics.modeVersion,
+      changedBy: diagnostics.lastChangedBy,
+      changedAt: diagnostics.lastChangedAt,
+    })
+
+    if (managed.agent) {
+      managed.agent.setPermissionMode(mode)
+    }
+
+    this.sendEvent(
+      {
+        type: 'permission_mode_changed',
+        sessionId: managed.id,
         permissionMode: mode,
         modeVersion: diagnostics.modeVersion,
         changedBy: diagnostics.lastChangedBy,
         changedAt: diagnostics.lastChangedAt,
-      })
+        previousPermissionMode: diagnostics.previousPermissionMode,
+        transitionDisplay: diagnostics.transitionDisplay,
+      },
+      managed.workspace.id,
+    )
+    this.persistSession(managed)
+    return true
+  }
 
-      // Forward to the agent instance so backends can propagate mode changes downstream.
-      if (managed.agent) {
-        managed.agent.setPermissionMode(mode)
-      }
+  private async persistQwenApprovalMode(
+    mode: PermissionMode,
+    preferredSessionId?: string,
+  ): Promise<void> {
+    const preferred = preferredSessionId
+      ? this.sessions.get(preferredSessionId)
+      : undefined
+    const candidates = [
+      ...(preferred ? [preferred] : []),
+      ...[...this.sessions.values()].filter((s) => s !== preferred),
+    ]
 
-      this.sendEvent(
-        {
-          type: 'permission_mode_changed',
+    for (const managed of candidates) {
+      const agent = managed.agent
+      if (!agent || !canManageQwenSettings(agent)) continue
+      try {
+        await agent.setCoreSetting(
+          'user',
+          'tools.approvalMode',
+          mapPermissionModeToQwenApprovalMode(mode),
+        )
+        return
+      } catch (error) {
+        sessionLog.warn('Failed to persist Qwen approval mode via ACP', {
           sessionId: managed.id,
-          permissionMode: mode,
-          modeVersion: diagnostics.modeVersion,
-          changedBy: diagnostics.lastChangedBy,
-          changedAt: diagnostics.lastChangedAt,
-          previousPermissionMode: diagnostics.previousPermissionMode,
-          transitionDisplay: diagnostics.transitionDisplay,
-        },
-        managed.workspace.id,
-      )
-      // Persist to disk
-      this.persistSession(managed)
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
   }
 
@@ -9324,23 +9390,25 @@ export class SessionManager implements ISessionManager {
       diagnostics = getPermissionModeDiagnostics(sessionId)
     }
 
-    // Heal restore races where mode-manager still has default state while
-    // session metadata already has a persisted non-default mode.
-    if (
-      managed.permissionMode &&
-      diagnostics.permissionMode !== managed.permissionMode
-    ) {
+    const globalPermissionMode = this.currentGlobalPermissionMode
+    if (managed.permissionMode !== globalPermissionMode) {
+      managed.permissionMode = globalPermissionMode
+    }
+
+    // Heal restore races where mode-manager still has stale session state while
+    // the app-wide permission mode is authoritative.
+    if (diagnostics.permissionMode !== globalPermissionMode) {
       sessionLog.warn(
-        'Permission mode diagnostics mismatch, reconciling to managed session mode',
+        'Permission mode diagnostics mismatch, reconciling to global mode',
         {
           sessionId,
-          managedMode: managed.permissionMode,
+          globalMode: globalPermissionMode,
           diagnosticsMode: diagnostics.permissionMode,
           modeVersion: diagnostics.modeVersion,
           changedBy: diagnostics.lastChangedBy,
         },
       )
-      setPermissionMode(sessionId, managed.permissionMode, {
+      setPermissionMode(sessionId, globalPermissionMode, {
         changedBy: 'restore',
       })
       if (managed.previousPermissionMode) {
@@ -9415,15 +9483,13 @@ export class SessionManager implements ISessionManager {
     }
 
     const workspaceConfig = loadWorkspaceConfig(workspace.rootPath)
-    const globalDefaults = loadConfigDefaults()
     const workingDirectory =
       options.workingDirectory ??
       workspaceConfig?.defaults?.workingDirectory ??
       undefined
     const permissionMode =
       options.permissionMode ??
-      workspaceConfig?.defaults?.permissionMode ??
-      globalDefaults.workspaceDefaults.permissionMode
+      this.currentGlobalPermissionMode
     const thinkingLevel =
       normalizeThinkingLevel(options.thinkingLevel) ??
       normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ??
@@ -9550,15 +9616,13 @@ export class SessionManager implements ISessionManager {
     }
 
     const workspaceConfig = loadWorkspaceConfig(workspace.rootPath)
-    const globalDefaults = loadConfigDefaults()
     const workingDirectory =
       options.workingDirectory ??
       workspaceConfig?.defaults?.workingDirectory ??
       undefined
     const permissionMode =
       options.permissionMode ??
-      workspaceConfig?.defaults?.permissionMode ??
-      globalDefaults.workspaceDefaults.permissionMode
+      this.currentGlobalPermissionMode
     const thinkingLevel =
       normalizeThinkingLevel(options.thinkingLevel) ??
       normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ??
@@ -9677,15 +9741,13 @@ export class SessionManager implements ISessionManager {
     }
 
     const workspaceConfig = loadWorkspaceConfig(workspace.rootPath)
-    const globalDefaults = loadConfigDefaults()
     const workingDirectory =
       options.workingDirectory ??
       workspaceConfig?.defaults?.workingDirectory ??
       undefined
     const permissionMode =
       options.permissionMode ??
-      workspaceConfig?.defaults?.permissionMode ??
-      globalDefaults.workspaceDefaults.permissionMode
+      this.currentGlobalPermissionMode
     const thinkingLevel =
       normalizeThinkingLevel(options.thinkingLevel) ??
       normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ??
@@ -9786,15 +9848,13 @@ export class SessionManager implements ISessionManager {
     }
 
     const workspaceConfig = loadWorkspaceConfig(workspace.rootPath)
-    const globalDefaults = loadConfigDefaults()
     const workingDirectory =
       options.workingDirectory ??
       workspaceConfig?.defaults?.workingDirectory ??
       undefined
     const permissionMode =
       options.permissionMode ??
-      workspaceConfig?.defaults?.permissionMode ??
-      globalDefaults.workspaceDefaults.permissionMode
+      this.currentGlobalPermissionMode
     const thinkingLevel =
       normalizeThinkingLevel(options.thinkingLevel) ??
       normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ??
@@ -11479,8 +11539,6 @@ export class SessionManager implements ISessionManager {
       lastUsedAt: Date.now(),
       lastMessageAt: header.lastMessageAt,
       isFlagged: header.isFlagged,
-      permissionMode: header.permissionMode,
-      previousPermissionMode: header.previousPermissionMode,
       sessionStatus: header.sessionStatus,
       labels: header.labels,
       enabledSourceSlugs: header.enabledSourceSlugs,
@@ -11606,6 +11664,7 @@ export class SessionManager implements ISessionManager {
     const managed = createManagedSession(sessionMeta, workspace, {
       messagesLoaded: true,
       workingDirectory: storedSession.workingDirectory,
+      permissionMode: this.currentGlobalPermissionMode,
     })
     managed.messages = bundleMessages.map(storedToMessage)
 
@@ -11622,7 +11681,6 @@ export class SessionManager implements ISessionManager {
     const automationSystem = this.automationSystems.get(workspaceRootPath)
     if (automationSystem) {
       automationSystem.setInitialSessionMetadata(sessionId, {
-        permissionMode: storedSession.permissionMode,
         labels: storedSession.labels,
         isFlagged: storedSession.isFlagged,
         sessionStatus: storedSession.sessionStatus,

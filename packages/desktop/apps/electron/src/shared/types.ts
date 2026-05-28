@@ -932,6 +932,10 @@ export interface ElectronAPI {
   setDefaultThinkingLevel(
     level: ThinkingLevel,
   ): Promise<{ success: boolean; error?: string }>
+  getGlobalPermissionMode(): Promise<PermissionMode>
+  setGlobalPermissionMode(
+    mode: PermissionMode,
+  ): Promise<{ success: boolean; error?: string }>
   setWorkspaceDefaultLlmConnection(
     workspaceId: string,
     slug: string | null,

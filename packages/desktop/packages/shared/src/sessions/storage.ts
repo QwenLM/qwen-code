@@ -180,7 +180,6 @@ export async function createSession(
   options?: {
     name?: string;
     workingDirectory?: string;
-    permissionMode?: SessionConfig['permissionMode'];
     enabledSourceSlugs?: string[];
     model?: string;
     llmConnection?: string;
@@ -212,7 +211,6 @@ export async function createSession(
     lastUsedAt: now,
     workingDirectory: options?.workingDirectory,
     sdkCwd,
-    permissionMode: options?.permissionMode,
     enabledSourceSlugs: options?.enabledSourceSlugs,
     model: options?.model,
     llmConnection: options?.llmConnection,
@@ -562,7 +560,6 @@ export async function updateSessionMetadata(
     | 'enabledSourceSlugs'
     | 'workingDirectory'
     | 'sdkCwd'
-    | 'permissionMode'
     | 'sharedUrl'
     | 'sharedId'
     | 'model'
@@ -581,7 +578,6 @@ export async function updateSessionMetadata(
   if (updates.enabledSourceSlugs !== undefined) session.enabledSourceSlugs = updates.enabledSourceSlugs;
   if (updates.workingDirectory !== undefined) session.workingDirectory = updates.workingDirectory;
   if (updates.sdkCwd !== undefined) session.sdkCwd = updates.sdkCwd;
-  if (updates.permissionMode !== undefined) session.permissionMode = updates.permissionMode;
   if ('lastReadMessageId' in updates) session.lastReadMessageId = updates.lastReadMessageId;
   if ('hasUnread' in updates) session.hasUnread = updates.hasUnread;
   if ('sharedUrl' in updates) session.sharedUrl = updates.sharedUrl;

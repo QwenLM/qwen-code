@@ -258,6 +258,7 @@ const mockAppShellContext = {
   pendingCredentials: new Map(),
   currentModel: 'haiku',
   connectionDefaultModel: null,
+  globalPermissionMode: 'ask',
   sessionOptions: new Map(),
   getDraft: () => '',
   onSelectSession: () => {},

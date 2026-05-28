@@ -16,8 +16,8 @@ afterEach(() => {
   }
 });
 
-describe('session jsonl: permission mode normalization', () => {
-  it('normalizes canonical permissionMode and previousPermissionMode in header reads', () => {
+describe('session jsonl: approval mode fields', () => {
+  it('strips legacy permissionMode and previousPermissionMode in header reads', () => {
     const sessionDir = mkdtempSync(join(tmpdir(), 'session-mode-header-'));
     tempDirs.push(sessionDir);
 
@@ -42,11 +42,11 @@ describe('session jsonl: permission mode normalization', () => {
     writeFileSync(sessionFile, `${JSON.stringify(header)}\n`, 'utf-8');
 
     const loadedHeader = readSessionHeader(sessionFile);
-    expect(loadedHeader?.permissionMode).toBe('allow-all');
-    expect(loadedHeader?.previousPermissionMode).toBe('safe');
+    expect(loadedHeader?.permissionMode).toBeUndefined();
+    expect(loadedHeader?.previousPermissionMode).toBeUndefined();
   });
 
-  it('normalizes canonical mode values when loading full session', () => {
+  it('omits legacy mode values when loading full session', () => {
     const sessionDir = mkdtempSync(join(tmpdir(), 'session-mode-full-'));
     tempDirs.push(sessionDir);
 
@@ -78,7 +78,7 @@ describe('session jsonl: permission mode normalization', () => {
     writeFileSync(sessionFile, `${JSON.stringify(header)}\n${JSON.stringify(message)}\n`, 'utf-8');
 
     const loaded = readSessionJsonl(sessionFile);
-    expect(loaded?.permissionMode).toBe('safe');
-    expect(loaded?.previousPermissionMode).toBe('allow-all');
+    expect(loaded?.permissionMode).toBeUndefined();
+    expect(loaded?.previousPermissionMode).toBeUndefined();
   });
 });

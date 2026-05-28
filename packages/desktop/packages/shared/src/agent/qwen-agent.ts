@@ -616,6 +616,33 @@ export async function getQwenSettingsPathViaAcp(
   return settingsPath
 }
 
+export async function getQwenCoreSettingsViaAcp(
+  options: QwenSettingsAcpOptions,
+): Promise<QwenCoreSettingsSnapshot> {
+  const cwd = options.cwd || qwenSettingsCwd(options.hostRuntime)
+  const response = await callQwenSettingsAcpMethod(
+    { ...options, cwd },
+    'qwen/settings/getCore',
+    { cwd },
+  )
+  return response as unknown as QwenCoreSettingsSnapshot
+}
+
+export async function setQwenCoreSettingViaAcp(
+  options: QwenSettingsAcpOptions,
+  scope: QwenSettingsScope,
+  key: QwenCoreSettingKey,
+  value: QwenSettingValue,
+): Promise<QwenCoreSettingsSnapshot> {
+  const cwd = options.cwd || qwenSettingsCwd(options.hostRuntime)
+  const response = await callQwenSettingsAcpMethod(
+    { ...options, cwd },
+    'qwen/settings/setCoreValue',
+    { cwd, scope, key, value },
+  )
+  return response as unknown as QwenCoreSettingsSnapshot
+}
+
 export async function getQwenMemoryPathsViaAcp(
   options: QwenSettingsAcpOptions & { projectRoot?: string },
 ): Promise<QwenMemoryPaths> {

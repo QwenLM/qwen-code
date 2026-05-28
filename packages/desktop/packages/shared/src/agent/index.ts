@@ -7,6 +7,8 @@ export {
   getQwenMemorySettingsViaAcp,
   setQwenMemorySettingsViaAcp,
   getQwenSettingsPathViaAcp,
+  getQwenCoreSettingsViaAcp,
+  setQwenCoreSettingViaAcp,
   getQwenMemoryPathsViaAcp,
   listQwenProvidersViaAcp,
   connectQwenProviderViaAcp,

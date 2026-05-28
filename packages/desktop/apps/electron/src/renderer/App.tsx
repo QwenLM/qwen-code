@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { useTheme } from '@/hooks/useTheme'
 import type { ThemeOverrides } from '@config/theme'
 import { useSetAtom, useStore, useAtomValue, useAtom } from 'jotai'
-import type { Session, Workspace, SessionEvent, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, SetupNeeds, SessionStatus, NewChatActionParams, ContentBadge, LlmConnectionWithStatus, PermissionModeState, LoadedSkill } from '../shared/types'
+import type { Session, Workspace, SessionEvent, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, SetupNeeds, SessionStatus, NewChatActionParams, ContentBadge, LlmConnectionWithStatus, PermissionMode, PermissionModeState, LoadedSkill } from '../shared/types'
 import type { SessionDraft, DraftAttachmentRef } from '@craft-agent/shared/config'
 import type { SessionOptions, SessionOptionUpdates } from './hooks/useSessionOptions'
 import { defaultSessionOptions, mergeSessionOptions } from './hooks/useSessionOptions'
@@ -339,6 +339,9 @@ export default function App() {
   const sessionDraftsRef = useRef<Map<string, SessionDraft>>(new Map())
   // Unified session options for all session-scoped settings
   const [sessionOptions, setSessionOptions] = useState<Map<string, SessionOptions>>(new Map())
+  const [globalPermissionMode, setGlobalPermissionMode] = useState<PermissionMode>(
+    defaultSessionOptions.permissionMode,
+  )
 
   // Theme state (app-level only)
   const [appTheme, setAppTheme] = useState<ThemeOverrides | null>(null)
@@ -390,10 +393,39 @@ export default function App() {
     sessionOptionsRef.current = sessionOptions
   }, [sessionOptions])
 
+  useEffect(() => {
+    setSessionOptions(prev => {
+      if (prev.size === 0) return prev
+      const next = new Map(prev)
+      for (const [sessionId, options] of next) {
+        next.set(sessionId, { ...options, permissionMode: globalPermissionMode })
+      }
+      return next
+    })
+  }, [globalPermissionMode])
+
+  useEffect(() => {
+    let cancelled = false
+    window.electronAPI.getGlobalPermissionMode()
+      .then((mode) => {
+        if (!cancelled) setGlobalPermissionMode(mode)
+      })
+      .catch((error) => {
+        console.warn('[App] Failed to load global permission mode:', error)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const applyPermissionModeState = useCallback((sessionId: string, state: PermissionModeState, source: 'event' | 'reconcile') => {
     setSessionOptions(prev => {
       const next = new Map(prev)
-      const current = next.get(sessionId) ?? defaultSessionOptions
+      const current = {
+        ...defaultSessionOptions,
+        permissionMode: state.permissionMode,
+        ...next.get(sessionId),
+      }
       const currentVersion = current.permissionModeVersion ?? -1
 
       if (state.modeVersion < currentVersion) {
@@ -420,6 +452,7 @@ export default function App() {
         )
       }
 
+      setGlobalPermissionMode(state.permissionMode)
       next.set(sessionId, {
         ...current,
         permissionMode: state.permissionMode,
@@ -452,14 +485,13 @@ export default function App() {
       const merged = {
         ...defaultSessionOptions,
         ...current,
-        permissionMode: session.permissionMode ?? defaultSessionOptions.permissionMode,
+        permissionMode: globalPermissionMode,
         thinkingLevel: session.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
       }
 
-      const hasNonDefaultMode = merged.permissionMode !== defaultSessionOptions.permissionMode
       const hasNonDefaultThinking = merged.thinkingLevel !== DEFAULT_THINKING_LEVEL
 
-      if (!hasNonDefaultMode && !hasNonDefaultThinking && merged.permissionModeVersion == null) {
+      if (!hasNonDefaultThinking && merged.permissionModeVersion == null) {
         next.delete(session.id)
       } else {
         next.set(session.id, merged)
@@ -467,7 +499,7 @@ export default function App() {
 
       return next
     })
-  }, [])
+  }, [globalPermissionMode])
 
   const refreshSessionFromServer = useCallback(async (sessionId: string): Promise<'refreshed' | 'preserved_stale_messages' | 'failed'> => {
     try {
@@ -518,17 +550,16 @@ export default function App() {
     // Initialize unified sessionOptions from session data.
     const optionsMap = new Map<string, SessionOptions>()
     for (const s of loadedSessions) {
-      const hasNonDefaultMode = s.permissionMode && s.permissionMode !== defaultSessionOptions.permissionMode
       const hasNonDefaultThinking = s.thinkingLevel && s.thinkingLevel !== DEFAULT_THINKING_LEVEL
-      if (hasNonDefaultMode || hasNonDefaultThinking) {
+      if (hasNonDefaultThinking) {
         optionsMap.set(s.id, {
-          permissionMode: s.permissionMode ?? defaultSessionOptions.permissionMode,
+          permissionMode: globalPermissionMode,
           thinkingLevel: s.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
         })
       }
     }
     setSessionOptions(optionsMap)
-  }, [cacheWorkspaceSessionMetas, initializeSessions, initializeWorkspaceSessions])
+  }, [cacheWorkspaceSessionMetas, globalPermissionMode, initializeSessions, initializeWorkspaceSessions])
 
   const reconcileLoadedSessionPermissionModes = useCallback((loadedSessions: Session[]) => {
     return Promise.allSettled(
@@ -980,6 +1011,7 @@ export default function App() {
               }, 'event')
             } else {
               // Backward compatibility: apply mode optimistically then reconcile authoritative state.
+              setGlobalPermissionMode(effect.permissionMode)
               setSessionOptions(prevOpts => {
                 const next = new Map(prevOpts)
                 const current = next.get(effect.sessionId) ?? defaultSessionOptions
@@ -1589,21 +1621,33 @@ export default function App() {
   const handleSessionOptionsChange = useCallback((sessionId: string, updates: SessionOptionUpdates) => {
     setSessionOptions(prev => {
       const next = new Map(prev)
-      const current = next.get(sessionId) ?? defaultSessionOptions
+      const current = {
+        ...defaultSessionOptions,
+        ...next.get(sessionId),
+        permissionMode: globalPermissionMode,
+      }
+      if (updates.permissionMode !== undefined) {
+        for (const [id, options] of next) {
+          next.set(id, { ...options, permissionMode: updates.permissionMode })
+        }
+      }
       next.set(sessionId, mergeSessionOptions(current, updates))
       return next
     })
 
     // Handle persistence/backend for specific options
     if (updates.permissionMode !== undefined) {
-      // Sync permission mode change with backend
-      window.electronAPI.sessionCommand(sessionId, { type: 'setPermissionMode', mode: updates.permissionMode })
+      setGlobalPermissionMode(updates.permissionMode)
+      window.electronAPI.setGlobalPermissionMode(updates.permissionMode).catch((error) => {
+        console.error('[App] Failed to persist global permission mode:', error)
+        void reconcilePermissionModeState(sessionId)
+      })
     }
     if (updates.thinkingLevel !== undefined) {
       // Sync thinking level change with backend (session-level, persisted)
       window.electronAPI.sessionCommand(sessionId, { type: 'setThinkingLevel', level: updates.thinkingLevel })
     }
-  }, [sessionOptions])
+  }, [globalPermissionMode, reconcilePermissionModeState])
 
   // Handle input draft changes per session with debounced persistence
   const draftSaveTimeoutRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
@@ -2116,6 +2160,7 @@ export default function App() {
     getDraft,
     getDraftAttachmentRefs,
     hydrateDraftAttachments,
+    globalPermissionMode,
     sessionOptions,
     // Session callbacks
     onCreateSession: handleCreateSession,
@@ -2163,6 +2208,7 @@ export default function App() {
     getDraft,
     getDraftAttachmentRefs,
     hydrateDraftAttachments,
+    globalPermissionMode,
     sessionOptions,
     handleCreateSession,
     handleSendMessage,

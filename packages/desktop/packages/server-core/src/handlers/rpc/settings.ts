@@ -3,13 +3,18 @@ import { dirname } from 'path'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { getPreferencesPath, getSessionDraft, setSessionDraft, deleteSessionDraft, getAllSessionDrafts, getWorkspaceByNameOrId, getDefaultThinkingLevel, setDefaultThinkingLevel, isProtectedWorkspace } from '@craft-agent/shared/config'
 import type { QwenMemoryPathTarget, QwenMemorySettings } from '@craft-agent/shared/config'
+import { parsePermissionMode } from '@craft-agent/shared/agent/modes'
+import type { PermissionMode } from '@craft-agent/shared/agent/modes'
 import { isValidThinkingLevel, normalizeThinkingLevel, THINKING_LEVEL_IDS } from '@craft-agent/shared/agent/thinking-levels'
 import {
+  getQwenCoreSettingsViaAcp,
   getQwenMemorySettingsViaAcp,
   setQwenMemorySettingsViaAcp,
+  setQwenCoreSettingViaAcp,
   getQwenSettingsPathViaAcp,
   getQwenMemoryPathsViaAcp,
 } from '@craft-agent/shared/agent'
+import type { QwenCoreSettingsSnapshot } from '@craft-agent/shared/protocol'
 
 const VALID_THINKING_LEVELS_LIST = THINKING_LEVEL_IDS.map(id => `'${id}'`).join(', ')
 import { getWorkspaceOrThrow, buildBackendHostRuntimeContext } from '@craft-agent/server-core/handlers'
@@ -49,6 +54,8 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.sessions.SET_MODEL,
   RPC_CHANNELS.settings.GET_DEFAULT_THINKING_LEVEL,
   RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL,
+  RPC_CHANNELS.settings.GET_GLOBAL_PERMISSION_MODE,
+  RPC_CHANNELS.settings.SET_GLOBAL_PERMISSION_MODE,
   RPC_CHANNELS.tools.GET_BROWSER_TOOL_ENABLED,
   RPC_CHANNELS.tools.SET_BROWSER_TOOL_ENABLED,
   RPC_CHANNELS.settings.GET_NETWORK_PROXY,
@@ -78,7 +85,61 @@ async function getQwenMemoryAcpOptions(
   }
 }
 
+function mapPermissionModeToQwenApprovalMode(mode: PermissionMode): string {
+  switch (mode) {
+    case 'allow-all':
+      return 'yolo'
+    case 'safe':
+      return 'plan'
+    case 'auto-edit':
+      return 'auto-edit'
+    case 'ask':
+    default:
+      return 'default'
+  }
+}
+
+function permissionModeFromQwenCoreSettings(
+  snapshot: QwenCoreSettingsSnapshot,
+): PermissionMode {
+  const approvalMode = snapshot.user.values['tools.approvalMode']
+  if (typeof approvalMode === 'string') {
+    return parsePermissionMode(approvalMode) ?? 'ask'
+  }
+  return 'ask'
+}
+
 export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): void {
+  // ============================================================
+  // Settings - Global Permission Mode (App-Level)
+  // ============================================================
+
+  server.handle(RPC_CHANNELS.settings.GET_GLOBAL_PERMISSION_MODE, async (ctx) => {
+    const snapshot = await getQwenCoreSettingsViaAcp(
+      await getQwenMemoryAcpOptions(deps, ctx),
+    )
+    const mode = permissionModeFromQwenCoreSettings(snapshot)
+    await deps.sessionManager.applyGlobalPermissionMode(mode, {
+      changedBy: 'restore',
+    })
+    return mode
+  })
+
+  server.handle(RPC_CHANNELS.settings.SET_GLOBAL_PERMISSION_MODE, async (ctx, mode: string) => {
+    const parsed = parsePermissionMode(mode)
+    if (!parsed) {
+      throw new Error(`Invalid permission mode: ${mode}`)
+    }
+    await setQwenCoreSettingViaAcp(
+      await getQwenMemoryAcpOptions(deps, ctx),
+      'user',
+      'tools.approvalMode',
+      mapPermissionModeToQwenApprovalMode(parsed),
+    )
+    await deps.sessionManager.applyGlobalPermissionMode(parsed)
+    return { success: true }
+  })
+
   // ============================================================
   // Settings - Default Thinking Level (App-Level)
   // ============================================================

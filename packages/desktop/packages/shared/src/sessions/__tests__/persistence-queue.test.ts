@@ -43,7 +43,6 @@ describe('session persistence header conflict helpers', () => {
       labels: ['local'],
       isFlagged: false,
       sessionStatus: 'todo',
-      permissionMode: 'allow-all',
       hasUnread: true,
       lastReadMessageId: 'm-local',
       messageCount: 99,
@@ -68,7 +67,7 @@ describe('session persistence header conflict helpers', () => {
     expect(merged.labels).toEqual(['disk'])
     expect(merged.isFlagged).toBe(true)
     expect(merged.sessionStatus).toBe('needs-review')
-    expect(merged.permissionMode).toBe('safe')
+    expect(merged.permissionMode).toBeUndefined()
     expect(merged.hasUnread).toBe(false)
     expect(merged.lastReadMessageId).toBe('m-disk')
 
@@ -86,8 +85,9 @@ describe('session persistence header conflict helpers', () => {
 
     // This is the condition used by persistence queue at startup:
     // no previousSig yet, disk differs from local → preserve external metadata.
+    const previousSig: string | undefined = undefined
     const hasExternalMetadataChange = diskSig !== localSig
-      && (undefined === undefined || diskSig !== undefined)
+      && (previousSig === undefined || diskSig !== previousSig)
 
     expect(hasExternalMetadataChange).toBe(true)
 

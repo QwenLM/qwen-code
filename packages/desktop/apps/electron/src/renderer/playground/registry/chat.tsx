@@ -221,6 +221,7 @@ const playgroundAppShellContext = {
   pendingPermissions: new Map(),
   pendingCredentials: new Map(),
   getDraft: () => '',
+  globalPermissionMode: 'ask',
   sessionOptions: new Map(),
   onCreateSession: async () => ({
     id: 'playground-session',

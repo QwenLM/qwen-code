@@ -1696,7 +1696,7 @@ function AppShellContent({
         const currentOptions =
           contextValue.sessionOptions.get(effectiveSessionId)
         const currentMode =
-          currentOptions?.permissionMode ?? defaultSessionOptions.permissionMode
+          currentOptions?.permissionMode ?? contextValue.globalPermissionMode
         const nextMode = getNextPermissionMode(currentMode, enabledModes)
         contextValue.onSessionOptionsChange(effectiveSessionId, {
           permissionMode: nextMode,

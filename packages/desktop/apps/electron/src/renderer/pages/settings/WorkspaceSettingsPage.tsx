@@ -89,11 +89,14 @@ export default function WorkspaceSettingsPage() {
 
       setIsLoadingWorkspace(true)
       try {
-        const settings = await window.electronAPI.getWorkspaceSettings(activeWorkspaceId)
+        const [settings, globalMode] = await Promise.all([
+          window.electronAPI.getWorkspaceSettings(activeWorkspaceId),
+          window.electronAPI.getGlobalPermissionMode(),
+        ])
         if (settings) {
           setWsName(settings.name || '')
           setWsNameEditing(settings.name || '')
-          setPermissionMode(settings.permissionMode || 'allow-all')
+          setPermissionMode(globalMode)
           setWorkingDirectory(settings.workingDirectory || '')
           setLocalMcpEnabled(settings.localMcpEnabled ?? true)
           // Load cyclable permission modes from workspace settings
@@ -249,9 +252,9 @@ export default function WorkspaceSettingsPage() {
   const handlePermissionModeChange = useCallback(
     async (newMode: PermissionMode) => {
       setPermissionMode(newMode)
-      await updateWorkspaceSetting('permissionMode', newMode)
+      await window.electronAPI.setGlobalPermissionMode(newMode)
     },
-    [updateWorkspaceSetting]
+    []
   )
 
   const handleWorkingDirectorySelected = useCallback(async (selectedPath: string) => {
@@ -439,8 +442,8 @@ export default function WorkspaceSettingsPage() {
             <SettingsSection title={t("settings.workspace.permissionsSection")}>
               <SettingsCard>
                 <SettingsMenuSelectRow
-                  label={t("settings.workspace.defaultMode")}
-                  description={t("settings.workspace.defaultModeDesc")}
+                  label={t("settings.qwen.general.toolApprovalMode")}
+                  description={t("settings.qwen.general.toolApprovalModeDesc")}
                   value={permissionMode}
                   onValueChange={(v) => handlePermissionModeChange(v as PermissionMode)}
                   options={[

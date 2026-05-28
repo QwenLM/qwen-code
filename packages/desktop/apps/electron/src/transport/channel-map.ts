@@ -167,6 +167,12 @@ export const CHANNEL_MAP = {
   setDefaultThinkingLevel: invoke(
     RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL,
   ),
+  getGlobalPermissionMode: invoke(
+    RPC_CHANNELS.settings.GET_GLOBAL_PERMISSION_MODE,
+  ),
+  setGlobalPermissionMode: invoke(
+    RPC_CHANNELS.settings.SET_GLOBAL_PERMISSION_MODE,
+  ),
   getNetworkProxySettings: invoke(RPC_CHANNELS.settings.GET_NETWORK_PROXY),
   setNetworkProxySettings: invoke(RPC_CHANNELS.settings.SET_NETWORK_PROXY),
 

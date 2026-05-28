@@ -22,8 +22,6 @@ import type {
   StoredMessage,
   SessionTokenUsage,
 } from './types.ts';
-import type { PermissionMode } from '../agent/mode-types.ts';
-import { parsePermissionMode } from '../agent/mode-types.ts';
 import { toPortablePath, expandPath, normalizePath } from '../utils/paths.ts';
 import { debug } from '../utils/debug.ts';
 import { safeJsonParse } from '../utils/files.ts';
@@ -90,29 +88,9 @@ export function expandSessionPath(
   return jsonLine.replaceAll(SESSION_PATH_TOKEN, normalizePath(sessionDir));
 }
 
-function normalizePermissionMode(value: unknown): PermissionMode | undefined {
-  if (typeof value !== 'string') return undefined;
-  return parsePermissionMode(value) ?? undefined;
-}
-
 function normalizeHeaderPermissionModes<T extends SessionHeader>(header: T): T {
-  const permissionMode = normalizePermissionMode(header.permissionMode);
-  const previousPermissionMode = normalizePermissionMode(
-    header.previousPermissionMode,
-  );
-
-  if (permissionMode) {
-    header.permissionMode = permissionMode;
-  } else {
-    delete (header as Partial<SessionHeader>).permissionMode;
-  }
-
-  if (previousPermissionMode) {
-    header.previousPermissionMode = previousPermissionMode;
-  } else {
-    delete (header as Partial<SessionHeader>).previousPermissionMode;
-  }
-
+  delete (header as Partial<SessionHeader>).permissionMode;
+  delete (header as Partial<SessionHeader>).previousPermissionMode;
   return header;
 }
 
