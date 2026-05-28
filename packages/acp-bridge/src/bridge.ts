@@ -357,7 +357,10 @@ function extractPermissionResponseMetadata(
     typeof answers === 'object' &&
     !Array.isArray(answers)
   ) {
-    return { answers };
+    const entries = Object.entries(answers as Record<string, unknown>);
+    if (entries.every(([, v]) => typeof v === 'string')) {
+      return { answers };
+    }
   }
   return undefined;
 }
@@ -3369,7 +3372,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
                   update: {
                     sessionUpdate: 'shell_output',
                     output: chunk,
-                    _meta: { serverTimestamp: Date.now(), source: 'user-shell' },
+                    _meta: {
+                      serverTimestamp: Date.now(),
+                      source: 'user-shell',
+                    },
                   },
                 },
                 ...(originatorClientId ? { originatorClientId } : {}),
