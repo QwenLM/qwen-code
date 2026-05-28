@@ -3972,6 +3972,16 @@ export class Config {
       });
     }
 
+    // Register computer-use tools unless disabled.
+    // All 9 are deferred — they surface only via ToolSearch keyword
+    // match (see packages/core/src/tools/computer-use/).
+    if (this.isComputerUseEnabled()) {
+      const { registerComputerUseTools } = await import(
+        '../tools/computer-use/index.js'
+      );
+      registerComputerUseTools(registry);
+    }
+
     // Register monitor tool
     await registerLazy(ToolNames.MONITOR, async () => {
       const { MonitorTool } = await import('../tools/monitor.js');
