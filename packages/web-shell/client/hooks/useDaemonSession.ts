@@ -451,6 +451,22 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               }
               store.dispatch(uiEvents);
               if (
+                event.type === 'turn_complete' &&
+                !activePromptsRef.current.has(activeSession.sessionId)
+              ) {
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                const stopReason =
+                  (
+                    event.data as import('@qwen-code/sdk/daemon').DaemonTurnCompleteData
+                  ).stopReason ?? 'end_turn';
+                store.dispatch({ type: 'assistant.done', reason: stopReason });
+              } else if (
+                event.type === 'turn_error' &&
+                !activePromptsRef.current.has(activeSession.sessionId)
+              ) {
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                store.dispatch({ type: 'assistant.done', reason: 'error' });
+              } else if (
                 !activePromptsRef.current.has(activeSession.sessionId) &&
                 hasAssistantDelta(uiEvents)
               ) {

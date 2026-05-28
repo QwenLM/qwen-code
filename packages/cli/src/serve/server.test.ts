@@ -165,6 +165,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // `permission_partial_vote` / `permission_forbidden` SSE events. Always-
   // on; runtime-active policy is at `/capabilities` body `policy.permission`.
   'permission_mediation',
+  'non_blocking_prompt',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -185,7 +186,10 @@ const EXPECTED_REGISTERED_FEATURES = [
   // they appear here in their registry-declaration order, not the
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.filter(
-    (f) => f !== 'auth_device_flow' && f !== 'permission_mediation',
+    (f) =>
+      f !== 'auth_device_flow' &&
+      f !== 'permission_mediation' &&
+      f !== 'non_blocking_prompt',
   ),
   'mcp_workspace_pool',
   'mcp_pool_restart',
@@ -198,6 +202,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'permission_mediation',
   'prompt_absolute_deadline',
   'writer_idle_timeout',
+  'non_blocking_prompt',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -226,6 +231,7 @@ interface FakeBridgeOpts {
     req?: CancelNotification,
     context?: BridgeClientRequestContext,
   ) => Promise<void>;
+  getSessionLastEventIdImpl?: (sessionId: string) => number;
   subscribeImpl?: (
     sessionId: string,
     opts?: SubscribeOptions,
@@ -707,6 +713,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       return (async function* () {
         // empty
       })();
+    },
+    getSessionLastEventId(sessionId) {
+      if (opts.getSessionLastEventIdImpl) {
+        return opts.getSessionLastEventIdImpl(sessionId);
+      }
+      return 0;
     },
     respondToPermission(requestId, response, context) {
       const accepted = respondImpl(requestId, response, context);
@@ -2215,7 +2227,7 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/prompt', () => {
-    it('200 with PromptResponse on success; route :id wins over body sessionId', async () => {
+    it('202 with promptId on success; route :id wins over body sessionId', async () => {
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -2227,14 +2239,18 @@ describe('createServeApp', () => {
           sessionId: 'spoofed-session-B',
           prompt: [{ type: 'text', text: 'hi' }],
         });
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({ stopReason: 'end_turn' });
+      expect(res.status).toBe(202);
+      expect(res.body.promptId).toBeDefined();
+      expect(typeof res.body.promptId).toBe('string');
+      expect(typeof res.body.lastEventId).toBe('number');
+      // Allow the async bridge call to settle.
+      await new Promise((r) => setTimeout(r, 20));
       expect(bridge.promptCalls).toHaveLength(1);
       expect(bridge.promptCalls[0]?.sessionId).toBe('session-A');
       expect(bridge.promptCalls[0]?.req.sessionId).toBe('session-A');
     });
 
-    it('passes client identity context into bridge.sendPrompt', async () => {
+    it('passes client identity and promptId context into bridge.sendPrompt', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
       const res = await request(app)
@@ -2242,30 +2258,12 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ prompt: [{ type: 'text', text: 'hi' }] });
-      expect(res.status).toBe(200);
-      expect(bridge.promptCalls[0]?.context).toEqual({
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(bridge.promptCalls[0]?.context).toMatchObject({
         clientId: 'client-1',
       });
-    });
-
-    it('400 invalid_client_id when the bridge rejects prompt originator', async () => {
-      const bridge = fakeBridge({
-        promptImpl: async (sessionId) => {
-          throw new InvalidClientIdError(sessionId, 'client-unknown');
-        },
-      });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .post('/session/session-A/prompt')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('X-Qwen-Client-Id', 'client-unknown')
-        .send({ prompt: [{ type: 'text', text: 'hi' }] });
-      expect(res.status).toBe(400);
-      expect(res.body).toMatchObject({
-        code: 'invalid_client_id',
-        sessionId: 'session-A',
-        clientId: 'client-unknown',
-      });
+      expect(bridge.promptCalls[0]?.context?.promptId).toBe(res.body.promptId);
     });
 
     it('400 when prompt body is missing', async () => {
@@ -2281,7 +2279,7 @@ describe('createServeApp', () => {
 
     it('404 when bridge reports unknown session', async () => {
       const bridge = fakeBridge({
-        promptImpl: async (sessionId) => {
+        getSessionLastEventIdImpl: (sessionId) => {
           throw new SessionNotFoundError(sessionId);
         },
       });
@@ -2294,7 +2292,7 @@ describe('createServeApp', () => {
       expect(res.body.sessionId).toBe('missing');
     });
 
-    it('500 on generic bridge errors', async () => {
+    it('202 even when bridge errors asynchronously (turn_error event covers failure)', async () => {
       const bridge = fakeBridge({
         promptImpl: async () => {
           throw new Error('agent crashed');
@@ -2305,8 +2303,8 @@ describe('createServeApp', () => {
         .post('/session/session-A/prompt')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ prompt: [{ type: 'text', text: 'hi' }] });
-      expect(res.status).toBe(500);
-      expect(res.body).toEqual({ error: 'agent crashed' });
+      expect(res.status).toBe(202);
+      expect(res.body.promptId).toBeDefined();
     });
 
     it('passes an AbortSignal into bridge.sendPrompt', async () => {
@@ -2324,69 +2322,30 @@ describe('createServeApp', () => {
         .post('/session/session-A/prompt')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ prompt: [{ type: 'text', text: 'hi' }] });
-      expect(res.status).toBe(200);
-      // The route always supplies a signal — the AbortController it wires
-      // to req.on('close'). The bridge must receive it so a future client
-      // disconnect can be routed into an ACP cancel. (Capture happens at
-      // call time; supertest's later connection close would flip the
-      // signal's `aborted` flag if asserted post-hoc.)
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 20));
       expect(signalDefined).toBe(true);
       expect(abortedAtCall).toBe(false);
     });
 
-    it('aborting the signal mid-prompt asks the bridge to wind down', async () => {
-      // Bridge waits forever unless aborted, then resolves with a
-      // cancelled stop reason. Verifies the route's
-      // req.on('close') → abort.abort() flow propagates.
-      let promptStarted: (() => void) | undefined;
-      const promptStartedPromise = new Promise<void>((r) => {
-        promptStarted = r;
-      });
+    it('non-blocking prompt returns 202 and fires sendPrompt asynchronously', async () => {
+      let promptResolve: (() => void) | undefined;
       const bridge = fakeBridge({
-        promptImpl: async (_sid, _req, signal) =>
+        promptImpl: async () =>
           new Promise((resolve) => {
-            promptStarted!();
-            const onAbort = () => resolve({ stopReason: 'cancelled' });
-            if (signal?.aborted) onAbort();
-            else signal?.addEventListener('abort', onAbort, { once: true });
+            promptResolve = () => resolve({ stopReason: 'end_turn' });
           }),
       });
-      const localHandle = await runQwenServe(
-        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
-        { bridge },
-      );
-      try {
-        const port = (localHandle.server.address() as { port: number }).port;
-        // Use Node's `http` directly — vitest's jsdom env replaces
-        // AbortController with a polyfill that undici's fetch rejects.
-        const http = await import('node:http');
-        const reqBody = JSON.stringify({
-          prompt: [{ type: 'text', text: 'hi' }],
-        });
-        const httpReq = http.request({
-          host: '127.0.0.1',
-          port,
-          method: 'POST',
-          path: '/session/sess/prompt',
-          headers: {
-            'content-type': 'application/json',
-            'content-length': Buffer.byteLength(reqBody),
-          },
-        });
-        // Swallow ECONNRESET / socket-hangup that the destroy below emits.
-        httpReq.on('error', () => {});
-        httpReq.write(reqBody);
-        httpReq.end();
-        // Wait for the bridge to receive the prompt before destroying.
-        await promptStartedPromise;
-        httpReq.destroy();
-        // Give the daemon a moment to register the close → propagate.
-        await new Promise((r) => setTimeout(r, 100));
-        expect(bridge.promptCalls).toHaveLength(1);
-        expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
-      } finally {
-        await localHandle.close();
-      }
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+      expect(res.status).toBe(202);
+      expect(bridge.promptCalls).toHaveLength(1);
+      // Resolve the async prompt to clean up.
+      promptResolve!();
+      await new Promise((r) => setTimeout(r, 10));
     });
   });
 
@@ -6997,12 +6956,11 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
       }
     });
 
-    it('fires the server-side deadline and returns 504 with errorKind', async () => {
+    it('fires the server-side deadline and aborts the bridge signal', async () => {
       // 50ms server deadline + a prompt that resolves only on abort:
-      // the deadline timer must abort the AbortController, the catch
-      // block must detect the typed reason, and the response must
-      // carry the structured `errorKind: 'prompt_deadline_exceeded'`
-      // (not a generic 500 / silent close).
+      // the deadline timer must abort the AbortController. With non-
+      // blocking prompt the HTTP response is always 202; the deadline
+      // outcome is delivered via `turn_error` on the SSE bus.
       const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
       const app = createServeApp(
         { ...baseOpts, promptDeadlineMs: 50 },
@@ -7013,47 +6971,16 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
         .post('/session/session-A/prompt')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ prompt: [{ type: 'text', text: 'slow' }] });
-      expect(res.status).toBe(504);
-      expect(res.body).toMatchObject({
-        code: 'prompt_deadline_exceeded',
-        errorKind: 'prompt_deadline_exceeded',
-        deadlineMs: 50,
-      });
-      // The bridge MUST have received an aborted signal so the agent
-      // can wind down its FIFO slot — otherwise a buggy agent keeps
-      // the per-session lane blocked forever even though the HTTP
-      // client got its 504.
+      expect(res.status).toBe(202);
+      expect(res.body).toHaveProperty('promptId');
+      expect(res.body).toHaveProperty('lastEventId');
+      // Wait for the deadline timer to fire asynchronously.
+      await new Promise((r) => setTimeout(r, 200));
       expect(bridge.promptCalls).toHaveLength(1);
       expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
       expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
         PromptDeadlineExceededError,
       );
-    });
-
-    it('still returns typed 504 when deadline stderr logging fails', async () => {
-      const stderrSpy = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => {
-          throw new Error('stderr pipe closed');
-        });
-      try {
-        const bridge = fakeBridge({
-          promptImpl: () => new Promise(() => {}),
-        });
-        const app = createServeApp(
-          { ...baseOpts, promptDeadlineMs: 50 },
-          undefined,
-          { bridge },
-        );
-        const res = await request(app)
-          .post('/session/session-A/prompt')
-          .set('Host', `127.0.0.1:${baseOpts.port}`)
-          .send({ prompt: [{ type: 'text', text: 'slow' }] });
-        expect(res.status).toBe(504);
-        expect(res.body.errorKind).toBe('prompt_deadline_exceeded');
-      } finally {
-        stderrSpy.mockRestore();
-      }
     });
 
     it('strips route-only deadlineMs before forwarding the prompt body', async () => {
@@ -7075,7 +7002,7 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
           _meta: { trace: 'kept' },
           extra: 'kept',
         });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(202);
       expect(bridge.promptCalls).toHaveLength(1);
       expect(bridge.promptCalls[0]?.req).not.toHaveProperty('deadlineMs');
       expect(bridge.promptCalls[0]?.req).toMatchObject({
@@ -7087,11 +7014,9 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
     });
 
     it('caps a per-prompt `deadlineMs` override at the server flag', async () => {
-      // Server flag 50ms, request asks for 5000ms — the effective
-      // deadline must be the smaller 50ms. The way we observe it is
-      // the same 504-with-deadlineMs:50 response: if the cap was
-      // incorrectly the request's 5000ms, the test would time out
-      // long before completing.
+      // Server flag 50ms, request asks for 5000ms — effective deadline
+      // must be 50ms. With non-blocking prompt the HTTP response is
+      // always 202; we verify the abort signal fires within ~50ms.
       const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
       const app = createServeApp(
         { ...baseOpts, promptDeadlineMs: 50 },
@@ -7105,14 +7030,17 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
           prompt: [{ type: 'text', text: 'slow' }],
           deadlineMs: 5_000,
         });
-      expect(res.status).toBe(504);
-      expect(res.body.deadlineMs).toBe(50);
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
+      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
+        PromptDeadlineExceededError,
+      );
     });
 
     it('uses the per-prompt override when shorter than the server flag', async () => {
       // Server flag 10s, request 30ms — request wins as the tighter
-      // bound. Same observability path as above; if the cap was the
-      // server's 10s the test would hang past its own short timeout.
+      // bound. Abort signal should fire within ~30ms.
       const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
       const app = createServeApp(
         { ...baseOpts, promptDeadlineMs: 10_000 },
@@ -7126,20 +7054,18 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
           prompt: [{ type: 'text', text: 'slow' }],
           deadlineMs: 30,
         });
-      expect(res.status).toBe(504);
-      expect(res.body.deadlineMs).toBe(30);
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
+      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
+        PromptDeadlineExceededError,
+      );
     });
 
-    it('still emits 504 when the bridge IGNORES the abort signal (race contract)', async () => {
-      // The deadline must be a hard server-side guarantee, not contingent
-      // on the bridge / agent honoring AbortSignal. A buggy agent that
-      // never resolves its sendPrompt promise would, without the
-      // Promise.race in the prompt handler, keep the HTTP request open
-      // indefinitely and never emit the promised 504 — that was the
-      // Copilot finding on the initial T2.9 commit. This test exercises
-      // a non-cooperative bridge to lock the contract: deadline 50ms,
-      // bridge promise never settles, route still returns 504 within a
-      // reasonable budget.
+    it('still aborts the signal when the bridge IGNORES the abort (non-cooperative bridge)', async () => {
+      // With non-blocking prompt the HTTP response is always 202. The
+      // deadline timer must still fire and abort the signal so the
+      // bridge can observe it, even if it ignores the abort.
       const bridge = fakeBridge({
         promptImpl: () => new Promise(() => {}),
       });
@@ -7152,24 +7078,15 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
         .post('/session/session-A/prompt')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ prompt: [{ type: 'text', text: 'slow' }] });
-      expect(res.status).toBe(504);
-      expect(res.body).toMatchObject({
-        code: 'prompt_deadline_exceeded',
-        errorKind: 'prompt_deadline_exceeded',
-        deadlineMs: 50,
-      });
-      // The signal was still aborted with the typed reason as best-
-      // effort wind-down — the agent has every chance to clean up
-      // its FIFO slot even though we no longer wait for it.
+      expect(res.status).toBe(202);
+      await new Promise((r) => setTimeout(r, 200));
       expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
       expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
         PromptDeadlineExceededError,
       );
     });
 
-    it('does not interfere with normal prompt completion when the flag is unset', async () => {
-      // The deadline path must be 100% off by default. A 200 OK with
-      // the bridge's stopReason is the bit-for-bit pre-PR contract.
+    it('returns 202 without deadline when the flag is unset', async () => {
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -7178,14 +7095,13 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
         .post('/session/session-A/prompt')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ prompt: [{ type: 'text', text: 'hi' }] });
-      expect(res.status).toBe(200);
-      expect(res.body.stopReason).toBe('end_turn');
+      expect(res.status).toBe(202);
+      expect(res.body).toHaveProperty('promptId');
+      expect(res.body).toHaveProperty('lastEventId');
     });
 
     it('does not fire the deadline when the prompt resolves promptly', async () => {
-      // 5s deadline + an immediate resolve: the timer must not fire
-      // and must not corrupt the 200 response. Guards against a
-      // future regression where the timer races the response.
+      // 5s deadline + immediate resolve: the timer must not fire.
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -7198,8 +7114,11 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
         .post('/session/session-A/prompt')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ prompt: [{ type: 'text', text: 'hi' }] });
-      expect(res.status).toBe(200);
-      expect(res.body.stopReason).toBe('end_turn');
+      expect(res.status).toBe(202);
+      expect(res.body).toHaveProperty('promptId');
+      // Give enough time for a timer to fire if it were going to.
+      await new Promise((r) => setTimeout(r, 100));
+      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
     });
   });
 

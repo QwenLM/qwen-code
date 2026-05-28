@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
@@ -314,34 +315,6 @@ export function resolvePromptDeadlineMs(
     return serverMs;
   }
   return Math.min(serverMs, requestMs);
-}
-
-/**
- * Issue #4514 T2.9. Single source of truth for the prompt-deadline 504
- * response: log the operator-facing stderr breadcrumb (so a 504 spike
- * at the load balancer can be grepped back to a session) and emit the
- * typed JSON body. Keeping the wire format and log line together
- * prevents drift between future prompt-deadline response paths.
- */
-function emitPromptDeadline504(
-  res: import('express').Response,
-  err: PromptDeadlineExceededError,
-  sessionId: string,
-): void {
-  try {
-    writeStderrLine(
-      `qwen serve: prompt deadline fired (session ${sessionId}) — ` +
-        `deadlineMs=${err.deadlineMs}`,
-    );
-  } catch {
-    /* stderr pipe closed; 504 response still going out. */
-  }
-  res.status(504).json({
-    error: err.message,
-    code: 'prompt_deadline_exceeded',
-    errorKind: 'prompt_deadline_exceeded',
-    deadlineMs: err.deadlineMs,
-  });
 }
 
 /**
@@ -1461,12 +1434,6 @@ export function createServeApp(
     if (
       !prompt.every(
         (item: unknown) =>
-          // `typeof item === 'object'` is true for arrays too, so an
-          // exclude-arrays check is needed to keep the contract
-          // ("ACP content block, like {type: 'text', text: '...'}")
-          // honest. Without `!Array.isArray(item)`, `prompt: [[]]`
-          // passes validation and a confusing 500 surfaces from the
-          // ACP SDK layer.
           typeof item === 'object' && item !== null && !Array.isArray(item),
       )
     ) {
@@ -1475,12 +1442,6 @@ export function createServeApp(
       });
       return;
     }
-    // T2.9: validate the optional per-prompt `deadlineMs` override BEFORE
-    // we touch the abort controller — a malformed value is operator-
-    // visible client error (400) rather than silently dropped (which
-    // would let the client believe their deadline was active when it
-    // wasn't). Capping vs the server flag happens later, after we
-    // know what the server is willing to enforce.
     const rawRequestDeadline = body['deadlineMs'];
     let requestDeadlineMs: number | undefined;
     if (rawRequestDeadline !== undefined && rawRequestDeadline !== null) {
@@ -1498,75 +1459,41 @@ export function createServeApp(
       }
       requestDeadlineMs = rawRequestDeadline;
     }
-    // Propagate HTTP-client disconnect to an ACP cancel notification so
-    // the agent winds down promptly and the per-session FIFO doesn't
-    // stay blocked on a dead client. Detached after the prompt settles.
-    //
-    // Use `res.on('close')` (NOT `req.on('close')`) — `IncomingMessage`'s
-    // close event fires once the request body has been fully consumed
-    // even when the client is still listening for the response, which
-    // would cancel every ordinary prompt the moment its upload
-    // finished. `ServerResponse`'s close event only fires when the
-    // socket goes away. Guard with `!res.writableEnded` so a normal
-    // response flush (which also triggers `res.close`) doesn't fire
-    // the abort retroactively.
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+
+    const promptId = crypto.randomUUID();
+    const forwardedBody = { ...body };
+    delete forwardedBody['deadlineMs'];
+
+    let lastEventId: number;
+    try {
+      lastEventId = bridge.getSessionLastEventId(sessionId);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/prompt',
+        sessionId,
+      });
+      return;
+    }
+
     const abort = new AbortController();
-    const onResClose = () => {
-      if (!res.writableEnded) abort.abort();
-    };
-    res.once('close', onResClose);
-    // T2.9: arm the server-side wallclock deadline (if configured).
-    // `resolvePromptDeadlineMs` returns `undefined` when the server
-    // flag is unset, preserving the legacy "client disconnect is
-    // the only auto-cancel" behavior bit-for-bit. When a deadline IS
-    // configured we Promise.race the bridge call against an explicit
-    // rejecting timer — without the race, a non-cooperative agent
-    // that ignores AbortSignal could keep the HTTP request open
-    // indefinitely (the FIXME in `httpAcpBridge.ts` `sendPrompt` was
-    // promised closed by T2.9 in the PR description; relying on the
-    // bridge alone wouldn't deliver). The race makes the 504 a hard
-    // guarantee independent of bridge cooperation; `abort.abort` is
-    // still called as best-effort wind-down so the agent's FIFO slot
-    // is freed if it does honor the signal.
     const effectiveDeadlineMs = resolvePromptDeadlineMs(
       opts.promptDeadlineMs,
       requestDeadlineMs,
     );
-    const forwardedBody = { ...body };
-    delete forwardedBody['deadlineMs'];
     let deadlineTimer: NodeJS.Timeout | undefined;
-    const deadlinePromise: Promise<never> | undefined =
-      effectiveDeadlineMs !== undefined
-        ? new Promise<never>((_, reject) => {
-            deadlineTimer = setTimeout(() => {
-              const err = new PromptDeadlineExceededError(effectiveDeadlineMs);
-              // Reject FIRST so Promise.race resolves deterministically
-              // with the typed deadline error; the bridge's own
-              // AbortError rejection (if the agent honors abort)
-              // would otherwise race the route's microtask queue and
-              // surface as a generic AbortError in the catch path.
-              reject(err);
-              if (!abort.signal.aborted) abort.abort(err);
-            }, effectiveDeadlineMs);
-            // unref so a still-armed timer can't keep the daemon alive
-            // past shutdown.
-            deadlineTimer.unref();
-          })
-        : undefined;
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) {
-      res.off('close', onResClose);
-      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-      return;
+    if (effectiveDeadlineMs !== undefined) {
+      deadlineTimer = setTimeout(() => {
+        if (!abort.signal.aborted) {
+          abort.abort(new PromptDeadlineExceededError(effectiveDeadlineMs));
+        }
+      }, effectiveDeadlineMs);
+      deadlineTimer.unref();
     }
-    try {
-      // SECURITY NOTE: this `...forwardedBody` passthrough is
-      // intentional — the bridge / ACP SDK ignores fields it
-      // doesn't recognize (ACP-spec `_meta` etc are forwarded
-      // wholesale to the agent, which is the documented behavior).
-      // `sessionId`, `prompt`, and the route-only `deadlineMs` are
-      // forced/stripped so the child never sees uncapped client input.
-      const bridgePromise = bridge.sendPrompt(
+
+    bridge
+      .sendPrompt(
         sessionId,
         {
           ...forwardedBody,
@@ -1574,69 +1501,17 @@ export function createServeApp(
           prompt,
         } as Parameters<HttpAcpBridge['sendPrompt']>[1],
         abort.signal,
-        clientId !== undefined ? { clientId } : undefined,
-      );
-      // T2.9: when the deadline race fires first, the underlying
-      // bridge promise becomes an orphan that may eventually settle
-      // minutes later (especially against a buggy agent). Tail-attach
-      // a no-op handler so its eventual rejection doesn't surface as
-      // an unhandledRejection — the 504 has already been sent and the
-      // route has no further use for the result.
-      if (deadlinePromise !== undefined) {
-        bridgePromise.catch(() => undefined);
-      }
-      const result = await (deadlinePromise !== undefined
-        ? Promise.race([bridgePromise, deadlinePromise])
-        : bridgePromise);
-      res.status(200).json(result);
-    } catch (err) {
-      // T2.9: the deadline race won — emit the typed 504 directly.
-      // This is the primary deadline-exceeded path now that the
-      // route races the bridge against its own timer.
-      //
-      // The `return` MUST fire on every `PromptDeadlineExceededError`,
-      // including the writableEnded race (client disconnected in the
-      // same tick the deadline timer fired). Without the early return,
-      // the typed error would fall through to the AbortError branch
-      // (false — not a DOMException), then `sendBridgeError`, which
-      // would call `res.status(500).json(...)` on an already-ended
-      // response and trip `ERR_STREAM_WRITE_AFTER_END`. wenshao
-      // review #4530 inline #3 (Critical).
-      if (err instanceof PromptDeadlineExceededError) {
-        if (!res.writableEnded) emitPromptDeadline504(res, err, sessionId);
-        return;
-      }
-      // The HTTP client disconnecting fires the abort path above and
-      // the bridge re-throws as `AbortError`. That's a normal
-      // wind-down, not an error worth a 500 + stderr stack trace.
-      // Drop it silently — the socket is already closed so we can't
-      // send a response anyway, and active clients (e.g. an IDE
-      // plugin scrubbing a stuck prompt) would otherwise spam the
-      // daemon log.
-      //
-      // BX9_k: narrow the swallow to ONLY the case where WE armed
-      // the abort. The earlier blanket `err.name === 'AbortError'`
-      // could also swallow an internal bridge abort (e.g. the child
-      // process aborting a prompt mid-flight) — leaving the client
-      // with no response and no log trace. If `abort.signal.aborted`
-      // is false, the AbortError came from somewhere we didn't
-      // expect → route it through `sendBridgeError` as a real
-      // failure.
-      if (
-        err instanceof DOMException &&
-        err.name === 'AbortError' &&
-        abort.signal.aborted
-      ) {
-        return;
-      }
-      sendBridgeError(res, err, {
-        route: 'POST /session/:id/prompt',
-        sessionId,
-      });
-    } finally {
-      res.off('close', onResClose);
-      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
-    }
+        {
+          ...(clientId !== undefined ? { clientId } : {}),
+          promptId,
+        },
+      )
+      .finally(() => {
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      })
+      .catch(() => {});
+
+    res.status(202).json({ promptId, lastEventId });
   });
 
   app.post('/session/:id/heartbeat', mutate(), (req, res) => {
