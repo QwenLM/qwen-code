@@ -9,7 +9,6 @@ import {
   buildDeferredToolsSection,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
-  getSubagentSystemReminder,
   getPlanModeSystemReminder,
   resolvePathFromEnv,
 } from './prompts.js';
@@ -451,31 +450,6 @@ describe('getCustomSystemPrompt', () => {
       'You are a code assistant. Always provide examples.\n\n---\n\nUser prefers TypeScript examples.',
     );
     expect(result).toContain('---');
-  });
-});
-
-describe('getSubagentSystemReminder', () => {
-  it('should format single agent type correctly', () => {
-    const result = getSubagentSystemReminder(['python']);
-
-    expect(result).toMatch(/^<system-reminder>.*<\/system-reminder>$/);
-    expect(result).toContain('available agent types are: python');
-    expect(result).toContain('PROACTIVELY use the');
-  });
-
-  it('should join multiple agent types with commas', () => {
-    const result = getSubagentSystemReminder(['python', 'web', 'analysis']);
-
-    expect(result).toContain(
-      'available agent types are: python, web, analysis',
-    );
-  });
-
-  it('should handle empty array', () => {
-    const result = getSubagentSystemReminder([]);
-
-    expect(result).toContain('available agent types are: ');
-    expect(result).toContain('<system-reminder>');
   });
 });
 
