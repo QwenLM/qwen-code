@@ -6,7 +6,7 @@ import {
   ComputerUseTool,
   buildLlmContent,
   buildDisplayText,
-  coerceNumericStrings,
+  coerceTypes,
 } from './tool.js';
 import { ComputerUseClient } from './client.js';
 import { COMPUTER_USE_SCHEMAS } from './schemas.js';
@@ -111,41 +111,42 @@ describe('ComputerUseTool', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Numeric-string coercion tests (Bug 1 fix)
+// Bidirectional type coercion tests
 // ---------------------------------------------------------------------------
 
-describe('coerceNumericStrings', () => {
+describe('coerceTypes', () => {
   const schema = COMPUTER_USE_SCHEMAS.click.parameterSchema;
 
-  it('coerces string element_index to integer', () => {
-    const result = coerceNumericStrings(
-      { app: 'X', element_index: '11' },
-      schema,
-    );
-    expect(result['element_index']).toBe(11);
-    expect(typeof result['element_index']).toBe('number');
-  });
-
-  it('coerces string x/y coordinates to integers', () => {
-    const result = coerceNumericStrings(
-      { app: 'X', x: '500', y: '920' },
-      schema,
-    );
+  // Direction 1: string → number (schema wants number, model sent string)
+  it('coerces string x/y coordinates to numbers (schema type: number)', () => {
+    const result = coerceTypes({ app: 'X', x: '500', y: '920' }, schema);
     expect(result['x']).toBe(500);
     expect(result['y']).toBe(920);
+    expect(typeof result['x']).toBe('number');
+    expect(typeof result['y']).toBe('number');
+  });
+
+  // Direction 2: number → string (schema wants string, model sent number)
+  it('coerces integer element_index to string (schema type: string)', () => {
+    const result = coerceTypes({ app: 'X', element_index: 11 }, schema);
+    expect(result['element_index']).toBe('11');
+    expect(typeof result['element_index']).toBe('string');
+  });
+
+  it('leaves string element_index unchanged (already correct type)', () => {
+    const result = coerceTypes({ app: 'X', element_index: '11' }, schema);
+    expect(result['element_index']).toBe('11');
+    expect(typeof result['element_index']).toBe('string');
   });
 
   it('does not coerce garbage strings — they remain strings and fail validation', () => {
-    const result = coerceNumericStrings(
-      { app: 'X', element_index: 'abc' },
-      schema,
-    );
-    // Value must stay as string so AJV produces the correct type error
-    expect(result['element_index']).toBe('abc');
+    const result = coerceTypes({ app: 'X', x: 'abc' }, schema);
+    // 'abc' is not a clean numeric string; stays as-is so AJV produces the correct type error
+    expect(result['x']).toBe('abc');
   });
 
   it('does not coerce non-numeric string fields like app', () => {
-    const result = coerceNumericStrings(
+    const result = coerceTypes(
       { app: 'com.apple.stocks', element_index: 5 },
       schema,
     );
@@ -153,12 +154,8 @@ describe('coerceNumericStrings', () => {
     expect(typeof result['app']).toBe('string');
   });
 
-  it('passes through real integers unchanged', () => {
-    const result = coerceNumericStrings(
-      { app: 'X', element_index: 42, x: 100, y: 200 },
-      schema,
-    );
-    expect(result['element_index']).toBe(42);
+  it('passes through real numbers unchanged for number-typed fields', () => {
+    const result = coerceTypes({ app: 'X', x: 100, y: 200 }, schema);
     expect(result['x']).toBe(100);
     expect(result['y']).toBe(200);
   });
@@ -174,15 +171,23 @@ describe('ComputerUseTool.build() coercion integration', () => {
     delete process.env['QWEN_COMPUTER_USE_AUTO_APPROVE'];
   });
 
-  it('build() succeeds when element_index is a numeric string', () => {
+  it('build() succeeds when element_index is a string (schema type: string)', () => {
     const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    // Should not throw — coercion converts "11" → 11 before AJV sees it
+    // element_index is type: "string" in upstream schema — "11" is already correct
     expect(() =>
       tool.build({ app: 'TextEdit', element_index: '11' }),
     ).not.toThrow();
   });
 
-  it('build() forwards coerced integer to client', async () => {
+  it('build() succeeds when element_index is an integer (coerces to string)', () => {
+    const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
+    // qwen3.6 may send element_index: 11 (integer); coerceTypes converts to "11"
+    expect(() =>
+      tool.build({ app: 'TextEdit', element_index: 11 }),
+    ).not.toThrow();
+  });
+
+  it('build() forwards string element_index to client', async () => {
     const fake = makeFakeClient(async () => ({
       content: [{ type: 'text', text: 'clicked' }],
       isError: false,
@@ -190,21 +195,23 @@ describe('ComputerUseTool.build() coercion integration', () => {
     ComputerUseClient.setSharedForTest(fake);
 
     const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
-    const invocation = tool.build({ app: 'TextEdit', element_index: '11' });
+    // Pass integer 11 — coercion should stringify it to "11" before forwarding
+    const invocation = tool.build({ app: 'TextEdit', element_index: 11 });
     await invocation.execute(new AbortController().signal);
 
-    // The client must receive the integer 11, not the string "11"
+    // The client must receive the string "11", not the integer 11
     expect(fake.callTool).toHaveBeenCalledWith(
       'click',
-      expect.objectContaining({ element_index: 11 }),
+      expect.objectContaining({ element_index: '11' }),
     );
   });
 
-  it('build() still rejects truly invalid element_index', () => {
+  it('build() accepts any string for element_index (string schema does not restrict values)', () => {
     const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
+    // "abc" is a valid string — the schema only requires type: string, not numeric format
     expect(() =>
       tool.build({ app: 'TextEdit', element_index: 'abc' }),
-    ).toThrow();
+    ).not.toThrow();
   });
 });
 

@@ -170,13 +170,14 @@ export class ComputerUseTool extends BaseDeclarativeTool<
   }
 
   /**
-   * Coerce numeric strings to actual numbers before schema validation.
-   * Some models (e.g. qwen3.6) produce JSON like `{"element_index": "11"}`
-   * even when the schema declares `type: "integer"`. Pre-coercing avoids
-   * spurious validation failures without loosening the schema types.
+   * Coerce parameter types before schema validation.
+   * Models can send the wrong JS type for a field:
+   *  - qwen3.6 sends `element_index: 2` (number) but upstream wants "2" (string)
+   *  - Some models send `x: "500"` (string) but upstream wants 500 (number)
+   * Pre-coercing avoids spurious validation failures without loosening schema types.
    */
   override validateToolParams(params: ComputerUseParams): string | null {
-    const coerced = coerceNumericStrings(
+    const coerced = coerceTypes(
       params,
       this.parameterSchema as Record<string, unknown>,
     );
@@ -186,7 +187,7 @@ export class ComputerUseTool extends BaseDeclarativeTool<
   override build(
     params: ComputerUseParams,
   ): ToolInvocation<ComputerUseParams, ToolResult> {
-    const coerced = coerceNumericStrings(
+    const coerced = coerceTypes(
       params,
       this.parameterSchema as Record<string, unknown>,
     );
@@ -201,12 +202,16 @@ export class ComputerUseTool extends BaseDeclarativeTool<
 }
 
 /**
- * Walk schema properties and coerce string values to integers/numbers when the
- * schema declares `type: 'integer'` or `type: 'number'` and the value is a
- * clean numeric string. Garbage strings (e.g. "abc") are left untouched so
+ * Walk schema properties and coerce values to the type declared by the schema.
+ *
+ * Direction 1 (string → number): schema says integer/number, model sent a
+ * numeric string (e.g. `x: "500"`). Garbage strings are left untouched so
  * they still fail schema validation with a clear error.
+ *
+ * Direction 2 (number → string): schema says string, model sent a number
+ * (e.g. `element_index: 2` when upstream expects `"2"`). Coerce via String().
  */
-export function coerceNumericStrings(
+export function coerceTypes(
   params: Record<string, unknown>,
   schema: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -217,6 +222,7 @@ export function coerceNumericStrings(
   const result: Record<string, unknown> = { ...params };
   for (const [key, value] of Object.entries(result)) {
     const fieldType = properties[key]?.type;
+    // Direction 1: string value, schema wants integer/number → parse
     if (
       (fieldType === 'integer' || fieldType === 'number') &&
       typeof value === 'string'
@@ -231,9 +237,19 @@ export function coerceNumericStrings(
         }
       }
     }
+    // Direction 2: number value, schema wants string → stringify
+    // (qwen3.6 sometimes sends element_index: 2 instead of "2")
+    else if (fieldType === 'string' && typeof value === 'number') {
+      result[key] = String(value);
+    }
   }
   return result;
 }
+
+/**
+ * @deprecated Use coerceTypes instead. Kept for backward compatibility.
+ */
+export const coerceNumericStrings = coerceTypes;
 
 // ---------------------------------------------------------------------------
 // Content transformation helpers
