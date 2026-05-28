@@ -251,46 +251,51 @@ export function injectDaemonTraceContext<T extends object>(request: T): T {
 export function extractDaemonTraceContext(
   source: unknown,
 ): Context | undefined {
-  const meta = (source as { _meta?: unknown } | undefined)?._meta;
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
-    return undefined;
-  }
-  const record = meta as Record<string, unknown>;
-  const traceparent = record[DAEMON_TRACEPARENT_META_KEY];
-  if (typeof traceparent !== 'string' || traceparent.length === 0) {
-    return undefined;
-  }
-  const carrier: Record<string, string> = { traceparent };
-  const tracestate = record[DAEMON_TRACESTATE_META_KEY];
-  if (typeof tracestate === 'string' && tracestate.length > 0) {
-    carrier['tracestate'] = tracestate;
-  }
-  const extracted = propagation.extract(ROOT_CONTEXT, carrier);
-  if (trace.getSpanContext(extracted)) return extracted;
+  try {
+    const meta = (source as { _meta?: unknown } | undefined)?._meta;
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+      return undefined;
+    }
+    const record = meta as Record<string, unknown>;
+    const traceparent = record[DAEMON_TRACEPARENT_META_KEY];
+    if (typeof traceparent !== 'string' || traceparent.length === 0) {
+      return undefined;
+    }
+    const carrier: Record<string, string> = { traceparent };
+    const tracestate = record[DAEMON_TRACESTATE_META_KEY];
+    if (typeof tracestate === 'string' && tracestate.length > 0) {
+      carrier['tracestate'] = tracestate;
+    }
+    const extracted = propagation.extract(ROOT_CONTEXT, carrier);
+    if (trace.getSpanContext(extracted)) return extracted;
 
-  const parts = traceparent.split('-');
-  const traceId = parts[1];
-  const spanId = parts[2];
-  const flags = parts[3];
-  if (
-    parts[0] !== '00' ||
-    !traceId?.match(/^[0-9a-f]{32}$/) ||
-    !spanId?.match(/^[0-9a-f]{16}$/) ||
-    !flags?.match(/^[0-9a-f]{2}$/) ||
-    traceId === INVALID_TRACE_ID ||
-    spanId === INVALID_SPAN_ID
-  ) {
+    const parts = traceparent.split('-');
+    const traceId = parts[1];
+    const spanId = parts[2];
+    const flags = parts[3];
+    if (
+      parts[0] !== '00' ||
+      !traceId?.match(/^[0-9a-f]{32}$/) ||
+      !spanId?.match(/^[0-9a-f]{16}$/) ||
+      !flags?.match(/^[0-9a-f]{2}$/) ||
+      traceId === INVALID_TRACE_ID ||
+      spanId === INVALID_SPAN_ID
+    ) {
+      return undefined;
+    }
+    return trace.setSpan(
+      ROOT_CONTEXT,
+      trace.wrapSpanContext({
+        traceId,
+        spanId,
+        traceFlags: Number.parseInt(flags, 16),
+        isRemote: true,
+      }),
+    );
+  } catch {
+    // Telemetry must not affect prompt forwarding.
     return undefined;
   }
-  return trace.setSpan(
-    ROOT_CONTEXT,
-    trace.wrapSpanContext({
-      traceId,
-      spanId,
-      traceFlags: Number.parseInt(flags, 16),
-      isRemote: true,
-    }),
-  );
 }
 
 export function createDaemonBridgeTelemetry(): {

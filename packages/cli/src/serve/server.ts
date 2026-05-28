@@ -334,7 +334,6 @@ function daemonTelemetryMiddleware(
           try {
             next();
           } catch (error) {
-            recordDaemonError(span, error);
             reject(error);
           }
         }),
