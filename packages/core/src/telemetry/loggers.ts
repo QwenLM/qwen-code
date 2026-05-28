@@ -956,6 +956,7 @@ export function logAuth(config: Config, event: AuthEvent): void {
 }
 
 export function logSkillLaunch(config: Config, event: SkillLaunchEvent): void {
+  QwenLogger.getInstance(config)?.logSkillLaunchEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {

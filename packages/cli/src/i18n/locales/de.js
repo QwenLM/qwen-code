@@ -818,6 +818,7 @@ export default {
   'Auto-memory: {{status}}': 'Auto-Speicher: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Auto-Konsolidierung: {{status}} · {{lastDream}} · /dream zum Ausführen',
+  'Auto-skill: {{status}}': 'Auto-Skill: {{status}}',
   never: 'nie',
   on: 'ein',
   off: 'aus',

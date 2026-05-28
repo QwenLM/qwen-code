@@ -2001,6 +2001,35 @@ describe('Settings Loading and Merging', () => {
       vi.restoreAllMocks();
     });
 
+    it('should return warnings suitable for early stderr emission when settings.json has invalid JSON', () => {
+      const invalidJsonContent = '{ broken json!!!';
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
+          return '{}';
+        },
+      );
+      (fs.renameSync as Mock).mockImplementation(() => {});
+
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      const warnings = getSettingsWarnings(result);
+
+      // Warnings must be non-empty so the early stderr loop in gemini.tsx
+      // (before relaunchAppInChildProcess) actually emits something.
+      expect(warnings.length).toBeGreaterThan(0);
+      // Each warning should be a human-readable string suitable for stderr
+      for (const w of warnings) {
+        expect(typeof w).toBe('string');
+        expect(w.length).toBeGreaterThan(0);
+      }
+      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(true);
+
+      vi.restoreAllMocks();
+    });
+
     it('should resolve environment variables in user settings', () => {
       process.env['TEST_API_KEY'] = 'user_api_key_from_env';
       const userSettingsContent: TestSettings = {
@@ -2729,6 +2758,122 @@ describe('Settings Loading and Merging', () => {
       expect(writtenContent.model.name).toBe('manually-added-model');
       expect(writtenContent.modelProviders.openai).toEqual(
         externallyModifiedUserSettingsContent.modelProviders.openai,
+      );
+    });
+
+    it('persists removed MCP servers when replacing the top-level mcpServers object', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+
+      const userSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        ui: {
+          theme: 'dark',
+        },
+        mcpServers: {
+          keep: {
+            command: 'node',
+          },
+          remove: {
+            command: 'python',
+          },
+        },
+      };
+
+      let currentUserSettingsContent = JSON.stringify(userSettingsContent);
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return currentUserSettingsContent;
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      currentUserSettingsContent = JSON.stringify(userSettingsContent);
+
+      settings.setValue(SettingScope.User, 'mcpServers', {
+        keep: {
+          command: 'node',
+        },
+      });
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      expect(writeCall).toBeDefined();
+
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.ui).toEqual({ theme: 'dark' });
+      expect(writtenContent.mcpServers).toEqual({
+        keep: {
+          command: 'node',
+        },
+      });
+    });
+
+    it('preserves sibling keys for non-MCP top-level object updates', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+
+      const userSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        tools: {
+          approvalMode: 'default',
+          disabled: ['shell'],
+        },
+      };
+
+      let currentUserSettingsContent = JSON.stringify(userSettingsContent);
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return currentUserSettingsContent;
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      currentUserSettingsContent = JSON.stringify(userSettingsContent);
+
+      settings.setValue(SettingScope.User, 'tools', {
+        disabled: ['read-file'],
+      });
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      expect(writeCall).toBeDefined();
+
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.tools).toEqual({
+        approvalMode: 'default',
+        disabled: ['read-file'],
+      });
+    });
+
+    it('logs when setValue persistence is refused', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+            });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const mockFn =
+        commentJsonUtils.updateSettingsFilePreservingFormat as Mock;
+      mockFn.mockReturnValueOnce(false);
+
+      settings.setValue(SettingScope.User, 'mcpServers', {});
+
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'saveSettings: updateSettingsFilePreservingFormat returned false',
+        ),
       );
     });
   });

@@ -116,13 +116,14 @@ export async function collectContextData(
 
   const toolRegistry = config.getToolRegistry();
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
-  // Pass includeDeferred so this token estimate lines up with the per-tool
-  // breakdown below (which iterates getAllTools, unfiltered). Without it the
-  // "all tools" total would exclude deferred tools while the per-tool sum
-  // still includes them, and displayBuiltinTools = total - mcp would go
-  // negative.
+  // Match what's actually sent to the model: deferred tools — MCP tools and
+  // low-frequency built-ins like web_fetch / monitor / cron_* — are absent
+  // from the prompt unless ToolSearch has revealed them this session. See
+  // client.ts which calls getFunctionDeclarations() with no args. The
+  // per-tool loop below applies the same filter so allToolsTokens stays
+  // aligned with the breakdown sum.
   const toolDeclarations = toolRegistry
-    ? toolRegistry.getFunctionDeclarations({ includeDeferred: true })
+    ? toolRegistry.getFunctionDeclarations()
     : [];
   const toolsJsonStr = JSON.stringify(toolDeclarations);
   const allToolsTokens = estimateTokens(toolsJsonStr);
@@ -130,6 +131,13 @@ export async function collectContextData(
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
   for (const tool of allTools) {
+    if (
+      tool.shouldDefer &&
+      !tool.alwaysLoad &&
+      !toolRegistry?.isDeferredToolRevealed(tool.name)
+    ) {
+      continue;
+    }
     const toolJsonStr = JSON.stringify(tool.schema);
     const tokens = estimateTokens(toolJsonStr);
     if (tool instanceof DiscoveredMCPTool) {

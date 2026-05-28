@@ -351,10 +351,7 @@ describe('getDirPathCompletions', () => {
     fs.mkdirSync(path.join(tempTestDir, 'sub1', 'deep'), { recursive: true });
     // Add some non-directory files (should be filtered out)
     fs.writeFileSync(path.join(tempTestDir, 'file.txt'), '');
-    fs.writeFileSync(
-      path.join(tempTestDir, 'sub1', 'nested.txt'),
-      '',
-    );
+    fs.writeFileSync(path.join(tempTestDir, 'sub1', 'nested.txt'), '');
   });
 
   afterAll(() => {
