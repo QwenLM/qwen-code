@@ -795,6 +795,12 @@ download_with_progress() {
         return $?
     fi
 
+    # Skip progress bar for small files (e.g. SHA256SUMS)
+    if [[ "${content_length}" -lt 102400 ]] 2>/dev/null; then
+        curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 "${url}" -o "${output}"
+        return $?
+    fi
+
     printf "\033[?25l" >&2
     print_progress 0 "${content_length}"
 

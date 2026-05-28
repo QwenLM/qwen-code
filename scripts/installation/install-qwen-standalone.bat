@@ -318,8 +318,9 @@ echo.
 exit /b 0
 
 :PrintLogo
-echo  QWEN CODE
-echo  ========================================
+rem QWEN CODE logo with color (Windows Terminal VT100 support)
+echo.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$e=[char]27; Write-Host \"  $e[38;2;71;150;228mQ W E N  $e[38;2;132;122;206mC O D E$e[0m\""
 echo.
 exit /b 0
 
@@ -599,7 +600,7 @@ rem already on the user PATH. Uses PowerShell rather than `setx` because setx
 rem truncates PATH at 1024 chars, which can silently mangle long PATHs.
 set "QWEN_NEW_BIN=%~1"
 if "!QWEN_NEW_BIN!"=="" exit /b 0
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$bin = $env:QWEN_NEW_BIN; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if ([string]::IsNullOrEmpty($userPath)) { $userPath = '' }; $entries = @($userPath -split ';' | Where-Object { $_ -ne '' }); $remaining = @($entries | Where-Object { $_ -ne $bin }); if ($entries.Count -gt 0 -and $entries[0] -eq $bin -and $remaining.Count -eq ($entries.Count - 1)) { Write-Output ('INFO: User PATH already starts with ' + $bin + ' (skipping).'); exit 0 }; $newPath = (@($bin) + $remaining) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, 'User'); Write-Output ('SUCCESS: Prepended ' + $bin + ' to your user PATH.'); Write-Output 'INFO: Open a NEW command prompt for the change to take effect.'"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$bin = $env:QWEN_NEW_BIN; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if ([string]::IsNullOrEmpty($userPath)) { $userPath = '' }; $entries = @($userPath -split ';' | Where-Object { $_ -ne '' }); $remaining = @($entries | Where-Object { $_ -ne $bin }); if ($entries.Count -gt 0 -and $entries[0] -eq $bin -and $remaining.Count -eq ($entries.Count - 1)) { Write-Output ('User PATH already starts with ' + $bin); exit 0 }; $newPath = (@($bin) + $remaining) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, 'User'); exit 0"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_NEW_BIN="
 exit /b %PS_STATUS%
@@ -618,7 +619,8 @@ set "QWEN_DOWNLOAD_URL=%~1"
 set "QWEN_DOWNLOAD_DEST=%~2"
 rem Prefer curl.exe -# for a hash-mark progress bar (Windows 10+ includes it);
 rem fall back to Invoke-WebRequest (which shows its own progress bar).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $curl = $env:QWEN_INSTALL_CURL_EXE; if ([string]::IsNullOrEmpty($curl)) { $cmd = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -ne $cmd) { $curl = $cmd.Source } }; if (-not [string]::IsNullOrEmpty($curl)) { & $curl --connect-timeout 15 --max-time 300 --retry 2 -#fSLo $env:QWEN_DOWNLOAD_DEST $env:QWEN_DOWNLOAD_URL; if ($LASTEXITCODE -ne 0) { throw ('curl.exe download failed (exit code ' + $LASTEXITCODE + ')') }; exit 0 }; try { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 300; exit 0 } catch { [Console]::Error.WriteLine('Download error: ' + $_.Exception.Message); exit 1 }"
+rem Progress output is suppressed (-s overrides -#) because PrintProgressComplete provides the visual.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $curl = $env:QWEN_INSTALL_CURL_EXE; if ([string]::IsNullOrEmpty($curl)) { $cmd = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -ne $cmd) { $curl = $cmd.Source } }; if (-not [string]::IsNullOrEmpty($curl)) { & $curl --connect-timeout 15 --max-time 300 --retry 2 -#fSLo $env:QWEN_DOWNLOAD_DEST $env:QWEN_DOWNLOAD_URL -s --show-error; if ($LASTEXITCODE -ne 0) { throw ('curl.exe download failed (exit code ' + $LASTEXITCODE + ')') }; exit 0 }; try { $ProgressPreference = 'SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 300; exit 0 } catch { [Console]::Error.WriteLine('Download error: ' + $_.Exception.Message); exit 1 }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_DOWNLOAD_URL="
 set "QWEN_DOWNLOAD_DEST="
@@ -690,7 +692,7 @@ if "!CHECKSUM_FILE!"=="" (
         call :CreateTempFile "qwen-code-checksums"
         if !ERRORLEVEL! NEQ 0 exit /b 1
         set "TEMP_CHECKSUM=!TEMP_FILE!"
-        call :DownloadFile "!CHECKSUM_FILE!" "!TEMP_CHECKSUM!"
+        call :DownloadFileQuiet "!CHECKSUM_FILE!" "!TEMP_CHECKSUM!"
         if !ERRORLEVEL! NEQ 0 (
             if exist "!TEMP_CHECKSUM!" del /F /Q "!TEMP_CHECKSUM!" >nul 2>&1
             echo ERROR: Could not download SHA256SUMS for checksum verification.
