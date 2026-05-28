@@ -16,6 +16,7 @@
  */
 
 import type { Content, Part } from '@google/genai';
+import { readFile } from 'node:fs/promises';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 export const POST_COMPACT_MAX_TOKENS_PER_FILE = 5_000;
@@ -117,4 +118,71 @@ export function extractRecentImages(
   }
 
   return collected;
+}
+
+export type FileReadResult =
+  | { kind: 'embed'; content: string }
+  | { kind: 'reference' }
+  | { kind: 'missing' }
+  | { kind: 'binary' };
+
+const CHARS_PER_TOKEN = 4;
+const BINARY_DETECT_SAMPLE = 512;
+const BINARY_NONPRINTABLE_THRESHOLD = 0.3;
+
+/**
+ * Read a file from disk and decide whether to embed its full content
+ * (small files, ≤ maxTokens × CHARS_PER_TOKEN) or only return a path
+ * reference (large files; the agent must call read_file to view them).
+ *
+ * Returns 'missing' if the file no longer exists (deleted between when
+ * it was last touched and compaction time), 'binary' if it appears to
+ * contain non-text data.
+ */
+export async function readFileSizeAdaptive(
+  filePath: string,
+  maxTokens: number,
+): Promise<FileReadResult> {
+  let buffer: Buffer;
+  try {
+    buffer = await readFile(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { kind: 'missing' };
+    }
+    // Permission errors, IO errors, etc. — treat as missing for the
+    // purpose of compaction. The agent can still retry via read_file
+    // and get a real error there if it's load-bearing.
+    return { kind: 'missing' };
+  }
+
+  // Binary detection on first BINARY_DETECT_SAMPLE bytes. Counts
+  // bytes outside printable ASCII + common whitespace as suspicious.
+  const sample = buffer.subarray(
+    0,
+    Math.min(buffer.length, BINARY_DETECT_SAMPLE),
+  );
+  let nonPrintable = 0;
+  for (const byte of sample) {
+    const printable =
+      (byte >= 0x20 && byte <= 0x7e) || // ASCII printable
+      byte === 0x09 || // tab
+      byte === 0x0a || // LF
+      byte === 0x0d || // CR
+      byte >= 0x80; // utf-8 continuation bytes — treat as printable
+    if (!printable) nonPrintable++;
+  }
+  if (
+    sample.length > 0 &&
+    nonPrintable / sample.length > BINARY_NONPRINTABLE_THRESHOLD
+  ) {
+    return { kind: 'binary' };
+  }
+
+  const maxChars = maxTokens * CHARS_PER_TOKEN;
+  if (buffer.length > maxChars) {
+    return { kind: 'reference' };
+  }
+
+  return { kind: 'embed', content: buffer.toString('utf-8') };
 }

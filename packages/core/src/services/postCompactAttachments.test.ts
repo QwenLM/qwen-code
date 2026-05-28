@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { Content } from '@google/genai';
 import { extractRecentFilePaths } from './postCompactAttachments.js';
 
@@ -216,5 +216,55 @@ describe('extractRecentImages', () => {
       },
     ];
     expect(extractRecentImages(history, 3)).toEqual([]);
+  });
+});
+
+import { readFileSizeAdaptive } from './postCompactAttachments.js';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+describe('readFileSizeAdaptive', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'pca-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns kind=embed with full content when file is under the size cap', async () => {
+    const path = join(tmpDir, 'small.txt');
+    writeFileSync(path, 'hello world', 'utf-8');
+    const result = await readFileSizeAdaptive(path, 5_000);
+    expect(result.kind).toBe('embed');
+    if (result.kind === 'embed') {
+      expect(result.content).toBe('hello world');
+    }
+  });
+
+  it('returns kind=reference when file exceeds the size cap', async () => {
+    const path = join(tmpDir, 'big.txt');
+    // 5000 tokens × 4 chars = 20000 chars cap; write 30000 chars to exceed
+    writeFileSync(path, 'x'.repeat(30_000), 'utf-8');
+    const result = await readFileSizeAdaptive(path, 5_000);
+    expect(result.kind).toBe('reference');
+  });
+
+  it('returns kind=missing when the file does not exist', async () => {
+    const path = join(tmpDir, 'nope.txt');
+    const result = await readFileSizeAdaptive(path, 5_000);
+    expect(result.kind).toBe('missing');
+  });
+
+  it('returns kind=binary when content has too many non-printable bytes', async () => {
+    const path = join(tmpDir, 'bin.dat');
+    const buf = Buffer.alloc(100);
+    for (let i = 0; i < 100; i++) buf[i] = i % 32; // mostly control bytes
+    writeFileSync(path, buf);
+    const result = await readFileSizeAdaptive(path, 5_000);
+    expect(result.kind).toBe('binary');
   });
 });
