@@ -156,6 +156,8 @@ const EXPECTED_STAGE1_FEATURES = [
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
   'session_recap',
+  // Side question (/btw) against the session's conversation context.
+  'session_btw',
   // Issue #4175 PR 21 — auth device-flow surface advertised unconditionally.
   // Registry order on origin/main has PR 21 appended last, so the
   // baseline assertion below mirrors that even though PR 21 landed
@@ -847,6 +849,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return generateSessionRecapImpl(sessionId, context);
+    },
+    async generateSessionBtw(sessionId, _question, _signal, _context) {
+      return { sessionId, answer: 'mock btw answer' };
     },
     async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
       setToolEnabledCalls.push({

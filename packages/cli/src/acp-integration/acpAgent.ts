@@ -8,6 +8,8 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
+  buildBtwCacheSafeParams,
+  buildBtwPrompt,
   clearCachedCredentialFile,
   createDebugLogger,
   generateSessionRecap,
@@ -15,6 +17,7 @@ import {
   qwenOAuth2Events,
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
+  runForkedAgent,
   SessionService,
   SESSION_TITLE_MAX_LENGTH,
   tokenLimit,
@@ -2537,6 +2540,45 @@ class QwenAgent implements Agent {
           new AbortController().signal,
         );
         return { sessionId, recap };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionBtw: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const question = params['question'];
+        if (typeof question !== 'string' || !question.trim()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing question',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        const cacheSafeParams = buildBtwCacheSafeParams(config);
+        if (!cacheSafeParams) {
+          return { sessionId, answer: null };
+        }
+        let result;
+        try {
+          result = await runForkedAgent({
+            config,
+            userMessage: buildBtwPrompt(question.trim()),
+            cacheSafeParams,
+            abortSignal: AbortSignal.timeout(55_000),
+          });
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'TimeoutError') {
+            throw RequestError.internalError(
+              'Side question timed out after 55s',
+            );
+          }
+          throw err;
+        }
+        return { sessionId, answer: result.text || null };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionShellHistory: {
         const sessionId = params['sessionId'];

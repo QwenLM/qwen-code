@@ -173,6 +173,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // may be `null` for too-short histories or transient model failures
   // (best-effort, never throws). SDK helper: `DaemonClient.recapSession`.
   session_recap: { since: 'v1' },
+  // Side question (/btw) against the session's conversation context.
+  // Single-turn, tool-free LLM call via runForkedAgent (cache path).
+  session_btw: { since: 'v1' },
   // F2 (#4175 commit 5). Daemon hosts a workspace-shared MCP transport
   // pool (`QwenAgent.mcpPool`); `GET /workspace/mcp` reflects pool-level
   // accounting (`entryCount`, `entrySummary` on each per-server cell).

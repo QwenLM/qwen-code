@@ -384,6 +384,18 @@ export interface HttpAcpBridge {
   ): Promise<{ sessionId: string; recap: string | null }>;
 
   /**
+   * Run a side question (/btw) against the session's conversation context.
+   * Uses runForkedAgent (cache path) for a single-turn, tool-free LLM call.
+   * Returns `answer: null` on empty/failed generation.
+   */
+  generateSessionBtw(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+    context?: BridgeClientRequestContext,
+  ): Promise<{ sessionId: string; answer: string | null }>;
+
+  /**
    * Execute a shell command directly on the daemon (no LLM involvement).
    * Streams output through the session's SSE bus and injects the
    * command+result into the LLM's chat history via extMethod.

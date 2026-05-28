@@ -580,6 +580,7 @@ const MCP_RESTART_TIMEOUT_MS = 300_000;
  * disconnect cancellation in v1 (see server.ts route comment).
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
+const SESSION_BTW_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 const DEFAULT_MAX_SESSIONS = 20;
@@ -3389,6 +3390,44 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return {
         sessionId: entry.sessionId,
         recap: response.recap ?? null,
+      };
+    },
+
+    async generateSessionBtw(sessionId, question, signal, _context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      if (signal?.aborted) return { sessionId, answer: null };
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const races: Promise<unknown>[] = [
+        withTimeout(
+          entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBtw, {
+            sessionId,
+            question,
+          }),
+          SESSION_BTW_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.sessionBtw,
+        ),
+        getTransportClosedReject(entry),
+      ];
+      if (signal) {
+        races.push(
+          new Promise<never>((_, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => reject(new DOMException('Aborted', 'AbortError')),
+              { once: true },
+            );
+          }),
+        );
+      }
+      const response = (await Promise.race(races)) as {
+        sessionId: string;
+        answer: string | null;
+      };
+      return {
+        sessionId: entry.sessionId,
+        answer: response.answer ?? null,
       };
     },
 
