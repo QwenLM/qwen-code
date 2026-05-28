@@ -16,6 +16,7 @@ import type {
   DaemonSessionRecapResult,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTasksStatus,
   DaemonShellCommandResult,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
@@ -186,6 +187,7 @@ export interface DaemonSessionActions {
   renameSession(displayName: string): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
+  getTasks(): Promise<DaemonSessionTasksStatus>;
 }
 
 export interface DaemonSessionContextValue {

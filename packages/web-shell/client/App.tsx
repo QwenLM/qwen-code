@@ -609,7 +609,7 @@ export function App({
             handleTasksSlashCommand({
               cmd,
               promptBlocked,
-              getTasks: actions.getTasks,
+              getTasks: sessionActions.getTasks,
               dispatch: store.dispatch,
               reportError,
             })
@@ -934,11 +934,9 @@ export function App({
         if (promptBlocked) return enqueuePrompt(text, images);
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
-        sessionActions
-          .sendShellCommand(cmd)
-          .catch((error: unknown) => {
-            reportError(error, 'Failed to execute shell command');
-          });
+        sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
+          reportError(error, 'Failed to execute shell command');
+        });
         return true;
       } else {
         if (promptBlocked) return enqueuePrompt(text, images);
@@ -1299,5 +1297,3 @@ export function App({
     </ThemeProvider>
   );
 }
-
-

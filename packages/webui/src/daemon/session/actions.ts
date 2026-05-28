@@ -452,6 +452,19 @@ export function createDaemonSessionActions({
       }
     },
 
+    async getTasks() {
+      const session = requireSessionForAction(
+        store,
+        sessionRef.current,
+        'Get tasks failed',
+      );
+      try {
+        return await withActionTimeout(session.tasks(), 'Get tasks timed out');
+      } catch (error) {
+        throw dispatchActionError(store, 'Get tasks failed', error);
+      }
+    },
+
     async respondToGlobalPermission(
       requestId: string,
       response: PermissionResponse,
