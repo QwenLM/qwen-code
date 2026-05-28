@@ -85,8 +85,17 @@ export type DaemonPromptStatus = 'idle' | 'waiting' | 'streaming';
 
 export interface DaemonModelInfo {
   id: string;
+  baseModelId?: string;
   label: string;
+  authType?: string;
   contextWindow?: number;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  isRuntime?: boolean;
 }
 
 export interface DaemonCommandInfo {

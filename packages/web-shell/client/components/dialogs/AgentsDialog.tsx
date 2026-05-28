@@ -81,6 +81,9 @@ export function AgentsDialog({
     initialScope(initialMode),
   );
   const listRef = useRef<HTMLDivElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const descriptionInputRef = useRef<HTMLInputElement>(null);
+  const systemPromptRef = useRef<HTMLTextAreaElement>(null);
   const directCreateMode =
     initialMode === 'create' ||
     initialMode === 'create-user' ||
@@ -141,6 +144,11 @@ export function AgentsDialog({
       | undefined;
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
+
+  useEffect(() => {
+    if (mode !== 'create') return;
+    window.setTimeout(() => nameInputRef.current?.focus(), 0);
+  }, [mode]);
 
   const loadDetail = useCallback(
     (agent: DaemonWorkspaceAgentSummary) => {
@@ -230,7 +238,37 @@ export function AgentsDialog({
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault();
         if (!busy) handleCreate();
+        return;
       }
+
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') {
+        return;
+      }
+
+      const target = e.target;
+      if (
+        !(target instanceof HTMLInputElement) &&
+        !(target instanceof HTMLTextAreaElement)
+      ) {
+        return;
+      }
+
+      const fields = [
+        nameInputRef.current,
+        descriptionInputRef.current,
+        systemPromptRef.current,
+      ].filter((field): field is HTMLInputElement | HTMLTextAreaElement =>
+        Boolean(field),
+      );
+      const index = fields.indexOf(target);
+      if (index < 0) return;
+
+      e.preventDefault();
+      const nextIndex =
+        e.key === 'ArrowDown'
+          ? Math.min(index + 1, fields.length - 1)
+          : Math.max(index - 1, 0);
+      fields[nextIndex]?.focus();
     },
     [busy, handleCreate],
   );
@@ -382,11 +420,16 @@ export function AgentsDialog({
         <div className={dp('dialog-form')} onKeyDown={handleCreateKeyDown}>
           <label>
             {t('agent.create.name')}
-            <input value={name} onChange={(e) => setName(e.target.value)} />
+            <input
+              ref={nameInputRef}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
           </label>
           <label>
             {t('agent.create.description')}
             <input
+              ref={descriptionInputRef}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
@@ -394,6 +437,7 @@ export function AgentsDialog({
           <label>
             {t('agent.create.prompt')}
             <textarea
+              ref={systemPromptRef}
               className={dp('dialog-textarea')}
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}

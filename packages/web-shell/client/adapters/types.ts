@@ -64,5 +64,15 @@ export interface CommandInfo {
 
 export interface ModelInfo {
   id: string;
+  baseModelId?: string;
   label?: string;
+  authType?: string;
+  contextWindow?: number;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  isRuntime?: boolean;
 }

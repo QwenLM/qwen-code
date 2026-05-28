@@ -19,7 +19,7 @@
 
 .lineMain {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   min-width: 0;
 }
@@ -93,7 +93,7 @@
 }
 
 .lineOutput {
-  margin-left: 28px;
+  margin-left: 16px;
   font-size: 12px;
   color: var(--text-dimmed);
   white-space: pre-wrap;
@@ -102,14 +102,12 @@
 }
 
 .lineDetail {
-  margin-top: 4px;
-  margin-left: 22px;
+  /* margin-top: 4px; */
+  /* margin-left: 22px; */
 }
 
 .expandedBash,
 .expandedRead {
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
   overflow: hidden;
 }
 
@@ -148,7 +146,7 @@
   font-family: var(--font-mono);
   background: var(--subtle-bg);
   border: none;
-  border-top: 1px solid var(--border-color);
+  /* border-top: 1px solid var(--border-color); */
   color: var(--text-dimmed);
   cursor: pointer;
   text-align: left;
@@ -184,4 +182,31 @@
 
 .todoPending {
   color: var(--text-dimmed);
+}
+
+.compactGroup {
+  margin-bottom: 12px;
+  margin-left: 14px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+}
+
+.compactHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.compactCount {
+  color: var(--text-dimmed);
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.compactHint {
+  font-size: 12px;
+  color: var(--text-dimmed);
+  margin-top: 4px;
 }

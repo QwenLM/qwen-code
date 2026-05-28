@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   useActions,
   useConnection,
@@ -7,6 +14,7 @@ import {
   useStreamingState,
   useTranscriptBlocks,
   useTranscriptStore,
+  useWorkspaceActions,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
@@ -27,7 +35,6 @@ import { MemoryDialog } from './components/dialogs/MemoryDialog';
 import type { MemoryDialogInitialMode } from './components/dialogs/MemoryDialog';
 import { AgentsDialog } from './components/dialogs/AgentsDialog';
 import type { AgentsDialogInitialMode } from './components/dialogs/AgentsDialog';
-import { SkillsDialog } from './components/dialogs/SkillsDialog';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { HelpDialog } from './components/dialogs/HelpDialog';
 import {
@@ -50,6 +57,7 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
+import type { SkillInfo } from './completions/slashCompletion';
 import { handleTasksSlashCommand } from './utils/tasksCommand';
 import {
   DAEMON_APPROVAL_MODES,
@@ -60,6 +68,8 @@ import type { ACPToolCall, Message, TodoItem } from './adapters/types';
 import { extractTodosFromToolCall, hasActiveTodos } from './utils/todos';
 import { ThemeProvider } from './themeContext';
 import styles from './App.module.css';
+
+export const CompactModeContext = createContext(false);
 
 const WEB_SHELL_VERSION = __WEB_SHELL_VERSION__;
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
@@ -263,6 +273,7 @@ export function App({
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
   const sessionActions = useActions();
+  const workspaceActions = useWorkspaceActions();
 
   const messages = useMessages();
   const [recapMessage, setRecapMessage] = useState<LocalRecapMessage | null>(
@@ -324,6 +335,20 @@ export function App({
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   const connected = connection.status === 'connected';
+  const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
+  useEffect(() => {
+    if (!connected) return;
+    workspaceActions
+      .loadSkillsStatus()
+      .then((status) => {
+        setLoadedSkills(
+          (status?.skills ?? [])
+            .map((s) => ({ name: s.name, description: s.description ?? '' }))
+            .sort((a, b) => a.name.localeCompare(b.name)),
+        );
+      })
+      .catch(() => {});
+  }, [connected, workspaceActions]);
 
   const [modelDialogMode, setModelDialogMode] = useState<
     'main' | 'fast' | null
@@ -335,7 +360,6 @@ export function App({
   const [showMcpDialog, setShowMcpDialog] = useState(false);
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
-  const [showSkillsDialog, setShowSkillsDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
   const [memoryDialogMode, setMemoryDialogMode] =
     useState<MemoryDialogInitialMode | null>(null);
@@ -359,7 +383,6 @@ export function App({
     showMcpDialog ||
     showHelpDialog ||
     showThemeDialog ||
-    showSkillsDialog ||
     showToolsDialog ||
     !!memoryDialogMode ||
     !!agentsDialogMode;
@@ -486,6 +509,25 @@ export function App({
   const handleToggleShortcuts = useCallback(() => {
     setShowShortcuts((prev) => !prev);
   }, []);
+
+  const [compactMode, setCompactMode] = useState(false);
+
+  const handleClearScreen = useCallback(() => {
+    store.reset();
+  }, [store]);
+
+  const handleToggleCompact = useCallback(() => {
+    setCompactMode((prev) => {
+      const next = !prev;
+      store.dispatch([
+        {
+          type: 'status',
+          text: next ? t('compact.enabled') : t('compact.disabled'),
+        },
+      ]);
+      return next;
+    });
+  }, [store, t]);
 
   const handleSetMode = useCallback(
     (modeId: string) => {
@@ -789,7 +831,33 @@ export function App({
                 reportError(error, 'Failed to send /skills command'),
               );
             } else {
-              setShowSkillsDialog(true);
+              workspaceActions
+                .loadSkillsStatus()
+                .then((status) => {
+                  const skills = (status?.skills ?? [])
+                    .map((s) => ({
+                      name: s.name,
+                      description: s.description ?? '',
+                    }))
+                    .sort((a, b) => a.name.localeCompare(b.name));
+                  setLoadedSkills(skills);
+                  if (skills.length === 0) {
+                    store.dispatch([
+                      { type: 'status', text: t('skills.none') },
+                    ]);
+                  } else {
+                    const list = skills.map((s) => `- ${s.name}`).join('\n');
+                    store.dispatch([
+                      {
+                        type: 'status',
+                        text: `${t('skills.available')}\n\n${list}`,
+                      },
+                    ]);
+                  }
+                })
+                .catch((error: unknown) => {
+                  reportError(error, 'Failed to load skills');
+                });
             }
             return true;
           }
@@ -966,6 +1034,7 @@ export function App({
       runVisibleRecap,
       selectedLanguage,
       t,
+      workspaceActions,
     ],
   );
 
@@ -1037,6 +1106,30 @@ export function App({
   }, []);
 
   useEffect(() => {
+    const onGlobalShortcut = (e: KeyboardEvent) => {
+      if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        if (e.key === 'l') {
+          e.preventDefault();
+          handleClearScreen();
+          return;
+        }
+        if (e.key === 'o') {
+          e.preventDefault();
+          handleToggleCompact();
+          return;
+        }
+        if (e.key === 'y') {
+          e.preventDefault();
+          editorRef.current?.retryLast();
+          return;
+        }
+      }
+    };
+    window.addEventListener('keydown', onGlobalShortcut, true);
+    return () => window.removeEventListener('keydown', onGlobalShortcut, true);
+  }, [handleClearScreen, handleToggleCompact]);
+
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
       if (e.key === 'Tab' && e.shiftKey && pendingApproval && !dialogOpen) {
@@ -1065,6 +1158,7 @@ export function App({
         !dialogOpen
       ) {
         handleCancel();
+        return;
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -1073,7 +1167,6 @@ export function App({
     streamingState,
     handleCancel,
     handleConfirm,
-    handleSetMode,
     pendingApproval,
     dialogOpen,
     clearQueuedPrompts,
@@ -1226,9 +1319,6 @@ export function App({
                   onClose={() => setShowThemeDialog(false)}
                 />
               )}
-              {showSkillsDialog && (
-                <SkillsDialog onClose={() => setShowSkillsDialog(false)} />
-              )}
               {showToolsDialog && (
                 <ToolsDialog onClose={() => setShowToolsDialog(false)} />
               )}
@@ -1250,30 +1340,33 @@ export function App({
             </div>
           )}
 
-          <div
-            className={
-              displayMessages.length > 0 || streamingState !== 'idle'
-                ? `${styles.content} ${styles.contentHasMessages}`
-                : styles.content
-            }
-            style={dialogOpen ? { visibility: 'hidden' } : undefined}
-          >
-            <MessageList
-              messages={displayMessages}
-              pendingApproval={pendingApproval}
-              onConfirm={handleConfirm}
-              welcomeHeader={
-                <WelcomeHeader
-                  version={WEB_SHELL_VERSION}
-                  cwd={connection.workspaceCwd || ''}
-                  currentModel={currentModel}
-                  currentMode={currentMode}
-                />
+          <CompactModeContext.Provider value={compactMode}>
+            <div
+              className={
+                displayMessages.length > 0 || streamingState !== 'idle'
+                  ? `${styles.content} ${styles.contentHasMessages}`
+                  : styles.content
               }
-            />
+              style={dialogOpen ? { visibility: 'hidden' } : undefined}
+            >
+              <MessageList
+                messages={displayMessages}
+                pendingApproval={pendingApproval}
+                onConfirm={handleConfirm}
+                workspaceCwd={connection.workspaceCwd || ''}
+                welcomeHeader={
+                  <WelcomeHeader
+                    version={WEB_SHELL_VERSION}
+                    cwd={connection.workspaceCwd || ''}
+                    currentModel={currentModel}
+                    currentMode={currentMode}
+                  />
+                }
+              />
 
-            <StreamingStatus />
-          </div>
+              <StreamingStatus />
+            </div>
+          </CompactModeContext.Provider>
 
           <div
             className={styles.footer}
@@ -1294,7 +1387,7 @@ export function App({
                   onToggleShortcuts={handleToggleShortcuts}
                   disabled={isDisabled}
                   commands={commands}
-                  skills={connection.skills ?? []}
+                  skills={loadedSkills}
                   queuedMessages={queuedPrompts.map((prompt) => prompt.text)}
                   onFocusActiveAgents={handleFocusActiveAgents}
                   onPopQueuedMessages={popQueuedPromptsForEdit}

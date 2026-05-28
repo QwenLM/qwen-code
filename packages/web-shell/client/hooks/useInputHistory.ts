@@ -110,6 +110,18 @@ export function useInputHistory(storageKey = DEFAULT_STORAGE_KEY) {
       .filter((item) => !lowerQuery || item.toLowerCase().includes(lowerQuery));
   }, []);
 
+  const getLastEntry = useCallback(
+    (filter?: (entry: string) => boolean): string | null => {
+      const h = historyRef.current;
+      if (!filter) return h.length > 0 ? h[h.length - 1] : null;
+      for (let i = h.length - 1; i >= 0; i--) {
+        if (filter(h[i])) return h[i];
+      }
+      return null;
+    },
+    [],
+  );
+
   const resetSearch = useCallback(() => {
     searchIndexRef.current = -1;
   }, []);
@@ -121,6 +133,7 @@ export function useInputHistory(storageKey = DEFAULT_STORAGE_KEY) {
     reset,
     searchReverse,
     getReverseMatches,
+    getLastEntry,
     resetSearch,
   };
 }

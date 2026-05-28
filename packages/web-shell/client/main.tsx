@@ -6,16 +6,10 @@ import {
   DaemonSessionProvider,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { App } from './App';
-import {
-  getDaemonBaseUrl,
-  getDaemonToken,
-  removeDaemonTokenFromUrl,
-} from './config/daemon';
+import { getDaemonBaseUrl, getDaemonToken } from './config/daemon';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
-
-removeDaemonTokenFromUrl();
 
 const DAEMON_BASE_URL = getDaemonBaseUrl();
 const DAEMON_TOKEN = getDaemonToken();

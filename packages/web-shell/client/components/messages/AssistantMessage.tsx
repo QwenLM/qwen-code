@@ -1,5 +1,6 @@
-import { memo } from 'react';
+import { memo, useContext } from 'react';
 import { Markdown } from './Markdown';
+import { CompactModeContext } from '../../App';
 import styles from './AssistantMessage.module.css';
 
 interface AssistantMessageProps {
@@ -11,9 +12,10 @@ export const AssistantMessage = memo(function AssistantMessage({
   content,
   thinking,
 }: AssistantMessageProps) {
+  const compactMode = useContext(CompactModeContext);
   return (
     <div className={styles.message}>
-      {thinking && (
+      {thinking && !compactMode && (
         <div className={styles.thinking}>
           <span className={styles.prefix}>✦</span>
           <pre>{thinking}</pre>

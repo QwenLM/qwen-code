@@ -19,12 +19,14 @@ interface MessageItemProps {
     selectedOption: string,
     answers?: Record<string, string>,
   ) => void;
+  workspaceCwd?: string;
 }
 
 export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onConfirm,
+  workspaceCwd,
 }: MessageItemProps) {
   switch (message.role) {
     case 'user':
@@ -42,6 +44,7 @@ export const MessageItem = memo(function MessageItem({
           tools={message.tools}
           pendingApproval={pendingApproval}
           onConfirm={onConfirm}
+          workspaceCwd={workspaceCwd}
         />
       );
     case 'plan':
@@ -61,6 +64,7 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onConfirm !== next.onConfirm) return false;
+  if (prev.workspaceCwd !== next.workspaceCwd) return false;
   return areMessagesEqual(prev.message, next.message);
 }
 

@@ -23,7 +23,10 @@ import {
   useOptionalWorkspace,
   type UseDaemonFollowupSuggestionReturn,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { slashCompletionSource } from '../completions/slashCompletion';
+import {
+  slashCompletionSource,
+  type SkillInfo,
+} from '../completions/slashCompletion';
 import { createAtCompletionSource } from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
 import { useI18n } from '../i18n';
@@ -42,7 +45,7 @@ interface EditorProps {
   disabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
-  skills?: string[];
+  skills?: SkillInfo[];
   queuedMessages?: string[];
   onPopQueuedMessages?: () => string | null;
   onClearQueuedMessages?: () => boolean;
@@ -60,6 +63,7 @@ export interface EditorHandle {
   blur(): void;
   focus(): void;
   insertText(text: string): void;
+  retryLast(): void;
 }
 
 const editableCompartment = new Compartment();
@@ -157,6 +161,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     navigateDown,
     reset,
     getReverseMatches,
+    getLastEntry,
     resetSearch,
   } = promptHistory;
   const historyActionsRef = useRef({
@@ -165,6 +170,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     navigateDown,
     reset,
     getReverseMatches,
+    getLastEntry,
     resetSearch,
   });
   historyActionsRef.current = {
@@ -173,6 +179,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     navigateDown,
     reset,
     getReverseMatches,
+    getLastEntry,
     resetSearch,
   };
   const shellHistoryActionsRef = useRef(shellHistory);
@@ -240,6 +247,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         run: () => false,
       },
       {
+        key: 'Ctrl-j',
+        run: (view) => {
+          view.dispatch(view.state.replaceSelection('\n'));
+          return true;
+        },
+      },
+      {
         key: 'Escape',
         run: () => {
           if (shellModeRef.current) {
@@ -252,6 +266,14 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
       {
         key: 'Ctrl-o',
+        run: () => true,
+      },
+      {
+        key: 'Ctrl-l',
+        run: () => true,
+      },
+      {
+        key: 'Ctrl-y',
         run: () => true,
       },
       {
@@ -379,7 +401,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     ]);
 
     const slashCompletionRestarter = EditorView.updateListener.of((update) => {
-      if (!update.docChanged || completionStatus(update.state) === 'active') {
+      if (!update.docChanged) {
         return;
       }
       const selection = update.state.selection.main;
@@ -418,6 +440,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           override: completionSources,
           activateOnTyping: true,
           icons: false,
+          optionClass: (completion) =>
+            completion.type === 'skill' ? 'cm-skill-completion' : '',
           aboveCursor: true,
           activateOnCompletion: (completion) =>
             typeof completion.apply === 'string' &&
@@ -553,6 +577,22 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           },
+          '.cm-tooltip-autocomplete ul li.cm-skill-completion': {
+            alignItems: 'flex-start',
+          },
+          '.cm-tooltip-autocomplete ul li.cm-skill-completion .cm-completionLabel':
+            {
+              alignSelf: 'center',
+            },
+          '.cm-tooltip-autocomplete ul li.cm-skill-completion .cm-completionDetail':
+            {
+              whiteSpace: 'normal',
+              display: '-webkit-box',
+              WebkitLineClamp: '2',
+              WebkitBoxOrient: 'vertical',
+              lineHeight: '1.35',
+              maxHeight: '2.7em',
+            },
         }),
       ],
     });
@@ -723,14 +763,26 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     }
   }, []);
 
+  const retryLast = useCallback(() => {
+    const last = historyActionsRef.current.getLastEntry(
+      (e) => !e.startsWith('/') && !e.startsWith('!'),
+    );
+    if (!last) return;
+    const accepted = onSubmitRef.current(last);
+    if (accepted === false) return;
+    historyActionsRef.current.push(last);
+    historyActionsRef.current.reset();
+  }, []);
+
   useImperativeHandle(
     ref,
     () => ({
       blur,
       focus,
       insertText,
+      retryLast,
     }),
-    [blur, focus, insertText],
+    [blur, focus, insertText, retryLast],
   );
 
   const replaceEditorText = useCallback((text: string) => {

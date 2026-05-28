@@ -12,8 +12,8 @@
   background: var(--app-bg);
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: 12px;
+  line-height: 1.5;
   overflow: hidden;
 }
 

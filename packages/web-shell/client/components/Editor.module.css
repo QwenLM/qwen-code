@@ -226,3 +226,24 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+:global(.cm-tooltip-autocomplete ul li.cm-skill-completion) {
+  align-items: flex-start !important;
+}
+
+:global(
+  .cm-tooltip-autocomplete ul li.cm-skill-completion .cm-completionLabel
+) {
+  align-self: center;
+}
+
+:global(
+  .cm-tooltip-autocomplete ul li.cm-skill-completion .cm-completionDetail
+) {
+  white-space: normal !important;
+  display: -webkit-box !important;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.35;
+  max-height: 2.7em;
+}

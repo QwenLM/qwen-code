@@ -10,6 +10,63 @@ interface ModelDialogProps {
   onClose: () => void;
 }
 
+interface ModelDialogModel {
+  id: string;
+  baseModelId?: string;
+  label?: string;
+  authType?: string;
+  contextWindow?: number;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  isRuntime?: boolean;
+}
+
+function formatContextWindow(size?: number): string {
+  return size ? `${size.toLocaleString('en-US')} tokens` : '(unknown)';
+}
+
+function formatModalities(model?: ModelDialogModel): string {
+  const modalities = model?.modalities;
+  if (!modalities) return 'text-only';
+  const parts: string[] = [];
+  if (modalities.image) parts.push('image');
+  if (modalities.pdf) parts.push('pdf');
+  if (modalities.audio) parts.push('audio');
+  if (modalities.video) parts.push('video');
+  return parts.length > 0 ? `text · ${parts.join(' · ')}` : 'text-only';
+}
+
+function getAuthType(model: ModelDialogModel): string | undefined {
+  if (model.authType) return model.authType;
+  const match = model.id.match(/\(([^()]+)\)$/);
+  return match?.[1];
+}
+
+function getModelName(model: ModelDialogModel): string {
+  if (model.label) return model.label;
+  if (model.baseModelId) return model.baseModelId;
+  return model.id.replace(/\([^()]+\)$/, '');
+}
+
+function DetailRow({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}): React.JSX.Element {
+  return (
+    <div className={dp('resume-picker-detail-row')}>
+      <span className={dp('resume-picker-detail-label')}>{label}:</span>
+      <span className={dp('resume-picker-detail-value')}>{value}</span>
+    </div>
+  );
+}
+
 export function ModelDialog({
   mode = 'main',
   onSelect,
@@ -17,7 +74,7 @@ export function ModelDialog({
 }: ModelDialogProps) {
   const connection = useConnection();
   const currentModel = connection.currentModel ?? '';
-  const availableModels = connection.models ?? [];
+  const availableModels = (connection.models ?? []) as ModelDialogModel[];
   const { t } = useI18n();
   const isFastMode = mode === 'fast';
   const [selectedIdx, setSelectedIdx] = useState(() => {
@@ -37,6 +94,7 @@ export function ModelDialog({
         );
       })
     : availableModels;
+  const selectedModel = filtered[selectedIdx];
 
   useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {
@@ -192,36 +250,64 @@ export function ModelDialog({
               : t('model.none')}
           </div>
         )}
-        {filtered.map((m, i) => (
-          <div
-            key={m.id}
-            className={dp(
-              'resume-picker-item',
-              i === selectedIdx && !searchMode ? 'selected' : undefined,
-            )}
-            onClick={() => {
-              onSelect(m.id);
-              onClose();
-            }}
-            onMouseEnter={() => setSelectedIdx(i)}
-          >
-            <div className={dp('resume-picker-item-row')}>
-              <span className={dp('resume-picker-item-prefix')}>
-                {i === selectedIdx && !searchMode ? '›' : ' '}
-              </span>
-              <span className={dp('resume-picker-item-title')}>
-                {m.label || m.id}
-              </span>
-              {!isFastMode && m.id === currentModel && (
-                <span className={dp('resume-picker-item-check')}> ✓</span>
+        {filtered.map((m, i) => {
+          const authType = getAuthType(m);
+          return (
+            <div
+              key={m.id}
+              className={dp(
+                'resume-picker-item',
+                i === selectedIdx && !searchMode ? 'selected' : undefined,
               )}
+              onClick={() => {
+                onSelect(m.id);
+                onClose();
+              }}
+              onMouseEnter={() => setSelectedIdx(i)}
+            >
+              <div className={dp('resume-picker-item-row')}>
+                <span className={dp('resume-picker-item-prefix')}>
+                  {i === selectedIdx && !searchMode ? '>' : ' '}
+                </span>
+                <span className={dp('resume-picker-item-number')}>
+                  {i + 1}.
+                </span>
+                {authType && (
+                  <span className={dp('resume-picker-item-provider')}>
+                    [{authType}]
+                  </span>
+                )}
+                <span className={dp('resume-picker-item-title')}>
+                  {getModelName(m)}
+                </span>
+                {m.isRuntime && (
+                  <span className={dp('resume-picker-item-badge')}>
+                    Runtime
+                  </span>
+                )}
+              </div>
             </div>
-            <div className={dp('resume-picker-item-meta')}>{m.id}</div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className={dp('resume-picker-sep')} />
+
+      {selectedModel && (
+        <>
+          <div className={dp('resume-picker-detail-panel')}>
+            <DetailRow
+              label="Modality"
+              value={formatModalities(selectedModel)}
+            />
+            <DetailRow
+              label="Context Window"
+              value={formatContextWindow(selectedModel.contextWindow)}
+            />
+          </div>
+          <div className={dp('resume-picker-sep')} />
+        </>
+      )}
 
       <div className={dp('resume-picker-footer')}>
         {searchMode

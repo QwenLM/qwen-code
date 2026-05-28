@@ -1,7 +1,15 @@
-import { useEffect, useRef, useCallback, useMemo, type ReactNode } from 'react';
+import {
+  useContext,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  type ReactNode,
+} from 'react';
 import type { Message, ACPToolCall } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import { isSubAgentToolCall } from '../adapters/toolClassification';
+import { CompactModeContext } from '../App';
 import { MessageItem } from './MessageItem';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { ToolApproval } from './messages/ToolApproval';
@@ -18,6 +26,7 @@ interface MessageListProps {
   ) => void;
   forceScrollToBottom?: boolean;
   welcomeHeader?: ReactNode;
+  workspaceCwd?: string;
 }
 
 function isAskUserQuestion(request: PermissionRequest): boolean {
@@ -57,6 +66,87 @@ function isAgentOnlyToolGroup(msg: Message): boolean {
     msg.tools.length === 1 &&
     isSubAgentToolCall(msg.tools[0])
   );
+}
+
+function isForceExpandGroup(
+  msg: Message,
+  pendingApproval: PermissionRequest | null,
+): boolean {
+  if (msg.role !== 'tool_group') return false;
+  if (
+    pendingApproval &&
+    msg.tools.some((t) => t.callId === pendingApproval.toolCallId)
+  )
+    return true;
+  return false;
+}
+
+function isHiddenInCompactMode(msg: Message): boolean {
+  if (msg.role === 'assistant' && msg.thinking && !msg.content) return true;
+  return false;
+}
+
+function mergeCompactToolGroups(
+  messages: Message[],
+  pendingApproval: PermissionRequest | null,
+): Message[] {
+  const result: Message[] = [];
+  let i = 0;
+
+  while (i < messages.length) {
+    const msg = messages[i];
+
+    if (msg.role !== 'tool_group' || isForceExpandGroup(msg, pendingApproval)) {
+      if (!isHiddenInCompactMode(msg)) {
+        result.push(msg);
+      }
+      i++;
+      continue;
+    }
+
+    const mergeableGroups: Message[] = [msg];
+    let lastMergedIdx = i;
+    let j = i + 1;
+
+    while (j < messages.length) {
+      const next = messages[j];
+
+      if (isHiddenInCompactMode(next)) {
+        j++;
+        continue;
+      }
+
+      if (
+        next.role === 'tool_group' &&
+        !isForceExpandGroup(next, pendingApproval)
+      ) {
+        mergeableGroups.push(next);
+        lastMergedIdx = j;
+        j++;
+        continue;
+      }
+
+      break;
+    }
+
+    if (mergeableGroups.length === 1) {
+      result.push(msg);
+      i++;
+      continue;
+    }
+
+    const mergedTools = mergeableGroups.flatMap((g) =>
+      g.role === 'tool_group' ? g.tools : [],
+    );
+    result.push({
+      id: mergeableGroups[0].id,
+      role: 'tool_group',
+      tools: mergedTools,
+    });
+    i = lastMergedIdx + 1;
+  }
+
+  return result;
 }
 
 export function groupParallelAgents(messages: Message[]): DisplayItem[] {
@@ -99,7 +189,18 @@ export function MessageList({
   forceScrollToBottom,
   welcomeHeader,
 }: MessageListProps) {
-  const displayItems = useMemo(() => groupParallelAgents(messages), [messages]);
+  const compactMode = useContext(CompactModeContext);
+  const mergedMessages = useMemo(
+    () =>
+      compactMode
+        ? mergeCompactToolGroups(messages, pendingApproval)
+        : messages,
+    [compactMode, messages, pendingApproval],
+  );
+  const displayItems = useMemo(
+    () => groupParallelAgents(mergedMessages),
+    [mergedMessages],
+  );
   const containerRef = useRef<HTMLDivElement>(null);
   const shouldAutoScroll = useRef(true);
   const prevMsgCount = useRef(messages.length);

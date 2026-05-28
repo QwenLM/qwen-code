@@ -1,4 +1,5 @@
 import styles from './ToolChrome.module.css';
+export { formatToolDisplayName, truncateText } from '../toolFormatting';
 
 export function StatusIcon({ status }: { status: string }) {
   switch (status) {
@@ -13,11 +14,6 @@ export function StatusIcon({ status }: { status: string }) {
     default:
       return <span className={`${styles.icon} ${styles.iconPending}`}>○</span>;
   }
-}
-
-export function truncateText(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return text.slice(0, max) + '...';
 }
 
 export function formatElapsed(start?: number, end?: number): string {
