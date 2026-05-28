@@ -165,7 +165,7 @@ export function recordDaemonError(
   if (!target) return;
   try {
     const message = truncateSpanError(errorMessage(error));
-    target.recordException(error instanceof Error ? error : new Error(message));
+    target.recordException(new Error(message));
     target.setAttributes({
       'error.type': errorType(error),
       'error.message': message,
