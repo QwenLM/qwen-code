@@ -114,3 +114,107 @@ describe('extractRecentFilePaths', () => {
     expect(extractRecentFilePaths(history, -1)).toEqual([]);
   });
 });
+
+import { extractRecentImages } from './postCompactAttachments.js';
+
+function modelCallScreenshot(app: string): Content {
+  return {
+    role: 'model',
+    parts: [
+      {
+        functionCall: {
+          name: 'computer_use__get_app_state',
+          args: { app },
+        },
+      },
+    ],
+  };
+}
+
+function userToolResultWithImage(mimeType: string, data: string): Content {
+  return {
+    role: 'user',
+    parts: [
+      {
+        functionResponse: {
+          name: 'computer_use__get_app_state',
+          response: { output: 'screenshot returned' },
+        },
+      },
+      { inlineData: { mimeType, data } },
+    ],
+  };
+}
+
+describe('extractRecentImages', () => {
+  it('returns the last N images in chronological order (oldest first)', () => {
+    const history: Content[] = [
+      modelCallScreenshot('Safari'),
+      userToolResultWithImage('image/png', 'aaaa'),
+      modelCallScreenshot('Mail'),
+      userToolResultWithImage('image/png', 'bbbb'),
+      modelCallScreenshot('Safari'),
+      userToolResultWithImage('image/png', 'cccc'),
+    ];
+    const result = extractRecentImages(history, 3);
+    expect(result.map((r) => r.part.inlineData?.data)).toEqual([
+      'aaaa',
+      'bbbb',
+      'cccc',
+    ]);
+  });
+
+  it('caps at maxImages by keeping the newest', () => {
+    const history: Content[] = [];
+    for (let i = 0; i < 5; i++) {
+      history.push(modelCallScreenshot(`App${i}`));
+      history.push(userToolResultWithImage('image/png', `data${i}`));
+    }
+    const result = extractRecentImages(history, 3);
+    expect(result.map((r) => r.part.inlineData?.data)).toEqual([
+      'data2',
+      'data3',
+      'data4',
+    ]);
+  });
+
+  it('captures the preceding model functionCall as metadata', () => {
+    const history: Content[] = [
+      modelCallScreenshot('Safari'),
+      userToolResultWithImage('image/png', 'aaaa'),
+    ];
+    const result = extractRecentImages(history, 3);
+    expect(result).toHaveLength(1);
+    expect(result[0].sourceToolName).toBe('computer_use__get_app_state');
+    expect(result[0].sourceToolArgs).toEqual({ app: 'Safari' });
+    expect(result[0].turnIndex).toBe(1); // user+fr is at index 1
+  });
+
+  it('also picks up images from user-paste (no preceding model+fc)', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: 'check this' },
+          { inlineData: { mimeType: 'image/png', data: 'pastedimage' } },
+        ],
+      },
+    ];
+    const result = extractRecentImages(history, 3);
+    expect(result).toHaveLength(1);
+    expect(result[0].sourceToolName).toBeUndefined();
+    expect(result[0].part.inlineData?.data).toBe('pastedimage');
+  });
+
+  it('ignores non-image inlineData', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'application/pdf', data: 'pdfdata' } },
+        ],
+      },
+    ];
+    expect(extractRecentImages(history, 3)).toEqual([]);
+  });
+});
