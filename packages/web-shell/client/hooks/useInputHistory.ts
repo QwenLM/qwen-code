@@ -29,6 +29,7 @@ function saveHistory(storageKey: string, history: string[]) {
 
 export function useInputHistory(storageKey = DEFAULT_STORAGE_KEY) {
   const storageKeyRef = useRef(storageKey);
+  storageKeyRef.current = storageKey;
   const historyRef = useRef<string[]>(loadHistory(storageKey));
   const indexRef = useRef<number>(-1);
   const draftRef = useRef<string>('');

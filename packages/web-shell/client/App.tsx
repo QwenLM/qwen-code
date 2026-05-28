@@ -3,6 +3,7 @@ import {
   useActions,
   useConnection,
   useMessages,
+  useDaemonFollowupSuggestion,
   useStreamingState,
   useTranscriptBlocks,
   useTranscriptStore,
@@ -262,19 +263,6 @@ export function App({
   const connection = useConnection();
   const sessionActions = useActions();
 
-  const sendPrompt = useCallback(
-    (
-      text: string,
-      images?: PromptImage[],
-      opts?: { optimisticUserMessage?: boolean },
-    ) =>
-      sessionActions.sendPrompt(text, {
-        images,
-        optimisticUserMessage: opts?.optimisticUserMessage,
-      }),
-    [sessionActions],
-  );
-
   const messages = useMessages();
   const [recapMessage, setRecapMessage] = useState<LocalRecapMessage | null>(
     null,
@@ -308,6 +296,30 @@ export function App({
   const floatingAgents = useMemo(() => getFloatingAgents(messages), [messages]);
   const activeAgentsPanelRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorHandle>(null);
+  const {
+    followupState,
+    onAcceptFollowup,
+    onDismissFollowup,
+    clear: clearFollowup,
+  } = useDaemonFollowupSuggestion({
+    onAccept: (suggestion) => {
+      editorRef.current?.insertText(suggestion);
+    },
+  });
+  const sendPrompt = useCallback(
+    (
+      text: string,
+      images?: PromptImage[],
+      opts?: { optimisticUserMessage?: boolean },
+    ) => {
+      clearFollowup();
+      return sessionActions.sendPrompt(text, {
+        images,
+        optimisticUserMessage: opts?.optimisticUserMessage,
+      });
+    },
+    [clearFollowup, sessionActions],
+  );
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   const connected = connection.status === 'connected';
@@ -536,6 +548,9 @@ export function App({
   const hiddenAtRef = useRef<number | null>(null);
   const lastRecapBlockCountRef = useRef(0);
   useEffect(() => {
+    lastRecapBlockCountRef.current = 0;
+  }, [connection.sessionId]);
+  useEffect(() => {
     const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
     const MIN_NEW_BLOCKS = 4;
     function onVisibilityChange() {
@@ -561,7 +576,9 @@ export function App({
             ]);
           }
         },
-        () => {},
+        (error: unknown) => {
+          console.warn('[auto-recap] failed:', error);
+        },
       );
     }
     document.addEventListener('visibilitychange', onVisibilityChange);
@@ -1251,6 +1268,9 @@ export function App({
                   onClearQueuedMessages={clearQueuedPrompts}
                   currentMode={currentMode}
                   dialogOpen={dialogOpen}
+                  followupState={followupState}
+                  onAcceptFollowup={onAcceptFollowup}
+                  onDismissFollowup={onDismissFollowup}
                   placeholderText={
                     !connected
                       ? t('common.loading')

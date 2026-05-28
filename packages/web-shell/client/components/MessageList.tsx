@@ -154,7 +154,12 @@ export function MessageList({
 
       {displayItems.map((item) =>
         item.type === 'parallel_agents' ? (
-          <ParallelAgentsGroup key={item.key} agents={item.agents} />
+          <ParallelAgentsGroup
+            key={item.key}
+            agents={item.agents}
+            pendingApproval={pendingApproval}
+            onConfirm={onConfirm}
+          />
         ) : (
           <MessageItem
             key={item.key}

@@ -2013,7 +2013,8 @@ class QwenAgent implements Agent {
     let usage;
     try {
       usage = await collectContextData(config, showDetails);
-    } catch {
+    } catch (err) {
+      console.warn('[context-usage] collectContextData failed:', err);
       usage = {
         type: 'context_usage' as const,
         modelName: config.getModel() || 'unknown',

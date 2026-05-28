@@ -1,11 +1,18 @@
 import { useState } from 'react';
-import type { ACPToolCall } from '../../../adapters/types';
+import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { StatusIcon, truncateText } from './toolDisplay';
 import { SubAgentPanel } from './SubAgentPanel';
+import { ToolApproval } from '../ToolApproval';
 import styles from './ParallelAgentsGroup.module.css';
 
 interface ParallelAgentsGroupProps {
   agents: ACPToolCall[];
+  pendingApproval?: PermissionRequest | null;
+  onConfirm?: (
+    id: string,
+    selectedOption: string,
+    answers?: Record<string, string>,
+  ) => void;
 }
 
 function getAgentDescription(agent: ACPToolCall): string {
@@ -40,13 +47,21 @@ function getCurrentToolHint(agent: ACPToolCall): string {
   return truncateText(hint, 50);
 }
 
-export function ParallelAgentsGroup({ agents }: ParallelAgentsGroupProps) {
+export function ParallelAgentsGroup({
+  agents,
+  pendingApproval,
+  onConfirm,
+}: ParallelAgentsGroupProps) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const doneCount = agents.filter(
     (a) => a.status === 'completed' || a.status === 'failed',
   ).length;
   const total = agents.length;
+
+  const approvalAgent = pendingApproval?.toolCallId
+    ? agents.find((a) => a.callId === pendingApproval.toolCallId)
+    : undefined;
 
   return (
     <div className={styles.group}>
@@ -82,6 +97,9 @@ export function ParallelAgentsGroup({ agents }: ParallelAgentsGroupProps) {
           );
         })}
       </div>
+      {approvalAgent && pendingApproval && onConfirm && (
+        <ToolApproval request={pendingApproval} onConfirm={onConfirm} />
+      )}
     </div>
   );
 }

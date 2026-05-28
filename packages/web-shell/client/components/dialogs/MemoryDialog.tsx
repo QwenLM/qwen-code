@@ -119,8 +119,8 @@ export function MemoryDialog({
   const files: DaemonWorkspaceMemoryFile[] = status?.files ?? [];
 
   const reload = useCallback(
-    (successMessage?: string) => {
-      reloadMemory();
+    async (successMessage?: string) => {
+      await reloadMemory();
       if (successMessage) setMessage(successMessage);
     },
     [reloadMemory],

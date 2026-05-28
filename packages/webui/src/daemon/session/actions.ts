@@ -341,15 +341,16 @@ export function createDaemonSessionActions({
 
     async releaseSession(sessionId) {
       try {
-        await withActionTimeout(
-          detachDaemonClient({
-            baseUrl,
-            token,
-            sessionId,
-            clientId: clientIdRef.current,
-          }),
-          'Release session timed out',
-        );
+        const session = sessionRef.current;
+        if (session && session.sessionId === sessionId) {
+          await withActionTimeout(session.close(), 'Release session timed out');
+        }
+        await detachDaemonClient({
+          baseUrl,
+          token,
+          sessionId,
+          clientId: clientIdRef.current,
+        }).catch(() => undefined);
       } catch (error) {
         throw dispatchActionError(store, 'Release session failed', error);
       }

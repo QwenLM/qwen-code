@@ -332,7 +332,10 @@ function fmtCategoryRow(
   contextWindowSize: number,
   indent = '  ',
 ): string {
-  const percentage = ((tokens / contextWindowSize) * 100).toFixed(1);
+  const percentage =
+    contextWindowSize > 0
+      ? ((tokens / contextWindowSize) * 100).toFixed(1)
+      : '0.0';
   const right = `${fmtTokens(tokens)} tokens (${percentage}%)`;
   const leftPart = `${indent}${label}`;
   const totalWidth = 56;
