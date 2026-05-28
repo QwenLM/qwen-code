@@ -284,7 +284,19 @@ async function readRecordsForMonth(month: string): Promise<TokenUsageRecord[]> {
   const records = await jsonl.read<unknown>(filePath, {
     throwOnNonEnoentError: true,
   });
-  return records.filter(isTokenUsageRecord);
+  const valid: TokenUsageRecord[] = [];
+  let dropped = 0;
+  for (const record of records) {
+    if (isTokenUsageRecord(record)) {
+      valid.push(record);
+    } else {
+      dropped++;
+    }
+  }
+  if (dropped > 0) {
+    debugLogger.warn(`Dropped ${dropped} invalid record(s) from ${filePath}`);
+  }
+  return valid;
 }
 
 function summarizeRecords(
@@ -368,16 +380,36 @@ export async function recordTokenUsageFromApiResponse(
   await jsonl.writeLine(getTokenUsageFilePath(record.localMonth), record);
 }
 
+const lastLoggedTimeByCode = new Map<string, number>();
+const TOKEN_USAGE_FAILURE_LOG_COOLDOWN_MS = 60_000;
+let _now: () => number = () => Date.now();
+
+/** @internal Override the time source for testing cooldown behavior. */
+export function __overrideNowForTesting(fn: () => number): void {
+  _now = fn;
+}
+
 function logTokenUsageWriteFailure(error: unknown): void {
   debugLogger.warn('Failed to record token usage:', error);
   const code = (error as NodeJS.ErrnoException).code;
   if (code && code !== 'ENOENT') {
-    // eslint-disable-next-line no-console -- surface persistent local write failures outside debug mode
-    console.error(
-      `[token-usage] Write failed (${code}):`,
-      error instanceof Error ? error.message : String(error),
-    );
+    const now = _now();
+    const lastTime = lastLoggedTimeByCode.get(code) ?? 0;
+    if (now - lastTime > TOKEN_USAGE_FAILURE_LOG_COOLDOWN_MS) {
+      lastLoggedTimeByCode.set(code, now);
+      // eslint-disable-next-line no-console -- surface persistent local write failures outside debug mode
+      console.error(
+        `[token-usage] Write failed (${code}):`,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   }
+}
+
+/** @internal Reset token usage failure rate-limiting state. For testing only. */
+export function resetTokenUsageFailureLogging(): void {
+  lastLoggedTimeByCode.clear();
+  _now = () => Date.now();
 }
 
 export function recordTokenUsageFromApiResponseBestEffort(

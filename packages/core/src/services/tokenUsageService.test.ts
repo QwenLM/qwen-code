@@ -15,6 +15,7 @@ import { makeFakeConfig } from '../test-utils/config.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import {
+  __overrideNowForTesting,
   apiResponseEventToTokenUsageRecord,
   exportTokenUsageSummary,
   formatTokenUsageSummaryAsCsv,
@@ -22,6 +23,7 @@ import {
   queryTokenUsage,
   recordTokenUsageFromApiResponse,
   recordTokenUsageFromApiResponseBestEffort,
+  resetTokenUsageFailureLogging,
 } from './tokenUsageService.js';
 
 describe('tokenUsageService', () => {
@@ -38,6 +40,7 @@ describe('tokenUsageService', () => {
 
   afterEach(async () => {
     vi.useRealTimers();
+    resetTokenUsageFailureLogging();
     if (originalRuntimeDir === undefined) {
       delete process.env['QWEN_RUNTIME_DIR'];
     } else {
@@ -264,6 +267,66 @@ describe('tokenUsageService', () => {
       writeSpy.mockRestore();
       stderrSpy.mockRestore();
     }
+  });
+
+  it('suppresses repeated console.error for same error code within 60s cooldown, re-fires after cooldown', async () => {
+    const config = makeFakeConfig({
+      sessionId: 'session-1',
+      targetDir: path.join(tempDir, 'project'),
+    });
+    const event = createEvent('model-a', 'prompt-1', {
+      promptTokenCount: 1,
+      candidatesTokenCount: 2,
+      totalTokenCount: 3,
+    });
+    const error = Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+
+    let fakeNow = 1000000;
+    __overrideNowForTesting(() => fakeNow);
+
+    const stderrSpy = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => undefined);
+
+    // --- First failure: should log ---
+    let writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    try {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledTimes(1);
+      });
+      expect(stderrSpy).toHaveBeenCalledWith(
+        '[token-usage] Write failed (ENOSPC):',
+        'disk full',
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    // --- Second failure, same code, within cooldown: suppressed ---
+    writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    try {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+      await vi.runAllTimers();
+      // Still only 1 call — the second was suppressed
+      expect(stderrSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    // --- Advance time past cooldown: should log again ---
+    fakeNow += 61_000;
+    writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    try {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledTimes(2);
+      });
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    stderrSpy.mockRestore();
   });
 
   it('does not surface best-effort ENOENT write failures to stderr', async () => {

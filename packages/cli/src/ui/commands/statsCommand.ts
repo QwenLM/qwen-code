@@ -19,7 +19,8 @@ import {
 import { getCurrentLanguage, t } from '../../i18n/index.js';
 import { calculateCost } from '../../utils/costCalculator.js';
 import {
-  exportTokenUsageSummary,
+  formatTokenUsageSummaryAsCsv,
+  formatTokenUsageSummaryAsJson,
   isSubpath,
   queryTokenUsage,
   type TokenUsageExportFormat,
@@ -565,11 +566,10 @@ async function writeStatsExport(
       period: parsed.period,
       value: parsed.value,
     });
-    const content = await exportTokenUsageSummary({
-      period: summary.period,
-      value: summary.value,
-      format: parsed.format,
-    });
+    const content =
+      parsed.format === 'json'
+        ? formatTokenUsageSummaryAsJson(summary)
+        : `${formatTokenUsageSummaryAsCsv(summary)}\n`;
     const cwd = path.resolve(getConfigCwd(context));
     const defaultFilename = `qwen-token-usage-${summary.period}-${summary.value}.${parsed.format}`;
     const targetPath = path.resolve(cwd, parsed.outputPath || defaultFilename);
