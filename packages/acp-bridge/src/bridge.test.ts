@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
@@ -5166,7 +5166,6 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
   });
-
 
   describe('subscribeEvents', () => {
     it('throws SessionNotFoundError for unknown session ids', () => {
