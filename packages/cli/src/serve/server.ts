@@ -1447,8 +1447,6 @@ export function createServeApp(
     const forwardedBody = { ...body };
     delete forwardedBody['deadlineMs'];
 
-    // Snapshot the event bus cursor BEFORE enqueuing so the client can
-    // start SSE from this point without missing `turn_complete`.
     let lastEventId: number;
     try {
       lastEventId = bridge.getSessionLastEventId(sessionId);
@@ -1460,9 +1458,6 @@ export function createServeApp(
       return;
     }
 
-    // Non-blocking: fire-and-forget. The bridge publishes
-    // `turn_complete` / `turn_error` on the SSE bus when done;
-    // deadline enforcement still aborts the prompt server-side.
     const abort = new AbortController();
     const effectiveDeadlineMs = resolvePromptDeadlineMs(
       opts.promptDeadlineMs,
@@ -1495,9 +1490,7 @@ export function createServeApp(
       .finally(() => {
         if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       })
-      .catch(() => {
-        // Swallowed — `turn_error` already published on the SSE bus.
-      });
+      .catch(() => {});
 
     res.status(202).json({ promptId, lastEventId });
   });

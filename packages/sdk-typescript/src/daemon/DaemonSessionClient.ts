@@ -6,6 +6,8 @@
 
 import type { DaemonClient } from './DaemonClient.js';
 import {
+  isNonBlockingAccepted,
+  matchTurnEvent,
   type CreateSessionRequest,
   type PromptRequest,
   type RestoreSessionRequest,
@@ -66,6 +68,13 @@ export class DaemonSessionClient {
   readonly state: DaemonSessionState;
   private lastSeenEventId: number | undefined;
   private subscriptionActive = false;
+  private readonly _pendingPrompts = new Map<
+    string,
+    {
+      resolve: (r: PromptResult) => void;
+      reject: (e: unknown) => void;
+    }
+  >();
 
   constructor(opts: DaemonSessionClientOptions) {
     this.client = opts.client;
@@ -194,7 +203,38 @@ export class DaemonSessionClient {
     req: PromptRequest,
     signal?: AbortSignal,
   ): Promise<PromptResult> {
-    return await this.client.prompt(this.sessionId, req, signal, this.clientId);
+    if (!this.subscriptionActive) {
+      return await this.client.prompt(
+        this.sessionId,
+        req,
+        signal,
+        this.clientId,
+      );
+    }
+
+    const accepted = await this.client.promptNonBlocking(
+      this.sessionId,
+      req,
+      signal,
+      this.clientId,
+    );
+    if (!isNonBlockingAccepted(accepted)) {
+      return accepted;
+    }
+
+    return new Promise<PromptResult>((resolve, reject) => {
+      this._pendingPrompts.set(accepted.promptId, { resolve, reject });
+      signal?.addEventListener(
+        'abort',
+        () => {
+          if (this._pendingPrompts.delete(accepted.promptId)) {
+            this.client.cancel(this.sessionId, this.clientId).catch(() => {});
+            reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+          }
+        },
+        { once: true },
+      );
+    });
   }
 
   async cancel(): Promise<void> {
@@ -378,13 +418,8 @@ export class DaemonSessionClient {
         ...subscribeOpts,
         lastEventId,
       })) {
+        this._dispatchTurnEvent(event);
         yield event;
-        // Cursor updates happen after the consumer resumes iteration. That
-        // avoids acknowledging an event before the adapter has processed it,
-        // but means `lastEventId` intentionally lags while the handler for the
-        // just-yielded event is still running.
-        // The cursor is a replay watermark, so it only moves forward even if a
-        // replayed or synthetic frame arrives with an older id.
         if (event.id !== undefined) {
           this.lastSeenEventId = Math.max(
             this.lastSeenEventId ?? 0,
@@ -393,8 +428,31 @@ export class DaemonSessionClient {
         }
       }
     } finally {
+      this._rejectAllPending(new Error('SSE stream ended'));
       release();
     }
+  }
+
+  private _dispatchTurnEvent(event: DaemonEvent): void {
+    const promptId = (event.data as { promptId?: string } | null | undefined)
+      ?.promptId;
+    if (!promptId) return;
+    const pending = this._pendingPrompts.get(promptId);
+    if (!pending) return;
+    this._pendingPrompts.delete(promptId);
+    try {
+      const result = matchTurnEvent(event, promptId);
+      if (result !== undefined) pending.resolve(result);
+    } catch (err) {
+      pending.reject(err);
+    }
+  }
+
+  private _rejectAllPending(err: unknown): void {
+    for (const [, pending] of this._pendingPrompts) {
+      pending.reject(err);
+    }
+    this._pendingPrompts.clear();
   }
 }
 

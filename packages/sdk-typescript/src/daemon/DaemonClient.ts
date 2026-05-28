@@ -247,6 +247,15 @@ export interface PromptRequest {
   [key: string]: unknown;
 }
 
+/**
+ * 202 Accepted envelope returned by non-blocking
+ * `POST /session/:id/prompt`.
+ */
+export interface NonBlockingPromptAccepted {
+  promptId: string;
+  lastEventId: number;
+}
+
 export interface SubscribeOptions {
   /** Resume from after this event id (`Last-Event-ID` header). */
   lastEventId?: number;
@@ -1241,9 +1250,12 @@ export class DaemonClient {
    * Send a prompt to the agent. Supports both blocking (legacy 200)
    * and non-blocking (202 + SSE `turn_complete`) daemon responses.
    *
-   * Cancellation is via the optional `signal` — on 202 daemons this
-   * calls `cancel()` out-of-band; on legacy 200 daemons the TCP
-   * close propagates to the agent.
+   * For 202 daemons this opens a **temporary** SSE subscription to
+   * await the matching `turn_complete`/`turn_error`. Callers that
+   * already manage a long-lived SSE subscription (e.g.
+   * `DaemonSessionClient`) should prefer {@link promptNonBlocking}
+   * and correlate via their existing event stream to avoid the extra
+   * connection.
    */
   async prompt(
     sessionId: string,
@@ -1262,10 +1274,7 @@ export class DaemonClient {
     );
 
     if (res.status === 202) {
-      const accept = (await res.json()) as {
-        promptId: string;
-        lastEventId: number;
-      };
+      const accept = (await res.json()) as NonBlockingPromptAccepted;
       return this._awaitTurnComplete(
         sessionId,
         accept.promptId,
@@ -1273,6 +1282,44 @@ export class DaemonClient {
         signal,
         clientId,
       );
+    }
+
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/prompt');
+    return (await res.json()) as PromptResult;
+  }
+
+  /**
+   * Fire-and-forget prompt trigger. Returns the 202 acceptance
+   * envelope (`{ promptId, lastEventId }`) without waiting for the
+   * turn to complete. The caller is responsible for observing
+   * `turn_complete` / `turn_error` on the session's SSE stream,
+   * matching by `promptId`.
+   *
+   * This is the recommended path for callers that already maintain a
+   * long-lived SSE subscription (like `DaemonSessionClient`) —
+   * avoids the extra SSE connection that {@link prompt} opens for
+   * the temporary 202 fallback.
+   *
+   * Falls back to `prompt()` for legacy 200 daemons.
+   */
+  async promptNonBlocking(
+    sessionId: string,
+    req: PromptRequest,
+    signal?: AbortSignal,
+    clientId?: string,
+  ): Promise<NonBlockingPromptAccepted | PromptResult> {
+    const res = await this._fetch(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(req),
+        signal,
+      },
+    );
+
+    if (res.status === 202) {
+      return (await res.json()) as NonBlockingPromptAccepted;
     }
 
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/prompt');
@@ -1297,30 +1344,8 @@ export class DaemonClient {
         signal: composedSignal,
       });
       for await (const event of events) {
-        if (event.type === 'turn_complete') {
-          const data = event.data as {
-            promptId?: string;
-            stopReason?: string;
-          };
-          if (data.promptId === promptId) {
-            return { stopReason: data.stopReason ?? 'end_turn' };
-          }
-        }
-        if (event.type === 'turn_error') {
-          const data = event.data as {
-            promptId?: string;
-            message?: string;
-            code?: string;
-          };
-          if (data.promptId === promptId) {
-            const err = new DaemonHttpError(
-              500,
-              data.code ?? 'turn_error',
-              data.message ?? 'Prompt failed',
-            );
-            throw err;
-          }
-        }
+        const result = matchTurnEvent(event, promptId);
+        if (result !== undefined) return result;
       }
       throw new Error('SSE stream ended without turn completion');
     } catch (err) {
@@ -1841,4 +1866,47 @@ export function composeAbortSignals(signals: AbortSignal[]): AbortSignal {
   // (e.g. its consumer aborted independently — defense-in-depth).
   ctrl.signal.addEventListener('abort', detachAll, { once: true });
   return ctrl.signal;
+}
+
+/**
+ * Check whether a daemon SSE event is a `turn_complete` or
+ * `turn_error` matching `promptId`. Returns `PromptResult` on
+ * `turn_complete`, throws `DaemonHttpError` on `turn_error`,
+ * returns `undefined` for non-matching / unrelated events.
+ *
+ * Extracted so both `DaemonClient._awaitTurnComplete` (temporary SSE
+ * fallback) and `DaemonSessionClient.prompt` (existing subscription
+ * path) share the same matching logic.
+ */
+export function matchTurnEvent(
+  event: DaemonEvent,
+  promptId: string,
+): PromptResult | undefined {
+  if (event.type === 'turn_complete') {
+    const data = event.data as { promptId?: string; stopReason?: string };
+    if (data.promptId === promptId) {
+      return { stopReason: data.stopReason ?? 'end_turn' };
+    }
+  }
+  if (event.type === 'turn_error') {
+    const data = event.data as {
+      promptId?: string;
+      message?: string;
+      code?: string;
+    };
+    if (data.promptId === promptId) {
+      throw new DaemonHttpError(
+        500,
+        data.code ?? 'turn_error',
+        data.message ?? 'Prompt failed',
+      );
+    }
+  }
+  return undefined;
+}
+
+export function isNonBlockingAccepted(
+  result: NonBlockingPromptAccepted | PromptResult,
+): result is NonBlockingPromptAccepted {
+  return 'promptId' in result && 'lastEventId' in result;
 }
