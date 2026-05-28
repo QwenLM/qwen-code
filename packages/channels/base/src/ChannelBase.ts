@@ -281,8 +281,16 @@ export abstract class ChannelBase {
             output: string;
             aborted: boolean;
           };
+          const longestRun = Math.max(
+            0,
+            ...Array.from(
+              (result.output || '').matchAll(/`+/g),
+              (m) => m[0].length,
+            ),
+          );
+          const fence = '`'.repeat(Math.max(3, longestRun + 1));
           const output = result.output
-            ? `\`\`\`\n${result.output}\n\`\`\``
+            ? `${fence}\n${result.output}\n${fence}`
             : '(no output)';
           const exitLine =
             result.exitCode !== null && result.exitCode !== 0

@@ -320,12 +320,13 @@ export class DaemonChannelBridge extends EventEmitter {
   async shellCommand(
     sessionId: string,
     command: string,
+    signal?: AbortSignal,
   ): Promise<{ exitCode: number | null; output: string; aborted: boolean }> {
     const session = this.ensureSession(sessionId);
     if (!session.shellCommand) {
       throw new Error('Shell command not supported by this session client');
     }
-    return session.shellCommand(command);
+    return session.shellCommand(command, signal);
   }
 
   async cancelSession(sessionId: string): Promise<void> {

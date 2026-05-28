@@ -169,13 +169,13 @@ export function normalizeDaemonEvent(
     }
     case 'user_shell_result': {
       const exitCode = numberField(event.data, 'exitCode');
-      return [
-        {
-          ...base,
-          type: 'status',
-          text: `Shell command exited with code ${exitCode ?? 'unknown'}`,
-        },
-      ];
+      const aborted =
+        isRecord(event.data) &&
+        (event.data as Record<string, unknown>)['aborted'] === true;
+      const text = aborted
+        ? 'Shell command was aborted'
+        : `Shell command exited with code ${exitCode ?? 'unknown'}`;
+      return [{ ...base, type: 'status', text }];
     }
 
     case 'replay_complete': {

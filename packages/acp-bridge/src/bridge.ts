@@ -448,7 +448,7 @@ const MCP_RESTART_TIMEOUT_MS = 300_000;
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
 const SHELL_COMMAND_TIMEOUT_MS = 120_000;
-const MAX_SHELL_OUTPUT_FOR_HISTORY = 256 * 1024;
+const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 const DEFAULT_MAX_SESSIONS = 20;
 /**
  * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
@@ -3199,7 +3199,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
               const chunk =
                 typeof event.chunk === 'string'
                   ? event.chunk
-                  : event.chunk.text;
+                  : event.chunk
+                      .map((line: Array<{ text: string }>) =>
+                        line.map((t) => t.text).join(''),
+                      )
+                      .join('\n');
               outputChunks.push(chunk);
               entry.events.publish({
                 type: 'session_update',
@@ -3257,11 +3261,27 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             SERVE_CONTROL_EXT_METHODS.sessionShellHistory,
             { sessionId, command, output: historyOutput, exitCode },
           );
-        } catch {
-          // Best-effort history injection — don't fail the command
+        } catch (err) {
+          writeServeDebugLine(
+            `shell history injection failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
 
         return { exitCode, output, aborted };
+      } catch (err) {
+        entry.events.publish({
+          type: 'user_shell_result',
+          data: {
+            sessionId,
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            error: err instanceof Error ? err.message : String(err),
+            _meta: { serverTimestamp: Date.now() },
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+        throw err;
       } finally {
         signal?.removeEventListener('abort', onSignalAbort);
       }
