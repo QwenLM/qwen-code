@@ -9,12 +9,23 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { ReadFileTool } from '../tools/read-file.js';
 import type { Config } from '../config/config.js';
-import { logToolOutputTruncated } from '../telemetry/loggers.js';
-import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
+import {
+  logToolOutputTruncated,
+  logToolOutputTruncationFailed,
+} from '../telemetry/loggers.js';
+import {
+  ToolOutputTruncatedEvent,
+  ToolOutputTruncationFailedEvent,
+} from '../telemetry/types.js';
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUNCATION');
 
+/**
+ * Sentinel used both as the first line of the truncation envelope and as
+ * scheduler metadata via ToolResult.alreadyTruncated. Do not change the
+ * wording without checking the scheduler double-truncation guards.
+ */
 export const TOOL_OUTPUT_TRUNCATED_PREFIX =
   'Tool output was too large and has been truncated.';
 
@@ -219,6 +230,7 @@ export async function truncateToolOutput(
     threshold?: number;
     lines?: number;
     contentLabel?: string;
+    callId?: string;
   } = {},
 ): Promise<{ content: string; outputFile?: string }> {
   const threshold =
@@ -240,6 +252,7 @@ export async function truncateToolOutput(
     options.contentLabel,
   );
 
+  const wasTruncated = shouldTruncateContent(content, threshold, lines);
   if (result.outputFile) {
     logToolOutputTruncated(
       config,
@@ -250,6 +263,16 @@ export async function truncateToolOutput(
         threshold,
         lines,
         outputFile: result.outputFile,
+      }),
+    );
+  } else if (wasTruncated) {
+    logToolOutputTruncationFailed(
+      config,
+      new ToolOutputTruncationFailedEvent(promptId, {
+        toolName,
+        callId: options.callId ?? '',
+        originalContentLength: originalLength,
+        error: new Error('failed to save full truncated content to file'),
       }),
     );
   }

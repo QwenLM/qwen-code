@@ -7342,6 +7342,7 @@ describe('CoreToolScheduler tool output truncation', () => {
       returnDisplay?: ToolResultDisplay;
       throwOnThresholdRead?: boolean;
       throwOnThresholdReadAfter?: number;
+      throwOnProjectTempDir?: boolean;
       alreadyTruncated?: boolean;
       onResult?: (result: ToolResult) => void;
     } = {},
@@ -7388,7 +7389,14 @@ describe('CoreToolScheduler tool output truncation', () => {
         terminalWidth: 90,
         terminalHeight: 30,
       }),
-      storage: { getProjectTempDir: () => tempDir },
+      storage: {
+        getProjectTempDir: () => {
+          if (options.throwOnProjectTempDir) {
+            throw new Error('temp dir unavailable');
+          }
+          return tempDir;
+        },
+      },
       getTruncateToolOutputThreshold: () => {
         thresholdReadCount += 1;
         if (options.throwOnThresholdRead) {
@@ -7712,6 +7720,59 @@ describe('CoreToolScheduler tool output truncation', () => {
       `${LargeOutputTool.Name}__post_tool_use_additional_context_`,
     );
     expect(savedFileName).not.toContain(':');
+  });
+
+  it('uses split budgets when both tool output and hook context fall back to in-memory truncation', async () => {
+    const largeOutput = 'A'.repeat(5000);
+    const hookContext = 'H'.repeat(5000);
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output:
+          request.eventName === 'PostToolUse'
+            ? { hookSpecificOutput: { additionalContext: hookContext } }
+            : {},
+      })),
+    };
+    const { scheduler, onAllToolCallsComplete } = createLargeOutputScheduler(
+      largeOutput,
+      {
+        threshold: 120,
+        truncateLines: 6,
+        messageBus,
+        disableHooks: false,
+        throwOnProjectTempDir: true,
+      },
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'split-fallback-1',
+          name: LargeOutputTool.Name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-split-fallback-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    const output = extractFunctionResponseOutput(
+      completedCalls[0].response.responseParts,
+    );
+
+    expect(output.match(/\[CONTENT TRUNCATED\]/g)).toHaveLength(2);
+    expect(output).toContain('[Note: Could not save full tool output to file]');
+    expect(output).toContain(
+      '[Note: Could not save full posttooluse hook context to file]',
+    );
+    expect(output).not.toContain('A'.repeat(20));
+    expect(output).not.toContain('H'.repeat(20));
   });
 
   it('falls back to bounded in-memory hook context when hook truncation fails', async () => {

@@ -15,12 +15,31 @@ vi.mock('node:fs/promises');
 const toolOutputTruncatedEvents = vi.hoisted(
   (): Array<{ prompt_id: string; output_file?: string }> => [],
 );
+const toolOutputTruncationFailedEvents = vi.hoisted(
+  (): Array<{
+    prompt_id: string;
+    call_id?: string;
+    error_message?: string;
+  }> => [],
+);
 const debugWarnMessages = vi.hoisted((): string[] => []);
 
 vi.mock('../telemetry/loggers.js', () => ({
   logToolOutputTruncated: vi.fn(
     (_config: Config, event: { prompt_id: string }) => {
       toolOutputTruncatedEvents.push(event);
+    },
+  ),
+  logToolOutputTruncationFailed: vi.fn(
+    (
+      _config: Config,
+      event: {
+        prompt_id: string;
+        call_id?: string;
+        error_message?: string;
+      },
+    ) => {
+      toolOutputTruncationFailedEvents.push(event);
     },
   ),
 }));
@@ -43,6 +62,7 @@ describe('truncateAndSaveToFile', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     toolOutputTruncatedEvents.length = 0;
+    toolOutputTruncationFailedEvents.length = 0;
     debugWarnMessages.length = 0;
     mockMkdir.mockResolvedValue(undefined);
     mockChmod.mockResolvedValue(undefined);
@@ -415,6 +435,39 @@ describe('truncateAndSaveToFile', () => {
               .replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}[a-f0-9]+\\.output$`,
           ),
         ),
+      }),
+    );
+  });
+
+  it('should log failure telemetry when saving the full output fails', async () => {
+    const content = 'a'.repeat(200_000);
+    const config = {
+      getTruncateToolOutputThreshold: () => 100,
+      getTruncateToolOutputLines: () => 10,
+      storage: { getProjectTempDir: () => '/tmp/safe_dir' },
+    } as unknown as Config;
+
+    mockWriteFile.mockRejectedValue(
+      new Error("EACCES: permission denied, open '/tmp/safe_dir/secret'"),
+    );
+
+    const result = await truncateToolOutput(
+      config,
+      'largeOutputTool',
+      content,
+      'prompt-large-1',
+      { callId: 'call-large-1' },
+    );
+
+    expect(result.outputFile).toBeUndefined();
+    expect(result.content).toContain(
+      '[Note: Could not save full tool output to file]',
+    );
+    expect(toolOutputTruncationFailedEvents).toContainEqual(
+      expect.objectContaining({
+        prompt_id: 'prompt-large-1',
+        call_id: 'call-large-1',
+        error_message: 'failed to save full truncated content to file',
       }),
     );
   });

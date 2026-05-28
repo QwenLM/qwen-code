@@ -199,6 +199,17 @@ function halfTruncationLimits(limits: { threshold: number; lines: number }): {
   };
 }
 
+function readFallbackTruncationLimits(
+  config: Config,
+  useSplitBudget: boolean,
+): { threshold: number; lines: number } | undefined {
+  const fallbackLimits = readTruncationLimits(config, true);
+  if (!fallbackLimits) {
+    return undefined;
+  }
+  return useSplitBudget ? halfTruncationLimits(fallbackLimits) : fallbackLimits;
+}
+
 function setToolSpanFailure(
   span: Span,
   failureKind: string,
@@ -2940,7 +2951,10 @@ export class CoreToolScheduler {
               toolName,
               content,
               scheduledCall.request.prompt_id,
-              componentTruncationLimits,
+              {
+                ...componentTruncationLimits,
+                callId: scheduledCall.request.callId,
+              },
             );
             content = truncated.content;
             if (truncated.outputFile && typeof resultDisplay === 'string') {
@@ -2969,7 +2983,10 @@ export class CoreToolScheduler {
                 },
               ),
             );
-            const fallbackLimits = readTruncationLimits(this.config, true);
+            const fallbackLimits = readFallbackTruncationLimits(
+              this.config,
+              useSplitBudget,
+            );
             if (fallbackLimits) {
               content = truncateContentInMemory(
                 content,
@@ -2997,6 +3014,7 @@ export class CoreToolScheduler {
               {
                 ...componentTruncationLimits,
                 contentLabel: 'PostToolUse hook context',
+                callId: scheduledCall.request.callId,
               },
             );
             postToolUseAdditionalContext = truncatedHookContext.content;
@@ -3020,7 +3038,10 @@ export class CoreToolScheduler {
                 },
               ),
             );
-            const fallbackLimits = readTruncationLimits(this.config, true);
+            const fallbackLimits = readFallbackTruncationLimits(
+              this.config,
+              useSplitBudget,
+            );
             if (fallbackLimits) {
               postToolUseAdditionalContext = truncateContentInMemory(
                 postToolUseAdditionalContext,
