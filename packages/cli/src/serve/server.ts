@@ -846,6 +846,50 @@ export function createServeApp(
     },
   );
 
+  // Access-log middleware. Logs every completed request (method, path,
+  // status, duration) via the structured daemon logger. Excluded:
+  //  - GET /health (high-frequency probe, would drown signal)
+  //  - GET /session/:id/events (SSE — logged inline at open/close)
+  if (daemonLog) {
+    const SESSION_ID_RE = /\/session\/([^/]+)/;
+    app.use((req, res, next) => {
+      const { method, path: reqPath } = req;
+      if (
+        method === 'GET' &&
+        (reqPath === '/health' || reqPath.endsWith('/events'))
+      ) {
+        return next();
+      }
+      const startMs = Date.now();
+      res.on('finish', () => {
+        try {
+          const durationMs = Date.now() - startMs;
+          const sessionMatch = reqPath.match(SESSION_ID_RE);
+          const sessionId = sessionMatch?.[1];
+          const clientId = req.headers['x-qwen-client-id'] as
+            | string
+            | undefined;
+          const status = res.statusCode;
+          const ctx = {
+            route: `${method}:${reqPath}`,
+            ...(sessionId ? { sessionId } : {}),
+            ...(clientId ? { clientId } : {}),
+            status,
+            durationMs,
+          };
+          if (status >= 400 && status < 500) {
+            daemonLog.warn('request completed', ctx);
+          } else {
+            daemonLog.info('request completed', ctx);
+          }
+        } catch {
+          // Logging failure must not affect the request.
+        }
+      });
+      next();
+    });
+  }
+
   if (!exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
     // `/health` and `/demo` AFTER `bearerAuth` so probes must carry
@@ -1339,6 +1383,12 @@ export function createServeApp(
       // The disconnect-without-reap branch also needs to skip
       // `res.json` — writing to a closed socket would throw EPIPE
       // through Express's default error handler.
+      if (daemonLog) {
+        daemonLog.info(
+          session.attached ? 'session attached' : 'session spawned',
+          { sessionId: session.sessionId, clientId: session.clientId },
+        );
+      }
       if (!res.writable) {
         if (!session.attached) {
           // `requireZeroAttaches: true` closes the BQ9tV race: if
@@ -1607,6 +1657,9 @@ export function createServeApp(
       })
       .catch(() => {});
 
+    if (daemonLog) {
+      daemonLog.info('prompt enqueued', { sessionId, promptId });
+    }
     res.status(202).json({ promptId, lastEventId });
   });
 
@@ -1676,6 +1729,9 @@ export function createServeApp(
         } as Parameters<HttpAcpBridge['cancelSession']>[1],
         clientId !== undefined ? { clientId } : undefined,
       );
+      if (daemonLog) {
+        daemonLog.info('cancel sent', { sessionId, clientId });
+      }
       res.status(204).end();
     } catch (err) {
       sendBridgeError(res, err, {
@@ -1854,6 +1910,13 @@ export function createServeApp(
         sessionId,
         clientId !== undefined ? { clientId } : undefined,
       );
+      if (daemonLog) {
+        const recap = (response as { recap?: string | null }).recap;
+        daemonLog.info(
+          recap ? `recap generated len=${recap.length}` : 'recap returned null',
+          { sessionId, clientId },
+        );
+      }
       res.status(200).json(response);
     } catch (err) {
       sendBridgeError(res, err, {
@@ -1890,6 +1953,13 @@ export function createServeApp(
         abort.signal,
         clientId !== undefined ? { clientId } : undefined,
       );
+      if (daemonLog) {
+        daemonLog.info('shell command completed', {
+          sessionId,
+          clientId,
+          exitCode: (result as { exitCode?: number })?.exitCode,
+        });
+      }
       res.status(200).json(result);
     } catch (err) {
       if (
@@ -2273,6 +2343,19 @@ export function createServeApp(
         sessionId,
       });
       return;
+    }
+
+    if (daemonLog) {
+      const sseOpenedAt = Date.now();
+      const sseClientId = req.headers['x-qwen-client-id'] as string | undefined;
+      daemonLog.info('SSE stream opened', { sessionId, clientId: sseClientId });
+      res.on('close', () => {
+        daemonLog.info('SSE stream closed', {
+          sessionId,
+          clientId: sseClientId,
+          durationMs: Date.now() - sseOpenedAt,
+        });
+      });
     }
 
     res.status(200);
