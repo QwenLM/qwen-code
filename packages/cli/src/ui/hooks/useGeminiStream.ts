@@ -1172,7 +1172,7 @@ export const useGeminiStream = (
         [FinishReason.IMAGE_RECITATION]:
           'Response stopped due to image recitation policy.',
         [FinishReason.IMAGE_OTHER]:
-          'Response stopped due to other image safety reasons.',
+          'Response stopped due to other image-related reasons.',
       };
 
       const message = finishReasonMessages[finishReason];

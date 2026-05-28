@@ -3917,6 +3917,22 @@ describe('useGeminiStream', () => {
           message: '⚠️  Response stopped due to image safety violations.',
         },
         {
+          reason: 'IMAGE_PROHIBITED_CONTENT',
+          message: '⚠️  Response stopped due to image prohibited content.',
+        },
+        {
+          reason: 'NO_IMAGE',
+          message: '⚠️  Response stopped due to no image.',
+        },
+        {
+          reason: 'IMAGE_RECITATION',
+          message: '⚠️  Response stopped due to image recitation policy.',
+        },
+        {
+          reason: 'IMAGE_OTHER',
+          message: '⚠️  Response stopped due to other image-related reasons.',
+        },
+        {
           reason: 'UNEXPECTED_TOOL_CALL',
           message: '⚠️  Response stopped due to unexpected tool call.',
         },

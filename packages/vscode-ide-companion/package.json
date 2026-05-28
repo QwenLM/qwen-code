@@ -312,7 +312,7 @@
     "@agentclientprotocol/sdk": "^0.14.1",
     "@qwen-code/sdk": "*",
     "@qwen-code/webui": "*",
-    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@modelcontextprotocol/sdk": "^1.25.2",
     "cors": "^2.8.5",
     "dotenv": "^17.1.0",
     "express": "^5.1.0",
