@@ -27,7 +27,7 @@ const FILE_TOUCHING_TOOLS = new Set<string>([
   'read_file',
   'write_file',
   'edit',
-  'replace',
+  'replace', // legacy alias for 'edit' — may appear in old sessions (see ToolNamesMigration)
 ]);
 
 /**
@@ -39,7 +39,9 @@ export function extractRecentFilePaths(
   history: Content[],
   maxFiles: number,
 ): string[] {
-  const seen = new Map<string, number>(); // path → first-seen index walking newest-first
+  if (maxFiles <= 0) return [];
+
+  const seen = new Set<string>();
   for (let i = history.length - 1; i >= 0; i--) {
     const content = history[i];
     if (content.role !== 'model') continue;
@@ -49,12 +51,10 @@ export function extractRecentFilePaths(
       const args = call.args as { file_path?: unknown } | undefined;
       const filePath =
         typeof args?.file_path === 'string' ? args.file_path : undefined;
-      if (!filePath) continue;
-      if (!seen.has(filePath)) {
-        seen.set(filePath, i);
-        if (seen.size >= maxFiles) return [...seen.keys()];
-      }
+      if (!filePath || seen.has(filePath)) continue;
+      seen.add(filePath);
+      if (seen.size >= maxFiles) return [...seen];
     }
   }
-  return [...seen.keys()];
+  return [...seen];
 }

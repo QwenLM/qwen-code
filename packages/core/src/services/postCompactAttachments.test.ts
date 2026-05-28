@@ -107,4 +107,10 @@ describe('extractRecentFilePaths', () => {
     expect(paths).toContain('/e.ts');
     expect(paths).toContain('/r.ts');
   });
+
+  it('returns empty array when maxFiles is 0 or negative', () => {
+    const history: Content[] = [fileReadCall('/a.ts'), fileReadCall('/b.ts')];
+    expect(extractRecentFilePaths(history, 0)).toEqual([]);
+    expect(extractRecentFilePaths(history, -1)).toEqual([]);
+  });
 });
