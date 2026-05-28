@@ -868,7 +868,9 @@ export function createServeApp(
             status,
             durationMs,
           };
-          if (status >= 400 && status < 500) {
+          if (status >= 500) {
+            daemonLog.error('request completed', null, ctx);
+          } else if (status >= 400) {
             daemonLog.warn('request completed', ctx);
           } else {
             daemonLog.info('request completed', ctx);
@@ -1938,7 +1940,7 @@ export function createServeApp(
         clientId !== undefined ? { clientId } : undefined,
       );
       if (daemonLog) {
-        const recap = (response as { recap?: string | null }).recap;
+        const recap = response.recap;
         daemonLog.info(
           recap ? `recap generated len=${recap.length}` : 'recap returned null',
           { sessionId, clientId },
@@ -1984,7 +1986,7 @@ export function createServeApp(
         daemonLog.info('shell command completed', {
           sessionId,
           clientId,
-          exitCode: (result as { exitCode?: number })?.exitCode,
+          exitCode: result.exitCode,
         });
       }
       res.status(200).json(result);
