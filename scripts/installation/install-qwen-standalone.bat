@@ -312,7 +312,19 @@ set "DISPLAY_VERSION=!VERSION!"
 if /i not "!DISPLAY_VERSION!"=="latest" (
     if /i "!DISPLAY_VERSION:~0,1!"=="v" set "DISPLAY_VERSION=!DISPLAY_VERSION:~1!"
 )
+echo.
 echo Installing Qwen Code version: !DISPLAY_VERSION!
+echo.
+exit /b 0
+
+:PrintLogo
+echo  QWEN CODE
+echo  ========================================
+echo.
+exit /b 0
+
+:PrintProgressComplete
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$esc = [char]27; $bar = [string]::new([char]0x25A0, 50); Write-Host \"$esc[38;5;214m$bar 100%%$esc[0m\""
 exit /b 0
 
 :ValidateRawEnvironmentOptions
@@ -815,7 +827,6 @@ if not "!ARCHIVE_PATH!"=="" (
         if exist "!ARCHIVE_FILE!" del /F /Q "!ARCHIVE_FILE!" >nul 2>&1
         echo WARNING: Aliyun standalone archive download failed; retrying GitHub mirror.
         call :UseGithubFallbackBaseUrl
-        echo Downloading !ARCHIVE_NAME!
         call :DownloadFile "!ARCHIVE_URL!" "!ARCHIVE_FILE!"
         set "DOWNLOAD_STATUS=!ERRORLEVEL!"
     )
@@ -825,6 +836,7 @@ if not "!ARCHIVE_PATH!"=="" (
         if /i "!METHOD!"=="detect" exit /b 2
         exit /b 1
     )
+    call :PrintProgressComplete
 )
 
 if "!TEMP_DIR!"=="" (
@@ -1226,9 +1238,9 @@ if not "!INSTALLED_BIN!"=="" if exist "!INSTALLED_BIN!" (
     for /f "delims=" %%i in ('"!INSTALLED_BIN!" --version 2^>nul') do set "INSTALLED_VERSION=%%i"
 )
 
-echo QWEN CODE
+call :PrintLogo
 echo.
-echo Qwen Code !INSTALLED_VERSION! installed successfully.
+echo   Qwen Code !INSTALLED_VERSION! installed successfully.
 echo.
 echo To start:
 echo   cd ^<project^>
