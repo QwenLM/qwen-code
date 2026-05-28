@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ComputerUseTool } from './tool.js';
 import { ComputerUseClient } from './client.js';
 import { COMPUTER_USE_SCHEMAS } from './schemas.js';
@@ -18,6 +18,14 @@ function makeFakeClient(
 describe('ComputerUseTool', () => {
   beforeEach(() => {
     ComputerUseClient.setSharedForTest(undefined);
+    // Auto-approve install so tool.test.ts doesn't block on the install
+    // confirmation prompt. The bootstrap state machine is tested in detail
+    // in bootstrap.test.ts; tool.test.ts focuses on the tool wrapper logic.
+    process.env['QWEN_COMPUTER_USE_AUTO_APPROVE'] = '1';
+  });
+
+  afterEach(() => {
+    delete process.env['QWEN_COMPUTER_USE_AUTO_APPROVE'];
   });
 
   it('exposes qwen-facing name with computer_use__ prefix', () => {
