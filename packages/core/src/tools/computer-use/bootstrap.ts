@@ -193,10 +193,17 @@ export async function runBootstrap(
   // get_app_state on Finder and repeatedly bring Finder to the
   // foreground (user-visible regression observed in real sessions).
   //
-  // If the user revokes permissions mid-session, the actual tool call
-  // will surface upstream's permissionDenied error and the next
-  // reconnect-driven start (stop → start in client.callTool's
-  // transport-closed retry) will trigger a fresh probe.
+  // Trade-off on mid-session permission revocation: upstream returns
+  // permissionDenied as an MCP result with isError=true (not a thrown
+  // exception), so it does NOT trigger client.callTool's transport-
+  // closed retry path, and the reconnect path itself goes through
+  // client.stop() + client.start() directly without re-entering
+  // runBootstrap. The model therefore receives permissionDenied on
+  // every subsequent tool call with no automatic recovery — the user
+  // must restart qwen-code to re-enter the permission flow. This is
+  // an acceptable trade-off: TCC revocation mid-session is extremely
+  // rare, whereas re-probing on every tool call caused 51+ visible
+  // foreground switches per session in real use.
   if (wasAlreadyStarted) return;
   if (deps.platform !== 'darwin') return;
 
