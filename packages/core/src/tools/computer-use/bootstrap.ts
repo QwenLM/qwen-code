@@ -222,7 +222,7 @@ export async function runBootstrap(
     // granted, so a fresh spawn brings the next prompt back into view.
     if (next !== lastProbeKind) {
       ctx.updateOutput?.(
-        `Now waiting for ${next} permission. Re-opening the onboarding window — please complete this step too.`,
+        `Now waiting for ${next} permission. Please complete this step in the onboarding window — bringing it to the front now.`,
       );
       deps.spawnDoctor();
       lastProbeKind = next;
