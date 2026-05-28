@@ -46,10 +46,18 @@ export const App = () => {
                     -CORRUPTED_SUFFIX.length,
                   );
                   fs.copyFileSync(settings.corruptedPath, settingsPath);
-                  fs.unlinkSync(settings.corruptedPath);
                 } catch (e) {
                   writeStderrLine(
                     `Failed to restore corrupted file: ${e instanceof Error ? e.message : String(e)}`,
+                  );
+                  process.exit(1);
+                  return;
+                }
+                try {
+                  fs.unlinkSync(settings.corruptedPath);
+                } catch (e) {
+                  writeStderrLine(
+                    `Settings restored, but could not remove ${settings.corruptedPath}: ${e instanceof Error ? e.message : String(e)}`,
                   );
                 }
               }
@@ -62,8 +70,10 @@ export const App = () => {
               ) {
                 try {
                   fs.unlinkSync(settings.corruptedPath);
-                } catch {
-                  /* ignore */
+                } catch (e) {
+                  writeStderrLine(
+                    `Could not remove ${settings.corruptedPath}: ${e instanceof Error ? e.message : String(e)}`,
+                  );
                 }
               }
               settings.corruptionDialogDismissed = true;

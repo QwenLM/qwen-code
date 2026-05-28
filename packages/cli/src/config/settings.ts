@@ -73,12 +73,22 @@ export function getUserSettingsDir(): string {
 }
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
+// Env var names used for inter-process communication of corruption state.
+// Defined as constants to avoid duplicated string literals.
+export const ENV_CORRUPTED_PATH = 'QWEN_CODE_SETTINGS_CORRUPTED_PATH';
+export const ENV_WAS_RECOVERED = 'QWEN_CODE_SETTINGS_WAS_RECOVERED';
+
 // QWEN_HOME and QWEN_RUNTIME_DIR control where global state (settings, OAuth
 // credentials, installation IDs, etc.) is written. A project `.env` must never
 // redirect these — that would split global state between the real home and a
 // project-controlled directory. Always excluded from project .env files,
 // regardless of user-configurable `advanced.excludedEnvVars`.
-const PROJECT_ENV_HARDCODED_EXCLUSIONS = ['QWEN_HOME', 'QWEN_RUNTIME_DIR'];
+const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
+  'QWEN_HOME',
+  'QWEN_RUNTIME_DIR',
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
+];
 
 // Settings version to track migration state
 export const SETTINGS_VERSION = 4;
@@ -961,18 +971,17 @@ export function loadSettings(
         // Only apply to user scope since that's where corruption is detected.
         // Clear env vars after reading so subsequent loadSettings calls
         // don't re-trigger this path.
-        const envCorruptedPath =
-          process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'];
+        const envCorruptedPath = process.env[ENV_CORRUPTED_PATH];
         if (
           consumeCorruptionEnvVars &&
           envCorruptedPath &&
+          envCorruptedPath === corruptedPath &&
           scope === SettingScope.User
         ) {
           corruptedSaved = true;
-          recoveredFromEnvVar =
-            process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] === '1';
-          delete process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'];
-          delete process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'];
+          recoveredFromEnvVar = process.env[ENV_WAS_RECOVERED] === '1';
+          delete process.env[ENV_CORRUPTED_PATH];
+          delete process.env[ENV_WAS_RECOVERED];
         }
 
         if (

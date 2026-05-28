@@ -29,6 +29,8 @@ import * as cliConfig from './config/config.js';
 import { loadCliConfig, parseArguments } from './config/config.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
 import {
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
   createMinimalSettings,
   getSettingsWarnings,
   loadSettings,
@@ -435,10 +437,8 @@ export async function main() {
   // Propagate corruption state to child process via env vars so
   // relaunchAppInChildProcess() doesn't lose the marker.
   if (settings.corruptedPath) {
-    process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'] = settings.corruptedPath;
-    process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'] = settings.wasRecovered
-      ? '1'
-      : '0';
+    process.env[ENV_CORRUPTED_PATH] = settings.corruptedPath;
+    process.env[ENV_WAS_RECOVERED] = settings.wasRecovered ? '1' : '0';
   }
   await cleanupCheckpoints();
   // Performance checkpoint
@@ -615,6 +615,11 @@ export async function main() {
       // Relaunch app so we always have a child process that can be internally
       // restarted if needed.
       await relaunchAppInChildProcess(memoryArgs, []);
+      // Clean up corruption env vars in parent so subsequent relaunch
+      // cycles (triggered by trust dialog exit code 42) don't inherit
+      // stale state.
+      delete process.env[ENV_CORRUPTED_PATH];
+      delete process.env[ENV_WAS_RECOVERED];
     }
   }
 
@@ -977,15 +982,15 @@ export async function main() {
       );
       // Clean up corruption env vars so subsequent relaunch children
       // and subprocesses don't inherit stale state.
-      delete process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'];
-      delete process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'];
+      delete process.env[ENV_CORRUPTED_PATH];
+      delete process.env[ENV_WAS_RECOVERED];
       return;
     }
 
     // Also clean up env vars for non-interactive paths so that
     // subprocesses don't inherit stale state.
-    delete process.env['QWEN_CODE_SETTINGS_CORRUPTED_PATH'];
-    delete process.env['QWEN_CODE_SETTINGS_WAS_RECOVERED'];
+    delete process.env[ENV_CORRUPTED_PATH];
+    delete process.env[ENV_WAS_RECOVERED];
 
     // Non-interactive: defer finalize until after `config.initialize()` runs
     // so MCP discovery events (mcp_first_tool_registered, mcp_all_servers_settled,
