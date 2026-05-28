@@ -2109,6 +2109,24 @@ describe('Settings Loading and Merging', () => {
         );
         expect(process.env[ENV_WAS_RECOVERED]).toBe('1');
       });
+
+      it('should reject mismatched ENV_CORRUPTED_PATH', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = '/some/other/path.corrupted';
+        process.env[ENV_WAS_RECOVERED] = '1';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+
+        // Guard rejected — corruptedPath not propagated
+        expect(result.corruptedPath).toBeUndefined();
+        // Env vars not consumed because guard failed
+        expect(process.env[ENV_CORRUPTED_PATH]).toBe(
+          '/some/other/path.corrupted',
+        );
+      });
     });
 
     it('should resolve environment variables in user settings', () => {

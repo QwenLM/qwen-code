@@ -1026,6 +1026,10 @@ export function loadSettings(
           }
         };
 
+        // Execute migrations even on recovered settings — the migrated data
+        // must persist. The disk-write branches below (version normalization)
+        // are guarded by !corruptedSaved to avoid creating .orig backups
+        // of freshly-reset settings.
         if (needsMigration(settingsObject)) {
           const migrationResult = runMigrations(settingsObject, scope);
           if (migrationResult.executedMigrations.length > 0) {
