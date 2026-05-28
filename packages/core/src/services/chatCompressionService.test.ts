@@ -1801,3 +1801,133 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     expect(result.info.compressionStatus).not.toBe(CompressionStatus.NOOP);
   });
 });
+
+describe('ChatCompressionService.compress — single-turn computer-use regression', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeFakeChat(history: Content[]): GeminiChat {
+    const getHistoryMock = vi.fn().mockReturnValue(history);
+    return {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+  }
+
+  function makeFakeConfig(): Config {
+    return {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+    } as unknown as Config;
+  }
+
+  it('preserves the user prompt verbatim in summary and restores 3 most recent screenshots', async () => {
+    // Reproduces the "single-turn long task" scenario the rewrite targets:
+    // ONE user message kicks off many tool calls. OLD behavior with the
+    // split-point model: 0 entries preserved verbatim when compression
+    // fires after a tool result (the common case). NEW behavior: summary
+    // contains the user prompt verbatim (via 9-section prompt template's
+    // "All user messages" section) + 3 most recent screenshots attached
+    // as the image restoration block.
+    const screenshot = (data: string): Content => ({
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: 'computer_use__get_app_state',
+            response: { output: 'ok' },
+          },
+        },
+        { inlineData: { mimeType: 'image/png', data } },
+      ],
+    });
+    const callScreenshot = (app: string): Content => ({
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            name: 'computer_use__get_app_state',
+            args: { app },
+          },
+        },
+      ],
+    });
+
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'open Safari and read the first headline' }],
+      },
+      callScreenshot('Safari'),
+      screenshot('s1'),
+      callScreenshot('Safari'),
+      screenshot('s2'),
+      callScreenshot('Safari'),
+      screenshot('s3'),
+      callScreenshot('Safari'),
+      screenshot('s4'),
+      callScreenshot('Safari'),
+      screenshot('s5'),
+    ];
+
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: 'SUMMARY containing "open Safari and read the first headline" verbatim',
+      usage: {
+        promptTokenCount: 170_000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 170_500,
+      },
+    } as never);
+
+    const service = new ChatCompressionService();
+    const result = await service.compress(makeFakeChat(history), {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-vl',
+      config: makeFakeConfig(),
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      trigger: 'manual',
+    });
+
+    expect(result.newHistory).not.toBeNull();
+    const flat = result.newHistory!;
+    const flatText = flat
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+
+    // Assertion 1: summary text (mocked) carries the user prompt verbatim.
+    expect(flatText).toContain('open Safari and read the first headline');
+
+    // Assertion 2: Image restoration block exists and contains exactly s3, s4, s5
+    // (the 3 most recent screenshots), in chronological order.
+    const inlineDataParts = flat.flatMap((c) =>
+      (c.parts ?? []).filter((p) =>
+        (
+          p as { inlineData?: { mimeType?: string } }
+        ).inlineData?.mimeType?.startsWith('image/'),
+      ),
+    );
+    expect(
+      inlineDataParts.map(
+        (p) => (p as { inlineData: { data: string } }).inlineData.data,
+      ),
+    ).toEqual(['s3', 's4', 's5']);
+
+    // Assertion 3: Image metadata header mentions the source tool and args.
+    expect(flatText).toContain('computer_use__get_app_state');
+    expect(flatText).toContain('"app":"Safari"');
+  });
+});
