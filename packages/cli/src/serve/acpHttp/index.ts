@@ -7,6 +7,7 @@
 import type { Application, Request, Response } from 'express';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { AcpDispatcher } from './dispatch.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { SseStream } from './sseStream.js';
@@ -25,6 +26,8 @@ const CONN_GRACE_MS = 10_000;
 
 export interface MountAcpHttpOptions {
   boundWorkspace: string;
+  /** Workspace service facade for workspace-scoped operations. */
+  workspace: DaemonWorkspaceService;
   /** Defaults to `process.env.QWEN_SERVE_ACP_HTTP !== '0'`. */
   enabled?: boolean;
   /** Mount path; defaults to `/acp`. */
@@ -59,7 +62,11 @@ export function mountAcpHttp(
   if (!enabled) return undefined;
 
   const path = opts.path ?? '/acp';
-  const dispatcher = new AcpDispatcher(bridge, opts.boundWorkspace);
+  const dispatcher = new AcpDispatcher(
+    bridge,
+    opts.boundWorkspace,
+    opts.workspace,
+  );
   // When a session/connection tears down with a permission still pending,
   // cancel it on the bridge so the agent's prompt isn't left blocked.
   const registry = new ConnectionRegistry(
