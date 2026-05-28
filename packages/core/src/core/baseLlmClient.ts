@@ -551,31 +551,46 @@ function parseJsonObjectFromText(
   }
 
   const jsonSlices = findJsonObjectSlices(withoutFence);
-  for (const jsonSlice of jsonSlices.slice().reverse()) {
-    let parsed: unknown;
+  let parsedObject: Record<string, unknown> | undefined;
+  let validObjectCount = 0;
+
+  for (const jsonSlice of jsonSlices) {
+    const parsed = parseJsonObjectSlice(jsonSlice, {
+      allowUnquotedKeyStringValues:
+        jsonSlices.length > 1 || withoutFence.trim() === jsonSlice.trim(),
+    });
+    if (!parsed) continue;
+
+    validObjectCount++;
+    if (validObjectCount > 1) {
+      return undefined;
+    }
+    parsedObject = parsed;
+  }
+
+  return parsedObject;
+}
+
+function parseJsonObjectSlice(
+  jsonSlice: string,
+  options: { allowUnquotedKeyStringValues?: boolean } = {},
+): Record<string, unknown> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonSlice);
+  } catch {
+    if (!shouldAttemptJsonRepair(jsonSlice, options)) {
+      return undefined;
+    }
     try {
-      parsed = JSON.parse(jsonSlice);
+      parsed = JSON.parse(jsonrepair(jsonSlice));
     } catch {
-      if (
-        !shouldAttemptJsonRepair(jsonSlice, {
-          allowUnquotedKeyStringValues: jsonSlices.length > 1,
-        })
-      ) {
-        continue;
-      }
-      try {
-        parsed = JSON.parse(jsonrepair(jsonSlice));
-      } catch {
-        continue;
-      }
+      return undefined;
     }
-    if (
-      parsed !== null &&
-      typeof parsed === 'object' &&
-      !Array.isArray(parsed)
-    ) {
-      return parsed as Record<string, unknown>;
-    }
+  }
+
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return parsed as Record<string, unknown>;
   }
 
   return undefined;
@@ -587,9 +602,6 @@ function shouldAttemptJsonRepair(
 ): boolean {
   if (/"[^"]+"\s*:/.test(jsonSlice)) {
     return true;
-  }
-  if (/,\s*[}\]]/.test(jsonSlice)) {
-    return /:\s*(?:"|[-\d[{]|\btrue\b|\bfalse\b|\bnull\b)/.test(jsonSlice);
   }
   if (/:\s*(?:[-\d[{]|\btrue\b|\bfalse\b|\bnull\b)/.test(jsonSlice)) {
     return true;

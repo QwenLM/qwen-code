@@ -473,7 +473,7 @@ describe('BaseLlmClient', () => {
       expect(result).toEqual({ color: 'cyan' });
     });
 
-    it('should prefer the last valid JSON object candidate from explanatory text', async () => {
+    it('should reject ambiguous text with multiple valid JSON objects', async () => {
       const mockResponse = createMockResponseWithText(
         'Format example: {"example":"value"}\nResult: {"answer":"actual"}',
       );
@@ -482,7 +482,10 @@ describe('BaseLlmClient', () => {
 
       const result = await client.generateJson(defaultOptions);
 
-      expect(result).toEqual({ answer: 'actual' });
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
     });
 
     it('should return the enclosing object, not a nested inner object', async () => {
@@ -497,7 +500,7 @@ describe('BaseLlmClient', () => {
       expect(result).toEqual({ result: { status: 'ok' } });
     });
 
-    it('should repair the last unquoted-key JSON candidate with a quoted string value', async () => {
+    it('should reject ambiguous text with a repairable second JSON candidate', async () => {
       const mockResponse = createMockResponseWithText(
         'Format example: {"status":"ok"}\nResult: {status: "complete"}',
       );
@@ -506,7 +509,10 @@ describe('BaseLlmClient', () => {
 
       const result = await client.generateJson(defaultOptions);
 
-      expect(result).toEqual({ status: 'complete' });
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
     });
 
     it('should fall back to an earlier JSON candidate when the last one fails parsing and repair', async () => {
@@ -631,6 +637,21 @@ describe('BaseLlmClient', () => {
     it('should not repair prose fragments with quoted string values into fabricated JSON objects', async () => {
       const mockResponse = createMockResponseWithText(
         'Notes: {note: "see docs"}. No structured response.',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
+    });
+
+    it('should not repair prose fragments with quoted string values and trailing commas', async () => {
+      const mockResponse = createMockResponseWithText(
+        'Notes: {note: "see docs",}. No structured response.',
       );
       mockGenerateContent.mockResolvedValue(mockResponse);
       vi.mocked(getFunctionCalls).mockReturnValue(undefined);
