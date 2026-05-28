@@ -19,6 +19,8 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
+  DAEMON_TRACEPARENT_META_KEY,
+  DAEMON_TRACESTATE_META_KEY,
   TrustGateError,
   getCurrentGeminiMdFilename,
 } from '@qwen-code/qwen-code-core';
@@ -83,9 +85,6 @@ import {
   type PermissionAuditPublisher,
 } from './permissionMediator.js';
 import { PermissionForbiddenError } from './bridgeErrors.js';
-
-const DAEMON_TRACEPARENT_META_KEY = 'qwen.telemetry.traceparent';
-const DAEMON_TRACESTATE_META_KEY = 'qwen.telemetry.tracestate';
 
 const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
   captureContext: () => undefined,
