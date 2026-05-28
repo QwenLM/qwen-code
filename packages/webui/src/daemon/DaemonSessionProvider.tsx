@@ -24,6 +24,7 @@ import {
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
+  type DaemonUiEvent,
   type DaemonUiSessionActions,
   type PermissionResponse,
   type PromptResult,
@@ -42,6 +43,14 @@ export interface DaemonConnectionState {
   sessionId?: string;
   workspaceCwd?: string;
   error?: string;
+  /**
+   * True while the daemon is replaying buffered history after a resume
+   * (a `Last-Event-ID` subscription), cleared when the `replay_complete`
+   * sentinel arrives. Lets the UI show a deterministic "catching up"
+   * indicator instead of guessing with a spinner timeout. Only set on
+   * resume — a fresh live-tail subscription has no replay phase.
+   */
+  catchingUp?: boolean;
 }
 
 export interface DaemonSessionProviderProps {
@@ -154,16 +163,21 @@ export function DaemonSessionProvider({
               store.reset();
             } else if (previousSessionId !== undefined) {
               store.dispatch({ type: 'assistant.done', reason: 'reconnected' });
-              // wenshao R6 (qwen3.7-max): clear the awaitingResync latch
-              // BEFORE the new SSE event loop starts. Otherwise, if the
-              // prior connection ended after `state_resync_required` set
-              // the latch, every event from the fresh stream gets dropped
-              // by `applyDaemonTranscriptEvent`'s passthrough guard —
-              // transcript stays permanently frozen even though the
-              // connection is healthy. Same-session reconnect IS the
-              // recovery path; signal it to the reducer now.
-              if (store.getSnapshot().awaitingResync) {
-                store.clearAwaitingResync();
+              const snapshot = store.getSnapshot();
+              if (snapshot.awaitingResync) {
+                if (snapshot.lastResyncRequired?.reason === 'epoch_reset') {
+                  // Defensive: epoch_reset is normally caught by
+                  // resetStoreForEpochResync in the event loop before the
+                  // reducer arms awaitingResync. If a previous iteration did
+                  // dispatch it, the count already includes that event.
+                  nextSession.setLastEventId(0);
+                  store.reset({
+                    resyncRequiredCount: snapshot.resyncRequiredCount,
+                    lastResyncRequired: snapshot.lastResyncRequired,
+                  });
+                } else {
+                  store.clearAwaitingResync();
+                }
               }
             }
             session = nextSession;
@@ -171,10 +185,19 @@ export function DaemonSessionProvider({
             sessionRef.current = session;
           }
 
+          // `catchingUp` arms a positive "replaying history" indicator that
+          // the daemon's `replay_complete` sentinel deterministically
+          // clears (no spinner-timeout heuristics). The daemon only emits
+          // `replay_complete` when the subscription carried a
+          // `Last-Event-ID` (i.e. a resume), so only arm it then —
+          // otherwise a live-tail subscribe would never see the sentinel
+          // and the indicator would stick on forever.
+          const expectingReplay = session.lastEventId !== undefined;
           setConnection({
             status: 'connected',
             sessionId: session.sessionId,
             workspaceCwd: session.workspaceCwd,
+            ...(expectingReplay ? { catchingUp: true } : {}),
           });
 
           let sawEvent = false;
@@ -186,6 +209,21 @@ export function DaemonSessionProvider({
               sawEvent = true;
               reconnectAttempt = 0;
             }
+            if (event.type === 'replay_complete') {
+              // Replay drained — flip from "catching up" to "live".
+              // For non-epoch resyncs (ring_evicted), the daemon keeps the
+              // stream open after state_resync_required. Clear the latch here
+              // so post-replay live events are accepted. Epoch reset is
+              // handled before dispatch by resetStoreForEpochResync.
+              if (store.getSnapshot().awaitingResync) {
+                store.clearAwaitingResync();
+              }
+              setConnection((current) =>
+                current.catchingUp
+                  ? { ...current, catchingUp: false }
+                  : current,
+              );
+            }
             try {
               const eventOptions = eventOptionsRef.current;
               const uiEvents = normalizeDaemonEvent(event, {
@@ -193,6 +231,9 @@ export function DaemonSessionProvider({
                 suppressOwnUserEcho: eventOptions.suppressOwnUserEcho,
                 includeRawEvent: eventOptions.includeRawEvent,
               });
+              if (resetStoreForEpochResync(store, session, uiEvents)) {
+                continue;
+              }
               store.dispatch(uiEvents);
             } catch (error) {
               const message =
@@ -215,6 +256,10 @@ export function DaemonSessionProvider({
             setConnection((current) => ({
               ...current,
               status: 'disconnected',
+              // Clear the catch-up indicator: if the stream ended mid-replay
+              // (before `replay_complete`), spreading `current` would leak
+              // `catchingUp: true` into the disconnected state.
+              catchingUp: false,
               error: 'SSE stream ended',
             }));
           }
@@ -277,6 +322,7 @@ export function DaemonSessionProvider({
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
+            catchingUp: false,
           }));
           return;
         }
@@ -291,6 +337,7 @@ export function DaemonSessionProvider({
         setConnection((current) => ({
           ...current,
           status: 'disconnected',
+          catchingUp: false,
           error: `Reconnecting in ${delayMs}ms`,
         }));
         await delay(delayMs, abort.signal);
@@ -533,6 +580,43 @@ function dispatchActionError(
     recoverable: true,
   });
   return error instanceof Error ? error : new Error(message);
+}
+
+type DaemonStateResyncUiEvent = Extract<
+  DaemonUiEvent,
+  { type: 'session.state_resync_required' }
+>;
+
+function resetStoreForEpochResync(
+  store: DaemonTranscriptStore,
+  session: DaemonSessionClient,
+  events: readonly DaemonUiEvent[],
+): boolean {
+  const resync = events.find(isEpochResetResyncEvent);
+  if (!resync) return false;
+
+  // The cursor belongs to a dead daemon epoch. Reset it before the generator
+  // resumes so replayed low-id events from the new epoch can advance it again.
+  session.setLastEventId(0);
+  const snapshot = store.getSnapshot();
+  store.reset({
+    resyncRequiredCount: snapshot.resyncRequiredCount + 1,
+    lastResyncRequired: {
+      reason: resync.reason,
+      lastDeliveredId: resync.lastDeliveredId,
+      earliestAvailableId: resync.earliestAvailableId,
+    },
+  });
+  return true;
+}
+
+function isEpochResetResyncEvent(
+  event: DaemonUiEvent,
+): event is DaemonStateResyncUiEvent {
+  return (
+    event.type === 'session.state_resync_required' &&
+    event.reason === 'epoch_reset'
+  );
 }
 
 function isAbortError(error: unknown): boolean {

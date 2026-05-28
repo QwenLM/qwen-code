@@ -90,7 +90,12 @@ describe('EventBus', () => {
     expect(events.map((e) => e.data)).toEqual([
       'a',
       'b',
-      expect.objectContaining({ lastEventId: 2, replayedCount: 2 }),
+      // D4: canonical `lastReplayedEventId` + deprecated `lastEventId` alias.
+      expect.objectContaining({
+        lastReplayedEventId: 2,
+        lastEventId: 2,
+        replayedCount: 2,
+      }),
       'c',
     ]);
     abort.abort();
@@ -619,9 +624,15 @@ describe('EventBus', () => {
       abort.abort();
     });
 
-    it('does NOT emit state_resync_required when ring is empty', async () => {
-      // No publishes yet → earliestInRing is undefined → resync check
-      // skipped. Subscriber waits for live events.
+    it('emits epoch_reset resync when lastEventId is past the bus high-water (D1)', async () => {
+      // doudouOUC #4484 post-merge review (D1): a fresh bus (nextId=1,
+      // empty ring) that receives a consumer presenting `lastEventId: 5`
+      // means the consumer's cursor is from a PREVIOUS bus epoch (daemon
+      // restart rebuilt the EventBus). Pre-fix this slid past the
+      // `ring_evicted` check (empty ring) and emitted a bare
+      // `replay_complete{replayedCount:0}` — a false "you're caught up"
+      // while the consumer's reducer still held dead-epoch state. Now it
+      // must emit `state_resync_required{reason:'epoch_reset'}` first.
       const bus = new EventBus(10);
       const abort = new AbortController();
       const iter = bus.subscribe({
@@ -633,18 +644,75 @@ describe('EventBus', () => {
       const out: BridgeEvent[] = [];
       for await (const e of iter) {
         out.push(e);
-        // The empty-ring case still emits `replay_complete` (zero
-        // frames replayed) so consumers always see the catch-up signal
-        // — then the one live event. 2 total.
+        // resync + replay_complete (0 frames) + 1 live = 3 total.
+        if (out.length === 3) break;
+      }
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(out[0]?.id).toBeUndefined();
+      const data = out[0]?.data as {
+        reason: string;
+        lastDeliveredId: number;
+        earliestAvailableId: number;
+      };
+      expect(data.reason).toBe('epoch_reset');
+      expect(data.lastDeliveredId).toBe(5);
+      expect(data.earliestAvailableId).toBe(1);
+      expect(out[1]?.type).toBe('replay_complete');
+      expect(out[1]?.data).toMatchObject({ replayedCount: 0 });
+      expect(out[2]?.type).toBe('foo');
+      expect(out[2]?.id).toBe(1);
+      abort.abort();
+    });
+
+    it('epoch_reset replays the WHOLE fresh ring (stale cursor must not filter new low ids)', async () => {
+      // After a restart the new epoch starts ids at 1 again. A consumer
+      // reconnecting with `lastEventId: 50` (dead epoch) must still receive
+      // the fresh ring's low-id events — filtering replay by 50 would drop
+      // ids 1..3 entirely, leaving the consumer permanently behind.
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 3; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 50,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + 3 replay frames + replay_complete = 5.
+        if (out.length === 5) break;
+      }
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect((out[0]?.data as { reason: string }).reason).toBe('epoch_reset');
+      // All three fresh events replay despite ids < stale cursor.
+      expect(out.slice(1, 4).map((e) => e.id)).toEqual([1, 2, 3]);
+      expect(out[4]?.type).toBe('replay_complete');
+      expect(out[4]?.data).toMatchObject({ replayedCount: 3 });
+      abort.abort();
+    });
+
+    it('does NOT emit epoch_reset at the caught-up boundary (lastEventId === high-water)', async () => {
+      // Consumer fully caught up: lastEventId equals the bus high-water
+      // (nextId - 1). nextId is one past it, so `lastEventId >= nextId` is
+      // false — no epoch reset. Off-by-one guard for D1.
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 3; i++) bus.publish({ type: 'foo', data: i });
+      // high-water is 3; nextId is 4. lastEventId: 3 is the caught-up case.
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 3,
+        signal: abort.signal,
+      });
+      setTimeout(() => bus.publish({ type: 'foo', data: 99 }), 0);
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // replay_complete (0 frames) + 1 live = 2.
         if (out.length === 2) break;
       }
-      // No resync frame — but replay_complete (id-less sentinel) +
-      // the live event.
       expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
       expect(out[0]?.type).toBe('replay_complete');
-      expect(out[0]?.data).toMatchObject({ replayedCount: 0 });
-      expect(out[1]?.type).toBe('foo');
-      expect(out[1]?.id).toBe(1);
+      expect(out[1]?.id).toBe(4);
       abort.abort();
     });
 

@@ -20,6 +20,7 @@ import {
   useDaemonActions,
   useDaemonConnection,
   useDaemonTranscriptBlocks,
+  useDaemonTranscriptState,
   type DaemonSessionProviderProps,
   type DaemonConnectionState,
 } from './DaemonSessionProvider.js';
@@ -28,6 +29,8 @@ interface MockSession {
   sessionId: string;
   workspaceCwd: string;
   clientId: string;
+  lastEventId?: number;
+  setLastEventId: (lastEventId: number | undefined) => void;
   prompt: (req: unknown, signal?: AbortSignal) => Promise<PromptResult>;
   cancel: () => Promise<void>;
   setModel: (modelId: string) => Promise<{ modelId: string }>;
@@ -410,6 +413,95 @@ describe('DaemonSessionProvider', () => {
       { kind: 'assistant', text: 'partial', streaming: false },
       { kind: 'error', text: 'Prompt failed: network down' },
     ]);
+  });
+
+  it('exposes catchingUp on resume and clears it on replay_complete', async () => {
+    // Resume subscriptions (session carries a Last-Event-ID) get a
+    // deterministic catch-up indicator: `catchingUp` arms on connect and
+    // clears when the daemon's `replay_complete` sentinel arrives.
+    const replayDrained = createDeferred<void>();
+    const session = createMockSession({
+      lastEventId: 5,
+      events: async function* resumeThenIdle(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        // First a replayed history frame, then the sentinel, then idle.
+        yield {
+          id: 6,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'replayed' },
+            },
+          },
+        };
+        yield {
+          v: 1,
+          type: 'replay_complete',
+          data: { replayedCount: 1, lastReplayedEventId: 6 },
+        };
+        replayDrained.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    const states: DaemonConnectionState[] = [];
+    function Harness() {
+      const connection = useDaemonConnection();
+      states.push(connection);
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await replayDrained.promise;
+      await flushPromises();
+    });
+
+    // While catching up we surface catchingUp:true; after replay_complete
+    // it clears to a plain connected state.
+    expect(states.some((s) => s.status === 'connected' && s.catchingUp)).toBe(
+      true,
+    );
+    const last = states[states.length - 1];
+    expect(last?.status).toBe('connected');
+    expect(last?.catchingUp).toBeFalsy();
+  });
+
+  it('never sets catchingUp on a fresh subscription (no Last-Event-ID)', async () => {
+    // A first-time attach has no resume cursor → the daemon emits no
+    // replay_complete → arming catchingUp would stick forever. The Provider
+    // only arms it when session.lastEventId is defined.
+    const session = createMockSession({
+      lastEventId: undefined, // fresh subscribe, live tail
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(session);
+
+    const states: DaemonConnectionState[] = [];
+    function Harness() {
+      states.push(useDaemonConnection());
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(states.some((s) => s.status === 'connected')).toBe(true);
+    expect(states.every((s) => !s.catchingUp)).toBe(true);
   });
 
   it('clears prompt state and transcript when reconnect attaches a different session', async () => {
@@ -966,6 +1058,261 @@ describe('DaemonSessionProvider', () => {
     }
   });
 
+  it('resets stale transcript and accepts replay after epoch-reset resync', async () => {
+    const startEpochReset = createDeferred<void>();
+    const replayDrained = createDeferred<void>();
+    const sessionRef: { current?: MockSession } = {};
+    const setLastEventId = vi.fn((lastEventId: number | undefined) => {
+      if (sessionRef.current) {
+        sessionRef.current.lastEventId = lastEventId;
+      }
+    });
+
+    const session = createMockSession({
+      lastEventId: 50,
+      setLastEventId,
+      events: async function* epochResetThenReplay(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await startEpochReset.promise;
+        if (opts.signal?.aborted) return;
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'epoch_reset',
+            lastDeliveredId: 50,
+            earliestAvailableId: 1,
+          },
+        };
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'fresh replayed' },
+            },
+          },
+        };
+        yield {
+          v: 1,
+          type: 'replay_complete',
+          data: { replayedCount: 1, lastReplayedEventId: 1 },
+        };
+        replayDrained.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sessionRef.current = session;
+    sdkMocks.sessions.push(session);
+
+    let actions: DaemonUiSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let awaitingResync = false;
+    function Harness() {
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const providerActions = requireActions(actions);
+    await act(async () => {
+      await providerActions.sendPrompt('stale local');
+      await flushPromises();
+    });
+    expect(blocks).toMatchObject([{ kind: 'user', text: 'stale local' }]);
+
+    await act(async () => {
+      startEpochReset.resolve();
+      await replayDrained.promise;
+      await flushPromises();
+    });
+
+    expect(setLastEventId).toHaveBeenCalledWith(0);
+    expect(awaitingResync).toBe(false);
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'fresh replayed' },
+    ]);
+  });
+
+  it('clears awaitingResync on replay_complete after ring-evicted resync', async () => {
+    const liveDelivered = createDeferred<void>();
+    const session = createMockSession({
+      lastEventId: 10,
+      events: async function* ringEvictedThenLive(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 10,
+            earliestAvailableId: 12,
+          },
+        };
+        yield {
+          v: 1,
+          type: 'replay_complete',
+          data: { replayedCount: 0 },
+        };
+        yield {
+          id: 12,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'live after replay' },
+            },
+          },
+        };
+        liveDelivered.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let awaitingResync = false;
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await liveDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(awaitingResync).toBe(false);
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'live after replay',
+        }),
+      ]),
+    );
+  });
+
+  it('clears ring-evicted awaitingResync on same-session reattach', async () => {
+    const firstStreamDone = createDeferred<void>();
+    const reattachDelivered = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-reattach',
+      lastEventId: 10,
+      events: async function* ringEvictedThenGone() {
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 10,
+            earliestAvailableId: 12,
+          },
+        };
+        firstStreamDone.resolve();
+        const error = new Error('session temporarily unavailable') as Error & {
+          status: number;
+        };
+        error.status = 410;
+        throw error;
+      },
+    });
+    const secondSession = createMockSession({
+      sessionId: 'session-reattach',
+      lastEventId: 10,
+      events: async function* reattachedLive(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        yield {
+          id: 12,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'after reattach' },
+            },
+          },
+        };
+        reattachDelivered.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    });
+    sdkMocks.sessions.push(firstSession, secondSession);
+
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let awaitingResync = false;
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await firstStreamDone.promise;
+      await flushPromises();
+    });
+    expect(awaitingResync).toBe(true);
+
+    await act(async () => {
+      await reattachDelivered.promise;
+      await flushPromises();
+    });
+
+    expect(awaitingResync).toBe(false);
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'error',
+          text: expect.stringContaining('State resync required'),
+        }),
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'after reattach',
+        }),
+      ]),
+    );
+  });
+
   async function renderWithProvider(
     children: ReactNode,
     props: Partial<DaemonSessionProviderProps> = {},
@@ -999,10 +1346,16 @@ function requireActions(
 }
 
 function createMockSession(opts: Partial<MockSession> = {}): MockSession {
-  return {
+  const session = {
     sessionId: opts.sessionId ?? 'session-1',
     workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
     clientId: opts.clientId ?? 'client-1',
+    lastEventId: opts.lastEventId,
+    setLastEventId:
+      opts.setLastEventId ??
+      vi.fn((lastEventId: number | undefined) => {
+        session.lastEventId = lastEventId;
+      }),
     prompt:
       opts.prompt ??
       vi.fn(async () => ({
@@ -1018,6 +1371,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
       opts.respondToSessionPermission ?? vi.fn(async () => true),
     events: opts.events ?? createIdleEvents(),
   };
+  return session;
 }
 
 function createIdleEvents(): MockSession['events'] {

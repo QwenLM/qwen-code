@@ -155,15 +155,26 @@ export function normalizeDaemonEvent(
     case 'state_resync_required':
       return normalizeStateResyncRequired(event, base);
 
-    case 'prompt_cancelled':
-      return [{ ...base, type: 'prompt.cancelled' }];
+    case 'prompt_cancelled': {
+      // Forward the optional `reason` (e.g. `'forward_failed'` from the
+      // bridge's C3 compensating broadcast) so consumers can distinguish a
+      // user cancel from a forward failure.
+      const reason = stringField(event.data, 'reason');
+      return [
+        { ...base, type: 'prompt.cancelled', ...(reason ? { reason } : {}) },
+      ];
+    }
 
     case 'followup_suggestion':
       return normalizeFollowupSuggestion(event, base);
 
     case 'replay_complete': {
       const replayedCount = numberField(event.data, 'replayedCount') ?? 0;
-      const lastReplayedEventId = numberField(event.data, 'lastEventId');
+      // D4: prefer the canonical `lastReplayedEventId`; fall back to the
+      // deprecated `lastEventId` alias for daemons predating the rename.
+      const lastReplayedEventId =
+        numberField(event.data, 'lastReplayedEventId') ??
+        numberField(event.data, 'lastEventId');
       return [
         {
           ...base,
@@ -1211,4 +1222,10 @@ function numberField(value: unknown, key: string): number | undefined {
   if (!isRecord(value)) return undefined;
   const v = value[key];
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+function stringField(value: unknown, key: string): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const v = value[key];
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
 }

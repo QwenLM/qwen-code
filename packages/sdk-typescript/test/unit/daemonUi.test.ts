@@ -5043,6 +5043,21 @@ describe('cross-client event recognition (prompt_cancelled / replay_complete)', 
         originatorClientId: 'client-X',
       }),
     ]);
+    // No reason for a plain user cancel.
+    expect(events[0]).not.toHaveProperty('reason');
+  });
+
+  it('forwards the prompt_cancelled reason (C3 forward_failed)', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'prompt_cancelled',
+      data: { sessionId: 's1', reason: 'forward_failed' },
+    } as never);
+    expect(events[0]).toMatchObject({
+      type: 'prompt.cancelled',
+      reason: 'forward_failed',
+    });
   });
 
   it('normalizes replay_complete to session.replay_complete with count', () => {
@@ -5056,6 +5071,20 @@ describe('cross-client event recognition (prompt_cancelled / replay_complete)', 
       type: 'session.replay_complete',
       replayedCount: 3,
       lastReplayedEventId: 7,
+    });
+  });
+
+  it('prefers canonical lastReplayedEventId over the deprecated lastEventId alias (D4)', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'replay_complete',
+      // Both present, different values — canonical must win.
+      data: { replayedCount: 2, lastReplayedEventId: 9, lastEventId: 7 },
+    } as never);
+    expect(events[0]).toMatchObject({
+      type: 'session.replay_complete',
+      lastReplayedEventId: 9,
     });
   });
 

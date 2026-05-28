@@ -386,21 +386,54 @@ export class EventBus {
       // loadSession clears the flag, but the frames stay on the
       // wire so SDK has the option to compute a "what you missed"
       // diff later. This is network-friendly (no extra reconnect).
-      const earliestInRing = this.ring[0]?.id;
-      if (
-        earliestInRing !== undefined &&
-        earliestInRing > opts.lastEventId + 1
-      ) {
+      // Epoch-reset detection (doudouOUC #4484 post-merge review, D1).
+      // `this.nextId` is the next id this bus will assign, so the bus has
+      // only ever emitted ids `< nextId` THIS epoch. A consumer presenting
+      // `lastEventId >= nextId` therefore saw an id this epoch never
+      // produced — the only way that happens is a previous bus epoch
+      // (daemon restart / EventBus rebuild resets `nextId` to 1 and clears
+      // the ring). The `ring_evicted` check below is structurally blind to
+      // this: after a restart the ring is empty (`earliestInRing ===
+      // undefined`), so it is skipped and the consumer would otherwise get
+      // a bare `replay_complete{replayedCount:0}` — a false "you're caught
+      // up" while its accumulated reducer state is stale data from the dead
+      // epoch. Emit `state_resync_required` (reason `epoch_reset`) first.
+      const epochReset = opts.lastEventId >= this.nextId;
+      if (epochReset) {
         queue.forcePush({
           v: EVENT_SCHEMA_VERSION,
           type: 'state_resync_required',
           data: {
-            reason: 'ring_evicted',
+            reason: 'epoch_reset',
             lastDeliveredId: opts.lastEventId,
-            earliestAvailableId: earliestInRing,
+            // Ring is typically empty right after a restart; fall back to
+            // `nextId` (the first id this epoch will assign) so the field
+            // stays meaningful ("fresh sequence starts here").
+            earliestAvailableId: this.ring[0]?.id ?? this.nextId,
           },
         });
+      } else {
+        const earliestInRing = this.ring[0]?.id;
+        if (
+          earliestInRing !== undefined &&
+          earliestInRing > opts.lastEventId + 1
+        ) {
+          queue.forcePush({
+            v: EVENT_SCHEMA_VERSION,
+            type: 'state_resync_required',
+            data: {
+              reason: 'ring_evicted',
+              lastDeliveredId: opts.lastEventId,
+              earliestAvailableId: earliestInRing,
+            },
+          });
+        }
       }
+      // After an epoch reset the consumer's cursor belongs to a dead epoch,
+      // so every current-epoch event is "new" to it. Filtering replay by the
+      // stale `lastEventId` (e.g. 50) would drop the fresh low-id events
+      // (1,2,3…) entirely. Replay the whole current ring in that case.
+      const replayFrom = epochReset ? 0 : opts.lastEventId;
       // Force-push replay frames so they bypass the per-subscriber size
       // cap. The cap protects against a slow live consumer; replay is
       // already historical and silently dropping it would undermine the
@@ -415,7 +448,7 @@ export class EventBus {
         // undefined here — but the type system can't see that since
         // BridgeEvent.id is optional for synthetic terminal frames.
         // Guard explicitly to keep narrow typing without runtime cost.
-        if (e.id !== undefined && e.id > opts.lastEventId) {
+        if (e.id !== undefined && e.id > replayFrom) {
           queue.forcePush(e);
           replayedCount += 1;
           lastReplayedId = e.id;
@@ -443,8 +476,17 @@ export class EventBus {
         v: EVENT_SCHEMA_VERSION,
         type: 'replay_complete',
         data: {
+          // D4 (doudouOUC #4484 post-merge review): `lastReplayedEventId`
+          // is the canonical wire name — the old `lastEventId` collided
+          // semantically with the SSE protocol's `Last-Event-ID` (envelope
+          // `id`) in raw daemon traces. Emit both: `lastReplayedEventId`
+          // for current SDKs and `lastEventId` as a deprecated alias so
+          // pre-rename consumers keep working (additive, non-breaking).
           ...(lastReplayedId !== undefined
-            ? { lastEventId: lastReplayedId }
+            ? {
+                lastReplayedEventId: lastReplayedId,
+                lastEventId: lastReplayedId,
+              }
             : {}),
           replayedCount,
         },

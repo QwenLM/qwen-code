@@ -259,6 +259,14 @@ export interface DaemonUiStateResyncRequiredEvent extends DaemonUiEventBase {
  */
 export interface DaemonUiPromptCancelledEvent extends DaemonUiEventBase {
   type: 'prompt.cancelled';
+  /**
+   * Why the turn was cancelled. Absent for a user-initiated cancel;
+   * `'forward_failed'` when the daemon synthesized the cancel because the
+   * prompt forward rejected after the user echo was already published (the
+   * bridge's C3 compensating broadcast). Lets the UI distinguish "peer
+   * cancelled" from "the request failed to reach the agent".
+   */
+  reason?: 'forward_failed' | (string & {});
 }
 
 /**
