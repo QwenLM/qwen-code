@@ -1661,6 +1661,34 @@ export class DaemonClient {
     );
   }
 
+  async deleteSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+  ): Promise<{
+    removed: string[];
+    notFound: string[];
+    errors: Array<{ sessionId: string; error: string }>;
+  }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/sessions/delete`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ sessionIds }),
+      },
+      async (res) => {
+        if (res.ok) {
+          return (await res.json()) as {
+            removed: string[];
+            notFound: string[];
+            errors: Array<{ sessionId: string; error: string }>;
+          };
+        }
+        throw await this.failOnError(res, 'POST /sessions/delete');
+      },
+    );
+  }
+
   // -- Auth device-flow (issue #4175 PR 21) -------------------------------
 
   /**

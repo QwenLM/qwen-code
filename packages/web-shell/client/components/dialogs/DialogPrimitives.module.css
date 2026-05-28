@@ -122,10 +122,11 @@
 }
 
 .resume-picker-item-prefix {
-  width: 12px;
+  min-width: 12px;
   flex-shrink: 0;
   color: var(--accent-color);
   font-weight: 700;
+  white-space: pre;
 }
 
 .resume-picker-item-title {

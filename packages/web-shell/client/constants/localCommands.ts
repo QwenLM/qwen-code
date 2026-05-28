@@ -30,6 +30,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       description: t('local.copy'),
       argumentHint: '[code|<lang>|latex|inline-latex] [index]',
     },
+    { name: 'delete', description: t('local.delete') },
     { name: 'release', description: t('local.release') },
     { name: 'mode', description: t('local.mode'), argumentHint: '<mode>' },
     {
