@@ -58,9 +58,9 @@ export enum Command {
   /**
    * @deprecated Replaced by ENTER_TRANSCRIPT (Ctrl+O now opens the
    * frozen transcript overlay instead of toggling a global compact mode).
-   * Kept for backward compatibility with user keybinding configs that
-   * reference `toggleCompactMode`; binds to no keys by default. Legacy
-   * configs are translated to `enterTranscript` at load time.
+   * Kept for backward compatibility; binds to no keys by default.
+   * Users with custom `toggleCompactMode` bindings must update their
+   * config to use `enterTranscript` instead.
    */
   TOGGLE_COMPACT_MODE = 'toggleCompactMode',
   /** Enter (or toggle off) the frozen transcript overlay. */

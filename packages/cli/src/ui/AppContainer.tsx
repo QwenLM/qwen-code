@@ -2051,6 +2051,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const settingsVerbose = settings.merged.ui?.verbose;
   const settingsCompactMode = settings.merged.ui?.compactMode;
   useEffect(() => {
+    if (process.env['QWEN_CODE_VERBOSE'] !== undefined) return;
     let next: boolean | undefined;
     if (typeof settingsVerbose === 'boolean') {
       next = settingsVerbose;
@@ -2703,6 +2704,19 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug('[DEBUG] Keystroke:', JSON.stringify(key));
       }
 
+      if (transcriptOverlay.isActive) {
+        if (
+          keyMatchers[Command.EXIT_TRANSCRIPT](key) ||
+          keyMatchers[Command.ESCAPE](key) ||
+          keyMatchers[Command.QUIT](key) ||
+          keyMatchers[Command.EXIT](key)
+        ) {
+          transcriptOverlay.exit();
+          refreshStatic();
+        }
+        return;
+      }
+
       if (keyMatchers[Command.QUIT](key)) {
         if (isAuthenticating) {
           return;
@@ -2731,29 +2745,7 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
-      } else if (
-        transcriptOverlay.isActive &&
-        keyMatchers[Command.EXIT_TRANSCRIPT](key)
-      ) {
-        // Dedicated EXIT_TRANSCRIPT handler — honours custom user
-        // bindings (e.g. remapping the overlay-exit key to `q`). Only
-        // fires while the overlay is active so the binding does not
-        // hijack the key during normal editing.
-        transcriptOverlay.exit();
-        refreshStatic();
-        return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
-        // Top priority: when the Ctrl+O transcript overlay is open, ESC
-        // closes the overlay and short-circuits the rest of the chain.
-        // The overlay owns input focus while active, so other ESC uses
-        // (cancel btw, clear buffer, abort streaming, double-esc rewind)
-        // are intentionally skipped here.
-        if (transcriptOverlay.isActive) {
-          transcriptOverlay.exit();
-          refreshStatic();
-          return;
-        }
-
         // Dismiss or cancel btw side-question on Escape,
         // but only when btw is actually visible (not hidden behind a dialog).
         if (btwItem && !dialogsVisibleRef.current) {
@@ -2871,15 +2863,9 @@ export const AppContainer = (props: AppContainerProps) => {
           setEmbeddedShellFocused((prev) => !prev);
         }
       } else if (keyMatchers[Command.ENTER_TRANSCRIPT](key)) {
-        // Ctrl+O = enter / toggle the transcript overlay (frozen full-detail
-        // snapshot). Matches Claude Code's `app:toggleTranscript` semantics
-        // (`useGlobalKeybindings.tsx:118-132`): pressing Ctrl+O while the
-        // overlay is active exits it.
+        if (dialogsVisibleRef.current) return;
         if (transcriptOverlay.isActive) {
           transcriptOverlay.exit();
-          // VP path: nothing to repaint. Static path: the next render falls
-          // back to the original <Static> tree; force a refresh so a brand
-          // new historyRemountKey re-renders cleanly.
           refreshStatic();
         } else {
           transcriptOverlay.enter(

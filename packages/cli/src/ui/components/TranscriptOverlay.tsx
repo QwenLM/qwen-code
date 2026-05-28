@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { DisplayModeProvider } from '../contexts/DisplayModeContext.js';
@@ -86,7 +86,24 @@ export const TranscriptOverlay: React.FC<TranscriptOverlayProps> = ({
     [ui.verbose],
   );
 
-  const frozenAtLabel = new Date(snapshot.frozenAt).toLocaleTimeString();
+  const frozenAtLabel = useMemo(
+    () => new Date(snapshot.frozenAt).toLocaleTimeString(),
+    [snapshot.frozenAt],
+  );
+
+  const renderItem = useCallback(
+    ({ item }: { item: HistoryItem }) => (
+      <HistoryItemDisplay
+        key={item.id}
+        item={item}
+        terminalWidth={terminalWidth}
+        mainAreaWidth={mainAreaWidth}
+        isPending={item.id < 0}
+        commands={ui.slashCommands}
+      />
+    ),
+    [terminalWidth, mainAreaWidth, ui.slashCommands],
+  );
 
   return (
     <DisplayModeProvider value={transcriptMode}>
@@ -104,16 +121,7 @@ export const TranscriptOverlay: React.FC<TranscriptOverlayProps> = ({
           <ScrollableList
             hasFocus={true}
             data={items}
-            renderItem={({ item }) => (
-              <HistoryItemDisplay
-                key={item.id}
-                item={item}
-                terminalWidth={terminalWidth}
-                mainAreaWidth={mainAreaWidth}
-                isPending={item.id < 0}
-                commands={ui.slashCommands}
-              />
-            )}
+            renderItem={renderItem}
             estimatedItemHeight={() => 3}
             keyExtractor={(it) => String(it.id)}
             initialScrollIndex={SCROLL_TO_ITEM_END}

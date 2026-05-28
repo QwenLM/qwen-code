@@ -87,7 +87,7 @@ export const SubagentGroupSummary: React.FC<{
         </Text>
       </Box>
       {datas.map((d, i) => (
-        <SubagentGroupRow key={d.subagentName ?? `agent-${i}`} data={d} />
+        <SubagentGroupRow key={`${d.subagentName ?? 'agent'}-${i}`} data={d} />
       ))}
     </Box>
   );

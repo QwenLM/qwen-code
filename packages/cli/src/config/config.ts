@@ -575,7 +575,6 @@ export async function parseArguments(): Promise<CliArgs> {
       default: false,
     })
     .option('verbose', {
-      alias: 'v',
       type: 'boolean',
       description:
         'Verbose display: show thinking output inline and full tool detail. Equivalent to setting ui.verbose=true.',

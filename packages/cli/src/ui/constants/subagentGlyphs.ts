@@ -21,7 +21,7 @@ const useUnicode = process.platform !== 'win32';
 export const SUBAGENT_GROUP_GLYPH = useUnicode ? '≡' : '>';
 
 /** Live / in-flight sub-agent. */
-export const SUBAGENT_GLYPH_RUNNING = useUnicode ? '!' : '!';
+export const SUBAGENT_GLYPH_RUNNING = useUnicode ? '▶' : '!';
 
 /** Sub-agent that finished cleanly. */
 export const SUBAGENT_GLYPH_COMPLETED = useUnicode ? '✓' : '+';

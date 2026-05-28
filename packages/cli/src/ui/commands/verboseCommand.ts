@@ -19,6 +19,9 @@ import { t } from '../../i18n/index.js';
  * customised it before the rewrite are not surprised.
  */
 function currentVerbose(context: CommandContext): boolean {
+  const envVerbose = process.env['QWEN_CODE_VERBOSE'];
+  if (envVerbose === '1') return true;
+  if (envVerbose === '0') return false;
   const ui = context.services.settings?.merged?.ui;
   if (typeof ui?.verbose === 'boolean') return ui.verbose;
   if (typeof ui?.compactMode === 'boolean') return !ui.compactMode;
