@@ -460,3 +460,103 @@ describe('buildImageRestorationBlock', () => {
     expect(header).toContain('user-provided'); // labeled instead of tool name
   });
 });
+
+import { composePostCompactHistory } from './postCompactAttachments.js';
+
+describe('composePostCompactHistory', () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'pca-'));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns summary + ack only when history has no files or images', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'hi' }] },
+      { role: 'model', parts: [{ text: 'hello' }] },
+    ];
+    const result = await composePostCompactHistory(history, 'SUMMARY_TEXT');
+    expect(result).toHaveLength(2);
+    expect(result[0].role).toBe('user');
+    expect((result[0].parts?.[0] as { text: string }).text).toContain(
+      'SUMMARY_TEXT',
+    );
+    expect(result[1].role).toBe('model');
+  });
+
+  it('orders sections as: summary → file refs → file embeds → images', async () => {
+    const small = join(tmpDir, 'cfg.json');
+    writeFileSync(small, '{"a":1}');
+    const big = join(tmpDir, 'big.txt');
+    writeFileSync(big, 'x'.repeat(30_000));
+
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { file_path: small } } },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { file_path: big } } },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: 'computer_use__get_app_state',
+              args: { app: 'Safari' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'computer_use__get_app_state',
+              response: { output: 'screenshot' },
+            },
+          },
+          { inlineData: { mimeType: 'image/png', data: 'shot' } },
+        ],
+      },
+    ];
+
+    const result = await composePostCompactHistory(history, 'SUM');
+
+    // Section markers we expect, in order:
+    const flatText = result
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n---\n');
+
+    const idxSummary = flatText.indexOf('SUM');
+    const idxRefs = flatText.indexOf('reference only');
+    const idxEmbed = flatText.indexOf('cfg.json');
+    const idxImage = flatText.indexOf('Recent visual snapshots');
+
+    expect(idxSummary).toBeGreaterThanOrEqual(0);
+    expect(idxRefs).toBeGreaterThan(idxSummary);
+    expect(idxEmbed).toBeGreaterThan(idxRefs);
+    expect(idxImage).toBeGreaterThan(idxEmbed);
+  });
+
+  it('includes a model ack message after the summary so role alternates correctly', async () => {
+    const history: Content[] = [{ role: 'user', parts: [{ text: 'do x' }] }];
+    const result = await composePostCompactHistory(history, 'SUM');
+    // First two entries must be user (summary), then model (ack).
+    expect(result[0].role).toBe('user');
+    expect(result[1].role).toBe('model');
+    expect((result[1].parts?.[0] as { text: string }).text).toMatch(
+      /got it|acknowledged|continue/i,
+    );
+  });
+});

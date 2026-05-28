@@ -297,3 +297,46 @@ export function buildImageRestorationBlock(
     parts: [{ text: lines.join('\n') }, ...images.map((img) => img.part)],
   };
 }
+
+/**
+ * Assemble the complete post-compact history from the pre-compact
+ * `history` and the summary text the side-query model produced.
+ *
+ * Output ordering:
+ *   1. Summary as a user message (the side-query output)
+ *   2. Synthetic model ack ("Got it. Thanks for the additional context.")
+ *   3. File reference block (path-only list of large files), if any
+ *   4. Per-embedded-file user message with full content
+ *   5. Image restoration block, if any
+ *
+ * The ack message keeps role alternation correct: the next API call will
+ * naturally append the model's continuation response.
+ */
+export async function composePostCompactHistory(
+  history: Content[],
+  summary: string,
+): Promise<Content[]> {
+  const filePaths = extractRecentFilePaths(
+    history,
+    POST_COMPACT_MAX_FILES_TO_RESTORE,
+  );
+  const fileBlocks = await buildFileRestorationBlocks(filePaths);
+
+  const images = extractRecentImages(
+    history,
+    POST_COMPACT_MAX_IMAGES_TO_RESTORE,
+  );
+  const imageBlock = buildImageRestorationBlock(images);
+
+  const out: Content[] = [
+    { role: 'user', parts: [{ text: summary }] },
+    {
+      role: 'model',
+      parts: [{ text: 'Got it. Thanks for the additional context!' }],
+    },
+    ...fileBlocks,
+  ];
+  if (imageBlock) out.push(imageBlock);
+
+  return out;
+}
