@@ -8,7 +8,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runBootstrap, type BootstrapDeps } from './bootstrap.js';
+import {
+  runBootstrap,
+  probeFinderPermissions,
+  type BootstrapDeps,
+} from './bootstrap.js';
 
 function makeFakeClient(opts: { startThrows?: Error } = {}) {
   const start = vi.fn(async () => {
@@ -163,5 +167,84 @@ describe('runBootstrap', () => {
     );
 
     expect(deps.spawnDoctor).not.toHaveBeenCalled();
+  });
+
+  it('re-spawns doctor when permission kind changes mid-poll', async () => {
+    const { saveInstallState } = await import('./install-state.js');
+    await saveInstallState(tmpHome, {
+      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedAtIso: '2026-05-28T10:00:00Z',
+    });
+
+    // Probe sequence: accessibility → screenRecording → ok
+    let probeCount = 0;
+    deps.probePermissions = vi.fn(async () => {
+      probeCount++;
+      if (probeCount === 1) return 'accessibility' as const;
+      if (probeCount === 2) return 'screenRecording' as const;
+      return 'ok' as const;
+    });
+    deps.pollIntervalMs = 1;
+    deps.pollTimeoutMs = 1000;
+
+    const messages: string[] = [];
+    const client = makeFakeClient();
+    await runBootstrap(
+      client as never,
+      {
+        signal: new AbortController().signal,
+        updateOutput: (msg) => messages.push(msg),
+      },
+      deps,
+    );
+
+    // spawnDoctor must be called exactly twice:
+    //   1. initial spawn for 'accessibility'
+    //   2. re-spawn on transition to 'screenRecording'
+    expect(deps.spawnDoctor).toHaveBeenCalledTimes(2);
+    // A re-open message must have been emitted naming 'screenRecording'
+    expect(messages.some((m) => m.includes('screenRecording'))).toBe(true);
+  });
+});
+
+describe('probeFinderPermissions', () => {
+  it("returns 'accessibility' when result has isError=true with AX permission text", async () => {
+    const fakeClient = {
+      callTool: vi.fn(async () => ({
+        isError: true,
+        content: [
+          { type: 'text', text: 'Accessibility permission is required.' },
+        ],
+      })),
+    };
+    const result = await probeFinderPermissions(fakeClient as never);
+    expect(result).toBe('accessibility');
+  });
+
+  it("returns 'screenRecording' when result is success but has no image content", async () => {
+    const fakeClient = {
+      callTool: vi.fn(async () => ({
+        isError: false,
+        content: [
+          { type: 'text', text: '<AXApplication>Finder</AXApplication>' },
+        ],
+      })),
+    };
+    const result = await probeFinderPermissions(fakeClient as never);
+    expect(result).toBe('screenRecording');
+  });
+
+  it("returns 'ok' when result has both text and image content", async () => {
+    const fakeClient = {
+      callTool: vi.fn(async () => ({
+        isError: false,
+        content: [
+          { type: 'text', text: '<AXApplication>Finder</AXApplication>' },
+          { type: 'image', data: 'base64data==', mimeType: 'image/png' },
+        ],
+      })),
+    };
+    const result = await probeFinderPermissions(fakeClient as never);
+    expect(result).toBe('ok');
   });
 });

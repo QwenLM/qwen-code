@@ -81,6 +81,45 @@ export interface BootstrapDeps {
   pollTimeoutMs?: number;
 }
 
+/**
+ * Probe Finder's app state to determine what macOS permissions are available.
+ *
+ * Exported for testing. In production it is wired into defaultDeps().
+ *
+ * Two-phase detection:
+ *   1. If get_app_state returns an MCP error, detectPermissionError classifies
+ *      it — Accessibility missing throws 'permissionDenied' upstream, so we
+ *      see isError=true.
+ *   2. If get_app_state succeeds (isError=false) but returns NO image content
+ *      part, Screen Recording is missing. The upstream binary silently sets
+ *      screenshotPNGData=nil and the MCP layer omits the image block entirely.
+ *      We treat absence of any image block as 'screenRecording'.
+ *
+ * Note on transient false-positives: a screenshot-capture timeout (rare) can
+ * also produce no image — but the next 2s poll iteration will succeed once
+ * the timeout clears, so a transient false-positive resolves itself without
+ * user action.
+ */
+export async function probeFinderPermissions(
+  client: ComputerUseClient,
+): Promise<PermissionProbeResult> {
+  // Use Finder as a known-running, always-installed macOS app.
+  // get_app_state hits AccessibilitySnapshot which is the first
+  // path that throws permissionDenied.
+  const result = await client.callTool('get_app_state', { app: 'Finder' });
+  const kind = detectPermissionError(result);
+  if (kind !== 'none') return kind;
+  // get_app_state succeeded with no error, but check if a screenshot
+  // came back. The upstream binary silently omits the image content
+  // part when ScreenCaptureKit can't capture — most commonly Screen
+  // Recording permission missing (also possible on capture timeout,
+  // but a granted-SR retry will succeed on the next 2s poll iteration,
+  // so a transient false-positive resolves itself).
+  const hasImage = result.content.some((part) => part.type === 'image');
+  if (!hasImage) return 'screenRecording';
+  return 'ok';
+}
+
 /** Production defaults — instantiated lazily so tests can override per call. */
 function defaultDeps(): BootstrapDeps {
   const packageSpec = resolveComputerUsePackageSpec();
@@ -110,14 +149,7 @@ function defaultDeps(): BootstrapDeps {
       });
       child.unref();
     },
-    probePermissions: async (client) => {
-      // Use Finder as a known-running, always-installed macOS app.
-      // get_app_state hits AccessibilitySnapshot which is the first
-      // path that throws permissionDenied.
-      const result = await client.callTool('get_app_state', { app: 'Finder' });
-      const kind = detectPermissionError(result);
-      return kind === 'none' ? 'ok' : kind;
-    },
+    probePermissions: probeFinderPermissions,
   };
 }
 
@@ -167,6 +199,10 @@ export async function runBootstrap(
   );
   deps.spawnDoctor();
 
+  // Track last probe kind so we can detect transitions between permissions
+  // (e.g. 'accessibility' → 'screenRecording') and re-spawn the doctor window.
+  let lastProbeKind: PermissionProbeResult = probe;
+
   const startedAt = Date.now();
   for (;;) {
     if (ctx.signal.aborted) {
@@ -180,7 +216,19 @@ export async function runBootstrap(
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     const next = await deps.probePermissions(client);
     if (next === 'ok' || next === 'other') return;
+
+    // Re-spawn doctor when permission kind shifts — upstream onboarding
+    // window has typically auto-closed after the first permission was
+    // granted, so a fresh spawn brings the next prompt back into view.
+    if (next !== lastProbeKind) {
+      ctx.updateOutput?.(
+        `Now waiting for ${next} permission. Re-opening the onboarding window — please complete this step too.`,
+      );
+      deps.spawnDoctor();
+      lastProbeKind = next;
+    }
+
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
-    ctx.updateOutput?.(`Waiting for permissions... (${elapsedSec}s)`);
+    ctx.updateOutput?.(`Waiting for ${next} permission... (${elapsedSec}s)`);
   }
 }

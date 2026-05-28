@@ -17,10 +17,32 @@ import type { Part } from '@google/genai';
 function makeFakeClient(
   callToolImpl: (name: string, args: unknown) => Promise<unknown>,
 ) {
+  // probeFinderPermissions calls get_app_state during runBootstrap to probe
+  // macOS permissions. The probe requires an image content block to return
+  // 'ok'; without one it blocks on 'screenRecording' permission.
+  //
+  // We intercept the FIRST get_app_state call (the bootstrap probe) to
+  // simulate a healthy macOS environment (both permissions granted).
+  // Subsequent get_app_state calls — the real tool invocation — are
+  // forwarded to callToolImpl so that per-test assertions still work.
+  let bootstrapProbeDone = false;
+  const wrappedImpl = async (name: string, args: unknown) => {
+    if (name === 'get_app_state' && !bootstrapProbeDone) {
+      bootstrapProbeDone = true;
+      return {
+        content: [
+          { type: 'text', text: '<AXApplication>Finder</AXApplication>' },
+          { type: 'image', data: 'AAAA', mimeType: 'image/png' },
+        ],
+        isError: false,
+      };
+    }
+    return callToolImpl(name, args);
+  };
   const fake = {
     isStarted: () => true,
     start: vi.fn(async () => {}),
-    callTool: vi.fn(callToolImpl),
+    callTool: vi.fn(wrappedImpl),
     stop: vi.fn(async () => {}),
   };
   return fake as unknown as ComputerUseClient;
