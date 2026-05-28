@@ -1,17 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useDaemonSession } from './hooks/useDaemonSession';
 import {
-  transcriptBlocksToMessages,
-  extractPendingPermission,
-  extractStreamingState,
-} from './adapters/transcriptAdapter';
+  useActions,
+  useConnection,
+  useMessages,
+  useDaemonFollowupSuggestion,
+  useStreamingState,
+  useTranscriptBlocks,
+  useTranscriptStore,
+  type DaemonStreamingState,
+} from '@qwen-code/webui/daemon-react-sdk';
+import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList } from './components/MessageList';
-import { Editor } from './components/Editor';
+import { Editor, type EditorHandle } from './components/Editor';
 import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar } from './components/StatusBar';
 import { ShortcutsPanel } from './components/ShortcutsPanel';
 import { StreamingStatus } from './components/StreamingStatus';
 import { TodoPanel } from './components/panels/TodoPanel';
+import { ActiveAgentsPanel } from './components/panels/ActiveAgentsPanel';
 import { WelcomeHeader } from './components/WelcomeHeader';
 import { ModelDialog } from './components/dialogs/ModelDialog';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
@@ -30,7 +36,6 @@ import {
 } from './components/dialogs/ThemeDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { getLocalCommands } from './constants/localCommands';
-import { getDaemonBaseUrl, getDaemonToken } from './config/daemon';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import {
@@ -48,13 +53,13 @@ import { handleTasksSlashCommand } from './utils/tasksCommand';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
-} from '@qwen-code/sdk/daemon';
-import type { Message, StreamingState, TodoItem } from './adapters/types';
+} from '@qwen-code/webui/daemon-react-sdk';
+import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
+import type { ACPToolCall, Message, TodoItem } from './adapters/types';
 import { extractTodosFromToolCall, hasActiveTodos } from './utils/todos';
+import { ThemeProvider } from './themeContext';
 import styles from './App.module.css';
 
-const DAEMON_BASE_URL = getDaemonBaseUrl();
-const DAEMON_TOKEN = getDaemonToken();
 const WEB_SHELL_VERSION = __WEB_SHELL_VERSION__;
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
@@ -65,16 +70,13 @@ interface QueuedPrompt {
   images?: PromptImage[];
 }
 
+interface LocalRecapMessage {
+  anchorAfterId?: string;
+  anchorIndex: number;
+  message: Message;
+}
+
 export interface WebShellProps {
-  /**
-   * Daemon API base URL. When omitted, the standalone app reads the `daemon`
-   * query parameter and otherwise uses same-origin API paths.
-   */
-  baseUrl?: string;
-  /** Bearer token for daemon API calls. Standalone mode falls back to `?token=`. */
-  token?: string;
-  /** Existing daemon session to attach to. Standalone mode falls back to `/session/:id`. */
-  initialSessionId?: string;
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string) => void;
   /** Visual theme for the embedded shell. Defaults to the dark terminal skin. */
@@ -85,17 +87,16 @@ export interface WebShellProps {
   language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
-}
-
-function getSessionIdFromUrl(): string | undefined {
-  if (typeof window === 'undefined') return undefined;
-  const match = window.location.pathname.match(/\/session\/([^/]+)/);
-  if (!match) return undefined;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return undefined;
-  }
+  /** Additional CSS class name appended to the root element. */
+  className?: string;
+  /** Inline styles applied to the root element. */
+  style?: React.CSSProperties;
+  /** Called when connection status changes (idle/connecting/connected/disconnected/error). */
+  onConnectionChange?: (status: string) => void;
+  /** Called when prompt status changes (idle/waiting/responding). */
+  onStreamingStateChange?: (state: DaemonStreamingState) => void;
+  /** Called when a critical error occurs (auth failure, session gone, etc). */
+  onError?: (error: Error) => void;
 }
 
 function replaceSessionUrl(sessionId: string): void {
@@ -156,6 +157,26 @@ function getFloatingTodos(messages: readonly Message[]): TodoItem[] {
     }
   }
   return [];
+}
+
+function isAgentTool(tool: ACPToolCall): boolean {
+  const name = tool.toolName.toLowerCase();
+  return (
+    name === 'agent' || name === 'task' || Boolean(tool.args?.subagent_type)
+  );
+}
+
+function isActiveTool(tool: ACPToolCall): boolean {
+  return tool.status === 'pending' || tool.status === 'in_progress';
+}
+
+function getFloatingAgents(messages: readonly Message[]): ACPToolCall[] {
+  return messages.flatMap((message) => {
+    if (message.role !== 'tool_group') return [];
+    return message.tools.filter(
+      (tool) => isAgentTool(tool) && isActiveTool(tool),
+    );
+  });
 }
 
 function translateCopyMessage(
@@ -219,19 +240,17 @@ function QueuedPromptDisplay({
 }
 
 export function App({
-  baseUrl,
-  token,
-  initialSessionId: providedInitialSessionId,
   onSessionIdChange,
   theme: providedTheme = 'dark',
   onThemeChange,
   language: providedLanguage,
   onLanguageChange,
+  className: externalClassName,
+  style: externalStyle,
+  onConnectionChange,
+  onStreamingStateChange,
+  onError,
 }: WebShellProps = {}) {
-  const initialSessionId = useMemo(
-    () => providedInitialSessionId ?? getSessionIdFromUrl(),
-    [providedInitialSessionId],
-  );
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
       providedLanguage === undefined
@@ -239,42 +258,70 @@ export function App({
         : normalizeLanguage(providedLanguage),
   );
   const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
-  const { store, state, connection, actions, promptStatus } = useDaemonSession({
-    baseUrl: baseUrl ?? DAEMON_BASE_URL,
-    token: token ?? DAEMON_TOKEN,
-    initialSessionId,
-    loadWarnings: {
-      models: t('loadWarning.models'),
-      commands: t('loadWarning.commands'),
-      context: t('loadWarning.context'),
-    },
-  });
+  const store = useTranscriptStore();
+  const blocks = useTranscriptBlocks();
+  const connection = useConnection();
+  const sessionActions = useActions();
 
-  const messageBlocks = useAnimationFrameValue(state.blocks);
-  const messages = useMemo(
-    () => transcriptBlocksToMessages(messageBlocks),
-    [messageBlocks],
+  const messages = useMessages();
+  const [recapMessage, setRecapMessage] = useState<LocalRecapMessage | null>(
+    null,
   );
+  const nextRecapMessageIdRef = useRef(1);
+  const activeSessionIdRef = useRef(connection.sessionId);
+  const displayMessages = useMemo(() => {
+    if (!recapMessage) return messages;
+    const anchorIndex = recapMessage.anchorAfterId
+      ? messages.findIndex(
+          (message) => message.id === recapMessage.anchorAfterId,
+        )
+      : -1;
+    const index =
+      anchorIndex >= 0
+        ? anchorIndex + 1
+        : Math.min(recapMessage.anchorIndex, messages.length);
+    return [
+      ...messages.slice(0, index),
+      recapMessage.message,
+      ...messages.slice(index),
+    ];
+  }, [messages, recapMessage]);
+  const messageBlocks = useAnimationFrameValue(blocks);
   const pendingApproval = useMemo(
     () => extractPendingPermission(messageBlocks),
     [messageBlocks],
   );
   const shouldHideComposer = pendingApproval !== null;
   const floatingTodos = useMemo(() => getFloatingTodos(messages), [messages]);
-  const transcriptStreamingState = useMemo(
-    () => extractStreamingState(messageBlocks),
-    [messageBlocks],
+  const floatingAgents = useMemo(() => getFloatingAgents(messages), [messages]);
+  const activeAgentsPanelRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<EditorHandle>(null);
+  const {
+    followupState,
+    onAcceptFollowup,
+    onDismissFollowup,
+    clear: clearFollowup,
+  } = useDaemonFollowupSuggestion({
+    onAccept: (suggestion) => {
+      editorRef.current?.insertText(suggestion);
+    },
+  });
+  const sendPrompt = useCallback(
+    (
+      text: string,
+      images?: PromptImage[],
+      opts?: { optimisticUserMessage?: boolean },
+    ) => {
+      clearFollowup();
+      return sessionActions.sendPrompt(text, {
+        images,
+        optimisticUserMessage: opts?.optimisticUserMessage,
+      });
+    },
+    [clearFollowup, sessionActions],
   );
-  const streamingState = useMemo<StreamingState>(() => {
-    if (promptStatus === 'idle') {
-      return transcriptStreamingState;
-    }
-    if (transcriptStreamingState !== 'idle') {
-      return transcriptStreamingState;
-    }
-    return promptStatus === 'waiting' ? 'waiting' : 'responding';
-  }, [promptStatus, transcriptStreamingState]);
-  const streamingStateRef = useRef<StreamingState>(streamingState);
+  const streamingState = useStreamingState();
+  const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   const connected = connection.status === 'connected';
 
   const [modelDialogMode, setModelDialogMode] = useState<
@@ -320,6 +367,59 @@ export function App({
     },
     [store],
   );
+
+  useEffect(() => {
+    activeSessionIdRef.current = connection.sessionId;
+    setRecapMessage(null);
+    lastRecapBlockCountRef.current = 0;
+  }, [connection.sessionId]);
+
+  const runVisibleRecap = useCallback(() => {
+    const messageId = `local-recap-${nextRecapMessageIdRef.current++}`;
+    const anchorIndex = messages.length;
+    const anchorAfterId = messages.at(-1)?.id;
+    const sessionId = connection.sessionId;
+    setRecapMessage({
+      anchorAfterId,
+      anchorIndex,
+      message: {
+        id: messageId,
+        role: 'system',
+        content: `※ recap: ${t('recap.loading')}`,
+        variant: 'info',
+      },
+    });
+    sessionActions.recapSession().then(
+      (result) => {
+        if (activeSessionIdRef.current !== sessionId) return;
+        setRecapMessage({
+          anchorAfterId,
+          anchorIndex,
+          message: {
+            id: messageId,
+            role: 'system',
+            content: result.recap
+              ? `※ recap: ${result.recap}`
+              : t('recap.empty'),
+            variant: 'info',
+          },
+        });
+      },
+      (error: unknown) => {
+        if (activeSessionIdRef.current !== sessionId) return;
+        setRecapMessage({
+          anchorAfterId,
+          anchorIndex,
+          message: {
+            id: messageId,
+            role: 'system',
+            content: formatError(error, t('recap.failed')),
+            variant: 'error',
+          },
+        });
+      },
+    );
+  }, [connection.sessionId, messages, sessionActions, t]);
 
   useEffect(() => {
     queuedPromptsRef.current = queuedPrompts;
@@ -393,7 +493,7 @@ export function App({
         );
         return;
       }
-      actions
+      sessionActions
         .setApprovalMode(modeId)
         .then((result) => {
           setCurrentMode(result.mode || modeId);
@@ -402,12 +502,26 @@ export function App({
           reportError(error, t('local.approvalMode'));
         });
     },
-    [actions, reportError, t],
+    [sessionActions, reportError, t],
   );
 
   useEffect(() => {
     streamingStateRef.current = streamingState;
   }, [streamingState]);
+
+  useEffect(() => {
+    onStreamingStateChange?.(streamingState);
+  }, [streamingState, onStreamingStateChange]);
+
+  useEffect(() => {
+    onConnectionChange?.(connection.status);
+  }, [connection.status, onConnectionChange]);
+
+  useEffect(() => {
+    if (connection.error) {
+      onError?.(new Error(connection.error));
+    }
+  }, [connection.error, onError]);
 
   useEffect(() => {
     if (connection.currentModel) {
@@ -429,6 +543,48 @@ export function App({
       }
     }
   }, [connection.sessionId, onSessionIdChange]);
+
+  // Auto-recap: fire when the user returns after being away ≥ 3 minutes
+  const hiddenAtRef = useRef<number | null>(null);
+  const lastRecapBlockCountRef = useRef(0);
+  useEffect(() => {
+    lastRecapBlockCountRef.current = 0;
+  }, [connection.sessionId]);
+  useEffect(() => {
+    const AWAY_THRESHOLD_MS = 3 * 60 * 1000;
+    const MIN_NEW_BLOCKS = 4;
+    function onVisibilityChange() {
+      if (document.hidden) {
+        if (hiddenAtRef.current === null) hiddenAtRef.current = Date.now();
+        return;
+      }
+      const hiddenAt = hiddenAtRef.current;
+      hiddenAtRef.current = null;
+      if (hiddenAt === null) return;
+      if (Date.now() - hiddenAt < AWAY_THRESHOLD_MS) return;
+      if (streamingStateRef.current !== 'idle') return;
+      if (!connection.sessionId) return;
+      const currentCount = store.getSnapshot().blocks.length;
+      if (currentCount - lastRecapBlockCountRef.current < MIN_NEW_BLOCKS)
+        return;
+      lastRecapBlockCountRef.current = currentCount;
+      sessionActions.recapSession().then(
+        (result) => {
+          if (result.recap) {
+            store.dispatch([
+              { type: 'status', text: `※ recap: ${result.recap}` },
+            ]);
+          }
+        },
+        (error: unknown) => {
+          console.warn('[auto-recap] failed:', error);
+        },
+      );
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () =>
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [connection.sessionId, sessionActions, store]);
 
   const handleCycleMode = useCallback(() => {
     const idx = isDaemonApprovalMode(currentMode)
@@ -453,7 +609,7 @@ export function App({
             handleTasksSlashCommand({
               cmd,
               promptBlocked,
-              getTasks: actions.getTasks,
+              getTasks: sessionActions.getTasks,
               dispatch: store.dispatch,
               reportError,
             })
@@ -528,11 +684,10 @@ export function App({
               setSelectedLanguage(nextLanguage);
               onLanguageChange?.(nextLanguage);
               if (!promptBlocked) {
-                actions
-                  .sendPrompt(`/language ui ${nextLanguage}`, undefined, {
-                    optimisticUserMessage: false,
-                  })
-                  .then(() => actions.refreshCommands())
+                sendPrompt(`/language ui ${nextLanguage}`, undefined, {
+                  optimisticUserMessage: false,
+                })
+                  .then(() => sessionActions.refreshCommands())
                   .catch((error: unknown) => {
                     reportError(error, 'Failed to sync /language command');
                   });
@@ -569,15 +724,13 @@ export function App({
             }
             if (modelArg.startsWith('--fast ')) {
               if (promptBlocked) return enqueuePrompt(text, images);
-              actions
-                .sendPrompt(text, images)
-                .catch((error: unknown) =>
-                  reportError(error, 'Failed to send /model --fast'),
-                );
+              sendPrompt(text, images).catch((error: unknown) =>
+                reportError(error, 'Failed to send /model --fast'),
+              );
               return true;
             }
             if (modelArg) {
-              actions
+              sessionActions
                 .setModel(modelArg)
                 .then(() => {
                   setCurrentModel(modelArg);
@@ -593,16 +746,14 @@ export function App({
           if (cmd === 'plan') {
             if (promptBlocked) return enqueuePrompt(text, images);
             const prompt = text.slice(match[0].length).trim();
-            actions
+            sessionActions
               .setApprovalMode('plan')
               .then(() => {
                 setCurrentMode('plan');
                 if (prompt) {
-                  actions
-                    .sendPrompt(prompt, images)
-                    .catch((error: unknown) =>
-                      reportError(error, 'Failed to send plan prompt'),
-                    );
+                  sendPrompt(prompt, images).catch((error: unknown) =>
+                    reportError(error, 'Failed to send plan prompt'),
+                  );
                 }
               })
               .catch((error: unknown) => {
@@ -627,11 +778,9 @@ export function App({
             const skillArg = text.slice(match[0].length).trim();
             if (skillArg) {
               if (promptBlocked) return enqueuePrompt(text, images);
-              actions
-                .sendPrompt(text, images)
-                .catch((error: unknown) =>
-                  reportError(error, 'Failed to send /skills command'),
-                );
+              sendPrompt(text, images).catch((error: unknown) =>
+                reportError(error, 'Failed to send /skills command'),
+              );
             } else {
               setShowSkillsDialog(true);
             }
@@ -640,6 +789,31 @@ export function App({
           if (cmd === 'tools') {
             setShowToolsDialog(true);
             return true;
+          }
+          if (cmd === 'context') {
+            const contextArg = text.slice(match[0].length).trim().toLowerCase();
+            if (
+              contextArg === '' ||
+              contextArg === 'detail' ||
+              contextArg === '-d'
+            ) {
+              sessionActions
+                .getContextUsage({
+                  detail: contextArg === 'detail' || contextArg === '-d',
+                })
+                .then((result) => {
+                  store.dispatch([
+                    {
+                      type: 'status',
+                      text: serializeContextUsageMessage(result),
+                    },
+                  ]);
+                })
+                .catch((error: unknown) => {
+                  reportError(error, 'Failed to load context usage');
+                });
+              return true;
+            }
           }
           if (cmd === 'memory') {
             const memoryArg = text.slice(match[0].length).trim().toLowerCase();
@@ -687,7 +861,7 @@ export function App({
             return true;
           }
           if (cmd === 'new' || cmd === 'reset') {
-            actions.newSession().catch((error: unknown) => {
+            sessionActions.newSession().catch((error: unknown) => {
               reportError(error, 'Failed to create a new session');
             });
             return true;
@@ -696,11 +870,9 @@ export function App({
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
               if (promptBlocked) return enqueuePrompt(text, images);
-              actions
-                .sendPrompt(text, images)
-                .catch((error: unknown) =>
-                  reportError(error, 'Failed to send /rename command'),
-                );
+              sendPrompt(text, images).catch((error: unknown) =>
+                reportError(error, 'Failed to send /rename command'),
+              );
               return true;
             }
             const displayName = renameArg.displayName;
@@ -713,7 +885,7 @@ export function App({
               ]);
               return true;
             }
-            actions
+            sessionActions
               .renameSession(displayName)
               .then(() => {
                 store.dispatch([
@@ -739,7 +911,7 @@ export function App({
           if (cmd === 'resume') {
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
-              actions.loadSession(sessionId).catch((error: unknown) => {
+              sessionActions.loadSession(sessionId).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
             } else {
@@ -747,37 +919,36 @@ export function App({
             }
             return true;
           }
+          if (cmd === 'recap') {
+            runVisibleRecap();
+            return true;
+          }
         }
         // Forward slash commands as prompts
         if (promptBlocked) return enqueuePrompt(text, images);
-        actions
-          .sendPrompt(text, images)
-          .catch((error: unknown) =>
-            reportError(error, 'Failed to send command'),
-          );
+        sendPrompt(text, images).catch((error: unknown) =>
+          reportError(error, 'Failed to send command'),
+        );
         return true;
       } else if (text.startsWith('!')) {
         if (promptBlocked) return enqueuePrompt(text, images);
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
-        actions
-          .sendShellCommand(cmd)
-          .catch((error: unknown) => {
-            reportError(error, 'Failed to execute shell command');
-          });
+        sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
+          reportError(error, 'Failed to execute shell command');
+        });
         return true;
       } else {
         if (promptBlocked) return enqueuePrompt(text, images);
-        actions
-          .sendPrompt(text, images)
-          .catch((error: unknown) =>
-            reportError(error, 'Failed to send message'),
-          );
+        sendPrompt(text, images).catch((error: unknown) =>
+          reportError(error, 'Failed to send message'),
+        );
         return true;
       }
     },
     [
-      actions,
+      sendPrompt,
+      sessionActions,
       store,
       enqueuePrompt,
       handleThemeChange,
@@ -785,6 +956,7 @@ export function App({
       messages,
       onLanguageChange,
       reportError,
+      runVisibleRecap,
       selectedLanguage,
       t,
     ],
@@ -825,24 +997,51 @@ export function App({
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
-      actions
-        .respondToPermission(id, selectedOption, answers)
+      sessionActions
+        .submitPermission(id, selectedOption, answers)
         .catch((error: unknown) => {
           reportError(error, 'Failed to submit permission choice');
         });
     },
-    [actions, reportError],
+    [sessionActions, reportError],
   );
 
   const handleCancel = useCallback(() => {
-    actions.cancel().catch((error: unknown) => {
+    sessionActions.cancel().catch((error: unknown) => {
       reportError(error, 'Failed to cancel request');
     });
-  }, [actions, reportError]);
+  }, [sessionActions, reportError]);
+
+  const handleFocusActiveAgents = useCallback((): boolean => {
+    if (floatingAgents.length === 0) return false;
+    editorRef.current?.blur();
+    window.setTimeout(() => {
+      activeAgentsPanelRef.current?.focus({ preventScroll: true });
+    }, 0);
+    return true;
+  }, [floatingAgents.length]);
+
+  const handleReturnToEditor = useCallback((text?: string) => {
+    if (text) {
+      editorRef.current?.insertText(text);
+      return;
+    }
+    editorRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
+      if (e.key === 'Tab' && e.shiftKey && pendingApproval && !dialogOpen) {
+        e.preventDefault();
+        const allowAlways = pendingApproval.options.find(
+          (o) => o.kind === 'allow_always',
+        );
+        if (allowAlways) {
+          handleConfirm(pendingApproval.id, allowAlways.id);
+        }
+        return;
+      }
       if (
         e.key === 'Escape' &&
         !pendingApproval &&
@@ -866,6 +1065,8 @@ export function App({
   }, [
     streamingState,
     handleCancel,
+    handleConfirm,
+    handleSetMode,
     pendingApproval,
     dialogOpen,
     clearQueuedPrompts,
@@ -875,7 +1076,7 @@ export function App({
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
-      actions
+      sessionActions
         .setModel(modelId)
         .then(() => {
           setCurrentModel(modelId);
@@ -884,17 +1085,17 @@ export function App({
           reportError(error, t('model.switch'));
         });
     },
-    [actions, reportError, t],
+    [sessionActions, reportError, t],
   );
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') return;
-      actions.sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
+      sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
     },
-    [actions, streamingState, reportError],
+    [sendPrompt, streamingState, reportError],
   );
 
   const commands = useMemo(() => {
@@ -907,193 +1108,192 @@ export function App({
     );
   }, [connection.commands, connection.skills, t]);
 
-  const appClassName = `${styles.app} ${
-    selectedTheme === 'light' ? styles.themeLight : styles.themeDark
-  }`;
+  const appClassName = [
+    styles.app,
+    selectedTheme === 'light' ? styles.themeLight : styles.themeDark,
+    externalClassName,
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   return (
-    <I18nProvider language={selectedLanguage}>
-      <div className={appClassName}>
-        {modelDialogMode ? (
-          <ModelDialog
-            mode={modelDialogMode}
-            currentModel={currentModel}
-            availableModels={connection.models ?? []}
-            onSelect={
-              modelDialogMode === 'fast'
-                ? handleFastModelSelect
-                : handleModelSelect
-            }
-            onClose={() => setModelDialogMode(null)}
-          />
-        ) : showResumeDialog ? (
-          <ResumeDialog
-            currentSessionId={connection.sessionId}
-            loadSessions={actions.listSessions}
-            onSelect={(sessionId) => {
-              actions.loadSession(sessionId).catch((error: unknown) => {
-                reportError(error, 'Failed to load session');
-              });
-            }}
-            onClose={() => setShowResumeDialog(false)}
-          />
-        ) : showReleaseDialog ? (
-          <ReleaseSessionDialog
-            currentSessionId={connection.sessionId}
-            loadSessions={actions.listSessions}
-            releaseSession={actions.releaseSession}
-            onReleased={(sessionId) => {
-              store.dispatch([
-                {
-                  type: 'status',
-                  text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
-                },
-              ]);
-            }}
-            onError={(error) => {
-              const reason =
-                error instanceof Error ? error.message : String(error);
-              store.dispatch([
-                {
-                  type: 'error',
-                  text: t('release.failed', { reason }),
-                },
-              ]);
-            }}
-            onClose={() => setShowReleaseDialog(false)}
-          />
-        ) : showModeDialog ? (
-          <ApprovalModeDialog
-            currentMode={currentMode}
-            onSelect={handleSetMode}
-            onClose={() => setShowModeDialog(false)}
-          />
-        ) : showMcpDialog ? (
-          <McpDialog
-            loadStatus={actions.loadMcpStatus}
-            loadTools={actions.loadMcpTools}
-            restartServer={actions.restartMcpServer}
-            onClose={() => setShowMcpDialog(false)}
-          />
-        ) : showHelpDialog ? (
-          <HelpDialog
-            commands={commands}
-            onClose={() => setShowHelpDialog(false)}
-          />
-        ) : showThemeDialog ? (
-          <ThemeDialog
-            currentTheme={selectedTheme}
-            onSelect={handleThemeChange}
-            onClose={() => setShowThemeDialog(false)}
-          />
-        ) : showSkillsDialog ? (
-          <SkillsDialog
-            loadStatus={actions.loadSkillsStatus}
-            onClose={() => setShowSkillsDialog(false)}
-          />
-        ) : showToolsDialog ? (
-          <ToolsDialog
-            loadStatus={actions.loadToolsStatus}
-            setToolEnabled={actions.setWorkspaceToolEnabled}
-            onClose={() => setShowToolsDialog(false)}
-          />
-        ) : memoryDialogMode ? (
-          <MemoryDialog
-            initialMode={memoryDialogMode}
-            loadStatus={actions.loadMemoryStatus}
-            readFile={actions.readWorkspaceFile}
-            writeMemory={actions.writeMemory}
-            onMessage={(text, type = 'status') => {
-              store.dispatch([{ type, text }]);
-            }}
-            onClose={() => setMemoryDialogMode(null)}
-          />
-        ) : agentsDialogMode ? (
-          <AgentsDialog
-            initialMode={agentsDialogMode}
-            listAgents={actions.listAgents}
-            getAgent={actions.getAgent}
-            createAgent={actions.createAgent}
-            deleteAgent={actions.deleteAgent}
-            onClose={() => setAgentsDialogMode(null)}
-          />
-        ) : (
-          <>
-            <div
-              className={
-                messages.length > 0 || streamingState !== 'idle'
-                  ? `${styles.content} ${styles.contentHasMessages}`
-                  : styles.content
-              }
-            >
-              <MessageList
-                messages={messages}
-                pendingApproval={pendingApproval}
-                onConfirm={handleConfirm}
-                welcomeHeader={
-                  <WelcomeHeader
-                    version={WEB_SHELL_VERSION}
-                    cwd={connection.workspaceCwd || ''}
-                    currentModel={currentModel}
-                    currentMode={currentMode}
-                  />
-                }
-              />
-
-              <StreamingStatus
-                streamingState={streamingState}
-                tokenCount={connection.tokenCount ?? 0}
-              />
-            </div>
-
-            <div className={styles.footer}>
-              {floatingTodos.length > 0 && <TodoPanel todos={floatingTodos} />}
-              {!shouldHideComposer && (
-                <div className={styles.composer}>
-                  <QueuedPromptDisplay prompts={queuedPrompts} t={t} />
-                  <Editor
-                    onSubmit={handleSubmit}
-                    onCycleMode={handleCycleMode}
-                    onToggleShortcuts={handleToggleShortcuts}
-                    disabled={isDisabled}
-                    commands={commands}
-                    skills={connection.skills ?? []}
-                    daemonBaseUrl={DAEMON_BASE_URL}
-                    daemonToken={token ?? DAEMON_TOKEN}
-                    queuedMessages={queuedPrompts.map((prompt) => prompt.text)}
-                    onPopQueuedMessages={popQueuedPromptsForEdit}
-                    onClearQueuedMessages={clearQueuedPrompts}
-                    currentMode={currentMode}
-                    placeholderText={
-                      !connected
-                        ? t('common.loading')
-                        : streamingState !== 'idle'
-                          ? t('editor.processing')
-                          : t('editor.placeholder')
-                    }
-                  />
-                </div>
+    <ThemeProvider value={selectedTheme}>
+      <I18nProvider language={selectedLanguage}>
+        <div className={appClassName} style={externalStyle}>
+          {dialogOpen && (
+            <div className={styles.dialogOverlay} data-keyboard-scope>
+              {modelDialogMode && (
+                <ModelDialog
+                  mode={modelDialogMode}
+                  onSelect={
+                    modelDialogMode === 'fast'
+                      ? handleFastModelSelect
+                      : handleModelSelect
+                  }
+                  onClose={() => setModelDialogMode(null)}
+                />
               )}
-
-              {!shouldHideComposer &&
-                (showShortcuts ? (
-                  <ShortcutsPanel />
-                ) : (
-                  <StatusBar
-                    connected={connected}
-                    streamingState={streamingState}
-                    currentModel={currentModel}
-                    currentMode={currentMode}
-                    tokenCount={connection.tokenCount ?? 0}
-                    contextWindow={connection.contextWindow ?? 0}
-                  />
-                ))}
+              {showResumeDialog && (
+                <ResumeDialog
+                  onSelect={(sessionId) => {
+                    sessionActions
+                      .loadSession(sessionId)
+                      .catch((error: unknown) => {
+                        reportError(error, 'Failed to load session');
+                      });
+                  }}
+                  onClose={() => setShowResumeDialog(false)}
+                />
+              )}
+              {showReleaseDialog && (
+                <ReleaseSessionDialog
+                  onReleased={(sessionId) => {
+                    store.dispatch([
+                      {
+                        type: 'status',
+                        text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
+                      },
+                    ]);
+                  }}
+                  onError={(error) => {
+                    const reason =
+                      error instanceof Error ? error.message : String(error);
+                    store.dispatch([
+                      {
+                        type: 'error',
+                        text: t('release.failed', { reason }),
+                      },
+                    ]);
+                  }}
+                  onClose={() => setShowReleaseDialog(false)}
+                />
+              )}
+              {showModeDialog && (
+                <ApprovalModeDialog
+                  currentMode={currentMode}
+                  onSelect={handleSetMode}
+                  onClose={() => setShowModeDialog(false)}
+                />
+              )}
+              {showMcpDialog && (
+                <McpDialog onClose={() => setShowMcpDialog(false)} />
+              )}
+              {showHelpDialog && (
+                <HelpDialog
+                  commands={commands}
+                  onClose={() => setShowHelpDialog(false)}
+                />
+              )}
+              {showThemeDialog && (
+                <ThemeDialog
+                  currentTheme={selectedTheme}
+                  onSelect={handleThemeChange}
+                  onClose={() => setShowThemeDialog(false)}
+                />
+              )}
+              {showSkillsDialog && (
+                <SkillsDialog onClose={() => setShowSkillsDialog(false)} />
+              )}
+              {showToolsDialog && (
+                <ToolsDialog onClose={() => setShowToolsDialog(false)} />
+              )}
+              {memoryDialogMode && (
+                <MemoryDialog
+                  initialMode={memoryDialogMode}
+                  onMessage={(text, type = 'status') => {
+                    store.dispatch([{ type, text }]);
+                  }}
+                  onClose={() => setMemoryDialogMode(null)}
+                />
+              )}
+              {agentsDialogMode && (
+                <AgentsDialog
+                  initialMode={agentsDialogMode}
+                  onClose={() => setAgentsDialogMode(null)}
+                />
+              )}
             </div>
-          </>
-        )}
-      </div>
-    </I18nProvider>
+          )}
+
+          <div
+            className={
+              displayMessages.length > 0 || streamingState !== 'idle'
+                ? `${styles.content} ${styles.contentHasMessages}`
+                : styles.content
+            }
+            style={dialogOpen ? { visibility: 'hidden' } : undefined}
+          >
+            <MessageList
+              messages={displayMessages}
+              pendingApproval={pendingApproval}
+              onConfirm={handleConfirm}
+              welcomeHeader={
+                <WelcomeHeader
+                  version={WEB_SHELL_VERSION}
+                  cwd={connection.workspaceCwd || ''}
+                  currentModel={currentModel}
+                  currentMode={currentMode}
+                />
+              }
+            />
+
+            <StreamingStatus />
+          </div>
+
+          <div
+            className={styles.footer}
+            style={dialogOpen ? { visibility: 'hidden' } : undefined}
+          >
+            {floatingTodos.length > 0 && (
+              <div className={styles.bottomPanels}>
+                <TodoPanel todos={floatingTodos} />
+              </div>
+            )}
+            {!shouldHideComposer && (
+              <div className={styles.composer}>
+                <QueuedPromptDisplay prompts={queuedPrompts} t={t} />
+                <Editor
+                  ref={editorRef}
+                  onSubmit={handleSubmit}
+                  onCycleMode={handleCycleMode}
+                  onToggleShortcuts={handleToggleShortcuts}
+                  disabled={isDisabled}
+                  commands={commands}
+                  skills={connection.skills ?? []}
+                  queuedMessages={queuedPrompts.map((prompt) => prompt.text)}
+                  onFocusActiveAgents={handleFocusActiveAgents}
+                  onPopQueuedMessages={popQueuedPromptsForEdit}
+                  onClearQueuedMessages={clearQueuedPrompts}
+                  currentMode={currentMode}
+                  dialogOpen={dialogOpen}
+                  followupState={followupState}
+                  onAcceptFollowup={onAcceptFollowup}
+                  onDismissFollowup={onDismissFollowup}
+                  placeholderText={
+                    !connected
+                      ? t('common.loading')
+                      : streamingState !== 'idle'
+                        ? t('editor.processing')
+                        : t('editor.placeholder')
+                  }
+                />
+              </div>
+            )}
+            {!shouldHideComposer &&
+              (showShortcuts ? <ShortcutsPanel /> : <StatusBar />)}
+
+            {floatingAgents.length > 0 && (
+              <div className={styles.bottomPanels}>
+                <ActiveAgentsPanel
+                  ref={activeAgentsPanelRef}
+                  agents={floatingAgents}
+                  onReturnToInput={handleReturnToEditor}
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      </I18nProvider>
+    </ThemeProvider>
   );
 }
-
-

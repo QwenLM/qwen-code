@@ -109,6 +109,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   workspaceAgents: 'qwen/status/workspace/agents',
   workspacePreflight: 'qwen/status/workspace/preflight',
   sessionContext: 'qwen/status/session/context',
+  sessionContextUsage: 'qwen/status/session/context_usage',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
 } as const;
@@ -360,6 +361,55 @@ export interface ServeSessionContextStatus {
     configOptions?: unknown[] | null;
     [key: string]: unknown;
   };
+}
+
+export interface ServeContextCategoryBreakdown {
+  systemPrompt: number;
+  builtinTools: number;
+  mcpTools: number;
+  memoryFiles: number;
+  skills: number;
+  messages: number;
+  freeSpace: number;
+  autocompactBuffer: number;
+}
+
+export interface ServeContextToolDetail {
+  name: string;
+  tokens: number;
+}
+
+export interface ServeContextMemoryDetail {
+  path: string;
+  tokens: number;
+}
+
+export interface ServeContextSkillDetail {
+  name: string;
+  tokens: number;
+  loaded?: boolean;
+  bodyTokens?: number;
+}
+
+export interface ServeSessionContextUsage {
+  modelName: string;
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: ServeContextCategoryBreakdown;
+  builtinTools: ServeContextToolDetail[];
+  mcpTools: ServeContextToolDetail[];
+  memoryFiles: ServeContextMemoryDetail[];
+  skills: ServeContextSkillDetail[];
+  isEstimated?: boolean;
+  showDetails?: boolean;
+}
+
+export interface ServeSessionContextUsageStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  usage: ServeSessionContextUsage;
+  formattedText: string;
 }
 
 export interface ServeSessionSupportedCommandsStatus {

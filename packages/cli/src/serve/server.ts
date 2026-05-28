@@ -1382,6 +1382,28 @@ export function createServeApp(
     }
   });
 
+  app.get('/session/:id/context-usage', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    try {
+      res.status(200).json(
+        await bridge.getSessionContextUsageStatus(sessionId, {
+          detail: req.query['detail'] === 'true',
+        }),
+      );
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/context-usage',
+        sessionId,
+      });
+    }
+  });
+
   app.get('/session/:id/supported-commands', async (req, res) => {
     const sessionId = req.params['id'];
     if (!sessionId) {

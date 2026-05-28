@@ -188,6 +188,12 @@
   text-align: center;
 }
 
+.mermaidBlock.mermaidInline {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+}
+
 .mermaidBlock :global(svg) {
   max-width: 100%;
   height: auto;
@@ -198,6 +204,11 @@
   font-size: 12px;
   font-style: italic;
   padding: 20px;
+}
+
+.mermaidActions {
+  display: flex;
+  gap: 4px;
 }
 
 .content :global(.katex-display) {

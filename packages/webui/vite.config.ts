@@ -13,11 +13,9 @@ import { resolve } from 'path';
  * Vite configuration for @qwen-code/webui library
  *
  * Build outputs:
- * - ESM: dist/index.js (primary format)
- * - CJS: dist/index.cjs (compatibility)
- * - UMD: dist/index.umd.js (for CDN usage)
- * - TypeScript declarations: dist/index.d.ts
- * - CSS: dist/styles.css (optional styles)
+ * - Main entry:    dist/index.js, dist/index.cjs, dist/index.d.ts
+ * - Advanced entry: dist/advanced.js, dist/advanced.cjs, dist/advanced.d.ts
+ * - CSS: dist/styles.css
  */
 export default defineConfig(({ command }) => ({
   resolve:
@@ -42,19 +40,16 @@ export default defineConfig(({ command }) => ({
       outDir: 'dist',
       rollupTypes: true,
       insertTypesEntry: true,
+      aliasesExclude: [/^@qwen-code\//],
     }),
   ],
   build: {
     lib: {
-      entry: resolve(__dirname, 'src/index.ts'),
-      name: 'QwenCodeWebUI',
-      formats: ['es', 'cjs', 'umd'],
-      fileName: (format) => {
-        if (format === 'es') return 'index.js';
-        if (format === 'cjs') return 'index.cjs';
-        if (format === 'umd') return 'index.umd.js';
-        return 'index.js';
+      entry: {
+        index: resolve(__dirname, 'src/index.ts'),
+        'daemon-react-sdk': resolve(__dirname, 'src/daemon-react-sdk.ts'),
       },
+      formats: ['es', 'cjs'],
     },
     rollupOptions: {
       external: [

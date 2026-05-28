@@ -1,11 +1,11 @@
 import { useCallback, useRef } from 'react';
 
-const STORAGE_KEY = 'qwen-web-shell-history';
+const DEFAULT_STORAGE_KEY = 'qwen-web-shell-history';
 const MAX_HISTORY = 100;
 
-function loadHistory(): string[] {
+function loadHistory(storageKey: string): string[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed)
@@ -16,10 +16,10 @@ function loadHistory(): string[] {
   }
 }
 
-function saveHistory(history: string[]) {
+function saveHistory(storageKey: string, history: string[]) {
   try {
     localStorage.setItem(
-      STORAGE_KEY,
+      storageKey,
       JSON.stringify(history.slice(-MAX_HISTORY)),
     );
   } catch {
@@ -27,8 +27,10 @@ function saveHistory(history: string[]) {
   }
 }
 
-export function useInputHistory() {
-  const historyRef = useRef<string[]>(loadHistory());
+export function useInputHistory(storageKey = DEFAULT_STORAGE_KEY) {
+  const storageKeyRef = useRef(storageKey);
+  storageKeyRef.current = storageKey;
+  const historyRef = useRef<string[]>(loadHistory(storageKey));
   const indexRef = useRef<number>(-1);
   const draftRef = useRef<string>('');
   const searchIndexRef = useRef<number>(-1);
@@ -38,7 +40,7 @@ export function useInputHistory() {
     if (h[h.length - 1] === text) return;
     h.push(text);
     if (h.length > MAX_HISTORY) h.shift();
-    saveHistory(h);
+    saveHistory(storageKeyRef.current, h);
     indexRef.current = -1;
   }, []);
 

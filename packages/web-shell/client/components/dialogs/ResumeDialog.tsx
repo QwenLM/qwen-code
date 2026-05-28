@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { dp } from './dialogStyles';
+import { useConnection, useSessions } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 
@@ -18,45 +19,20 @@ function formatRelativeTime(iso: string, language: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
-interface SessionInfo {
-  sessionId: string;
-  title?: string;
-  displayName?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  clientCount?: number;
-  hasActivePrompt?: boolean;
-}
-
 interface ResumeDialogProps {
-  currentSessionId?: string | null;
-  loadSessions: () => Promise<SessionInfo[]>;
   onSelect: (sessionId: string) => void;
   onClose: () => void;
 }
 
-export function ResumeDialog({
-  currentSessionId,
-  loadSessions,
-  onSelect,
-  onClose,
-}: ResumeDialogProps) {
+export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
   const { language, t } = useI18n();
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  const connection = useConnection();
+  const { sessions, loading, error } = useSessions({ autoLoad: true });
+  const currentSessionId = connection.sessionId;
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    loadSessions()
-      .then((loadedSessions) => {
-        setSessions(loadedSessions);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [loadSessions]);
 
   const filtered = searchQuery
     ? sessions.filter((s) => {
@@ -171,6 +147,13 @@ export function ResumeDialog({
             ({filtered.length} matches)
           </span>
         )}
+        <button
+          className={dp('resume-picker-close')}
+          onClick={onClose}
+          title="Close"
+        >
+          ESC
+        </button>
       </div>
 
       {/* Search row */}
@@ -215,7 +198,12 @@ export function ResumeDialog({
         {loading && (
           <div className={dp('resume-picker-empty')}>{t('common.loading')}</div>
         )}
-        {!loading && filtered.length === 0 && (
+        {!loading && error && (
+          <div className={dp('resume-picker-empty')}>
+            {error.message || 'Failed to load sessions'}
+          </div>
+        )}
+        {!loading && !error && filtered.length === 0 && (
           <div className={dp('resume-picker-empty')}>
             {searchQuery
               ? t('resume.noMatch', { query: searchQuery })

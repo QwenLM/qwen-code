@@ -1,0 +1,85 @@
+.group {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.headerDot {
+  color: var(--text-dimmed);
+}
+
+.headerCount {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-left: 2px solid var(--border-color);
+  padding-left: 10px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  min-width: 0;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.row:hover {
+  background: var(--bg-tertiary);
+}
+
+.rowIndex {
+  font-size: 12px;
+  color: var(--text-dimmed);
+  min-width: 2ch;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.rowDesc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.rowTool {
+  font-size: 11px;
+  color: var(--text-dimmed);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+  max-width: 40%;
+}
+
+.detail {
+  margin-top: 4px;
+  padding: 6px 0 2px;
+  border-top: 1px solid var(--border-color);
+}

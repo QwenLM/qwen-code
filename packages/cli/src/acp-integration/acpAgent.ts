@@ -126,7 +126,12 @@ import {
   type ServeWorkspaceSkillsStatus,
   type ServeWorkspaceToolStatus,
   type ServeWorkspaceToolsStatus,
+  type ServeSessionContextUsageStatus,
 } from '../serve/status.js';
+import {
+  collectContextData,
+  formatContextUsageText,
+} from '../ui/commands/contextCommand.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 
@@ -1999,6 +2004,65 @@ class QwenAgent implements Agent {
     };
   }
 
+  private async buildSessionContextUsageStatus(
+    sessionId: string,
+    showDetails: boolean,
+  ): Promise<ServeSessionContextUsageStatus> {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    let usage;
+    try {
+      usage = await collectContextData(config, showDetails);
+    } catch (err) {
+      console.warn('[context-usage] collectContextData failed:', err);
+      usage = {
+        type: 'context_usage' as const,
+        modelName: config.getModel() || 'unknown',
+        totalTokens: 0,
+        contextWindowSize: 0,
+        breakdown: {
+          systemPrompt: 0,
+          builtinTools: 0,
+          mcpTools: 0,
+          memoryFiles: 0,
+          skills: 0,
+          messages: 0,
+          freeSpace: 0,
+          autocompactBuffer: 0,
+        },
+        builtinTools: [] as Array<{ name: string; tokens: number }>,
+        mcpTools: [] as Array<{ name: string; tokens: number }>,
+        memoryFiles: [] as Array<{ path: string; tokens: number }>,
+        skills: [] as Array<{
+          name: string;
+          tokens: number;
+          loaded?: boolean;
+          bodyTokens?: number;
+        }>,
+        isEstimated: true,
+        showDetails,
+      };
+    }
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      workspaceCwd: this.workspaceCwd(config),
+      usage: {
+        modelName: usage.modelName,
+        totalTokens: usage.totalTokens,
+        contextWindowSize: usage.contextWindowSize,
+        breakdown: usage.breakdown,
+        builtinTools: usage.builtinTools,
+        mcpTools: usage.mcpTools,
+        memoryFiles: usage.memoryFiles,
+        skills: usage.skills,
+        isEstimated: usage.isEstimated,
+        showDetails: usage.showDetails,
+      },
+      formattedText: formatContextUsageText(usage),
+    };
+  }
+
   private async buildSessionSupportedCommandsStatus(
     sessionId: string,
   ): Promise<ServeSessionSupportedCommandsStatus> {
@@ -2073,6 +2137,19 @@ class QwenAgent implements Agent {
           string,
           unknown
         >;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionContextUsage: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return (await this.buildSessionContextUsageStatus(
+          sessionId,
+          params['detail'] === true,
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionSupportedCommands: {
         const sessionId = params['sessionId'];

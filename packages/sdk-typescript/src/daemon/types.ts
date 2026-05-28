@@ -723,6 +723,55 @@ export interface DaemonSessionContextStatus {
   state: DaemonSessionState;
 }
 
+export interface DaemonContextCategoryBreakdown {
+  systemPrompt: number;
+  builtinTools: number;
+  mcpTools: number;
+  memoryFiles: number;
+  skills: number;
+  messages: number;
+  freeSpace: number;
+  autocompactBuffer: number;
+}
+
+export interface DaemonContextToolDetail {
+  name: string;
+  tokens: number;
+}
+
+export interface DaemonContextMemoryDetail {
+  path: string;
+  tokens: number;
+}
+
+export interface DaemonContextSkillDetail {
+  name: string;
+  tokens: number;
+  loaded?: boolean;
+  bodyTokens?: number;
+}
+
+export interface DaemonSessionContextUsage {
+  modelName: string;
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: DaemonContextCategoryBreakdown;
+  builtinTools: DaemonContextToolDetail[];
+  mcpTools: DaemonContextToolDetail[];
+  memoryFiles: DaemonContextMemoryDetail[];
+  skills: DaemonContextSkillDetail[];
+  isEstimated?: boolean;
+  showDetails?: boolean;
+}
+
+export interface DaemonSessionContextUsageStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  usage: DaemonSessionContextUsage;
+  formattedText: string;
+}
+
 export interface DaemonAvailableCommand {
   name: string;
   description?: string;

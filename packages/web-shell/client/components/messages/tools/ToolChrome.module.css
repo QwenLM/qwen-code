@@ -178,7 +178,7 @@
 }
 
 .todoActive {
-  color: var(--success-color);
+  /* color: var(--success-color); */
   font-weight: 600;
 }
 

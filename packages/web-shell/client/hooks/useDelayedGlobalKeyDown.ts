@@ -1,6 +1,16 @@
 import { useEffect, useRef } from 'react';
 import { isEditableTarget } from '../utils/dom';
 
+/**
+ * Returns true when the event target is inside a `[data-keyboard-scope]`
+ * container — meaning the dialog owns the keyboard, so even editable
+ * targets (inputs) should still let the dialog's handler run.
+ */
+function isInsideKeyboardScope(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return !!target.closest('[data-keyboard-scope]');
+}
+
 export function useDelayedGlobalKeyDown(
   handler: (event: KeyboardEvent) => void,
   deps: readonly unknown[],
@@ -15,7 +25,11 @@ export function useDelayedGlobalKeyDown(
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
-      if (isEditableTarget(event.target)) return;
+      if (
+        isEditableTarget(event.target) &&
+        !isInsideKeyboardScope(event.target)
+      )
+        return;
       handlerRef.current(event);
     };
     const timer = setTimeout(() => {

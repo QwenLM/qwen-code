@@ -1,4 +1,5 @@
 import { memo } from 'react';
+import { PromptChevron } from '../PromptChevron';
 import styles from './UserMessage.module.css';
 
 interface UserMessageProps {
@@ -10,7 +11,9 @@ export const UserMessage = memo(function UserMessage({
 }: UserMessageProps) {
   return (
     <div className={styles.message}>
-      <span className={styles.prefix}>&gt;</span>
+      <span className={styles.prefix}>
+        <PromptChevron />
+      </span>
       <span className={styles.body}>{content}</span>
     </div>
   );

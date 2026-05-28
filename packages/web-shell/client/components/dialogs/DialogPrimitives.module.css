@@ -12,9 +12,30 @@
 
 .resume-picker-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   padding: 8px 12px;
+}
+
+.resume-picker-close {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 2px 8px;
+  flex-shrink: 0;
+}
+
+.resume-picker-close:hover {
+  color: var(--text-primary);
+  border-color: var(--accent-color);
 }
 
 .resume-picker-title {

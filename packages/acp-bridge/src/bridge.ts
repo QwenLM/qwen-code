@@ -345,6 +345,26 @@ const MAX_DISPLAY_NAME_LENGTH = 256;
  */
 const MAX_ECHO_CONTENT_BLOCKS = 256;
 
+function extractPermissionResponseMetadata(
+  response: unknown,
+): Readonly<Record<string, unknown>> | undefined {
+  if (response === null || typeof response !== 'object') return undefined;
+  // Keep this extension deliberately narrow. Today the only non-ACP field
+  // expected by the agent is AskUserQuestion's `answers` payload.
+  const answers = (response as { readonly answers?: unknown }).answers;
+  if (
+    answers !== null &&
+    typeof answers === 'object' &&
+    !Array.isArray(answers)
+  ) {
+    const entries = Object.entries(answers as Record<string, unknown>);
+    if (entries.every(([, v]) => typeof v === 'string')) {
+      return { answers };
+    }
+  }
+  return undefined;
+}
+
 /**
  * Echo a user prompt to the session bus so multi-client SSE subscribers
  * see the input alongside the agent response. Iterates content blocks
@@ -1472,6 +1492,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   const requestSessionStatus = async <T>(
     sessionId: string,
     method: string,
+    params: Record<string, unknown> = {},
   ): Promise<T> => {
     const entry = byId.get(sessionId);
     if (!entry) throw new SessionNotFoundError(sessionId);
@@ -1479,7 +1500,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
     const response = await Promise.race([
       withTimeout(
-        entry.connection.extMethod(method, { sessionId }),
+        entry.connection.extMethod(method, { ...params, sessionId }),
         initTimeoutMs,
         method,
       ),
@@ -2535,6 +2556,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         response.outcome.outcome === 'selected'
           ? response.outcome.optionId
           : CANCEL_VOTE_SENTINEL;
+      const voterMetadata = extractPermissionResponseMetadata(response);
       const outcome = permissionMediator.vote({
         requestId,
         sessionId,
@@ -2542,6 +2564,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         optionId,
         receivedAtMs: Date.now(),
         fromLoopback: context?.fromLoopback ?? false,
+        ...(voterMetadata ? { metadata: voterMetadata } : {}),
       });
       switch (outcome.kind) {
         case 'resolved':
@@ -3068,6 +3091,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       );
     },
 
+    async getSessionContextUsageStatus(sessionId, opts) {
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionContextUsage,
+        { detail: opts?.detail === true },
+      );
+    },
+
     async getSessionSupportedCommandsStatus(sessionId) {
       return requestSessionStatus(
         sessionId,
@@ -3413,7 +3444,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
                   update: {
                     sessionUpdate: 'shell_output',
                     output: chunk,
-                    _meta: { serverTimestamp: Date.now(), source: 'user-shell' },
+                    _meta: {
+                      serverTimestamp: Date.now(),
+                      source: 'user-shell',
+                    },
                   },
                 },
                 ...(originatorClientId ? { originatorClientId } : {}),

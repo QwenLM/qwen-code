@@ -139,6 +139,10 @@ function getToolResultSummary(tool: ACPToolCall): string {
     return lines[0] || '';
   }
 
+  if (name === 'ask_user_question') {
+    return text;
+  }
+
   const firstLine = lines[0] || '';
   return truncateText(firstLine, 80);
 }
@@ -177,7 +181,7 @@ function extractDiff(tool: ACPToolCall): string {
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
     if (diffBlock && diffBlock.type === 'diff') {
-      return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText);
+      return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
   }
   if (tool.rawOutput && typeof tool.rawOutput === 'object') {
@@ -197,8 +201,8 @@ function buildUnifiedDiff(oldText: string, newText: string): string {
   const m = newLines.length;
 
   if (n * m > MAX_DIFF_PRODUCT) {
-    const removed = oldLines.map((l) => `-${l}`);
-    const added = newLines.map((l) => `+${l}`);
+    const removed = oldLines.map((l) => (l ? `-${l}` : '-'));
+    const added = newLines.map((l) => (l ? `+${l}` : '+'));
     return [...removed, ...added].join('\n');
   }
 
@@ -334,6 +338,7 @@ function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
   const [showAll, setShowAll] = useState(false);
   const content = getWriteContent(tool);
   const lines = content.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   const isLong = lines.length > MAX_WRITE_LINES;
   const displayLines =
     isLong && !showAll ? lines.slice(0, MAX_WRITE_LINES) : lines;
@@ -344,7 +349,7 @@ function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
     <div className={styles.expandedWrite}>
       <pre className={styles.expandedOutput}>
         {displayLines.map((line, i) => (
-          <span key={i} className={styles.writeAdd}>{`+${line}\n`}</span>
+          <span key={i} className={styles.writeAdd}>{`+ ${line}\n`}</span>
         ))}
       </pre>
       {isLong && (
@@ -434,6 +439,8 @@ function shouldAutoExpand(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (name === 'write_file' || name === 'writefile') return true;
   if (name === 'edit' || name === 'editfile') return true;
+  if (name === 'bash' || name === 'shell' || name === 'execute_command')
+    return true;
   return false;
 }
 

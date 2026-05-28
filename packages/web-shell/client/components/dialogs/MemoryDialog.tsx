@@ -7,14 +7,11 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { dp } from './dialogStyles';
-import type {
-  DaemonContextFileScope,
-  DaemonWorkspaceFile,
-  DaemonWorkspaceMemoryFile,
-  DaemonWorkspaceMemoryStatus,
-  DaemonWriteMemoryRequest,
-  DaemonWriteMemoryResult,
-} from '@qwen-code/sdk/daemon';
+import {
+  useMemory,
+  type DaemonContextFileScope,
+  type DaemonWorkspaceMemoryFile,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import styles from './MemoryDialog.module.css';
@@ -29,11 +26,6 @@ export type MemoryDialogInitialMode =
 
 interface MemoryDialogProps {
   initialMode?: MemoryDialogInitialMode;
-  loadStatus: () => Promise<DaemonWorkspaceMemoryStatus>;
-  readFile: (filePath: string) => Promise<DaemonWorkspaceFile>;
-  writeMemory: (
-    req: DaemonWriteMemoryRequest,
-  ) => Promise<DaemonWriteMemoryResult>;
   onMessage?: (message: string, type?: 'status' | 'error') => void;
   onClose: () => void;
 }
@@ -73,13 +65,18 @@ function scopeLabel(
 
 export function MemoryDialog({
   initialMode = 'menu',
-  loadStatus,
-  readFile,
-  writeMemory,
   onMessage,
   onClose,
 }: MemoryDialogProps) {
   const { t } = useI18n();
+  const {
+    status: memoryStatus,
+    loading: memoryLoading,
+    error: memoryError,
+    reload: reloadMemory,
+    readFile,
+    writeMemory,
+  } = useMemory({ autoLoad: true });
   const scopes: ScopeItem[] = useMemo(
     () => [
       {
@@ -96,9 +93,6 @@ export function MemoryDialog({
     [t],
   );
   const [view, setView] = useState<MemoryView>(() => initialView(initialMode));
-  const [status, setStatus] = useState<DaemonWorkspaceMemoryStatus | null>(
-    null,
-  );
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [fileIdx, setFileIdx] = useState(0);
   const [selectedFile, setSelectedFile] =
@@ -112,7 +106,6 @@ export function MemoryDialog({
     initialScope(initialMode),
   );
   const [content, setContent] = useState('');
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -121,28 +114,23 @@ export function MemoryDialog({
     initialMode === 'add-user' || initialMode === 'add-project';
   const directMode = initialMode !== 'menu';
 
+  const status = memoryStatus;
+  const loading = memoryLoading;
+  const files: DaemonWorkspaceMemoryFile[] = status?.files ?? [];
+
   const reload = useCallback(
-    (successMessage?: string) => {
-      setLoading(true);
-      loadStatus()
-        .then((next) => {
-          setStatus(next);
-          setFileIdx((idx) =>
-            Math.min(idx, Math.max(next.files.length - 1, 0)),
-          );
-          setMessage(successMessage ?? null);
-        })
-        .catch((error: unknown) => {
-          setMessage(error instanceof Error ? error.message : String(error));
-        })
-        .finally(() => setLoading(false));
+    async (successMessage?: string) => {
+      await reloadMemory();
+      if (successMessage) setMessage(successMessage);
     },
-    [loadStatus],
+    [reloadMemory],
   );
 
   useEffect(() => {
-    reload(initialMode === 'refresh' ? t('memory.refreshed') : undefined);
-  }, [initialMode, reload, t]);
+    if (memoryError) setMessage(memoryError.message);
+    else if (initialMode === 'refresh' && memoryStatus)
+      setMessage(t('memory.refreshed'));
+  }, [memoryError, memoryStatus, initialMode, t]);
 
   useEffect(() => {
     if (view === 'edit') {
@@ -261,9 +249,7 @@ export function MemoryDialog({
             Math.min(idx + 1, Math.max(scopes.length - 1, 0)),
           );
         } else if (view === 'show') {
-          setFileIdx((idx) =>
-            Math.min(idx + 1, Math.max((status?.files.length ?? 0) - 1, 0)),
-          );
+          setFileIdx((idx) => Math.min(idx + 1, Math.max(files.length - 1, 0)));
         }
         return;
       }
@@ -284,7 +270,7 @@ export function MemoryDialog({
           setView('edit');
           setMessage(null);
         } else if (view === 'show') {
-          const file = status?.files[fileIdx];
+          const file = files[fileIdx];
           if (file) openFile(file);
         }
       }
@@ -295,11 +281,11 @@ export function MemoryDialog({
       fileIdx,
       menuItems,
       onClose,
+      files,
       openFile,
       scopeIdx,
       scopes,
       selectedIdx,
-      status?.files,
       view,
     ],
   );
@@ -381,6 +367,13 @@ export function MemoryDialog({
             ? `${status.fileCount} files · ${status.totalBytes} bytes`
             : ''}
         </span>
+        <button
+          className={dp('resume-picker-close')}
+          onClick={onClose}
+          title="Close"
+        >
+          ESC
+        </button>
       </div>
 
       <div className={dp('resume-picker-search')}>
@@ -465,12 +458,12 @@ export function MemoryDialog({
 
       {view === 'show' && (
         <div className={dp('resume-picker-list')} ref={listRef}>
-          {!loading && status?.files.length === 0 && (
+          {!loading && files.length === 0 && (
             <div className={dp('resume-picker-empty')}>
               {t('memory.noFiles')}
             </div>
           )}
-          {status?.files.map((file, index) => (
+          {files.map((file, index) => (
             <div
               key={`${file.scope}:${file.path}`}
               className={dp(

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { dp } from './dialogStyles';
-import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
+import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 
@@ -79,6 +79,13 @@ export function ApprovalModeDialog({
           {approvalModes.find((m) => m.id === currentMode)?.label ||
             currentMode}
         </span>
+        <button
+          className={dp('resume-picker-close')}
+          onClick={onClose}
+          title="Close"
+        >
+          ESC
+        </button>
       </div>
 
       <div className={dp('resume-picker-sep')} />

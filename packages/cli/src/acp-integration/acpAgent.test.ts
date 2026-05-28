@@ -179,6 +179,30 @@ vi.mock('../config/settings.js', () => ({
   loadSettings: vi.fn(),
 }));
 vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
+vi.mock('../ui/commands/contextCommand.js', () => ({
+  collectContextData: vi.fn().mockResolvedValue({
+    modelName: 'm',
+    showDetails: true,
+    contextWindowSize: 128000,
+    apiTotalTokens: 1000,
+    apiCachedTokens: 200,
+    systemPromptTokens: 500,
+    allToolsTokens: 300,
+    displayBuiltinToolsTokens: 100,
+    displayMcpToolsTokens: 200,
+    skillToolDefinitionTokens: 0,
+    loadedSkillBodiesTokens: 0,
+    memoryFilesTokens: 50,
+    categories: [],
+    builtinTools: [],
+    mcpTools: [],
+    memoryFiles: [],
+    skills: [],
+  }),
+  formatContextUsageText: vi
+    .fn()
+    .mockReturnValue('## Context Usage\nformatted'),
+}));
 vi.mock('./session/Session.js', () => ({
   Session: vi.fn(),
   buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
@@ -1521,6 +1545,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const tasks = await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
       sessionId,
     });
+    const contextUsage = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionContextUsage,
+      { sessionId, detail: true },
+    );
 
     expect(context).toMatchObject({
       v: 1,
@@ -1599,6 +1627,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(JSON.stringify(tasks)).not.toContain('outputOffset');
     expect(JSON.stringify(tasks)).not.toContain('pendingMessages');
     expect(JSON.stringify(tasks)).not.toContain('idleTimer');
+    expect(contextUsage).toMatchObject({
+      v: 1,
+      sessionId,
+      workspaceCwd: '/tmp',
+      usage: {
+        modelName: 'm',
+        showDetails: true,
+      },
+      formattedText: expect.stringContaining('## Context Usage'),
+    });
     expect(buildAvailableCommandsSnapshot).toHaveBeenCalledWith(innerConfig);
 
     dateNowSpy.mockRestore();

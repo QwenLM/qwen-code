@@ -4,6 +4,7 @@
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --radius: 6px;
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -59,7 +60,7 @@
 }
 
 .themeLight {
-  --app-bg: #fbfbf8;
+  --app-bg: #FFF;
   --bg-primary: #ffffff;
   --bg-secondary: #f7f7f2;
   --bg-tertiary: #efeee8;
@@ -95,6 +96,15 @@
   --error-border: rgba(192, 54, 44, 0.24);
 }
 
+.dialogOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: var(--app-bg);
+}
+
 .content {
   flex: 0 1 auto;
   min-height: 0;
@@ -110,6 +120,13 @@
 .footer {
   margin: 0 -12px;
   flex-shrink: 0;
+}
+
+.bottomPanels {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 4px;
 }
 
 .composer {

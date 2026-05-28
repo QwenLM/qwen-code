@@ -31,6 +31,9 @@ const daemonProxy: ProxyOptions = {
 export default defineConfig({
   root: 'client',
   plugins: [react()],
+  resolve: {
+    dedupe: ['react', 'react-dom', '@qwen-code/webui'],
+  },
   build: {
     outDir: '../dist',
     emptyOutDir: true,

@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
+import {
+  useConnection,
+  useSessions,
+  type DaemonSessionSummary,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 
@@ -18,36 +23,26 @@ function formatRelativeTime(iso: string, language: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
-interface SessionInfo {
-  sessionId: string;
-  title?: string;
-  displayName?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  clientCount?: number;
-  hasActivePrompt?: boolean;
-}
-
 interface ReleaseSessionDialogProps {
-  currentSessionId?: string | null;
-  loadSessions: () => Promise<SessionInfo[]>;
-  releaseSession: (sessionId: string) => Promise<void>;
   onReleased: (sessionId: string) => void;
   onError: (error: unknown) => void;
   onClose: () => void;
 }
 
 export function ReleaseSessionDialog({
-  currentSessionId,
-  loadSessions,
-  releaseSession,
   onReleased,
   onError,
   onClose,
 }: ReleaseSessionDialogProps) {
   const { language, t } = useI18n();
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  const connection = useConnection();
+  const {
+    sessions,
+    loading,
+    error: sessionsError,
+    releaseSession,
+  } = useSessions({ autoLoad: true });
+  const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [searchMode, setSearchMode] = useState(false);
@@ -56,15 +51,8 @@ export function ReleaseSessionDialog({
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    loadSessions()
-      .then((loadedSessions) => {
-        setSessions(loadedSessions);
-      })
-      .catch((error: unknown) => {
-        setMessage(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => setLoading(false));
-  }, [loadSessions]);
+    if (sessionsError) setMessage(sessionsError.message);
+  }, [sessionsError]);
 
   const filtered = searchQuery
     ? sessions.filter((s) => {
@@ -90,7 +78,7 @@ export function ReleaseSessionDialog({
   }, [selectedIdx]);
 
   const handleRelease = useCallback(
-    (targetSession?: SessionInfo) => {
+    (targetSession?: DaemonSessionSummary) => {
       const session = targetSession ?? filtered[selectedIdx];
       if (!session || deleting) return;
       const releasable =
@@ -103,6 +91,7 @@ export function ReleaseSessionDialog({
         setMessage(t('release.cannotCurrent'));
         return;
       }
+      if (!releaseSession) return;
       setDeleting(true);
       releaseSession(session.sessionId)
         .then(() => {
@@ -211,6 +200,13 @@ export function ReleaseSessionDialog({
             ({filtered.length} matches)
           </span>
         )}
+        <button
+          className={dp('resume-picker-close')}
+          onClick={onClose}
+          title="Close"
+        >
+          ESC
+        </button>
       </div>
 
       <div className={dp('resume-picker-search')}>

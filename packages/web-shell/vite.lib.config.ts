@@ -24,7 +24,7 @@ function injectCssModules(): Plugin {
         if (item.type !== 'chunk') continue;
         if (
           !item.isEntry &&
-          !item.facadeModuleId?.endsWith('/client/index.ts')
+          !item.facadeModuleId?.endsWith('/client/index.tsx')
         ) {
           continue;
         }
@@ -43,7 +43,7 @@ export default defineConfig({
   build: {
     emptyOutDir: false,
     lib: {
-      entry: 'client/index.ts',
+      entry: 'client/index.tsx',
       formats: ['es'],
       fileName: () => 'index.js',
     },
@@ -55,6 +55,8 @@ export default defineConfig({
         'react-dom/client',
         '@qwen-code/sdk',
         /^@qwen-code\/sdk\//,
+        '@qwen-code/webui',
+        /^@qwen-code\/webui\//,
         'react-markdown',
         'remark-gfm',
         'remark-math',

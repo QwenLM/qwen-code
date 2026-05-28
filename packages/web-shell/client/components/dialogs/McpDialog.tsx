@@ -1,21 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
-import type {
-  DaemonMcpRestartResult,
-  DaemonWorkspaceMcpServerStatus,
-  DaemonWorkspaceMcpStatus,
-} from '@qwen-code/sdk/daemon';
+import {
+  useMcp,
+  type DaemonWorkspaceMcpServerStatus,
+  type DaemonWorkspaceMcpToolStatus,
+  type DaemonWorkspaceMcpToolsStatus,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
-import type {
-  WebShellMcpToolStatus,
-  WebShellMcpToolsStatus,
-} from '../../hooks/useDaemonSession';
 
 interface McpDialogProps {
-  loadStatus: () => Promise<DaemonWorkspaceMcpStatus>;
-  loadTools: (serverName: string) => Promise<WebShellMcpToolsStatus>;
-  restartServer: (serverName: string) => Promise<DaemonMcpRestartResult>;
   onClose: () => void;
 }
 
@@ -85,28 +79,24 @@ function schemaSummary(
   return lines;
 }
 
-export function McpDialog({
-  loadStatus,
-  loadTools,
-  restartServer,
-  onClose,
-}: McpDialogProps) {
+export function McpDialog({ onClose }: McpDialogProps) {
   const { t } = useI18n();
-  const [status, setStatus] = useState<DaemonWorkspaceMcpStatus | null>(null);
+  const { status, loading, error, reload, loadTools, restartServer } = useMcp({
+    autoLoad: true,
+  });
   const [toolsByServer, setToolsByServer] = useState<
-    Record<string, WebShellMcpToolsStatus>
+    Record<string, DaemonWorkspaceMcpToolsStatus>
   >({});
   const [view, setView] = useState<McpView>('servers');
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [actionIdx, setActionIdx] = useState(0);
   const [toolIdx, setToolIdx] = useState(0);
-  const [loading, setLoading] = useState(true);
   const [loadingTools, setLoadingTools] = useState<string | null>(null);
   const [busyServer, setBusyServer] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const servers = status?.servers ?? [];
+  const servers: DaemonWorkspaceMcpServerStatus[] = status?.servers ?? [];
   const selected = servers[selectedIdx];
   const selectedTools = selected
     ? (toolsByServer[selected.name]?.tools ?? [])
@@ -121,30 +111,19 @@ export function McpDialog({
           setToolsByServer((cur) => ({ ...cur, [serverName]: next }));
           setMessage(next.errors?.[0]?.error ?? null);
         })
-        .catch((error: unknown) => {
-          setMessage(error instanceof Error ? error.message : String(error));
+        .catch((err: unknown) => {
+          setMessage(err instanceof Error ? err.message : String(err));
         })
         .finally(() => setLoadingTools(null));
     },
     [loadTools],
   );
 
-  const reload = useCallback(() => {
-    setLoading(true);
-    loadStatus()
-      .then((next) => {
-        setStatus(next);
-        setMessage(null);
-      })
-      .catch((error: unknown) => {
-        setMessage(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => setLoading(false));
-  }, [loadStatus]);
-
   useEffect(() => {
-    reload();
-  }, [reload]);
+    if (error) setMessage(error.message);
+    else if (status?.errors?.[0]?.error) setMessage(status.errors[0].error);
+    else if (status) setMessage(null);
+  }, [status, error]);
 
   useEffect(() => {
     if (selectedIdx >= servers.length && servers.length > 0) {
@@ -357,6 +336,13 @@ export function McpDialog({
                 : selected?.name}
         </span>
         <span className={dp('resume-picker-count')}>{budgetText}</span>
+        <button
+          className={dp('resume-picker-close')}
+          onClick={onClose}
+          title="Close"
+        >
+          ESC
+        </button>
       </div>
 
       <div className={dp('resume-picker-search')}>
@@ -510,7 +496,7 @@ export function McpDialog({
   );
 }
 
-function ToolDetail({ tool }: { tool: WebShellMcpToolStatus }) {
+function ToolDetail({ tool }: { tool: DaemonWorkspaceMcpToolStatus }) {
   const { t } = useI18n();
   return (
     <div className={dp('resume-picker-list')}>

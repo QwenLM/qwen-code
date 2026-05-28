@@ -1,24 +1,23 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { dp } from './dialogStyles';
-import type { ModelInfo } from '../../adapters/types';
+import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 
 interface ModelDialogProps {
   mode?: 'main' | 'fast';
-  currentModel: string;
-  availableModels: ModelInfo[];
   onSelect: (modelId: string) => void;
   onClose: () => void;
 }
 
 export function ModelDialog({
   mode = 'main',
-  currentModel,
-  availableModels,
   onSelect,
   onClose,
 }: ModelDialogProps) {
+  const connection = useConnection();
+  const currentModel = connection.currentModel ?? '';
+  const availableModels = connection.models ?? [];
   const { t } = useI18n();
   const isFastMode = mode === 'fast';
   const [selectedIdx, setSelectedIdx] = useState(() => {
@@ -27,10 +26,7 @@ export function ModelDialog({
   });
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [customMode, setCustomMode] = useState(false);
-  const [customInput, setCustomInput] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
-  const customInputRef = useRef<HTMLInputElement>(null);
 
   const filtered = searchQuery
     ? availableModels.filter((m) => {
@@ -55,12 +51,6 @@ export function ModelDialog({
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
-  useEffect(() => {
-    if (customMode) {
-      customInputRef.current?.focus();
-    }
-  }, [customMode]);
-
   const handleSelect = useCallback(() => {
     const model = filtered[selectedIdx];
     if (model) {
@@ -71,25 +61,6 @@ export function ModelDialog({
 
   useDelayedGlobalKeyDown(
     (e: KeyboardEvent) => {
-      if (customMode) {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          setCustomMode(false);
-          setCustomInput('');
-          return;
-        }
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          const val = customInput.trim();
-          if (val) {
-            onSelect(val);
-            onClose();
-          }
-          return;
-        }
-        return;
-      }
-
       if (searchMode) {
         if (e.key === 'Escape') {
           e.preventDefault();
@@ -152,23 +123,8 @@ export function ModelDialog({
         setSearchMode(true);
         return;
       }
-      if (e.key === 'c' && !e.ctrlKey && !e.metaKey) {
-        e.preventDefault();
-        setCustomMode(true);
-        return;
-      }
     },
-    [
-      searchMode,
-      searchQuery,
-      filtered,
-      selectedIdx,
-      onClose,
-      handleSelect,
-      customMode,
-      customInput,
-      onSelect,
-    ],
+    [searchMode, searchQuery, filtered, selectedIdx, onClose, handleSelect],
   );
 
   return (
@@ -184,24 +140,17 @@ export function ModelDialog({
                 model: currentModel || t('model.unknown'),
               })}
         </span>
+        <button
+          className={dp('resume-picker-close')}
+          onClick={onClose}
+          title="Close"
+        >
+          ESC
+        </button>
       </div>
 
       <div className={dp('resume-picker-search')}>
-        {customMode ? (
-          <>
-            <span className={dp('resume-picker-search-label')}>
-              {t('model.custom')}:{' '}
-            </span>
-            <input
-              ref={customInputRef}
-              className={dp('resume-picker-search-input')}
-              value={customInput}
-              onChange={(e) => setCustomInput(e.target.value)}
-              autoFocus
-              placeholder={t('model.placeholder')}
-            />
-          </>
-        ) : searchMode ? (
+        {searchMode ? (
           <>
             <span className={dp('resume-picker-search-label')}>
               {t('common.search')}:{' '}
@@ -228,7 +177,7 @@ export function ModelDialog({
           </>
         ) : (
           <span className={dp('resume-picker-search-hint')}>
-            {t('model.customHint')}
+            {t('model.searchHint')}
           </span>
         )}
       </div>
@@ -248,9 +197,7 @@ export function ModelDialog({
             key={m.id}
             className={dp(
               'resume-picker-item',
-              i === selectedIdx && !searchMode && !customMode
-                ? 'selected'
-                : undefined,
+              i === selectedIdx && !searchMode ? 'selected' : undefined,
             )}
             onClick={() => {
               onSelect(m.id);
@@ -260,7 +207,7 @@ export function ModelDialog({
           >
             <div className={dp('resume-picker-item-row')}>
               <span className={dp('resume-picker-item-prefix')}>
-                {i === selectedIdx && !searchMode && !customMode ? '›' : ' '}
+                {i === selectedIdx && !searchMode ? '›' : ' '}
               </span>
               <span className={dp('resume-picker-item-title')}>
                 {m.label || m.id}
@@ -277,13 +224,11 @@ export function ModelDialog({
       <div className={dp('resume-picker-sep')} />
 
       <div className={dp('resume-picker-footer')}>
-        {customMode
-          ? t('dialog.footer.confirmCancel')
-          : searchMode
-            ? t('dialog.footer.search')
-            : isFastMode
-              ? t('dialog.footer.modelFast')
-              : t('dialog.footer.navSelectCancel')}
+        {searchMode
+          ? t('dialog.footer.search')
+          : isFastMode
+            ? t('dialog.footer.modelFast')
+            : t('dialog.footer.navSelectCancel')}
       </div>
     </div>
   );

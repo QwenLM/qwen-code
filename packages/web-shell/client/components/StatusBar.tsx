@@ -1,14 +1,6 @@
+import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import styles from './StatusBar.module.css';
-
-interface StatusBarProps {
-  connected: boolean;
-  streamingState: 'idle' | 'waiting' | 'responding' | 'thinking';
-  currentModel: string;
-  currentMode: string;
-  tokenCount: number;
-  contextWindow: number;
-}
 
 function getModeIndicator(
   mode: string,
@@ -26,13 +18,13 @@ function getModeIndicator(
   }
 }
 
-export function StatusBar({
-  connected,
-  currentModel,
-  currentMode,
-  tokenCount,
-  contextWindow,
-}: StatusBarProps) {
+export function StatusBar() {
+  const connection = useConnection();
+  const connected = connection.status === 'connected';
+  const currentModel = connection.currentModel ?? '';
+  const currentMode = connection.currentMode ?? '';
+  const tokenCount = connection.tokenCount ?? 0;
+  const contextWindow = connection.contextWindow ?? 0;
   const { t } = useI18n();
   const pct = contextWindow > 0 ? (tokenCount / contextWindow) * 100 : 0;
   const pctDisplay = pct.toFixed(1);

@@ -109,9 +109,12 @@ function preserveFsErrorOverAcp(err: unknown): never {
  */
 function resolutionToAcpResponse(
   resolution: PermissionResolution,
-): RequestPermissionResponse {
+): RequestPermissionResponse & Record<string, unknown> {
   if (resolution.kind === 'option') {
-    return { outcome: { outcome: 'selected', optionId: resolution.optionId } };
+    return {
+      outcome: { outcome: 'selected', optionId: resolution.optionId },
+      ...(resolution.metadata ?? {}),
+    };
   }
   return { outcome: { outcome: 'cancelled' } };
 }

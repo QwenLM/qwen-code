@@ -142,9 +142,12 @@ function formatTokens(summary?: TaskExecution['executionSummary']): string {
   return `${t} tokens`;
 }
 
+type SubAgentTab = 'result' | 'tools';
+
 export function SubAgentPanel({ tool }: SubAgentPanelProps) {
   const isComplete = tool.status === 'completed' || tool.status === 'failed';
   const [expanded, setExpanded] = useState(false);
+  const [activeTab, setActiveTab] = useState<SubAgentTab>('result');
 
   const taskExec = isTaskExecution(tool.rawOutput) ? tool.rawOutput : null;
 
@@ -170,6 +173,13 @@ export function SubAgentPanel({ tool }: SubAgentPanelProps) {
     return taskExec?.toolCalls || null;
   }, [tool.subTools, taskExec]);
 
+  const hasResult = !!(tool.subContent || resultText);
+  const hasTools = !!(
+    (tool.subTools && tool.subTools.length > 0) ||
+    (taskToolCalls && taskToolCalls.length > 0)
+  );
+  const showTabs = hasResult && hasTools;
+
   return (
     <div className={styles.panel}>
       <div className={styles.header} onClick={() => setExpanded(!expanded)}>
@@ -190,7 +200,24 @@ export function SubAgentPanel({ tool }: SubAgentPanelProps) {
 
       {expanded && (
         <div className={styles.body}>
-          {(tool.subContent || (!tool.subContent && resultText)) && (
+          {showTabs && (
+            <div className={styles.tabBar}>
+              <button
+                className={`${styles.tab} ${activeTab === 'result' ? styles.tabActive : ''}`}
+                onClick={() => setActiveTab('result')}
+              >
+                Result
+              </button>
+              <button
+                className={`${styles.tab} ${activeTab === 'tools' ? styles.tabActive : ''}`}
+                onClick={() => setActiveTab('tools')}
+              >
+                Tools ({subToolCount})
+              </button>
+            </div>
+          )}
+
+          {(!showTabs || activeTab === 'result') && hasResult && (
             <div className={styles.content}>
               {isComplete ? (
                 <Markdown content={tool.subContent || resultText} />
@@ -201,19 +228,24 @@ export function SubAgentPanel({ tool }: SubAgentPanelProps) {
               )}
             </div>
           )}
-          {tool.subTools && tool.subTools.length > 0 && (
-            <div className={styles.tools}>
-              {tool.subTools.map((sub) => (
-                <SubToolLine key={sub.callId} tool={sub} />
-              ))}
-            </div>
-          )}
-          {taskToolCalls && taskToolCalls.length > 0 && (
-            <div className={styles.tools}>
-              {taskToolCalls.map((tc) => (
-                <TaskToolCallLine key={tc.callId} tc={tc} />
-              ))}
-            </div>
+
+          {(!showTabs || activeTab === 'tools') && (
+            <>
+              {tool.subTools && tool.subTools.length > 0 && (
+                <div className={styles.tools}>
+                  {tool.subTools.map((sub) => (
+                    <SubToolLine key={sub.callId} tool={sub} />
+                  ))}
+                </div>
+              )}
+              {taskToolCalls && taskToolCalls.length > 0 && (
+                <div className={styles.tools}>
+                  {taskToolCalls.map((tc) => (
+                    <TaskToolCallLine key={tc.callId} tc={tc} />
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

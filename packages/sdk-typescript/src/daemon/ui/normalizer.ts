@@ -439,6 +439,8 @@ function normalizeSessionUpdate(
     }
     case 'plan':
       return [normalizePlanUpdate(update, base)];
+    case 'current_mode_update':
+      return [];
     default:
       return [
         {

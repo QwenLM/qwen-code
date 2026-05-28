@@ -77,6 +77,13 @@ export function ThemeDialog({
         <span className={dp('resume-picker-count')}>
           {t('theme.current', { theme: currentTheme })}
         </span>
+        <button
+          className={dp('resume-picker-close')}
+          onClick={onClose}
+          title="Close"
+        >
+          ESC
+        </button>
       </div>
 
       <div className={dp('resume-picker-sep')} />
