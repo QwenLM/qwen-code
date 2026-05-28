@@ -21,10 +21,13 @@ import {
   DaemonHttpError,
   DaemonSessionClient,
   createDaemonTranscriptStore,
+  matchTurnEvent,
   normalizeDaemonEvent,
+  type DaemonEvent,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
+  type DaemonTurnCompleteData,
 } from '@qwen-code/sdk/daemon';
 import { createDaemonSessionActions } from './actions.js';
 import { detachDaemonClient, getStableClientId } from './clientLifecycle.js';
@@ -50,6 +53,7 @@ import {
   delay,
   getReconnectDelayMs,
   schedulePassiveAssistantDone,
+  type TimerRef,
 } from '../timing.js';
 import {
   parseSidechannelFollowupSuggestion,
@@ -398,17 +402,28 @@ export function DaemonSessionProvider({
               }
               updateConnectionFromDaemonEvent(event, setConnection);
               const eventOptions = eventOptionsRef.current;
-              const uiEvents = normalizeDaemonEvent(event, {
+              const normalizedUiEvents = normalizeDaemonEvent(event, {
                 clientId: activeSession.clientId,
                 suppressOwnUserEcho: eventOptions.suppressOwnUserEcho,
                 includeRawEvent: eventOptions.includeRawEvent,
               });
+              const uiEvents = isPromptLifecycleTurnEvent(event)
+                ? []
+                : normalizedUiEvents;
               bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
               if (uiEvents.length > 0) {
                 setPromptStatus((current) =>
                   current === 'waiting' ? 'streaming' : current,
                 );
               }
+              const activePromptSettled = settleActivePromptFromTurnEvent(
+                activePromptsRef.current,
+                activeSession.sessionId,
+                event,
+                store,
+                setPromptStatus,
+                passiveAssistantDoneTimerRef,
+              );
               const shouldGuardAssistant =
                 !activePromptsRef.current.has(activeSession.sessionId) &&
                 store.getSnapshot().activeAssistantBlockId != null;
@@ -441,9 +456,9 @@ export function DaemonSessionProvider({
                   }
                 }
               }
-              const isObserver = !activePromptsRef.current.has(
-                activeSession.sessionId,
-              );
+              const isObserver =
+                !activePromptSettled &&
+                !activePromptsRef.current.has(activeSession.sessionId);
               if (isObserver) {
                 const hasUserMsg = uiEvents.some(
                   (e) => e.type === 'user.text.delta',
@@ -456,7 +471,18 @@ export function DaemonSessionProvider({
                   );
                 }
               }
-              if (isObserver && hasActiveGenerationSignal(uiEvents)) {
+              if (isObserver && event.type === 'turn_complete') {
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                const stopReason =
+                  (event.data as DaemonTurnCompleteData | undefined)
+                    ?.stopReason ?? 'end_turn';
+                store.dispatch({ type: 'assistant.done', reason: stopReason });
+                setPromptStatus('idle');
+              } else if (isObserver && event.type === 'turn_error') {
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                store.dispatch({ type: 'assistant.done', reason: 'error' });
+                setPromptStatus('idle');
+              } else if (isObserver && hasActiveGenerationSignal(uiEvents)) {
                 schedulePassiveAssistantDone(
                   store,
                   passiveAssistantDoneTimerRef,
@@ -728,6 +754,63 @@ export function DaemonSessionProvider({
       </DaemonConnectionContext.Provider>
     </DaemonStoreContext.Provider>
   );
+}
+
+function settleActivePromptFromTurnEvent(
+  activePrompts: Map<string, ActivePrompt>,
+  sessionId: string,
+  event: DaemonEvent,
+  store: DaemonTranscriptStore,
+  setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>,
+  passiveAssistantDoneTimerRef: TimerRef,
+): boolean {
+  if (event.type !== 'turn_complete' && event.type !== 'turn_error') {
+    return false;
+  }
+  const promptId = (event.data as { promptId?: string } | null | undefined)
+    ?.promptId;
+  if (!promptId) return false;
+  const active = activePrompts.get(sessionId);
+  if (!active) return false;
+  if (active.promptId !== undefined && active.promptId !== promptId) {
+    return false;
+  }
+
+  clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+  try {
+    const result = matchTurnEvent(event, promptId);
+    if (!result) return false;
+    store.dispatch({ type: 'assistant.done', reason: result.stopReason });
+    setPromptStatus('idle');
+    if (active.resolve) {
+      activePrompts.delete(sessionId);
+      active.resolve(result);
+    } else {
+      activePrompts.set(sessionId, {
+        ...active,
+        promptId,
+        pendingResult: result,
+      });
+    }
+  } catch (error) {
+    store.dispatch({ type: 'assistant.done', reason: 'error' });
+    setPromptStatus('idle');
+    if (active.reject) {
+      activePrompts.delete(sessionId);
+      active.reject(error);
+    } else {
+      activePrompts.set(sessionId, {
+        ...active,
+        promptId,
+        pendingError: error,
+      });
+    }
+  }
+  return true;
+}
+
+function isPromptLifecycleTurnEvent(event: DaemonEvent): boolean {
+  return event.type === 'turn_complete' || event.type === 'turn_error';
 }
 
 export function useDaemonSession(): DaemonSessionContextValue {

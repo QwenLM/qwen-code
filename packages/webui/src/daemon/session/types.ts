@@ -208,6 +208,11 @@ export interface DaemonWorkspaceEventSignals {
 
 export interface ActivePrompt {
   controller: AbortController;
+  promptId?: string;
+  resolve?: (result: PromptResult) => void;
+  reject?: (error: unknown) => void;
+  pendingResult?: PromptResult;
+  pendingError?: unknown;
 }
 
 export interface PendingSessionLoad {

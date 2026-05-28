@@ -12,6 +12,10 @@ import type {
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
+import {
+  isNonBlockingAccepted,
+  type PromptResult,
+} from '@qwen-code/sdk/daemon';
 import { mapSupportedCommands } from './mappers.js';
 import { toDaemonPromptContent } from './promptContent.js';
 import {
@@ -128,6 +132,14 @@ export function createDaemonSessionActions({
           },
           ctrl.signal,
         );
+        if (isNonBlockingAccepted(result)) {
+          return await waitForAcceptedPromptCompletion(
+            activePromptsRef.current,
+            sessionId,
+            ctrl,
+            result.promptId,
+          );
+        }
         if (sessionRef.current?.sessionId === sessionId) {
           store.dispatch({
             type: 'assistant.done',
@@ -475,6 +487,68 @@ export function createDaemonSessionActions({
       }
     },
   };
+}
+
+function waitForAcceptedPromptCompletion(
+  activePrompts: Map<string, ActivePrompt>,
+  sessionId: string,
+  controller: AbortController,
+  promptId: string,
+): Promise<PromptResult> {
+  return new Promise<PromptResult>((resolve, reject) => {
+    const active = activePrompts.get(sessionId);
+    if (active?.controller !== controller) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    if (active.promptId !== undefined && active.promptId !== promptId) {
+      reject(new Error(`Prompt accepted with unexpected id ${promptId}`));
+      return;
+    }
+    if (active.pendingResult !== undefined) {
+      activePrompts.delete(sessionId);
+      resolve(active.pendingResult);
+      return;
+    }
+    if (active.pendingError !== undefined) {
+      activePrompts.delete(sessionId);
+      reject(active.pendingError);
+      return;
+    }
+    if (controller.signal.aborted) {
+      activePrompts.delete(sessionId);
+      reject(
+        controller.signal.reason ?? new DOMException('Aborted', 'AbortError'),
+      );
+      return;
+    }
+    const cleanup = () => {
+      controller.signal.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      const current = activePrompts.get(sessionId);
+      if (current?.controller === controller) {
+        activePrompts.delete(sessionId);
+      }
+      cleanup();
+      reject(
+        controller.signal.reason ?? new DOMException('Aborted', 'AbortError'),
+      );
+    };
+    activePrompts.set(sessionId, {
+      ...active,
+      promptId,
+      resolve: (result) => {
+        cleanup();
+        resolve(result);
+      },
+      reject: (error) => {
+        cleanup();
+        reject(error);
+      },
+    });
+    controller.signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function getModeFromSessionContext(
