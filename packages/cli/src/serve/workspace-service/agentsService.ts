@@ -157,9 +157,7 @@ export function createAgentsService(deps: AgentsServiceDeps): AgentsService {
       if (params.runConfig) config.runConfig = params.runConfig;
 
       // Collision preflight: reject if agent already exists at the target level.
-      const existing = await subagentManager
-        .loadSubagent(params.name, level)
-        .catch(() => null);
+      const existing = await subagentManager.loadSubagent(params.name, level);
       if (existing) {
         throw new Error(`agent_already_exists: ${params.name}`);
       }
