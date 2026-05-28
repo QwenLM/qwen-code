@@ -7,6 +7,7 @@
 
 // Import shared types - single source of truth
 import type { SessionFilter, SettingsSubpage } from '../../../shared/types';
+import { DEFAULT_SETTINGS_SUBPAGE } from '../../../shared/settings-registry';
 export type { SessionFilter, SettingsSubpage };
 
 /**
@@ -91,7 +92,9 @@ export const parseSidebarModeKey = (key: string): SidebarMode | null => {
       return { type: 'settings', subpage };
     }
   }
-  if (key === 'settings') return { type: 'settings', subpage: 'app' };
+  if (key === 'settings') {
+    return { type: 'settings', subpage: DEFAULT_SETTINGS_SUBPAGE };
+  }
   return null;
 };
 

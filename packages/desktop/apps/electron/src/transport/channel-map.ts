@@ -141,7 +141,7 @@ export const CHANNEL_MAP = {
   getAuthState: invoke(RPC_CHANNELS.onboarding.GET_AUTH_STATE),
   getSetupNeeds: invoke(
     RPC_CHANNELS.onboarding.GET_AUTH_STATE,
-    (r) => r.setupNeeds,
+    (r) => (r as { setupNeeds: unknown }).setupNeeds,
   ),
   startWorkspaceMcpOAuth: invoke(RPC_CHANNELS.onboarding.START_MCP_OAUTH),
   deferSetup: invoke(RPC_CHANNELS.onboarding.DEFER_SETUP),

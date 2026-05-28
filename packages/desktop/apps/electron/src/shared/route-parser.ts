@@ -17,6 +17,7 @@ import type {
   RightSidebarPanel,
 } from './types';
 import {
+  DEFAULT_SETTINGS_SUBPAGE,
   isValidSettingsSubpage,
   type SettingsSubpage,
 } from './settings-registry';
@@ -102,7 +103,7 @@ export function isCompoundRoute(route: string): boolean {
  *   'sources/local' -> { navigator: 'sources', sourceFilter: { kind: 'type', sourceType: 'local' }, details: null }
  *   'sources/source/github' -> { navigator: 'sources', details: { type: 'source', id: 'github' } }
  *   'sources/api/source/gmail' -> { navigator: 'sources', sourceFilter: { kind: 'type', sourceType: 'api' }, details: { type: 'source', id: 'gmail' } }
- *   'settings' -> { navigator: 'settings', details: { type: 'app', id: 'app' } }
+ *   'settings' -> { navigator: 'settings', details: { type: 'general', id: 'general' } }
  *   'settings/shortcuts' -> { navigator: 'settings', details: { type: 'shortcuts', id: 'shortcuts' } }
  */
 export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
@@ -113,7 +114,7 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
 
   // Settings navigator
   if (first === 'settings') {
-    const subpage = segments[1] || 'app';
+    const subpage = segments[1] || DEFAULT_SETTINGS_SUBPAGE;
     if (!isValidSettingsSubpage(subpage)) return null;
     return {
       navigator: 'settings',
@@ -286,7 +287,7 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
  */
 export function buildCompoundRoute(parsed: ParsedCompoundRoute): string {
   if (parsed.navigator === 'settings') {
-    const detailsType = parsed.details?.type || 'app';
+    const detailsType = parsed.details?.type || DEFAULT_SETTINGS_SUBPAGE;
     return `settings/${detailsType}`;
   }
 
@@ -409,8 +410,8 @@ function convertCompoundToViewRoute(
 ): ParsedRoute {
   // Settings
   if (compound.navigator === 'settings') {
-    const subpage = compound.details?.type || 'app';
-    if (subpage === 'app') {
+    const subpage = compound.details?.type || DEFAULT_SETTINGS_SUBPAGE;
+    if (subpage === DEFAULT_SETTINGS_SUBPAGE) {
       return { type: 'view', name: 'settings', params: {} };
     }
     return { type: 'view', name: subpage, params: {} };
@@ -550,7 +551,8 @@ function convertCompoundToNavigationState(
 ): NavigationState {
   // Settings
   if (compound.navigator === 'settings') {
-    const subpage = (compound.details?.type || 'app') as SettingsSubpage;
+    const subpage = (compound.details?.type ||
+      DEFAULT_SETTINGS_SUBPAGE) as SettingsSubpage;
     return { navigator: 'settings', subpage };
   }
 
@@ -626,7 +628,7 @@ function convertParsedRouteToNavigationState(
 
   switch (parsed.name) {
     case 'settings':
-      return { navigator: 'settings', subpage: 'app' };
+      return { navigator: 'settings', subpage: DEFAULT_SETTINGS_SUBPAGE };
     case 'ai':
       return { navigator: 'settings', subpage: 'ai' };
     case 'general':

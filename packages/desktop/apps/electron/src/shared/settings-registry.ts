@@ -36,6 +36,16 @@ export interface SettingsPageDefinition {
  */
 export const SETTINGS_PAGES = [
   {
+    id: 'general' as const,
+    labelKey: 'settings.general.title',
+    descriptionKey: 'settings.general.description',
+  },
+  {
+    id: 'appearance' as const,
+    labelKey: 'settings.appearance.title',
+    descriptionKey: 'settings.appearance.description',
+  },
+  {
     id: 'app' as const,
     labelKey: 'settings.app.title',
     descriptionKey: 'settings.app.description',
@@ -46,9 +56,19 @@ export const SETTINGS_PAGES = [
     descriptionKey: 'settings.ai.description',
   },
   {
-    id: 'general' as const,
-    labelKey: 'settings.general.title',
-    descriptionKey: 'settings.general.description',
+    id: 'input' as const,
+    labelKey: 'settings.input.title',
+    descriptionKey: 'settings.input.description',
+  },
+  {
+    id: 'shortcuts' as const,
+    labelKey: 'settings.shortcuts.title',
+    descriptionKey: 'settings.shortcuts.description',
+  },
+  {
+    id: 'memory' as const,
+    labelKey: 'settings.memory.title',
+    descriptionKey: 'settings.memory.description',
   },
   {
     id: 'mcpServers' as const,
@@ -64,26 +84,6 @@ export const SETTINGS_PAGES = [
     id: 'extensions' as const,
     labelKey: 'settings.extensions.title',
     descriptionKey: 'settings.extensions.description',
-  },
-  {
-    id: 'memory' as const,
-    labelKey: 'settings.memory.title',
-    descriptionKey: 'settings.memory.description',
-  },
-  {
-    id: 'appearance' as const,
-    labelKey: 'settings.appearance.title',
-    descriptionKey: 'settings.appearance.description',
-  },
-  {
-    id: 'input' as const,
-    labelKey: 'settings.input.title',
-    descriptionKey: 'settings.input.description',
-  },
-  {
-    id: 'workspace' as const,
-    labelKey: 'settings.workspace.title',
-    descriptionKey: 'settings.workspace.description',
   },
   {
     id: 'permissions' as const,
@@ -106,9 +106,9 @@ export const SETTINGS_PAGES = [
     descriptionKey: 'settings.server.description',
   },
   {
-    id: 'shortcuts' as const,
-    labelKey: 'settings.shortcuts.title',
-    descriptionKey: 'settings.shortcuts.description',
+    id: 'workspace' as const,
+    labelKey: 'settings.workspace.title',
+    descriptionKey: 'settings.workspace.description',
   },
   {
     id: 'preferences' as const,
@@ -122,6 +122,8 @@ export const SETTINGS_PAGES = [
  * This replaces the manual union type in types.ts
  */
 export type SettingsSubpage = (typeof SETTINGS_PAGES)[number]['id'];
+
+export const DEFAULT_SETTINGS_SUBPAGE: SettingsSubpage = SETTINGS_PAGES[0].id;
 
 /**
  * Array of valid settings subpage IDs - for runtime validation

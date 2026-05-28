@@ -69,7 +69,7 @@ describe('normalizePanelRouteForReconcile', () => {
       return state
     }
 
-    expect(normalizePanelRouteForReconcile('settings', resolver)).toBe('settings/app')
+    expect(normalizePanelRouteForReconcile('settings', resolver)).toBe('settings/general')
     expect(normalizePanelRouteForReconcile('sources', resolver)).toBe('sources')
   })
 

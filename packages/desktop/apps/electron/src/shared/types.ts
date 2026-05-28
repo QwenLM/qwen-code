@@ -1114,6 +1114,7 @@ export type SessionFilter =
  */
 export type { SettingsSubpage } from './settings-registry';
 import {
+  DEFAULT_SETTINGS_SUBPAGE,
   isValidSettingsSubpage,
   type SettingsSubpage,
 } from './settings-registry';
@@ -1290,7 +1291,9 @@ export const parseNavigationStateKey = (
   }
 
   // Handle settings
-  if (key === 'settings') return { navigator: 'settings', subpage: 'app' };
+  if (key === 'settings') {
+    return { navigator: 'settings', subpage: DEFAULT_SETTINGS_SUBPAGE };
+  }
   if (key.startsWith('settings:')) {
     const subpage = key.slice(9);
     if (isValidSettingsSubpage(subpage)) {
