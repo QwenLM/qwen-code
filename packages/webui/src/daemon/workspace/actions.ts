@@ -36,6 +36,26 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async deleteSession(sessionId: string) {
+      const client = requireClient(getClient, 'Delete session failed');
+      const result = await withActionTimeout(
+        client.deleteSessionsData([sessionId]),
+        'Delete session timed out',
+      );
+      if (result.errors.length > 0) {
+        throw new Error(result.errors[0].error);
+      }
+      return result.removed.length > 0;
+    },
+
+    async deleteSessions(sessionIds: string[]) {
+      const client = requireClient(getClient, 'Delete sessions failed');
+      return withActionTimeout(
+        client.deleteSessionsData(sessionIds),
+        'Delete sessions timed out',
+      );
+    },
+
     async loadMcpStatus() {
       const client = requireClient(getClient, 'Load MCP status failed');
       return withActionTimeout(

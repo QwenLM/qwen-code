@@ -34,6 +34,7 @@ import {
   ThemeDialog,
   type WebShellTheme,
 } from './components/dialogs/ThemeDialog';
+import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
@@ -329,6 +330,7 @@ export function App({
   >(null);
   const [showModeDialog, setShowModeDialog] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
   const [showMcpDialog, setShowMcpDialog] = useState(false);
   const [showHelpDialog, setShowHelpDialog] = useState(false);
@@ -352,6 +354,7 @@ export function App({
     !!modelDialogMode ||
     showModeDialog ||
     showResumeDialog ||
+    showDeleteDialog ||
     showReleaseDialog ||
     showMcpDialog ||
     showHelpDialog ||
@@ -709,6 +712,10 @@ export function App({
               .catch((error: unknown) => {
                 reportError(error, t('copy.failedFallback'));
               });
+            return true;
+          }
+          if (cmd === 'delete') {
+            setShowDeleteDialog(true);
             return true;
           }
           if (cmd === 'release') {
@@ -1143,6 +1150,34 @@ export function App({
                       });
                   }}
                   onClose={() => setShowResumeDialog(false)}
+                />
+              )}
+              {showDeleteDialog && (
+                <DeleteSessionDialog
+                  onDeleted={(sessionIds) => {
+                    store.dispatch([
+                      {
+                        type: 'status',
+                        text:
+                          sessionIds.length === 1
+                            ? `${t('delete.deleted')} (${sessionIds[0]!.slice(0, 8)})`
+                            : t('delete.deletedCount', {
+                                count: sessionIds.length,
+                              }),
+                      },
+                    ]);
+                  }}
+                  onError={(error) => {
+                    const reason =
+                      error instanceof Error ? error.message : String(error);
+                    store.dispatch([
+                      {
+                        type: 'error',
+                        text: t('delete.failed', { reason }),
+                      },
+                    ]);
+                  }}
+                  onClose={() => setShowDeleteDialog(false)}
                 />
               )}
               {showReleaseDialog && (

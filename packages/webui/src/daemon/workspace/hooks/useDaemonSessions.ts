@@ -22,6 +22,23 @@ export function useDaemonSessions(options: DaemonResourceOptions = {}) {
     ...options,
     enabled: (options.enabled ?? true) && workspaceReady,
   });
+  const { reload } = result;
+  const deleteSession = useCallback(
+    async (sessionId: string) => {
+      const removed = await workspace.actions.deleteSession(sessionId);
+      if (removed) reload();
+      return removed;
+    },
+    [workspace.actions, reload],
+  );
+  const deleteSessions = useCallback(
+    async (sessionIds: string[]) => {
+      const res = await workspace.actions.deleteSessions(sessionIds);
+      if (res.removed.length > 0) reload();
+      return res;
+    },
+    [workspace.actions, reload],
+  );
   return {
     ...result,
     sessions: result.data ?? [],
@@ -29,5 +46,7 @@ export function useDaemonSessions(options: DaemonResourceOptions = {}) {
     resumeSession: sessionActions?.resumeSession,
     newSession: sessionActions?.newSession,
     releaseSession: sessionActions?.releaseSession,
+    deleteSession,
+    deleteSessions,
   };
 }
