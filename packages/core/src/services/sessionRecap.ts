@@ -32,11 +32,6 @@ const RECAP_USER_PROMPT =
 const RECAP_OPEN_TAG = '<recap>';
 const RECAP_TAG_RE = /<recap>([\s\S]*?)<\/recap>/i;
 
-export interface SessionRecapResult {
-  text: string;
-  modelUsed: string;
-}
-
 /**
  * Generate a 1-2 sentence "where did I leave off" summary of the current
  * session. Uses the configured fast model (falls back to main model) with
@@ -49,7 +44,7 @@ export interface SessionRecapResult {
 export async function generateSessionRecap(
   config: Config,
   abortSignal: AbortSignal,
-): Promise<SessionRecapResult | null> {
+): Promise<string | null> {
   try {
     const geminiClient = config.getGeminiClient();
     if (!geminiClient) return null;
@@ -60,11 +55,6 @@ export async function generateSessionRecap(
     const dialog = filterToDialog(fullHistory);
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
     if (recentHistory.length === 0) return null;
-
-    const model =
-      config.getFastModelForSideQuery?.() ??
-      config.getFastModel() ??
-      config.getModel();
 
     const result = await runSideQuery(config, {
       purpose: 'session-recap',
@@ -89,7 +79,7 @@ export async function generateSessionRecap(
     const text = extractRecap(result.text);
     if (!text) return null;
 
-    return { text, modelUsed: model };
+    return text;
   } catch (err) {
     debugLogger.warn(
       `Recap generation failed: ${err instanceof Error ? err.message : String(err)}`,

@@ -7,14 +7,17 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomBytes, randomInt } from 'node:crypto';
-import { execSync } from 'node:child_process';
+import { execFile, execSync } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 import { simpleGit, CheckRepoActions } from 'simple-git';
 import type { SimpleGit } from 'simple-git';
 import { Storage } from '../config/storage.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { fileExists } from '../utils/fileUtils.js';
+import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
@@ -370,6 +373,26 @@ export class GitWorktreeService {
   async getCurrentCommitHash(): Promise<string> {
     const hash = await this.git.revparse(['HEAD']);
     return hash.trim();
+  }
+
+  /**
+   * Resolves a git ref name to a 40-char commit SHA. Returns `null` when
+   * the ref is unknown / unborn / not a commit.
+   *
+   * Used by Phase D-3 to lock in `FETCH_HEAD` immediately after
+   * `fetchPullRequestRef` succeeds, so the SHA passed to
+   * `git worktree add` is immutable against a concurrent `git fetch` from
+   * another process sharing the same repo, AND so `WorktreeExitDialog`'s
+   * `rev-list <originalHeadCommit>..HEAD` counts only THIS session's new
+   * work rather than every commit in the fetched PR.
+   */
+  async resolveRef(ref: string): Promise<string | null> {
+    try {
+      const out = (await this.git.raw(['rev-parse', '--verify', ref])).trim();
+      return /^[0-9a-f]{40}$/.test(out) ? out : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1030,6 +1053,299 @@ export class GitWorktreeService {
   }
 
   /**
+   * Parses a PR reference from a string. Recognised forms:
+   *
+   * - `#123` — shorthand PR number
+   * - `https://github.com/<owner>/<repo>/pull/123` — full GitHub URL
+   *   (any host, any query string, any fragment)
+   *
+   * Returns the parsed PR number on match, `null` otherwise. The slug for
+   * a PR worktree is derived by callers as `pr-<N>` and the branch as
+   * `worktree-pr-<N>` (see `createUserWorktree`).
+   *
+   * Mirrors claude-code's `parsePRReference` (utils/worktree.ts:633) so
+   * cross-CLI muscle memory transfers.
+   */
+  static parsePRReference(input: string): number | null {
+    if (typeof input !== 'string') return null;
+    const trimmed = input.trim();
+
+    // GitHub-style PR URL: https://<host>/owner/repo/pull/<N>
+    // - any host (public github.com or enterprise)
+    // - optional trailing slash, query string, or fragment
+    // - optional sub-path after `/pull/<N>/` (`/files`, `/commits`,
+    //   `/checks`, etc.) — users routinely copy URLs while browsing
+    //   files on a PR, and the PR number is still unambiguous
+    const urlMatch = trimmed.match(
+      /^https?:\/\/[^/]+\/[^/]+\/[^/]+\/pull\/(\d+)(?:\/[^?#]*)?(?:[?#].*)?$/i,
+    );
+    if (urlMatch?.[1]) {
+      const n = parseInt(urlMatch[1], 10);
+      return Number.isSafeInteger(n) && n > 0 ? n : null;
+    }
+
+    // `#N` shorthand. Reject leading zeros (`#0123`) to keep round-trips
+    // unambiguous — `gh pr view 0123` errors out anyway.
+    const hashMatch = trimmed.match(/^#([1-9]\d*)$/);
+    if (hashMatch?.[1]) {
+      const n = parseInt(hashMatch[1], 10);
+      return Number.isSafeInteger(n) && n > 0 ? n : null;
+    }
+
+    return null;
+  }
+
+  /**
+   * Identifies the registered worktree at `worktreePath` as a member of
+   * THIS repository (`sourceRepoPath`). Returns the branch + HEAD commit
+   * SHA on success, or `null` when the path is not a worktree of this
+   * repo.
+   *
+   * Used by Phase D-1's re-attach path: when `--worktree foo` is passed
+   * and `<repoRoot>/.qwen/worktrees/foo` already exists on disk, we
+   * verify it really IS a Qwen-managed worktree of the current repo (not
+   * a standalone `git init` someone dropped at that path) before
+   * assuming it's safe to chdir into. Returning the HEAD SHA in the
+   * same call avoids a second subprocess to recapture it after chdir.
+   *
+   * Implementation — a single `git rev-parse` returning four lines:
+   * 1. `HEAD` → the worktree's HEAD commit SHA (must come BEFORE
+   *    `--abbrev-ref` since the flag sticks for all subsequent refs).
+   * 2. `--abbrev-ref HEAD` → the branch name. A detached HEAD produces
+   *    `HEAD` here, which we treat as "no real branch" and return null
+   *    — the caller's re-attach gate will then refuse, since the
+   *    slug-derived branch couldn't possibly be `HEAD`.
+   * 3. `--git-common-dir` → the common `.git` directory. For a real
+   *    linked worktree of this repo that's `<sourceRepoPath>/.git`;
+   *    for a sibling `git init` it resolves to `<worktreePath>/.git`.
+   *    We compare against this repo's own common-dir to reject the
+   *    latter.
+   * 4. `--show-toplevel` → git's idea of the worktree top. For a real
+   *    linked worktree this equals `worktreePath`; for a plain
+   *    directory living UNDER the main repo (e.g. `mkdir
+   *    <repo>/.qwen/worktrees/foo`) git walks up to the outer `.git`
+   *    and returns the OUTER repo's root — which would otherwise pass
+   *    the common-dir check and let us "re-attach" to a non-worktree
+   *    directory. Compare paths to reject this.
+   */
+  async getRegisteredWorktreeBranch(
+    worktreePath: string,
+  ): Promise<{ branch: string; headCommit: string } | null> {
+    let resolvedWorktreePath: string;
+    try {
+      const stat = await fs.stat(worktreePath);
+      if (!stat.isDirectory()) return null;
+      // `realpath` so macOS /var → /private/var canonicalises before
+      // the toplevel comparison below — otherwise a real worktree
+      // under /var/folders compares unequal to git's `/private/var/…`
+      // answer and we'd reject every legitimate re-attach on macOS.
+      resolvedWorktreePath = await fs.realpath(worktreePath);
+    } catch {
+      return null;
+    }
+
+    // Run the two probes in parallel: this repo's common-dir comes from
+    // `this.git`, the candidate's HEAD-SHA + branch + common-dir +
+    // toplevel come from a fresh simple-git rooted at `worktreePath`
+    // via a single combined rev-parse.
+    const probeGit = simpleGit(worktreePath);
+    let ourCommonDir: string;
+    let headCommit: string;
+    let branch: string;
+    let probeCommonDir: string;
+    let probeToplevel: string;
+    try {
+      const [ourRaw, probeRaw] = await Promise.all([
+        this.git.raw(['rev-parse', '--git-common-dir']),
+        probeGit.raw([
+          'rev-parse',
+          'HEAD',
+          '--abbrev-ref',
+          'HEAD',
+          '--git-common-dir',
+          '--show-toplevel',
+        ]),
+      ]);
+      ourCommonDir = path.resolve(this.sourceRepoPath, ourRaw.trim());
+      const lines = probeRaw
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      if (lines.length < 4) return null;
+      headCommit = lines[0]!;
+      branch = lines[1]!;
+      probeCommonDir = path.resolve(worktreePath, lines[2]!);
+      probeToplevel = path.resolve(lines[3]!);
+    } catch (error) {
+      debugLogger.debug(
+        `getRegisteredWorktreeBranch: probe at ${worktreePath} failed: ${error}`,
+      );
+      return null;
+    }
+
+    if (probeCommonDir !== ourCommonDir) {
+      debugLogger.debug(
+        `getRegisteredWorktreeBranch: ${worktreePath} belongs to a different repo (common-dir=${probeCommonDir}, expected ${ourCommonDir})`,
+      );
+      return null;
+    }
+    if (probeToplevel !== resolvedWorktreePath) {
+      // Plain directory under the main repo — git walked up and
+      // returned the outer repo's toplevel. Refuse to treat as a
+      // worktree.
+      debugLogger.debug(
+        `getRegisteredWorktreeBranch: ${worktreePath} is not a registered worktree (toplevel=${probeToplevel}, expected ${resolvedWorktreePath})`,
+      );
+      return null;
+    }
+    if (!branch || branch === 'HEAD') return null;
+    return { branch, headCommit };
+  }
+
+  /**
+   * Fetches the GitHub PR ref `refs/pull/<N>/head` from the `origin` remote
+   * so a subsequent `createUserWorktree(..., 'FETCH_HEAD')` call can branch
+   * off the PR's tip (Phase D-3). Returns `{ success: true }` on success,
+   * or `{ success: false, error }` with a user-facing reason on failure.
+   *
+   * Implementation notes:
+   *
+   * - Uses `git fetch origin pull/<N>/head` (no `gh` CLI dependency).
+   * - Hard timeout of 30s by default — overridable for tests. A hung git
+   *   process on a misconfigured corporate proxy would otherwise stall
+   *   the entire startup sequence.
+   * - Does NOT create a local branch — leaves the ref accessible only
+   *   via `FETCH_HEAD`. Subsequent `git worktree add -b <branch> <wt>
+   *   FETCH_HEAD` materialises the worktree branch off it.
+   *
+   * Error message taxonomy is friendly because this is the user's first
+   * impression when their `--worktree=#<N>` fails:
+   * - missing `origin` → tell them the remote is required + how to fix
+   * - timeout → mention the configured timeout so they can blame the network
+   * - generic failure → "PR may not exist or origin is unreachable"
+   */
+  async fetchPullRequestRef(
+    prNumber: number,
+    options?: { timeoutMs?: number },
+  ): Promise<{ success: true } | { success: false; error: string }> {
+    if (
+      !Number.isSafeInteger(prNumber) ||
+      prNumber <= 0 ||
+      prNumber > 1_000_000_000
+    ) {
+      // Out-of-range PR numbers can't sensibly hit GitHub. Reject locally
+      // rather than firing a doomed network call.
+      return {
+        success: false,
+        error: `Invalid PR number: ${prNumber}.`,
+      };
+    }
+    const timeoutMs = options?.timeoutMs ?? 30_000;
+
+    // Two-layer defense for the refspec argv element:
+    //
+    // 1. Regex digit-only validation at the call site — CodeQL's
+    //    `js/second-order-command-line-injection` rule recognises
+    //    `/^[1-9][0-9]*$/.test(x)` as a lexical sanitizer, which proves
+    //    `prNumber` cannot resemble a `--upload-pack=…` flag. The
+    //    entry guard above already establishes this at runtime, but
+    //    CodeQL's interprocedural taint tracker doesn't see through
+    //    that guard; the regex check IS the pattern its sanitizer
+    //    library recognises.
+    // 2. `--end-of-options` as a git-runtime marker. Even though
+    //    layer 1 makes a flag-shaped refspec impossible, the marker
+    //    tells git definitively that every subsequent argv element
+    //    is positional — defense-in-depth against a future
+    //    regression that loosens the entry guard.
+    const prNumberStr = String(prNumber);
+    if (!/^[1-9][0-9]*$/.test(prNumberStr)) {
+      // Unreachable given the entry guard; here to make the
+      // lexical sanitizer visible to static analyzers.
+      return {
+        success: false,
+        error: `Invalid PR number: ${prNumber}.`,
+      };
+    }
+    const refspec = `pull/${prNumberStr}/head`;
+
+    try {
+      // Force English git stderr so the error-taxonomy regexes below
+      // match. Without this, users with non-English locales fall
+      // through to the generic "PR may not exist" branch even for
+      // well-known cases like missing-origin. The git binary itself is
+      // unaffected by LANG/LC_ALL beyond message strings.
+      await execFileAsync(
+        'git',
+        ['fetch', '--end-of-options', 'origin', refspec],
+        {
+          cwd: this.sourceRepoPath,
+          timeout: timeoutMs,
+          env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
+        },
+      );
+      return { success: true };
+    } catch (error) {
+      // execFile reports timeouts via `signal: 'SIGTERM'` on the
+      // error object; the stderr text gives us the underlying git error.
+      const err = error as NodeJS.ErrnoException & {
+        stderr?: string | Buffer;
+        signal?: string;
+      };
+      const stderr =
+        typeof err.stderr === 'string'
+          ? err.stderr
+          : err.stderr instanceof Buffer
+            ? err.stderr.toString('utf8')
+            : '';
+      const lower = stderr.toLowerCase();
+
+      if (err.signal === 'SIGTERM') {
+        return {
+          success: false,
+          error:
+            `Failed to fetch PR #${prNumber}: timed out after ${Math.round(timeoutMs / 1000)}s. ` +
+            `Check network connectivity and any HTTP(S) proxy settings.`,
+        };
+      }
+      if (
+        lower.includes('does not appear to be a git repository') ||
+        lower.includes('could not read from remote repository') ||
+        lower.includes("'origin' does not appear")
+      ) {
+        return {
+          success: false,
+          error:
+            `--worktree=#${prNumber} requires an "origin" remote that points at GitHub. ` +
+            `Add one with \`git remote add origin <url>\` and retry.`,
+        };
+      }
+      if (
+        lower.includes('no such ref') ||
+        lower.includes("couldn't find remote ref") ||
+        lower.includes("couldn't find remote ref pull/")
+      ) {
+        return {
+          success: false,
+          error:
+            `Failed to fetch PR #${prNumber}: the PR does not exist on origin, ` +
+            `or origin is not a GitHub repository (only GitHub exposes refs/pull/<N>/head).`,
+        };
+      }
+      // Generic fallback. Include the stderr first line so an operator
+      // running with --debug can correlate, but keep it terse.
+      const firstLine = stderr.split('\n').find((l) => l.trim().length > 0);
+      const detail = firstLine ? ` (${firstLine.trim()})` : '';
+      debugLogger.warn(
+        `fetchPullRequestRef: git fetch pull/${prNumber}/head failed: ${error}`,
+      );
+      return {
+        success: false,
+        error: `Failed to fetch PR #${prNumber}: PR may not exist, or origin remote is unreachable${detail}.`,
+      };
+    }
+  }
+
+  /**
    * Validates a worktree slug. Returns null on success, or an error message.
    *
    * Rules (mirrors claude-code's `validateWorktreeSlug`):
@@ -1089,6 +1405,7 @@ export class GitWorktreeService {
   async createUserWorktree(
     slug: string,
     baseBranch?: string,
+    options?: { symlinkDirectories?: readonly string[] },
   ): Promise<CreateWorktreeResult> {
     const validationError = GitWorktreeService.validateUserWorktreeSlug(slug);
     if (validationError) {
@@ -1141,6 +1458,33 @@ export class GitWorktreeService {
         base,
       ]);
 
+      // Configure core.hooksPath so commits inside the worktree run the
+      // main repo's hooks (the new worktree's .git directory has no hooks
+      // of its own). Priority: .husky/ first (common for JS projects),
+      // .git/hooks fallback. Mirrors claude-code's performPostCreationSetup.
+      // Best-effort: hook failures must not abort worktree creation.
+      await this.configureHooksPath(worktreePath).catch((error) => {
+        debugLogger.warn(
+          `createUserWorktree: failed to configure core.hooksPath for ${slug}: ${error}`,
+        );
+      });
+
+      // Phase D-2: symlink user-configured directories from the main
+      // repo into the new worktree (e.g. node_modules) so the model can
+      // run tests / builds without a fresh install. Same fail-open
+      // policy as hooksPath — failures log and continue.
+      const symlinkPaths = options?.symlinkDirectories ?? [];
+      if (symlinkPaths.length > 0) {
+        await this.symlinkConfiguredDirectories(
+          worktreePath,
+          symlinkPaths,
+        ).catch((error) => {
+          debugLogger.warn(
+            `createUserWorktree: symlinkConfiguredDirectories failed for ${slug}: ${error}`,
+          );
+        });
+      }
+
       const worktree: WorktreeInfo = {
         id: slug,
         name: slug,
@@ -1154,6 +1498,361 @@ export class GitWorktreeService {
       const message = `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`;
       debugLogger.warn(`createUserWorktree: ${message}`);
       return { success: false, error: message };
+    }
+  }
+
+  /**
+   * Configures `core.hooksPath` inside `worktreePath` to point at the main
+   * repository's hooks directory. Prefers `.husky/` over `.git/hooks/` to
+   * match the convention most JS projects use (husky's prepare script
+   * configures `core.hooksPath=.husky` in the main repo).
+   *
+   * Skips the `git config` write subprocess when the value already
+   * matches the desired one — common when this method runs against a
+   * worktree that already inherits the same `core.hooksPath` from a
+   * prior creation cycle. The probe read itself is still a subprocess
+   * (claude-code's `parseGitConfigValue` reads the config file
+   * directly to avoid even that, but the read runs once per worktree
+   * creation so the extra ~14ms isn't worth the file-parsing complexity).
+   */
+  private async configureHooksPath(worktreePath: string): Promise<void> {
+    // .husky/ is the convention for JS projects; check it first.
+    const huskyPath = path.join(this.sourceRepoPath, '.husky');
+    let hooksPath: string | null = null;
+    try {
+      await fs.stat(huskyPath);
+      hooksPath = huskyPath;
+    } catch (error) {
+      if (!(isNodeError(error) && error.code === 'ENOENT')) {
+        debugLogger.warn(
+          `configureHooksPath: cannot stat ${huskyPath}: ${error}`,
+        );
+      }
+    }
+
+    // Fall back to the canonical hooks dir. Construct `<sourceRepoPath>/.git/hooks`
+    // assumes `.git` is a directory — but when Qwen itself is launched
+    // from a linked worktree, `.git` is a FILE pointing at the real
+    // gitdir, and the constructed path ENOTDIRs. Use `git rev-parse
+    // --git-common-dir` to get the canonical hooks parent regardless
+    // of worktree/non-worktree shape. (PR #4174 review #3259975237.)
+    if (!hooksPath) {
+      try {
+        const commonDir = (
+          await this.git.raw(['rev-parse', '--git-common-dir'])
+        ).trim();
+        const resolvedCommonDir = path.isAbsolute(commonDir)
+          ? commonDir
+          : path.resolve(this.sourceRepoPath, commonDir);
+        const candidate = path.join(resolvedCommonDir, 'hooks');
+        await fs.stat(candidate);
+        hooksPath = candidate;
+      } catch (error) {
+        if (!(isNodeError(error) && error.code === 'ENOENT')) {
+          debugLogger.warn(
+            `configureHooksPath: cannot resolve git common hooks dir: ${error}`,
+          );
+        }
+      }
+    }
+    if (!hooksPath) return;
+
+    const worktreeGit = simpleGit(worktreePath);
+    let existing = '';
+    try {
+      // Saves the write subprocess when value already matches. The probe
+      // read is also a subprocess — claude-code skips even that via
+      // parseGitConfigValue, but the read runs once per worktree
+      // creation so the extra ~14ms isn't worth the file-parser tax.
+      existing = (
+        await worktreeGit.raw(['config', '--local', 'core.hooksPath'])
+      ).trim();
+    } catch {
+      // Key not set — empty string means "proceed with the write".
+    }
+    // Only write when the key is unset. A non-empty existing value is
+    // either inherited (system / global / local config from the user
+    // or from a previous Qwen run) or an explicit user policy override
+    // — in both cases overwriting silently replaces the user's choice.
+    // (PR #4174 review #3259975242.)
+    if (existing === '') {
+      await worktreeGit.raw(['config', 'core.hooksPath', hooksPath]);
+    } else if (existing !== hooksPath) {
+      debugLogger.debug(
+        `configureHooksPath: preserving existing core.hooksPath=${existing} ` +
+          `(Qwen would have set it to ${hooksPath})`,
+      );
+    }
+  }
+
+  /**
+   * Phase D-2 symlink loop. For each configured directory under the main
+   * repository, creates a symbolic link from the new worktree to the
+   * main-repo location (`<worktreePath>/<dir>` → `<repoRoot>/<dir>`).
+   *
+   * Fail-open semantics — the worktree IS already on disk and usable by
+   * the time this runs, so a symlink failure must NOT abort the parent
+   * `createUserWorktree` call. Per-entry failures are logged at debug or
+   * warn level depending on cause:
+   *
+   * - **ENOENT on source** (the main repo does not have the directory):
+   *   debug log, skip. Typical for users who configure `node_modules`
+   *   but launch from a fresh clone where `npm install` hasn't run yet.
+   * - **EEXIST on destination** (something already lives at the symlink
+   *   target inside the worktree): debug log, skip. No overwrite; the
+   *   existing content (whether file, dir, or stale link) wins.
+   * - **Absolute path or path traversal in the configured value**:
+   *   warn log, skip the entry. Configured values must stay relative to
+   *   the repo root to prevent a setting from redirecting writes onto
+   *   `/etc`, `~`, or anywhere outside the repo subtree.
+   * - **Other I/O errors**: warn log, continue to the next entry.
+   *
+   * Mirrors claude-code's `symlinkDirectories` helper (utils/worktree.ts).
+   */
+  private async symlinkConfiguredDirectories(
+    worktreePath: string,
+    configured: readonly string[],
+  ): Promise<void> {
+    // Loop-invariant canonical paths, hoisted out of the per-entry loop.
+    //
+    // We must `fs.realpath` the repo root (rather than `path.resolve`,
+    // which is purely lexical) so every containment check below compares
+    // canonical paths to canonical paths. The post-stat `realSource =
+    // fs.realpath(sourceAbs)` produces a canonical path, and on any
+    // system where the repo path contains a symlink component (macOS
+    // `/tmp → /private/tmp` is ubiquitous; user-symlinked source trees on
+    // Linux/Windows too) the lexical `path.resolve(sourceRepoPath)` does
+    // not share a prefix with that canonical realpath. Without this hoist
+    // `isWithinRoot(realSource, repoRootAbs)` silently rejects EVERY
+    // configured entry — cf. PR #4381 round 8 regression.
+    let repoRootAbs: string;
+    try {
+      repoRootAbs = await fs.realpath(this.sourceRepoPath);
+    } catch {
+      // realpath of a non-existent / inaccessible repo root is fatal for
+      // the symlink loop's containment checks (we can't validate against
+      // a path we can't canonicalise). Bail out — the worktree itself is
+      // already on disk so this is non-destructive; we just skip the
+      // opt-in symlink step.
+      debugLogger.warn(
+        `symlinkConfiguredDirectories: cannot realpath sourceRepoPath "${this.sourceRepoPath}", skipping all entries`,
+      );
+      return;
+    }
+    const gitDirAbs = path.join(repoRootAbs, '.git');
+    const qwenDirAbs = path.join(repoRootAbs, '.qwen');
+    // Same canonical-vs-canonical requirement for the dest side. The
+    // worktree was just created by `git worktree add`, so the path
+    // should exist; fall back to the input path on realpath error so a
+    // weird-but-extant worktree path doesn't deadlock the whole loop.
+    const realWorktreePath = await fs
+      .realpath(worktreePath)
+      .catch(() => worktreePath);
+
+    for (const raw of configured) {
+      if (typeof raw !== 'string' || raw.length === 0) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: skipping non-string / empty entry: ${JSON.stringify(raw)}`,
+        );
+        continue;
+      }
+
+      // Reject absolute paths and any traversal-prone form. Resolve first
+      // to catch `./foo/../../etc` style escapes that look relative.
+      if (path.isAbsolute(raw)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing absolute path "${raw}"`,
+        );
+        continue;
+      }
+      // Reject any literal `..` segment up front. The post-resolve
+      // `isWithinRoot` check below would still accept `foo/../bar`
+      // (resolves to `bar`, which is inside the repo), but the public
+      // contract — settingsSchema description, docs/users/features/
+      // worktree.md, WorktreeSettings JSDoc — promises rejection of
+      // any entry containing `..`. Enforce that promise here.
+      if (raw.split(/[\\/]/).includes('..')) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — contains '..' segment`,
+        );
+        continue;
+      }
+      const sourceAbs = path.resolve(repoRootAbs, raw);
+      if (sourceAbs === repoRootAbs) {
+        // `""` / `"."` / `"./"` etc. — pointless and would alias the
+        // entire repo into itself. Reject explicitly so the path-prefix
+        // checks below don't have to handle this degenerate case.
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing empty / repo-root path "${raw}"`,
+        );
+        continue;
+      }
+      if (!isWithinRoot(sourceAbs, repoRootAbs)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — resolves outside repo root (${sourceAbs} vs ${repoRootAbs})`,
+        );
+        continue;
+      }
+
+      // Refuse to symlink git-internal paths into the worktree. `.git`
+      // would silently break commits / status / diff inside the
+      // worktree (the worktree's own gitlink file points at the parent
+      // common-dir, and a symlink would shadow it). The whole `.qwen`
+      // tree is also off-limits: linking `.qwen` (parent) would
+      // recursively pull `.qwen/worktrees` into the new worktree,
+      // recreating the loop; linking `.qwen/worktrees` directly
+      // creates the same loop more obviously; and `.qwen/projects`
+      // / `.qwen/tmp` are CLI metadata users have no legitimate
+      // reason to share across worktrees.
+      // `gitDirAbs` / `qwenDirAbs` are canonical (derived from the
+      // realpath'd `repoRootAbs` hoisted above the loop), so these
+      // comparisons stay consistent with the post-stat realpath check.
+      if (isWithinRoot(sourceAbs, gitDirAbs)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing git-internal path "${raw}"`,
+        );
+        continue;
+      }
+      if (isWithinRoot(sourceAbs, qwenDirAbs)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — ` +
+            `the .qwen tree is CLI-managed; symlinking any of it could ` +
+            `create a worktrees-inside-worktrees loop or alias CLI metadata.`,
+        );
+        continue;
+      }
+
+      // Confirm the source exists. We don't insist on it being a directory
+      // specifically — `node_modules` is canonically a dir, but a user
+      // who wants to share a single file (`.env`, `secrets.json`) via
+      // `symlinkDirectories` should still get the link.
+      let sourceStat: { isDirectory: () => boolean } | null = null;
+      try {
+        sourceStat = await fs.stat(sourceAbs);
+      } catch (error) {
+        if (isNodeError(error) && error.code === 'ENOENT') {
+          debugLogger.debug(
+            `symlinkConfiguredDirectories: source missing, skipping: ${sourceAbs}`,
+          );
+        } else {
+          debugLogger.warn(
+            `symlinkConfiguredDirectories: cannot stat ${sourceAbs}: ${error}`,
+          );
+        }
+        continue;
+      }
+
+      // Resolve through any symlinks in the source path and RE-RUN the
+      // containment + blocklist checks against the realpath. The lexical
+      // checks above only see `path.resolve(repoRoot, raw)` — they can't
+      // tell that `<repo>/node_modules` is actually a symlink chaining
+      // into `.git`, an outside dir, or `.qwen`. Without this step a
+      // committed-or-out-of-band source symlink bypasses every guard the
+      // lexical loop set up. Use the realpath as the symlink target so
+      // the new link points canonically rather than preserving the chain.
+      let realSource: string;
+      try {
+        realSource = await fs.realpath(sourceAbs);
+      } catch (error) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: cannot realpath source "${sourceAbs}": ${error}`,
+        );
+        continue;
+      }
+      if (!isWithinRoot(realSource, repoRootAbs)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} escapes repo root ${repoRootAbs}`,
+        );
+        continue;
+      }
+      if (isWithinRoot(realSource, gitDirAbs)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} resolves inside .git`,
+        );
+        continue;
+      }
+      if (isWithinRoot(realSource, qwenDirAbs)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — real source ${realSource} resolves inside .qwen`,
+        );
+        continue;
+      }
+
+      const destAbs = path.join(worktreePath, raw);
+
+      // Ensure the parent directory of `destAbs` exists. For top-level
+      // entries (`node_modules`) this is a no-op against the worktree
+      // root, but for nested values (`tools/cache`) we may need to
+      // create the intermediate dirs first — git worktree add does NOT
+      // create them.
+      try {
+        await fs.mkdir(path.dirname(destAbs), { recursive: true });
+      } catch (error) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: cannot mkdir parent of ${destAbs}: ${error}`,
+        );
+        continue;
+      }
+
+      // Sibling-drift defense to the round-7 source-side realpath check:
+      // `path.join(worktreePath, raw)` is lexical too. If `git worktree
+      // add` materialized a committed symlink under the worktree
+      // (e.g. HEAD ships `tools → /etc`), then the OS-side resolution
+      // of `<worktree>/tools/cache` traverses through the committed
+      // symlink and our `fs.mkdir` / `fs.symlink` write OUTSIDE the
+      // worktree. Realpath the dest parent and refuse if it escapes.
+      let realDestParent: string;
+      try {
+        realDestParent = await fs.realpath(path.dirname(destAbs));
+      } catch (error) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: cannot realpath dest parent for "${raw}" (${path.dirname(destAbs)}): ${error}`,
+        );
+        continue;
+      }
+      if (!isWithinRoot(realDestParent, realWorktreePath)) {
+        debugLogger.warn(
+          `symlinkConfiguredDirectories: refusing path "${raw}" — dest parent ${realDestParent} escapes worktree root ${realWorktreePath} (committed-symlink chain)`,
+        );
+        continue;
+      }
+
+      // `fs.symlink` rejects with EEXIST when the destination already
+      // exists. Treat that as "user already populated this slot, leave
+      // it alone" — same as claude-code's behavior.
+      try {
+        // On Windows, `fs.symlink(..., 'dir')` requires
+        // SeCreateSymbolicLinkPrivilege (administrator rights, or
+        // Developer Mode + unprivileged-symlink-creation enabled) and
+        // EPERMs on default consumer installs. A junction is a reparse
+        // point that achieves the same "this path resolves over there"
+        // semantics for directories without elevation. `'file'` symlinks
+        // on Windows also need the same privilege but there's no
+        // junction-equivalent for files, so we leave `'file'` as-is and
+        // accept the EPERM fall-through for the rare file-symlink case.
+        const symlinkType = sourceStat.isDirectory()
+          ? process.platform === 'win32'
+            ? 'junction'
+            : 'dir'
+          : 'file';
+        // Point at the canonical realpath rather than the lexical
+        // `sourceAbs` so the new link is one-hop and doesn't preserve
+        // the chain we just validated.
+        await fs.symlink(realSource, destAbs, symlinkType);
+        debugLogger.debug(
+          `symlinkConfiguredDirectories: linked ${destAbs} → ${realSource} (${symlinkType})`,
+        );
+      } catch (error) {
+        if (isNodeError(error) && error.code === 'EEXIST') {
+          debugLogger.debug(
+            `symlinkConfiguredDirectories: destination exists, skipping: ${destAbs}`,
+          );
+        } else {
+          debugLogger.warn(
+            `symlinkConfiguredDirectories: failed to link ${destAbs} → ${realSource}: ${error}`,
+          );
+        }
+      }
     }
   }
 

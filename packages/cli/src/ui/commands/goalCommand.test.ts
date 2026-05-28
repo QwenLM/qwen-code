@@ -31,8 +31,12 @@ describe('goalCommand', () => {
   beforeEach(() => __resetActiveGoalStoreForTests());
   afterEach(() => __resetActiveGoalStoreForTests());
 
-  it('is currently limited to interactive mode', () => {
-    expect(goalCommand.supportedModes).toEqual(['interactive']);
+  it('is available in interactive, non-interactive, and ACP modes', () => {
+    expect(goalCommand.supportedModes).toEqual([
+      'interactive',
+      'non_interactive',
+      'acp',
+    ]);
   });
 
   it('rejects when config is missing', async () => {
@@ -111,6 +115,21 @@ describe('goalCommand', () => {
       type: 'goal_status',
       kind: 'cleared',
       condition: 'write hello',
+    });
+  });
+
+  it('returns a clear message outside interactive mode', async () => {
+    const cfg = makeConfig();
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      services: { config: cfg as unknown as Config },
+    });
+    await goalCommand.action!(ctx, 'write hello');
+    const result = await goalCommand.action!(ctx, 'clear');
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'Goal cleared: write hello',
     });
   });
 

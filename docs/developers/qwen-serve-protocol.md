@@ -98,8 +98,13 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'slow_client_warning', 'typed_event_schema',
  'session_set_model', 'client_identity', 'client_heartbeat',
  'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
- 'workspace_providers', 'session_context', 'session_supported_commands',
- 'session_close', 'session_metadata']
+ 'workspace_providers', 'workspace_env', 'workspace_preflight',
+ 'session_context', 'session_supported_commands',
+ 'session_close', 'session_metadata', 'mcp_guardrails',
+ 'mcp_guardrail_events',
+ 'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
+ 'session_approval_mode_control', 'workspace_tool_toggle',
+ 'workspace_init', 'workspace_mcp_restart']
 ```
 
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
@@ -114,11 +119,35 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_close` and `session_metadata` advertise `DELETE /session/:id` and `PATCH /session/:id/metadata`. Older daemons return `404`; pre-flight these tags before exposing close or rename affordances.
 
+`session_approval_mode_control`, `workspace_tool_toggle`, `workspace_init`, and `workspace_mcp_restart` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 17) advertise the four mutation control routes documented under "Mutation: approval, tools, init, MCP restart" below. All four are strict-gated by the PR 15 mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance.
+
+`mcp_guardrails` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14) covers the MCP budget surface: the `clientCount` / `clientBudget` / `budgetMode` / `budgets[]` fields on `GET /workspace/mcp`, the `disabledReason` field on per-server cells, and the `--mcp-client-budget` / `--mcp-budget-mode` CLI flags. Older daemons omit the new fields entirely; SDK clients pre-flight this tag before relying on `budgets[]` semantics. The registry descriptor also carries `modes: ['warn', 'enforce']` for future feature-modes exposure — for now, clients infer mode from the snapshot's `budgetMode` field. Server refusal under `enforce` mode is deterministic by `Object.entries(mcpServers)` declaration order; a future scope-precedence layer (if qwen-code adopts one) would shift this to "lowest-precedence first" to mirror claude-code's `plugin < user < project < local` convention.
+
+> ⚠️ **PR 14 v1 scope: per-session, not per-workspace.** Each ACP session inside the daemon constructs its own `Config` + `McpClientManager` (via `acpAgent.newSessionConfig`). The budget caps live MCP clients **per session**; each session independently reads `QWEN_SERVE_MCP_CLIENT_BUDGET` from the forwarded env. With `--mcp-client-budget=10` and 5 concurrent ACP sessions, the actual live MCP client count can reach 5 × 10 = 50 across the daemon. The `GET /workspace/mcp` snapshot reads the **bootstrap session's** `McpClientManager` accounting only — the `budgets[0].scope: 'session'` value is the honest signal that this is per-session, not aggregated. **Wave 5 PR 23 (shared MCP pool)** will introduce a workspace-scoped manager and add a `scope: 'workspace'` cell alongside the per-session cell for true cross-session aggregation. v1 is the in-process counter + soft enforcement foundation that PR 23 builds on.
+
+`workspace_file_read` covers the text/list/stat/glob workspace file routes
+(`GET /file`, `GET /list`, `GET /glob`, `GET /stat`). `workspace_file_bytes`
+covers `GET /file/bytes`, which was added later so clients can pre-flight raw
+byte-window support against PR19-era daemons. `workspace_file_write` covers
+the hash-aware text mutation routes (`POST /file/write`, `POST /file/edit`).
+The write tag means the route contract exists; it does not mean the current
+deployment is open for anonymous mutation. Write/edit are strict mutation
+routes and require a configured bearer token even on loopback.
+
 **Conditional tags.** A small number of feature tags are advertised only when the matching deployment toggle is on. Tag presence = behavior is on; absence = either an older daemon predating the tag, OR a current daemon where the operator did not opt in. Currently:
 
 | Tag            | Advertised when …                                                                                                                                                            |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `require_auth` | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every route, including `/health` on loopback binds. |
+
+`mcp_guardrails` is **not** in this conditional table — it's an always-on tag, advertised whenever the binary supports the new `/workspace/mcp` budget fields, regardless of whether the operator configured a budget. Operators who haven't set `--mcp-client-budget` still get the new fields (with `budgetMode: 'off'`, `budgets: []`).
+
+`mcp_guardrail_events` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14b) advertises the typed SSE push events that surface MCP budget state crossings without a poll loop. Two frame types arrive on `GET /session/:id/events`:
+
+- `mcp_budget_warning` — fires once on the upward 75% crossing of `reservedSlots.size / clientBudget`. Re-arms only after the ratio drops below 37.5% (`MCP_BUDGET_REARM_FRACTION`). Mirrors PR 10's `slow_client_warning` hysteresis, but at the manager level rather than the per-subscriber backlog level. Payload: `{ liveCount, reservedCount, budget, thresholdRatio: 0.75, mode: 'warn' | 'enforce' }`. Fires under both `warn` and `enforce` modes; never under `off`.
+- `mcp_child_refused_batch` — fires at end of each `discoverAllMcpTools*` pass when one or more servers were refused, AND as a length-1 batch on the `readResource` lazy-spawn refusal path. Payload: `{ refusedServers: [{ name, transport, reason: 'budget_exhausted' }, ...], budget, liveCount, reservedCount, mode: 'enforce' }`. `mode` is the literal `'enforce'` because `warn` mode never refuses.
+
+Both events live in the per-session SSE replay ring (they carry an `id`) so a client reconnecting with `Last-Event-ID` resumes through them; the snapshot at `GET /workspace/mcp` is still the source-of-truth for state-after-extended-disconnect. Always-on once advertised — there is no conditional toggle. SDK reducer state (`DaemonSessionViewState`) exposes `mcpBudgetWarningCount`, `lastMcpBudgetWarning`, `mcpChildRefusedBatchCount`, `lastMcpChildRefusedBatch` for adapters that want simple lag-style UI.
 
 ## Routes
 
@@ -248,6 +277,79 @@ vars only; proxy URLs are stripped of credentials and reduced to
 `discoveryState` is one of `not_started`, `in_progress`, or `completed`.
 `transport` is one of `stdio`, `sse`, `http`, `websocket`, `sdk`, or
 `unknown`. `errors` is omitted when discovery succeeds.
+
+**MCP client guardrails (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14).** Post-PR-14 daemons extend the payload with four additive fields and one workspace-level cell:
+
+```jsonc
+{
+  "v": 1,
+  "workspaceCwd": "/canonical/path",
+  "initialized": true,
+  "discoveryState": "completed",
+  "clientCount": 3,
+  "clientBudget": 2,
+  "budgetMode": "enforce",
+  "budgets": [
+    {
+      "kind": "mcp_budget",
+      "scope": "session",
+      "status": "error",
+      "errorKind": "budget_exhausted",
+      "hint": "Raise --mcp-client-budget or remove servers from mcpServers config.",
+      "liveCount": 2,
+      "budget": 2,
+      "mode": "enforce",
+      "refusedCount": 1,
+    },
+  ],
+  "servers": [
+    {
+      "kind": "mcp_server",
+      "status": "ok",
+      "name": "a",
+      "mcpStatus": "connected",
+      "transport": "stdio",
+      "disabled": false,
+    },
+    {
+      "kind": "mcp_server",
+      "status": "ok",
+      "name": "b",
+      "mcpStatus": "connected",
+      "transport": "stdio",
+      "disabled": false,
+    },
+    {
+      "kind": "mcp_server",
+      "status": "error",
+      "name": "c",
+      "mcpStatus": "disconnected",
+      "transport": "stdio",
+      "disabled": false,
+      "disabledReason": "budget",
+      "errorKind": "budget_exhausted",
+      "hint": "...",
+    },
+  ],
+}
+```
+
+`budgetMode` is one of `enforce`, `warn`, or `off`. `clientBudget` is absent when no budget was set. `budgets[]` is **always an array** on post-PR-14 daemons (possibly empty when `budgetMode === 'off'`); pre-PR-14 daemons omit the field entirely. v1 emits one cell with `scope: 'session'` (per-session enforcement — see the capabilities section above for why). Consumers MUST tolerate additional `budgets[]` entries with unrecognized `scope` values — Wave 5 PR 23 will add `scope: 'workspace'` (or `'pool'`) alongside the per-session cell without a schema bump.
+
+`disabledReason` on per-server cells distinguishes operator-disabled (`'config'` — `disabledMcpServers` config list) from budget-refused (`'budget'` — discovered but never connected due to `enforce` mode). Refusals are deterministic by `Object.entries(mcpServers)` declaration order. The per-server `status: 'error', errorKind: 'budget_exhausted'` shadows the raw `mcpStatus: 'disconnected'` (which is true but not the operator-facing severity).
+
+Budget enforcement in PR 14 v1 is **per-session, not per-workspace**. Although Mode B daemons are `1 daemon = 1 workspace × N sessions` post-#4113 at the process level, the `McpClientManager` is constructed inside each ACP session's `Config` via `acpAgent.newSessionConfig`, so N sessions each enforce their own copy of the cap. The snapshot represents the bootstrap session's view. Wave 5 PR 23 introduces a workspace-scoped shared MCP pool that graduates this to true per-workspace enforcement.
+
+**Detecting budget pressure.** Two surfaces, both populated post-PR-14b:
+
+- **Push events** (advertised via `mcp_guardrail_events`): subscribe to `GET /session/:id/events` and narrow `mcp_budget_warning` / `mcp_child_refused_batch` frames through `KnownDaemonEvent`. The state machine fires once per upward 75% crossing (re-armed below 37.5%); refusals are coalesced once per discovery pass under `enforce` mode.
+- **Snapshot poll** (advertised via `mcp_guardrails`): `GET /workspace/mcp` and inspect the per-session budget cell (`budgets[0]`):
+
+- `budgets[0].status === 'warning'` ⇔ `liveCount >= 0.75 * clientBudget` (matches the hysteresis threshold PR 14b's push event will use).
+- `budgets[0].status === 'error'` ⇔ `refusedCount > 0` (one or more servers refused this discovery pass).
+- `budgets[0].status === 'ok'` ⇔ below the 75% threshold AND no refusals.
+
+Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; the snapshot is cheap and the budget cell carries no extra discovery cost. SDK clients that subscribe to push events still benefit from the snapshot for state-after-extended-disconnect (the SSE replay ring depth is finite — `--event-ring-size`, default 8000 — so a client offline longer than the ring's coverage falls back to snapshot resync).
 
 ### `GET /workspace/skills`
 
@@ -528,6 +630,173 @@ request (e.g. a mid-request channel close), the envelope's `errors` array
 carries a single `ServeStatusCell` describing the failure and the cells
 fall back to `not_started` ACP placeholders. Daemon-level cells are still
 returned.
+
+### Workspace file routes
+
+All file paths are resolved through the daemon's bound workspace. Responses use
+workspace-relative paths and never return absolute filesystem paths for normal
+success cases. Successful file responses include:
+
+```http
+Cache-Control: no-store
+X-Content-Type-Options: nosniff
+```
+
+Filesystem errors use this JSON shape:
+
+```json
+{
+  "errorKind": "hash_mismatch",
+  "error": "expected sha256:..., found sha256:...",
+  "hint": "re-read the file and retry with the latest hash",
+  "status": 409
+}
+```
+
+`errorKind` values include `path_outside_workspace`, `symlink_escape`,
+`path_not_found`, `binary_file`, `file_too_large`, `untrusted_workspace`,
+`permission_denied`, `parse_error`, `hash_mismatch`,
+`file_already_exists`, `text_not_found`, and `ambiguous_text_match`.
+
+#### `GET /file`
+
+Reads a text file. Query params: `path` (required), `maxBytes`, `line`, and
+`limit`. The daemon rejects binary files and files above the text read cap.
+The response includes `hash`, a SHA-256 digest over the raw on-disk bytes for
+the whole file, even when `line`, `limit`, or `maxBytes` returned a slice.
+
+```json
+{
+  "kind": "file",
+  "path": "src/index.ts",
+  "content": "export {};\n",
+  "encoding": "utf-8",
+  "bom": false,
+  "lineEnding": "lf",
+  "sizeBytes": 11,
+  "returnedBytes": 11,
+  "truncated": false,
+  "hash": "sha256:...",
+  "matchedIgnore": null,
+  "originalLineCount": null
+}
+```
+
+#### `GET /file/bytes`
+
+Reads raw bytes from a file without decoding. Query params: `path` (required),
+`offset` (default `0`), and `maxBytes` (default `65536`, max `262144`). This
+route supports bounded windows on large binary files without slurping the whole
+file. The response includes `hash` only when the returned window covers the
+entire file.
+
+```json
+{
+  "kind": "file_bytes",
+  "path": "assets/logo.png",
+  "offset": 0,
+  "sizeBytes": 3912,
+  "returnedBytes": 3912,
+  "truncated": false,
+  "contentBase64": "...",
+  "hash": "sha256:..."
+}
+```
+
+#### `POST /file/write`
+
+Creates or replaces a text file. This is a strict mutation route: on loopback
+without a configured token it returns `401 { "code": "token_required" }`.
+With `--require-auth`, the global bearer middleware rejects unauthenticated
+requests before the route runs.
+
+Body:
+
+```json
+{
+  "path": "src/new.ts",
+  "content": "export const value = 1;\n",
+  "mode": "create"
+}
+```
+
+```json
+{
+  "path": "src/existing.ts",
+  "content": "export const value = 2;\n",
+  "mode": "replace",
+  "expectedHash": "sha256:..."
+}
+```
+
+`mode` must be `create` or `replace`. `create` never overwrites an existing
+file (`409 file_already_exists`). `replace` requires `expectedHash`; missing or
+malformed hashes are `400 parse_error`, and stale hashes are
+`409 hash_mismatch`. `expectedHash` is `sha256:` plus 64 lowercase hex
+characters, computed over raw on-disk bytes.
+
+`bom`, `encoding`, and `lineEnding` may be supplied. Replacement preserves the
+existing file's encoding profile by default; explicit fields override it.
+Binary writes are out of scope.
+
+The daemon writes to a random temp file in the target directory, fsyncs where
+supported, re-checks the current hash immediately before `rename()`, then
+renames into place. This prevents partial-file observation and serializes
+daemon-originated writes to the same file, but it is not a cross-process
+kernel compare-and-swap: an external editor can still race in the tiny window
+between final hash check and rename.
+
+```json
+{
+  "kind": "file_write",
+  "path": "src/existing.ts",
+  "mode": "replace",
+  "created": false,
+  "sizeBytes": 24,
+  "hash": "sha256:...",
+  "encoding": "utf-8",
+  "bom": false,
+  "lineEnding": "lf",
+  "matchedIgnore": null
+}
+```
+
+#### `POST /file/edit`
+
+Applies one exact text replacement to an existing text file. This is also a
+strict mutation route and requires `expectedHash`.
+
+```json
+{
+  "path": "src/config.ts",
+  "oldText": "timeout: 30000",
+  "newText": "timeout: 60000",
+  "expectedHash": "sha256:..."
+}
+```
+
+`oldText` must be non-empty and occur exactly once. No match returns
+`422 text_not_found`; multiple matches return `422 ambiguous_text_match`.
+The route preserves encoding, BOM, and line endings, and re-checks
+`expectedHash` immediately before the atomic rename.
+
+Explicit writes/edits to ignored paths are allowed because the authenticated
+caller named the path. Success responses and audit events include
+`matchedIgnore: "file" | "directory" | null`.
+
+```json
+{
+  "kind": "file_edit",
+  "path": "src/config.ts",
+  "replacements": 1,
+  "sizeBytes": 128,
+  "hash": "sha256:...",
+  "encoding": "utf-8",
+  "bom": false,
+  "lineEnding": "lf",
+  "matchedIgnore": null
+}
+```
 
 ### `GET /session/:id/context`
 
@@ -830,6 +1099,149 @@ Response:
 
 On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler.
 
+### Mutation: approval, tools, init, MCP restart
+
+Issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) Wave 4 PR 17 adds four mutation control routes that let remote clients change runtime posture without touching the daemon host's CLI. All four:
+
+- Are gated by the **strict** mutation gate from PR 15. A daemon configured without a bearer token rejects them with `401 {code: 'token_required'}`. Configure `--token` (or `QWEN_SERVER_TOKEN`) before opting in.
+- Accept and stamp the `X-Qwen-Client-Id` header (PR 7 audit chain). When the header carries a trusted id, the daemon emits `originatorClientId` on the corresponding SSE event so cross-client UIs can suppress echoes of their own mutations.
+- Pre-flight each per-tag capability before exposing the affordance. Older daemons return `404` for the route.
+
+Three of the four routes (`tools/:name/enable`, `init`, `mcp/:server/restart`) emit **workspace-scoped** events: every active session SSE bus receives the event, regardless of which session was attached when the mutation was triggered. `approval-mode` emits a **session-scoped** event because the change is local to one session's `Config`.
+
+#### `POST /session/:id/approval-mode`
+
+Capability tag: `session_approval_mode_control`. Bridge → ACP extMethod `qwen/control/session/approval_mode`.
+
+Change the approval mode of a live session. The new mode lands inside the ACP child's per-session `Config` immediately. Settings are NOT written to disk by default — pass `persist: true` to also write `tools.approvalMode` to workspace settings.
+
+Request:
+
+```json
+{ "mode": "auto-edit", "persist": false }
+```
+
+`mode` must be one of `'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo'` (mirror of core's `ApprovalMode` enum; the SDK exports `DAEMON_APPROVAL_MODES` for runtime validation). `persist` defaults to `false`.
+
+Response (200):
+
+```json
+{
+  "sessionId": "sess:42",
+  "mode": "auto-edit",
+  "previous": "default",
+  "persisted": false
+}
+```
+
+Errors:
+
+- `400 {code: 'invalid_approval_mode', allowed: [...]}` — unknown mode literal.
+- `400 {code: 'invalid_persist_flag'}` — `persist` is non-boolean.
+- `403 {code: 'trust_gate', errorKind: 'auth_env_error'}` — the requested mode requires a trusted folder (privileged modes in untrusted workspaces are rejected by core's `Config.setApprovalMode`).
+- `404` — session unknown.
+
+SSE event (session-scoped): `approval_mode_changed` with `{sessionId, previous, next, persisted, originatorClientId?}`.
+
+#### `POST /workspace/tools/:name/enable`
+
+Capability tag: `workspace_tool_toggle`. Pure file IO — no ACP roundtrip.
+
+Toggle a tool name in the workspace's `tools.disabled` settings list. Tools listed there are **not registered** at all (distinct from `permissions.deny`, which keeps the tool registered and rejects invocation). Both built-in tools and MCP-discovered tools flow through `ToolRegistry.registerTool`, which consults the disabled set.
+
+> ⚠️ **Names must match the registry's exposed identifier exactly.** No alias resolution happens — the route stores whatever string is in the path parameter into `tools.disabled`, and the next ACP child compares against `tool.name` at register time. Built-ins use their canonical registry name (snake_case verb form): `run_shell_command`, `read_file`, `write_file`, `list_directory`, `glob`, `search_file_content`, `ripgrep`, `web_fetch`, etc. — NOT the display labels (`Shell`, `Read`, `Write`) that the CLI surfaces. MCP-discovered tools use the qualified `mcp__<server>__<name>` form (which is also the form `tool_toggled` events broadcast and what `GET /workspace/mcp` lists). Disabling `Bash` will NOT prevent `run_shell_command` from registering on the next session.
+
+Live ACP children retain already-registered tools — the toggle takes effect on the **next** ACP child spawn. Combine with `POST /workspace/mcp/:server/restart` (for MCP-sourced tools) or new-session creation to make the change effective in the current daemon.
+
+Unknown tool names are accepted: pre-disabling a not-yet-installed MCP tool is a legitimate use case.
+
+Request:
+
+```json
+{ "enabled": false }
+```
+
+Response (200):
+
+```json
+{ "toolName": "run_shell_command", "enabled": false }
+```
+
+Errors:
+
+- `400 {code: 'invalid_tool_name'}` — empty path parameter, or path parameter exceeds the 256-character cap.
+- `400 {code: 'invalid_enabled_flag'}` — `enabled` missing or non-boolean.
+
+SSE event (workspace-scoped): `tool_toggled` with `{toolName, enabled, originatorClientId?}`.
+
+#### `POST /workspace/init`
+
+Capability tag: `workspace_init`. Pure file IO — no ACP roundtrip, **no LLM invocation**.
+
+Scaffold an empty `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns under `--memory-file-name` overrides) at the daemon's bound workspace root. Mechanical only — for AI-driven content fill, follow up with `POST /session/:id/prompt`.
+
+Default refuses to overwrite when the target file exists with non-whitespace content. Whitespace-only files are treated as absent (matches the local `/init` slash command).
+
+Request:
+
+```json
+{ "force": false }
+```
+
+Response (200):
+
+```json
+{ "path": "/work/bound/QWEN.md", "action": "created" }
+```
+
+`action` is `'created'` for fresh creates, `'noop'` when an existing whitespace-only file was left untouched (no write performed), and `'overwrote'` when `force: true` replaced non-empty content. The `workspace_initialized` SSE event mirrors the response action — observers can filter for `action !== 'noop'` to react only to actual on-disk changes.
+
+Errors:
+
+- `400 {code: 'invalid_force_flag'}` — `force` is non-boolean.
+- `409 {code: 'workspace_init_conflict', path, existingSize}` — file exists with non-whitespace content and `force` is omitted/false. Body carries the absolute path and size (bytes) so SDK clients can render an "overwrite N bytes?" prompt without re-stat'ing.
+
+SSE event (workspace-scoped): `workspace_initialized` with `{path, action, originatorClientId?}`.
+
+#### `POST /workspace/mcp/:server/restart`
+
+Capability tag: `workspace_mcp_restart`. Bridge → ACP extMethod `qwen/control/workspace/mcp/restart`.
+
+Restart a configured MCP server through the ACP child's `McpClientManager.discoverMcpToolsForServer` (disconnect + reconnect + rediscover). Pre-checks the live budget snapshot from PR 14 v1's accounting so a restart on a budget-saturated workspace returns a soft refusal rather than triggering a `BudgetExhaustedError` cascade.
+
+Request body is empty (`{}`). The path parameter is the URL-encoded server name as it appears in `mcpServers` config.
+
+Response (200) — discriminated union on `restarted`:
+
+```json
+{ "serverName": "docs", "restarted": true, "durationMs": 1234 }
+```
+
+```json
+{
+  "serverName": "docs",
+  "restarted": false,
+  "skipped": true,
+  "reason": "budget_would_exceed"
+}
+```
+
+Soft skip reasons (all return 200):
+
+| `reason`                | Meaning                                                                                                                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'in_flight'`           | Another discovery / restart for this server is already in progress. The route returns immediately rather than awaiting the original promise. Caller should retry after a short delay. |
+| `'disabled'`            | Server is configured but listed in `excludedMcpServers`. Re-enable before restart.                                                                                                    |
+| `'budget_would_exceed'` | Daemon is `--mcp-budget-mode=enforce`, the target server is not currently in `reservedSlots`, and the live total has reached `clientBudget`. Caller should free a slot first.         |
+
+Errors (non-2xx):
+
+- `400 {code: 'invalid_server_name'}` — empty path parameter.
+- `404` — server name not in `mcpServers` config, or no live ACP channel exists (restart inherently requires a live `McpClientManager` instance).
+- `500` — internal error (e.g. `ToolRegistry` not initialized).
+
+SSE events (workspace-scoped): `mcp_server_restarted` with `{serverName, durationMs, originatorClientId?}` on success; `mcp_server_restart_refused` with `{serverName, reason, originatorClientId?}` on soft skip.
+
 ### `GET /session/:id/events` (SSE)
 
 Subscribe to the session's event stream.
@@ -930,6 +1342,97 @@ Response:
 - `404 { "error": "..." }` — the requestId is unknown (already resolved, never existed, or session torn down)
 
 After a successful vote, every connected client sees `permission_resolved` with the same `requestId` and the chosen `outcome`.
+
+### Auth device-flow routes (issue #4175 PR 21)
+
+The daemon brokers an OAuth 2.0 Device Authorization Grant (RFC 8628) so a remote SDK client can trigger a login whose tokens land on the **daemon** filesystem — not on the client. The daemon polls the IdP itself; the client's only job is to display the verification URL + user code and (optionally) subscribe to SSE for completion events.
+
+Capability tag: `auth_device_flow` (always advertised). Supported providers in v1: `qwen-oauth`.
+
+**Runtime locality.** The daemon never spawns a browser — even if it can. The client decides whether to call `open(verificationUri)` locally; on a headless pod (the canonical Mode B deployment) the user opens the URL on whatever device they have a browser on. See `docs/users/qwen-serve.md` for the recommended UX.
+
+**No token leakage in events.** `auth_device_flow_started` carries `{deviceFlowId, providerId, expiresAt}` only. The user code and verification URL come back point-to-point in the POST 201 body and via `GET /workspace/auth/device-flow/:id`; they are never broadcast on SSE.
+
+**Per-provider singleton.** A second `POST` for the same provider while a flow is pending is an idempotent take-over — it returns the existing entry with `attached: true` rather than starting a fresh IdP request.
+
+#### `POST /workspace/auth/device-flow`
+
+Strict mutation gate: requires a bearer token even on token-less loopback defaults (`401 token_required`).
+
+Request:
+
+```json
+{ "providerId": "qwen-oauth" }
+```
+
+Response (`201` fresh start, `200` idempotent take-over):
+
+```json
+{
+  "deviceFlowId": "fa07c61b-…",
+  "providerId": "qwen-oauth",
+  "status": "pending",
+  "userCode": "USER-1",
+  "verificationUri": "https://chat.qwen.ai/api/v1/oauth2/device",
+  "verificationUriComplete": "https://chat.qwen.ai/api/v1/oauth2/device?user_code=USER-1",
+  "expiresAt": 1700000600000,
+  "intervalMs": 5000,
+  "attached": false
+}
+```
+
+Errors:
+
+- `400 unsupported_provider` — unknown `providerId` (response includes `supportedProviders`)
+- `409 too_many_active_flows` — workspace cap (4) reached; cancel one with `DELETE`
+- `401 token_required` — strict gate denied a token-less request
+- `502 upstream_error` — IdP returned an unexpected error
+
+#### `GET /workspace/auth/device-flow/:id`
+
+Read the current state. Pending entries echo `userCode/verificationUri/expiresAt/intervalMs`; terminal entries (5-min grace) drop them and surface `status` + optional `errorKind/hint`.
+
+Returns `404 device_flow_not_found` for unknown ids and post-grace evicted entries.
+
+#### `DELETE /workspace/auth/device-flow/:id`
+
+Idempotent cancel:
+
+- pending entry → `204` + emit `auth_device_flow_cancelled`
+- terminal entry → `204` no-op (no event re-emit)
+- unknown id → `404`
+
+#### `GET /workspace/auth/status`
+
+Snapshot of pending flows + supported providers:
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/work/bound",
+  "providers": [],
+  "pendingDeviceFlows": [
+    {
+      "deviceFlowId": "fa07c61b-…",
+      "providerId": "qwen-oauth",
+      "expiresAt": 1700000600000
+    }
+  ],
+  "supportedDeviceFlowProviders": ["qwen-oauth"]
+}
+```
+
+#### Device-flow SSE events
+
+Five typed events (workspace-scoped, fanned out to every active session bus):
+
+- `auth_device_flow_started` `{deviceFlowId, providerId, expiresAt}` — POST succeeded; SDK should subscribe (no userCode here, fetch via GET if needed)
+- `auth_device_flow_throttled` `{deviceFlowId, intervalMs}` — daemon honored upstream `slow_down`; clients polling GET should bump their interval to match
+- `auth_device_flow_authorized` `{deviceFlowId, providerId, expiresAt?, accountAlias?}` — credentials persisted; `accountAlias` is a non-PII label (never email/phone)
+- `auth_device_flow_failed` `{deviceFlowId, errorKind, hint?}` — terminal; `errorKind` is one of `expired_token | access_denied | invalid_grant | upstream_error | persist_failed`. `persist_failed` is daemon-internal: the IdP exchange succeeded but the daemon couldn't durably store credentials (EACCES / EROFS / ENOSPC). The user should retry once the underlying disk condition is fixed.
+- `auth_device_flow_cancelled` `{deviceFlowId}` — DELETE succeeded against a pending entry
+
+> **Not MCP-compatible.** The MCP authorization spec (2025-06-18) mandates OAuth 2.1 + PKCE auth-code with a redirect callback, which doesn't work for headless-pod daemons. Mode B's device-flow surface is daemon-private — clients targeting MCP-compliant servers should use a different auth path.
 
 ## Streaming wire format
 

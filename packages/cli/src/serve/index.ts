@@ -37,6 +37,7 @@ export {
 export {
   ACP_PREFLIGHT_KINDS,
   BridgeTimeoutError,
+  SERVE_CONTROL_EXT_METHODS,
   SERVE_ERROR_KINDS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
@@ -88,6 +89,7 @@ export {
   createHttpAcpBridge,
   defaultSpawnChannelFactory,
   SessionNotFoundError,
+  WorkspaceInitConflictError,
   type AcpChannel,
   type BridgeOptions,
   type BridgeSession,

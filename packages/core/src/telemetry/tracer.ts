@@ -74,6 +74,10 @@ function safeEndSpan(span: Span): void {
   }
 }
 
+// SYNC: keep parent-resolution logic in step with resolveParentContext()
+// in telemetry/session-tracing.ts. Both helpers must use the same
+// active-span-then-session-root precedence or trace trees become
+// inconsistent between withSpan() spans and ALS-driven spans (#4302 review).
 function getParentContext(): Context {
   const active = context.active();
   if (trace.getSpan(active)) {

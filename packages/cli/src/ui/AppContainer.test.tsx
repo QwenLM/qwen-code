@@ -14,6 +14,7 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
+import { useContext, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
@@ -43,7 +44,6 @@ import {
   type HistoryItemWithoutId,
   ToolCallStatus,
 } from './types.js';
-import { useContext } from 'react';
 import { Box, measureElement } from 'ink';
 
 // Mock useStdout to capture terminal title writes
@@ -94,6 +94,8 @@ vi.mock('./hooks/useIdeTrustListener.js');
 vi.mock('./hooks/useMessageQueue.js');
 vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
+vi.mock('./hooks/usePreferredEditor.js');
+vi.mock('./hooks/useWorktreeSession.js');
 vi.mock('./hooks/useProviderUpdates.js', () => ({
   useProviderUpdates: vi.fn(() => ({
     providerUpdateRequest: undefined,
@@ -236,21 +238,15 @@ describe('AppContainer State Management', () => {
           authMessage: null,
         },
       },
-      handleAuthSelect: vi.fn(),
-      handleSubscriptionPlanSubmit: vi.fn(),
-      handleCodingPlanSubmit: vi.fn(),
-      handleTokenPlanSubmit: vi.fn(),
-      handleApiKeyProviderSubmit: vi.fn(),
-      handleOpenRouterSubmit: vi.fn(),
-      handleCustomApiKeySubmit: vi.fn(),
+      closeAuthDialog: vi.fn(),
+      handleProviderSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
       actions: {
         setAuthState: vi.fn(),
         onAuthError: vi.fn(),
-        handleAuthSelect: vi.fn(),
+        closeAuthDialog: vi.fn(),
         handleProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
       },
@@ -2341,7 +2337,13 @@ describe('AppContainer State Management', () => {
       expect(lastCall[2]).toBe(1);
     });
 
-    it('does not remeasure footer height for sticky todo status-only updates', () => {
+    it('does not remeasure footer height for sticky todo status-only updates', async () => {
+      // Scoped stub: makeFakeConfig().initialize() rejects on React's
+      // double-mount, which leaks async renders and destabilizes the
+      // footer-measurement timing this test depends on. Kept per-test so
+      // unrelated tests in this block still exercise the real init gate.
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+
       const historyManager = {
         history: makeTodoHistory('pending'),
         addItem: vi.fn(),
@@ -2354,29 +2356,55 @@ describe('AppContainer State Management', () => {
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
       mockedMeasureElement.mockReturnValue({ width: 80, height: 4 });
 
-      const view = render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
-      const callsAfterInitialRender = mockedMeasureElement.mock.calls.length;
+      let view: ReturnType<typeof render>;
+      await act(async () => {
+        view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+
+      // Let any pending state updates from useLayoutEffect settle.
+      await act(async () => {
+        view!.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+
+      const heightAfterSettle = capturedUIState.availableTerminalHeight;
+
+      // Switch the mock to a different height so any re-measurement triggered
+      // by the status-only rerender below would change controlsHeight (and
+      // therefore availableTerminalHeight). Without this, the production
+      // same-value short-circuit on setControlsHeight makes the equality
+      // assertion pass even when the optimization regresses.
+      mockedMeasureElement.mockReturnValue({ width: 80, height: 10 });
 
       historyManager.history = makeTodoHistory('in_progress');
-      view.rerender(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+      await act(async () => {
+        view!.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
 
-      expect(mockedMeasureElement).toHaveBeenCalledTimes(
-        callsAfterInitialRender,
-      );
+      // The sticky todo status change (pending → in_progress) must not alter
+      // the computed terminal height. Combined with the mock-height swap
+      // above, this fails iff the footer was re-measured.
+      expect(capturedUIState.availableTerminalHeight).toBe(heightAfterSettle);
     });
   });
 
@@ -2408,21 +2436,15 @@ describe('AppContainer State Management', () => {
             authMessage: null,
           },
         },
-        handleAuthSelect: vi.fn(),
-        handleSubscriptionPlanSubmit: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleTokenPlanSubmit: vi.fn(),
-        handleApiKeyProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit: vi.fn(),
+        closeAuthDialog: vi.fn(),
+        handleProviderSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
         actions: {
           setAuthState: vi.fn(),
           onAuthError: vi.fn(),
-          handleAuthSelect: vi.fn(),
+          closeAuthDialog: vi.fn(),
           handleProviderSubmit: vi.fn(),
-          handleOpenRouterSubmit: vi.fn(),
           openAuthDialog: vi.fn(),
           cancelAuthentication: vi.fn(),
         },

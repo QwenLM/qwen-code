@@ -15,6 +15,7 @@ import {
   getScopedEnvContents,
   QwenOAuth2Event,
   qwenOAuth2Events,
+  MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   SessionService,
   SESSION_TITLE_MAX_LENGTH,
@@ -24,13 +25,17 @@ import {
   getMCPServerStatus,
   MCPDiscoveryState,
   MCPServerStatus,
-  type Config,
-  type ConversationRecord,
-  type DeviceAuthorizationData,
   ExtensionManager,
   ExtensionSettingScope,
   updateSetting,
   SessionEndReason,
+  restoreWorktreeContext,
+} from '@qwen-code/qwen-code-core';
+import type {
+  ApprovalMode,
+  Config,
+  ConversationRecord,
+  DeviceAuthorizationData,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -79,13 +84,12 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
-import type { ApprovalModeValue } from './session/types.js';
+import type { ApprovalModeValue , SessionContext } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
-import type { SessionContext } from './session/types.js';
 import {
   formatAcpModelId,
   parseAcpBaseModelId,
@@ -96,10 +100,13 @@ import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
+  SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   mapDomainErrorToErrorKind,
   type AcpPreflightKind,
   type ServeErrorKind,
+  type ServeMcpBudgetMode,
+  type ServeMcpBudgetStatusCell,
   type ServeMcpDiscoveryState,
   type ServeMcpServerRuntimeStatus,
   type ServeMcpTransport,
@@ -1155,7 +1162,12 @@ class QwenAgent implements Agent {
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
-    await this.createAndStoreSession(config, sessionData?.conversation);
+    const session = await this.createAndStoreSession(
+      config,
+      sessionData?.conversation,
+    );
+
+    await this.#restoreWorktreeOnResume(config, session);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -1192,7 +1204,9 @@ class QwenAgent implements Agent {
     await this.ensureAuthenticated(config);
     this.setupFileSystem(config);
 
-    await this.createAndStoreSession(config);
+    const session = await this.createAndStoreSession(config);
+
+    await this.#restoreWorktreeOnResume(config, session);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -1203,6 +1217,34 @@ class QwenAgent implements Agent {
       models: availableModels,
       configOptions,
     };
+  }
+
+  /**
+   * Shared worktree restore for both ACP entry points (`loadSession` and
+   * `unstable_resumeSession`). Reads the WorktreeSession sidecar, cleans
+   * up stale ones, and queues the context reminder on the Session so the
+   * next `#executePrompt` prepends it to the user's first prompt.
+   *
+   * Best-effort: failures don't block session load — worktree context
+   * is a hint to the model, not a load-time correctness requirement.
+   * (PR #4174 review #3259975... — parity between the two ACP entry
+   * points.)
+   */
+  async #restoreWorktreeOnResume(
+    config: Config,
+    session: Session,
+  ): Promise<void> {
+    try {
+      const sessionPath = config
+        .getSessionService()
+        .getWorktreeSessionPath(config.getSessionId());
+      const restored = await restoreWorktreeContext(sessionPath);
+      if (restored.contextMessage) {
+        session.pendingWorktreeNotice = restored.contextMessage;
+      }
+    } catch (error) {
+      debugLogger.warn(`ACP worktree restore failed: ${error}`);
+    }
   }
 
   async unstable_listSessions(
@@ -1596,6 +1638,41 @@ class QwenAgent implements Agent {
     try {
       const workspaceCwd = this.workspaceCwd(config);
       const servers = config.getMcpServers() ?? {};
+
+      // PR 14: pull live accounting + budget config from the child's
+      // McpClientManager so the daemon's read-only route reflects the
+      // single source of truth (not a daemon-side polled cache).
+      // `getToolRegistry()` and `getMcpClientManager()` are best-effort
+      // — older test stubs or partially-initialized configs may not
+      // expose them; in that case we fall back to "no budget surface".
+      let clientCount: number | undefined;
+      let clientBudget: number | undefined;
+      let budgetMode: ServeMcpBudgetMode | undefined;
+      let refusedSet: ReadonlySet<string> = new Set<string>();
+      try {
+        const manager = config.getToolRegistry()?.getMcpClientManager();
+        if (manager) {
+          const accounting = manager.getMcpClientAccounting();
+          clientCount = accounting.total;
+          clientBudget = manager.getMcpClientBudget();
+          budgetMode = manager.getMcpBudgetMode();
+          refusedSet = new Set(accounting.refusedServerNames);
+        }
+      } catch (err) {
+        // Accounting failure must not crash the snapshot — the per-
+        // server data is still useful even without budget overlay.
+        // PR 14 fix (review #4247 wenshao S7a): bumped from
+        // `debugLogger.debug` to stderr `process.stderr.write` so a
+        // production daemon emits a visible warning when accounting
+        // breaks. `debugLogger.debug` is gated on the operator
+        // having set debug=true, which makes silent slot-leak / type-
+        // mismatch failures invisible in real deployments.
+        process.stderr.write(
+          `qwen serve: getMcpClientAccounting failed: ` +
+            `${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd,
@@ -1604,14 +1681,39 @@ class QwenAgent implements Agent {
         servers: Object.entries(servers).map(([name, server]) => {
           const disabled = config.isMcpServerDisabled(name);
           const rawStatus = getMCPServerStatus(name);
+          const refusedByBudget = refusedSet.has(name);
+          // PR 14 fix (review #4247): config-disable takes precedence
+          // over budget-refusal. `lastRefusedServerNames` is a
+          // per-discovery-pass snapshot; if an operator runs
+          // `/mcp disable <name>` against a server that was refused
+          // last pass, the entry stays in the refused list until the
+          // next discovery pass clears it (`McpClientManager.removeServer`
+          // now drops the entry too — see sibling fix). Either way,
+          // a `disabled` cell should NEVER show `budget_exhausted` —
+          // the operator's deliberate disable wins.
+          const effectivelyRefused = refusedByBudget && !disabled;
           const out: ServeWorkspaceMcpServerStatus = {
             kind: 'mcp_server',
-            status: this.mcpCellStatus(rawStatus, disabled),
+            // Refused-by-budget shadows the raw status: the rawStatus
+            // is `DISCONNECTED` (we never tried to connect), but the
+            // operator-facing severity is `error` with an explanatory
+            // errorKind rather than the generic disconnected `error`.
+            status: effectivelyRefused
+              ? 'error'
+              : this.mcpCellStatus(rawStatus, disabled),
             name,
             mcpStatus: this.mcpStatus(rawStatus),
             transport: this.mcpTransport(server),
             disabled,
           };
+          if (effectivelyRefused) {
+            out.errorKind = 'budget_exhausted';
+            out.disabledReason = 'budget';
+            out.hint =
+              'Raise --mcp-client-budget or remove servers from mcpServers config.';
+          } else if (disabled) {
+            out.disabledReason = 'config';
+          }
           const description =
             server && typeof server === 'object'
               ? (server as { description?: unknown }).description
@@ -1628,6 +1730,31 @@ class QwenAgent implements Agent {
           }
           return out;
         }),
+        ...(clientCount !== undefined ? { clientCount } : {}),
+        ...(clientBudget !== undefined ? { clientBudget } : {}),
+        ...(budgetMode !== undefined ? { budgetMode } : {}),
+        ...(budgetMode !== undefined
+          ? {
+              // PR 14 fix (review #4247 wenshao R2-#6): filter out
+              // servers that are now config-disabled so the
+              // workspace cell matches the per-server cell
+              // precedence (`effectivelyRefused = refusedByBudget
+              // && !disabled` above). Pre-fix a server disabled
+              // after being refused would render `disabled` on its
+              // per-server row but `error: budget_exhausted` on the
+              // workspace row — confusing for dashboards. Use
+              // `Array.from(refusedSet).filter(...)` to apply the
+              // same disabled gate the per-server loop applies.
+              budgets: this.buildBudgetCells(
+                clientCount ?? 0,
+                clientBudget,
+                budgetMode,
+                Array.from(refusedSet).filter(
+                  (n) => !config.isMcpServerDisabled(n),
+                ).length,
+              ),
+            }
+          : {}),
       };
     } catch (error) {
       return {
@@ -1638,6 +1765,88 @@ class QwenAgent implements Agent {
         errors: [this.errorCell('mcp', error)],
       };
     }
+  }
+
+  /**
+   * Build the MCP budget status cells exposed on `GET /workspace/mcp`
+   * (PR 14). v1 emits one cell with `scope: 'session'` — each ACP
+   * session has its own `McpClientManager`, so the budget enforces
+   * per-session (snapshot reflects the bootstrap session's view).
+   * Wave 5 PR 23 (shared MCP pool) will add `scope: 'workspace'`
+   * for true per-workspace aggregation. Consumers MUST tolerate
+   * additional entries with unrecognized scope values (drop, don't
+   * fail).
+   *
+   * Cell `status` semantics:
+   *   - `error`   — refusals happened this pass (only possible in enforce mode)
+   *   - `warning` — live count crossed 75% of budget (warn or enforce mode)
+   *   - `ok`      — under threshold (or `off` mode)
+   *
+   * **`liveCount` vs `reservedSlots.size` (PR 14 review #4247 R9 #5)**:
+   * `liveCount` here is `accounting.total` — only `MCPServerStatus.CONNECTED`
+   * clients. Enforcement (`tryReserveSlot`) on the other hand uses
+   * `reservedSlots.size` — all reserved names, including in-flight
+   * connects and never-connected stale entries. The two diverge when
+   * servers hold a slot during the connect handshake or after a
+   * connect failure that didn't release (e.g. `'already_held'`
+   * reconnect timeouts). The snapshot intentionally uses the live
+   * count for **operator observability** — "how many MCP clients
+   * are actually serving requests right now" — while enforcement
+   * uses the reservation count to prevent capacity races across
+   * `Promise.all` microtask boundaries. PR 14b's typed events
+   * should consider exposing both for real-time pressure signals.
+   */
+  private buildBudgetCells(
+    liveCount: number,
+    budget: number | undefined,
+    mode: ServeMcpBudgetMode,
+    refusedCount: number,
+  ): ServeMcpBudgetStatusCell[] {
+    // PR 14 fix (review #4247): when no `--mcp-client-budget` is
+    // configured the manager resolves to `mode: 'off'`. The protocol
+    // docs and SDK type comments promise `budgets: []` for that case;
+    // a synthetic `mcp_budget` cell carrying nothing actionable was
+    // (a) protocol-noncompliant, (b) clutter — clients iterating
+    // `budgets[]` to render rows would draw an "ok" budget row for
+    // uncapped workspaces. Always return empty so the top-level
+    // `budgetMode: 'off'` field is the sole signal that guardrails
+    // are inactive.
+    if (mode === 'off') return [];
+    let status: ServeStatus = 'ok';
+    let errorKind: ServeErrorKind | undefined;
+    let hint: string | undefined;
+    if (refusedCount > 0) {
+      status = 'error';
+      errorKind = 'budget_exhausted';
+      hint =
+        'Raise --mcp-client-budget or remove servers from mcpServers config.';
+    } else if (
+      budget !== undefined &&
+      budget > 0 &&
+      liveCount >= MCP_BUDGET_WARN_FRACTION * budget
+    ) {
+      status = 'warning';
+      hint = `Live MCP clients are above ${Math.round(
+        MCP_BUDGET_WARN_FRACTION * 100,
+      )}% of the configured budget.`;
+    }
+    const cell: ServeMcpBudgetStatusCell = {
+      kind: 'mcp_budget',
+      // PR 14 v1: per-session, not per-workspace. Each ACP session has
+      // its own `Config`/`McpClientManager` (via `newSessionConfig`)
+      // and reads `QWEN_SERVE_MCP_CLIENT_BUDGET` independently.
+      // Snapshot shows the bootstrap session's view. Wave 5 PR 23
+      // shared MCP pool will graduate this to `'workspace'`.
+      scope: 'session',
+      status,
+      liveCount,
+      mode,
+      refusedCount,
+    };
+    if (budget !== undefined) cell.budget = budget;
+    if (errorKind) cell.errorKind = errorKind;
+    if (hint) cell.hint = hint;
+    return [cell];
   }
 
   private errorCell(
@@ -2209,6 +2418,157 @@ class QwenAgent implements Agent {
           sessionId,
         )) as unknown as Record<string, unknown>;
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
+        // #4175 Wave 4 PR 17. Single-server MCP restart with budget
+        // pre-check from PR 14 v1's accounting snapshot. Soft skips
+        // (in_flight, disabled, budget_would_exceed) come back as
+        // structured 200 responses; hard errors (server not in
+        // config, manager unavailable, post-discover not connected)
+        // propagate as JSON-RPC errors with structured `data` that
+        // the bridge translates to typed HTTP responses.
+        const serverName = params['serverName'];
+        if (typeof serverName !== 'string' || serverName.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing serverName',
+          );
+        }
+        const servers = this.config.getMcpServers() ?? {};
+        if (!Object.prototype.hasOwnProperty.call(servers, serverName)) {
+          // #4282 gpt-5.5 C5 fold-in: the bridge looks for
+          // `data.errorKind: 'mcp_server_not_found'` to map this back
+          // to a typed `McpServerNotFoundError` and a stable HTTP 404
+          // — without the structured payload the bridge can't
+          // distinguish this from a generic JSON-RPC error and the
+          // route falls through to 500.
+          throw new RequestError(
+            -32004,
+            `MCP server not configured: ${JSON.stringify(serverName)}`,
+            { errorKind: 'mcp_server_not_found', serverName },
+          );
+        }
+        if (this.config.isMcpServerDisabled(serverName)) {
+          return {
+            serverName,
+            restarted: false,
+            skipped: true,
+            reason: 'disabled' as const,
+          };
+        }
+        const manager = this.config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw RequestError.internalError(
+            undefined,
+            'McpClientManager unavailable on this Config',
+          );
+        }
+        if (manager.isServerDiscovering(serverName)) {
+          return {
+            serverName,
+            restarted: false,
+            skipped: true,
+            reason: 'in_flight' as const,
+          };
+        }
+        const accounting = manager.getMcpClientAccounting();
+        const budget = manager.getMcpClientBudget();
+        const mode = manager.getMcpBudgetMode();
+        // #4282 gpt-5.5 C3 fold-in: enforce-mode capacity is reserved
+        // by `tryReserveSlot` via `reservedSlots` (which counts
+        // configured + in-flight + disconnected slot holders), not by
+        // `total` (which only counts CONNECTED clients). Comparing
+        // `total` to budget under-counted reservations and let a
+        // restart proceed past capacity; the manager would then
+        // refuse internally and return void, while this handler
+        // reported `restarted: true`. Mirror the manager's policy
+        // by checking `reservedSlots.length` for servers that don't
+        // already hold a reservation.
+        if (
+          mode === 'enforce' &&
+          budget !== undefined &&
+          !accounting.reservedSlots.includes(serverName) &&
+          accounting.reservedSlots.length >= budget
+        ) {
+          return {
+            serverName,
+            restarted: false,
+            skipped: true,
+            reason: 'budget_would_exceed' as const,
+          };
+        }
+        const start = Date.now();
+        await manager.discoverMcpToolsForServer(serverName, this.config);
+        // #4282 gpt-5.5 C4 fold-in: `discoverMcpToolsForServer`
+        // catches reconnect/discovery errors internally (logs and
+        // resolves void) so a broken MCP server would otherwise
+        // surface as `restarted: true`. Verify the live status from
+        // the per-server status map; anything other than CONNECTED
+        // means the restart didn't take effect.
+        const postStatus = getMCPServerStatus(serverName);
+        if (postStatus !== MCPServerStatus.CONNECTED) {
+          throw new RequestError(
+            -32099,
+            `MCP server ${JSON.stringify(serverName)} did not reach a ` +
+              `connected state after restart (status: ${postStatus}).`,
+            {
+              errorKind: 'mcp_restart_failed',
+              serverName,
+              mcpStatus: postStatus,
+            },
+          );
+        }
+        return {
+          serverName,
+          restarted: true,
+          durationMs: Date.now() - start,
+        };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
+        // #4175 Wave 4 PR 17: remote callers change a live session's
+        // approval mode via this ACP extMethod. `Config.setApprovalMode`
+        // throws `TrustGateError` for privileged modes in an untrusted
+        // folder; we let it propagate — the bridge's mapping helper
+        // converts the name to `errorKind: 'auth_env_error'` on the
+        // wire so the SDK consumer gets a structured failure.
+        const sessionId = params['sessionId'];
+        const mode = params['mode'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof mode !== 'string' ||
+          !APPROVAL_MODES.includes(mode as ApprovalMode)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Invalid approval mode; allowed: ${APPROVAL_MODES.join(', ')}`,
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        const previous = config.getApprovalMode();
+        try {
+          config.setApprovalMode(mode as ApprovalMode);
+        } catch (err) {
+          // `TrustGateError` is the core's structured rejection for
+          // untrusted-folder + privileged-mode. We re-raise it as a
+          // JSON-RPC error whose `data.errorKind` is the literal the
+          // bridge looks for to reconstruct a typed `TrustGateError` on
+          // the daemon side (JSON-RPC strips the class name across the
+          // wire). Other errors propagate unchanged.
+          if (err instanceof Error && err.name === 'TrustGateError') {
+            throw new RequestError(-32003, err.message, {
+              errorKind: 'trust_gate',
+            });
+          }
+          throw err;
+        }
+        const current = config.getApprovalMode();
+        return { previous, current };
+      }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
         if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
@@ -2441,7 +2801,8 @@ class QwenAgent implements Agent {
         }
         const settings = loadSettings(cwd);
         const settingScope = toSettingsScope(params['scope']);
-        const scope = settingScope === SettingScope.Workspace ? 'workspace' : 'user';
+        const scope =
+          settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
         const mcpServers = {
           ...toRecord(existing['mcpServers']),
@@ -2464,7 +2825,8 @@ class QwenAgent implements Agent {
         }
         const settings = loadSettings(cwd);
         const settingScope = toSettingsScope(params['scope']);
-        const scope = settingScope === SettingScope.Workspace ? 'workspace' : 'user';
+        const scope =
+          settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
         const mcpServers = { ...toRecord(existing['mcpServers']) };
         delete mcpServers[name.trim()];
@@ -2480,7 +2842,8 @@ class QwenAgent implements Agent {
         }
         const settings = loadSettings(cwd);
         const settingScope = toSettingsScope(params['scope']);
-        const scope = settingScope === SettingScope.Workspace ? 'workspace' : 'user';
+        const scope =
+          settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
         const hooksRoot = { ...toRecord(existing['hooks']) };
         const eventHooks = Array.isArray(hooksRoot[event])
@@ -2510,7 +2873,8 @@ class QwenAgent implements Agent {
         }
         const settings = loadSettings(cwd);
         const settingScope = toSettingsScope(params['scope']);
-        const scope = settingScope === SettingScope.Workspace ? 'workspace' : 'user';
+        const scope =
+          settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
         const hooksRoot = { ...toRecord(existing['hooks']) };
         const eventHooks = Array.isArray(hooksRoot[event])
@@ -2691,6 +3055,66 @@ class QwenAgent implements Agent {
         projectHooks: this.settings.getProjectHooks(),
       },
     );
+    // PR 14b fix #2 (codex review round 1): register the MCP guardrail
+    // budget-event callback BEFORE `config.initialize()`. Pre-fix the
+    // registration ran AFTER initialize, which (a) missed end-of-pass
+    // events under `QWEN_CODE_LEGACY_MCP_BLOCKING=1` (synchronous
+    // discovery completes inside initialize, before our setter runs)
+    // and (b) raced against background-discovery completion under the
+    // default progressive mode. `Config.setMcpBudgetEventCallback`
+    // stashes the callback and `createToolRegistry` applies it to the
+    // manager BEFORE `discoverAllTools` / `startMcpDiscoveryInBackground`
+    // fires, closing both windows.
+    //
+    // sessionId source: `config.getSessionId()` reads the Config's own
+    // session id (auto-assigned via `randomUUID()` in the Config
+    // constructor when no override is passed — see `config.ts:849`),
+    // so the value is available immediately after `loadCliConfig`
+    // returns. The closure pins it for the manager's whole lifetime.
+    //
+    // Defensive `typeof` checks tolerate stub Configs / ToolRegistries
+    // in older tests (older fixtures may omit `setMcpBudgetEventCallback`
+    // or `getSessionId`).
+    const wiredSessionId =
+      typeof config.getSessionId === 'function'
+        ? config.getSessionId()
+        : undefined;
+    if (
+      typeof config.setMcpBudgetEventCallback === 'function' &&
+      wiredSessionId !== undefined
+    ) {
+      const sid = wiredSessionId;
+      config.setMcpBudgetEventCallback((event) => {
+        // Fire-and-forget: `extNotification` returns Promise<void> but
+        // the manager's call site doesn't await. `.catch` suppresses
+        // unhandled rejections — a mid-flight ACP disconnect would
+        // otherwise crash the child. Snapshot still carries the state
+        // for clients that reconnect.
+        //
+        // PR 14b fix (codex round 3 — DeepSeek): pre-fix the catch
+        // handler was `() => {}`, silently dropping every error
+        // including "real" ones (serialization bugs, protocol
+        // violations) — operators had no debug trail. Now logs at
+        // `debug` level: ACP channel closure during shutdown is the
+        // expected case and would spam at higher levels, but `debug`
+        // is opt-in so when an oncall engineer DOES turn it on for
+        // an MCP guardrail incident, they see exactly which event
+        // dropped and why.
+        void this.connection
+          .extNotification('qwen/notify/session/mcp-budget-event', {
+            v: 1,
+            sessionId: sid,
+            ...event,
+          })
+          .catch((err: unknown) => {
+            debugLogger.debug(
+              `MCP budget extNotification dropped ` +
+                `(session=${sid}, kind=${event.kind}): ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+      });
+    }
     await config.initialize();
     // Same reasoning as the top-level runAcpAgent path: ACP feeds session
     // messages to the model immediately, so we cannot return a Config whose

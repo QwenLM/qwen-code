@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { Config as ConfigImpl, ApprovalMode } from '../config/config.js';
 import { AgentHeadless } from '../agents/runtime/agent-headless.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
+import type { ModelConfig } from '../agents/runtime/agent-types.js';
 import { runForkedAgent } from './forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { EditTool } from '../tools/edit.js';
@@ -16,6 +17,30 @@ import {
   hasRebuiltToolRegistry,
   TOOL_REGISTRY_REBUILT,
 } from '../tools/agent/agent.js';
+import { AuthType } from '../core/contentGenerator.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
+
+vi.mock('../models/content-generator-config.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../models/content-generator-config.js')
+    >();
+  return {
+    ...actual,
+    createRuntimeContentGeneratorView: vi.fn(),
+  };
+});
+
+function makeRuntimeView(model: string): RuntimeContentGeneratorView {
+  return {
+    contentGenerator: {} as RuntimeContentGeneratorView['contentGenerator'],
+    contentGeneratorConfig: {
+      model,
+      authType: AuthType.USE_OPENAI,
+    },
+  };
+}
 
 /**
  * Regression: `runForkedAgent` (AgentHeadless path) used to produce its
@@ -31,6 +56,10 @@ import {
  * to the wrapper.
  */
 describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
+  beforeEach(() => {
+    vi.mocked(createRuntimeContentGeneratorView).mockReset();
+  });
+
   // Bare mode keeps the registry small (ReadFile / Edit / Shell only) so
   // the rebuild covers the file tools we actually care about.
   const baseParams = {
@@ -321,5 +350,93 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
 
     await new Promise((resolve) => setImmediate(resolve));
     expect(stopSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a runtime content-generator view for cross-auth fast models', async () => {
+    const fastModel = 'deepseek-v4-flash';
+    const runtimeView = makeRuntimeView(fastModel);
+    vi.mocked(createRuntimeContentGeneratorView).mockResolvedValue(runtimeView);
+
+    const parent = new ConfigImpl({
+      ...baseParams,
+      model: 'claude-main',
+    });
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    vi.spyOn(parent, 'getContentGeneratorConfig').mockReturnValue({
+      model: 'claude-main',
+      authType: AuthType.USE_ANTHROPIC,
+    });
+    vi.spyOn(parent, 'getFastModel').mockReturnValue(
+      `${AuthType.USE_OPENAI}:${fastModel}`,
+    );
+    vi.spyOn(parent, 'getAllConfiguredModels').mockImplementation(
+      (authTypes?: AuthType[]) =>
+        authTypes?.includes(AuthType.USE_OPENAI)
+          ? [
+              {
+                id: fastModel,
+                label: fastModel,
+                authType: AuthType.USE_OPENAI,
+              },
+            ]
+          : [],
+    );
+
+    const captured: {
+      config?: Config;
+      modelConfig?: ModelConfig;
+      runtimeView?: RuntimeContentGeneratorView;
+    } = {};
+    const createSpy = vi
+      .spyOn(AgentHeadless, 'create')
+      .mockImplementation(
+        async (
+          _name: string,
+          config: Config,
+          _promptConfig: unknown,
+          modelConfig: ModelConfig,
+          _runConfig: unknown,
+          _toolConfig: unknown,
+          _eventEmitter: unknown,
+          _hooks: unknown,
+          runtimeViewArg?: RuntimeContentGeneratorView,
+        ): Promise<AgentHeadless> => {
+          captured.config = config;
+          captured.modelConfig = modelConfig;
+          captured.runtimeView = runtimeViewArg;
+          return {
+            execute: vi.fn().mockResolvedValue(undefined),
+            getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+            getFinalText: vi.fn().mockReturnValue('done'),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any;
+        },
+      );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'do the task',
+        config: parent,
+      });
+      expect(result.status).toBe('completed');
+    } finally {
+      createSpy.mockRestore();
+    }
+
+    expect(captured.modelConfig?.model).toBe(fastModel);
+    expect(captured.runtimeView).toBe(runtimeView);
+    expect(createRuntimeContentGeneratorView).toHaveBeenCalledWith(
+      parent,
+      captured.config,
+      fastModel,
+      { authType: AuthType.USE_OPENAI },
+    );
   });
 });

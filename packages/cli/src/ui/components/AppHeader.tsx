@@ -6,9 +6,11 @@
 
 import { useMemo } from 'react';
 import { Box } from 'ink';
-import { AuthType } from '@qwen-code/qwen-code-core';
-import { findProviderByCredentials } from '../../auth/allProviders.js';
-import { resolveMetadataKey } from '../../auth/providerConfig.js';
+import {
+  AuthType,
+  findProviderByCredentials,
+  resolveMetadataKey,
+} from '@qwen-code/qwen-code-core';
 import { Header, AuthDisplayType } from './Header.js';
 import { Tips } from './Tips.js';
 import { useSettings } from '../contexts/SettingsContext.js';

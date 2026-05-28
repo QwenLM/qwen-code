@@ -216,6 +216,91 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('should apply provider request context overrides', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'test-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({
+        splitToolMedia: true,
+      });
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          splitToolMedia: true,
+        }),
+      );
+    });
+
+    it('should let provider request context overrides take precedence over content generator config', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'test-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      mockContentGeneratorConfig.splitToolMedia = true;
+      mockProvider.getRequestContextOverrides = vi.fn().mockReturnValue({
+        splitToolMedia: false,
+      });
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, userPromptId);
+
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          splitToolMedia: false,
+        }),
+      );
+    });
+
     it('should fall back to configured model when request.model is empty', async () => {
       // Arrange — empty model string is falsy, should fall back to contentGeneratorConfig.model
       const request: GenerateContentParameters = {

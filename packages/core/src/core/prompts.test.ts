@@ -737,3 +737,27 @@ describe('resolvePathFromEnv helper function', () => {
     });
   });
 });
+
+describe('New Applications workflow deferred to skill', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('SANDBOX', undefined);
+  });
+
+  it('system prompt does not contain the full New Applications workflow', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const prompt = getCoreSystemPrompt();
+    expect(prompt).not.toContain(
+      'Autonomously implement and deliver a visually appealing',
+    );
+    expect(prompt).not.toContain('Websites (Frontend):');
+    expect(prompt).not.toContain('npx create-react-app');
+  });
+
+  it('system prompt references the new-app skill', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const prompt = getCoreSystemPrompt();
+    expect(prompt).toContain('new-app');
+    expect(prompt).toContain('## New Applications');
+  });
+});

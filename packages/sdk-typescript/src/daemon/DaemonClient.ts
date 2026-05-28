@@ -4,26 +4,50 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { parseSseStream } from './sse.js';
 import type {
+  DaemonAgentMutationResult,
+  DaemonAuthProviderId,
+  DaemonAuthStatusSnapshot,
   DaemonCapabilities,
+  DaemonCreateAgentRequest,
+  DaemonDeviceFlowStartResult,
+  DaemonDeviceFlowState,
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonUpdateAgentRequest,
+  DaemonWorkspaceFile,
+  DaemonWorkspaceFileBytes,
+  DaemonWorkspaceFileEditRequest,
+  DaemonWorkspaceFileEditResult,
+  DaemonWorkspaceFileWriteRequest,
+  DaemonWorkspaceFileWriteResult,
+  DaemonWorkspaceAgentDetail,
+  DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonWriteMemoryRequest,
+  DaemonWriteMemoryResult,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
   SetModelResult,
   SessionMetadataResult,
+  DaemonApprovalMode,
+  DaemonApprovalModeResult,
+  DaemonInitWorkspaceResult,
+  DaemonMcpRestartResult,
+  DaemonToolToggleResult,
 } from './types.js';
 
 /**
@@ -167,6 +191,21 @@ export class DaemonClient {
   private readonly token: string | undefined;
   private readonly _fetch: typeof globalThis.fetch;
   private readonly fetchTimeoutMs: number;
+  // Lazy singleton so clients that never touch auth pay no allocation cost.
+  // Exposed via the readonly `auth` accessor below.
+  private _authFlow?: DaemonAuthFlow;
+
+  /**
+   * High-level auth helper (issue #4175 PR 21). Wraps the four
+   * `*DeviceFlow*` methods with a `start(...).awaitCompletion()` shape
+   * for the common "log in remotely" UX. Lazy-constructed.
+   */
+  get auth(): DaemonAuthFlow {
+    if (!this._authFlow) {
+      this._authFlow = new DaemonAuthFlow(this);
+    }
+    return this._authFlow;
+  }
 
   constructor(opts: DaemonClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts.baseUrl);
@@ -342,6 +381,298 @@ export class DaemonClient {
     );
   }
 
+  // -- Workspace files (issue #4175 PR 20) -------------------------------
+
+  async readWorkspaceFile(
+    filePath: string,
+    opts: { maxBytes?: number; line?: number; limit?: number } = {},
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFile> {
+    const url = new URL(`${this.baseUrl}/file`);
+    url.searchParams.set('path', filePath);
+    if (opts.maxBytes !== undefined) {
+      url.searchParams.set('maxBytes', String(opts.maxBytes));
+    }
+    if (opts.line !== undefined) {
+      url.searchParams.set('line', String(opts.line));
+    }
+    if (opts.limit !== undefined) {
+      url.searchParams.set('limit', String(opts.limit));
+    }
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /file');
+        return (await res.json()) as DaemonWorkspaceFile;
+      },
+    );
+  }
+
+  async readWorkspaceFileBytes(
+    filePath: string,
+    opts: { offset?: number; maxBytes?: number } = {},
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileBytes> {
+    const url = new URL(`${this.baseUrl}/file/bytes`);
+    url.searchParams.set('path', filePath);
+    if (opts.offset !== undefined) {
+      url.searchParams.set('offset', String(opts.offset));
+    }
+    if (opts.maxBytes !== undefined) {
+      url.searchParams.set('maxBytes', String(opts.maxBytes));
+    }
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /file/bytes');
+        return (await res.json()) as DaemonWorkspaceFileBytes;
+      },
+    );
+  }
+
+  async writeWorkspaceFile(
+    req: DaemonWorkspaceFileWriteRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileWriteResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/file/write`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'POST /file/write');
+        return (await res.json()) as DaemonWorkspaceFileWriteResult;
+      },
+    );
+  }
+
+  async editWorkspaceFile(
+    req: DaemonWorkspaceFileEditRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileEditResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/file/edit`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'POST /file/edit');
+        return (await res.json()) as DaemonWorkspaceFileEditResult;
+      },
+    );
+  }
+
+  // -- Workspace memory (issue #4175 PR 16) ------------------------------
+
+  /**
+   * Fetch the daemon's `QWEN.md` / `AGENTS.md` snapshot. Read-only;
+   * pre-flight `caps.features.workspace_memory` before calling
+   * against an unknown daemon. Returns `initialized: false` and an
+   * empty `files` array when no memory files exist at the bound
+   * workspace root or `~/.qwen`.
+   *
+   * v1 discovers files at the bound workspace ROOT only, plus the
+   * user's global `~/.qwen` directory — it does NOT walk parent
+   * directories or recurse into the workspace tree. The route's
+   * companion helper `walkWorkspaceForMemory` keeps a guarded
+   * upward-walk loop body for a future hierarchical mode but breaks
+   * after iteration 1 in this release. PR 16.5 will lift the cap
+   * once auto-memory CRUD lands.
+   */
+  async workspaceMemory(): Promise<DaemonWorkspaceMemoryStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/memory`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/memory');
+        }
+        return (await res.json()) as DaemonWorkspaceMemoryStatus;
+      },
+    );
+  }
+
+  /**
+   * Append to or replace `QWEN.md` at workspace or global scope.
+   * Strict mutation gate (`token_required` on no-token loopback
+   * defaults). When the daemon advertises `workspace_memory`, expect
+   * 200 with `{ ok, filePath, bytesWritten, mode }`; older daemons
+   * without the capability return 404.
+   */
+  async writeWorkspaceMemory(
+    req: DaemonWriteMemoryRequest,
+    clientId?: string,
+  ): Promise<DaemonWriteMemoryResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/memory`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/memory');
+        }
+        return (await res.json()) as DaemonWriteMemoryResult;
+      },
+    );
+  }
+
+  // -- Workspace agents (issue #4175 PR 16) ------------------------------
+
+  async listWorkspaceAgents(): Promise<DaemonWorkspaceAgentsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/agents`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/agents');
+        }
+        return (await res.json()) as DaemonWorkspaceAgentsStatus;
+      },
+    );
+  }
+
+  /**
+   * Create a project- or user-level subagent. 409 `agent_already_exists`
+   * when a same-name agent is already registered at the chosen level;
+   * 422 `invalid_config` for validation failures.
+   */
+  async createWorkspaceAgent(
+    req: DaemonCreateAgentRequest,
+    clientId?: string,
+  ): Promise<DaemonAgentMutationResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/agents`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/agents');
+        }
+        return (await res.json()) as DaemonAgentMutationResult;
+      },
+    );
+  }
+
+  async getWorkspaceAgent(
+    agentType: string,
+  ): Promise<DaemonWorkspaceAgentDetail> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/agents/:agentType');
+        }
+        return (await res.json()) as DaemonWorkspaceAgentDetail;
+      },
+    );
+  }
+
+  /**
+   * Update a project- or user-level subagent definition. Built-in /
+   * extension / session-level agents are read-only and return 403
+   * `agent_readonly`; missing agents return 404 `agent_not_found`.
+   *
+   * Optional `scope` mirrors the delete helper: when a project agent
+   * shadows a user-level agent of the same name, pass
+   * `{ scope: 'global' }` to update the user-level definition
+   * specifically. Without the scope the daemon resolves through the
+   * default precedence (project > user) and updates the project entry.
+   */
+  async updateWorkspaceAgent(
+    agentType: string,
+    req: DaemonUpdateAgentRequest,
+    opts: { scope?: 'workspace' | 'global' } = {},
+    clientId?: string,
+  ): Promise<DaemonAgentMutationResult> {
+    const url = opts.scope
+      ? `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}?scope=${encodeURIComponent(opts.scope)}`
+      : `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`;
+    return await this.fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/agents/:agentType',
+          );
+        }
+        return (await res.json()) as DaemonAgentMutationResult;
+      },
+    );
+  }
+
+  /**
+   * Delete a project- or user-level subagent definition. Optional
+   * `scope` query narrows deletion to one level when the same name
+   * exists at both. Idempotent for SDK callers — both 204 (deleted)
+   * and 404 (already gone) resolve successfully.
+   */
+  async deleteWorkspaceAgent(
+    agentType: string,
+    opts: { scope?: 'workspace' | 'global' } = {},
+    clientId?: string,
+  ): Promise<void> {
+    const url = opts.scope
+      ? `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}?scope=${encodeURIComponent(opts.scope)}`
+      : `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`;
+    return await this.fetchWithTimeout(
+      url,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, clientId),
+      },
+      async (res) => {
+        if (res.status === 204) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        // Treat as idempotent ONLY when the daemon explicitly says
+        // `agent_not_found`. A bare 404 (e.g. an HTTP proxy returning
+        // a generic page, an older daemon that doesn't know the
+        // route, a misrouted load balancer) would otherwise be
+        // silently swallowed and the SDK caller would believe the
+        // agent was deleted when the request never reached a route
+        // that understands workspace agents. Failing on non-
+        // structured 404s makes routing errors visible.
+        if (res.status === 404) {
+          const err = await this.failOnError(
+            res,
+            'DELETE /workspace/agents/:agentType',
+          );
+          const body = err.body as { code?: unknown } | undefined;
+          if (body && body.code === 'agent_not_found') return;
+          throw err;
+        }
+        throw await this.failOnError(
+          res,
+          'DELETE /workspace/agents/:agentType',
+        );
+      },
+    );
+  }
+
   async workspaceEnv(): Promise<DaemonWorkspaceEnvStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/env`,
@@ -508,6 +839,163 @@ export class DaemonClient {
           throw await this.failOnError(res, `POST /session/:id/${action}`);
         }
         return (await res.json()) as DaemonRestoredSession;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Change the approval mode of a live session.
+   * The daemon applies the change in the ACP child's per-session
+   * `Config` and publishes an `approval_mode_changed` event. Pass
+   * `opts.persist: true` to also write `tools.approvalMode` to the
+   * workspace settings file (default is ephemeral so a remote caller
+   * does not pollute the user's host settings unless asked).
+   *
+   * Pre-flight `caps.features.session_approval_mode_control` before
+   * calling — older daemons reject the route with 404.
+   *
+   * The trust-folder gate inside core's `setApprovalMode` rejects
+   * privileged modes in untrusted folders; the route surfaces that
+   * with HTTP 403 + `errorKind: 'auth_env_error'`.
+   */
+  async setSessionApprovalMode(
+    sessionId: string,
+    mode: DaemonApprovalMode,
+    opts?: { persist?: boolean; clientId?: string },
+  ): Promise<DaemonApprovalModeResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/approval-mode`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({
+          mode,
+          ...(opts?.persist === true ? { persist: true } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/approval-mode');
+        }
+        return (await res.json()) as DaemonApprovalModeResult;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Toggle a tool name in the workspace's
+   * `tools.disabled` settings list. Strict-gated mutation route — the
+   * daemon must be configured with a bearer token. The daemon writes
+   * the settings file directly and fan-outs a `tool_toggled` event to
+   * every live session SSE bus.
+   *
+   * Already-registered tools in active sessions are NOT retroactively
+   * unregistered. The toggle takes effect on the next ACP child spawn
+   * — listeners that need the live tool list to reflect the change
+   * should also `POST /workspace/mcp/:server/restart` (when the tool
+   * is MCP-discovered) or open a new session.
+   *
+   * Pre-flight `caps.features.workspace_tool_toggle` before calling.
+   */
+  async setWorkspaceToolEnabled(
+    toolName: string,
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonToolToggleResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/tools/${encodeURIComponent(toolName)}/enable`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ enabled }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/tools/:name/enable',
+          );
+        }
+        return (await res.json()) as DaemonToolToggleResult;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Restart a configured MCP server through the
+   * ACP child's `McpClientManager`. The daemon pre-checks the live
+   * budget snapshot from PR 14 v1; soft refusals (in-flight discovery,
+   * disabled server, budget would exceed under `enforce` mode) come
+   * back as 200 OK with `{restarted: false, skipped: true, reason}`.
+   * Only hard errors (unknown server name, no live ACP channel)
+   * surface as non-2xx.
+   *
+   * Pre-flight `caps.features.workspace_mcp_restart` before calling.
+   */
+  async restartMcpServer(
+    serverName: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonMcpRestartResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/mcp/:server/restart',
+          );
+        }
+        return (await res.json()) as DaemonMcpRestartResult;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Scaffold a `QWEN.md` at the daemon's bound
+   * workspace root. Mechanical only — does NOT invoke the LLM. The
+   * daemon writes an empty file; clients that want AI-driven content
+   * fill should follow up with `POST /session/:id/prompt`.
+   *
+   * Default refuses to overwrite — when the file exists with non-
+   * whitespace content the daemon returns 409
+   * `workspace_init_conflict` with the existing path and size in the
+   * body. Pass `opts.force: true` to overwrite unconditionally.
+   *
+   * Pre-flight `caps.features.workspace_init` before calling.
+   */
+  async initWorkspace(opts?: {
+    force?: boolean;
+    clientId?: string;
+  }): Promise<DaemonInitWorkspaceResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/init`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify(opts?.force === true ? { force: true } : {}),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/init');
+        }
+        return (await res.json()) as DaemonInitWorkspaceResult;
       },
     );
   }
@@ -821,6 +1309,115 @@ export class DaemonClient {
           return;
         }
         throw await this.failOnError(res, 'DELETE /session/:id');
+      },
+    );
+  }
+
+  // -- Auth device-flow (issue #4175 PR 21) -------------------------------
+
+  /**
+   * Start an OAuth device-flow login for the given provider. The daemon
+   * polls the IdP in the background and emits typed `auth_device_flow_*`
+   * SSE events; callers can also poll `getDeviceFlow(...)`.
+   *
+   * Per-provider singleton: a repeat call while a flow is already pending
+   * for the same provider is an idempotent take-over and returns the
+   * existing entry rather than starting a fresh IdP request. The
+   * `attached` field on the result distinguishes the two cases.
+   */
+  async startDeviceFlow(opts: {
+    providerId: DaemonAuthProviderId;
+    clientId?: string;
+  }): Promise<DaemonDeviceFlowStartResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/device-flow`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts.clientId,
+        ),
+        body: JSON.stringify({ providerId: opts.providerId }),
+      },
+      async (res) => {
+        if (res.status !== 200 && res.status !== 201) {
+          throw await this.failOnError(res, 'POST /workspace/auth/device-flow');
+        }
+        return (await res.json()) as DaemonDeviceFlowStartResult;
+      },
+    );
+  }
+
+  async getDeviceFlow(
+    deviceFlowId: string,
+    opts: { clientId?: string; signal?: AbortSignal } = {},
+  ): Promise<DaemonDeviceFlowState> {
+    // PR #4255 fold-in 7 review thread #6: forward `signal` into
+    // `fetchWithTimeout`, which composes it with the per-request
+    // `fetchTimeoutMs` controller. Without this, an `awaitCompletion`
+    // caller that aborts mid-poll could not cancel the in-flight GET
+    // — only the post-await guard would notice, but that runs only
+    // after the body is already settled (or the daemon-side
+    // `fetchTimeoutMs` fires, which can be 30s+).
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/device-flow/${encodeURIComponent(deviceFlowId)}`,
+      { headers: this.headers({}, opts.clientId), signal: opts.signal },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /workspace/auth/device-flow/:id',
+          );
+        }
+        return (await res.json()) as DaemonDeviceFlowState;
+      },
+    );
+  }
+
+  /**
+   * Cancel a pending device-flow. Idempotent: terminal entries return
+   * 204 (no-op); unknown ids return 404 — both resolve here, matching
+   * the SDK's `closeSession` shape.
+   */
+  async cancelDeviceFlow(
+    deviceFlowId: string,
+    opts: { clientId?: string } = {},
+  ): Promise<void> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/device-flow/${encodeURIComponent(deviceFlowId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, opts.clientId),
+      },
+      async (res) => {
+        if (res.status === 204 || res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        throw await this.failOnError(
+          res,
+          'DELETE /workspace/auth/device-flow/:id',
+        );
+      },
+    );
+  }
+
+  /** Snapshot of persisted auth credentials + currently pending device-flows. */
+  async getAuthStatus(
+    opts: { clientId?: string } = {},
+  ): Promise<DaemonAuthStatusSnapshot> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/status`,
+      { headers: this.headers({}, opts.clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/auth/status');
+        }
+        return (await res.json()) as DaemonAuthStatusSnapshot;
       },
     );
   }

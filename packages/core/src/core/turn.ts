@@ -34,6 +34,7 @@ import {
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
+import type { ActiveGoal } from '../goals/activeGoalStore.js';
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -64,6 +65,7 @@ export enum GeminiEventType {
   HookSystemMessage = 'hook_system_message',
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
+  ActiveGoal = 'active_goal',
 }
 
 export type ServerGeminiRetryEvent = {
@@ -169,6 +171,19 @@ export enum CompressionStatus {
 
   /** The compression was not necessary and no action was taken */
   NOOP,
+
+  /**
+   * The compression call produced a summary, but the output hit
+   * COMPACT_MAX_OUTPUT_TOKENS, indicating likely truncation. The summary
+   * is dropped (newHistory=null) and the attempt is treated as a failure:
+   * `isCompressionFailureStatus` returns true so it counts toward the
+   * per-chat circuit breaker. Kept distinct from
+   * `COMPRESSION_FAILED_EMPTY_SUMMARY` so telemetry can separate
+   * prompt-quality failures (empty / nonsensical summary) from capacity
+   * failures (output cap hit, may need a higher cap or finer-grained
+   * splitter). (R5.2)
+   */
+  COMPRESSION_FAILED_OUTPUT_TRUNCATED,
 }
 
 export interface ChatCompressionInfo {
@@ -233,8 +248,14 @@ export type ServerGeminiStopHookLoopEvent = {
   };
 };
 
+export type ServerGeminiActiveGoalEvent = {
+  type: GeminiEventType.ActiveGoal;
+  value: ActiveGoal | null;
+};
+
 // The original union type, now composed of the individual types
 export type ServerGeminiStreamEvent =
+  | ServerGeminiActiveGoalEvent
   | ServerGeminiChatCompressedEvent
   | ServerGeminiCitationEvent
   | ServerGeminiContentEvent

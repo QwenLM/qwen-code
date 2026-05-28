@@ -111,8 +111,13 @@ const env = {
 const isWin = platform() === 'win32';
 const tsxBinName = isWin ? 'tsx.cmd' : 'tsx';
 const localTsxCli = join(root, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+const localTsxCmd = join(root, 'node_modules', '.bin', tsxBinName);
 const hasLocalTsxCli = existsSync(localTsxCli);
-const tsxCmd = hasLocalTsxCli ? process.execPath : tsxBinName;
+const tsxCmd = hasLocalTsxCli
+  ? process.execPath
+  : existsSync(localTsxCmd)
+    ? localTsxCmd
+    : tsxBinName;
 const tsxArgs = [
   ...(hasLocalTsxCli ? [localTsxCli] : []),
   cliEntry,

@@ -5,6 +5,7 @@ export { SdkLogger } from './utils/logger.js';
 
 // Daemon HTTP client (talks to `qwen serve`; see GitHub issue #3803)
 export {
+  DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
   DaemonCapabilityMissingError,
   DaemonClient,
@@ -12,6 +13,7 @@ export {
   DaemonSessionClient,
   asKnownDaemonEvent,
   createDaemonSessionViewState,
+  isDaemonContentHash,
   isDaemonEventType,
   isKnownDaemonEvent,
   parseSseStream,
@@ -20,6 +22,21 @@ export {
   requireWorkspaceCwd,
   SseFramingError,
   type CreateSessionRequest,
+  type DaemonApprovalMode,
+  type DaemonApprovalModeChangedData,
+  type DaemonApprovalModeChangedEvent,
+  type DaemonApprovalModeResult,
+  type DaemonInitWorkspaceResult,
+  type DaemonMcpRestartResult,
+  type DaemonMcpServerRestartedData,
+  type DaemonMcpServerRestartedEvent,
+  type DaemonMcpServerRestartRefusedData,
+  type DaemonMcpServerRestartRefusedEvent,
+  type DaemonToolToggleResult,
+  type DaemonToolToggledData,
+  type DaemonToolToggledEvent,
+  type DaemonWorkspaceInitializedData,
+  type DaemonWorkspaceInitializedEvent,
   type DaemonAvailableCommand,
   type DaemonCapabilities,
   type DaemonEnvCell,
@@ -28,10 +45,18 @@ export {
   type DaemonClientEvictedData,
   type DaemonClientEvictedEvent,
   type DaemonClientOptions,
+  type DaemonContentHash,
   type DaemonControlEvent,
   type DaemonEvent,
   type DaemonEventEnvelope,
   type DaemonKnownEventType,
+  // PR 14b — MCP guardrail push-event types.
+  type DaemonMcpBudgetWarningData,
+  type DaemonMcpBudgetWarningEvent,
+  type DaemonMcpChildRefusedBatchData,
+  type DaemonMcpChildRefusedBatchEvent,
+  type DaemonMcpGuardrailEvent,
+  type DaemonMcpRefusedServer,
   type DaemonMcpDiscoveryState,
   type DaemonMcpServerRuntimeStatus,
   type DaemonMcpTransport,
@@ -66,6 +91,12 @@ export {
   type DaemonStatus,
   type DaemonStatusCell,
   type DaemonWorkspaceEnvStatus,
+  type DaemonWorkspaceFile,
+  type DaemonWorkspaceFileBytes,
+  type DaemonWorkspaceFileEditRequest,
+  type DaemonWorkspaceFileEditResult,
+  type DaemonWorkspaceFileWriteRequest,
+  type DaemonWorkspaceFileWriteResult,
   type DaemonWorkspacePreflightStatus,
   type DaemonSessionUpdateData,
   type DaemonSessionUpdateEvent,
@@ -106,6 +137,44 @@ export {
   type SetModelResult,
   type SessionMetadataResult,
   type SubscribeOptions,
+} from './daemon/index.js';
+
+// PR #4255 fold-in 9 review thread #11 — Issue #4175 PR 21 auth
+// surface. These were re-exported from `./daemon/index.js` but the
+// public SDK entry (this file) never re-exported them, so an
+// `import { DaemonAuthFlow } from '@qwen-code/sdk'` resolved to
+// undefined. The PR description lists `reduceDaemonAuthEvent` as
+// SDK surface and `client.auth.start()` works only because
+// `DaemonClient` (already exported above) constructs `DaemonAuthFlow`
+// internally; every other API path was unreachable.
+export {
+  DaemonAuthFlow,
+  DEVICE_FLOW_EXPIRY_GRACE_MS,
+  createDaemonAuthState,
+  reduceDaemonAuthEvent,
+  reduceDaemonAuthEvents,
+  type AwaitCompletionOptions,
+  type DaemonAuthDeviceFlowAuthorizedData,
+  type DaemonAuthDeviceFlowAuthorizedEvent,
+  type DaemonAuthDeviceFlowCancelledData,
+  type DaemonAuthDeviceFlowCancelledEvent,
+  type DaemonAuthDeviceFlowErrorKind,
+  type DaemonAuthDeviceFlowFailedData,
+  type DaemonAuthDeviceFlowFailedEvent,
+  type DaemonAuthDeviceFlowProviderId,
+  type DaemonAuthDeviceFlowStartedData,
+  type DaemonAuthDeviceFlowStartedEvent,
+  type DaemonAuthDeviceFlowStatus,
+  type DaemonAuthDeviceFlowThrottledData,
+  type DaemonAuthDeviceFlowThrottledEvent,
+  type DaemonAuthEvent,
+  type DaemonAuthFlowHandle,
+  type DaemonAuthProviderId,
+  type DaemonAuthState,
+  type DaemonAuthStatusSnapshot,
+  type DaemonDeviceFlowReducerState,
+  type DaemonDeviceFlowStartResult,
+  type DaemonDeviceFlowState,
 } from './daemon/index.js';
 
 // SDK MCP Server exports

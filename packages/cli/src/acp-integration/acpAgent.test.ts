@@ -2213,6 +2213,155 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  // PR 14b: budget-event push channel. After codex review fix #2, the
+  // callback is wired via `Config.setMcpBudgetEventCallback` BEFORE
+  // `config.initialize()`, so MCP discovery (which can fire events
+  // synchronously in legacy blocking mode and races with background
+  // discovery in progressive mode) sees the callback wired from the
+  // first pass. The Config-level shim stashes the callback and applies
+  // it inside `createToolRegistry` to the freshly-constructed manager.
+  it('newSession wires Config.setMcpBudgetEventCallback BEFORE initialize() (codex fix #2)', async () => {
+    const sessionId = 'session-budget-events';
+    const innerConfig = await setupSessionMocks(sessionId);
+    // Stub `setMcpBudgetEventCallback` on the inner Config. The
+    // production path delegates the manager apply to Config; the test
+    // captures the callback at the Config boundary and verifies the
+    // ordering vs `initialize()`.
+    let capturedCallback:
+      | ((event: Record<string, unknown>) => void)
+      | undefined;
+    const callOrder: string[] = [];
+    (innerConfig as unknown as Record<string, unknown>)[
+      'setMcpBudgetEventCallback'
+    ] = vi.fn((cb: (event: Record<string, unknown>) => void) => {
+      callOrder.push('setMcpBudgetEventCallback');
+      capturedCallback = cb;
+    });
+    // Wrap `initialize` to record its position in `callOrder`. The
+    // critical invariant codex review fix #2 enforces: setter runs
+    // BEFORE initialize.
+    const originalInitialize = innerConfig.initialize;
+    innerConfig.initialize = vi.fn().mockImplementation(async () => {
+      callOrder.push('initialize');
+      return originalInitialize();
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    // Spy connection: only `extNotification` is exercised here, but
+    // the AgentSideConnection contract is wide. Stubbing only what the
+    // PR 14b code path touches keeps the test focused.
+    const extNotification = vi.fn().mockResolvedValue(undefined);
+    const fakeConn = {
+      get closed() {
+        return mockConnectionState.promise;
+      },
+      extNotification,
+    };
+    const agent = capturedAgentFactory!(
+      fakeConn as unknown as AgentSideConnectionLike,
+    ) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // Strict ordering invariant — codex review fix #2.
+    expect(callOrder).toEqual(['setMcpBudgetEventCallback', 'initialize']);
+    expect(typeof capturedCallback).toBe('function');
+
+    // Fire a synthetic budget_warning through the captured callback —
+    // the wired extNotification must receive the same shape with
+    // `sessionId` inserted and `v: 1` envelope.
+    const warningEvent = {
+      kind: 'budget_warning' as const,
+      liveCount: 4,
+      reservedCount: 4,
+      budget: 4,
+      thresholdRatio: 0.75 as const,
+      mode: 'warn' as const,
+    };
+    capturedCallback!(warningEvent);
+
+    expect(extNotification).toHaveBeenCalledTimes(1);
+    expect(extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/mcp-budget-event',
+      {
+        v: 1,
+        sessionId,
+        ...warningEvent,
+      },
+    );
+
+    // Fire a refused_batch through the same callback — same routing,
+    // discriminated union shape preserved verbatim.
+    const refusedEvent = {
+      kind: 'refused_batch' as const,
+      refusedServers: [
+        { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+      ],
+      budget: 1,
+      liveCount: 1,
+      reservedCount: 1,
+      mode: 'enforce' as const,
+    };
+    capturedCallback!(refusedEvent);
+
+    expect(extNotification).toHaveBeenCalledTimes(2);
+    expect(extNotification).toHaveBeenLastCalledWith(
+      'qwen/notify/session/mcp-budget-event',
+      {
+        v: 1,
+        sessionId,
+        ...refusedEvent,
+      },
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('newSession is a no-op for budget wiring when setMcpBudgetEventCallback is absent (defensive)', async () => {
+    // Codex review fix #2: the wiring path now goes through
+    // `Config.setMcpBudgetEventCallback`, not the manager directly.
+    // Older / stubbed `Config` shapes may omit it; the `typeof check`
+    // in newSessionConfig keeps the absence silent.
+    const innerConfig = await setupSessionMocks('session-no-cb-setter');
+    // `setupSessionMocks`/`makeInnerConfig` returns a Config without
+    // `setMcpBudgetEventCallback` defined — that's the defensive case.
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const extNotification = vi.fn().mockResolvedValue(undefined);
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+      extNotification,
+    } as unknown as AgentSideConnectionLike) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // No setter on Config → no wiring → no extNotification fires.
+    expect(
+      (innerConfig as unknown as Record<string, unknown>)[
+        'setMcpBudgetEventCallback'
+      ],
+    ).toBeUndefined();
+    expect(extNotification).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 });
 
 // Regression coverage for the MR-review finding that ACP renameSession

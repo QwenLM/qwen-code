@@ -8,7 +8,9 @@
     "types": ["node", "vitest/globals"],
     "paths": {
       "@qwen-code/qwen-code-core": ["../core/src/index.ts"],
-      "@qwen-code/qwen-code-core/*": ["../core/src/*"]
+      "@qwen-code/qwen-code-core/*": ["../core/src/*"],
+      "@qwen-code/acp-bridge": ["../acp-bridge/src/index.ts"],
+      "@qwen-code/acp-bridge/*": ["../acp-bridge/src/*"]
     }
   },
   "include": [
@@ -94,6 +96,7 @@
   ],
   "references": [
     { "path": "../core" },
+    { "path": "../acp-bridge" },
     { "path": "../channels/base" },
     { "path": "../channels/telegram" },
     { "path": "../channels/weixin" },
