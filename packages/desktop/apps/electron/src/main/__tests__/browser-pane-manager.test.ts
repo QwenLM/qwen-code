@@ -40,6 +40,7 @@ function createMockWebContents() {
     getURL: mock(() => currentUrl),
     canGoBack: mock(() => false),
     canGoForward: mock(() => false),
+    isDestroyed: mock(() => false),
     goBack: mock(() => {}),
     goForward: mock(() => {}),
     reload: mock(() => {}),
@@ -73,18 +74,33 @@ function createMockWebContents() {
   }
 }
 
-function createMockBrowserView() {
-  const webContents = createMockWebContents()
-  return {
-    webContents,
+function createMockView(withWebContents = false) {
+  const children: any[] = []
+  const view: any = {
     setBounds: mock(() => {}),
-    setAutoResize: mock(() => {}),
+    setBackgroundColor: mock(() => {}),
+    setBorderRadius: mock(() => {}),
+    addChildView: mock((child: any) => {
+      const existingIndex = children.indexOf(child)
+      if (existingIndex >= 0) children.splice(existingIndex, 1)
+      children.push(child)
+    }),
+    removeChildView: mock((child: any) => {
+      const existingIndex = children.indexOf(child)
+      if (existingIndex >= 0) children.splice(existingIndex, 1)
+    }),
+    children,
   }
+  if (withWebContents) {
+    view.webContents = createMockWebContents()
+  }
+  return view
 }
 
 function createMockWindow(opts?: { width?: number; height?: number; minWidth?: number; minHeight?: number }) {
   const listeners: Record<string, Function[]> = {}
   const webContents = createMockWebContents()
+  const contentView = createMockView()
   let contentWidth = opts?.width ?? 1200
   let contentHeight = opts?.height ?? 900
   const minWidth = opts?.minWidth ?? 0
@@ -92,6 +108,7 @@ function createMockWindow(opts?: { width?: number; height?: number; minWidth?: n
 
   const win = {
     webContents,
+    contentView,
     on: (event: string, cb: Function) => {
       if (!listeners[event]) listeners[event] = []
       listeners[event].push(cb)
@@ -109,6 +126,7 @@ function createMockWindow(opts?: { width?: number; height?: number; minWidth?: n
     },
     isDestroyed: mock(() => false),
     isMinimized: mock(() => false),
+    isVisible: mock(() => false),
     restore: mock(() => {}),
     show: mock(() => {}),
     showInactive: mock(() => {}),
@@ -120,9 +138,6 @@ function createMockWindow(opts?: { width?: number; height?: number; minWidth?: n
     destroy: mock(() => {
       win._emit('closed')
     }),
-    setBrowserView: mock((_view: any) => {}),
-    addBrowserView: mock((_view: any) => {}),
-    setTopBrowserView: mock((_view: any) => {}),
     getContentSize: mock(() => [contentWidth, contentHeight]),
     setContentSize: mock((width: number, height: number) => {
       contentWidth = Math.max(minWidth, Math.floor(width))
@@ -143,10 +158,15 @@ mock.module('electron', () => ({
       Object.assign(this, win)
     }
   },
-  BrowserView: class MockBrowserView {
+  View: class MockView {
+    constructor() {
+      Object.assign(this, createMockView())
+    }
+  },
+  WebContentsView: class MockWebContentsView {
     webContents: any
     constructor(_opts?: any) {
-      const view = createMockBrowserView()
+      const view = createMockView(true)
       this.webContents = view.webContents
       Object.assign(this, view)
     }
@@ -164,6 +184,9 @@ mock.module('electron', () => ({
   },
   shell: {
     openExternal: mockShellOpenExternal,
+  },
+  app: {
+    getPath: mock(() => '/tmp'),
   },
   session: {
     fromPartition: mock(() => ({
@@ -260,6 +283,48 @@ describe('BrowserPaneManager', () => {
     expect(first).toBe('same-id')
     expect(second).toBe('same-id')
     expect(manager.listInstances()).toHaveLength(1)
+  })
+
+  it('docks an instance into a host window', () => {
+    const id = manager.createInstance('dock-1', {
+      show: true,
+      presentation: 'docked',
+    } as any)
+    const instance = (manager as any).instances.get('dock-1')
+    const hostWindow = createMockWindow({ width: 1000, height: 800 })
+
+    expect(id).toBe('dock-1')
+    expect(instance.window.show).toHaveBeenCalledTimes(0)
+    expect(manager.listInstances()[0].presentation).toBe('docked')
+
+    manager.dock('dock-1', hostWindow as any, {
+      x: 360,
+      y: 0,
+      width: 640,
+      height: 800,
+    })
+
+    expect(instance.viewHostWindow).toBe(hostWindow)
+    expect(hostWindow.contentView.addChildView).toHaveBeenCalledWith(instance.containerView)
+    expect(instance.containerView.setBounds.mock.calls.at(-1)?.[0]).toEqual({
+      x: 360,
+      y: 0,
+      width: 640,
+      height: 800,
+    })
+    expect(instance.containerView.setBorderRadius).toHaveBeenCalled()
+    expect(instance.toolbarView.setBounds.mock.calls.at(-1)?.[0]).toEqual({
+      x: 0,
+      y: 0,
+      width: 640,
+      height: 0,
+    })
+    expect(instance.pageView.setBounds.mock.calls.at(-1)?.[0]).toEqual({
+      x: 0,
+      y: 0,
+      width: 640,
+      height: 800,
+    })
   })
 
   it('allows http(s) popups with shared browser partition', () => {
@@ -647,6 +712,8 @@ describe('BrowserPaneManager', () => {
         canGoBack: true,
         canGoForward: false,
         themeColor: '#123456',
+        presentation: 'window',
+        dockExpanded: false,
       },
     ])
   })
@@ -678,6 +745,8 @@ describe('BrowserPaneManager', () => {
         canGoBack: true,
         canGoForward: true,
         themeColor: '#654321',
+        presentation: 'window',
+        dockExpanded: false,
       },
     ])
   })

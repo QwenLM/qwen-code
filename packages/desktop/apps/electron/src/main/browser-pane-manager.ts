@@ -1,15 +1,14 @@
 /**
  * BrowserPaneManager
  *
- * Owns browser instances as dedicated BrowserWindow objects.
- * Each instance maps 1:1 to a full native window while preserving
- * shared session/cookie partition and CDP automation support.
+ * Owns browser instances as native web contents views. Instances can live in
+ * a dedicated BrowserWindow or be docked into an app window.
  */
 
 import { join, parse as parsePath } from 'path'
 import { existsSync, mkdirSync } from 'fs'
 import { validateFilePath, getWorkspaceAllowedDirs } from '@craft-agent/server-core/handlers'
-import { BrowserView, BrowserWindow, app, ipcMain, nativeTheme, session, shell, type Session as ElectronSession } from 'electron'
+import { BrowserWindow, View, WebContentsView, app, ipcMain, nativeTheme, session, shell, type Session as ElectronSession } from 'electron'
 import { mainLog } from './logger'
 import type { WindowManager } from './window-manager'
 import { BrowserCDP, type AccessibilitySnapshot, type ElementGeometry } from './browser-cdp'
@@ -28,6 +27,7 @@ const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
 const TOOLBAR_LOAD_MAX_RETRIES = 4
 const TOOLBAR_LOAD_RETRY_DELAY_MS = 500
 const TOOLBAR_HEIGHT = 48
+const DOCK_CONTAINER_RADIUS = process.platform === 'darwin' ? 14 : 8
 const MAX_CONSOLE_LOG_ENTRIES = 500
 const MAX_NETWORK_LOG_ENTRIES = 500
 const MAX_DOWNLOAD_LOG_ENTRIES = 200
@@ -109,6 +109,7 @@ const TOOLBAR_CHANNELS = {
   STOP: 'browser-toolbar:stop',
   MENU_GEOMETRY: 'browser-toolbar:menu-geometry',
   FORCE_CLOSE_MENU: 'browser-toolbar:force-close-menu',
+  TOGGLE_DOCK_EXPANDED: 'browser-toolbar:toggle-dock-expanded',
   HIDE: 'browser-toolbar:hide',
   DESTROY: 'browser-toolbar:destroy',
   STATE_UPDATE: 'browser-toolbar:state-update',
@@ -132,9 +133,11 @@ interface AgentControlLockState {
 interface BrowserInstance {
   id: string
   window: BrowserWindow
-  toolbarView: BrowserView
-  pageView: BrowserView
-  nativeOverlayView: BrowserView
+  viewHostWindow: BrowserWindow
+  containerView: View
+  toolbarView: WebContentsView
+  pageView: WebContentsView
+  nativeOverlayView: WebContentsView
   cdp: BrowserCDP
   currentUrl: string
   title: string
@@ -146,6 +149,9 @@ interface BrowserInstance {
   ownerType: 'session' | 'manual'
   ownerSessionId: string | null
   isVisible: boolean
+  presentation: 'window' | 'docked'
+  dockBounds: BrowserPaneDockBounds | null
+  dockExpanded: boolean
   keepAliveOnWindowClose: boolean
   toolbarReady: boolean
   toolbarMenuOpen: boolean
@@ -171,6 +177,14 @@ interface CreateBrowserInstanceOptions {
   show?: boolean
   ownerType?: 'session' | 'manual'
   ownerSessionId?: string
+  presentation?: 'window' | 'docked'
+}
+
+interface BrowserPaneDockBounds {
+  x: number
+  y: number
+  width: number
+  height: number
 }
 
 export interface BrowserScreenshotOptions {
@@ -348,9 +362,24 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     const shouldShow = options?.show ?? false
     const ownerType = options?.ownerType ?? 'manual'
     const ownerSessionId = ownerType === 'session' ? (options?.ownerSessionId ?? null) : null
+    const presentation = options?.presentation ?? 'window'
 
-    if (this.instances.has(instanceId)) {
+    const existingInstance = this.instances.get(instanceId)
+    if (existingInstance) {
       mainLog.warn(`[browser-pane] Instance already exists, reusing: ${instanceId}`)
+      if (options?.presentation) {
+        existingInstance.presentation = options.presentation
+      }
+      if (shouldShow) {
+        if (existingInstance.presentation === 'docked') {
+          existingInstance.isVisible = true
+          existingInstance.pendingShowOnReady = false
+          existingInstance.pendingShowToken += 1
+          this.emitStateChange(existingInstance)
+        } else {
+          this.focus(existingInstance.id)
+        }
+      }
       return instanceId
     }
 
@@ -368,7 +397,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       minHeight: 500,
       show: false, // Always hidden until toolbar is painted (ready-to-show)
       backgroundColor: bgColor,
-      // Fully chromeless — toolbar is rendered in a dedicated BrowserView
+      // Fully chromeless — toolbar is rendered in a dedicated WebContentsView
       frame: false,
       webPreferences: {
         partition: SESSION_PARTITION,
@@ -379,7 +408,10 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       },
     })
 
-    const toolbarView = new BrowserView({
+    const containerView = new View()
+    containerView.setBackgroundColor('#00000000')
+
+    const toolbarView = new WebContentsView({
       webPreferences: {
         preload: join(__dirname, 'browser-toolbar-preload.cjs'),
         partition: SESSION_PARTITION,
@@ -390,7 +422,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       },
     })
 
-    const pageView = new BrowserView({
+    const pageView = new WebContentsView({
       webPreferences: {
         partition: SESSION_PARTITION,
         session: ses,
@@ -400,12 +432,12 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       },
     })
 
-    const supportsMultiView = typeof window.addBrowserView === 'function' && typeof window.setTopBrowserView === 'function'
+    const supportsMultiView = typeof window.contentView?.addChildView === 'function'
     if (!supportsMultiView) {
-      throw new Error('[browser-pane] Native overlay requires BrowserWindow.addBrowserView + setTopBrowserView')
+      throw new Error('[browser-pane] Native overlay requires BrowserWindow.contentView.addChildView')
     }
 
-    const nativeOverlayView = new BrowserView({
+    const nativeOverlayView = new WebContentsView({
       webPreferences: {
         partition: SESSION_PARTITION,
         session: ses,
@@ -415,19 +447,18 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       },
     })
 
-    // Set BrowserView backgrounds to match theme so about:blank doesn't flash white
-    const toolbarWcWithBg = toolbarView.webContents as typeof toolbarView.webContents & { setBackgroundColor?: (color: string) => void }
-    toolbarWcWithBg.setBackgroundColor?.('#00000000')
-    const pageWcWithBg = pageView.webContents as typeof pageView.webContents & { setBackgroundColor?: (color: string) => void }
-    pageWcWithBg.setBackgroundColor?.(bgColor)
-    const overlayWcWithBg = nativeOverlayView.webContents as typeof nativeOverlayView.webContents & { setBackgroundColor?: (color: string) => void }
-    overlayWcWithBg.setBackgroundColor?.('#00000000')
+    // Set view backgrounds to match theme so about:blank doesn't flash white.
+    toolbarView.setBackgroundColor('#00000000')
+    pageView.setBackgroundColor(bgColor)
+    nativeOverlayView.setBackgroundColor('#00000000')
 
     const cdp = new BrowserCDP(pageView.webContents)
 
     const instance: BrowserInstance = {
       id: instanceId,
       window,
+      viewHostWindow: window,
+      containerView,
       toolbarView,
       pageView,
       nativeOverlayView,
@@ -441,13 +472,16 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       boundSessionId: ownerSessionId,
       ownerType,
       ownerSessionId,
-      isVisible: false,
+      isVisible: presentation === 'docked' ? shouldShow : false,
+      presentation,
+      dockBounds: null,
+      dockExpanded: false,
       keepAliveOnWindowClose: true,
       toolbarReady: false,
       toolbarMenuOpen: false,
       toolbarMenuHeight: 0,
       toolbarMenuOverlayActive: false,
-      showOnCreate: shouldShow,
+      showOnCreate: presentation === 'window' ? shouldShow : false,
       pendingShowOnReady: false,
       pendingShowToken: 0,
       lastAction: null,
@@ -472,10 +506,10 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       pageView.webContents.setUserAgent(sanitizedUa)
     }
 
-    window.addBrowserView(pageView)
-    window.addBrowserView(nativeOverlayView)
-    window.addBrowserView(toolbarView)
-    window.setTopBrowserView(toolbarView)
+    containerView.addChildView(pageView)
+    containerView.addChildView(nativeOverlayView)
+    containerView.addChildView(toolbarView)
+    window.contentView.addChildView(containerView)
     void this.loadNativeOverlayPage(instance)
 
     this.layoutAllViews(instance)
@@ -536,6 +570,11 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     runCleanup('closePopupsForParent', () => this.closePopupsForParent(instance.id, 'parent_destroy'))
     runCleanup('applyAgentControlLock', () => this.applyAgentControlLock(instance, false))
     runCleanup('updateNativeOverlayState', () => this.updateNativeOverlayState(instance))
+    runCleanup('restoreViewsToOwner', () => {
+      if (!instance.window.isDestroyed()) {
+        this.attachViewsToHost(instance, instance.window)
+      }
+    })
 
     try {
       if (!instance.window.isDestroyed()) {
@@ -747,6 +786,18 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     const win = instance.window
     if (win.isDestroyed()) return
 
+    if (instance.presentation === 'docked') {
+      instance.isVisible = true
+      const hostWindow = this.getViewHostWindow(instance)
+      if (hostWindow && hostWindow !== instance.window) {
+        if (hostWindow.isMinimized()) hostWindow.restore()
+        hostWindow.focus()
+        instance.pageView.webContents.focus()
+      }
+      this.emitStateChange(instance)
+      return
+    }
+
     // If toolbar hasn't painted yet, defer showing until markToolbarReady runs.
     // Token guard prevents stale deferred focus from showing after hide/destroy.
     if (!instance.toolbarReady) {
@@ -765,6 +816,53 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     this.emitStateChange(instance)
   }
 
+  dock(id: string, hostWindow: BrowserWindow, bounds: BrowserPaneDockBounds): void {
+    const instance = this.instances.get(id)
+    if (!instance || instance.window.isDestroyed() || hostWindow.isDestroyed()) return
+
+    const nextBounds = {
+      x: Math.max(0, Math.round(bounds.x)),
+      y: Math.max(0, Math.round(bounds.y)),
+      width: Math.max(0, Math.round(bounds.width)),
+      height: Math.max(0, Math.round(bounds.height)),
+    }
+    const previousBounds = instance.dockBounds
+    const boundsChanged = !previousBounds
+      || previousBounds.x !== nextBounds.x
+      || previousBounds.y !== nextBounds.y
+      || previousBounds.width !== nextBounds.width
+      || previousBounds.height !== nextBounds.height
+    const stateChanged = instance.presentation !== 'docked'
+      || !instance.isVisible
+      || instance.viewHostWindow !== hostWindow
+
+    instance.presentation = 'docked'
+    instance.dockBounds = nextBounds
+    instance.isVisible = nextBounds.width > 0 && nextBounds.height > 0
+    instance.pendingShowOnReady = false
+    instance.pendingShowToken += 1
+
+    this.attachViewsToHost(instance, hostWindow)
+    if (!instance.window.isDestroyed() && instance.window.isVisible()) {
+      instance.window.hide()
+    }
+    this.layoutAllViews(instance)
+
+    if (stateChanged || boundsChanged) {
+      this.emitStateChange(instance)
+    }
+  }
+
+  toggleDockExpanded(id: string): void {
+    const instance = this.instances.get(id)
+    if (!instance || instance.presentation !== 'docked') return
+
+    instance.dockExpanded = !instance.dockExpanded
+    this.forceCloseToolbarMenu(instance, 'dock-toggle')
+    this.pushToolbarState(instance)
+    this.emitStateChange(instance)
+  }
+
   hide(id: string): void {
     const instance = this.instances.get(id)
     if (!instance) return
@@ -779,6 +877,14 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     }
 
     this.forceCloseToolbarMenu(instance, 'window-hide')
+
+    if (instance.presentation === 'docked') {
+      instance.isVisible = false
+      instance.dockBounds = null
+      this.hideHostedViews(instance)
+      this.emitStateChange(instance)
+      return
+    }
 
     win.hide()
 
@@ -1876,18 +1982,88 @@ export class BrowserPaneManager implements IBrowserPaneManager {
   }
 
   private getToolbarEffectiveHeight(instance: BrowserInstance): number {
+    if (instance.presentation === 'docked') return 0
     if (!instance.toolbarMenuOpen) return TOOLBAR_HEIGHT
 
-    const [, contentHeight] = instance.window.getContentSize()
-    return Math.max(TOOLBAR_HEIGHT, contentHeight)
+    const frame = this.getLayoutFrame(instance)
+    return Math.max(TOOLBAR_HEIGHT, frame?.height ?? TOOLBAR_HEIGHT)
+  }
+
+  private getLayoutFrame(instance: BrowserInstance): BrowserPaneDockBounds | null {
+    if (instance.presentation === 'docked') {
+      if (!instance.isVisible || !instance.dockBounds) return null
+      return instance.dockBounds
+    }
+
+    if (instance.window.isDestroyed()) return null
+
+    const [width, height] = instance.window.getContentSize()
+    return { x: 0, y: 0, width, height }
+  }
+
+  private getViewHostWindow(instance: BrowserInstance): BrowserWindow | null {
+    return instance.viewHostWindow.isDestroyed() ? null : instance.viewHostWindow
+  }
+
+  private removeViewsFromWindow(window: BrowserWindow, instance: BrowserInstance): void {
+    if (window.isDestroyed()) return
+
+    try {
+      window.contentView.removeChildView(instance.containerView)
+    } catch {
+      // Electron throws if a view is not attached to this host.
+    }
+  }
+
+  private attachViewsToHost(instance: BrowserInstance, hostWindow: BrowserWindow): void {
+    if (hostWindow.isDestroyed()) return
+    if (instance.viewHostWindow === hostWindow && !hostWindow.isDestroyed()) return
+
+    this.removeViewsFromWindow(instance.viewHostWindow, instance)
+    hostWindow.contentView.addChildView(instance.containerView)
+    instance.viewHostWindow = hostWindow
+  }
+
+  private hideHostedViews(instance: BrowserInstance): void {
+    instance.containerView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+    instance.toolbarView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+    instance.pageView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+    instance.nativeOverlayView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+  }
+
+  private raiseToolbarView(instance: BrowserInstance): void {
+    instance.containerView.addChildView(instance.toolbarView)
+  }
+
+  private layoutContainerView(instance: BrowserInstance): BrowserPaneDockBounds | null {
+    const frame = this.getLayoutFrame(instance)
+    if (!frame) {
+      this.hideHostedViews(instance)
+      return null
+    }
+
+    instance.containerView.setBounds(frame)
+    instance.containerView.setBorderRadius(
+      instance.presentation === 'docked' ? DOCK_CONTAINER_RADIUS : 0,
+    )
+
+    return frame
   }
 
   private layoutToolbarView(instance: BrowserInstance): void {
-    const [width] = instance.window.getContentSize()
+    const frame = this.layoutContainerView(instance)
+    if (!frame) {
+      return
+    }
+
     const toolbarHeight = this.getToolbarEffectiveHeight(instance)
 
-    instance.toolbarView.setBounds({ x: 0, y: 0, width, height: toolbarHeight })
-    instance.toolbarView.setAutoResize({ width: true, height: false })
+    instance.toolbarView.setBounds({
+      x: 0,
+      y: 0,
+      width: frame.width,
+      height: toolbarHeight,
+    })
   }
 
   private updateNativeOverlayState(instance: BrowserInstance): void {
@@ -1896,19 +2072,24 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     const menuActive = !!instance.toolbarMenuOverlayActive
     const shouldShow = agentActive || menuActive
 
-    if (!shouldShow || !instance.nativeOverlayReady || instance.window.isDestroyed()) {
+    const hostWindow = this.getViewHostWindow(instance)
+    const frame = this.getLayoutFrame(instance)
+
+    if (!shouldShow || !instance.nativeOverlayReady || !hostWindow || !frame) {
       instance.nativeOverlayView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
-      if (!instance.window.isDestroyed()) {
-        instance.window.setTopBrowserView(instance.toolbarView)
-      }
+      this.raiseToolbarView(instance)
       return
     }
 
-    const [width, height] = instance.window.getContentSize()
-    const overlayHeight = Math.max(100, height - TOOLBAR_HEIGHT)
-    instance.nativeOverlayView.setBounds({ x: 0, y: TOOLBAR_HEIGHT, width, height: overlayHeight })
-    instance.nativeOverlayView.setAutoResize({ width: true, height: true })
-    instance.window.setTopBrowserView(instance.toolbarView)
+    const toolbarHeight = this.getToolbarEffectiveHeight(instance)
+    const overlayHeight = Math.max(100, frame.height - toolbarHeight)
+    instance.nativeOverlayView.setBounds({
+      x: 0,
+      y: toolbarHeight,
+      width: frame.width,
+      height: overlayHeight,
+    })
+    this.raiseToolbarView(instance)
 
     if (agentActive) {
       const label = this.getAgentControlLabel(control)
@@ -1997,18 +2178,26 @@ export class BrowserPaneManager implements IBrowserPaneManager {
   }
 
   private layoutPageView(instance: BrowserInstance): void {
-    const [width, height] = instance.window.getContentSize()
-    instance.pageView.setBounds({ x: 0, y: TOOLBAR_HEIGHT, width, height: Math.max(100, height - TOOLBAR_HEIGHT) })
-    instance.pageView.setAutoResize({ width: true, height: true })
+    const frame = this.layoutContainerView(instance)
+    if (!frame) {
+      this.updateNativeOverlayState(instance)
+      return
+    }
+
+    const toolbarHeight = this.getToolbarEffectiveHeight(instance)
+    instance.pageView.setBounds({
+      x: 0,
+      y: toolbarHeight,
+      width: frame.width,
+      height: Math.max(100, frame.height - toolbarHeight),
+    })
     this.updateNativeOverlayState(instance)
   }
 
   private layoutAllViews(instance: BrowserInstance): void {
     this.layoutToolbarView(instance)
     this.layoutPageView(instance)
-    if (!instance.window.isDestroyed()) {
-      instance.window.setTopBrowserView(instance.toolbarView)
-    }
+    this.raiseToolbarView(instance)
   }
 
   private forceCloseToolbarMenu(instance: BrowserInstance, reason: string): void {
@@ -2193,6 +2382,8 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       canGoBack: instance.canGoBack,
       canGoForward: instance.canGoForward,
       themeColor: instance.themeColor,
+      presentation: instance.presentation,
+      dockExpanded: instance.dockExpanded,
     }
     instance.toolbarView.webContents.send(TOOLBAR_CHANNELS.STATE_UPDATE, state)
   }
@@ -2252,6 +2443,10 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       this.layoutAllViews(inst)
     })
 
+    ipcMain.handle(TOOLBAR_CHANNELS.TOGGLE_DOCK_EXPANDED, async (_event, instanceId: string) => {
+      this.toggleDockExpanded(instanceId)
+    })
+
     ipcMain.handle(TOOLBAR_CHANNELS.HIDE, async (_event, instanceId: string) => {
       const inst = findInstance(instanceId)
       mainLog.info(`[browser-pane] toolbar ipc hide requested instanceId=${instanceId} resolved=${inst?.id ?? 'none'}`)
@@ -2281,6 +2476,12 @@ export class BrowserPaneManager implements IBrowserPaneManager {
 
     if (instance.window.isDestroyed()) return
     if (instance.pendingShowToken !== tokenAtReady) return
+
+    if (instance.presentation === 'docked') {
+      instance.isVisible = true
+      this.emitStateChange(instance)
+      return
+    }
 
     instance.window.show()
     instance.window.focus()
@@ -3087,6 +3288,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     })
 
     instance.window.on('hide', () => {
+      if (instance.presentation === 'docked') return
       instance.isVisible = false
       this.emitStateChange(instance)
       this.updateNativeOverlayState(instance)
@@ -3112,6 +3314,8 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       isVisible: instance.isVisible,
       agentControlActive: !!instance.agentControl?.active,
       themeColor: instance.themeColor,
+      presentation: instance.presentation,
+      dockExpanded: instance.dockExpanded,
     }
   }
 

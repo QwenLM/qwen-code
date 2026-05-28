@@ -3,6 +3,7 @@ import { createStore } from 'jotai'
 import type { BrowserInstanceInfo } from '../../../shared/types'
 import {
   browserInstancesAtom,
+  DEFAULT_DOCKED_BROWSER_INSTANCE_ID,
   removeBrowserInstanceAtom,
   setBrowserInstancesAtom,
   updateBrowserInstanceAtom,
@@ -52,5 +53,19 @@ describe('browser pane atoms', () => {
     store.set(setBrowserInstancesAtom, [makeInstance('browser-2')])
 
     expect(store.get(browserInstancesAtom).map((i) => i.id)).toEqual(['browser-2'])
+  })
+
+  it('allows the fixed docked browser ID to reopen after removal', () => {
+    const store = createStore()
+
+    store.set(removeBrowserInstanceAtom, DEFAULT_DOCKED_BROWSER_INSTANCE_ID)
+    store.set(
+      updateBrowserInstanceAtom,
+      makeInstance(DEFAULT_DOCKED_BROWSER_INSTANCE_ID),
+    )
+
+    expect(store.get(browserInstancesAtom).map((i) => i.id)).toEqual([
+      DEFAULT_DOCKED_BROWSER_INSTANCE_ID,
+    ])
   })
 })

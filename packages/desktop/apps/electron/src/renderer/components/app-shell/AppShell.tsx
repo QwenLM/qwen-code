@@ -68,6 +68,7 @@ import {
 import { SessionList, type ChatGroupingMode } from './SessionList'
 import { MainContentPanel } from './MainContentPanel'
 import { PanelStackContainer } from './PanelStackContainer'
+import { BrowserDockPanel } from './BrowserDockPanel'
 import type { ChatDisplayHandle } from './ChatDisplay'
 import { LeftSidebar } from './LeftSidebar'
 import { WorkspaceProjectTree } from './WorkspaceProjectTree'
@@ -3255,6 +3256,12 @@ function AppShellContent({
     effectiveSessionStatuses,
   ])
 
+  const browserDockExpandedLeft = effectiveSidebarAndNavigatorHidden
+    ? PANEL_EDGE_INSET
+    : isSidebarVisible
+      ? sidebarWidth + PANEL_GAP
+      : PANEL_EDGE_INSET
+
   return (
     <AppShellProvider value={appShellContextValue}>
       {/* === TOP BAR === */}
@@ -4734,6 +4741,11 @@ function AppShellContent({
           isRightSidebarVisible={false}
           isCompact={isAutoCompact}
           isResizing={!!isResizing}
+        />
+
+        <BrowserDockPanel
+          expandedLeft={browserDockExpandedLeft}
+          isCompact={isAutoCompact}
         />
 
         {/* Sidebar Resize Handle */}

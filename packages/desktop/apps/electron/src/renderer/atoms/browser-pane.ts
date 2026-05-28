@@ -8,6 +8,8 @@
 import { atom } from 'jotai'
 import type { BrowserInstanceInfo } from '../../shared/types'
 
+export const DEFAULT_DOCKED_BROWSER_INSTANCE_ID = 'built-in-browser'
+
 /** Map of all browser instances by ID */
 export const browserInstancesMapAtom = atom<Map<string, BrowserInstanceInfo>>(new Map())
 
@@ -40,7 +42,13 @@ export const updateBrowserInstanceAtom = atom(
   (get, set, info: BrowserInstanceInfo) => {
     const removedIds = get(removedBrowserInstanceIdsAtom)
     if (removedIds.has(info.id)) {
-      return
+      if (info.id !== DEFAULT_DOCKED_BROWSER_INSTANCE_ID) {
+        return
+      }
+
+      const nextRemovedIds = new Set(removedIds)
+      nextRemovedIds.delete(info.id)
+      set(removedBrowserInstanceIdsAtom, nextRemovedIds)
     }
 
     const map = new Map(get(browserInstancesMapAtom))

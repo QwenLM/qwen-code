@@ -16,6 +16,7 @@ const CHANNELS = {
   STOP: 'browser-toolbar:stop',
   MENU_GEOMETRY: 'browser-toolbar:menu-geometry',
   FORCE_CLOSE_MENU: 'browser-toolbar:force-close-menu',
+  TOGGLE_DOCK_EXPANDED: 'browser-toolbar:toggle-dock-expanded',
   HIDE: 'browser-toolbar:hide',
   DESTROY: 'browser-toolbar:destroy',
   STATE_UPDATE: 'browser-toolbar:state-update',
@@ -33,6 +34,7 @@ contextBridge.exposeInMainWorld('browserToolbar', {
   reload: () => ipcRenderer.invoke(CHANNELS.RELOAD, instanceId),
   stop: () => ipcRenderer.invoke(CHANNELS.STOP, instanceId),
   setMenuGeometry: (open: boolean, height = 0) => ipcRenderer.invoke(CHANNELS.MENU_GEOMETRY, instanceId, open, height),
+  toggleDockExpanded: () => ipcRenderer.invoke(CHANNELS.TOGGLE_DOCK_EXPANDED, instanceId),
   hideWindow: () => ipcRenderer.invoke(CHANNELS.HIDE, instanceId),
   closeWindowEntirely: () => ipcRenderer.invoke(CHANNELS.DESTROY, instanceId),
   onStateUpdate: (callback: (state: unknown) => void) => {

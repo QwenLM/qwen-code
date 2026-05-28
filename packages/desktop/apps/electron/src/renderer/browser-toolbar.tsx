@@ -8,7 +8,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import ReactDOM from 'react-dom/client'
-import { EyeOff, X, XCircle } from 'lucide-react'
+import { EyeOff, Maximize2, Minimize2, X, XCircle } from 'lucide-react'
 import { BrowserControls } from '@craft-agent/ui'
 import { HeaderIconButton } from '@/components/ui/HeaderIconButton'
 import {
@@ -30,6 +30,8 @@ interface ToolbarState {
   canGoBack: boolean
   canGoForward: boolean
   themeColor?: string | null
+  presentation?: 'window' | 'docked'
+  dockExpanded?: boolean
 }
 
 declare global {
@@ -42,6 +44,7 @@ declare global {
       reload: () => Promise<void>
       stop: () => Promise<void>
       setMenuGeometry: (open: boolean, height?: number) => Promise<void>
+      toggleDockExpanded: () => Promise<void>
       hideWindow: () => Promise<void>
       closeWindowEntirely: () => Promise<void>
       onStateUpdate: (callback: (state: ToolbarState) => void) => () => void
@@ -144,6 +147,10 @@ function BrowserToolbarApp() {
     void api?.stop()
   }, [api])
 
+  const handleToggleDockExpanded = useCallback(() => {
+    void api?.toggleDockExpanded()
+  }, [api])
+
   const handleHideWindow = useCallback(() => {
     setWindowMenuOpen(false)
     void api?.hideWindow()
@@ -183,34 +190,60 @@ function BrowserToolbarApp() {
         onStop={handleStop}
         trailingContent={(
           <div className="ml-2 flex items-center gap-1.5 titlebar-no-drag">
-            <DropdownMenu open={windowMenuOpen} onOpenChange={setWindowMenuOpen}>
-              <DropdownMenuTrigger asChild>
+            {state.presentation === 'docked' && (
+              <>
                 <HeaderIconButton
-                  icon={<X className="h-3.5 w-3.5" />}
-                  aria-label="Browser window options"
+                  icon={state.dockExpanded ? (
+                    <Minimize2 className="h-3.5 w-3.5" />
+                  ) : (
+                    <Maximize2 className="h-3.5 w-3.5" />
+                  )}
+                  aria-label={state.dockExpanded ? 'Restore panel width' : 'Expand panel'}
+                  tooltip={state.dockExpanded ? 'Restore panel width' : 'Expand panel'}
+                  onClick={handleToggleDockExpanded}
                   className={themeColor ? '' : 'bg-background shadow-minimal hover:bg-foreground/5'}
                   style={themeColor ? { color: 'var(--tb-fg)' } : undefined}
                 />
-              </DropdownMenuTrigger>
+                <HeaderIconButton
+                  icon={<X className="h-3.5 w-3.5" />}
+                  aria-label="Close side panel"
+                  tooltip="Close side panel"
+                  onClick={handleHideWindow}
+                  className={themeColor ? '' : 'bg-background shadow-minimal hover:bg-foreground/5'}
+                  style={themeColor ? { color: 'var(--tb-fg)' } : undefined}
+                />
+              </>
+            )}
+            {state.presentation !== 'docked' && (
+              <DropdownMenu open={windowMenuOpen} onOpenChange={setWindowMenuOpen}>
+                <DropdownMenuTrigger asChild>
+                  <HeaderIconButton
+                    icon={<X className="h-3.5 w-3.5" />}
+                    aria-label="Browser window options"
+                    className={themeColor ? '' : 'bg-background shadow-minimal hover:bg-foreground/5'}
+                    style={themeColor ? { color: 'var(--tb-fg)' } : undefined}
+                  />
+                </DropdownMenuTrigger>
 
-              <StyledDropdownMenuContent
-                ref={menuContentRef}
-                align="end"
-                side="bottom"
-                sideOffset={6}
-                minWidth="min-w-44"
-                className="titlebar-no-drag z-[110] max-h-none overflow-visible"
-              >
-                <StyledDropdownMenuItem onSelect={handleHideWindow}>
-                  <EyeOff className="h-3.5 w-3.5" />
-                  Hide Window
-                </StyledDropdownMenuItem>
-                <StyledDropdownMenuItem variant="destructive" onSelect={handleCloseWindowEntirely}>
-                  <XCircle className="h-3.5 w-3.5" />
-                  Close Window Entirely
-                </StyledDropdownMenuItem>
-              </StyledDropdownMenuContent>
-            </DropdownMenu>
+                <StyledDropdownMenuContent
+                  ref={menuContentRef}
+                  align="end"
+                  side="bottom"
+                  sideOffset={6}
+                  minWidth="min-w-44"
+                  className="titlebar-no-drag z-[110] max-h-none overflow-visible"
+                >
+                  <StyledDropdownMenuItem onSelect={handleHideWindow}>
+                    <EyeOff className="h-3.5 w-3.5" />
+                    Hide Window
+                  </StyledDropdownMenuItem>
+                  <StyledDropdownMenuItem variant="destructive" onSelect={handleCloseWindowEntirely}>
+                    <XCircle className="h-3.5 w-3.5" />
+                    Close Window Entirely
+                  </StyledDropdownMenuItem>
+                </StyledDropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         )}
         themeColor={themeColor}

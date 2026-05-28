@@ -1,4 +1,4 @@
-import { RPC_CHANNELS, type BrowserPaneCreateOptions, type BrowserEmptyStateLaunchPayload } from '../../shared/types'
+import { RPC_CHANNELS, type BrowserPaneCreateOptions, type BrowserEmptyStateLaunchPayload, type BrowserPaneDockBounds } from '../../shared/types'
 import type { BrowserScreenshotOptions } from '../browser-pane-manager'
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from './handler-deps'
@@ -13,6 +13,9 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.browserPane.RELOAD,
   RPC_CHANNELS.browserPane.STOP,
   RPC_CHANNELS.browserPane.FOCUS,
+  RPC_CHANNELS.browserPane.HIDE,
+  RPC_CHANNELS.browserPane.DOCK,
+  RPC_CHANNELS.browserPane.TOGGLE_DOCK_EXPANDED,
   RPC_CHANNELS.browserPane.LAUNCH,
   RPC_CHANNELS.browserPane.SNAPSHOT,
   RPC_CHANNELS.browserPane.CLICK,
@@ -24,7 +27,7 @@ export const HANDLED_CHANNELS = [
 ] as const
 
 export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): void {
-  const { browserPaneManager, platform } = deps
+  const { browserPaneManager, platform, windowManager } = deps
   if (!browserPaneManager) return
 
   server.handle(RPC_CHANNELS.browserPane.CREATE, (_ctx, input?: string | BrowserPaneCreateOptions) => {
@@ -36,7 +39,10 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
       return browserPaneManager.createForSession(input.bindToSessionId, { show: input.show ?? false })
     }
 
-    return browserPaneManager.createInstance(input?.id, { show: input?.show })
+    return browserPaneManager.createInstance(input?.id, {
+      show: input?.show,
+      presentation: input?.presentation,
+    })
   })
 
   server.handle(RPC_CHANNELS.browserPane.DESTROY, (_ctx, id: string) => {
@@ -84,6 +90,26 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
 
   server.handle(RPC_CHANNELS.browserPane.FOCUS, (_ctx, id: string) => {
     browserPaneManager.focus(id)
+  })
+
+  server.handle(RPC_CHANNELS.browserPane.HIDE, (_ctx, id: string) => {
+    browserPaneManager.hide(id)
+  })
+
+  server.handle(RPC_CHANNELS.browserPane.DOCK, (ctx, id: string, bounds: BrowserPaneDockBounds) => {
+    const hostWindow = ctx.webContentsId && windowManager
+      ? windowManager.getWindowByWebContentsId(ctx.webContentsId)
+      : null
+    if (!hostWindow) {
+      platform.logger.warn(`[browser-pane] dock ignored for ${id}: host window unavailable`)
+      return
+    }
+
+    browserPaneManager.dock(id, hostWindow, bounds)
+  })
+
+  server.handle(RPC_CHANNELS.browserPane.TOGGLE_DOCK_EXPANDED, (_ctx, id: string) => {
+    browserPaneManager.toggleDockExpanded(id)
   })
 
   server.handle(RPC_CHANNELS.browserPane.LAUNCH, async (ctx, payload: BrowserEmptyStateLaunchPayload) => {

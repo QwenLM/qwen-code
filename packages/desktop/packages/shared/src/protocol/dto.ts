@@ -1135,6 +1135,8 @@ export interface BrowserInstanceInfo {
   isVisible: boolean
   agentControlActive: boolean
   themeColor: string | null
+  presentation?: 'window' | 'docked'
+  dockExpanded?: boolean
 }
 
 export interface DeepLinkNavigation {

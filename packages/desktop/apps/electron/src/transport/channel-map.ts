@@ -380,6 +380,11 @@ export const CHANNEL_MAP = {
   'browserPane.reload': invoke(RPC_CHANNELS.browserPane.RELOAD),
   'browserPane.stop': invoke(RPC_CHANNELS.browserPane.STOP),
   'browserPane.focus': invoke(RPC_CHANNELS.browserPane.FOCUS),
+  'browserPane.hide': invoke(RPC_CHANNELS.browserPane.HIDE),
+  'browserPane.dock': invoke(RPC_CHANNELS.browserPane.DOCK),
+  'browserPane.toggleDockExpanded': invoke(
+    RPC_CHANNELS.browserPane.TOGGLE_DOCK_EXPANDED,
+  ),
   'browserPane.emptyStateLaunch': invoke(RPC_CHANNELS.browserPane.LAUNCH),
   'browserPane.onStateChanged': listener(
     RPC_CHANNELS.browserPane.STATE_CHANGED,

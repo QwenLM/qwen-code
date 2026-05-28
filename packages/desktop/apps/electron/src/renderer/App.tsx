@@ -61,6 +61,7 @@ import {
 } from '@/atoms/sessions'
 import { sourcesAtom } from '@/atoms/sources'
 import { skillsAtom } from '@/atoms/skills'
+import { DEFAULT_DOCKED_BROWSER_INSTANCE_ID } from '@/atoms/browser-pane'
 import { extractBadges } from '@/lib/mentions'
 import { extractCommandBadges } from '@/lib/slash-command-badges'
 import { contentBadgesToTextElements } from '@craft-agent/core/utils'
@@ -1935,7 +1936,11 @@ export default function App() {
           return
         }
 
-        instanceId = await browserPaneApi.create({ show: true })
+        instanceId = await browserPaneApi.create({
+          id: DEFAULT_DOCKED_BROWSER_INSTANCE_ID,
+          show: true,
+          presentation: 'docked',
+        })
         await browserPaneApi.navigate(instanceId, trimmedUrl)
         await browserPaneApi.focus(instanceId)
       } catch (error) {

@@ -130,6 +130,7 @@ export const BROWSER_TOOLBAR_CHANNELS = {
   RELOAD: 'browser-toolbar:reload',
   STOP: 'browser-toolbar:stop',
   OPEN_MENU: 'browser-toolbar:open-menu',
+  TOGGLE_DOCK_EXPANDED: 'browser-toolbar:toggle-dock-expanded',
   HIDE: 'browser-toolbar:hide',
   DESTROY: 'browser-toolbar:destroy',
   STATE_UPDATE: 'browser-toolbar:state-update',
@@ -152,6 +153,14 @@ export interface BrowserPaneCreateOptions {
   id?: string
   show?: boolean
   bindToSessionId?: string
+  presentation?: 'window' | 'docked'
+}
+
+export interface BrowserPaneDockBounds {
+  x: number
+  y: number
+  width: number
+  height: number
 }
 
 /**
@@ -902,6 +911,9 @@ export interface ElectronAPI {
     reload(id: string): Promise<void>
     stop(id: string): Promise<void>
     focus(id: string): Promise<void>
+    hide(id: string): Promise<void>
+    dock(id: string, bounds: BrowserPaneDockBounds): Promise<void>
+    toggleDockExpanded(id: string): Promise<void>
     emptyStateLaunch(
       payload: BrowserEmptyStateLaunchPayload,
     ): Promise<BrowserEmptyStateLaunchResult>

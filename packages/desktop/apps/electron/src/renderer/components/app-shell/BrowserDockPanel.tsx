@@ -1,0 +1,262 @@
+import * as React from 'react'
+import { useAtomValue, useSetAtom } from 'jotai'
+import { Maximize2, Minimize2, X } from 'lucide-react'
+import {
+  activeBrowserInstanceIdAtom,
+  browserInstancesAtom,
+  removeBrowserInstanceAtom,
+  setBrowserInstancesAtom,
+  updateBrowserInstanceAtom,
+} from '@/atoms/browser-pane'
+import { cn } from '@/lib/utils'
+import { HeaderIconButton } from '@/components/ui/HeaderIconButton'
+import { RADIUS_EDGE } from './panel-constants'
+import type { BrowserInstanceInfo } from '../../../shared/types'
+
+const DOCK_WIDTH = 'clamp(480px, 42vw, 640px)'
+const DOCK_HEADER_HEIGHT = 48
+
+type BrowserDockAction = 'expand' | 'close'
+
+interface BrowserDockPanelProps {
+  expandedLeft: number
+  isCompact?: boolean
+}
+
+export function BrowserDockPanel({
+  expandedLeft,
+  isCompact = false,
+}: BrowserDockPanelProps) {
+  const browserInstances = useAtomValue(browserInstancesAtom)
+  const setBrowserInstances = useSetAtom(setBrowserInstancesAtom)
+  const updateBrowserInstance = useSetAtom(updateBrowserInstanceAtom)
+  const removeBrowserInstance = useSetAtom(removeBrowserInstanceAtom)
+  const setActiveBrowserInstanceId = useSetAtom(activeBrowserInstanceIdAtom)
+  const [hoveredAction, setHoveredAction] = React.useState<BrowserDockAction | null>(null)
+  const dockedInstance = React.useMemo(() => {
+    return browserInstances.find(
+      (instance) => instance.presentation === 'docked' && instance.isVisible,
+    ) ?? null
+  }, [browserInstances])
+  const panelRef = React.useRef<HTMLDivElement | null>(null)
+  const viewportRef = React.useRef<HTMLDivElement | null>(null)
+  const lastBoundsKeyRef = React.useRef<string | null>(null)
+
+  const expanded = isCompact || !!dockedInstance?.dockExpanded
+
+  const handleToggleExpanded = React.useCallback(() => {
+    if (!dockedInstance) return
+
+    void window.electronAPI?.browserPane
+      ?.toggleDockExpanded(dockedInstance.id)
+      .catch((error) => {
+        console.warn('[BrowserDockPanel] Failed to toggle browser dock:', error)
+      })
+  }, [dockedInstance])
+
+  const handleClose = React.useCallback(() => {
+    if (!dockedInstance) return
+
+    void window.electronAPI?.browserPane
+      ?.hide(dockedInstance.id)
+      .catch((error) => {
+        console.warn('[BrowserDockPanel] Failed to close browser dock:', error)
+      })
+  }, [dockedInstance])
+
+  React.useEffect(() => {
+    const browserPaneApi = window.electronAPI?.browserPane
+    if (!browserPaneApi || !window.electronAPI.isChannelAvailable('browser-pane:list')) {
+      setBrowserInstances([])
+      setActiveBrowserInstanceId(null)
+      return
+    }
+
+    let cancelled = false
+
+    void browserPaneApi.list()
+      .then((items) => {
+        if (cancelled) return
+        setBrowserInstances(items)
+        setActiveBrowserInstanceId((prev) => {
+          if (prev && items.some((item) => item.id === prev)) return prev
+          return items[0]?.id ?? null
+        })
+      })
+      .catch((error) => {
+        if (cancelled) return
+        console.warn('[BrowserDockPanel] Failed to list browser panes:', error)
+        setBrowserInstances([])
+        setActiveBrowserInstanceId(null)
+      })
+
+    const cleanupState = browserPaneApi.onStateChanged((info: BrowserInstanceInfo) => {
+      updateBrowserInstance(info)
+      setActiveBrowserInstanceId((prev) => prev ?? info.id)
+    })
+
+    const cleanupRemoved = browserPaneApi.onRemoved((id: string) => {
+      removeBrowserInstance(id)
+      setActiveBrowserInstanceId((prev) => (prev === id ? null : prev))
+    })
+
+    const cleanupInteracted = browserPaneApi.onInteracted((id: string) => {
+      setActiveBrowserInstanceId(id)
+    })
+
+    return () => {
+      cancelled = true
+      cleanupState()
+      cleanupRemoved()
+      cleanupInteracted()
+    }
+  }, [
+    removeBrowserInstance,
+    setActiveBrowserInstanceId,
+    setBrowserInstances,
+    updateBrowserInstance,
+  ])
+
+  React.useLayoutEffect(() => {
+    if (!dockedInstance) return
+
+    const browserPaneApi = window.electronAPI?.browserPane
+    if (!browserPaneApi?.dock) return
+
+    lastBoundsKeyRef.current = null
+
+    const syncBounds = () => {
+      const rect = viewportRef.current?.getBoundingClientRect()
+      if (!rect || rect.width <= 0 || rect.height <= 0) return
+
+      const left = Math.ceil(rect.left)
+      const top = Math.ceil(rect.top)
+      const right = Math.floor(rect.right)
+      const bottom = Math.floor(rect.bottom)
+      const width = Math.max(0, right - left)
+      const height = Math.max(0, bottom - top)
+      if (width <= 0 || height <= 0) return
+
+      const bounds = {
+        x: left,
+        y: top,
+        width,
+        height,
+      }
+      const boundsKey = [
+        Math.round(bounds.x),
+        Math.round(bounds.y),
+        Math.round(bounds.width),
+        Math.round(bounds.height),
+      ].join(':')
+
+      if (lastBoundsKeyRef.current === boundsKey) return
+      lastBoundsKeyRef.current = boundsKey
+
+      void browserPaneApi.dock(dockedInstance.id, bounds).catch((error) => {
+        console.warn('[BrowserDockPanel] Failed to sync browser dock bounds:', error)
+      })
+    }
+
+    const frame = requestAnimationFrame(syncBounds)
+    const observer = new ResizeObserver(syncBounds)
+    if (viewportRef.current) {
+      observer.observe(viewportRef.current)
+    }
+    window.addEventListener('resize', syncBounds)
+
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+      window.removeEventListener('resize', syncBounds)
+    }
+  }, [dockedInstance, expanded])
+
+  if (!dockedInstance) return null
+
+  const expandLabel = expanded ? 'Restore panel width' : 'Expand panel'
+  const tooltipLabel =
+    hoveredAction === 'expand'
+      ? expandLabel
+      : hoveredAction === 'close'
+        ? 'Close side panel'
+        : null
+
+  return (
+    <div
+      ref={panelRef}
+      className={cn(
+        'shrink-0 overflow-hidden bg-background shadow-middle',
+        'border-l border-foreground/10',
+        expanded ? 'absolute z-fullscreen' : 'relative z-panel',
+      )}
+      style={
+        expanded
+          ? {
+              top: 0,
+              bottom: 0,
+              left: Math.max(0, expandedLeft),
+              right: 0,
+              borderTopRightRadius: RADIUS_EDGE,
+              borderBottomRightRadius: RADIUS_EDGE,
+            }
+          : {
+              width: DOCK_WIDTH,
+              borderTopRightRadius: RADIUS_EDGE,
+              borderBottomRightRadius: RADIUS_EDGE,
+            }
+      }
+    >
+      <div
+        className={cn(
+          'flex items-center justify-between gap-2 px-3',
+          'border-b border-foreground/10 bg-background/95',
+        )}
+        style={{ height: DOCK_HEADER_HEIGHT }}
+      >
+        <div className="min-w-0 flex-1 truncate text-sm font-medium text-foreground/80">
+          {dockedInstance.title || 'Browser'}
+        </div>
+        <div className="relative flex shrink-0 items-center gap-1">
+          {tooltipLabel && (
+            <div className="pointer-events-none absolute right-full top-1/2 mr-2 -translate-y-1/2 whitespace-nowrap rounded-[6px] bg-popover px-2 py-1 text-xs text-popover-foreground shadow-modal-small">
+              {tooltipLabel}
+            </div>
+          )}
+          <HeaderIconButton
+            icon={
+              expanded ? (
+                <Minimize2 className="h-3.5 w-3.5" />
+              ) : (
+                <Maximize2 className="h-3.5 w-3.5" />
+              )
+            }
+            aria-label={expandLabel}
+            onMouseEnter={() => setHoveredAction('expand')}
+            onMouseLeave={() => setHoveredAction(null)}
+            onFocus={() => setHoveredAction('expand')}
+            onBlur={() => setHoveredAction(null)}
+            onClick={handleToggleExpanded}
+          />
+          <HeaderIconButton
+            icon={<X className="h-3.5 w-3.5" />}
+            aria-label="Close side panel"
+            onMouseEnter={() => setHoveredAction('close')}
+            onMouseLeave={() => setHoveredAction(null)}
+            onFocus={() => setHoveredAction('close')}
+            onBlur={() => setHoveredAction(null)}
+            onClick={handleClose}
+          />
+        </div>
+      </div>
+      <div
+        ref={viewportRef}
+        className="absolute inset-x-0 bottom-0 overflow-hidden"
+        style={{
+          top: DOCK_HEADER_HEIGHT,
+          borderBottomRightRadius: RADIUS_EDGE,
+        }}
+      />
+    </div>
+  )
+}
