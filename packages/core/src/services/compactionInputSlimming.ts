@@ -100,10 +100,10 @@ function resolveNumber(
 
 /**
  * Approximate char count for a single `Part`, used by
- * `findCompressSplitPoint` and by the slimming module's own budget
+ * `estimateContentChars` and by the slimming module's own budget
  * accounting. Binary parts get a fixed budget (in chars) derived from
  * the configured token estimate; this keeps base64 payloads from
- * skewing the split point or token-budget math.
+ * skewing compression size estimation or token-budget math.
  */
 export function estimatePartChars(
   part: Part,

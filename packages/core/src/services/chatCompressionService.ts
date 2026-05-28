@@ -15,36 +15,11 @@ import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import {
-  DEFAULT_IMAGE_TOKEN_ESTIMATE,
-  estimateContentChars,
   resolveSlimmingConfig,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
 import { estimatePromptTokens } from './tokenEstimation.js';
 import { composePostCompactHistory } from './postCompactAttachments.js';
-
-/**
- * The fraction of the latest chat history to keep. A value of 0.3
- * means that only the last 30% of the chat history will be kept after compression.
- */
-export const COMPRESSION_PRESERVE_THRESHOLD = 0.3;
-
-/**
- * Minimum fraction of history (by character count) that must be compressible
- * to proceed with a compression API call. Prevents futile calls where the
- * model receives almost no context and generates a useless summary.
- */
-export const MIN_COMPRESSION_FRACTION = 0.05;
-
-/**
- * When the trailing entry is an in-flight `model+functionCall` and the regular
- * scan finds no clean split past the target fraction, the splitter falls back
- * to compressing everything except the last few entries. This constant sets
- * how many most-recent complete `(model+functionCall, user+functionResponse)`
- * tool rounds are retained as working context (the trailing in-flight call is
- * always retained on top of these).
- */
-export const TOOL_ROUND_RETAIN_COUNT = 2;
 
 /**
  * Hard cap on the compression sideQuery output (summary text only, since
@@ -149,118 +124,6 @@ export function computeThresholds(window: number): CompactionThresholds {
 }
 
 export type CompactTrigger = 'manual' | 'auto';
-
-const hasFunctionCall = (content: Content | undefined): boolean =>
-  !!content?.parts?.some((part) => !!part.functionCall);
-
-const hasFunctionResponse = (content: Content | undefined): boolean =>
-  !!content?.parts?.some((part) => !!part.functionResponse);
-
-/**
- * Walk backward from the trailing in-flight `model+functionCall` and return
- * the index after which the most-recent `retainCount` complete tool-round
- * pairs sit (plus the trailing fc itself). Used by the splitter's in-flight
- * fallback path. Stops counting at the first non-pair encountered, so the
- * retain count is best-effort: if there are fewer complete pairs than
- * requested, all of them are retained.
- */
-function splitPointRetainingTrailingPairs(
-  contents: Content[],
-  retainCount: number,
-): number {
-  let pairsFound = 0;
-  let i = contents.length - 2;
-  while (i >= 1 && pairsFound < retainCount) {
-    if (hasFunctionCall(contents[i - 1]) && hasFunctionResponse(contents[i])) {
-      pairsFound += 1;
-      i -= 2;
-    } else {
-      break;
-    }
-  }
-  return contents.length - (2 * pairsFound + 1);
-}
-
-/**
- * Returns the index of the oldest item to keep when compressing. May return
- * contents.length which indicates that everything should be compressed.
- *
- * The algorithm has two phases:
- *
- * 1. **Scan:** walk left-to-right looking for the first non-functionResponse
- *    user message that lands past `fraction` of total chars. That's the
- *    "clean" split — the kept slice starts with a fresh user prompt.
- *
- * 2. **Fallbacks** (no clean split found): the gate that gets us here has
- *    already decided we need to compress, so all three fallbacks bias toward
- *    *more* compression rather than less:
- *
- *    - last entry is `model` without functionCall → compress everything.
- *    - last entry is `user` with functionResponse → compress everything (the
- *      trailing tool round is complete; no orphans).
- *    - last entry is `model` with functionCall (in-flight) → compress
- *      everything except the trailing call plus the last `retainCount`
- *      complete tool rounds. The kept slice may start with `model+fc`;
- *      callers must inject a synthetic continuation user message between
- *      `summary_ack_model` and the kept slice to preserve role alternation.
- *
- * The pre-fallback returns of `lastSplitPoint` (compress less) only happen
- * for malformed histories that don't end in user/model.
- *
- * Exported for testing purposes.
- */
-export function findCompressSplitPoint(
-  contents: Content[],
-  fraction: number,
-  retainCount = TOOL_ROUND_RETAIN_COUNT,
-  precomputedCharCounts?: number[],
-): number {
-  if (fraction <= 0 || fraction >= 1) {
-    throw new Error('Fraction must be between 0 and 1');
-  }
-
-  // Slimming-aware char estimator: base64 payloads in inlineData
-  // would otherwise dominate the split. The caller can pre-compute and
-  // pass `precomputedCharCounts` to avoid a redundant walk when the
-  // surrounding compress() loop also needs the values.
-  //
-  // NOTE on the fallback: when `precomputedCharCounts` is omitted, we
-  // use `DEFAULT_IMAGE_TOKEN_ESTIMATE` rather than the user's resolved
-  // setting / env override. The only production caller is `compress()`,
-  // which always passes precomputed counts, so the fallback is a
-  // test-friendly default — not a behavior path users can influence.
-  // Production callers MUST pass `precomputedCharCounts`.
-  const charCounts =
-    precomputedCharCounts ??
-    contents.map((content) =>
-      estimateContentChars(content, DEFAULT_IMAGE_TOKEN_ESTIMATE),
-    );
-  const totalCharCount = charCounts.reduce((a, b) => a + b, 0);
-  const targetCharCount = totalCharCount * fraction;
-
-  let lastSplitPoint = 0;
-  let cumulativeCharCount = 0;
-  for (let i = 0; i < contents.length; i++) {
-    const content = contents[i];
-    if (content.role === 'user' && !hasFunctionResponse(content)) {
-      if (cumulativeCharCount >= targetCharCount) {
-        return i;
-      }
-      lastSplitPoint = i;
-    }
-    cumulativeCharCount += charCounts[i];
-  }
-
-  const lastContent = contents[contents.length - 1];
-  if (lastContent?.role === 'model') {
-    if (!hasFunctionCall(lastContent)) return contents.length;
-    return splitPointRetainingTrailingPairs(contents, retainCount);
-  }
-  if (lastContent?.role === 'user' && hasFunctionResponse(lastContent)) {
-    return contents.length;
-  }
-  return lastSplitPoint;
-}
 
 export interface CompressOptions {
   promptId: string;
@@ -408,23 +271,6 @@ export class ChatCompressionService {
       }
     }
 
-    // Only manual `/compress` (trigger='manual') performs the orphan-strip:
-    // if the chat was interrupted with a trailing model funcCall whose
-    // funcResponse never arrived, the user-initiated /compress between
-    // turns can safely drop it before computing the split point.
-    //
-    // Both automatic paths (trigger='auto') — cheap-gate (force=false) AND
-    // hard-rescue (force=true) — must NOT strip. They fire inside
-    // sendMessageStream() BEFORE the pending funcResponse is pushed onto
-    // history, so the trailing funcCall is still active, not orphaned.
-    //
-    // Gating on `trigger === 'manual'` instead of `force` disambiguates
-    // "user wants this compressed now, history can be mutated" from
-    // "automatic compression mid-turn, history snapshot is live state and
-    // must be preserved verbatim". Earlier the predicate used `force`,
-    // which is correct for manual /compress (force=true, trigger='manual')
-    // but conflated hard-rescue (force=true, trigger='auto') and silently
-    // stripped active funcCalls there.
     // CLAUDE-CODE-STYLE FULL-HISTORY COMPRESSION
     // We no longer split the history into "compress" + "keep" slices.
     // The entire curated history is sent to the summary side-query, and

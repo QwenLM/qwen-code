@@ -270,7 +270,7 @@ export interface BugCommandSettings {
 export interface ChatCompressionSettings {
   /**
    * Estimated tokens for a single inline image / document part when
-   * apportioning chars across history in `findCompressSplitPoint`.
+   * apportioning chars across history during compression size estimation.
    * Also used as the placeholder budget when stripping inline media
    * out of the side-query compaction prompt. Default 1600.
    * Env override: `QWEN_IMAGE_TOKEN_ESTIMATE`.
