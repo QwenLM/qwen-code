@@ -507,7 +507,7 @@ export class ChatCompressionService {
           role: 'user',
           parts: [
             {
-              text: 'First, reason in your scratchpad. Then, generate the <state_snapshot>.',
+              text: 'First, reason in your scratchpad. Then, produce the 9-section summary.',
             },
           ],
         },

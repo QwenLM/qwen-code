@@ -779,10 +779,11 @@ describe('getCompressionPrompt', () => {
 
   it('mandates verbatim preservation of user messages', () => {
     const prompt = getCompressionPrompt();
-    // Hardest part of the discipline: model must NOT paraphrase user input.
-    expect(prompt.toLowerCase()).toMatch(
-      /verbatim|word[\s-]for[\s-]word|exactly as|do not paraphrase/,
-    );
+    // Must explicitly say "preserve every user message verbatim" — the
+    // word "verbatim" alone is insufficient because it also appears in
+    // section 4 ("error messages verbatim").
+    expect(prompt).toContain('preserve every user message verbatim');
+    expect(prompt).toContain('do NOT paraphrase');
   });
 
   it('instructs the model to resume directly without acknowledging the summary', () => {
