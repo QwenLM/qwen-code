@@ -279,4 +279,407 @@ describe('<VirtualizedList />', () => {
     expect(listRef!.getScrollIndex()).toBeLessThanOrEqual(4);
     expect(listRef!.getScrollIndex()).toBeGreaterThanOrEqual(0);
   });
+
+  describe('scrollBy', () => {
+    it('scrollBy positive moves the viewport down', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={makeItems(30)}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={0}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+      expect(listRef!.getScrollState().scrollTop).toBe(0);
+
+      act(() => {
+        listRef!.scrollBy(3);
+      });
+      rerender(<Wrapper />);
+      expect(listRef!.getScrollState().scrollTop).toBe(3);
+    });
+
+    it('scrollBy negative moves the viewport up and clears sticking-to-bottom', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={makeItems(30)}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={SCROLL_TO_ITEM_END}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+
+      act(() => {
+        listRef!.scrollBy(-5);
+      });
+      rerender(<Wrapper />);
+      // After scrolling up, scrollTop should be less than maxScroll
+      const state = listRef!.getScrollState();
+      expect(state.scrollTop).toBe(state.scrollHeight - state.innerHeight - 5);
+    });
+
+    it('scrollBy past bottom re-engages sticking-to-bottom with live end anchor', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={makeItems(30)}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={0}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+
+      act(() => {
+        listRef!.scrollBy(9999);
+      });
+      rerender(<Wrapper />);
+      // Should be at the very end
+      expect(listRef!.getScrollIndex()).toBe(29);
+      const state = listRef!.getScrollState();
+      expect(state.scrollTop).toBe(state.scrollHeight - state.innerHeight);
+    });
+
+    it('scrollBy clamps to 0 when scrolling past the top', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={makeItems(30)}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={2}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+
+      act(() => {
+        listRef!.scrollBy(-9999);
+      });
+      rerender(<Wrapper />);
+      expect(listRef!.getScrollState().scrollTop).toBe(0);
+    });
+  });
+
+  describe('scrollTo', () => {
+    it('scrollTo middle offset positions correctly', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={makeItems(30)}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={0}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+
+      act(() => {
+        listRef!.scrollTo(10);
+      });
+      rerender(<Wrapper />);
+      expect(listRef!.getScrollState().scrollTop).toBe(10);
+    });
+
+    it('scrollTo 0 moves to the beginning', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={makeItems(30)}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={SCROLL_TO_ITEM_END}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+
+      act(() => {
+        listRef!.scrollTo(0);
+      });
+      rerender(<Wrapper />);
+      expect(listRef!.getScrollState().scrollTop).toBe(0);
+    });
+
+    it('scrollTo past maxScroll re-engages sticking-to-bottom', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={makeItems(30)}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={0}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+
+      act(() => {
+        listRef!.scrollTo(9999);
+      });
+      rerender(<Wrapper />);
+      expect(listRef!.getScrollIndex()).toBe(29);
+      const state = listRef!.getScrollState();
+      expect(state.scrollTop).toBe(state.scrollHeight - state.innerHeight);
+    });
+
+    it('scrollTo negative is clamped to 0', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={makeItems(30)}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={10}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+
+      act(() => {
+        listRef!.scrollTo(-100);
+      });
+      rerender(<Wrapper />);
+      expect(listRef!.getScrollState().scrollTop).toBe(0);
+    });
+  });
+
+  describe('auto-scroll during streaming', () => {
+    it('auto-scrolls when at bottom and data grows', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+      let items = makeItems(10);
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={items}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={SCROLL_TO_ITEM_END}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+      expect(listRef!.getScrollIndex()).toBe(9);
+
+      // Simulate streaming: add new items
+      items = makeItems(15);
+      rerender(<Wrapper />);
+      rerender(<Wrapper />);
+      // Should auto-scroll to the new last item
+      expect(listRef!.getScrollIndex()).toBe(14);
+    });
+
+    it('does NOT auto-scroll when user has scrolled away from bottom', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+      let items = makeItems(20);
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={items}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={SCROLL_TO_ITEM_END}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+
+      // User scrolls up
+      act(() => {
+        listRef!.scrollTo(0);
+      });
+      rerender(<Wrapper />);
+      expect(listRef!.getScrollState().scrollTop).toBe(0);
+
+      // New data arrives
+      items = makeItems(25);
+      rerender(<Wrapper />);
+      rerender(<Wrapper />);
+      // Should NOT auto-scroll — user explicitly scrolled away
+      expect(listRef!.getScrollState().scrollTop).toBe(0);
+    });
+
+    it('re-engages auto-scroll when user scrolls back to bottom', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+      let items = makeItems(20);
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={items}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={SCROLL_TO_ITEM_END}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+
+      // User scrolls up
+      act(() => {
+        listRef!.scrollTo(0);
+      });
+      rerender(<Wrapper />);
+
+      // User scrolls back to bottom
+      act(() => {
+        listRef!.scrollToEnd();
+      });
+      rerender(<Wrapper />);
+      expect(listRef!.getScrollIndex()).toBe(19);
+
+      // New data arrives — should auto-scroll again
+      items = makeItems(25);
+      rerender(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef!.getScrollIndex()).toBe(24);
+    });
+  });
 });

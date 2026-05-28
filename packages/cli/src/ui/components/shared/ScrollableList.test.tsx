@@ -125,3 +125,180 @@ describe('<ScrollableList /> mouse wheel', () => {
     expect(lastFrame()).toBe(before);
   });
 });
+
+// ANSI escape sequences for keyboard scroll commands.
+// Modifier encoding: CSI code ; (1 + modifier_bits) char
+// shift = bit 0 → modifier param = 2; ctrl = bit 2 → modifier param = 5
+const SHIFT_UP = `${ESC}[1;2A`;
+const SHIFT_DOWN = `${ESC}[1;2B`;
+const PAGE_UP = `${ESC}[5~`;
+const PAGE_DOWN = `${ESC}[6~`;
+const CTRL_HOME = `${ESC}[1;5H`;
+const CTRL_END = `${ESC}[1;5F`;
+
+describe('<ScrollableList /> keyboard scroll', () => {
+  const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+
+  it('Shift+Up scrolls up by 1 line', async () => {
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={10}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, lastFrame, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(lastFrame()).not.toContain('item-0');
+
+    await act(async () => {
+      for (let i = 0; i < 15; i++) stdin.write(SHIFT_UP);
+    });
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-0');
+  });
+
+  it('Shift+Down scrolls down by 1 line', async () => {
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, lastFrame, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-0');
+
+    await act(async () => {
+      for (let i = 0; i < 5; i++) stdin.write(SHIFT_DOWN);
+    });
+    await act(async () => {});
+    expect(lastFrame()).not.toContain('item-0');
+  });
+
+  it('PageUp scrolls up by one page (containerHeight lines)', async () => {
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={20}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, lastFrame, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(lastFrame()).not.toContain('item-0');
+
+    // 4 PageUp with containerHeight=5 scrolls 20 lines → item-0 visible
+    await act(async () => {
+      for (let i = 0; i < 4; i++) stdin.write(PAGE_UP);
+    });
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-0');
+  });
+
+  it('PageDown scrolls down by one page', async () => {
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, lastFrame, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-0');
+
+    await act(async () => {
+      stdin.write(PAGE_DOWN);
+    });
+    await act(async () => {});
+    expect(lastFrame()).not.toContain('item-0');
+  });
+
+  it('Ctrl+Home scrolls to the very top', async () => {
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, lastFrame, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(lastFrame()).not.toContain('item-0');
+
+    await act(async () => {
+      stdin.write(CTRL_HOME);
+    });
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-0');
+  });
+
+  it('Ctrl+End scrolls to the very bottom', async () => {
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, lastFrame, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-0');
+
+    await act(async () => {
+      stdin.write(CTRL_END);
+    });
+    await act(async () => {});
+    expect(lastFrame()).toContain('item-49');
+  });
+});
