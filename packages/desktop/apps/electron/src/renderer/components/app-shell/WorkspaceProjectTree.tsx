@@ -1,7 +1,5 @@
 import * as React from "react"
 import { useTranslation } from "react-i18next"
-import { formatDistanceToNowStrict } from "date-fns"
-import type { Locale } from "date-fns"
 import { AnimatePresence } from "motion/react"
 import { useSetAtom } from "jotai"
 import { ChevronDown, ChevronRight, Cloud, ExternalLink, Flag, Folder, FolderPlus, MessageSquare, Pencil, Pin, PinOff, Trash2 } from "lucide-react"
@@ -28,7 +26,7 @@ import { SessionMenu } from "./SessionMenu"
 import { SquarePenRounded } from "../icons/SquarePenRounded"
 import { useSessionActions } from "@/hooks/useSessionActions"
 import { useWorkspaceIcons } from "@/hooks/useWorkspaceIcon"
-import { getSessionTitle, hasUnreadMeta, shortTimeLocale } from "@/utils/session"
+import { formatSessionRelativeTime, getSessionTitle, hasUnreadMeta } from "@/utils/session"
 import { getWorkspaceDisplayName, isConversationWorkspace, isProtectedWorkspace } from "@/utils/workspace"
 import { Spinner, Tooltip, TooltipContent, TooltipTrigger } from "@craft-agent/ui"
 import type { LabelConfig } from "@craft-agent/shared/labels"
@@ -315,10 +313,7 @@ function ProjectSessionRow({
       </span>
       <span className="justify-self-end text-[11px] text-foreground/38 tabular-nums">
         {session.lastMessageAt && (
-          formatDistanceToNowStrict(new Date(session.lastMessageAt), {
-            locale: shortTimeLocale as Locale,
-            roundingMethod: "floor",
-          })
+          formatSessionRelativeTime(session.lastMessageAt)
         )}
       </span>
       <span className="flex h-1.5 w-1.5 items-center justify-center justify-self-center">

@@ -1,5 +1,3 @@
-import { formatDistanceToNowStrict } from "date-fns"
-import type { Locale } from "date-fns"
 import { Flag, ShieldAlert } from "lucide-react"
 import { useActionLabel } from "@/actions"
 import { cn } from "@/lib/utils"
@@ -11,7 +9,7 @@ import { SessionMenu } from "./SessionMenu"
 import { BatchSessionMenu } from "./BatchSessionMenu"
 import { SessionStatusIcon } from "./SessionStatusIcon"
 import { SessionBadges } from "./SessionBadges"
-import { getSessionTitle, getSessionPreviewText, highlightMatch, hasUnreadMeta, shortTimeLocale } from "@/utils/session"
+import { getSessionTitle, getSessionPreviewText, highlightMatch, hasUnreadMeta, formatSessionRelativeTime } from "@/utils/session"
 import { useSessionListContext } from "@/context/SessionListContext"
 import { useAppShellContext } from "@/context/AppShellContext"
 import { navigate, routes } from "@/lib/navigate"
@@ -233,7 +231,7 @@ export function SessionItem({
         </div>
       ) : item.lastMessageAt ? (
         <span className="text-[11px] text-foreground/40 whitespace-nowrap">
-          {formatDistanceToNowStrict(new Date(item.lastMessageAt), { locale: shortTimeLocale as Locale, roundingMethod: 'floor' })}
+          {formatSessionRelativeTime(item.lastMessageAt)}
         </span>
       ) : undefined}
       badges={hasLabels ? <SessionBadges item={item} /> : undefined}

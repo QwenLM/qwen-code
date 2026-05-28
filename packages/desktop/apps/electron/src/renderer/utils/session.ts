@@ -1,5 +1,7 @@
 import * as React from "react"
 import i18next from "i18next"
+import { formatDistanceToNowStrict } from "date-fns"
+import type { Locale } from "date-fns"
 import { truncateTitle } from "@craft-agent/shared/utils/title-generator"
 import type { Session, Message } from "../../shared/types"
 import type { SessionMeta } from "../atoms/sessions"
@@ -172,6 +174,19 @@ export const shortTimeLocale = {
     const key = tokenToKey[token]
     return key ? i18next.t(key, { count }) : `${count}`
   },
+}
+
+const JUST_NOW_THRESHOLD_MS = 60 * 60 * 1000
+
+export function formatSessionRelativeTime(timestamp: number): string {
+  if (Date.now() - timestamp < JUST_NOW_THRESHOLD_MS) {
+    return i18next.t('common.justNow', 'Just now')
+  }
+
+  return formatDistanceToNowStrict(new Date(timestamp), {
+    locale: shortTimeLocale as Locale,
+    roundingMethod: 'floor',
+  })
 }
 
 /** Highlight matching text in a string with yellow background spans. */
