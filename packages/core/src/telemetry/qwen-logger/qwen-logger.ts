@@ -593,6 +593,8 @@ export class QwenLogger {
     const rumEvent = this.createActionEvent('tool', 'tool_output_truncated', {
       properties: {
         tool_name: event.tool_name,
+        prompt_id: event.prompt_id,
+        call_id: event.call_id,
       },
       snapshots: JSON.stringify({
         original_content_length: event.original_content_length,

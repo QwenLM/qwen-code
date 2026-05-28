@@ -1244,6 +1244,7 @@ describe('loggers', () => {
     it('should log a tool output truncated event', () => {
       const event = new ToolOutputTruncatedEvent('prompt-id-1', {
         toolName: 'test-tool',
+        callId: 'call-id-1',
         originalContentLength: 1000,
         truncatedContentLength: 100,
         threshold: 500,
@@ -1262,6 +1263,7 @@ describe('loggers', () => {
           eventName: 'tool_output_truncated',
           prompt_id: 'prompt-id-1',
           tool_name: 'test-tool',
+          call_id: 'call-id-1',
           original_content_length: 1000,
           truncated_content_length: 100,
           threshold: 500,

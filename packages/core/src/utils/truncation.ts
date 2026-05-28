@@ -160,7 +160,7 @@ export async function truncateAndSaveToFile(
   threshold: number,
   truncateLines: number,
   contentLabel = 'Tool output',
-): Promise<{ content: string; outputFile?: string }> {
+): Promise<{ content: string; outputFile?: string; saveError?: unknown }> {
   // Check both constraints: character threshold and line limit.
   if (!shouldTruncateContent(content, threshold, truncateLines)) {
     return { content };
@@ -204,6 +204,7 @@ export async function truncateAndSaveToFile(
     );
     return {
       content: formatTruncatedContent(truncatedContent, contentLabel),
+      saveError: error,
     };
   }
 }
@@ -232,7 +233,7 @@ export async function truncateToolOutput(
     contentLabel?: string;
     callId?: string;
   } = {},
-): Promise<{ content: string; outputFile?: string }> {
+): Promise<{ content: string; outputFile?: string; saveError?: unknown }> {
   const threshold =
     options.threshold ?? config.getTruncateToolOutputThreshold();
   const lines = options.lines ?? config.getTruncateToolOutputLines();
@@ -258,6 +259,7 @@ export async function truncateToolOutput(
       config,
       new ToolOutputTruncatedEvent(promptId, {
         toolName,
+        callId: options.callId ?? '',
         originalContentLength: originalLength,
         truncatedContentLength: result.content.length,
         threshold,
@@ -272,7 +274,9 @@ export async function truncateToolOutput(
         toolName,
         callId: options.callId ?? '',
         originalContentLength: originalLength,
-        error: new Error('failed to save full truncated content to file'),
+        error:
+          result.saveError ??
+          new Error('failed to save full truncated content to file'),
       }),
     );
   }

@@ -13,7 +13,11 @@ import type { Config } from '../config/config.js';
 vi.mock('node:fs/promises');
 
 const toolOutputTruncatedEvents = vi.hoisted(
-  (): Array<{ prompt_id: string; output_file?: string }> => [],
+  (): Array<{
+    prompt_id: string;
+    call_id?: string;
+    output_file?: string;
+  }> => [],
 );
 const toolOutputTruncationFailedEvents = vi.hoisted(
   (): Array<{
@@ -296,6 +300,7 @@ describe('truncateAndSaveToFile', () => {
     );
 
     expect(result.outputFile).toBeUndefined();
+    expect(result.saveError).toEqual(new Error('File write failed'));
     expect(result.content).toContain(
       '[Note: Could not save full tool output to file]',
     );
@@ -423,11 +428,13 @@ describe('truncateAndSaveToFile', () => {
       'largeOutputTool',
       content,
       'prompt-large-1',
+      { callId: 'call-large-1' },
     );
 
     expect(toolOutputTruncatedEvents).toContainEqual(
       expect.objectContaining({
         prompt_id: 'prompt-large-1',
+        call_id: 'call-large-1',
         output_file: expect.stringMatching(
           new RegExp(
             `${path
@@ -467,7 +474,7 @@ describe('truncateAndSaveToFile', () => {
       expect.objectContaining({
         prompt_id: 'prompt-large-1',
         call_id: 'call-large-1',
-        error_message: 'failed to save full truncated content to file',
+        error_message: "EACCES: permission denied, open 'secret'",
       }),
     );
   });

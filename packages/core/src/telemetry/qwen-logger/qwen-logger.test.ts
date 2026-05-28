@@ -399,6 +399,7 @@ describe('QwenLogger', () => {
 
       const event = new ToolOutputTruncatedEvent('prompt-id-1', {
         toolName: 'test-tool',
+        callId: 'call-id-1',
         originalContentLength: 1000,
         truncatedContentLength: 100,
         threshold: 500,
@@ -413,6 +414,11 @@ describe('QwenLogger', () => {
           event_type: 'action',
           type: 'tool',
           name: 'tool_output_truncated',
+          properties: {
+            tool_name: 'test-tool',
+            prompt_id: 'prompt-id-1',
+            call_id: 'call-id-1',
+          },
           snapshots: JSON.stringify({
             original_content_length: 1000,
             truncated_content_length: 100,
