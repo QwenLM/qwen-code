@@ -2441,6 +2441,36 @@ class QwenAgent implements Agent {
         );
         return { sessionId, recap };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionShellHistory: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const command = params['command'];
+        if (typeof command !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing command',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        const geminiClient = config.getGeminiClient()!;
+        const outputText =
+          typeof params['output'] === 'string' ? params['output'] : '';
+        geminiClient.addHistory({
+          role: 'user',
+          parts: [
+            {
+              text: `I ran the following shell command:\n\`\`\`sh\n${command}\n\`\`\`\n\nThis produced the following result:\n\`\`\`\n${outputText}\n\`\`\``,
+            },
+          ],
+        });
+        return { sessionId, injected: true };
+      }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
         if (!sessionId || !SESSION_ID_RE.test(sessionId)) {

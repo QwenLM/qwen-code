@@ -830,6 +830,12 @@ export interface DaemonSessionRecapResult {
   recap: string | null;
 }
 
+export interface DaemonShellCommandResult {
+  exitCode: number | null;
+  output: string;
+  aborted: boolean;
+}
+
 /**
  * #4175 Wave 4 PR 17. Result body of `POST /workspace/mcp/:server/
  * restart`. Discriminated by `restarted`: `true` carries the wall-

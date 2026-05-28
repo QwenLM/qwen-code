@@ -245,6 +245,7 @@ export type {
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
   DaemonSessionRecapResult,
+  DaemonShellCommandResult,
   DaemonToolToggleResult,
   DaemonAvailableCommand,
   DaemonCapabilities,

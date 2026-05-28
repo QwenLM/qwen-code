@@ -168,6 +168,23 @@ export function normalizeDaemonEvent(
     case 'followup_suggestion':
       return normalizeFollowupSuggestion(event, base);
 
+    case 'user_shell_command': {
+      const command = getString(event.data, 'command');
+      return command
+        ? [{ ...base, type: 'user.text.delta', text: `! ${command}` }]
+        : [];
+    }
+    case 'user_shell_result': {
+      const exitCode = numberField(event.data, 'exitCode');
+      const aborted =
+        isRecord(event.data) &&
+        (event.data as Record<string, unknown>)['aborted'] === true;
+      const text = aborted
+        ? 'Shell command was aborted'
+        : `Shell command exited with code ${exitCode ?? 'unknown'}`;
+      return [{ ...base, type: 'status', text }];
+    }
+
     case 'replay_complete': {
       const replayedCount = numberField(event.data, 'replayedCount') ?? 0;
       // D4: prefer the canonical `lastReplayedEventId`; fall back to the
