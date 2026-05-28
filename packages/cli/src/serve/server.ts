@@ -862,7 +862,7 @@ export function createServeApp(
             | string
             | undefined;
           const ctx = {
-            route: `${method}:${reqPath}`,
+            route: `${method} ${reqPath}`,
             ...(sessionId ? { sessionId } : {}),
             ...(clientId ? { clientId } : {}),
             status,
