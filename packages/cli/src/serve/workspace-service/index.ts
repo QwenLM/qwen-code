@@ -250,7 +250,7 @@ export function createDaemonWorkspaceService(
         writeStderrLine(
           `qwen serve: getEnvStatus failed: ${err instanceof Error ? err.message : String(err)}`,
         );
-        return createIdleEnvStatus(boundWorkspace, false);
+        return createIdleEnvStatus(boundWorkspace, acpChannelLive);
       }
     },
 
