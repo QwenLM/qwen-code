@@ -36,6 +36,8 @@ interface MockSession {
   workspaceCwd: string;
   clientId: string;
   client?: MockClient;
+  lastEventId?: number;
+  setLastEventId: (lastEventId: number | undefined) => void;
   prompt: (req: unknown, signal?: AbortSignal) => Promise<PromptResult>;
   cancel: () => Promise<void>;
   setModel: (modelId: string) => Promise<{ modelId: string }>;

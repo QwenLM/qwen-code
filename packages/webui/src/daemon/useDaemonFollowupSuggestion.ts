@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSyncExternalStore } from 'react';
-import { useDaemonTranscriptStore } from './DaemonSessionProvider.js';
+import { useDaemonTranscriptStore } from './session/DaemonSessionProvider.js';
 import {
   clearSidechannelFollowupSuggestion,
   getSidechannelFollowupSuggestion,

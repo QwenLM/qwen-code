@@ -131,7 +131,6 @@ export type {
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMemoryFile,
-  DaemonWorkspaceSkillDetail,
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceToolStatus,
 } from '@qwen-code/sdk/daemon';
