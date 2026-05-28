@@ -139,6 +139,9 @@ export { useDaemonTranscriptStore as useTranscriptStore } from './daemon/session
 /** Low-level prompt lifecycle status (queued, streaming, idle). */
 export { useDaemonPromptStatus as usePromptStatus } from './daemon/session/index.js';
 
+/** Server-pushed prompt follow-up suggestions for daemon-backed UIs. */
+export { useDaemonFollowupSuggestion } from './daemon/index.js';
+
 // ── Constants ─────────────────────────────────────────────────────
 
 /** Ordered list of approval modes for cycling: `['auto', 'suggest', 'ask']`. */
@@ -165,6 +168,8 @@ export type {
   DaemonStreamingState,
   /** Prompt submission status: `'idle' | 'waiting' | 'streaming'`. */
   DaemonPromptStatus,
+  /** Hook return value for daemon follow-up suggestions. */
+  UseDaemonFollowupSuggestionReturn,
   /** Image attachment (base64 data + MIME type) for prompt submission. */
   DaemonPromptImage,
   /** Permission approval level: `'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo'`. */

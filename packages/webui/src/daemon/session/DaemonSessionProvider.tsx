@@ -51,6 +51,10 @@ import {
   getReconnectDelayMs,
   schedulePassiveAssistantDone,
 } from '../timing.js';
+import {
+  parseSidechannelFollowupSuggestion,
+  publishSidechannelFollowupSuggestion,
+} from '../followupSidechannel.js';
 import type {
   ActivePrompt,
   DaemonConnectionState,
@@ -381,6 +385,12 @@ export function DaemonSessionProvider({
               reconnectAttempt = 0;
             }
             try {
+              const followupSuggestion =
+                parseSidechannelFollowupSuggestion(event);
+              if (followupSuggestion) {
+                publishSidechannelFollowupSuggestion(followupSuggestion);
+                continue;
+              }
               updateConnectionFromDaemonEvent(event, setConnection);
               const eventOptions = eventOptionsRef.current;
               const uiEvents = normalizeDaemonEvent(event, {

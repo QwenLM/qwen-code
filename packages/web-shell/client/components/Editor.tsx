@@ -19,7 +19,10 @@ import {
 import { minimalSetup } from 'codemirror';
 import type { CommandInfo } from '../adapters/types';
 import type { PromptImage } from '../adapters/promptTypes';
-import { useOptionalWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import {
+  useOptionalWorkspace,
+  type UseDaemonFollowupSuggestionReturn,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { slashCompletionSource } from '../completions/slashCompletion';
 import { createAtCompletionSource } from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
@@ -48,6 +51,9 @@ interface EditorProps {
   draftVersion?: number;
   onFocusActiveAgents?: () => boolean;
   dialogOpen?: boolean;
+  followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
+  onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
+  onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
 }
 
 export interface EditorHandle {
@@ -90,6 +96,9 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     draftVersion,
     onFocusActiveAgents,
     dialogOpen = false,
+    followupState,
+    onAcceptFollowup,
+    onDismissFollowup,
   },
   ref,
 ) {
@@ -115,6 +124,12 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   onPopQueuedMessagesRef.current = onPopQueuedMessages;
   const onClearQueuedMessagesRef = useRef(onClearQueuedMessages);
   onClearQueuedMessagesRef.current = onClearQueuedMessages;
+  const followupStateRef = useRef(followupState);
+  followupStateRef.current = followupState;
+  const onAcceptFollowupRef = useRef(onAcceptFollowup);
+  onAcceptFollowupRef.current = onAcceptFollowup;
+  const onDismissFollowupRef = useRef(onDismissFollowup);
+  onDismissFollowupRef.current = onDismissFollowup;
   const onFocusActiveAgentsRef = useRef(onFocusActiveAgents);
   onFocusActiveAgentsRef.current = onFocusActiveAgents;
   const languageRef = useRef(language);
@@ -177,6 +192,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         images.length > 0 ? [...images] : undefined,
       );
       if (accepted === false) return true;
+      onDismissFollowupRef.current?.();
       if (isShellMode) {
         shellHistoryActionsRef.current.push(text);
         shellHistoryActionsRef.current.reset();
@@ -207,6 +223,15 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         key: 'Enter',
         run: (view) => {
           if (completionStatus(view.state) === 'active') return false;
+          const followup = followupStateRef.current;
+          if (
+            view.state.doc.toString().length === 0 &&
+            followup?.isVisible &&
+            followup.suggestion
+          ) {
+            onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
+            return submitText(view, followup.suggestion);
+          }
           return submitText(view);
         },
       },
@@ -312,7 +337,37 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
       {
         key: 'Tab',
-        run: acceptCompletion,
+        run: (view) => {
+          if (completionStatus(view.state) === 'active') {
+            return acceptCompletion(view);
+          }
+          const followup = followupStateRef.current;
+          if (
+            view.state.doc.toString().length === 0 &&
+            followup?.isVisible &&
+            followup.suggestion
+          ) {
+            onAcceptFollowupRef.current?.('tab');
+            return true;
+          }
+          return acceptCompletion(view);
+        },
+      },
+      {
+        key: 'ArrowRight',
+        run: (view) => {
+          const followup = followupStateRef.current;
+          if (
+            completionStatus(view.state) !== 'active' &&
+            view.state.doc.toString().length === 0 &&
+            followup?.isVisible &&
+            followup.suggestion
+          ) {
+            onAcceptFollowupRef.current?.('right');
+            return true;
+          }
+          return false;
+        },
       },
       {
         key: 'Shift-Tab',
@@ -375,6 +430,13 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         inputHighlightTheme,
         slashCompletionRestarter,
         EditorView.inputHandler.of((view, from, to, insert) => {
+          if (
+            insert.length > 0 &&
+            view.state.doc.toString() === '' &&
+            followupStateRef.current?.isVisible
+          ) {
+            onDismissFollowupRef.current?.();
+          }
           if (
             insert === '!' &&
             view.state.doc.toString() === '' &&
@@ -525,10 +587,15 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    const followupSuggestion =
+      followupState?.isVisible && followupState.suggestion
+        ? followupState.suggestion
+        : null;
+    const nextPlaceholder = followupSuggestion ?? placeholderText;
     view.dispatch({
-      effects: placeholderCompartment.reconfigure(placeholder(placeholderText)),
+      effects: placeholderCompartment.reconfigure(placeholder(nextPlaceholder)),
     });
-  }, [placeholderText]);
+  }, [placeholderText, followupState?.isVisible, followupState?.suggestion]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -554,15 +621,52 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     const handler = (event: KeyboardEvent) => {
       if (disabledRef.current || searchMode || dialogOpen) return;
       if (event.defaultPrevented) return;
+      const view = viewRef.current;
+      const followup = followupStateRef.current;
+      if (
+        view &&
+        !view.hasFocus &&
+        followup?.isVisible &&
+        followup.suggestion &&
+        view.state.doc.toString().length === 0 &&
+        !isEditableTarget(event.target)
+      ) {
+        if (
+          event.key === 'Tab' &&
+          !event.shiftKey &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          !event.altKey &&
+          completionStatus(view.state) !== 'active'
+        ) {
+          event.preventDefault();
+          onAcceptFollowupRef.current?.('tab');
+          return;
+        }
+        if (
+          event.key === 'ArrowRight' &&
+          !event.shiftKey &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          !event.altKey &&
+          completionStatus(view.state) !== 'active'
+        ) {
+          event.preventDefault();
+          onAcceptFollowupRef.current?.('right');
+          return;
+        }
+      }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key.length !== 1) return;
       if (isEditableTarget(event.target)) return;
 
-      const view = viewRef.current;
       if (!view || view.hasFocus) return;
 
       event.preventDefault();
       if (event.key === '!' && view.state.doc.toString() === '') {
+        if (followupStateRef.current?.isVisible) {
+          onDismissFollowupRef.current?.();
+        }
         setShellMode((value) => !value);
         view.focus();
         return;
@@ -674,6 +778,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         replaceEditorText(match);
         return;
       }
+      onDismissFollowupRef.current?.();
       if (isShellMode) {
         shellHistoryActionsRef.current.push(text);
         shellHistoryActionsRef.current.reset();
