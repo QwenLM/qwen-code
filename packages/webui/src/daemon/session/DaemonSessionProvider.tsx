@@ -354,7 +354,10 @@ export function DaemonSessionProvider({
             supportedCommands,
             context,
             capabilities,
-            catchingUp: isSameSessionReconnect || undefined,
+            catchingUp:
+              isSameSessionReconnect ||
+              activeSession.lastEventId != null ||
+              undefined,
           }));
           setPromptStatus(
             activePromptsRef.current.has(activeSession.sessionId)
@@ -423,6 +426,9 @@ export function DaemonSessionProvider({
                   activePromptsRef.current.delete(activeSession.sessionId);
                 } else if (uiEvent.type === 'session.replay_complete') {
                   setConnection((c) => ({ ...c, catchingUp: undefined }));
+                  if (store.getSnapshot().awaitingResync) {
+                    store.clearAwaitingResync();
+                  }
                   if (!activePromptsRef.current.has(activeSession.sessionId)) {
                     clearPassiveAssistantDoneTimer(
                       passiveAssistantDoneTimerRef,
@@ -460,18 +466,27 @@ export function DaemonSessionProvider({
                 );
               }
               if (event.type === 'state_resync_required') {
-                resyncRequested = true;
+                const reason =
+                  typeof event.data === 'object' && event.data !== null
+                    ? (event.data as Record<string, unknown>).reason
+                    : undefined;
                 setPromptStatus('idle');
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-                store.reset();
-                session = undefined;
-                sessionRef.current = undefined;
-                setConnection((current) => ({
-                  ...current,
-                  status: 'connecting',
-                  error: undefined,
-                }));
-                break;
+                if (reason === 'epoch_reset') {
+                  store.reset();
+                  activeSession.setLastEventId(0);
+                } else if (reason !== 'ring_evicted') {
+                  resyncRequested = true;
+                  store.reset();
+                  session = undefined;
+                  sessionRef.current = undefined;
+                  setConnection((current) => ({
+                    ...current,
+                    status: 'connecting',
+                    error: undefined,
+                  }));
+                  break;
+                }
               }
             } catch (error) {
               const message =
