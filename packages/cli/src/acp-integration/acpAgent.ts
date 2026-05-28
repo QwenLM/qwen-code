@@ -95,6 +95,7 @@ import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
@@ -618,6 +619,77 @@ function encodeGitHubPath(filePath: string): string {
   return filePath.split('/').map(encodeURIComponent).join('/');
 }
 
+function readTarString(
+  archive: Uint8Array,
+  offset: number,
+  length: number,
+): string {
+  const bytes = archive.subarray(offset, offset + length);
+  const nul = bytes.indexOf(0);
+  const end = nul >= 0 ? nul : bytes.length;
+  return Buffer.from(bytes.subarray(0, end)).toString('utf8').trim();
+}
+
+function readTarSize(archive: Uint8Array, offset: number): number {
+  const raw = readTarString(archive, offset + 124, 12);
+  return raw ? Number.parseInt(raw, 8) : 0;
+}
+
+function isZeroTarBlock(archive: Uint8Array, offset: number): boolean {
+  for (let i = 0; i < 512; i += 1) {
+    if (archive[offset + i] !== 0) return false;
+  }
+  return true;
+}
+
+function readTarPath(archive: Uint8Array, offset: number): string {
+  const name = readTarString(archive, offset, 100);
+  const prefix = readTarString(archive, offset + 345, 155);
+  return prefix ? `${prefix}/${name}` : name;
+}
+
+function stripArchiveRoot(filePath: string): string {
+  const parts = filePath.split('/').filter(Boolean);
+  return parts.length > 1 ? parts.slice(1).join('/') : '';
+}
+
+function extractFilesFromTarGz(
+  archiveBytes: Uint8Array,
+  directoryPath: string,
+): DownloadedSkillFile[] {
+  const archive = gunzipSync(archiveBytes);
+  const normalizedDirectory = directoryPath.replace(/^\/+|\/+$/g, '');
+  const directoryPrefix = normalizedDirectory ? `${normalizedDirectory}/` : '';
+  const files: DownloadedSkillFile[] = [];
+
+  for (let offset = 0; offset + 512 <= archive.length; ) {
+    if (isZeroTarBlock(archive, offset)) break;
+
+    const fullPath = readTarPath(archive, offset);
+    const typeFlag = String.fromCharCode(archive[offset + 156] || 0);
+    const size = readTarSize(archive, offset);
+    const dataOffset = offset + 512;
+    const nextOffset = dataOffset + Math.ceil(size / 512) * 512;
+
+    if (typeFlag === '0' || typeFlag === '\0') {
+      const repoPath = stripArchiveRoot(fullPath);
+      if (repoPath.startsWith(directoryPrefix)) {
+        const relativePath = repoPath.slice(directoryPrefix.length);
+        if (relativePath) {
+          files.push({
+            relativePath,
+            content: archive.subarray(dataOffset, dataOffset + size),
+          });
+        }
+      }
+    }
+
+    offset = nextOffset;
+  }
+
+  return files;
+}
+
 async function fetchBytes(url: string): Promise<Uint8Array> {
   const response = await fetch(url);
   if (!response.ok) {
@@ -639,6 +711,29 @@ async function downloadSingleSkillFile(
     skillContent: Buffer.from(content).toString('utf8'),
     files: [{ relativePath: 'SKILL.md', content }],
   };
+}
+
+async function downloadGitHubSkillDirectoryFromArchive(
+  githubUrl: GitHubBlobSkillUrl,
+  directoryPath: string,
+): Promise<DownloadedSkillFile[]> {
+  const archiveUrl = `https://codeload.github.com/${githubUrl.owner}/${githubUrl.repo}/tar.gz/${githubUrl.ref}`;
+  const response = await fetch(archiveUrl, {
+    headers: {
+      'User-Agent': 'qwen-code',
+    },
+  });
+  if (!response.ok) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Failed to download GitHub skill archive (${response.status})`,
+    );
+  }
+
+  return extractFilesFromTarGz(
+    new Uint8Array(await response.arrayBuffer()),
+    directoryPath,
+  );
 }
 
 async function fetchGitHubDirectoryItems(
@@ -675,6 +770,14 @@ async function downloadGitHubSkillDirectory(
   directoryPath: string,
   relativeRoot = '',
 ): Promise<DownloadedSkillFile[]> {
+  if (!relativeRoot) {
+    const archiveFiles = await downloadGitHubSkillDirectoryFromArchive(
+      githubUrl,
+      directoryPath,
+    ).catch(() => null);
+    if (archiveFiles?.length) return archiveFiles;
+  }
+
   const items = await fetchGitHubDirectoryItems(githubUrl, directoryPath);
   const files: DownloadedSkillFile[] = [];
 

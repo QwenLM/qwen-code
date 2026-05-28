@@ -17,6 +17,7 @@ import {
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { gzipSync } from 'node:zlib';
 
 // Mock cleanup module before importing anything else
 const { mockRunExitCleanup } = vi.hoisted(() => ({
@@ -1811,53 +1812,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const skillContent =
       '---\nname: pptx\ndescription: Create slide decks\n---\nCreate slide decks\n';
     const editingContent = '# Editing guide\n';
-    const toArrayBuffer = (text: string): ArrayBuffer =>
-      new TextEncoder().encode(text).buffer as ArrayBuffer;
-    const githubApiUrl =
-      'https://api.github.com/repos/anthropics/skills/contents/skills/pptx?ref=main';
-    const skillDownloadUrl =
-      'https://raw.githubusercontent.com/anthropics/skills/main/skills/pptx/SKILL.md';
-    const editingDownloadUrl =
-      'https://raw.githubusercontent.com/anthropics/skills/main/skills/pptx/editing.md';
+    const toArrayBuffer = (buffer: Uint8Array): ArrayBuffer =>
+      buffer.buffer.slice(
+        buffer.byteOffset,
+        buffer.byteOffset + buffer.byteLength,
+      ) as ArrayBuffer;
+    const writeTarEntry = (filePath: string, content: string): Buffer => {
+      const data = Buffer.from(content);
+      const header = Buffer.alloc(512);
+      header.write(filePath, 0, 100, 'utf8');
+      header.write('0000644\0', 100, 8, 'ascii');
+      header.write('0000000\0', 108, 8, 'ascii');
+      header.write('0000000\0', 116, 8, 'ascii');
+      header.write(data.length.toString(8).padStart(11, '0') + '\0', 124, 12);
+      header.write('00000000000\0', 136, 12, 'ascii');
+      header.write('        ', 148, 8, 'ascii');
+      header[156] = '0'.charCodeAt(0);
+      header.write('ustar\0', 257, 6, 'ascii');
+      header.write('00', 263, 2, 'ascii');
+      const padding = Buffer.alloc((512 - (data.length % 512)) % 512);
+      return Buffer.concat([header, data, padding]);
+    };
+    const skillArchive = gzipSync(
+      Buffer.concat([
+        writeTarEntry('skills-main/skills/pptx/SKILL.md', skillContent),
+        writeTarEntry('skills-main/skills/pptx/editing.md', editingContent),
+        Buffer.alloc(1024),
+      ]),
+    );
+    const archiveUrl =
+      'https://codeload.github.com/anthropics/skills/tar.gz/main';
     const fetchMock = vi.fn(async (url: string) => {
-      if (url === githubApiUrl) {
+      if (url === archiveUrl) {
         return {
           ok: true,
           status: 200,
-          json: vi.fn().mockResolvedValue([
-            {
-              name: 'SKILL.md',
-              path: 'skills/pptx/SKILL.md',
-              type: 'file',
-              download_url: skillDownloadUrl,
-            },
-            {
-              name: 'editing.md',
-              path: 'skills/pptx/editing.md',
-              type: 'file',
-              download_url: editingDownloadUrl,
-            },
-          ]),
-        };
-      }
-      if (url === skillDownloadUrl) {
-        return {
-          ok: true,
-          status: 200,
-          arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer(skillContent)),
-        };
-      }
-      if (url === editingDownloadUrl) {
-        return {
-          ok: true,
-          status: 200,
-          arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer(editingContent)),
+          arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer(skillArchive)),
         };
       }
       return {
         ok: false,
         status: 404,
-        arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer('')),
+        arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer(Buffer.alloc(0))),
       };
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -1893,15 +1889,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       });
 
       expect(fetchMock).toHaveBeenCalledWith(
-        githubApiUrl,
+        archiveUrl,
         expect.objectContaining({
           headers: expect.objectContaining({
-            Accept: 'application/vnd.github+json',
+            'User-Agent': 'qwen-code',
           }),
         }),
       );
-      expect(fetchMock).toHaveBeenCalledWith(skillDownloadUrl);
-      expect(fetchMock).toHaveBeenCalledWith(editingDownloadUrl);
       expect(parseSkillContent).toHaveBeenCalledWith(
         expect.stringContaining('name: pptx'),
         installedPath,
