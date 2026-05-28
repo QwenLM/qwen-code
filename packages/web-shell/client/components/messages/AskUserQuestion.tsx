@@ -95,9 +95,9 @@ export function AskUserQuestion({ request, onConfirm }: AskUserQuestionProps) {
         const multi = selectedMulti[i] || [];
         const custom = customInputs[i];
         const all = custom ? [...multi, custom] : multi;
-        result[String(i)] = all.join(', ');
+        result[q.question] = all.join(', ');
       } else {
-        result[String(i)] = answers[i] || customInputs[i] || '';
+        result[q.question] = answers[i] || customInputs[i] || '';
       }
     }
     return result;

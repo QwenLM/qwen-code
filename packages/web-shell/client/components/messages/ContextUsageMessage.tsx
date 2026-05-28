@@ -24,9 +24,11 @@ export function parseContextUsageMessage(
 ): DaemonSessionContextUsageStatus | null {
   if (!content.startsWith(SENTINEL)) return null;
   try {
-    return JSON.parse(
-      content.slice(SENTINEL.length),
-    ) as DaemonSessionContextUsageStatus | null;
+    const parsed = JSON.parse(content.slice(SENTINEL.length));
+    if (!parsed?.usage || typeof parsed.usage.totalTokens !== 'number') {
+      return null;
+    }
+    return parsed as DaemonSessionContextUsageStatus;
   } catch {
     return null;
   }
