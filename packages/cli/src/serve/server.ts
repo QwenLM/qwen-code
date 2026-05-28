@@ -717,7 +717,10 @@ export function createServeApp(
       deviceFlowRegistry,
       subagentManager: undefined,
       persistDisabledTools:
-        deps.persistDisabledTools ?? (async () => { /* no-op for tests */ }),
+        deps.persistDisabledTools ??
+        (async () => {
+          /* no-op for tests */
+        }),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
@@ -2652,7 +2655,7 @@ export function createServeApp(
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
   // route through the JSON error contract below.
-  mountAcpHttp(app, bridge, { boundWorkspace });
+  mountAcpHttp(app, bridge, { boundWorkspace, workspace });
 
   // Final error handler. `express.json()` throws `SyntaxError` (with
   // `status: 400`) on malformed body — without this 4-arg middleware
