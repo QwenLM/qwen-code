@@ -1,5 +1,6 @@
 import { Menu, app, shell, BrowserWindow } from 'electron'
 import { i18n } from '@craft-agent/shared/i18n'
+import { BRAND } from '@craft-agent/shared/branding'
 import { RPC_CHANNELS, type BroadcastEventMap } from '../shared/types'
 import { EDIT_MENU, VIEW_MENU, WINDOW_MENU } from '../shared/menu-schema'
 import type { MenuItem } from '../shared/menu-schema'
@@ -79,7 +80,7 @@ export async function rebuildMenu(): Promise<void> {
   const template: Electron.MenuItemConstructorOptions[] = [
     // App menu (macOS only)
     ...(isMac ? [{
-      label: 'Qwen Code',
+      label: BRAND.appName,
       submenu: [
         { role: 'about' as const, label: i18n.t('menu.aboutCraftAgents') },
         updateMenuItem,

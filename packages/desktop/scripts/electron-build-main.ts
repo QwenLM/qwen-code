@@ -53,6 +53,7 @@ function getBuildDefines(): string[] {
     "MICROSOFT_OAUTH_CLIENT_SECRET",
     "SENTRY_ELECTRON_INGEST_URL",
     "CRAFT_DEV_RUNTIME",
+    "CRAFT_BRAND",
   ];
 
   return definedVars.map((varName) => {

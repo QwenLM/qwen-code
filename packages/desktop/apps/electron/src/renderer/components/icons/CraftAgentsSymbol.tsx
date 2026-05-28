@@ -1,12 +1,26 @@
+import { BRAND } from '@craft-agent/shared/branding'
+import modelStudioIcon from '@/assets/modelstudio-icon.png'
+
 interface CraftAgentsSymbolProps {
   className?: string
 }
 
 /**
- * Qwen Code symbol.
- * Uses accent color from theme (currentColor from className)
+ * Brand-aware app symbol.
+ * Renders the appropriate logo based on the active brand config.
  */
 export function CraftAgentsSymbol({ className }: CraftAgentsSymbolProps) {
+  if (BRAND.id === 'modelstudio') {
+    return (
+      <img
+        src={modelStudioIcon}
+        alt={BRAND.appName}
+        className={className}
+        draggable={false}
+      />
+    )
+  }
+
   return (
     <svg
       viewBox="0 0 141.38 140"

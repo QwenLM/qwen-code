@@ -138,6 +138,7 @@ interface AppMenuProps {
   onOpenSettingsSubpage: (subpage: SettingsMenuItem['id']) => void
   onOpenKeyboardShortcuts: () => void
   onOpenStoredUserPreferences: () => void
+  onShowAbout?: () => void
   onBack?: () => void
   onForward?: () => void
   canGoBack?: boolean
@@ -169,6 +170,7 @@ export function AppMenu({
   onOpenSettingsSubpage,
   onOpenKeyboardShortcuts,
   onOpenStoredUserPreferences,
+  onShowAbout,
   onBack,
   onForward,
   canGoBack = true,
@@ -285,6 +287,15 @@ export function AppMenu({
                 Keyboard Shortcuts
                 {keyboardShortcutsHotkey && <DropdownMenuShortcut className="pl-6">{keyboardShortcutsHotkey}</DropdownMenuShortcut>}
               </StyledDropdownMenuItem>
+              {onShowAbout && (
+                <>
+                  <StyledDropdownMenuSeparator />
+                  <StyledDropdownMenuItem onClick={onShowAbout}>
+                    <Icons.Info className="h-3.5 w-3.5" />
+                    {t("menu.aboutCraftAgents")}
+                  </StyledDropdownMenuItem>
+                </>
+              )}
             </StyledDropdownMenuSubContent>
           </DropdownMenuSub>
 

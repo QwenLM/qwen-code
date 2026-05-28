@@ -145,6 +145,7 @@ interface TopBarProps {
   onOpenSettings: () => void
   onOpenSettingsSubpage: (subpage: SettingsMenuItem['id']) => void
   onOpenKeyboardShortcuts: () => void
+  onShowAbout?: () => void
   onBack: () => void
   onForward: () => void
   canGoBack: boolean
@@ -161,6 +162,7 @@ export function TopBar({
   onOpenSettings,
   onOpenSettingsSubpage,
   onOpenKeyboardShortcuts,
+  onShowAbout,
   onBack,
   onForward,
   canGoBack,
@@ -283,6 +285,15 @@ export function TopBar({
                   {t("menu.keyboardShortcuts")}
                   {keyboardShortcutsHotkey && <DropdownMenuShortcut className="pl-6">{keyboardShortcutsHotkey}</DropdownMenuShortcut>}
                 </StyledDropdownMenuItem>
+                {onShowAbout && (
+                  <>
+                    <StyledDropdownMenuSeparator />
+                    <StyledDropdownMenuItem onClick={onShowAbout}>
+                      <Icons.Info className="h-3.5 w-3.5" />
+                      {t("menu.aboutCraftAgents")}
+                    </StyledDropdownMenuItem>
+                  </>
+                )}
               </StyledDropdownMenuSubContent>
             </DropdownMenuSub>
 

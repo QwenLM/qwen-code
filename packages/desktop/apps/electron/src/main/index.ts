@@ -208,7 +208,8 @@ let pendingDeepLink: string | null = null
 
 // Set app name early (before app.whenReady) to ensure correct macOS menu bar title
 // Supports multi-instance dev: CRAFT_APP_NAME env var (e.g., "Qwen Code [1]")
-app.setName(process.env.CRAFT_APP_NAME || 'Qwen Code')
+import { BRAND } from '@craft-agent/shared/branding'
+app.setName(process.env.CRAFT_APP_NAME || BRAND.appName)
 
 // Register as default protocol client for craftagents:// URLs
 // This must be done before app.whenReady() on some platforms
@@ -378,6 +379,15 @@ app.whenReady().then(async () => {
   // Export packaged state as env var so logger.ts (and headless Bun) don't need 'electron'
   process.env.CRAFT_IS_PACKAGED = app.isPackaged ? 'true' : 'false'
 
+  // Set About panel info (shown via "About <AppName>" on macOS)
+  // Detailed credits live in the custom AboutDialog (Help → About)
+  app.setAboutPanelOptions({
+    applicationName: BRAND.appName,
+    applicationVersion: app.getVersion(),
+    copyright: BRAND.copyright,
+    ...(BRAND.creditsShort ? { credits: BRAND.creditsShort } : {}),
+  })
+
   // Register bundled assets root so all seeding functions can find their files
   // (docs, permissions, themes, tool-icons resolve via getBundledAssetsDir)
   setBundledAssetsRoot(__dirname)
@@ -425,7 +435,12 @@ app.whenReady().then(async () => {
   if (process.platform === 'darwin' && app.dock) {
     // In packaged app, resources are at dist/resources/ (same level as __dirname)
     // In dev, resources are at ../resources/ (sibling of dist/)
+    // Brand-aware: use brand-specific icon when available, fall back to default
+    const brandIconRelPath = BRAND.id === 'qwen-code' ? 'resources/icon.png' : `resources/brands/${BRAND.id}/icon.png`
     const dockIconPath = [
+      join(__dirname, brandIconRelPath),
+      join(__dirname, '..', brandIconRelPath),
+      // Fallback to default icon if brand-specific one is missing
       join(__dirname, 'resources/icon.png'),
       join(__dirname, '../resources/icon.png'),
     ].find(p => existsSync(p))
