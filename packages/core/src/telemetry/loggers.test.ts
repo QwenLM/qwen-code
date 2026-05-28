@@ -1281,13 +1281,17 @@ describe('loggers', () => {
     } as unknown as Config;
 
     it('should log a tool output truncation failed event', () => {
+      const fsError = Object.assign(
+        new Error(
+          "EACCES: permission denied, open '/Users/alice/.qwen/tmp/test-tool.output'",
+        ),
+        { code: 'EACCES' },
+      );
       const event = new ToolOutputTruncationFailedEvent('prompt-id-1', {
         toolName: 'test-tool',
         callId: 'call-id-1',
         originalContentLength: 1000,
-        error: new Error(
-          "EACCES: permission denied, open '/Users/alice/.qwen/tmp/test-tool.output'",
-        ),
+        error: fsError,
       });
 
       logToolOutputTruncationFailed(mockConfig, event);
@@ -1303,7 +1307,7 @@ describe('loggers', () => {
           tool_name: 'test-tool',
           call_id: 'call-id-1',
           original_content_length: 1000,
-          error_type: 'Error',
+          error_type: 'EACCES',
           error_message: "EACCES: permission denied, open 'test-tool.output'",
         },
       });

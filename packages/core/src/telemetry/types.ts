@@ -755,16 +755,35 @@ export class ToolOutputTruncationFailedEvent implements BaseTelemetryEvent {
     this.tool_name = details.toolName;
     this.call_id = details.callId;
     this.original_content_length = details.originalContentLength;
-    this.error_type =
-      details.error instanceof Error
-        ? details.error.name
-        : typeof details.error;
+    this.error_type = getTelemetryErrorType(details.error);
     this.error_message = sanitizeTelemetryErrorMessage(
       details.error instanceof Error
         ? details.error.message
         : String(details.error),
     );
   }
+}
+
+function getTelemetryErrorType(error: unknown): string {
+  const code = getTelemetryErrorCode(error);
+  if (code) {
+    return code;
+  }
+  return error instanceof Error ? error.name : typeof error;
+}
+
+function getTelemetryErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === 'string' && code.length > 0) {
+    return code;
+  }
+  if (typeof code === 'number' && Number.isFinite(code)) {
+    return String(code);
+  }
+  return undefined;
 }
 
 function sanitizeTelemetryErrorMessage(message: string): string {

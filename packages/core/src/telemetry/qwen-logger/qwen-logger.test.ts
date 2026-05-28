@@ -434,13 +434,17 @@ describe('QwenLogger', () => {
       const logger = QwenLogger.getInstance(mockConfig)!;
       const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
 
+      const fsError = Object.assign(
+        new Error(
+          "EACCES: permission denied, open 'C:\\Users\\alice\\.qwen\\tmp\\test-tool.output'",
+        ),
+        { code: 'EACCES' },
+      );
       const event = new ToolOutputTruncationFailedEvent('prompt-id-1', {
         toolName: 'test-tool',
         callId: 'call-id-1',
         originalContentLength: 1000,
-        error: new Error(
-          "EACCES: permission denied, open 'C:\\Users\\alice\\.qwen\\tmp\\test-tool.output'",
-        ),
+        error: fsError,
       });
 
       logger.logToolOutputTruncationFailedEvent(event);
@@ -454,7 +458,7 @@ describe('QwenLogger', () => {
             tool_name: 'test-tool',
             prompt_id: 'prompt-id-1',
             call_id: 'call-id-1',
-            error_type: 'Error',
+            error_type: 'EACCES',
           },
           snapshots: JSON.stringify({
             original_content_length: 1000,
