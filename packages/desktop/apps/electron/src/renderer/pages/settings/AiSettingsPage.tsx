@@ -2,10 +2,10 @@
  * AiSettingsPage
  *
  * The local ACP backend is the only supported backend. This page focuses on the
- * settings users can still change: model and performance.
+ * settings users can still change: model and provider connection.
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Plus } from 'lucide-react';
 
@@ -22,7 +22,6 @@ import {
   SettingsCard,
   SettingsRow,
   SettingsMenuSelectRow,
-  SettingsToggle,
 } from '@/components/settings';
 import type {
   LlmConnection,
@@ -75,25 +74,7 @@ function getModelOptionsForConnection(
 export default function AiSettingsPage() {
   const { t } = useTranslation();
   const { llmConnections, refreshLlmConnections } = useAppShellContext();
-  const [extendedPromptCache, setExtendedPromptCache] = useState(false);
-  const [enable1MContext, setEnable1MContext] = useState(false);
   const [providerDialogOpen, setProviderDialogOpen] = useState(false);
-
-  useEffect(() => {
-    const load = async () => {
-      if (!window.electronAPI) return;
-      try {
-        const extendedCache = await window.electronAPI.getExtendedPromptCache();
-        setExtendedPromptCache(extendedCache);
-
-        const enable1M = await window.electronAPI.getEnable1MContext();
-        setEnable1MContext(enable1M);
-      } catch {
-        // Keep the page usable if optional settings cannot be read.
-      }
-    };
-    load();
-  }, []);
 
   const qwenConnection = useMemo(
     () =>
@@ -140,19 +121,6 @@ export default function AiSettingsPage() {
     },
     [qwenConnection, refreshLlmConnections],
   );
-
-  const handleExtendedPromptCacheChange = useCallback(
-    async (enabled: boolean) => {
-      setExtendedPromptCache(enabled);
-      await window.electronAPI?.setExtendedPromptCache(enabled);
-    },
-    [],
-  );
-
-  const handleEnable1MContextChange = useCallback(async (enabled: boolean) => {
-    setEnable1MContext(enabled);
-    await window.electronAPI?.setEnable1MContext(enabled);
-  }, []);
 
   const handleProviderConnected = useCallback(async () => {
     await refreshLlmConnections();
@@ -211,26 +179,6 @@ export default function AiSettingsPage() {
                         {t('auth.connect')}
                       </Button>
                     }
-                  />
-                </SettingsCard>
-              </SettingsSection>
-
-              <SettingsSection
-                title={t('settings.ai.performance')}
-                description={t('settings.ai.performanceDesc')}
-              >
-                <SettingsCard>
-                  <SettingsToggle
-                    label={t('settings.ai.extendedContext')}
-                    description={t('settings.ai.extendedContextDesc')}
-                    checked={enable1MContext}
-                    onCheckedChange={handleEnable1MContextChange}
-                  />
-                  <SettingsToggle
-                    label={t('settings.ai.extendedPromptCache')}
-                    description={t('settings.ai.extendedPromptCacheDesc')}
-                    checked={extendedPromptCache}
-                    onCheckedChange={handleExtendedPromptCacheChange}
                   />
                 </SettingsCard>
               </SettingsSection>
