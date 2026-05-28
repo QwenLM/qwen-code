@@ -271,15 +271,14 @@ export class ChatCompressionService {
       }
     }
 
-    // CLAUDE-CODE-STYLE FULL-HISTORY COMPRESSION
-    // We no longer split the history into "compress" + "keep" slices.
-    // The entire curated history is sent to the summary side-query, and
-    // the post-compact history is assembled by composePostCompactHistory
-    // (summary + model ack + recent file restores + recent image restore).
-    const historyForCompression = curatedHistory;
+    // CLAUDE-CODE-STYLE FULL-HISTORY COMPRESSION: the entire curated
+    // history is sent to the summary side-query (no split, no tail
+    // preservation), and the post-compact history is assembled by
+    // composePostCompactHistory below (summary + model ack + recent
+    // file restores + recent image restore).
 
     // Guard: need at least a user+model pair for a meaningful summary.
-    if (historyForCompression.length < 2) {
+    if (curatedHistory.length < 2) {
       return {
         newHistory: null,
         info: {
@@ -293,7 +292,7 @@ export class ChatCompressionService {
     // Slim the side-query input: replace inlineData with placeholders.
     // The original history (with images) is preserved separately for
     // the post-compact image restoration block.
-    const slim = slimCompactionInput(historyForCompression);
+    const slim = slimCompactionInput(curatedHistory);
     if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
       config
         .getDebugLogger()
@@ -399,10 +398,7 @@ export class ChatCompressionService {
     if (!isSummaryEmpty) {
       // Use the new composer — assembles summary + ack + file restores +
       // image restore. No tail preservation, no continuation bridge.
-      extraHistory = await composePostCompactHistory(
-        historyForCompression,
-        summary,
-      );
+      extraHistory = await composePostCompactHistory(curatedHistory, summary);
 
       // Best-effort token math using *only* model-reported token counts.
       //

@@ -20,6 +20,36 @@ import { readFile } from 'node:fs/promises';
 import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
+
+/**
+ * Find the longest run of consecutive backticks in `s`. Used to choose
+ * a CommonMark-safe fence: a fence one backtick longer than any run
+ * inside the fenced content cannot be closed prematurely.
+ */
+function longestBacktickRun(s: string): number {
+  let longest = 0;
+  let current = 0;
+  for (const ch of s) {
+    if (ch === '`') {
+      current += 1;
+      if (current > longest) longest = current;
+    } else {
+      current = 0;
+    }
+  }
+  return longest;
+}
+
+/**
+ * Strip control characters from a path before rendering it into an
+ * attachment's markdown text. The path itself stays usable for tool
+ * calls (we just don't print the dangerous characters). A path with a
+ * literal newline could otherwise inject markdown structure into the
+ * model's view of the attachment.
+ */
+function sanitizePathForDisplay(path: string): string {
+  return path.replace(/[\r\n\t]/g, '');
+}
 export const POST_COMPACT_MAX_TOKENS_PER_FILE = 5_000;
 export const POST_COMPACT_TOKEN_BUDGET = 50_000;
 export const POST_COMPACT_MAX_IMAGES_TO_RESTORE = 3;
@@ -252,7 +282,7 @@ export async function buildFileRestorationBlocks(
     const lines = [
       'The following files were recently accessed before context was compacted. They are listed as reference only because they are large. Use `read_file` to view current content for any file you need:',
       '',
-      ...references.map((p) => `- ${p}`),
+      ...references.map((p) => `- ${sanitizePathForDisplay(p)}`),
     ];
     blocks.push({
       role: 'user',
@@ -261,16 +291,24 @@ export async function buildFileRestorationBlocks(
   }
 
   for (const { path, content } of embeds) {
+    // CommonMark-safe fence: use a backtick run that is one longer than
+    // the longest run already in the content. Markdown/CLAUDE.md/README
+    // files frequently contain ``` themselves; a fixed 3-backtick fence
+    // closes prematurely and leaks the remainder as unfenced text.
+    const fence = '`'.repeat(longestBacktickRun(content) + 1);
+    const safeFence = fence.length >= 3 ? fence : '```';
     blocks.push({
       role: 'user',
       parts: [
         {
           text:
             `Recently accessed file (full current content embedded):\n\n` +
-            `## ${path}\n\n` +
-            '```\n' +
+            `## ${sanitizePathForDisplay(path)}\n\n` +
+            safeFence +
+            '\n' +
             content +
-            '\n```',
+            '\n' +
+            safeFence,
         },
       ],
     });
