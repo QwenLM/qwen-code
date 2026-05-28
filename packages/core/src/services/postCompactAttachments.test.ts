@@ -267,4 +267,20 @@ describe('readFileSizeAdaptive', () => {
     const result = await readFileSizeAdaptive(path, 5_000);
     expect(result.kind).toBe('binary');
   });
+
+  it('counts CHARACTERS not BYTES for the size cap (UTF-8 multibyte safe)', async () => {
+    const path = join(tmpDir, 'cjk.txt');
+    // 10000 Chinese characters = ~30000 bytes (3 bytes each) but only
+    // 10000 chars. With maxTokens=5000 (20000 char cap), this should
+    // embed cleanly. If the implementation counted bytes, it would
+    // wrongly classify as 'reference'.
+    const cjkText = '中'.repeat(10_000);
+    writeFileSync(path, cjkText, 'utf-8');
+    const result = await readFileSizeAdaptive(path, 5_000);
+    expect(result.kind).toBe('embed');
+    if (result.kind === 'embed') {
+      expect(result.content).toBe(cjkText);
+      expect(result.content.length).toBe(10_000);
+    }
+  });
 });

@@ -17,6 +17,7 @@
 
 import type { Content, Part } from '@google/genai';
 import { readFile } from 'node:fs/promises';
+import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 export const POST_COMPACT_MAX_TOKENS_PER_FILE = 5_000;
@@ -120,13 +121,12 @@ export function extractRecentImages(
   return collected;
 }
 
-export type FileReadResult =
+export type FileEmbedResult =
   | { kind: 'embed'; content: string }
   | { kind: 'reference' }
   | { kind: 'missing' }
   | { kind: 'binary' };
 
-const CHARS_PER_TOKEN = 4;
 const BINARY_DETECT_SAMPLE = 512;
 const BINARY_NONPRINTABLE_THRESHOLD = 0.3;
 
@@ -142,7 +142,7 @@ const BINARY_NONPRINTABLE_THRESHOLD = 0.3;
 export async function readFileSizeAdaptive(
   filePath: string,
   maxTokens: number,
-): Promise<FileReadResult> {
+): Promise<FileEmbedResult> {
   let buffer: Buffer;
   try {
     buffer = await readFile(filePath);
@@ -179,10 +179,15 @@ export async function readFileSizeAdaptive(
     return { kind: 'binary' };
   }
 
+  // Decode once and compare against the cap by character length, not
+  // byte length. A 3-byte UTF-8 character (e.g. Chinese) would otherwise
+  // be triple-counted against the budget. The decoded value is reused
+  // for the embed branch so this costs nothing extra.
+  const decoded = buffer.toString('utf-8');
   const maxChars = maxTokens * CHARS_PER_TOKEN;
-  if (buffer.length > maxChars) {
+  if (decoded.length > maxChars) {
     return { kind: 'reference' };
   }
 
-  return { kind: 'embed', content: buffer.toString('utf-8') };
+  return { kind: 'embed', content: decoded };
 }
