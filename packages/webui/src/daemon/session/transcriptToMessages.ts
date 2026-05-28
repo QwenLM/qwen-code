@@ -174,6 +174,20 @@ export function transcriptBlocksToDaemonMessages(
               tools: [...lastMsg.tools.slice(0, -1), nextTool],
             };
           }
+        } else {
+          messages.push({
+            id: block.id,
+            role: 'tool_group',
+            tools: [
+              {
+                callId: block.id,
+                toolName: 'shell',
+                status: 'completed',
+                kind: 'execute',
+                rawOutput: shellBlock.text,
+              },
+            ],
+          });
         }
         break;
       }

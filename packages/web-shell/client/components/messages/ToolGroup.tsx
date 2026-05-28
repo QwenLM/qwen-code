@@ -439,6 +439,8 @@ function shouldAutoExpand(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (name === 'write_file' || name === 'writefile') return true;
   if (name === 'edit' || name === 'editfile') return true;
+  if (name === 'bash' || name === 'shell' || name === 'execute_command')
+    return true;
   return false;
 }
 

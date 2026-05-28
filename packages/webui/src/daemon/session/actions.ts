@@ -326,12 +326,17 @@ export function createDaemonSessionActions({
         if (session && session.sessionId === sessionId) {
           await withActionTimeout(session.close(), 'Release session timed out');
         }
-        await detachDaemonClient({
-          baseUrl,
-          token,
-          sessionId,
-          clientId: clientIdRef.current,
-        }).catch(() => undefined);
+        await withActionTimeout(
+          detachDaemonClient({
+            baseUrl,
+            token,
+            sessionId,
+            clientId: clientIdRef.current,
+          }).catch((err) =>
+            console.warn('[releaseSession] detach failed:', err),
+          ),
+          'Release session timed out',
+        );
       } catch (error) {
         throw dispatchActionError(store, 'Release session failed', error);
       }
@@ -429,10 +434,21 @@ export function createDaemonSessionActions({
         sessionRef.current,
         'Shell command failed',
       );
+      const sessionId = session.sessionId;
+      setPromptStatus('waiting');
+      const ctrl = new AbortController();
+      activePromptsRef.current.set(sessionId, { controller: ctrl });
       try {
-        return await session.shellCommand(command);
+        return await session.shellCommand(command, ctrl.signal);
       } catch (error) {
         throw dispatchActionError(store, 'Shell command failed', error);
+      } finally {
+        if (activePromptsRef.current.get(sessionId)?.controller === ctrl) {
+          activePromptsRef.current.delete(sessionId);
+        }
+        if (sessionRef.current?.sessionId === sessionId) {
+          setPromptStatus('idle');
+        }
       }
     },
 

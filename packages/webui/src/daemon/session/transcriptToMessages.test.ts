@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type {
+  DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextTranscriptBlock,
   DaemonToolTranscriptBlock,
@@ -32,6 +33,21 @@ function statusBlock(
   return {
     id,
     kind: 'status',
+    text,
+    clientReceivedAt: createdAt,
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
+
+function shellBlock(
+  id: string,
+  text: string,
+  createdAt: number,
+): DaemonShellTranscriptBlock {
+  return {
+    id,
+    kind: 'shell',
     text,
     clientReceivedAt: createdAt,
     createdAt,
@@ -262,5 +278,63 @@ describe('transcriptBlocksToDaemonMessages', () => {
         isStreaming: false,
       },
     ]);
+  });
+
+  it('creates standalone tool_group for shell output after user message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('u1', 'user', '! ls', 1),
+      shellBlock('sh1', 'file1.ts\nfile2.ts\n', 2),
+      statusBlock('st1', 'Shell command exited with code 0', 3),
+    ]);
+
+    expect(messages).toHaveLength(3);
+    expect(messages[0]).toMatchObject({ role: 'user', content: '! ls' });
+    expect(messages[1]).toMatchObject({
+      id: 'sh1',
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'sh1',
+          toolName: 'shell',
+          status: 'completed',
+          kind: 'execute',
+          rawOutput: 'file1.ts\nfile2.ts\n',
+        },
+      ],
+    });
+    expect(messages[2]).toMatchObject({
+      role: 'system',
+      content: 'Shell command exited with code 0',
+    });
+  });
+
+  it('appends shell output to preceding tool_group', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, {
+        toolName: 'bash',
+        toolKind: 'execute',
+      }),
+      shellBlock('sh1', 'output text', 2),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'tc1', rawOutput: 'output text' }],
+    });
+  });
+
+  it('concatenates multiple shell blocks after user message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('u1', 'user', '! find .', 1),
+      shellBlock('sh1', 'chunk1\n', 2),
+      shellBlock('sh2', 'chunk2\n', 3),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ rawOutput: 'chunk1\nchunk2\n' }],
+    });
   });
 });
