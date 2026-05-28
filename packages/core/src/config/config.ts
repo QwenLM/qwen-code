@@ -3972,14 +3972,19 @@ export class Config {
       });
     }
 
-    // Register computer-use tools unless disabled.
-    // All 9 are deferred — they surface only via ToolSearch keyword
-    // match (see packages/core/src/tools/computer-use/).
+    // Register computer-use tools unless disabled. All 9 are deferred —
+    // they surface only via ToolSearch keyword match
+    // (see packages/core/src/tools/computer-use/).
+    //
+    // Pass `registerLazy` (not the bare `registry`) so the same
+    // PermissionManager.isToolEnabled() check that gates every other
+    // built-in also gates these. Direct registry.registerFactory() would
+    // bypass coreTools allowlist + whole-tool deny rules.
     if (this.isComputerUseEnabled()) {
       const { registerComputerUseTools } = await import(
         '../tools/computer-use/index.js'
       );
-      registerComputerUseTools(registry);
+      await registerComputerUseTools(registerLazy);
     }
 
     // Register monitor tool
