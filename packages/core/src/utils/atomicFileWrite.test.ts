@@ -795,4 +795,45 @@ describe('writeInPlaceWithFdGuards', () => {
       }
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'should throw EINODE_UNLINKED_DURING_WRITE when nlink drops to 0 post-write',
+    async () => {
+      const filePath = path.join(tmpDir, 'nlink-guard.txt');
+      await fs.writeFile(filePath, 'original');
+      const beforeStat = await fs.stat(filePath);
+
+      const probeFh = await fs.open(filePath, 'r');
+      const FileHandleProto = Object.getPrototypeOf(probeFh);
+      const origStat = FileHandleProto.stat;
+      await probeFh.close();
+
+      let statCallCount = 0;
+      FileHandleProto.stat = async function mockStat(
+        ...args: unknown[]
+      ): Promise<unknown> {
+        statCallCount++;
+        const real = await origStat.apply(this, args);
+        // First stat call is the post-open guard (fstat check).
+        // Second stat call is the post-write nlink check — return nlink: 0.
+        if (statCallCount >= 2) {
+          return { ...real, nlink: 0 };
+        }
+        return real;
+      };
+
+      try {
+        await expect(
+          writeInPlaceWithFdGuards(filePath, 'updated', beforeStat, {
+            encoding: 'utf-8',
+          }),
+        ).rejects.toMatchObject({
+          code: 'EINODE_UNLINKED_DURING_WRITE',
+          message: expect.stringMatching(/unlinked between fstat and close/),
+        });
+      } finally {
+        FileHandleProto.stat = origStat;
+      }
+    },
+  );
 });
