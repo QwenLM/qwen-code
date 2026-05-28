@@ -11,6 +11,14 @@ import { KeypressProvider } from '../contexts/KeypressContext.js';
 
 const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const lastFrameText = (lastFrame: () => string | undefined): string => {
+  const text = lastFrame();
+  if (text == null) {
+    throw new Error('lastFrame returned undefined');
+  }
+  return text;
+};
+
 const waitFor = async (
   predicate: () => void,
   options: { timeout?: number; interval?: number } = {},
@@ -104,7 +112,7 @@ describe('SettingsCorruptedDialog', () => {
     // must have '>' in it
     await wait();
     await waitFor(() => {
-      const lines = lastFrame().split('\n');
+      const lines = lastFrameText(lastFrame).split('\n');
       const exitLine = lines.find((l) => l.includes('Exit and restore'));
       expect(exitLine).toBeTruthy();
       expect(exitLine).toContain('>');
@@ -114,7 +122,7 @@ describe('SettingsCorruptedDialog', () => {
     stdin.write(TerminalKeys.DOWN_ARROW as string);
     await wait();
     await waitFor(() => {
-      const lines = lastFrame().split('\n');
+      const lines = lastFrameText(lastFrame).split('\n');
       const continueLine = lines.find((l) => l.includes('Continue with'));
       expect(continueLine).toBeTruthy();
       expect(continueLine).toContain('>');
@@ -124,7 +132,7 @@ describe('SettingsCorruptedDialog', () => {
     stdin.write(TerminalKeys.UP_ARROW as string);
     await wait();
     await waitFor(() => {
-      const lines = lastFrame().split('\n');
+      const lines = lastFrameText(lastFrame).split('\n');
       const exitLine = lines.find((l) => l.includes('Exit and restore'));
       expect(exitLine).toBeTruthy();
       expect(exitLine).toContain('>');
@@ -172,7 +180,7 @@ describe('SettingsCorruptedDialog', () => {
     stdin.write(TerminalKeys.DOWN_ARROW as string);
     await wait();
     await waitFor(() => {
-      const lines = lastFrame().split('\n');
+      const lines = lastFrameText(lastFrame).split('\n');
       const continueLine = lines.find((l) => l.includes('Continue with'));
       expect(continueLine).toBeTruthy();
       expect(continueLine).toContain('>');
