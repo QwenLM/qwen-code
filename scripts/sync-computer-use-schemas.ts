@@ -6,9 +6,14 @@
  * Usage:
  *   npx tsx scripts/sync-computer-use-schemas.ts [packageSpec]
  *
- * Defaults packageSpec to `open-computer-use@latest`. The pin written
- * into the generated file is whatever spec was used — pass an explicit
- * pin (e.g. `open-computer-use@0.3.5`) for release builds.
+ * The default is the currently-pinned version from
+ * `packages/core/src/tools/computer-use/constants.ts`
+ * (PINNED_OPEN_COMPUTER_USE_VERSION). Running with no args verifies
+ * the current pin is still in sync; pass an explicit version
+ * (e.g. `open-computer-use@0.1.52`) to upgrade.
+ *
+ * Bumping the upstream pin is a 4-step procedure documented in
+ * constants.ts — read that JSDoc first.
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -16,8 +21,15 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
+// Keep in sync with PINNED_OPEN_COMPUTER_USE_VERSION in
+// packages/core/src/tools/computer-use/constants.ts. Duplicated as a
+// literal here because importing TypeScript from `scripts/` into the
+// package tree adds tooling complexity for a single-string lookup.
+const DEFAULT_PINNED_VERSION = '0.1.51';
+
 async function main(): Promise<void> {
-  const packageSpec = process.argv[2] ?? 'open-computer-use@latest';
+  const packageSpec =
+    process.argv[2] ?? `open-computer-use@${DEFAULT_PINNED_VERSION}`;
 
   const transport = new StdioClientTransport({
     command: 'npx',
