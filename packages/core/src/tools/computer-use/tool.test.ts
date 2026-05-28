@@ -2,11 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ComputerUseTool } from './tool.js';
+import { ComputerUseTool, buildLlmContent, buildDisplayText } from './tool.js';
 import { ComputerUseClient } from './client.js';
 import { COMPUTER_USE_SCHEMAS } from './schemas.js';
 import { saveInstallState, isPackageSpecApproved } from './install-state.js';
 import { ToolConfirmationOutcome } from '../tools.js';
+import type { Part } from '@google/genai';
 
 function makeFakeClient(
   callToolImpl: (name: string, args: unknown) => Promise<unknown>,
@@ -223,5 +224,160 @@ describe('ComputerUseInvocation confirmation pathway', () => {
       process.env['QWEN_COMPUTER_USE_PACKAGE'] ?? 'open-computer-use@latest';
     const approved = await isPackageSpecApproved(tmpHome, packageSpec);
     expect(approved).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Content transformation unit tests
+// ---------------------------------------------------------------------------
+
+describe('buildLlmContent', () => {
+  it('returns a plain string when content has only text parts', () => {
+    const content = [
+      { type: 'text' as const, text: 'hello' },
+      { type: 'text' as const, text: 'world' },
+    ];
+    const result = buildLlmContent(content, 'get_app_state');
+    expect(typeof result).toBe('string');
+    expect(result).toBe('hello\nworld');
+  });
+
+  it('returns Part[] when content includes an image part', () => {
+    const content = [
+      { type: 'text' as const, text: 'screenshot below' },
+      {
+        type: 'image' as const,
+        mimeType: 'image/png',
+        data: 'base64data==',
+      },
+    ];
+    const result = buildLlmContent(content, 'get_app_state');
+    expect(Array.isArray(result)).toBe(true);
+
+    const parts = result as Part[];
+    // text label for text block
+    expect(parts.some((p) => p.text === 'screenshot below')).toBe(true);
+    // contextual label for image
+    expect(
+      parts.some(
+        (p) => p.text?.includes('image') && p.text.includes('image/png'),
+      ),
+    ).toBe(true);
+    // inlineData part with the base64 payload
+    const inlinePart = parts.find((p) => p.inlineData !== undefined);
+    expect(inlinePart?.inlineData?.mimeType).toBe('image/png');
+    expect(inlinePart?.inlineData?.data).toBe('base64data==');
+  });
+
+  it('returns Part[] with only the image when content has no text', () => {
+    const content = [
+      {
+        type: 'image' as const,
+        mimeType: 'image/jpeg',
+        data: 'imgdata==',
+      },
+    ];
+    const result = buildLlmContent(content, 'screenshot');
+    expect(Array.isArray(result)).toBe(true);
+
+    const parts = result as Part[];
+    const inlinePart = parts.find((p) => p.inlineData !== undefined);
+    expect(inlinePart?.inlineData?.mimeType).toBe('image/jpeg');
+    expect(inlinePart?.inlineData?.data).toBe('imgdata==');
+  });
+
+  it('returns empty string for empty content', () => {
+    const result = buildLlmContent([], 'noop');
+    expect(result).toBe('');
+  });
+});
+
+describe('buildDisplayText', () => {
+  it('returns only text parts joined by newline', () => {
+    const content = [
+      { type: 'text' as const, text: 'line1' },
+      { type: 'image' as const, mimeType: 'image/png', data: 'base64==' },
+      { type: 'text' as const, text: 'line2' },
+    ];
+    expect(buildDisplayText(content)).toBe('line1\nline2');
+  });
+
+  it('returns empty string when there are no text parts', () => {
+    const content = [
+      { type: 'image' as const, mimeType: 'image/png', data: 'base64==' },
+    ];
+    expect(buildDisplayText(content)).toBe('');
+  });
+});
+
+describe('execute() image content forwarding', () => {
+  beforeEach(() => {
+    ComputerUseClient.setSharedForTest(undefined);
+    process.env['QWEN_COMPUTER_USE_AUTO_APPROVE'] = '1';
+  });
+
+  afterEach(() => {
+    delete process.env['QWEN_COMPUTER_USE_AUTO_APPROVE'];
+    ComputerUseClient.setSharedForTest(undefined);
+  });
+
+  it('llmContent is Part[] containing inlineData when MCP returns an image', async () => {
+    const fake = makeFakeClient(async () => ({
+      content: [
+        { type: 'text', text: 'app state captured' },
+        { type: 'image', mimeType: 'image/png', data: 'PNGBASE64==' },
+      ],
+      isError: false,
+    }));
+    ComputerUseClient.setSharedForTest(fake);
+
+    const tool = new ComputerUseTool(
+      'get_app_state',
+      COMPUTER_USE_SCHEMAS.get_app_state,
+    );
+    const invocation = tool.build({ app: 'TextEdit' });
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(Array.isArray(result.llmContent)).toBe(true);
+
+    const parts = result.llmContent as Part[];
+    const inlinePart = parts.find((p) => p.inlineData !== undefined);
+    expect(inlinePart?.inlineData?.mimeType).toBe('image/png');
+    expect(inlinePart?.inlineData?.data).toBe('PNGBASE64==');
+  });
+
+  it('llmContent is string when MCP returns only text', async () => {
+    const fake = makeFakeClient(async () => ({
+      content: [{ type: 'text', text: 'click confirmed' }],
+      isError: false,
+    }));
+    ComputerUseClient.setSharedForTest(fake);
+
+    const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
+    const invocation = tool.build({ app: 'TextEdit', element_index: 1 });
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(typeof result.llmContent).toBe('string');
+    expect(result.llmContent).toBe('click confirmed');
+  });
+
+  it('error result still sets result.error when isError=true with image content', async () => {
+    const fake = makeFakeClient(async () => ({
+      content: [
+        { type: 'text', text: 'error occurred' },
+        { type: 'image', mimeType: 'image/png', data: 'ERRPNG==' },
+      ],
+      isError: true,
+    }));
+    ComputerUseClient.setSharedForTest(fake);
+
+    const tool = new ComputerUseTool('click', COMPUTER_USE_SCHEMAS.click);
+    const invocation = tool.build({ app: 'TextEdit', element_index: 0 });
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.error?.message).toContain('error occurred');
   });
 });

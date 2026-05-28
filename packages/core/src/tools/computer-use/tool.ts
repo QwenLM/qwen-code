@@ -16,6 +16,7 @@ import {
 } from '../tools.js';
 import type { PermissionDecision } from '../../permissions/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { Part, PartListUnion } from '@google/genai';
 import { ComputerUseClient } from './client.js';
 import type { ComputerUseToolName, ComputerUseToolSchema } from './schemas.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
@@ -120,22 +121,27 @@ class ComputerUseInvocation extends BaseToolInvocation<
       };
     }
 
-    const text = mcpResult.content
-      .map((part) => (part.type === 'text' ? part.text : ''))
-      .filter(Boolean)
-      .join('\n');
+    // Transform MCP content blocks into GenAI Parts, preserving image/audio
+    // parts so the model can actually "see" screenshots from get_app_state.
+    // NOTE: mcp-tool.ts has an analogous private transformation (transformMcpContentToParts /
+    // transformImageAudioBlock); those helpers are not exported so we replicate
+    // the pattern here. A future PR should extract a shared utility.
+    const llmContent = buildLlmContent(mcpResult.content, this.upstreamName);
+    const returnDisplay = buildDisplayText(mcpResult.content);
 
     if (mcpResult.isError) {
+      const errorText =
+        returnDisplay || `Tool '${this.upstreamName}' returned isError=true`;
       return {
-        llmContent: text || `Tool '${this.upstreamName}' returned isError=true`,
-        returnDisplay: text || 'Error',
-        error: { message: text || 'tool returned error' },
+        llmContent: llmContent || errorText,
+        returnDisplay: errorText,
+        error: { message: errorText },
       };
     }
 
     return {
-      llmContent: text,
-      returnDisplay: text,
+      llmContent,
+      returnDisplay,
     };
   }
 }
@@ -168,4 +174,67 @@ export class ComputerUseTool extends BaseDeclarativeTool<
   ): ToolInvocation<ComputerUseParams, ToolResult> {
     return new ComputerUseInvocation(this.upstreamName, params);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Content transformation helpers
+// ---------------------------------------------------------------------------
+
+type RawContentBlock = CallToolResult['content'][number];
+
+/**
+ * Converts MCP content blocks to a GenAI PartListUnion.
+ * - Text-only results → plain string (preserves existing caller expectations).
+ * - Mixed or image/audio results → Part[] so the model can see screenshots.
+ */
+export function buildLlmContent(
+  content: RawContentBlock[],
+  toolName: string,
+): PartListUnion {
+  const parts: Part[] = [];
+
+  for (const block of content) {
+    if (block.type === 'text' && block.text) {
+      parts.push({ text: block.text });
+    } else if (
+      (block.type === 'image' || block.type === 'audio') &&
+      block.mimeType &&
+      block.data
+    ) {
+      parts.push({
+        text: `[Tool '${toolName}' provided the following ${block.type} data with mime-type: ${block.mimeType}]`,
+      });
+      parts.push({
+        inlineData: {
+          mimeType: block.mimeType,
+          data: block.data,
+        },
+      });
+    }
+    // Other block types (resource, resource_link, etc.) are currently ignored
+    // for computer-use; extend here if the MCP server introduces them.
+  }
+
+  // If every part is a text Part, collapse to a plain string so callers that
+  // do string operations on llmContent (e.g. error-path concatenation) keep
+  // working without changes.
+  const hasNonText = parts.some((p) => p.inlineData !== undefined);
+  if (!hasNonText) {
+    return parts
+      .map((p) => p.text ?? '')
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  return parts;
+}
+
+/**
+ * Builds the human-readable display string (text only, no binary data).
+ */
+export function buildDisplayText(content: RawContentBlock[]): string {
+  return content
+    .map((block) => (block.type === 'text' ? (block.text ?? '') : ''))
+    .filter(Boolean)
+    .join('\n');
 }
