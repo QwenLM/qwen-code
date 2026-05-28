@@ -87,6 +87,36 @@ interface HistoryItemDisplayProps {
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
 }
 
+function getHistoryItemMarginTop(item: HistoryItem): number {
+  switch (item.type) {
+    case 'gemini':
+    case 'gemini_content':
+    case 'gemini_thought':
+    case 'gemini_thought_content':
+    case 'info':
+    case 'success':
+    case 'warning':
+    case 'error':
+    case 'retry_countdown':
+    case 'memory_saved':
+    case 'tool_group':
+    case 'tool_use_summary':
+    case 'notification':
+    case 'compression':
+    case 'summary':
+    case 'insight_progress':
+    case 'btw':
+    case 'away_recap':
+    case 'user_prompt_submit_blocked':
+    case 'stop_hook_loop':
+    case 'stop_hook_system_message':
+    case 'goal_status':
+      return 0;
+    default:
+      return 1;
+  }
+}
+
 const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   item,
   availableTerminalHeight,
@@ -102,10 +132,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   summaryAbsorbed = false,
   sourceCopyIndexOffsets,
 }) => {
-  const marginTop =
-    item.type === 'gemini_content' || item.type === 'gemini_thought_content'
-      ? 0
-      : 1;
+  const marginTop = getHistoryItemMarginTop(item);
 
   const { compactMode } = useCompactMode();
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
