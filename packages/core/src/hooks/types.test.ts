@@ -11,7 +11,7 @@ import {
   UserPromptExpansionHookOutput,
 } from './types.js';
 
-describe('UserPromptSubmitHookOutput.getAdditionalContext', () => {
+describe('UserPromptSubmit getAdditionalContext', () => {
   it('sanitizes additionalContext', () => {
     const output = createHookOutput('UserPromptSubmit', {
       hookSpecificOutput: { additionalContext: '<xml>value</xml>' },

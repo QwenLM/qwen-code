@@ -10,7 +10,6 @@ import {
   PreToolUseHookOutput,
   PostToolUseHookOutput,
   PostToolUseFailureHookOutput,
-  UserPromptSubmitHookOutput,
   UserPromptExpansionHookOutput,
   StopHookOutput,
   PermissionRequestHookOutput,
@@ -368,8 +367,6 @@ export class HookAggregator {
         return new PostToolUseHookOutput(output);
       case HookEventName.PostToolUseFailure:
         return new PostToolUseFailureHookOutput(output);
-      case HookEventName.UserPromptSubmit:
-        return new UserPromptSubmitHookOutput(output);
       case HookEventName.UserPromptExpansion:
         return new UserPromptExpansionHookOutput(output);
       case HookEventName.Stop:
