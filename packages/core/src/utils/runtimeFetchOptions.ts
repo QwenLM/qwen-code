@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ProxyAgent, fetch as undiciFetch, type Dispatcher } from 'undici';
+import { Agent, ProxyAgent, fetch as undiciFetch, type Dispatcher } from 'undici';
 
 import { createDebugLogger } from './debugLogger.js';
 
@@ -596,7 +596,12 @@ function buildFetchOptionsWithDispatcher(
   // between the project's bundled undici and the Node.js built-in undici.
   // Re-verify compatibility if the bundled undici version changes.
   if (!proxyUrl) {
-    return NO_DISPATCHER_FALLBACK[sdkType];
+    const dispatcher = new Agent({
+      headersTimeout: 0,
+      bodyTimeout: 0,
+      keepAliveTimeout: 60_000,
+    });
+    return { fetchOptions: { dispatcher }, fetch: undiciFetch };
   }
 
   // Note: Without a custom dispatcher, Node.js built-in fetch uses its default
