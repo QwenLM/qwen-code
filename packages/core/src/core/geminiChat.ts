@@ -1362,9 +1362,11 @@ export class GeminiChat {
    *
    * Returns the compression info regardless of outcome. On a successful
    * compaction (`COMPRESSED`), this method has already mutated the chat's
-   * history, recorded the event to `chatRecordingService` (if wired), and
-   * updated both the per-chat token count and (when wired) the global
-   * telemetry singleton.
+   * history, recorded the event to `chatRecordingService` (if wired and
+   * unless `options.deferChatCompressionRecord` is set), and updated both
+   * the per-chat token count and (when wired) the global telemetry singleton.
+   * Deferred callers are responsible for recording after their own
+   * post-compression guards pass.
    */
   async tryCompress(
     promptId: string,
