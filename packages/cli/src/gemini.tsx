@@ -619,11 +619,9 @@ export async function main() {
     } else {
       // Relaunch app so we always have a child process that can be internally
       // restarted if needed.
-      await relaunchAppInChildProcess(memoryArgs, []);
-      // Clean up corruption env vars in parent so subsequent relaunch
-      // cycles (triggered by trust dialog exit code 42) don't inherit
-      // stale state.
-      clearCorruptionEnvVars();
+      await relaunchAppInChildProcess(memoryArgs, [], {
+        afterSpawn: clearCorruptionEnvVars,
+      });
     }
   }
 
