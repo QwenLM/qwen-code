@@ -31,6 +31,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 MUTED='\033[0;2m'
 NC='\033[0m'
+BRAND_ORANGE='\033[38;5;214m'
 
 supports_truecolor() {
     [[ "${COLORTERM:-}" == "truecolor" || "${COLORTERM:-}" == "24bit" ]]
@@ -62,6 +63,31 @@ log_error() {
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+is_terminal() {
+    [ -t 2 ]
+}
+
+print_progress() {
+    local bytes="$1"
+    local length="$2"
+    [ "$length" -gt 0 ] || return 0
+    local width=50
+    local percent=$(( bytes * 100 / length ))
+    [ "$percent" -gt 100 ] && percent=100
+    local on=$(( percent * width / 100 ))
+    local off=$(( width - on ))
+    local filled=$(printf "%*s" "$on" "")
+    filled=${filled// /■}
+    local empty=$(printf "%*s" "$off" "")
+    empty=${empty// /･}
+    printf "\r${BRAND_ORANGE}%s%s %3d%%${NC}" "$filled" "$empty" "$percent" >&2
+}
+
+finish_progress() {
+    print_progress 1 1
+    echo "" >&2
 }
 
 TEMP_DIRS=()
@@ -117,26 +143,18 @@ Qwen Code Installer
 Usage: $0 [OPTIONS]
 
 Options:
-  -s, --source SOURCE      Record the installation source.
-  --method METHOD          Install method: detect, standalone, or npm.
-                           Defaults to QWEN_INSTALL_METHOD or detect.
-  --mirror MIRROR          Standalone archive mirror: auto, github, or aliyun.
-                           Defaults to QWEN_INSTALL_MIRROR or auto, which picks
-                           whichever responds first via a HEAD probe.
-  --base-url URL           Override standalone archive base URL.
-  --archive PATH           Install from a local standalone archive.
-  --version VERSION        Standalone release version. Defaults to latest.
-  --registry REGISTRY      npm registry to use for npm fallback.
-                           Defaults to QWEN_NPM_REGISTRY or https://registry.npmmirror.com
-  --no-modify-path         Do not append PATH to the user's shell rc file even
-                           when a shadowing 'qwen' is detected.
-  -h, --help               Show this help message.
+  --method METHOD      Install method: detect, standalone, or npm (default: detect)
+  --mirror MIRROR      Mirror: auto, github, or aliyun (default: auto)
+  --base-url URL       Override standalone archive base URL
+  --archive PATH       Install from a local standalone archive
+  --version VERSION    Release version (default: latest)
+  --registry URL       npm registry (default: https://registry.npmmirror.com)
+  --no-modify-path     Do not modify shell rc file
+  -s, --source SOURCE  Record installation source
+  -h, --help           Show this help message
 
-Examples:
+Example:
   curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash
-  curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash -s -- --source github
-  curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash -s -- --method standalone
-  ./install-qwen-standalone.sh --archive ./qwen-code-linux-x64.tar.gz
 EOF
 }
 
@@ -344,30 +362,15 @@ done
 validate_options
 
 print_header() {
+    echo ""
     echo "Installing Qwen Code version: $(display_install_version)"
+    echo ""
 }
 
 print_node_help() {
     echo ""
-    echo "Node.js 22 or newer is required before installing Qwen Code with npm."
-    echo ""
-    echo "Install Node.js, then rerun this installer:"
-    case "$(uname -s 2>/dev/null || echo unknown)" in
-        Darwin)
-            echo "  brew install node"
-            echo "  # or download from https://nodejs.org/"
-            ;;
-        Linux)
-            echo "  # Use your distribution package manager or:"
-            echo "  https://nodejs.org/en/download/package-manager"
-            ;;
-        *)
-            echo "  https://nodejs.org/"
-            ;;
-    esac
-    echo ""
-    echo "If you already use a Node version manager, activate Node.js 22+"
-    echo "in this shell before rerunning the installer."
+    echo "Node.js 22 or newer is required. Install from https://nodejs.org/ then rerun."
+    echo "  brew install node"
 }
 
 require_node() {
@@ -394,20 +397,14 @@ require_node() {
         return 1
     fi
 
-    log_success "Node.js ${node_version} detected."
 }
 
 require_npm() {
     if command_exists npm; then
-        log_success "npm $(npm -v 2>/dev/null || echo unknown) detected."
         return 0
     fi
 
-    log_error "npm was not found."
-    echo ""
-    echo "Please install Node.js with npm included, then rerun this installer."
-    echo "Download Node.js from https://nodejs.org/ if your package manager"
-    echo "installed Node without npm."
+    log_error "npm was not found. Install Node.js with npm from https://nodejs.org/"
     return 1
 }
 
@@ -450,7 +447,6 @@ create_source_json() {
 }
 EOF
 
-    log_success "Installation source saved to ~/.qwen/source.json"
 }
 
 detect_target() {
@@ -560,11 +556,9 @@ maybe_update_shell_path() {
         local current_tail
         current_tail=$(tail -n 3 "${rc_file}" 2>/dev/null || true)
         if [[ "${current_tail}" == "${begin_marker}"$'\n'"${export_line}"$'\n'"${end_marker}" ]]; then
-            log_info "PATH update for ${install_bin_dir} already present in ${rc_file} (skipping)."
             PATH_UPDATE_APPLIED=1
             return 0
         fi
-        log_info "PATH update for ${install_bin_dir} exists but is not last; appending a fresh block."
     fi
 
     mkdir -p "$(dirname "${rc_file}")" 2>/dev/null || true
@@ -578,8 +572,6 @@ maybe_update_shell_path() {
         return 0
     }
 
-    log_success "Appended PATH prepend to ${rc_file}"
-    log_info "Open a new terminal, or run: source ${rc_file}"
     PATH_UPDATE_APPLIED=1
 }
 
@@ -672,7 +664,7 @@ resolve_aliyun_version_path() {
         return 1
     fi
 
-    log_info "Resolved Aliyun latest to ${resolved_version_path}." >&2
+    : # resolved to ${resolved_version_path}
     echo "${resolved_version_path}"
 }
 
@@ -766,10 +758,7 @@ standalone_base_url() {
         fi
         selected=$(race_mirror_head 2 "${gh_head}" "${oss_head}")
         if [[ "${selected}" == "timeout" ]]; then
-            log_info "Mirror auto-selection timed out; defaulting to github." >&2
             selected="github"
-        else
-            log_info "Mirror auto-selected via HEAD probe: ${selected}" >&2
         fi
         MIRROR="${selected}"
     fi
@@ -785,20 +774,56 @@ standalone_base_url() {
     github_base_url_for_version "${version_path}"
 }
 
+get_content_length() {
+    local url="$1"
+    curl -fsSLI --retry 1 --connect-timeout 10 --max-time 15 "${url}" 2>/dev/null \
+        | grep -i '^content-length:' | tail -1 | tr -d '\r' | awk '{print $2}'
+}
+
 download_with_progress() {
     local url="$1"
     local output="$2"
 
-    if ! command_exists curl; then
+    if ! command_exists curl || ! is_terminal; then
         download_file_simple "$url" "$output"
         return $?
     fi
 
-    curl -fL --retry 2 --connect-timeout 15 --max-time 300 --progress-bar "$url" -o "$output" &
+    local content_length
+    content_length=$(get_content_length "${url}")
+
+    if [[ -z "${content_length}" ]] || [[ "${content_length}" -le 0 ]] 2>/dev/null; then
+        download_file_simple "$url" "$output"
+        return $?
+    fi
+
+    printf "\033[?25l" >&2
+    print_progress 0 "${content_length}"
+
+    curl -fsSL --retry 2 --connect-timeout 15 --max-time 300 "${url}" -o "${output}" &
     ACTIVE_DOWNLOAD_PID=$!
+
+    while kill -0 "${ACTIVE_DOWNLOAD_PID}" 2>/dev/null; do
+        if [[ -f "${output}" ]]; then
+            local file_size
+            file_size=$(wc -c < "${output}" 2>/dev/null | tr -d ' ')
+            if [[ -n "${file_size}" ]]; then
+                print_progress "${file_size}" "${content_length}"
+            fi
+        fi
+        sleep 0.3
+    done
+
     wait "${ACTIVE_DOWNLOAD_PID}"
     local exit_code=$?
     ACTIVE_DOWNLOAD_PID=""
+    printf "\033[?25h" >&2
+
+    if [[ $exit_code -eq 0 ]]; then
+        finish_progress
+    else
+        echo "" >&2
+    fi
     return $exit_code
 }
 
@@ -922,7 +947,6 @@ verify_checksum() {
         return 1
     fi
 
-    log_success "Checksum verified for ${archive_name}."
 }
 
 validate_archive_entry_path() {
@@ -1203,7 +1227,7 @@ install_standalone() {
         register_temp_dir "${temp_dir}"
         archive_path="${temp_dir}/${archive_name}"
 
-        echo -e "${BRAND_BLUE}[1/3]${NC} Downloading ${archive_name}"
+        log_info "Downloading ${archive_name}"
         if ! download_file "${archive_url}" "${archive_path}"; then
             if [[ -n "${github_fallback_base_url}" ]]; then
                 rm -f "${archive_path}"
@@ -1212,7 +1236,6 @@ install_standalone() {
                 MIRROR="github"
                 github_fallback_base_url=""
                 log_warning "Aliyun standalone archive download failed; retrying GitHub mirror."
-                echo -e "${BRAND_BLUE}[1/3]${NC} Downloading ${archive_name}"
                 if download_file "${archive_url}" "${archive_path}"; then
                     :
                 else
@@ -1239,15 +1262,11 @@ install_standalone() {
         register_temp_dir "${temp_dir}"
     fi
 
-    # Verify integrity before extraction or changing the install directory.
-    echo -e "${BRAND_BLUE}[2/3]${NC} Verifying checksum"
     if ! verify_checksum "${archive_path}" "${checksum_source}" "${archive_name}"; then
         rm -rf "${temp_dir}"
         return 1
     fi
 
-    # Extract into a temporary directory, then validate required entry points.
-    echo -e "${BRAND_BLUE}[3/3]${NC} Installing"
     local extract_dir="${temp_dir}/extract"
     if ! extract_archive "${archive_path}" "${extract_dir}"; then
         rm -rf "${temp_dir}"
@@ -1337,8 +1356,6 @@ install_standalone() {
     create_source_json
     rm -rf "${temp_dir}"
 
-    log_success "Qwen Code standalone archive installed successfully."
-    log_info "Installed to ${INSTALL_LIB_DIR}"
 }
 
 npm_package_spec() {
@@ -1358,17 +1375,6 @@ install_npm() {
     local package_spec
     package_spec=$(npm_package_spec)
 
-    if command_exists qwen; then
-        local qwen_version
-        qwen_version=$(qwen --version 2>/dev/null || echo "unknown")
-        log_info "Existing Qwen Code detected: ${qwen_version}"
-        if [[ "${VERSION}" == "latest" ]]; then
-            log_info "Upgrading to the latest version."
-        else
-            log_info "Installing requested version ${VERSION}."
-        fi
-    fi
-
     local install_cmd=(
         npm
         install
@@ -1378,19 +1384,12 @@ install_npm() {
         "${NPM_REGISTRY}"
     )
 
-    log_info "Running: npm install -g ${package_spec} --registry ${NPM_REGISTRY}"
     if "${install_cmd[@]}"; then
-        log_success "Qwen Code installed successfully."
         create_source_json
         return 0
     fi
 
-    log_error "Failed to install Qwen Code."
-    echo ""
-    echo "This installer does not change your npm prefix or shell profile."
-    echo "If the failure is a permission error, install Node.js with a user-owned"
-    echo "Node version manager or fix your npm global package directory, then run:"
-    echo "  npm install -g ${package_spec} --registry ${NPM_REGISTRY}"
+    log_error "Failed to install. Try: npm install -g ${package_spec} --registry ${NPM_REGISTRY}"
     return 1
 }
 
@@ -1447,16 +1446,13 @@ print_final_instructions() {
     local install_dir="${2:-}"
     local install_method="${3:-standalone}"
     local installed_bin=""
-    local quoted_install_bin_dir=""
     local standalone_uninstall_url="https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.sh"
     if [[ -n "${install_bin_dir}" ]]; then
         installed_bin="${install_bin_dir}/qwen"
-        quoted_install_bin_dir=$(shell_quote "${install_bin_dir}")
+        export PATH="${install_bin_dir}:${PATH}"
     fi
 
-    # PRE_INSTALL_QWENS was captured by main() BEFORE the install ran
-    # (newline-separated list of every qwen binary found on disk). Filter out
-    # the one we just installed; whatever remains may shadow this install.
+    # Detect shadowing qwen executables
     local other_qwens=""
     if [[ -n "${PRE_INSTALL_QWENS:-}" ]]; then
         local saved_ifs="${IFS}"
@@ -1474,11 +1470,10 @@ print_final_instructions() {
         IFS="${saved_ifs}"
     fi
 
-    if [[ -n "${install_bin_dir}" ]]; then
-        export PATH="${install_bin_dir}:${PATH}"
+    if [[ -n "${install_bin_dir}" && "${NO_MODIFY_PATH:-0}" != "1" ]]; then
+        PATH_UPDATE_APPLIED=0
+        maybe_update_shell_path "${install_bin_dir}"
     fi
-
-    echo ""
 
     local installed_version="unknown"
     if [[ -n "${installed_bin}" && -x "${installed_bin}" ]]; then
@@ -1487,10 +1482,22 @@ print_final_instructions() {
         installed_version=$(qwen --version 2>/dev/null || echo "unknown")
     fi
 
+    local rc_name=""
+    case "${SHELL:-}" in
+        */zsh)  rc_name="~/.zshrc" ;;
+        */bash) rc_name="~/.bashrc" ;;
+        */fish) rc_name="~/.config/fish/config.fish" ;;
+    esac
+    if [[ "${PATH_UPDATE_APPLIED:-0}" == "1" && -n "${rc_name}" ]]; then
+        echo -e "${MUTED}Successfully added${NC} qwen ${MUTED}to \$PATH in${NC} ${rc_name}"
+    fi
+
+    echo ""
     print_logo
     echo ""
-    echo -e "  ${BRAND_PURPLE}Qwen Code ${installed_version}${NC} installed successfully."
+    echo -e "  ${MUTED}Qwen Code ${installed_version} installed successfully.${NC}"
     echo ""
+
     echo "To start:"
     echo "  cd <project>"
     echo "  qwen"
@@ -1511,15 +1518,9 @@ print_final_instructions() {
         echo "  curl -fsSL ${standalone_uninstall_url} | bash"
     fi
 
-    if [[ -n "${install_bin_dir}" && "${NO_MODIFY_PATH:-0}" != "1" ]]; then
-        PATH_UPDATE_APPLIED=0
-        maybe_update_shell_path "${install_bin_dir}"
-    fi
-
     if [[ -n "${other_qwens}" ]]; then
         echo ""
-        log_warning "Other 'qwen' executables exist on this system. Depending on your"
-        log_warning "shell PATH order, one of these may run instead of the install above:"
+        log_warning "Other 'qwen' executables exist on this system:"
         local saved_ifs="${IFS}"
         IFS=$'\n'
         local path
@@ -1528,8 +1529,8 @@ print_final_instructions() {
             log_warning "  ${path}"
         done
         IFS="${saved_ifs}"
-        echo ""
         if [[ "${install_method}" == "standalone" ]]; then
+            echo ""
             echo "Existing npm or package-manager installs are left unchanged."
             if [[ "${PATH_UPDATE_APPLIED:-0}" == "1" ]]; then
                 echo "This standalone install is configured as the preferred qwen for new shells."
@@ -1542,16 +1543,16 @@ print_final_instructions() {
             fi
             echo "Remove npm/global package install with: npm uninstall -g @qwen-code/qwen-code"
             echo "To keep using npm, rerun this installer with --method npm."
-            echo ""
         fi
         if [[ "${PATH_UPDATE_APPLIED:-0}" == "1" ]]; then
             echo "To make this install take priority, restart your terminal."
         fi
         echo "Or invoke directly: ${installed_bin}"
-        return 0
     fi
 
-    echo "(Open a new terminal for the PATH change to take effect.)"
+    echo ""
+    echo -e "${MUTED}For more information visit${NC} https://qwenlm.github.io/qwen-code"
+    echo ""
 }
 
 main() {
@@ -1608,7 +1609,6 @@ main() {
             print_final_instructions "$(get_npm_global_bin)" "$(get_npm_global_root)" "npm"
             ;;
         detect)
-            # Try the standalone archive first; fall back only when unavailable.
             if install_standalone; then
                 print_final_instructions "${INSTALL_BIN_DIR}" "${INSTALL_LIB_DIR}" "standalone"
             else
@@ -1618,12 +1618,11 @@ main() {
                     if install_npm; then
                         print_final_instructions "$(get_npm_global_bin)" "$(get_npm_global_root)" "npm"
                     else
-                        log_warning "Standalone archive was unavailable before npm fallback; npm fallback also failed."
-                        log_warning "Retry with --method standalone to debug the standalone failure, or install Node.js 22+ and rerun --method npm."
+                        log_error "Standalone archive was unavailable; npm fallback also failed."
                         exit 1
                     fi
                 else
-                    log_warning "Standalone install failed. Retry with --method npm to use npm, or --method standalone to debug the standalone failure."
+                    log_error "Standalone install failed. Retry with --method npm to use npm, or --method standalone to debug."
                     exit "${standalone_status}"
                 fi
             fi

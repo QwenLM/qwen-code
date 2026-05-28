@@ -296,20 +296,15 @@ echo.
 echo Usage: install-qwen-standalone.bat [OPTIONS]
 echo.
 echo Options:
-echo   -s, --source SOURCE      Record the installation source.
-echo                            Only letters, numbers, dot, underscore, and dash are allowed.
-echo   --method METHOD          Install method: detect, standalone, or npm.
-echo   --mirror MIRROR          Standalone archive mirror: auto, github, or aliyun.
-echo                            Defaults to QWEN_INSTALL_MIRROR or auto, which picks
-echo                            whichever responds first via a HEAD probe.
-echo   --base-url URL           Override standalone archive base URL.
-echo   --archive PATH           Install from a local standalone archive.
-echo   --version VERSION        Standalone release version. Defaults to latest.
-echo   --registry REGISTRY      npm registry to use.
-echo                            Defaults to QWEN_NPM_REGISTRY or https://registry.npmmirror.com
-echo   --no-modify-path         Do not prepend INSTALL_BIN_DIR to user PATH even
-echo                            when a shadowing 'qwen' is detected.
-echo   -h, --help               Show this help message.
+echo   --method METHOD      Install method: detect, standalone, or npm (default: detect)
+echo   --mirror MIRROR      Mirror: auto, github, or aliyun (default: auto)
+echo   --base-url URL       Override standalone archive base URL
+echo   --archive PATH       Install from a local standalone archive
+echo   --version VERSION    Release version (default: latest)
+echo   --registry URL       npm registry (default: https://registry.npmmirror.com)
+echo   --no-modify-path     Do not modify user PATH
+echo   -s, --source SOURCE  Record installation source
+echo   -h, --help           Show this help message
 exit /b 0
 
 :PrintHeader
@@ -547,11 +542,11 @@ if /i "!MIRROR!"=="auto" (
     )
     call :RaceMirrorHead 2 "!QWEN_GH_BASE_URL!/SHA256SUMS" "!QWEN_OSS_PROBE_URL!"
     if /i "!QWEN_RACE_RESULT!"=="timeout" (
-        echo INFO: Mirror auto-selection timed out; defaulting to github.
+        REM Mirror auto-selection timed out; defaulting to github.
         set "MIRROR=github"
     ) else (
         set "MIRROR=!QWEN_RACE_RESULT!"
-        echo INFO: Mirror auto-selected via HEAD probe: !QWEN_RACE_RESULT!
+        REM Mirror auto-selected: !QWEN_RACE_RESULT!
     )
     set "QWEN_GH_BASE_URL="
     set "QWEN_OSS_BASE_URL="
@@ -667,7 +662,7 @@ if "!RESOLVED_VERSION_PATH!"=="" (
     exit /b 1
 )
 
-echo INFO: Resolved Aliyun latest to !RESOLVED_VERSION_PATH!.
+REM Resolved Aliyun latest to !RESOLVED_VERSION_PATH!
 exit /b 0
 
 :VerifyChecksum
@@ -733,7 +728,7 @@ if /i not "!EXPECTED_HASH!"=="!ACTUAL_HASH!" (
     exit /b 1
 )
 
-echo SUCCESS: Checksum verified for !ARCHIVE_NAME!.
+REM Checksum verified for !ARCHIVE_NAME!
 exit /b 0
 
 :InstallStandalone
@@ -1002,8 +997,7 @@ set "PATH=!INSTALL_BIN_DIR!;!PATH!"
 call :CreateSourceJson
 if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
 
-echo SUCCESS: Qwen Code standalone archive installed successfully.
-echo INFO: Installed to !INSTALL_DIR!
+REM Standalone archive installed to !INSTALL_DIR!
 exit /b 0
 
 :CreateTempDir
@@ -1157,19 +1151,18 @@ if %NODE_MAJOR_NUM% LSS 22 (
     exit /b 1
 )
 
-echo SUCCESS: Node.js %NODE_VERSION% detected.
+REM Node.js %NODE_VERSION% detected.
 exit /b 0
 
 :RequireNpm
 where npm >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
-    echo ERROR: npm was not found.
-    echo Please install Node.js with npm included, then rerun this installer.
+    echo ERROR: npm was not found. Install Node.js with npm from https://nodejs.org/
     exit /b 1
 )
 
 for /f "delims=" %%i in ('npm -v 2^>nul') do set "NPM_VERSION=%%i"
-echo SUCCESS: npm %NPM_VERSION% detected.
+REM npm %NPM_VERSION% detected.
 exit /b 0
 
 :NpmPackageSpec
@@ -1189,29 +1182,11 @@ if %ERRORLEVEL% NEQ 0 exit /b 1
 
 call :NpmPackageSpec
 
-where qwen >nul 2>&1
-if %ERRORLEVEL% EQU 0 (
-    for /f "delims=" %%i in ('qwen --version 2^>nul') do set "QWEN_VERSION=%%i"
-    echo INFO: Existing Qwen Code detected: !QWEN_VERSION!
-    if /i "!VERSION!"=="latest" (
-        echo INFO: Upgrading to the latest version.
-    ) else (
-        echo INFO: Installing requested version !VERSION!.
-    )
-)
-
-echo INFO: Running: npm install -g !NPM_PACKAGE_SPEC! --registry !NPM_REGISTRY!
 call npm install -g !NPM_PACKAGE_SPEC! --registry "!NPM_REGISTRY!"
 if %ERRORLEVEL% NEQ 0 (
-    echo ERROR: Failed to install Qwen Code.
-    echo.
-    echo This installer does not change your npm prefix or PATH.
-    echo If the failure is a permission error, fix your npm global package directory, then run:
-    echo   npm install -g !NPM_PACKAGE_SPEC! --registry !NPM_REGISTRY!
+    echo ERROR: Failed to install. Try: npm install -g !NPM_PACKAGE_SPEC! --registry !NPM_REGISTRY!
     exit /b 1
 )
-
-echo SUCCESS: Qwen Code installed successfully.
 call :CreateSourceJson
 exit /b 0
 
@@ -1228,7 +1203,6 @@ echo   "source": "!SOURCE!"
 echo }
 ) > "!QWEN_DIR!\source.json"
 
-echo SUCCESS: Installation source saved to !USERPROFILE!\.qwen\source.json
 exit /b 0
 
 :PrintFinalInstructions
@@ -1336,9 +1310,11 @@ if defined OTHER_QWENS (
     exit /b 0
 )
 
+echo.
+echo For more information visit https://qwenlm.github.io/qwen-code
+
 if /i "!QWEN_INSTALLER_PARENT_POWERSHELL!"=="1" (
-    echo INFO: Final PATH refresh is handled by the PowerShell entrypoint.
+    REM Final PATH refresh is handled by the PowerShell entrypoint.
     exit /b 0
 )
-echo qwen is ready to use in this terminal.
 exit /b 0
