@@ -233,6 +233,12 @@ export type {
   DaemonAssistEvent,
   DaemonFollowupSuggestionData,
   DaemonFollowupSuggestionEvent,
+  // Non-blocking prompt completion events
+  DaemonTurnEvent,
+  DaemonTurnCompleteData,
+  DaemonTurnCompleteEvent,
+  DaemonTurnErrorData,
+  DaemonTurnErrorEvent,
   DaemonDeviceFlowReducerState,
   DaemonAuthState,
   KnownDaemonEvent,

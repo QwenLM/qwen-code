@@ -1238,14 +1238,12 @@ export class DaemonClient {
   }
 
   /**
-   * Send a prompt to the agent. Long-lived: a model + tool turn can
-   * take minutes, so this method bypasses `fetchTimeoutMs` (which
-   * would force a default 30s deadline that's too short for normal
-   * use). Cancellation is via the optional `signal` — when it fires,
-   * the daemon receives the underlying TCP close and forwards an
-   * ACP `cancel` notification to the agent, resolving the prompt
-   * with `stopReason: 'cancelled'`. `cancel(sessionId)` is the
-   * out-of-band alternative.
+   * Send a prompt to the agent. Supports both blocking (legacy 200)
+   * and non-blocking (202 + SSE `turn_complete`) daemon responses.
+   *
+   * Cancellation is via the optional `signal` — on 202 daemons this
+   * calls `cancel()` out-of-band; on legacy 200 daemons the TCP
+   * close propagates to the agent.
    */
   async prompt(
     sessionId: string,
@@ -1262,8 +1260,82 @@ export class DaemonClient {
         signal,
       },
     );
+
+    if (res.status === 202) {
+      const accept = (await res.json()) as {
+        promptId: string;
+        lastEventId: number;
+      };
+      return this._awaitTurnComplete(
+        sessionId,
+        accept.promptId,
+        accept.lastEventId,
+        signal,
+        clientId,
+      );
+    }
+
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/prompt');
     return (await res.json()) as PromptResult;
+  }
+
+  private async _awaitTurnComplete(
+    sessionId: string,
+    promptId: string,
+    lastEventId: number,
+    signal?: AbortSignal,
+    clientId?: string,
+  ): Promise<PromptResult> {
+    const sseAbort = new AbortController();
+    const composedSignal = signal
+      ? composeAbortSignals([signal, sseAbort.signal])
+      : sseAbort.signal;
+
+    try {
+      const events = this.subscribeEvents(sessionId, {
+        lastEventId,
+        signal: composedSignal,
+      });
+      for await (const event of events) {
+        if (event.type === 'turn_complete') {
+          const data = event.data as {
+            promptId?: string;
+            stopReason?: string;
+          };
+          if (data.promptId === promptId) {
+            return { stopReason: data.stopReason ?? 'end_turn' };
+          }
+        }
+        if (event.type === 'turn_error') {
+          const data = event.data as {
+            promptId?: string;
+            message?: string;
+            code?: string;
+          };
+          if (data.promptId === promptId) {
+            const err = new DaemonHttpError(
+              500,
+              data.code ?? 'turn_error',
+              data.message ?? 'Prompt failed',
+            );
+            throw err;
+          }
+        }
+      }
+      throw new Error('SSE stream ended without turn completion');
+    } catch (err) {
+      if (
+        signal?.aborted &&
+        err instanceof DOMException &&
+        err.name === 'AbortError'
+      ) {
+        this.cancel(sessionId, clientId).catch(() => {});
+        throw err;
+      }
+      throw err;
+    } finally {
+      if (!sseAbort.signal.aborted) sseAbort.abort();
+    }
   }
 
   /**

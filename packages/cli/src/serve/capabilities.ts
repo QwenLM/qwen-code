@@ -227,6 +227,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   },
   prompt_absolute_deadline: { since: 'v1' },
   writer_idle_timeout: { since: 'v1' },
+  non_blocking_prompt: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;

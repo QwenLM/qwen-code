@@ -99,6 +99,8 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'followup_suggestion',
   'user_shell_command',
   'user_shell_result',
+  'turn_complete',
+  'turn_error',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -622,6 +624,21 @@ export interface DaemonFollowupSuggestionData {
   [key: string]: unknown;
 }
 
+export interface DaemonTurnCompleteData {
+  sessionId: string;
+  stopReason: string;
+  promptId?: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonTurnErrorData {
+  sessionId: string;
+  message: string;
+  code?: string;
+  promptId?: string;
+  [key: string]: unknown;
+}
+
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -745,6 +762,15 @@ export type DaemonFollowupSuggestionEvent = DaemonEventEnvelope<
   DaemonFollowupSuggestionData
 >;
 
+export type DaemonTurnCompleteEvent = DaemonEventEnvelope<
+  'turn_complete',
+  DaemonTurnCompleteData
+>;
+export type DaemonTurnErrorEvent = DaemonEventEnvelope<
+  'turn_error',
+  DaemonTurnErrorData
+>;
+
 export type DaemonAuthEvent =
   | DaemonAuthDeviceFlowStartedEvent
   | DaemonAuthDeviceFlowThrottledEvent
@@ -809,6 +835,8 @@ export type DaemonWorkspaceMutationEvent =
  */
 export type DaemonAssistEvent = DaemonFollowupSuggestionEvent;
 
+export type DaemonTurnEvent = DaemonTurnCompleteEvent | DaemonTurnErrorEvent;
+
 export type KnownDaemonEvent =
   | DaemonSessionEvent
   | DaemonControlEvent
@@ -816,7 +844,8 @@ export type KnownDaemonEvent =
   | DaemonMcpGuardrailEvent
   | DaemonWorkspaceMutationEvent
   | DaemonAuthEvent
-  | DaemonAssistEvent;
+  | DaemonAssistEvent
+  | DaemonTurnEvent;
 
 export interface DaemonSessionViewState {
   lastEventId?: number;
@@ -998,6 +1027,8 @@ export interface DaemonSessionViewState {
    * at least one suggestion.
    */
   lastFollowupSuggestion?: DaemonFollowupSuggestionData;
+  lastTurnComplete?: DaemonTurnCompleteData;
+  lastTurnError?: DaemonTurnErrorData;
 }
 
 /**
@@ -1260,6 +1291,14 @@ export function asKnownDaemonEvent(
     case 'followup_suggestion':
       return isFollowupSuggestionData(event.data)
         ? (event as DaemonFollowupSuggestionEvent)
+        : undefined;
+    case 'turn_complete':
+      return isTurnCompleteData(event.data)
+        ? (event as DaemonTurnCompleteEvent)
+        : undefined;
+    case 'turn_error':
+      return isTurnErrorData(event.data)
+        ? (event as DaemonTurnErrorEvent)
         : undefined;
     default:
       return undefined;
@@ -1609,6 +1648,16 @@ export function reduceDaemonSessionEvent(
       return {
         ...base,
         lastFollowupSuggestion: event.data,
+      };
+    case 'turn_complete':
+      return {
+        ...base,
+        lastTurnComplete: event.data,
+      };
+    case 'turn_error':
+      return {
+        ...base,
+        lastTurnError: event.data,
       };
     default: {
       const _exhaustive: never = event;
@@ -2309,6 +2358,22 @@ function isFollowupSuggestionData(
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['suggestion']) &&
     isNonEmptyString(value['promptId'])
+  );
+}
+
+function isTurnCompleteData(value: unknown): value is DaemonTurnCompleteData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['stopReason'])
+  );
+}
+
+function isTurnErrorData(value: unknown): value is DaemonTurnErrorData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['message'])
   );
 }
 

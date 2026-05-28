@@ -481,6 +481,48 @@ function broadcastPromptCancelledOnce(
   broadcastPromptCancelled(entry, sessionId, originatorClientId, reason);
 }
 
+function broadcastTurnComplete(
+  entry: SessionEntry,
+  sessionId: string,
+  promptResult: { stopReason?: string; [k: string]: unknown },
+  promptId: string | undefined,
+  originatorClientId: string | undefined,
+): void {
+  entry.events.publish({
+    type: 'turn_complete',
+    data: {
+      sessionId,
+      stopReason: promptResult.stopReason ?? 'end_turn',
+      ...(promptId ? { promptId } : {}),
+    },
+    ...(originatorClientId ? { originatorClientId } : {}),
+  });
+}
+
+function broadcastTurnError(
+  entry: SessionEntry,
+  sessionId: string,
+  err: unknown,
+  promptId: string | undefined,
+  originatorClientId: string | undefined,
+): void {
+  const message = err instanceof Error ? err.message : String(err);
+  const code =
+    err instanceof Error && 'code' in err
+      ? String((err as Error & { code?: string }).code)
+      : undefined;
+  entry.events.publish({
+    type: 'turn_error',
+    data: {
+      sessionId,
+      message,
+      ...(code ? { code } : {}),
+      ...(promptId ? { promptId } : {}),
+    },
+    ...(originatorClientId ? { originatorClientId } : {}),
+  });
+}
+
 function hasControlCharacter(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
@@ -2263,6 +2305,28 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         }
         return racedPromise;
       });
+      const promptId = context?.promptId;
+      result.then(
+        (promptResult) => {
+          broadcastTurnComplete(
+            entry,
+            sessionId,
+            promptResult,
+            promptId,
+            originatorClientId,
+          );
+        },
+        (err) => {
+          if (err instanceof DOMException && err.name === 'AbortError') return;
+          broadcastTurnError(
+            entry,
+            sessionId,
+            err,
+            promptId,
+            originatorClientId,
+          );
+        },
+      );
       // Tail swallows failures so subsequent prompts still run. The caller
       // still sees rejections on its own `result` reference.
       entry.promptQueue = result.then(
@@ -2337,6 +2401,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.subscribe(subOpts);
+    },
+
+    getSessionLastEventId(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return entry.events.lastEventId;
     },
 
     respondToPermission(requestId, response, context) {

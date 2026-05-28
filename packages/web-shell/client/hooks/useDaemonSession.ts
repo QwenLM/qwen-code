@@ -449,6 +449,15 @@ export function useDaemonSession(config: Partial<DaemonSessionConfig> = {}) {
               }
               store.dispatch(uiEvents);
               if (
+                event.type === 'turn_complete' &&
+                !activePromptsRef.current.has(activeSession.sessionId)
+              ) {
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                const stopReason =
+                  (event.data as { stopReason?: string })?.stopReason ??
+                  'end_turn';
+                store.dispatch({ type: 'assistant.done', reason: stopReason });
+              } else if (
                 !activePromptsRef.current.has(activeSession.sessionId) &&
                 hasAssistantDelta(uiEvents)
               ) {
