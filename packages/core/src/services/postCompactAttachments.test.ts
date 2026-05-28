@@ -637,4 +637,71 @@ describe('composePostCompactHistory', () => {
       /got it|acknowledged|continue/i,
     );
   });
+
+  it('strips the <analysis> block from the raw summary before placing it in newHistory', async () => {
+    const history: Content[] = [{ role: 'user', parts: [{ text: 'do x' }] }];
+    const raw =
+      '<analysis>\nthe model was thinking out loud here\nshould not leak\n</analysis>\n\n<state_snapshot>\n  <primary_request_and_intent>actual summary</primary_request_and_intent>\n</state_snapshot>';
+    const result = await composePostCompactHistory(history, raw);
+    const summaryText = (result[0].parts?.[0] as { text: string }).text;
+    expect(summaryText).not.toContain('<analysis>');
+    expect(summaryText).not.toContain('thinking out loud');
+    expect(summaryText).toContain('<state_snapshot>');
+    expect(summaryText).toContain('actual summary');
+  });
+
+  it('appends the resume trailer to the summary message text', async () => {
+    const history: Content[] = [{ role: 'user', parts: [{ text: 'do x' }] }];
+    const result = await composePostCompactHistory(
+      history,
+      '<state_snapshot>...</state_snapshot>',
+    );
+    const summaryText = (result[0].parts?.[0] as { text: string }).text;
+    // Trailer instructs the resuming agent not to greet / recap.
+    expect(summaryText).toMatch(/resume.*prior task|continue from/i);
+    expect(summaryText).toMatch(
+      /do not acknowledge|do not re-introduce|do not greet/i,
+    );
+  });
+});
+
+describe('postProcessSummary', () => {
+  it('returns body + trailer when no <analysis> block is present', async () => {
+    const { postProcessSummary } = await import('./postCompactAttachments.js');
+    const out = postProcessSummary('<state_snapshot>body</state_snapshot>');
+    expect(out).toContain('<state_snapshot>body</state_snapshot>');
+    expect(out).toMatch(/resume.*prior task/i);
+  });
+
+  it('strips <analysis> wrappers (greedy across newlines)', async () => {
+    const { postProcessSummary } = await import('./postCompactAttachments.js');
+    const out = postProcessSummary(
+      '<analysis>\nlots of\nmulti-line\nreasoning\n</analysis>\n\n<state_snapshot>body</state_snapshot>',
+    );
+    expect(out).not.toContain('<analysis>');
+    expect(out).not.toContain('multi-line');
+    expect(out).toContain('<state_snapshot>body</state_snapshot>');
+  });
+
+  it('strips multiple <analysis> blocks if the model emits more than one', async () => {
+    const { postProcessSummary } = await import('./postCompactAttachments.js');
+    const out = postProcessSummary(
+      '<analysis>first</analysis>\n<state_snapshot>body</state_snapshot>\n<analysis>second</analysis>',
+    );
+    expect(out).not.toContain('<analysis>');
+    expect(out).not.toContain('first');
+    expect(out).not.toContain('second');
+  });
+
+  it('falls back to the raw summary when stripping leaves nothing', async () => {
+    const { postProcessSummary } = await import('./postCompactAttachments.js');
+    // Pathological case: model produced only an <analysis> block. We should
+    // NOT return only the trailer — that would lose the entire model
+    // response. Fall back to the raw text so caller has something to
+    // inspect / log.
+    const raw = '<analysis>nothing else</analysis>';
+    const out = postProcessSummary(raw);
+    expect(out).toContain('nothing else');
+    expect(out).toMatch(/resume.*prior task/i);
+  });
 });

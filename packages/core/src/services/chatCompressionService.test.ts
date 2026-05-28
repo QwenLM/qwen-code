@@ -274,7 +274,9 @@ describe('ChatCompressionService', () => {
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(result.info.newTokenCount).toBe(250); // 800 - (1600 - 1000) + 50
     expect(result.newHistory).not.toBeNull();
-    expect(result.newHistory![0].parts![0].text).toBe('Summary');
+    // postProcessSummary appends the resume trailer to the summary body,
+    // so it's "Summary\n\n<trailer>" rather than a strict equality.
+    expect(result.newHistory![0].parts![0].text).toContain('Summary');
     expect(mockGenerateContent).toHaveBeenCalled();
     expect(mockGetHookSystem).toHaveBeenCalled();
   });

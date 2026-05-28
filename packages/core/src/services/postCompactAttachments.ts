@@ -364,6 +364,40 @@ export function buildImageRestorationBlock(
  * The ack message keeps role alternation correct: the next API call will
  * naturally append the model's continuation response.
  */
+/**
+ * Trailer appended to the post-compact summary message. Mirrors claude-code's
+ * "Resume directly" guidance for the resuming agent: it must NOT acknowledge
+ * the summary, re-greet, or recap — it picks up from where the prior turn
+ * left off based on the summary.
+ *
+ * Lives in the wrapper (not in the compression system prompt) so the summary
+ * model does not have to re-generate this text every compaction (saves
+ * output tokens, prevents wording drift).
+ */
+const RESUME_TRAILER =
+  'Resume the prior task using the summary above. Continue from the last in-flight step; do not acknowledge the summary, do not re-introduce, do not greet the user again.';
+
+/**
+ * Strip the model's drafting scratchpad before the summary becomes the new
+ * post-compact context. The compression prompt instructs the summary model
+ * to wrap its chain-of-thought reasoning in an `<analysis>...</analysis>`
+ * block, which is purely for the model's own benefit; keeping it in history
+ * wastes tokens and degrades signal-to-noise for the resuming agent.
+ *
+ * Defensive design: if the strip removes everything (model produced ONLY an
+ * analysis block with no summary content), fall back to the raw summary so
+ * the caller sees something rather than an empty string — the inflation
+ * guard upstream will still NOOP this round, but we don't want to silently
+ * lose the entire model response.
+ */
+export function postProcessSummary(rawSummary: string): string {
+  const stripped = rawSummary
+    .replace(/<analysis>[\s\S]*?<\/analysis>\s*/g, '')
+    .trim();
+  const body = stripped.length > 0 ? stripped : rawSummary.trim();
+  return `${body}\n\n${RESUME_TRAILER}`;
+}
+
 export async function composePostCompactHistory(
   history: Content[],
   summary: string,
@@ -381,7 +415,7 @@ export async function composePostCompactHistory(
   const imageBlock = buildImageRestorationBlock(images);
 
   const out: Content[] = [
-    { role: 'user', parts: [{ text: summary }] },
+    { role: 'user', parts: [{ text: postProcessSummary(summary) }] },
     {
       role: 'model',
       parts: [{ text: 'Got it. Thanks for the additional context!' }],

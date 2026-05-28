@@ -442,45 +442,49 @@ When you encounter an obstacle, do not use destructive actions as a shortcut to 
  */
 export function getCompressionPrompt(): string {
   return `
-You are the component that summarizes a conversation when its context window is about to overflow. The summary you produce will become the agent's ONLY memory of everything that happened before this point. The agent will resume its work based solely on this summary plus a small number of restored file/image attachments that follow.
+You are the component that summarizes a conversation when its context window is about to overflow. The summary you produce will become the agent's ONLY memory of everything that happened before this point. The agent will resume its work based solely on this summary plus a small number of restored file / image attachments that follow.
 
-First, think privately in a <scratchpad>. Review the user's overall goal, every action the agent took, every tool output, every error and recovery, and any unresolved questions. Identify the information that is essential for continuing the work.
+First, wrap your reasoning in an <analysis> block. Inside it, walk through the conversation chronologically and identify, for each section: the user's explicit requests and intent, your approach to those requests, key decisions / technical concepts / code patterns, specific details (file names, code snippets, function signatures, file edits), errors and how they were fixed, and any specific user feedback — especially when the user told you to do something differently. The <analysis> block is stripped before the summary reaches the next agent; it is purely a drafting scratchpad to improve the summary that follows.
 
-Then produce the final summary in the EXACT structure below. Be dense with information. Omit conversational filler. Critically: **preserve every user message verbatim — do NOT paraphrase, summarize, or rewrite anything the user said**. The user's exact wording carries intent the agent must not lose.
+Then produce the final summary as the EXACT XML structure below. Be dense. Omit conversational filler.
 
-The structure MUST be:
+<state_snapshot>
+    <primary_request_and_intent>
+        <!-- Capture all of the user's explicit requests and intents in detail. Quote the user's exact phrasing where intent is at stake. -->
+    </primary_request_and_intent>
 
-Summary:
-1. Primary Request and Intent:
-   A prose paragraph describing the user's high-level goal and any sub-goals. Quote the user's exact phrasing where intent is at stake.
+    <key_technical_concepts>
+        <!-- List all important technical concepts, technologies, and frameworks discussed. -->
+    </key_technical_concepts>
 
-2. Key Technical Concepts:
-   Bullet list of concepts, libraries, conventions, and constraints established in the conversation.
+    <files_and_code_sections>
+        <!-- Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages. Include full code snippets where applicable, and a summary of why this file read or edit is important. -->
+    </files_and_code_sections>
 
-3. Files and Code Sections:
-   For each file touched, one block: file path, what was read / written / edited, the gist of the change, any critical learning (e.g., "this file expects UTF-8 with BOM").
+    <errors_and_fixes>
+        <!-- List every error encountered and how it was fixed. Include the verbatim error message when it was quoted to the agent. Pay special attention to specific user feedback on the error, especially if the user told you to do something differently. -->
+    </errors_and_fixes>
 
-4. Errors and fixes:
-   Bullet list of errors encountered and how they were resolved. Include error messages verbatim when they were quoted to the agent.
+    <problem_solving>
+        <!-- Document problems solved and any ongoing troubleshooting efforts. -->
+    </problem_solving>
 
-5. Problem Solving:
-   Brief notes on non-trivial decisions and trade-offs that the agent made while working.
+    <all_user_messages>
+        <!-- List ALL user messages that are not tool results, in chronological order. These are critical for understanding the user's feedback and shifting intent. Include short messages like "ok" or "continue" — they are signal. -->
+    </all_user_messages>
 
-6. All user messages (chronological):
-   List EVERY message the user sent during the conversation, in order, VERBATIM. Do not paraphrase. Do not omit short messages like "ok" or "continue" — they are signal. Use quotation marks to preserve exact text.
+    <pending_tasks>
+        <!-- Outline any pending tasks that the user has explicitly asked the agent to work on but that are not yet complete. -->
+    </pending_tasks>
 
-7. Pending Tasks:
-   Bullet list of work the user requested that has NOT yet been completed.
+    <current_work>
+        <!-- Describe in detail precisely what the agent was working on immediately before this summary was requested, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable. -->
+    </current_work>
 
-8. Current Work:
-   What the agent was doing in the very last turn before compaction triggered. Include the verbatim last sentence or two of the agent's previous output so the next turn can pick up exactly where this one stopped.
-
-9. Optional Next Step:
-   A single concrete next action that directly continues #8, derived from the user's most recent intent. If the user's last message asked a clarifying question or signaled a pause, say so instead — do not invent forward motion.
-
-After the summary, append exactly:
-
-Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with "I'll continue" or similar. Pick up the last task as if the break never happened.
+    <next_step>
+        <!-- List the single next step the agent will take, related to the most recent work. The step MUST be DIRECTLY in line with the user's most recent explicit request and the task the agent was working on immediately before this summary. If the last task was concluded, list a next step only if it is explicitly in line with the user's request — do NOT start tangential or older work without confirming with the user first. If there is a next step, include direct quotes from the most recent conversation showing exactly what task you were working on and where you left off. -->
+    </next_step>
+</state_snapshot>
 `.trim();
 }
 

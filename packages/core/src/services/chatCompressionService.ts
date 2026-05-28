@@ -315,7 +315,7 @@ export class ChatCompressionService {
           role: 'user',
           parts: [
             {
-              text: 'First, reason in your scratchpad. Then, produce the 9-section summary.',
+              text: 'First, reason in your <analysis> block. Then, produce the <state_snapshot> XML.',
             },
           ],
         },
@@ -403,7 +403,7 @@ export class ChatCompressionService {
       // Best-effort token math using *only* model-reported token counts.
       //
       // Note: compressionInputTokenCount includes the compression prompt and
-      // the extra "reason in your scratchpad" instruction(approx. 1000 tokens), and
+      // the extra "reason in your <analysis> block" instruction (approx. 1000 tokens), and
       // compressionOutputTokenCount reflects the summary tokens only since
       // thinking is disabled.
       // We accept these inaccuracies to avoid local token estimation.

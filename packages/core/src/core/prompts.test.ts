@@ -764,32 +764,44 @@ describe('New Applications workflow deferred to skill', () => {
 });
 
 describe('getCompressionPrompt', () => {
-  it('contains all 9 required sections', () => {
+  it('uses the <state_snapshot> XML envelope with all 9 required section tags', () => {
     const prompt = getCompressionPrompt();
-    expect(prompt).toContain('1. Primary Request and Intent');
-    expect(prompt).toContain('2. Key Technical Concepts');
-    expect(prompt).toContain('3. Files and Code Sections');
-    expect(prompt).toContain('4. Errors and fixes');
-    expect(prompt).toContain('5. Problem Solving');
-    expect(prompt).toContain('6. All user messages');
-    expect(prompt).toContain('7. Pending Tasks');
-    expect(prompt).toContain('8. Current Work');
-    expect(prompt).toContain('9. Optional Next Step');
+    expect(prompt).toContain('<state_snapshot>');
+    expect(prompt).toContain('</state_snapshot>');
+    expect(prompt).toContain('<primary_request_and_intent>');
+    expect(prompt).toContain('<key_technical_concepts>');
+    expect(prompt).toContain('<files_and_code_sections>');
+    expect(prompt).toContain('<errors_and_fixes>');
+    expect(prompt).toContain('<problem_solving>');
+    expect(prompt).toContain('<all_user_messages>');
+    expect(prompt).toContain('<pending_tasks>');
+    expect(prompt).toContain('<current_work>');
+    expect(prompt).toContain('<next_step>');
   });
 
-  it('mandates verbatim preservation of user messages', () => {
+  it('instructs the model to wrap reasoning in an <analysis> block', () => {
     const prompt = getCompressionPrompt();
-    // Must explicitly say "preserve every user message verbatim" — the
-    // word "verbatim" alone is insufficient because it also appears in
-    // section 4 ("error messages verbatim").
-    expect(prompt).toContain('preserve every user message verbatim');
-    expect(prompt).toContain('do NOT paraphrase');
+    expect(prompt).toContain('<analysis>');
+    // Must signal that <analysis> is stripped (so the model knows it is a
+    // drafting scratchpad, not part of the final summary).
+    expect(prompt).toMatch(/<analysis>.*stripped|stripped.*<analysis>/is);
   });
 
-  it('instructs the model to resume directly without acknowledging the summary', () => {
+  it('asks for the <all_user_messages> section to be chronological and inclusive', () => {
     const prompt = getCompressionPrompt();
-    expect(prompt).toMatch(
-      /resume.*directly|do not acknowledge|without.*recap/i,
+    // The actual mandate text — verbatim-but-not-VERBATIM-policed.
+    expect(prompt).toMatch(/all user messages.*chronological/i);
+    expect(prompt).toContain('"ok"');
+    expect(prompt).toContain('"continue"');
+  });
+
+  it('does NOT include the resume trailer in the prompt body', () => {
+    // The trailer lives in postCompactAttachments.postProcessSummary, not in
+    // the prompt. Keeping it out of the prompt saves output tokens per
+    // compaction and prevents wording drift.
+    const prompt = getCompressionPrompt();
+    expect(prompt).not.toMatch(
+      /resume.*directly|continue the conversation from where it left off/i,
     );
   });
 });
