@@ -21,6 +21,7 @@ import {
   slimCompactionInput,
 } from './compactionInputSlimming.js';
 import { estimatePromptTokens } from './tokenEstimation.js';
+import { composePostCompactHistory } from './postCompactAttachments.js';
 
 /**
  * The fraction of the latest chat history to keep. A value of 0.3
@@ -424,35 +425,15 @@ export class ChatCompressionService {
     // which is correct for manual /compress (force=true, trigger='manual')
     // but conflated hard-rescue (force=true, trigger='auto') and silently
     // stripped active funcCalls there.
-    const lastMessage = curatedHistory[curatedHistory.length - 1];
-    const hasOrphanedFuncCall =
-      compactTrigger === 'manual' &&
-      lastMessage?.role === 'model' &&
-      lastMessage.parts?.some((p) => !!p.functionCall);
-    const historyForSplit = hasOrphanedFuncCall
-      ? curatedHistory.slice(0, -1)
-      : curatedHistory;
+    // CLAUDE-CODE-STYLE FULL-HISTORY COMPRESSION
+    // We no longer split the history into "compress" + "keep" slices.
+    // The entire curated history is sent to the summary side-query, and
+    // the post-compact history is assembled by composePostCompactHistory
+    // (summary + model ack + recent file restores + recent image restore).
+    const historyForCompression = curatedHistory;
 
-    // Precompute charCounts once and share with the splitter + the
-    // MIN_COMPRESSION_FRACTION guard below, avoiding two extra walks.
-    const charCounts = historyForSplit.map((c) =>
-      estimateContentChars(c, slimmingConfig.imageTokenEstimate),
-    );
-    const splitPoint = findCompressSplitPoint(
-      historyForSplit,
-      1 - COMPRESSION_PRESERVE_THRESHOLD,
-      TOOL_ROUND_RETAIN_COUNT,
-      charCounts,
-    );
-
-    const historyToCompress = historyForSplit.slice(0, splitPoint);
-    const historyToKeep = historyForSplit.slice(splitPoint);
-    // The in-flight fallback path may produce a kept slice starting with
-    // model+functionCall; the post-summary history needs a synthetic user
-    // between the summary's model_ack and the kept entries.
-    const keepNeedsContinuationBridge = historyToKeep[0]?.role === 'model';
-
-    if (historyToCompress.length === 0) {
+    // Guard: need at least a user+model pair for a meaningful summary.
+    if (historyForCompression.length < 2) {
       return {
         newHistory: null,
         info: {
@@ -463,28 +444,10 @@ export class ChatCompressionService {
       };
     }
 
-    // Guard: if historyToCompress is too small relative to the total history,
-    // skip compression. This prevents futile API calls where the model receives
-    // almost no context and generates a useless "summary" that inflates tokens.
-    let compressCharCount = 0;
-    for (let i = 0; i < splitPoint; i++) compressCharCount += charCounts[i]!;
-    const totalCharCount = charCounts.reduce((a, b) => a + b, 0);
-    if (
-      totalCharCount > 0 &&
-      compressCharCount / totalCharCount < MIN_COMPRESSION_FRACTION
-    ) {
-      return {
-        newHistory: null,
-        info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
-          compressionStatus: CompressionStatus.NOOP,
-        },
-      };
-    }
-
-    // Slim the side-query; live history unchanged.
-    const slim = slimCompactionInput(historyToCompress);
+    // Slim the side-query input: replace inlineData with placeholders.
+    // The original history (with images) is preserved separately for
+    // the post-compact image restoration block.
+    const slim = slimCompactionInput(historyForCompression);
     if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
       config
         .getDebugLogger()
@@ -588,33 +551,12 @@ export class ChatCompressionService {
     let canCalculateNewTokenCount = false;
 
     if (!isSummaryEmpty) {
-      extraHistory = [
-        {
-          role: 'user',
-          parts: [{ text: summary }],
-        },
-        {
-          role: 'model',
-          parts: [{ text: 'Got it. Thanks for the additional context!' }],
-        },
-        // When the kept slice starts with model+functionCall (because
-        // tool-round absorption pulled the only fresh user message into
-        // compress), inject a synthetic continuation prompt so the joined
-        // history alternates correctly.
-        ...(keepNeedsContinuationBridge
-          ? [
-              {
-                role: 'user' as const,
-                parts: [
-                  {
-                    text: 'Continue with the prior task using the context above.',
-                  },
-                ],
-              },
-            ]
-          : []),
-        ...historyToKeep,
-      ];
+      // Use the new composer — assembles summary + ack + file restores +
+      // image restore. No tail preservation, no continuation bridge.
+      extraHistory = await composePostCompactHistory(
+        historyForCompression,
+        summary,
+      );
 
       // Best-effort token math using *only* model-reported token counts.
       //

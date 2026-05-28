@@ -2376,6 +2376,111 @@ describe('computeThresholds', () => {
   });
 });
 
+describe('ChatCompressionService.compress — claude-code-style full-history compression', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeFakeChat(history: Content[]): GeminiChat {
+    const getHistoryMock = vi.fn().mockReturnValue(history);
+    return {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+  }
+
+  function makeFakeConfig(): Config {
+    return {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+    } as unknown as Config;
+  }
+
+  it('sends the ENTIRE history to the summary side-query (no split)', async () => {
+    const runSideQuerySpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: 'TEST SUMMARY',
+        usage: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 50,
+          totalTokenCount: 150,
+        },
+      } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'first request' }] },
+      { role: 'model', parts: [{ text: 'first reply' }] },
+      { role: 'user', parts: [{ text: 'second request' }] },
+      { role: 'model', parts: [{ text: 'second reply' }] },
+    ];
+
+    const service = new ChatCompressionService();
+    await service.compress(makeFakeChat(history), {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-vl',
+      config: makeFakeConfig(),
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      trigger: 'manual',
+    });
+
+    const calledWith = runSideQuerySpy.mock.calls[0]![1] as {
+      contents: Array<{ parts: Array<{ text?: string }> }>;
+    };
+    // Full 4 history entries + 1 trailing scratchpad prompt = 5 contents.
+    expect(calledWith.contents).toHaveLength(5);
+    expect(calledWith.contents[0].parts[0].text).toContain('first request');
+  });
+
+  it('produces newHistory composed via composePostCompactHistory', async () => {
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: 'SUM_TXT',
+      usage: {
+        // newTokenCount = 180_000 - (170_000 - 1000) + 500 = 11_500 <= 180_000
+        promptTokenCount: 170_000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 170_500,
+      },
+    } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'hi' }] },
+      { role: 'model', parts: [{ text: 'hello' }] },
+      { role: 'user', parts: [{ text: 'how are you' }] },
+      { role: 'model', parts: [{ text: 'fine' }] },
+    ];
+
+    const service = new ChatCompressionService();
+    const result = await service.compress(makeFakeChat(history), {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-vl',
+      config: makeFakeConfig(),
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      trigger: 'manual',
+    });
+
+    expect(result.newHistory).not.toBeNull();
+    expect(result.newHistory![0].role).toBe('user');
+    const firstPart = result.newHistory![0].parts?.[0] as { text?: string };
+    expect(firstPart.text).toContain('SUM_TXT');
+    expect(result.newHistory![1].role).toBe('model');
+  });
+});
+
 describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto', () => {
   afterEach(() => {
     vi.restoreAllMocks();
