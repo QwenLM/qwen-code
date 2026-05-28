@@ -79,8 +79,13 @@ import type {
   QwenHookEvent,
   QwenMcpServerConfig,
   QwenPermissionSettings,
+  QwenProviderCatalog,
+  QwenProviderConnectParams,
+  QwenProviderConnectResult,
   QwenSettingValue,
   QwenSettingsScope,
+  QwenSkillInstallRequest,
+  QwenSkillInstallResult,
 } from '../protocol/dto.ts';
 import type {
   QwenMemoryPaths,
@@ -624,6 +629,44 @@ export async function getQwenMemoryPathsViaAcp(
     throw new Error('Qwen ACP did not return memory paths');
   }
   return { userMemoryFile, projectMemoryFile, autoMemoryDir };
+}
+
+export async function listQwenProvidersViaAcp(
+  options: QwenSettingsAcpOptions,
+): Promise<QwenProviderCatalog> {
+  const response = await callQwenSettingsAcpMethod(
+    options,
+    'qwen/providers/list',
+  );
+  return {
+    providers: Array.isArray(response.providers)
+      ? (response.providers as QwenProviderCatalog['providers'])
+      : [],
+  };
+}
+
+export async function connectQwenProviderViaAcp(
+  options: QwenSettingsAcpOptions,
+  params: QwenProviderConnectParams,
+): Promise<QwenProviderConnectResult> {
+  const response = await callQwenSettingsAcpMethod(
+    options,
+    'qwen/providers/connect',
+    params as unknown as JsonRecord,
+  );
+  const error = asString(response.error);
+  const providerId = asString(response.providerId);
+  const providerLabel = asString(response.providerLabel);
+  const authType = asString(response.authType);
+  const modelId = asString(response.modelId);
+  return {
+    success: response.success === true,
+    ...(error ? { error } : {}),
+    ...(providerId ? { providerId } : {}),
+    ...(providerLabel ? { providerLabel } : {}),
+    ...(authType ? { authType } : {}),
+    ...(modelId ? { modelId } : {}),
+  };
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -1825,6 +1868,38 @@ export class QwenAgent extends BaseAgent {
       10_000,
     );
     return result as unknown as QwenCoreSettingsSnapshot;
+  }
+
+  async installSkill(
+    request: QwenSkillInstallRequest,
+  ): Promise<QwenSkillInstallResult> {
+    await this.ensureProcess();
+    const result = await this.callAcp(
+      'qwen/skills/install',
+      (connection) =>
+        connection.extMethod('qwen/skills/install', {
+          cwd: this.resolvedCwd(),
+          skill: {
+            ...request,
+            scope: request.scope ?? 'global',
+          },
+        }),
+      30_000,
+    );
+    const record = toRecord(result);
+    const installedSkill = toRecord(record.skill);
+    return {
+      id: asString(record.id) ?? asString(installedSkill.id) ?? request.id,
+      slug:
+        asString(record.slug) ?? asString(installedSkill.slug) ?? request.slug,
+      installed: asBoolean(record.installed) ?? true,
+      installedPath:
+        asString(record.installedPath) ??
+        asString(record.installed_path) ??
+        asString(installedSkill.installedPath) ??
+        asString(installedSkill.installed_path),
+      message: asString(record.message),
+    };
   }
 
   override setModel(model: string): void {

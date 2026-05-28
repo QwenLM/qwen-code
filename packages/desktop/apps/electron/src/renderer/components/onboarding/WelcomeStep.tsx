@@ -14,7 +14,7 @@ interface WelcomeStepProps {
  * WelcomeStep - Initial welcome screen for onboarding
  *
  * Shows different messaging for new vs existing users:
- * - New users: Welcome to Qwen Code
+ * - New users: Welcome to the app
  * - Existing users: Update your API connection settings
  */
 export function WelcomeStep({

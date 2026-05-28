@@ -5,15 +5,15 @@
  * the method→channel mapping used by buildClientApi().
  */
 
-import { RPC_CHANNELS } from '../shared/types'
-import type { ChannelMap } from './build-api'
+import { RPC_CHANNELS } from '../shared/types';
+import type { ChannelMap } from './build-api';
 
-function invoke(channel: string, transform?: (result: any) => any) {
-  return { type: 'invoke' as const, channel, ...(transform && { transform }) }
+function invoke(channel: string, transform?: (result: unknown) => unknown) {
+  return { type: 'invoke' as const, channel, ...(transform && { transform }) };
 }
 
 function listener(channel: string) {
-  return { type: 'listener' as const, channel }
+  return { type: 'listener' as const, channel };
 }
 
 export const CHANNEL_MAP = {
@@ -34,14 +34,24 @@ export const CHANNEL_MAP = {
   sessionCommand: invoke(RPC_CHANNELS.sessions.COMMAND),
   exportSession: invoke(RPC_CHANNELS.sessions.EXPORT),
   importSession: invoke(RPC_CHANNELS.sessions.IMPORT),
-  exportRemoteSessionTransfer: invoke(RPC_CHANNELS.sessions.EXPORT_REMOTE_TRANSFER),
-  importRemoteSessionTransfer: invoke(RPC_CHANNELS.sessions.IMPORT_REMOTE_TRANSFER),
-  getPendingPlanExecution: invoke(RPC_CHANNELS.sessions.GET_PENDING_PLAN_EXECUTION),
-  getSessionPermissionModeState: invoke(RPC_CHANNELS.sessions.GET_PERMISSION_MODE_STATE),
+  exportRemoteSessionTransfer: invoke(
+    RPC_CHANNELS.sessions.EXPORT_REMOTE_TRANSFER,
+  ),
+  importRemoteSessionTransfer: invoke(
+    RPC_CHANNELS.sessions.IMPORT_REMOTE_TRANSFER,
+  ),
+  getPendingPlanExecution: invoke(
+    RPC_CHANNELS.sessions.GET_PENDING_PLAN_EXECUTION,
+  ),
+  getSessionPermissionModeState: invoke(
+    RPC_CHANNELS.sessions.GET_PERMISSION_MODE_STATE,
+  ),
 
   // Event listeners
   onSessionEvent: listener(RPC_CHANNELS.sessions.EVENT),
-  onUnreadSummaryChanged: listener(RPC_CHANNELS.sessions.UNREAD_SUMMARY_CHANGED),
+  onUnreadSummaryChanged: listener(
+    RPC_CHANNELS.sessions.UNREAD_SUMMARY_CHANGED,
+  ),
 
   // Transport reliability
   onReconnected: listener('__transport:reconnected'),
@@ -61,7 +71,9 @@ export const CHANNEL_MAP = {
   getWindowWorkspace: invoke(RPC_CHANNELS.window.GET_WORKSPACE),
   getWindowMode: invoke(RPC_CHANNELS.window.GET_MODE),
   openWorkspace: invoke(RPC_CHANNELS.window.OPEN_WORKSPACE),
-  openSessionInNewWindow: invoke(RPC_CHANNELS.window.OPEN_SESSION_IN_NEW_WINDOW),
+  openSessionInNewWindow: invoke(
+    RPC_CHANNELS.window.OPEN_SESSION_IN_NEW_WINDOW,
+  ),
   switchWorkspace: invoke(RPC_CHANNELS.window.SWITCH_WORKSPACE),
   closeWindow: invoke(RPC_CHANNELS.window.CLOSE),
   confirmCloseWindow: invoke(RPC_CHANNELS.window.CONFIRM_CLOSE),
@@ -119,13 +131,18 @@ export const CHANNEL_MAP = {
 
   // Auth
   showLogoutConfirmation: invoke(RPC_CHANNELS.auth.SHOW_LOGOUT_CONFIRMATION),
-  showDeleteSessionConfirmation: invoke(RPC_CHANNELS.auth.SHOW_DELETE_SESSION_CONFIRMATION),
+  showDeleteSessionConfirmation: invoke(
+    RPC_CHANNELS.auth.SHOW_DELETE_SESSION_CONFIRMATION,
+  ),
   logout: invoke(RPC_CHANNELS.auth.LOGOUT),
   getCredentialHealth: invoke(RPC_CHANNELS.credentials.HEALTH_CHECK),
 
   // Onboarding
   getAuthState: invoke(RPC_CHANNELS.onboarding.GET_AUTH_STATE),
-  getSetupNeeds: invoke(RPC_CHANNELS.onboarding.GET_AUTH_STATE, r => r.setupNeeds),
+  getSetupNeeds: invoke(
+    RPC_CHANNELS.onboarding.GET_AUTH_STATE,
+    (r) => r.setupNeeds,
+  ),
   startWorkspaceMcpOAuth: invoke(RPC_CHANNELS.onboarding.START_MCP_OAUTH),
   deferSetup: invoke(RPC_CHANNELS.onboarding.DEFER_SETUP),
 
@@ -139,9 +156,17 @@ export const CHANNEL_MAP = {
 
   // Settings - API Setup
   setupLlmConnection: invoke(RPC_CHANNELS.settings.SETUP_LLM_CONNECTION),
-  testLlmConnectionSetup: invoke(RPC_CHANNELS.settings.TEST_LLM_CONNECTION_SETUP),
-  getDefaultThinkingLevel: invoke(RPC_CHANNELS.settings.GET_DEFAULT_THINKING_LEVEL),
-  setDefaultThinkingLevel: invoke(RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL),
+  testLlmConnectionSetup: invoke(
+    RPC_CHANNELS.settings.TEST_LLM_CONNECTION_SETUP,
+  ),
+  listQwenProviders: invoke(RPC_CHANNELS.settings.LIST_QWEN_PROVIDERS),
+  connectQwenProvider: invoke(RPC_CHANNELS.settings.CONNECT_QWEN_PROVIDER),
+  getDefaultThinkingLevel: invoke(
+    RPC_CHANNELS.settings.GET_DEFAULT_THINKING_LEVEL,
+  ),
+  setDefaultThinkingLevel: invoke(
+    RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL,
+  ),
   getNetworkProxySettings: invoke(RPC_CHANNELS.settings.GET_NETWORK_PROXY),
   setNetworkProxySettings: invoke(RPC_CHANNELS.settings.SET_NETWORK_PROXY),
 
@@ -192,7 +217,9 @@ export const CHANNEL_MAP = {
   getSourcePermissionsConfig: invoke(RPC_CHANNELS.sources.GET_PERMISSIONS),
   getWorkspacePermissionsConfig: invoke(RPC_CHANNELS.workspace.GET_PERMISSIONS),
   getDefaultPermissionsConfig: invoke(RPC_CHANNELS.permissions.GET_DEFAULTS),
-  onDefaultPermissionsChanged: listener(RPC_CHANNELS.permissions.DEFAULTS_CHANGED),
+  onDefaultPermissionsChanged: listener(
+    RPC_CHANNELS.permissions.DEFAULTS_CHANGED,
+  ),
   getMcpTools: invoke(RPC_CHANNELS.sources.GET_MCP_TOOLS),
 
   // Session content search
@@ -208,6 +235,8 @@ export const CHANNEL_MAP = {
   getSkills: invoke(RPC_CHANNELS.skills.GET),
   getSkillFiles: invoke(RPC_CHANNELS.skills.GET_FILES),
   deleteSkill: invoke(RPC_CHANNELS.skills.DELETE),
+  listSkillMarketplace: invoke(RPC_CHANNELS.skills.MARKETPLACE_LIST),
+  installSkillFromMarketplace: invoke(RPC_CHANNELS.skills.MARKETPLACE_INSTALL),
   openSkillInEditor: invoke(RPC_CHANNELS.skills.OPEN_EDITOR),
   openSkillInFinder: invoke(RPC_CHANNELS.skills.OPEN_FINDER),
   onSkillsChanged: listener(RPC_CHANNELS.skills.CHANGED),
@@ -250,7 +279,9 @@ export const CHANNEL_MAP = {
   onAppThemeChange: listener(RPC_CHANNELS.theme.APP_CHANGED),
   broadcastThemePreferences: invoke(RPC_CHANNELS.theme.BROADCAST_PREFERENCES),
   onThemePreferencesChange: listener(RPC_CHANNELS.theme.PREFERENCES_CHANGED),
-  broadcastWorkspaceThemeChange: invoke(RPC_CHANNELS.theme.BROADCAST_WORKSPACE_THEME),
+  broadcastWorkspaceThemeChange: invoke(
+    RPC_CHANNELS.theme.BROADCAST_WORKSPACE_THEME,
+  ),
   onWorkspaceThemeChange: listener(RPC_CHANNELS.theme.WORKSPACE_THEME_CHANGED),
 
   // Notifications
@@ -271,16 +302,24 @@ export const CHANNEL_MAP = {
   setKeepAwakeWhileRunning: invoke(RPC_CHANNELS.power.SET_KEEP_AWAKE),
 
   // Appearance settings
-  getRichToolDescriptions: invoke(RPC_CHANNELS.appearance.GET_RICH_TOOL_DESCRIPTIONS),
-  setRichToolDescriptions: invoke(RPC_CHANNELS.appearance.SET_RICH_TOOL_DESCRIPTIONS),
+  getRichToolDescriptions: invoke(
+    RPC_CHANNELS.appearance.GET_RICH_TOOL_DESCRIPTIONS,
+  ),
+  setRichToolDescriptions: invoke(
+    RPC_CHANNELS.appearance.SET_RICH_TOOL_DESCRIPTIONS,
+  ),
 
   // Tools settings
   getBrowserToolEnabled: invoke(RPC_CHANNELS.tools.GET_BROWSER_TOOL_ENABLED),
   setBrowserToolEnabled: invoke(RPC_CHANNELS.tools.SET_BROWSER_TOOL_ENABLED),
 
   // Prompt caching & context
-  getExtendedPromptCache: invoke(RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE),
-  setExtendedPromptCache: invoke(RPC_CHANNELS.caching.SET_EXTENDED_PROMPT_CACHE),
+  getExtendedPromptCache: invoke(
+    RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE,
+  ),
+  setExtendedPromptCache: invoke(
+    RPC_CHANNELS.caching.SET_EXTENDED_PROMPT_CACHE,
+  ),
   getEnable1MContext: invoke(RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT),
   setEnable1MContext: invoke(RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT),
 
@@ -335,21 +374,29 @@ export const CHANNEL_MAP = {
   'browserPane.stop': invoke(RPC_CHANNELS.browserPane.STOP),
   'browserPane.focus': invoke(RPC_CHANNELS.browserPane.FOCUS),
   'browserPane.emptyStateLaunch': invoke(RPC_CHANNELS.browserPane.LAUNCH),
-  'browserPane.onStateChanged': listener(RPC_CHANNELS.browserPane.STATE_CHANGED),
+  'browserPane.onStateChanged': listener(
+    RPC_CHANNELS.browserPane.STATE_CHANGED,
+  ),
   'browserPane.onRemoved': listener(RPC_CHANNELS.browserPane.REMOVED),
   'browserPane.onInteracted': listener(RPC_CHANNELS.browserPane.INTERACTED),
 
   // LLM Connections
   listLlmConnections: invoke(RPC_CHANNELS.llmConnections.LIST),
-  listLlmConnectionsWithStatus: invoke(RPC_CHANNELS.llmConnections.LIST_WITH_STATUS),
+  listLlmConnectionsWithStatus: invoke(
+    RPC_CHANNELS.llmConnections.LIST_WITH_STATUS,
+  ),
   getLlmConnection: invoke(RPC_CHANNELS.llmConnections.GET),
   getLlmConnectionApiKey: invoke(RPC_CHANNELS.llmConnections.GET_API_KEY),
   saveLlmConnection: invoke(RPC_CHANNELS.llmConnections.SAVE),
   deleteLlmConnection: invoke(RPC_CHANNELS.llmConnections.DELETE),
   testLlmConnection: invoke(RPC_CHANNELS.llmConnections.TEST),
   setDefaultLlmConnection: invoke(RPC_CHANNELS.llmConnections.SET_DEFAULT),
-  setWorkspaceDefaultLlmConnection: invoke(RPC_CHANNELS.llmConnections.SET_WORKSPACE_DEFAULT),
-  refreshLlmConnectionModels: invoke(RPC_CHANNELS.llmConnections.REFRESH_MODELS),
+  setWorkspaceDefaultLlmConnection: invoke(
+    RPC_CHANNELS.llmConnections.SET_WORKSPACE_DEFAULT,
+  ),
+  refreshLlmConnectionModels: invoke(
+    RPC_CHANNELS.llmConnections.REFRESH_MODELS,
+  ),
 
   // Automations
   getAutomations: invoke(RPC_CHANNELS.automations.GET),
@@ -382,4 +429,4 @@ export const CHANNEL_MAP = {
   startWhatsAppConnect: invoke(RPC_CHANNELS.messaging.WA_START_CONNECT),
   submitWhatsAppPhone: invoke(RPC_CHANNELS.messaging.WA_SUBMIT_PHONE),
   onWhatsAppEvent: listener(RPC_CHANNELS.messaging.WA_UI_EVENT),
-} satisfies ChannelMap
+} satisfies ChannelMap;

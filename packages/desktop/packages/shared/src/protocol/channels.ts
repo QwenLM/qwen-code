@@ -186,6 +186,8 @@ export const RPC_CHANNELS = {
   settings: {
     SETUP_LLM_CONNECTION: 'settings:setupLlmConnection',
     TEST_LLM_CONNECTION_SETUP: 'settings:testLlmConnectionSetup',
+    LIST_QWEN_PROVIDERS: 'settings:listQwenProviders',
+    CONNECT_QWEN_PROVIDER: 'settings:connectQwenProvider',
     GET_DEFAULT_THINKING_LEVEL: 'settings:getDefaultThinkingLevel',
     SET_DEFAULT_THINKING_LEVEL: 'settings:setDefaultThinkingLevel',
     GET_NETWORK_PROXY: 'settings:getNetworkProxy',
@@ -238,6 +240,8 @@ export const RPC_CHANNELS = {
     GET: 'skills:get',
     GET_FILES: 'skills:getFiles',
     DELETE: 'skills:delete',
+    MARKETPLACE_LIST: 'skills:marketplaceList',
+    MARKETPLACE_INSTALL: 'skills:marketplaceInstall',
     OPEN_EDITOR: 'skills:openEditor',
     OPEN_FINDER: 'skills:openFinder',
     CHANGED: 'skills:changed',
@@ -391,7 +395,7 @@ export const RPC_CHANNELS = {
     /** Broadcast to UI clients: QR string, pairing code, status, unavailable, error. */
     WA_UI_EVENT: 'messaging:wa:uiEvent',
   },
-} as const
+} as const;
 
 // IPC_CHANNELS compat alias removed — all consumers now use RPC_CHANNELS
 
@@ -400,11 +404,11 @@ export const RPC_CHANNELS = {
  * Used by the exhaustive routing test to ensure every channel is classified.
  */
 export function getAllChannelValues(): string[] {
-  const values: string[] = []
+  const values: string[] = [];
   for (const namespace of Object.values(RPC_CHANNELS)) {
     for (const channel of Object.values(namespace)) {
-      values.push(channel)
+      values.push(channel);
     }
   }
-  return values
+  return values;
 }

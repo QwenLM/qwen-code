@@ -260,6 +260,9 @@ import type {
   ImportRemoteSessionTransferResult,
   AvailableSlashCommand,
   QwenCoreSettingsSnapshot,
+  QwenProviderCatalog,
+  QwenProviderConnectParams,
+  QwenProviderConnectResult,
 } from '@craft-agent/shared/protocol';
 
 export interface ElectronAPI {
@@ -561,6 +564,10 @@ export interface ElectronAPI {
   testLlmConnectionSetup(
     params: TestLlmConnectionParams,
   ): Promise<TestLlmConnectionResult>;
+  listQwenProviders(): Promise<QwenProviderCatalog>;
+  connectQwenProvider(
+    params: QwenProviderConnectParams,
+  ): Promise<QwenProviderConnectResult>;
 
   // Session-specific model (overrides global)
   getSessionModel(

@@ -8,13 +8,20 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
+  ALL_PROVIDERS,
+  applyProviderInstallPlan,
+  buildInstallPlan,
   clearCachedCredentialFile,
   createDebugLogger,
+  findProviderById,
   getAllGeminiMdFilenames,
   getAutoMemoryRoot,
+  getDefaultBaseUrlForProtocol,
+  getDefaultModelIds,
   getScopedEnvContents,
   QwenOAuth2Event,
   qwenOAuth2Events,
+  resolveBaseUrl,
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   SessionService,
@@ -36,6 +43,8 @@ import type {
   Config,
   ConversationRecord,
   DeviceAuthorizationData,
+  ProviderConfig,
+  ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -84,7 +93,8 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { LoadedSettings } from '../config/settings.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
-import type { ApprovalModeValue , SessionContext } from './session/types.js';
+import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
+import type { ApprovalModeValue, SessionContext } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
@@ -229,6 +239,7 @@ type QwenMemoryPaths = {
   projectMemoryFile: string;
   autoMemoryDir: string;
 };
+
 
 type QwenSettingsScope = 'user' | 'workspace';
 type QwenSettingValue = string | number | boolean | string[] | undefined;
@@ -401,6 +412,227 @@ function toRecord(value: unknown): Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function readOptionalString(
+  value: unknown,
+  fieldName: string,
+): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid ${fieldName}: expected string`,
+    );
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readRequiredString(value: unknown, fieldName: string): string {
+  const stringValue = readOptionalString(value, fieldName);
+  if (!stringValue) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid or missing ${fieldName}`,
+    );
+  }
+  return stringValue;
+}
+
+function readStringArray(value: unknown, fieldName: string): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid ${fieldName}: expected string[]`,
+    );
+  }
+  return Array.from(
+    new Set(
+      value
+        .map((item) => {
+          if (typeof item !== 'string') {
+            throw RequestError.invalidParams(
+              undefined,
+              `Invalid ${fieldName}: expected string[]`,
+            );
+          }
+          return item.trim();
+        })
+        .filter(Boolean),
+    ),
+  );
+}
+
+function readPositiveNumber(
+  value: unknown,
+  fieldName: string,
+): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid ${fieldName}: expected positive number`,
+    );
+  }
+  return value;
+}
+
+function readProviderAdvancedConfig(
+  value: unknown,
+): ProviderSetupInputs['advancedConfig'] | undefined {
+  if (value === undefined || value === null) return undefined;
+  const record = toRecord(value);
+  if (
+    record['enableThinking'] !== undefined &&
+    typeof record['enableThinking'] !== 'boolean'
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Invalid advancedConfig.enableThinking: expected boolean',
+    );
+  }
+  const multimodalRecord = toRecord(record['multimodal']);
+  const multimodal: NonNullable<
+    ProviderSetupInputs['advancedConfig']
+  >['multimodal'] = {};
+  for (const key of ['image', 'video', 'audio', 'pdf'] as const) {
+    const flag = multimodalRecord[key];
+    if (flag !== undefined) {
+      if (typeof flag !== 'boolean') {
+        throw RequestError.invalidParams(
+          undefined,
+          `Invalid advancedConfig.multimodal.${key}: expected boolean`,
+        );
+      }
+      multimodal[key] = flag;
+    }
+  }
+  const contextWindowSize = readPositiveNumber(
+    record['contextWindowSize'],
+    'advancedConfig.contextWindowSize',
+  );
+  const maxTokens = readPositiveNumber(
+    record['maxTokens'],
+    'advancedConfig.maxTokens',
+  );
+
+  const advancedConfig: NonNullable<ProviderSetupInputs['advancedConfig']> = {
+    ...(typeof record['enableThinking'] === 'boolean'
+      ? { enableThinking: record['enableThinking'] }
+      : {}),
+    ...(Object.keys(multimodal).length > 0 ? { multimodal } : {}),
+    ...(contextWindowSize ? { contextWindowSize } : {}),
+    ...(maxTokens ? { maxTokens } : {}),
+  };
+
+  return Object.keys(advancedConfig).length > 0 ? advancedConfig : undefined;
+}
+
+function resolveProviderDocumentationUrl(
+  config: ProviderConfig,
+  baseUrl: string,
+): string | undefined {
+  if (typeof config.documentationUrl === 'string') {
+    return config.documentationUrl;
+  }
+  if (typeof config.documentationUrl === 'function') {
+    try {
+      return config.documentationUrl(baseUrl);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function serializeProviderConfig(
+  config: ProviderConfig,
+): Record<string, unknown> {
+  const defaultProtocol = config.protocolOptions?.[0] ?? config.protocol;
+  const defaultBaseUrl =
+    config.baseUrl === undefined
+      ? getDefaultBaseUrlForProtocol(defaultProtocol)
+      : resolveBaseUrl(config);
+
+  return {
+    id: config.id,
+    label: config.label,
+    description: config.description,
+    protocol: config.protocol,
+    protocolOptions: config.protocolOptions ?? [],
+    baseUrl: config.baseUrl,
+    baseUrlPlaceholder:
+      config.baseUrl === undefined ? defaultBaseUrl : undefined,
+    defaultModelIds: getDefaultModelIds(config),
+    models: config.models ?? [],
+    modelsEditable: config.modelsEditable === true || !config.models,
+    showAdvancedConfig: config.showAdvancedConfig === true,
+    apiKeyPlaceholder: config.apiKeyPlaceholder,
+    documentationUrl: resolveProviderDocumentationUrl(config, defaultBaseUrl),
+    uiGroup: config.uiGroup ?? 'third-party',
+    uiLabels: config.uiLabels,
+  };
+}
+
+function readProviderSetupInputs(
+  config: ProviderConfig,
+  params: Record<string, unknown>,
+): ProviderSetupInputs {
+  const protocol = readOptionalString(params['protocol'], 'protocol') as
+    | AuthType
+    | undefined;
+  if (
+    protocol &&
+    protocol !== config.protocol &&
+    !config.protocolOptions?.includes(protocol)
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid protocol for provider "${config.id}"`,
+    );
+  }
+
+  let baseUrl = resolveBaseUrl(
+    config,
+    readOptionalString(params['baseUrl'], 'baseUrl'),
+  ).trim();
+  if (!baseUrl && config.baseUrl === undefined) {
+    baseUrl = getDefaultBaseUrlForProtocol(protocol ?? config.protocol);
+  }
+  if (!baseUrl) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid or missing baseUrl for provider "${config.id}"`,
+    );
+  }
+
+  const apiKey = readRequiredString(params['apiKey'], 'apiKey');
+  const apiKeyError = config.validateApiKey?.(apiKey, baseUrl);
+  if (apiKeyError) {
+    throw RequestError.invalidParams(undefined, apiKeyError);
+  }
+
+  const defaultModelIds = getDefaultModelIds(config);
+  const modelIds = readStringArray(params['modelIds'], 'modelIds');
+  const resolvedModelIds = modelIds.length > 0 ? modelIds : defaultModelIds;
+  if (resolvedModelIds.length === 0) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Invalid or missing modelIds for provider "${config.id}"`,
+    );
+  }
+
+  const advancedConfig = readProviderAdvancedConfig(params['advancedConfig']);
+
+  return {
+    ...(protocol ? { protocol } : {}),
+    baseUrl,
+    apiKey,
+    modelIds: resolvedModelIds,
+    ...(advancedConfig ? { advancedConfig } : {}),
+  };
 }
 
 function getNestedSettingValue(
@@ -2335,6 +2567,45 @@ class QwenAgent implements Agent {
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
+      case 'qwen/providers/list': {
+        return {
+          providers: ALL_PROVIDERS.map(serializeProviderConfig),
+        };
+      }
+      case 'qwen/providers/connect': {
+        const providerId = readRequiredString(
+          params['providerId'],
+          'providerId',
+        );
+        const providerConfig = findProviderById(providerId);
+        if (!providerConfig) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Unknown provider: ${providerId}`,
+          );
+        }
+
+        const inputs = readProviderSetupInputs(providerConfig, params);
+        const plan = buildInstallPlan(providerConfig, inputs);
+        await applyProviderInstallPlan(plan, {
+          settings: createLoadedSettingsAdapter(this.settings),
+          reloadModelProviders: (modelProviders) =>
+            this.config.reloadModelProvidersConfig(modelProviders),
+          syncAuthState: (authType, modelId) =>
+            this.config
+              .getModelsConfig()
+              .syncAfterAuthRefresh(authType, modelId),
+          refreshAuth: (authType) => this.config.refreshAuth(authType),
+        });
+
+        return {
+          success: true,
+          providerId: providerConfig.id,
+          providerLabel: providerConfig.label,
+          authType: plan.authType,
+          modelId: plan.modelSelection?.modelId,
+        };
+      }
       case 'qwen/settings/getMemory': {
         return {
           settings: normalizeQwenMemorySettings(

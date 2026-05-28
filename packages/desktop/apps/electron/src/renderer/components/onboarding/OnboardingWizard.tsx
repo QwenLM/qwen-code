@@ -66,17 +66,16 @@ interface OnboardingWizardProps {
 /**
  * OnboardingWizard - Full-screen onboarding flow container
  *
- * Manages the step-by-step flow for setting up Qwen Code:
+ * Manages the step-by-step flow for setting up the local ACP backend:
  * 1. Welcome
- * 2. Provider Select (Qwen Code)
- * 3. Qwen Code connection check
+ * 2. Provider Select
+ * 3. Connection check
  * 4. Completion
  */
 export function OnboardingWizard({
   state,
   onContinue,
   onBack,
-  onSelectApiSetupMethod,
   onSubmitCredential,
   onFinish,
   // Git Bash (Windows)

@@ -34,7 +34,7 @@ export function APISetupStep({
   return (
     <StepFormLayout
       title={t("onboarding.apiSetup.title")}
-      description="Use the local Qwen Code backend. Authentication stays in Qwen Code."
+      description={t("onboarding.apiSetup.qwenCodeDescription")}
       actions={
         <>
           <BackButton onClick={onBack} />
@@ -60,9 +60,11 @@ export function APISetupStep({
           <SquareTerminal className="size-4" />
         </div>
         <div className="flex-1 min-w-0">
-          <div className="font-medium text-sm">Qwen Code</div>
+          <div className="font-medium text-sm">
+            {t("onboarding.apiSetup.qwenCodeName")}
+          </div>
           <p className="mt-1 text-xs text-muted-foreground">
-            Use Qwen Code through ACP. No third-party provider credential is stored here.
+            {t("onboarding.apiSetup.qwenCodeDetail")}
           </p>
         </div>
         <div

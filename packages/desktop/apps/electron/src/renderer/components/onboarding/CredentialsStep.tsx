@@ -1,23 +1,24 @@
-import { SquareTerminal } from "lucide-react"
-import type { ApiSetupMethod } from "./APISetupStep"
-import { StepFormLayout, BackButton, ContinueButton } from "./primitives"
-import type { ApiKeyStatus, ApiKeySubmitData } from "../apisetup"
+import { useTranslation } from 'react-i18next';
+import type { ApiSetupMethod } from './APISetupStep';
+import { StepFormLayout, BackButton } from './primitives';
+import type { ApiKeyStatus, ApiKeySubmitData } from '../apisetup';
+import { ProviderConnectForm } from '../apisetup';
 
-export type CredentialStatus = ApiKeyStatus
+export type CredentialStatus = ApiKeyStatus;
 
 interface CredentialsStepProps {
-  apiSetupMethod: ApiSetupMethod
-  status: CredentialStatus
-  errorMessage?: string
-  onSubmit: (data: ApiKeySubmitData) => void
-  onBack: () => void
+  apiSetupMethod: ApiSetupMethod;
+  status: CredentialStatus;
+  errorMessage?: string;
+  onSubmit: (data: ApiKeySubmitData) => void;
+  onBack: () => void;
   editInitialValues?: {
-    apiKey?: string
-    baseUrl?: string
-    connectionDefaultModel?: string
-    activePreset?: string
-    models?: string[]
-  }
+    apiKey?: string;
+    baseUrl?: string;
+    connectionDefaultModel?: string;
+    activePreset?: string;
+    models?: string[];
+  };
 }
 
 export function CredentialsStep({
@@ -26,33 +27,25 @@ export function CredentialsStep({
   onSubmit,
   onBack,
 }: CredentialsStepProps) {
+  const { t } = useTranslation();
+
   return (
     <StepFormLayout
-      title="Qwen Code"
-      description="Use the Qwen Code CLI as the only backend."
+      title={t('providerConnect.title')}
+      description={t('onboarding.credentials.providerDescription')}
       actions={
-        <>
-          <BackButton onClick={onBack} disabled={status === 'validating'} />
-          <ContinueButton
-            onClick={() => onSubmit({ apiKey: '' })}
-            className="gap-2"
-            loading={status === 'validating'}
-            loadingText="Checking"
-          >
-            <SquareTerminal className="size-4" />
-            Continue
-          </ContinueButton>
-        </>
+        <BackButton onClick={onBack} disabled={status === 'validating'} />
       }
     >
-      <div className="rounded-xl bg-foreground-2 p-4 text-sm text-muted-foreground">
-        Make sure Qwen Code is installed and signed in locally. Craft will connect through ACP and will not store provider credentials.
-      </div>
+      <ProviderConnectForm
+        showHeader={false}
+        onConnected={() => onSubmit({ apiKey: '' })}
+      />
       {status === 'error' && errorMessage && (
         <div className="rounded-lg bg-destructive/10 text-destructive text-sm p-3">
           {errorMessage}
         </div>
       )}
     </StepFormLayout>
-  )
+  );
 }

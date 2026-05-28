@@ -755,6 +755,76 @@ export interface FileSearchResult {
 // LLM connection types
 // ---------------------------------------------------------------------------
 
+export interface QwenProviderBaseUrlOption {
+  id: string;
+  label: string;
+  url: string;
+  documentationUrl?: string;
+  apiKeyUrl?: string;
+}
+
+export interface QwenProviderModelSpec {
+  id: string;
+  contextWindowSize?: number;
+  enableThinking?: boolean;
+  description?: string;
+}
+
+export interface QwenProviderSummary {
+  id: string;
+  label: string;
+  description: string;
+  protocol: string;
+  protocolOptions: string[];
+  baseUrl?: string | QwenProviderBaseUrlOption[];
+  baseUrlPlaceholder?: string;
+  defaultModelIds: string[];
+  models: QwenProviderModelSpec[];
+  modelsEditable: boolean;
+  showAdvancedConfig: boolean;
+  apiKeyPlaceholder?: string;
+  documentationUrl?: string;
+  uiGroup: string;
+  uiLabels?: {
+    flowTitle?: string;
+    baseUrlStepTitle?: string;
+  };
+}
+
+export interface QwenProviderCatalog {
+  providers: QwenProviderSummary[];
+}
+
+export interface QwenProviderAdvancedConfig {
+  enableThinking?: boolean;
+  multimodal?: {
+    image?: boolean;
+    video?: boolean;
+    audio?: boolean;
+    pdf?: boolean;
+  };
+  contextWindowSize?: number;
+  maxTokens?: number;
+}
+
+export interface QwenProviderConnectParams {
+  providerId: string;
+  protocol?: string;
+  baseUrl?: string;
+  apiKey: string;
+  modelIds?: string[];
+  advancedConfig?: QwenProviderAdvancedConfig;
+}
+
+export interface QwenProviderConnectResult {
+  success: boolean;
+  error?: string;
+  providerId?: string;
+  providerLabel?: string;
+  authType?: string;
+  modelId?: string;
+}
+
 export interface LlmConnectionSetup {
   slug: string;
   /** When true, reject setup if the connection doesn't already exist (reauth guard). */
@@ -781,6 +851,39 @@ export interface SkillFile {
   type: 'file' | 'directory';
   size?: number;
   children?: SkillFile[];
+}
+
+export interface SkillMarketplaceItem {
+  id: string;
+  slug: string;
+  name: string;
+  description: string;
+  sourceUrl: string;
+  installed: boolean;
+}
+
+export interface SkillMarketplaceInstallResult {
+  id: string;
+  slug: string;
+  installedPath?: string;
+  source?: 'qwen-acp';
+}
+
+export interface QwenSkillInstallRequest {
+  id: string;
+  slug: string;
+  name: string;
+  description?: string;
+  sourceUrl: string;
+  scope?: 'global';
+}
+
+export interface QwenSkillInstallResult {
+  id?: string;
+  slug?: string;
+  installed?: boolean;
+  installedPath?: string;
+  message?: string;
 }
 
 export interface OAuthResult {

@@ -89,7 +89,68 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   }),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
-  AuthType: {},
+  AuthType: {
+    QWEN_OAUTH: 'qwen-oauth',
+    USE_OPENAI: 'openai',
+    USE_ANTHROPIC: 'anthropic',
+    USE_GEMINI: 'gemini',
+    USE_VERTEX_AI: 'vertex-ai',
+  },
+  ALL_PROVIDERS: [
+    {
+      id: 'deepseek',
+      label: 'DeepSeek API Key',
+      description: 'Quick setup for DeepSeek',
+      protocol: 'openai',
+      baseUrl: 'https://api.deepseek.com',
+      envKey: 'DEEPSEEK_API_KEY',
+      models: [{ id: 'deepseek-chat' }],
+      modelsEditable: true,
+      modelNamePrefix: 'DeepSeek',
+      uiGroup: 'third-party',
+    },
+  ],
+  findProviderById: vi.fn((id: string) =>
+    id === 'deepseek'
+      ? {
+          id: 'deepseek',
+          label: 'DeepSeek API Key',
+          description: 'Quick setup for DeepSeek',
+          protocol: 'openai',
+          baseUrl: 'https://api.deepseek.com',
+          envKey: 'DEEPSEEK_API_KEY',
+          models: [{ id: 'deepseek-chat' }],
+          modelsEditable: true,
+          modelNamePrefix: 'DeepSeek',
+          uiGroup: 'third-party',
+        }
+      : undefined,
+  ),
+  getDefaultBaseUrlForProtocol: vi.fn(() => 'https://api.openai.com/v1'),
+  getDefaultModelIds: vi.fn(
+    (provider: { models?: Array<{ id: string }> }) =>
+      provider.models?.map((model) => model.id) ?? [],
+  ),
+  resolveBaseUrl: vi.fn(
+    (
+      provider: { baseUrl?: string | Array<{ url: string }> },
+      selectedBaseUrl?: string,
+    ) =>
+      typeof provider.baseUrl === 'string'
+        ? provider.baseUrl
+        : Array.isArray(provider.baseUrl)
+          ? (provider.baseUrl[0]?.url ?? selectedBaseUrl ?? '')
+          : (selectedBaseUrl ?? ''),
+  ),
+  buildInstallPlan: vi.fn((provider, inputs) => ({
+    providerId: provider.id,
+    authType: inputs.protocol ?? provider.protocol,
+    env: { [provider.envKey]: inputs.apiKey },
+    modelSelection: { modelId: inputs.modelIds[0] },
+  })),
+  applyProviderInstallPlan: vi.fn().mockResolvedValue({
+    updatedModelProviders: {},
+  }),
   clearCachedCredentialFile: vi.fn(),
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   getAutoMemoryRoot: vi.fn(
@@ -160,6 +221,9 @@ vi.mock('../config/settings.js', () => ({
   SettingScope: { User: 'User', Workspace: 'Workspace' },
   loadSettings: vi.fn(),
 }));
+vi.mock('../config/loadedSettingsAdapter.js', () => ({
+  createLoadedSettingsAdapter: vi.fn((settings: unknown) => settings),
+}));
 vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
 vi.mock('./session/Session.js', () => ({
   Session: vi.fn(),
@@ -195,6 +259,8 @@ import {
   getMCPDiscoveryState,
   getMCPServerStatus,
   tokenLimit,
+  buildInstallPlan,
+  applyProviderInstallPlan,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
@@ -748,7 +814,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getModel: vi.fn().mockReturnValue('test-model'),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
+        syncAfterAuthRefresh: vi.fn(),
       }),
+      reloadModelProvidersConfig: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
     } as unknown as Config;
 
@@ -805,7 +873,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
+        syncAfterAuthRefresh: vi.fn(),
       }),
+      reloadModelProvidersConfig: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       getModel: vi.fn().mockReturnValue('m'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
@@ -1581,6 +1651,60 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'User',
       'memory.enableAutoSkill',
       true,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers extension methods list and connect model providers', async () => {
+    const settings = makeSessionSettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual({
+      providers: [
+        expect.objectContaining({
+          id: 'deepseek',
+          label: 'DeepSeek API Key',
+          defaultModelIds: ['deepseek-chat'],
+          uiGroup: 'third-party',
+        }),
+      ],
+    });
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        apiKey: 'sk-test',
+        modelIds: ['deepseek-chat'],
+      }),
+    ).resolves.toEqual({
+      success: true,
+      providerId: 'deepseek',
+      providerLabel: 'DeepSeek API Key',
+      authType: 'openai',
+      modelId: 'deepseek-chat',
+    });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({
+        baseUrl: 'https://api.deepseek.com',
+        apiKey: 'sk-test',
+        modelIds: ['deepseek-chat'],
+      }),
+    );
+    expect(applyProviderInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: 'deepseek' }),
+      expect.objectContaining({ settings }),
     );
 
     mockConnectionState.resolve();

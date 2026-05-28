@@ -1,4 +1,5 @@
 import { SquareTerminal } from "lucide-react"
+import { useTranslation } from "react-i18next"
 
 export type ApiKeyStatus = 'idle' | 'validating' | 'success' | 'error'
 export type CustomEndpointApi = never
@@ -26,6 +27,8 @@ export function ApiKeyInput({
   formId = "api-key-form",
   disabled,
 }: ApiKeyInputProps) {
+  const { t } = useTranslation()
+
   return (
     <form
       id={formId}
@@ -37,7 +40,7 @@ export function ApiKeyInput({
     >
       <div className="flex items-start gap-3 rounded-xl bg-foreground-2 p-4 text-sm text-muted-foreground">
         <SquareTerminal className="mt-0.5 size-4 shrink-0" />
-        <p>Qwen Code handles authentication locally. No API key is stored in this app.</p>
+        <p>{t("apiSetup.localAuthNotice")}</p>
       </div>
       {status === 'error' && errorMessage && (
         <div className="rounded-lg bg-destructive/10 text-destructive text-sm p-3">

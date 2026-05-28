@@ -1,5 +1,6 @@
 export * from './conversation-summary.ts';
 
+// eslint-disable-next-line import/no-internal-modules
 export {
   QwenAgent,
   QwenBackend,
@@ -7,6 +8,8 @@ export {
   setQwenMemorySettingsViaAcp,
   getQwenSettingsPathViaAcp,
   getQwenMemoryPathsViaAcp,
+  listQwenProvidersViaAcp,
+  connectQwenProviderViaAcp,
 } from './qwen-agent.ts';
 export * from './errors.ts';
 
@@ -72,8 +75,17 @@ export {
 } from './mode-manager.ts';
 
 // Export plan types and permission mode messages
-export type { Plan, PlanStep, PlanState, PlanReviewRequest, PlanReviewResult } from './plan-types.ts';
-export { PERMISSION_MODE_MESSAGES, PERMISSION_MODE_PROMPTS } from './plan-types.ts';
+export type {
+  Plan,
+  PlanStep,
+  PlanState,
+  PlanReviewRequest,
+  PlanReviewResult,
+} from './plan-types.ts';
+export {
+  PERMISSION_MODE_MESSAGES,
+  PERMISSION_MODE_PROMPTS,
+} from './plan-types.ts';
 
 // Export thinking-levels - extended reasoning configuration
 export {
@@ -150,9 +162,10 @@ export {
   type SdkMcpServerConfig as BackendMcpServerConfig,
   // Enums
   AbortReason as BackendAbortReason,
-} from './backend/index.ts';
+} from './backend/index.ts'; // eslint-disable-line import/no-internal-modules
 
 // Export core utilities for shared agent logic
+// eslint-disable-next-line import/no-internal-modules
 export * from './core/index.ts';
 
 // Export browser tool name normalization helpers
