@@ -441,6 +441,7 @@ export class DaemonSessionClient {
   }
 
   private _dispatchTurnEvent(event: DaemonEvent): void {
+    if (event.type !== 'turn_complete' && event.type !== 'turn_error') return;
     const promptId = (event.data as { promptId?: string } | null | undefined)
       ?.promptId;
     if (!promptId) return;

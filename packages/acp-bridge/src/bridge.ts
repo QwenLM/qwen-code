@@ -508,8 +508,10 @@ function broadcastTurnError(
 ): void {
   const message = err instanceof Error ? err.message : String(err);
   const code =
-    err instanceof Error && 'code' in err
-      ? String((err as Error & { code?: string }).code)
+    err instanceof Error &&
+    'code' in err &&
+    typeof (err as Error & { code?: unknown }).code === 'string'
+      ? (err as Error & { code: string }).code
       : undefined;
   entry.events.publish({
     type: 'turn_error',
