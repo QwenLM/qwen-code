@@ -26,7 +26,11 @@ import {
 } from './constants.js';
 import { clearDetailedSpanState } from './detailed-span-attributes.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
-import { getSessionContext, setSessionContext } from './session-context.js';
+import {
+  getCurrentSessionId,
+  getSessionContext,
+  setSessionContext,
+} from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
@@ -437,7 +441,9 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
   // attaches to the tool span instead of skipping back to the session root.
   const ctx = resolveParentContext(parentCtx);
 
+  const sessionId = getCurrentSessionId();
   const attributes: Attributes = {
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'qwen-code.model': model,
     'qwen-code.prompt_id': promptId,
     'llm_request.context': parentCtx ? 'interaction' : 'standalone',
@@ -585,7 +591,9 @@ export function startToolSpan(
   // tools-inside-tools cases before falling back to the session root.
   const ctx = resolveParentContext(parentCtx);
 
+  const sessionId = getCurrentSessionId();
   const attributes: Attributes = {
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'tool.name': toolName,
     ...attrs,
   };
@@ -699,9 +707,13 @@ export function startToolExecutionSpan(): Span {
   // subsystem) before falling back to the session root.
   const ctx = resolveParentContext(parentCtx);
 
+  const sessionId = getCurrentSessionId();
   const span = getTracer().startSpan(
     SPAN_TOOL_EXECUTION,
-    { kind: SpanKind.INTERNAL },
+    {
+      kind: SpanKind.INTERNAL,
+      attributes: sessionId ? { 'session.id': sessionId } : {},
+    },
     ctx,
   );
 
@@ -709,7 +721,7 @@ export function startToolExecutionSpan(): Span {
   const spanContextObj: SpanContext = {
     span,
     startTime: Date.now(),
-    attributes: {},
+    attributes: sessionId ? { 'session.id': sessionId } : {},
     type: 'tool.execution',
   };
   activeSpans.set(spanId, new WeakRef(spanContextObj));

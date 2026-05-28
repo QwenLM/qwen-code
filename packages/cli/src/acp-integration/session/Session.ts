@@ -74,6 +74,13 @@ import {
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
   withInteractionSpan,
+  startToolSpan,
+  endToolSpan,
+  runInToolSpanContext,
+  startToolExecutionSpan,
+  endToolExecutionSpan,
+  logConversationFinishedEvent,
+  ConversationFinishedEvent,
 } from '@qwen-code/qwen-code-core';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
@@ -829,8 +836,10 @@ export class Session implements SessionContext {
             }
 
             let nextMessage: Content | null = { role: 'user', parts };
+            let turnCount = 0;
 
             while (nextMessage !== null) {
+              turnCount++;
               if (pendingSend.signal.aborted) {
                 this.#getCurrentChat().addHistory(nextMessage);
                 return { stopReason: 'cancelled' };
@@ -965,12 +974,24 @@ export class Session implements SessionContext {
 
             // Fire Stop hook loop (aligned with core path in client.ts)
             // This is triggered after model response completes with no pending tool calls
-            return this.#handleStopHookLoop(
-              pendingSend,
-              promptId,
-              hooksEnabled,
-              messageBus,
-            );
+            let stopResult: { stopReason: PromptResponse['stopReason'] };
+            try {
+              stopResult = await this.#handleStopHookLoop(
+                pendingSend,
+                promptId,
+                hooksEnabled,
+                messageBus,
+              );
+            } finally {
+              logConversationFinishedEvent(
+                this.config,
+                new ConversationFinishedEvent(
+                  this.config.getApprovalMode(),
+                  turnCount,
+                ),
+              );
+            }
+            return stopResult;
           },
           (result) => (result.stopReason === 'cancelled' ? 'cancelled' : 'ok'),
         );
@@ -1540,115 +1561,129 @@ export class Session implements SessionContext {
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
 
-        try {
-          // Echo the cron prompt as a user message so the client sees it
-          await this.sendUpdate({
-            sessionUpdate: 'user_message_chunk',
-            content: { type: 'text', text: prompt },
-            _meta: { source: 'cron' },
-          });
+        let cronHadError = false;
+        await withInteractionSpan(
+          this.config,
+          {
+            promptId,
+            model: this.config.getModel(),
+            messageType: 'cron',
+          },
+          async () => {
+            try {
+              // Echo the cron prompt as a user message so the client sees it
+              await this.sendUpdate({
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: prompt },
+                _meta: { source: 'cron' },
+              });
 
-          // Prepend session-level system reminders (same rationale as the
-          // user-query path in #executePrompt).
-          const cronReminders = await this.#buildInitialSystemReminders();
-          let nextMessage: Content | null = {
-            role: 'user',
-            parts: [...cronReminders, { text: prompt }],
-          };
+              // Prepend session-level system reminders (same rationale as the
+              // user-query path in #executePrompt).
+              const cronReminders = await this.#buildInitialSystemReminders();
+              let nextMessage: Content | null = {
+                role: 'user',
+                parts: [...cronReminders, { text: prompt }],
+              };
 
-          while (nextMessage !== null) {
-            if (ac.signal.aborted) return;
+              while (nextMessage !== null) {
+                if (ac.signal.aborted) return;
 
-            const functionCalls: FunctionCall[] = [];
-            let usageMetadata: GenerateContentResponseUsageMetadata | null =
-              null;
-            const streamStartTime = Date.now();
+                const functionCalls: FunctionCall[] = [];
+                let usageMetadata: GenerateContentResponseUsageMetadata | null =
+                  null;
+                const streamStartTime = Date.now();
 
-            const sendResult = await this.#sendMessageStreamWithAutoCompression(
-              promptId,
-              nextMessage.parts ?? [],
-              ac.signal,
-            );
-            if (!sendResult.responseStream) {
-              this.#preserveUnsentMessageHistory(
-                nextMessage,
-                sendResult.stopReason === 'cancelled',
-              );
-              if (sendResult.stopReason === 'max_tokens') {
-                this.#stopCronAfterTokenLimit();
-              }
-              return;
-            }
-            const responseStream = sendResult.responseStream;
-            nextMessage = null;
+                const sendResult =
+                  await this.#sendMessageStreamWithAutoCompression(
+                    promptId,
+                    nextMessage.parts ?? [],
+                    ac.signal,
+                  );
+                if (!sendResult.responseStream) {
+                  this.#preserveUnsentMessageHistory(
+                    nextMessage,
+                    sendResult.stopReason === 'cancelled',
+                  );
+                  if (sendResult.stopReason === 'max_tokens') {
+                    this.#stopCronAfterTokenLimit();
+                  }
+                  return;
+                }
+                const responseStream = sendResult.responseStream;
+                nextMessage = null;
 
-            for await (const resp of responseStream) {
-              if (ac.signal.aborted) return;
+                for await (const resp of responseStream) {
+                  if (ac.signal.aborted) return;
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.candidates &&
-                resp.value.candidates.length > 0
-              ) {
-                const candidate = resp.value.candidates[0];
-                for (const part of candidate.content?.parts ?? []) {
-                  if (!part.text) continue;
-                  this.messageEmitter.emitMessage(
-                    part.text,
-                    'assistant',
-                    part.thought,
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.candidates &&
+                    resp.value.candidates.length > 0
+                  ) {
+                    const candidate = resp.value.candidates[0];
+                    for (const part of candidate.content?.parts ?? []) {
+                      if (!part.text) continue;
+                      this.messageEmitter.emitMessage(
+                        part.text,
+                        'assistant',
+                        part.thought,
+                      );
+                    }
+                  }
+
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.usageMetadata
+                  ) {
+                    usageMetadata = resp.value.usageMetadata;
+                  }
+
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.functionCalls
+                  ) {
+                    functionCalls.push(...resp.value.functionCalls);
+                  }
+                }
+
+                if (usageMetadata) {
+                  this.#recordPromptTokenCount(usageMetadata);
+                  if (this.messageRewriter) {
+                    this.messageRewriter.flushTurn(ac.signal);
+                  }
+                  const durationMs = Date.now() - streamStartTime;
+                  await this.messageEmitter.emitUsageMetadata(
+                    usageMetadata,
+                    '',
+                    durationMs,
                   );
                 }
-              }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.usageMetadata
-              ) {
-                usageMetadata = resp.value.usageMetadata;
+                if (functionCalls.length > 0) {
+                  const toolResponseParts = await this.runToolCalls(
+                    ac.signal,
+                    promptId,
+                    functionCalls,
+                  );
+                  nextMessage = { role: 'user', parts: toolResponseParts };
+                }
               }
-
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.functionCalls
-              ) {
-                functionCalls.push(...resp.value.functionCalls);
+            } catch (error) {
+              if (ac.signal.aborted) return;
+              cronHadError = true;
+              debugLogger.error('Error processing cron prompt:', error);
+              const msg =
+                error instanceof Error ? error.message : String(error);
+              await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
+            } finally {
+              if (this.cronAbortController === ac) {
+                this.cronAbortController = null;
               }
             }
-
-            if (usageMetadata) {
-              this.#recordPromptTokenCount(usageMetadata);
-              // Kick off rewrite in background (non-blocking)
-              if (this.messageRewriter) {
-                this.messageRewriter.flushTurn(ac.signal);
-              }
-              const durationMs = Date.now() - streamStartTime;
-              await this.messageEmitter.emitUsageMetadata(
-                usageMetadata,
-                '',
-                durationMs,
-              );
-            }
-
-            if (functionCalls.length > 0) {
-              const toolResponseParts = await this.runToolCalls(
-                ac.signal,
-                promptId,
-                functionCalls,
-              );
-              nextMessage = { role: 'user', parts: toolResponseParts };
-            }
-          }
-        } catch (error) {
-          if (ac.signal.aborted) return;
-          debugLogger.error('Error processing cron prompt:', error);
-          const msg = error instanceof Error ? error.message : String(error);
-          await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
-        } finally {
-          if (this.cronAbortController === ac) {
-            this.cronAbortController = null;
-          }
-        }
+          },
+          () => (cronHadError ? 'cancelled' : 'ok'),
+        );
       },
     );
   }
@@ -1941,6 +1976,7 @@ export class Session implements SessionContext {
     let args = (fc.args ?? {}) as Record<string, unknown>;
 
     const startTime = Date.now();
+    let spanError: string | undefined;
 
     const errorResponse = (error: Error) => {
       const durationMs = Date.now() - startTime;
@@ -1975,6 +2011,7 @@ export class Session implements SessionContext {
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
     ) => {
+      spanError = error.message;
       if (toolName !== ToolNames.TODO_WRITE) {
         await this.toolCallEmitter.emitError(callId, toolName, error);
       }
@@ -1994,595 +2031,639 @@ export class Session implements SessionContext {
       return earlyErrorResponse(new Error('Missing function name'));
     }
 
+    const toolName: string = fc.name;
     const toolRegistry = this.config.getToolRegistry();
-    const tool = toolRegistry.getTool(fc.name as string);
+    const tool = toolRegistry.getTool(toolName);
 
     if (!tool) {
       return earlyErrorResponse(
-        new Error(`Tool "${fc.name}" not found in registry.`),
+        new Error(`Tool "${toolName}" not found in registry.`),
       );
     }
 
-    // ---- L1: Tool enablement check ----
-    const pm = this.config.getPermissionManager?.();
-    if (pm && !(await pm.isToolEnabled(fc.name as string))) {
-      return earlyErrorResponse(
-        new Error(
-          `Qwen Code requires permission to use "${fc.name}", but that permission was declined.`,
-        ),
-        fc.name,
-      );
-    }
-
-    // Detect TodoWriteTool early - route to plan updates instead of tool_call events
-    const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
-    const isAgentTool = tool.name === ToolNames.AGENT;
-    const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
-
-    // Track cleanup functions for sub-agent event listeners
-    let subAgentCleanupFunctions: Array<() => void> = [];
-
-    // Generate tool_use_id for hook tracking (aligned with core path)
-    const toolUseId = generateToolUseId();
-
-    // Get approval mode for hook context (defined outside try for catch block access)
-    const approvalMode = this.config.getApprovalMode();
+    const toolSpan = startToolSpan(toolName, {
+      'tool.call_id': callId,
+      tool_name: toolName,
+    });
+    let spanSuccess = false;
 
     try {
-      const invocation = tool.build(args);
-
-      // Production AgentTool always initializes `eventEmitter` on its
-      // invocation (`agent.ts:392`). Be defensive about the `undefined`
-      // case too so an incomplete/custom AgentTool invocation degrades
-      // gracefully (no sub-agent event forwarding) instead of throwing
-      // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
-      // key-presence check passed for `{ eventEmitter: undefined }` and
-      // the ensuing `eventEmitter.on(...)` blew up.
-      const taskEventEmitter = (
-        invocation as {
-          eventEmitter?: AgentEventEmitter;
-        }
-      ).eventEmitter;
-      if (isAgentTool && taskEventEmitter) {
-        // Extract subagent metadata from AgentTool call
-        const parentToolCallId = callId;
-        const subagentType = (args['subagent_type'] as string) ?? '';
-
-        // Create a SubAgentTracker for this tool execution
-        const subSubAgentTracker = new SubAgentTracker(
-          this,
-          this.client,
-          parentToolCallId,
-          subagentType,
-        );
-
-        // Set up sub-agent tool tracking
-        subAgentCleanupFunctions = subSubAgentTracker.setup(
-          taskEventEmitter,
-          abortSignal,
-        );
-      }
-
-      // L3→L4→L5 Permission Flow (aligned with coreToolScheduler)
-      //
-      // L3: Tool's intrinsic default permission
-      // L4: PermissionManager rule override
-      // L5: ApprovalMode override (YOLO / AUTO_EDIT / PLAN)
-      //
-      // AUTO_EDIT auto-approval is handled HERE, same as coreToolScheduler.
-      // The VS Code extension is just a UI layer for requestPermission.
-      const isAskUserQuestionTool = fc.name === ToolNames.ASK_USER_QUESTION;
-
-      // ---- L3→L4: Shared permission flow ----
-      const toolParams = invocation.params as Record<string, unknown>;
-      const flowResult = await evaluatePermissionFlow(
-        this.config,
-        invocation,
-        fc.name,
-        toolParams,
-      );
-      const { finalPermission, pmForcedAsk, pmCtx, denyMessage } = flowResult;
-
-      // ---- L5: ApprovalMode overrides ----
-      const isPlanMode = approvalMode === ApprovalMode.PLAN;
-
-      if (finalPermission === 'deny') {
-        return earlyErrorResponse(
-          new Error(denyMessage ?? `Tool "${fc.name}" is denied.`),
-          fc.name,
-        );
-      }
-
-      // Explicit allow (user rule matched, or tool's L3 default is 'allow')
-      // is authoritative — AUTO classifier must not be allowed to override
-      // it. Parallels coreToolScheduler.ts:1337-1366; without this, an ACP
-      // session in AUTO mode could see a user-written `Bash(git push *)`
-      // allow rule reach the classifier and get blocked by a conservative
-      // Stage-1 verdict. Also resets the denialTracking streak so a
-      // following classifier-eligible call doesn't surprise the user with
-      // a manual prompt right after an allow-rule call just worked.
-      let autoModeAllowed = finalPermission === 'allow';
-      if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
-        this.config.setAutoModeDenialState(
-          recordAllow(this.config.getAutoModeDenialState()),
-        );
-      }
-
-      // ── L5: AUTO mode three-layer filter (duplicated from
-      // coreToolScheduler.ts; ACP routes through this Session path).
-      // Returns 'allowed' / 'blocked' / 'fallback'. Blocked early-returns;
-      // allowed skips requestPermission; fallback drops through to the
-      // existing manual-approval flow below.
-      if (!autoModeAllowed && shouldRunAutoModeForCall(approvalMode, fc.name)) {
-        const denialState = this.config.getAutoModeDenialState();
-        // `buildClassifierContents` retains only the most recent
-        // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
-        // exactly that tail rather than triggering a `structuredClone`
-        // of the whole session on every non-fast-path AUTO call.
-        // Parallels coreToolScheduler.ts.
-        const messages =
-          this.config
-            .getGeminiClient?.()
-            ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
-        const decision = await evaluateAutoMode({
-          ctx: pmCtx,
-          pmForcedAsk,
-          toolParams,
-          messages,
-          config: this.config,
-          signal: abortSignal,
-          skipClassifier: shouldFallback(denialState).fallback,
-        });
-
-        // Apply decision via shared helper — eliminates ~40 lines of
-        // line-for-line duplication with coreToolScheduler.ts and makes
-        // the CLI / ACP paths share one source of truth for the
-        // switch + denial-tracking state updates + exhaustiveness
-        // guard.
-        const outcome = applyAutoModeDecision(
-          decision,
-          this.config,
-          denialState,
-        );
-        switch (outcome.kind) {
-          case 'approved':
-            autoModeAllowed = true;
-            break;
-          case 'blocked':
-            return earlyErrorResponse(new Error(outcome.errorMessage), fc.name);
-          case 'fallback':
-            // Drop through to the manual-approval flow below.
-            break;
-          default: {
-            const _exhaustive: never = outcome;
-            void _exhaustive;
-          }
-        }
-      }
-
-      let didRequestPermission = false;
-      let confirmationDetails: ToolCallConfirmationDetails | undefined;
-
-      if (
-        !autoModeAllowed &&
-        needsConfirmation(finalPermission, approvalMode, fc.name)
-      ) {
-        confirmationDetails =
-          await invocation.getConfirmationDetails(abortSignal);
-
-        // Centralised rule injection (for display and persistence)
-        injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
-
-        if (
-          isPlanModeBlocked(
-            isPlanMode,
-            isExitPlanModeTool,
-            isAskUserQuestionTool,
-            confirmationDetails,
-          )
-        ) {
+      return await runInToolSpanContext(toolSpan, async () => {
+        // ---- L1: Tool enablement check ----
+        const pm = this.config.getPermissionManager?.();
+        if (pm && !(await pm.isToolEnabled(toolName))) {
           return earlyErrorResponse(
             new Error(
-              `Plan mode is active. The tool "${fc.name}" cannot be executed because it modifies the system. ` +
-                'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
+              `Qwen Code requires permission to use "${toolName}", but that permission was declined.`,
             ),
-            fc.name,
+            toolName,
           );
         }
 
-        const messageBus = this.config.getMessageBus?.();
-        const hooksEnabled = !this.config.getDisableAllHooks?.();
-        let hookHandled = false;
+        // Detect TodoWriteTool early - route to plan updates instead of tool_call events
+        const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
+        const isAgentTool = tool.name === ToolNames.AGENT;
+        const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
 
-        if (hooksEnabled && messageBus) {
-          const hookResult = await firePermissionRequestHook(
-            messageBus,
-            fc.name,
-            args,
-            String(approvalMode),
+        // Track cleanup functions for sub-agent event listeners
+        let subAgentCleanupFunctions: Array<() => void> = [];
+
+        // Generate tool_use_id for hook tracking (aligned with core path)
+        const toolUseId = generateToolUseId();
+
+        // Get approval mode for hook context (defined outside try for catch block access)
+        const approvalMode = this.config.getApprovalMode();
+
+        try {
+          const invocation = tool.build(args);
+
+          // Production AgentTool always initializes `eventEmitter` on its
+          // invocation (`agent.ts:392`). Be defensive about the `undefined`
+          // case too so an incomplete/custom AgentTool invocation degrades
+          // gracefully (no sub-agent event forwarding) instead of throwing
+          // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
+          // key-presence check passed for `{ eventEmitter: undefined }` and
+          // the ensuing `eventEmitter.on(...)` blew up.
+          const taskEventEmitter = (
+            invocation as {
+              eventEmitter?: AgentEventEmitter;
+            }
+          ).eventEmitter;
+          if (isAgentTool && taskEventEmitter) {
+            // Extract subagent metadata from AgentTool call
+            const parentToolCallId = callId;
+            const subagentType = (args['subagent_type'] as string) ?? '';
+
+            // Create a SubAgentTracker for this tool execution
+            const subSubAgentTracker = new SubAgentTracker(
+              this,
+              this.client,
+              parentToolCallId,
+              subagentType,
+            );
+
+            // Set up sub-agent tool tracking
+            subAgentCleanupFunctions = subSubAgentTracker.setup(
+              taskEventEmitter,
+              abortSignal,
+            );
+          }
+
+          // L3→L4→L5 Permission Flow (aligned with coreToolScheduler)
+          //
+          // L3: Tool's intrinsic default permission
+          // L4: PermissionManager rule override
+          // L5: ApprovalMode override (YOLO / AUTO_EDIT / PLAN)
+          //
+          // AUTO_EDIT auto-approval is handled HERE, same as coreToolScheduler.
+          // The VS Code extension is just a UI layer for requestPermission.
+          const isAskUserQuestionTool =
+            toolName === ToolNames.ASK_USER_QUESTION;
+
+          // ---- L3→L4: Shared permission flow ----
+          const toolParams = invocation.params as Record<string, unknown>;
+          const flowResult = await evaluatePermissionFlow(
+            this.config,
+            invocation,
+            toolName,
+            toolParams,
           );
+          const { finalPermission, pmForcedAsk, pmCtx, denyMessage } =
+            flowResult;
 
-          if (hookResult.hasDecision) {
-            hookHandled = true;
-            if (hookResult.shouldAllow) {
-              if (hookResult.updatedInput) {
-                args = hookResult.updatedInput;
-                invocation.params =
-                  hookResult.updatedInput as typeof invocation.params;
+          // ---- L5: ApprovalMode overrides ----
+          const isPlanMode = approvalMode === ApprovalMode.PLAN;
+
+          if (finalPermission === 'deny') {
+            return earlyErrorResponse(
+              new Error(denyMessage ?? `Tool "${toolName}" is denied.`),
+              toolName,
+            );
+          }
+
+          // Explicit allow (user rule matched, or tool's L3 default is 'allow')
+          // is authoritative — AUTO classifier must not be allowed to override
+          // it. Parallels coreToolScheduler.ts:1337-1366; without this, an ACP
+          // session in AUTO mode could see a user-written `Bash(git push *)`
+          // allow rule reach the classifier and get blocked by a conservative
+          // Stage-1 verdict. Also resets the denialTracking streak so a
+          // following classifier-eligible call doesn't surprise the user with
+          // a manual prompt right after an allow-rule call just worked.
+          let autoModeAllowed = finalPermission === 'allow';
+          if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
+            this.config.setAutoModeDenialState(
+              recordAllow(this.config.getAutoModeDenialState()),
+            );
+          }
+
+          // ── L5: AUTO mode three-layer filter (duplicated from
+          // coreToolScheduler.ts; ACP routes through this Session path).
+          // Returns 'allowed' / 'blocked' / 'fallback'. Blocked early-returns;
+          // allowed skips requestPermission; fallback drops through to the
+          // existing manual-approval flow below.
+          if (
+            !autoModeAllowed &&
+            shouldRunAutoModeForCall(approvalMode, toolName)
+          ) {
+            const denialState = this.config.getAutoModeDenialState();
+            // `buildClassifierContents` retains only the most recent
+            // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
+            // exactly that tail rather than triggering a `structuredClone`
+            // of the whole session on every non-fast-path AUTO call.
+            // Parallels coreToolScheduler.ts.
+            const messages =
+              this.config
+                .getGeminiClient?.()
+                ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            const decision = await evaluateAutoMode({
+              ctx: pmCtx,
+              pmForcedAsk,
+              toolParams,
+              messages,
+              config: this.config,
+              signal: abortSignal,
+              skipClassifier: shouldFallback(denialState).fallback,
+            });
+
+            // Apply decision via shared helper — eliminates ~40 lines of
+            // line-for-line duplication with coreToolScheduler.ts and makes
+            // the CLI / ACP paths share one source of truth for the
+            // switch + denial-tracking state updates + exhaustiveness
+            // guard.
+            const outcome = applyAutoModeDecision(
+              decision,
+              this.config,
+              denialState,
+            );
+            switch (outcome.kind) {
+              case 'approved':
+                autoModeAllowed = true;
+                break;
+              case 'blocked':
+                return earlyErrorResponse(
+                  new Error(outcome.errorMessage),
+                  toolName,
+                );
+              case 'fallback':
+                // Drop through to the manual-approval flow below.
+                break;
+              default: {
+                const _exhaustive: never = outcome;
+                void _exhaustive;
               }
+            }
+          }
 
-              await confirmationDetails.onConfirm(
-                ToolConfirmationOutcome.ProceedOnce,
-              );
-            } else {
+          let didRequestPermission = false;
+          let confirmationDetails: ToolCallConfirmationDetails | undefined;
+
+          if (
+            !autoModeAllowed &&
+            needsConfirmation(finalPermission, approvalMode, toolName)
+          ) {
+            confirmationDetails =
+              await invocation.getConfirmationDetails(abortSignal);
+
+            // Centralised rule injection (for display and persistence)
+            injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
+
+            if (
+              isPlanModeBlocked(
+                isPlanMode,
+                isExitPlanModeTool,
+                isAskUserQuestionTool,
+                confirmationDetails,
+              )
+            ) {
               return earlyErrorResponse(
                 new Error(
-                  hookResult.denyMessage ||
-                    `Permission denied by hook for "${fc.name}"`,
+                  `Plan mode is active. The tool "${toolName}" cannot be executed because it modifies the system. ` +
+                    'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
                 ),
-                fc.name,
+                toolName,
+              );
+            }
+
+            const messageBus = this.config.getMessageBus?.();
+            const hooksEnabled = !this.config.getDisableAllHooks?.();
+            let hookHandled = false;
+
+            if (hooksEnabled && messageBus) {
+              const hookResult = await firePermissionRequestHook(
+                messageBus,
+                toolName,
+                args,
+                String(approvalMode),
+              );
+
+              if (hookResult.hasDecision) {
+                hookHandled = true;
+                if (hookResult.shouldAllow) {
+                  if (hookResult.updatedInput) {
+                    args = hookResult.updatedInput;
+                    invocation.params =
+                      hookResult.updatedInput as typeof invocation.params;
+                  }
+
+                  await confirmationDetails.onConfirm(
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
+                } else {
+                  return earlyErrorResponse(
+                    new Error(
+                      hookResult.denyMessage ||
+                        `Permission denied by hook for "${toolName}"`,
+                    ),
+                    toolName,
+                  );
+                }
+              }
+            }
+
+            // AUTO_EDIT mode: auto-approve edit and info tools
+            // (same as coreToolScheduler L5 — NOT delegated to the extension)
+            if (
+              approvalMode === ApprovalMode.AUTO_EDIT &&
+              (confirmationDetails.type === 'edit' ||
+                confirmationDetails.type === 'info')
+            ) {
+              // Auto-approve, skip requestPermission.
+              // didRequestPermission stays false → emitStart below.
+            } else if (!hookHandled) {
+              // Show permission dialog via ACP requestPermission
+              didRequestPermission = true;
+              const content =
+                buildPermissionRequestContent(confirmationDetails);
+
+              // Map tool kind, using switch_mode for exit_plan_mode per ACP spec
+              const mappedKind = this.toolCallEmitter.mapToolKind(
+                tool.kind,
+                toolName,
+              );
+
+              if (hooksEnabled && messageBus) {
+                void fireNotificationHook(
+                  messageBus,
+                  `Qwen Code needs your permission to use ${toolName}`,
+                  NotificationType.PermissionPrompt,
+                  'Permission needed',
+                );
+              }
+
+              const params: RequestPermissionRequest = {
+                sessionId: this.sessionId,
+                options: toPermissionOptions(confirmationDetails, pmForcedAsk),
+                toolCall: {
+                  toolCallId: callId,
+                  status: 'pending',
+                  title: invocation.getDescription(),
+                  content,
+                  locations: invocation.toolLocations(),
+                  kind: mappedKind,
+                  rawInput: args,
+                },
+              };
+
+              const output = (await this.client.requestPermission(
+                params,
+              )) as RequestPermissionResponse & {
+                answers?: Record<string, string>;
+              };
+              const outcome =
+                output.outcome.outcome === 'cancelled'
+                  ? ToolConfirmationOutcome.Cancel
+                  : z
+                      .nativeEnum(ToolConfirmationOutcome)
+                      .parse(output.outcome.optionId);
+
+              // Reset the AUTO-mode fallback streak when the user manually
+              // approves a prompt that was raised because denialTracking forced
+              // fallback. Without this, a single block-streak permanently
+              // downgrades the rest of the session to manual approval until the
+              // mode is toggled. Parallels coreToolScheduler.ts:1705-1717.
+              // Cancel / abort do NOT reset — treating rejection as a signal
+              // the classifier was right to block.
+              if (
+                approvalMode === ApprovalMode.AUTO &&
+                isApproveOutcome(outcome)
+              ) {
+                this.config.setAutoModeDenialState(
+                  recordFallbackApprove(this.config.getAutoModeDenialState()),
+                );
+              }
+
+              await confirmationDetails.onConfirm(outcome, {
+                answers: output.answers,
+              });
+
+              // Persist permission rules when user explicitly chose "Always Allow".
+              // This branch is only reached for tools that went through
+              // requestPermission (user saw dialog and made a choice).
+              // AUTO_EDIT auto-approved tools never reach here.
+              if (
+                outcome === ToolConfirmationOutcome.ProceedAlways ||
+                outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
+                outcome === ToolConfirmationOutcome.ProceedAlwaysUser
+              ) {
+                await persistPermissionOutcome(
+                  outcome,
+                  confirmationDetails,
+                  this.config.getOnPersistPermissionRule?.(),
+                  this.config.getPermissionManager?.(),
+                  { answers: output.answers },
+                );
+              }
+
+              // After exit_plan_mode confirmation, send current_mode_update
+              if (
+                isExitPlanModeTool &&
+                outcome !== ToolConfirmationOutcome.Cancel
+              ) {
+                await this.sendCurrentModeUpdateNotification(outcome);
+              }
+
+              // After edit tool ProceedAlways, notify the client about mode change
+              if (
+                confirmationDetails.type === 'edit' &&
+                outcome === ToolConfirmationOutcome.ProceedAlways
+              ) {
+                await this.sendCurrentModeUpdateNotification(outcome);
+              }
+
+              switch (outcome) {
+                case ToolConfirmationOutcome.Cancel:
+                  return errorResponse(
+                    new Error(`Tool "${toolName}" was canceled by the user.`),
+                  );
+                case ToolConfirmationOutcome.ProceedOnce:
+                case ToolConfirmationOutcome.ProceedAlways:
+                case ToolConfirmationOutcome.ProceedAlwaysProject:
+                case ToolConfirmationOutcome.ProceedAlwaysUser:
+                case ToolConfirmationOutcome.ProceedAlwaysServer:
+                case ToolConfirmationOutcome.ProceedAlwaysTool:
+                case ToolConfirmationOutcome.ModifyWithEditor:
+                case ToolConfirmationOutcome.RestorePrevious:
+                  break;
+                default: {
+                  const resultOutcome: never = outcome;
+                  throw new Error(`Unexpected: ${resultOutcome}`);
+                }
+              }
+            }
+          }
+
+          if (!didRequestPermission && !isTodoWriteTool) {
+            // Auto-approved (L3 allow / L4 PM allow / L5 YOLO|AUTO_EDIT)
+            // → emit tool_call start notification
+            const startParams: ToolCallStartParams = {
+              callId,
+              toolName,
+              args,
+              status: 'in_progress',
+            };
+            await this.toolCallEmitter.emitStart(startParams);
+          }
+
+          // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
+          const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
+          const messageBusForTool = this.config.getMessageBus?.();
+          const permissionMode = String(approvalMode);
+
+          if (hooksEnabledForTool && messageBusForTool) {
+            const preHookResult = await firePreToolUseHook(
+              messageBusForTool,
+              toolName,
+              args,
+              toolUseId,
+              permissionMode,
+              abortSignal,
+            );
+
+            if (!preHookResult.shouldProceed) {
+              // Hook blocked the tool execution - send notification to UI
+              const blockReason =
+                preHookResult.blockReason || 'Blocked by PreToolUse hook';
+              await this.messageEmitter.emitAgentMessage(
+                `🚫 **PreToolUse blocked**: ${toolName} - ${blockReason}`,
+              );
+              return earlyErrorResponse(new Error(blockReason), toolName);
+            }
+
+            // Add additional context from PreToolUse hook if provided
+            // Note: This context would need to be passed to the tool invocation
+            // For now, we just log it as the tool execution proceeds
+            if (preHookResult.additionalContext) {
+              debugLogger.debug(
+                `PreToolUse hook additional context for ${toolName}: ${preHookResult.additionalContext}`,
               );
             }
           }
-        }
 
-        // AUTO_EDIT mode: auto-approve edit and info tools
-        // (same as coreToolScheduler L5 — NOT delegated to the extension)
-        if (
-          approvalMode === ApprovalMode.AUTO_EDIT &&
-          (confirmationDetails.type === 'edit' ||
-            confirmationDetails.type === 'info')
-        ) {
-          // Auto-approve, skip requestPermission.
-          // didRequestPermission stays false → emitStart below.
-        } else if (!hookHandled) {
-          // Show permission dialog via ACP requestPermission
-          didRequestPermission = true;
-          const content = buildPermissionRequestContent(confirmationDetails);
+          const execSpan = startToolExecutionSpan();
+          let toolResult: ToolResult;
+          try {
+            toolResult = await invocation.execute(abortSignal);
+            endToolExecutionSpan(execSpan, {
+              success: !toolResult.error,
+              error: toolResult.error ? 'tool_error' : undefined,
+            });
+          } catch (execError) {
+            endToolExecutionSpan(execSpan, {
+              success: false,
+              error: abortSignal.aborted ? 'tool_cancelled' : 'tool_exception',
+              cancelled: abortSignal.aborted,
+            });
+            throw execError;
+          }
 
-          // Map tool kind, using switch_mode for exit_plan_mode per ACP spec
-          const mappedKind = this.toolCallEmitter.mapToolKind(
-            tool.kind,
-            fc.name,
+          // Clean up event listeners
+          subAgentCleanupFunctions.forEach((cleanup) => cleanup());
+
+          // Create response parts first (needed for emitResult and recordToolResult)
+          const responseParts = convertToFunctionResponse(
+            toolName,
+            callId,
+            toolResult.llmContent,
           );
 
-          if (hooksEnabled && messageBus) {
-            void fireNotificationHook(
-              messageBus,
-              `Qwen Code needs your permission to use ${fc.name}`,
-              NotificationType.PermissionPrompt,
-              'Permission needed',
+          // Fire PostToolUse hook on successful execution (aligned with core path)
+          if (hooksEnabledForTool && messageBusForTool && !toolResult.error) {
+            // Use the same response shape as core (llmContent/returnDisplay)
+            const toolResponse = {
+              llmContent: toolResult.llmContent,
+              returnDisplay: toolResult.returnDisplay,
+            };
+            const postHookResult = await firePostToolUseHook(
+              messageBusForTool,
+              toolName,
+              args,
+              toolResponse,
+              toolUseId,
+              permissionMode,
+              abortSignal,
             );
+
+            // If hook indicates to stop, return an error response
+            if (postHookResult.shouldStop) {
+              const stopMessage =
+                postHookResult.stopReason ||
+                'Execution stopped by PostToolUse hook';
+              debugLogger.info(
+                `PostToolUse hook requested stop for ${toolName}: ${stopMessage}`,
+              );
+              return earlyErrorResponse(new Error(stopMessage), toolName);
+            }
+
+            // Add additional context from PostToolUse hook if provided
+            if (postHookResult.additionalContext) {
+              // Append additional context to the tool response
+              const contextPart = { text: postHookResult.additionalContext };
+              responseParts.push(contextPart);
+            }
+          } else if (
+            hooksEnabledForTool &&
+            messageBusForTool &&
+            toolResult.error
+          ) {
+            // Fire PostToolUseFailure hook when tool returns an error (aligned with core path)
+            const failureHookResult = await firePostToolUseFailureHook(
+              messageBusForTool,
+              toolUseId,
+              toolName,
+              args,
+              toolResult.error.message,
+              false, // not an interrupt
+              permissionMode,
+              abortSignal,
+            );
+
+            // Log additional context if provided
+            if (failureHookResult.additionalContext) {
+              debugLogger.debug(
+                `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
+              );
+            }
           }
 
-          const params: RequestPermissionRequest = {
-            sessionId: this.sessionId,
-            options: toPermissionOptions(confirmationDetails, pmForcedAsk),
-            toolCall: {
-              toolCallId: callId,
-              status: 'pending',
-              title: invocation.getDescription(),
-              content,
-              locations: invocation.toolLocations(),
-              kind: mappedKind,
-              rawInput: args,
-            },
-          };
-
-          const output = (await this.client.requestPermission(
-            params,
-          )) as RequestPermissionResponse & {
-            answers?: Record<string, string>;
-          };
-          const outcome =
-            output.outcome.outcome === 'cancelled'
-              ? ToolConfirmationOutcome.Cancel
-              : z
-                  .nativeEnum(ToolConfirmationOutcome)
-                  .parse(output.outcome.optionId);
-
-          // Reset the AUTO-mode fallback streak when the user manually
-          // approves a prompt that was raised because denialTracking forced
-          // fallback. Without this, a single block-streak permanently
-          // downgrades the rest of the session to manual approval until the
-          // mode is toggled. Parallels coreToolScheduler.ts:1705-1717.
-          // Cancel / abort do NOT reset — treating rejection as a signal
-          // the classifier was right to block.
-          if (approvalMode === ApprovalMode.AUTO && isApproveOutcome(outcome)) {
-            this.config.setAutoModeDenialState(
-              recordFallbackApprove(this.config.getAutoModeDenialState()),
+          // Handle TodoWriteTool: extract todos and send plan update
+          if (isTodoWriteTool) {
+            const todos = this.planEmitter.extractTodos(
+              toolResult.returnDisplay,
+              args,
             );
+
+            // Match original logic: emit plan if todos.length > 0 OR if args had todos
+            if ((todos && todos.length > 0) || Array.isArray(args['todos'])) {
+              await this.planEmitter.emitPlan(todos ?? []);
+            }
+
+            // Skip tool_call_update event for TodoWriteTool
+            // Still log and return function response for LLM
+          } else {
+            // Normal tool handling: emit result using ToolCallEmitter
+            // Convert toolResult.error to Error type if present
+            const error = toolResult.error
+              ? new Error(toolResult.error.message)
+              : undefined;
+
+            await this.toolCallEmitter.emitResult({
+              callId,
+              toolName,
+              args,
+              message: responseParts,
+              resultDisplay: toolResult.returnDisplay,
+              error,
+              success: !toolResult.error,
+            });
           }
 
-          await confirmationDetails.onConfirm(outcome, {
-            answers: output.answers,
+          const durationMs = Date.now() - startTime;
+          logToolCall(this.config, {
+            'event.name': 'tool_call',
+            'event.timestamp': new Date().toISOString(),
+            function_name: toolName,
+            function_args: args,
+            duration_ms: durationMs,
+            status: 'success',
+            success: true,
+            prompt_id: promptId,
+            tool_type:
+              typeof tool !== 'undefined' && tool instanceof DiscoveredMCPTool
+                ? 'mcp'
+                : 'native',
           });
 
-          // Persist permission rules when user explicitly chose "Always Allow".
-          // This branch is only reached for tools that went through
-          // requestPermission (user saw dialog and made a choice).
-          // AUTO_EDIT auto-approved tools never reach here.
-          if (
-            outcome === ToolConfirmationOutcome.ProceedAlways ||
-            outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
-            outcome === ToolConfirmationOutcome.ProceedAlwaysUser
-          ) {
-            await persistPermissionOutcome(
-              outcome,
-              confirmationDetails,
-              this.config.getOnPersistPermissionRule?.(),
-              this.config.getPermissionManager?.(),
-              { answers: output.answers },
+          // Record tool result for session management
+          this.config
+            .getChatRecordingService()
+            ?.recordToolResult(responseParts, {
+              callId,
+              status: 'success',
+              resultDisplay: toolResult.returnDisplay,
+              error: undefined,
+              errorType: undefined,
+            });
+
+          spanSuccess = true;
+          return responseParts;
+        } catch (e) {
+          // Ensure cleanup on error
+          subAgentCleanupFunctions.forEach((cleanup) => cleanup());
+
+          const error = e instanceof Error ? e : new Error(String(e));
+          spanError = error.message;
+
+          // Fire PostToolUseFailure hook (aligned with core path in coreToolScheduler.ts)
+          const hooksEnabledForError = !this.config.getDisableAllHooks?.();
+          const messageBusForError = this.config.getMessageBus?.();
+          const isInterrupt = abortSignal.aborted;
+
+          if (hooksEnabledForError && messageBusForError) {
+            const failureHookResult = await firePostToolUseFailureHook(
+              messageBusForError,
+              toolUseId,
+              toolName,
+              args,
+              error.message,
+              isInterrupt,
+              String(approvalMode),
+              abortSignal,
             );
-          }
 
-          // After exit_plan_mode confirmation, send current_mode_update
-          if (
-            isExitPlanModeTool &&
-            outcome !== ToolConfirmationOutcome.Cancel
-          ) {
-            await this.sendCurrentModeUpdateNotification(outcome);
-          }
-
-          // After edit tool ProceedAlways, notify the client about mode change
-          if (
-            confirmationDetails.type === 'edit' &&
-            outcome === ToolConfirmationOutcome.ProceedAlways
-          ) {
-            await this.sendCurrentModeUpdateNotification(outcome);
-          }
-
-          switch (outcome) {
-            case ToolConfirmationOutcome.Cancel:
-              return errorResponse(
-                new Error(`Tool "${fc.name}" was canceled by the user.`),
+            // Log additional context if provided
+            if (failureHookResult.additionalContext) {
+              debugLogger.debug(
+                `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
-            case ToolConfirmationOutcome.ProceedOnce:
-            case ToolConfirmationOutcome.ProceedAlways:
-            case ToolConfirmationOutcome.ProceedAlwaysProject:
-            case ToolConfirmationOutcome.ProceedAlwaysUser:
-            case ToolConfirmationOutcome.ProceedAlwaysServer:
-            case ToolConfirmationOutcome.ProceedAlwaysTool:
-            case ToolConfirmationOutcome.ModifyWithEditor:
-            case ToolConfirmationOutcome.RestorePrevious:
-              break;
-            default: {
-              const resultOutcome: never = outcome;
-              throw new Error(`Unexpected: ${resultOutcome}`);
             }
           }
+
+          // Use ToolCallEmitter for error handling
+          await this.toolCallEmitter.emitError(callId, toolName, error);
+
+          // Record tool error for session management
+          const errorParts = [
+            {
+              functionResponse: {
+                id: callId,
+                name: toolName,
+                response: { error: error.message },
+              },
+            },
+          ];
+          this.config.getChatRecordingService()?.recordToolResult(errorParts, {
+            callId,
+            status: 'error',
+            resultDisplay: undefined,
+            error,
+            errorType: undefined,
+          });
+
+          return errorResponse(error);
         }
-      }
-
-      if (!didRequestPermission && !isTodoWriteTool) {
-        // Auto-approved (L3 allow / L4 PM allow / L5 YOLO|AUTO_EDIT)
-        // → emit tool_call start notification
-        const startParams: ToolCallStartParams = {
-          callId,
-          toolName: fc.name,
-          args,
-          status: 'in_progress',
-        };
-        await this.toolCallEmitter.emitStart(startParams);
-      }
-
-      // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
-      const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
-      const messageBusForTool = this.config.getMessageBus?.();
-      const permissionMode = String(approvalMode);
-
-      if (hooksEnabledForTool && messageBusForTool) {
-        const preHookResult = await firePreToolUseHook(
-          messageBusForTool,
-          fc.name,
-          args,
-          toolUseId,
-          permissionMode,
-          abortSignal,
-        );
-
-        if (!preHookResult.shouldProceed) {
-          // Hook blocked the tool execution - send notification to UI
-          const blockReason =
-            preHookResult.blockReason || 'Blocked by PreToolUse hook';
-          await this.messageEmitter.emitAgentMessage(
-            `🚫 **PreToolUse blocked**: ${fc.name} - ${blockReason}`,
-          );
-          return earlyErrorResponse(new Error(blockReason), fc.name);
-        }
-
-        // Add additional context from PreToolUse hook if provided
-        // Note: This context would need to be passed to the tool invocation
-        // For now, we just log it as the tool execution proceeds
-        if (preHookResult.additionalContext) {
-          debugLogger.debug(
-            `PreToolUse hook additional context for ${fc.name}: ${preHookResult.additionalContext}`,
-          );
-        }
-      }
-
-      const toolResult: ToolResult = await invocation.execute(abortSignal);
-
-      // Clean up event listeners
-      subAgentCleanupFunctions.forEach((cleanup) => cleanup());
-
-      // Create response parts first (needed for emitResult and recordToolResult)
-      const responseParts = convertToFunctionResponse(
-        fc.name,
-        callId,
-        toolResult.llmContent,
-      );
-
-      // Fire PostToolUse hook on successful execution (aligned with core path)
-      if (hooksEnabledForTool && messageBusForTool && !toolResult.error) {
-        // Use the same response shape as core (llmContent/returnDisplay)
-        const toolResponse = {
-          llmContent: toolResult.llmContent,
-          returnDisplay: toolResult.returnDisplay,
-        };
-        const postHookResult = await firePostToolUseHook(
-          messageBusForTool,
-          fc.name,
-          args,
-          toolResponse,
-          toolUseId,
-          permissionMode,
-          abortSignal,
-        );
-
-        // If hook indicates to stop, return an error response
-        if (postHookResult.shouldStop) {
-          const stopMessage =
-            postHookResult.stopReason ||
-            'Execution stopped by PostToolUse hook';
-          debugLogger.info(
-            `PostToolUse hook requested stop for ${fc.name}: ${stopMessage}`,
-          );
-          return earlyErrorResponse(new Error(stopMessage), fc.name);
-        }
-
-        // Add additional context from PostToolUse hook if provided
-        if (postHookResult.additionalContext) {
-          // Append additional context to the tool response
-          const contextPart = { text: postHookResult.additionalContext };
-          responseParts.push(contextPart);
-        }
-      } else if (hooksEnabledForTool && messageBusForTool && toolResult.error) {
-        // Fire PostToolUseFailure hook when tool returns an error (aligned with core path)
-        const failureHookResult = await firePostToolUseFailureHook(
-          messageBusForTool,
-          toolUseId,
-          fc.name ?? 'unknown_tool',
-          args,
-          toolResult.error.message,
-          false, // not an interrupt
-          permissionMode,
-          abortSignal,
-        );
-
-        // Log additional context if provided
-        if (failureHookResult.additionalContext) {
-          debugLogger.debug(
-            `PostToolUseFailure hook additional context for ${fc.name}: ${failureHookResult.additionalContext}`,
-          );
-        }
-      }
-
-      // Handle TodoWriteTool: extract todos and send plan update
-      if (isTodoWriteTool) {
-        const todos = this.planEmitter.extractTodos(
-          toolResult.returnDisplay,
-          args,
-        );
-
-        // Match original logic: emit plan if todos.length > 0 OR if args had todos
-        if ((todos && todos.length > 0) || Array.isArray(args['todos'])) {
-          await this.planEmitter.emitPlan(todos ?? []);
-        }
-
-        // Skip tool_call_update event for TodoWriteTool
-        // Still log and return function response for LLM
-      } else {
-        // Normal tool handling: emit result using ToolCallEmitter
-        // Convert toolResult.error to Error type if present
-        const error = toolResult.error
-          ? new Error(toolResult.error.message)
-          : undefined;
-
-        await this.toolCallEmitter.emitResult({
-          callId,
-          toolName: fc.name,
-          args,
-          message: responseParts,
-          resultDisplay: toolResult.returnDisplay,
-          error,
-          success: !toolResult.error,
-        });
-      }
-
-      const durationMs = Date.now() - startTime;
-      logToolCall(this.config, {
-        'event.name': 'tool_call',
-        'event.timestamp': new Date().toISOString(),
-        function_name: fc.name,
-        function_args: args,
-        duration_ms: durationMs,
-        status: 'success',
-        success: true,
-        prompt_id: promptId,
-        tool_type:
-          typeof tool !== 'undefined' && tool instanceof DiscoveredMCPTool
-            ? 'mcp'
-            : 'native',
-      });
-
-      // Record tool result for session management
-      this.config.getChatRecordingService()?.recordToolResult(responseParts, {
-        callId,
-        status: 'success',
-        resultDisplay: toolResult.returnDisplay,
-        error: undefined,
-        errorType: undefined,
-      });
-
-      return responseParts;
-    } catch (e) {
-      // Ensure cleanup on error
-      subAgentCleanupFunctions.forEach((cleanup) => cleanup());
-
-      const error = e instanceof Error ? e : new Error(String(e));
-
-      // Fire PostToolUseFailure hook (aligned with core path in coreToolScheduler.ts)
-      const hooksEnabledForError = !this.config.getDisableAllHooks?.();
-      const messageBusForError = this.config.getMessageBus?.();
-      const isInterrupt = abortSignal.aborted;
-
-      if (hooksEnabledForError && messageBusForError) {
-        const failureHookResult = await firePostToolUseFailureHook(
-          messageBusForError,
-          toolUseId,
-          fc.name ?? 'unknown_tool',
-          args,
-          error.message,
-          isInterrupt,
-          String(approvalMode),
-          abortSignal,
-        );
-
-        // Log additional context if provided
-        if (failureHookResult.additionalContext) {
-          debugLogger.debug(
-            `PostToolUseFailure hook additional context for ${fc.name}: ${failureHookResult.additionalContext}`,
-          );
-        }
-      }
-
-      // Use ToolCallEmitter for error handling
-      await this.toolCallEmitter.emitError(
-        callId,
-        fc.name ?? 'unknown_tool',
-        error,
-      );
-
-      // Record tool error for session management
-      const errorParts = [
-        {
-          functionResponse: {
-            id: callId,
-            name: fc.name ?? '',
-            response: { error: error.message },
-          },
-        },
-      ];
-      this.config.getChatRecordingService()?.recordToolResult(errorParts, {
-        callId,
-        status: 'error',
-        resultDisplay: undefined,
-        error,
-        errorType: undefined,
-      });
-
-      return errorResponse(error);
+      }); // end runInToolSpanContext
+    } finally {
+      endToolSpan(toolSpan, { success: spanSuccess, error: spanError });
     }
   }
 
