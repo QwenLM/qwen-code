@@ -831,45 +831,36 @@ export function createServeApp(
     app.get('/demo', demoHandler);
   }
 
-  app.use(bearerAuth(opts.token));
-
-  app.use(express.json({ limit: '10mb' }));
-  app.use(
-    (
-      err: unknown,
-      _req: import('express').Request,
-      res: import('express').Response,
-      next: import('express').NextFunction,
-    ) => {
-      if (sendJsonBodyParserError(res, err)) return;
-      next(err);
-    },
-  );
-
-  // Access-log middleware. Logs every completed request (method, path,
-  // status, duration) via the structured daemon logger. Excluded:
+  // Access-log middleware. Registered BEFORE bearerAuth and JSON parser
+  // so auth rejections (401) and malformed-body errors (400) are also
+  // captured in the daemon log. Excluded:
   //  - GET /health (high-frequency probe, would drown signal)
-  //  - GET /session/:id/events (SSE — logged inline at open/close)
+  //  - Successful SSE streams (GET .../events with 200) — logged inline
+  //    at open/close; failed SSE handshakes (4xx) are still recorded.
   if (daemonLog) {
     const SESSION_ID_RE = /\/session\/([^/]+)/;
     app.use((req, res, next) => {
       const { method, path: reqPath } = req;
-      if (
-        method === 'GET' &&
-        (reqPath === '/health' || reqPath.endsWith('/events'))
-      ) {
+      if (method === 'GET' && reqPath === '/health') {
         return next();
       }
       const startMs = Date.now();
       res.on('finish', () => {
         try {
+          const status = res.statusCode;
+          if (
+            method === 'GET' &&
+            reqPath.endsWith('/events') &&
+            status === 200
+          ) {
+            return;
+          }
           const durationMs = Date.now() - startMs;
           const sessionMatch = reqPath.match(SESSION_ID_RE);
           const sessionId = sessionMatch?.[1];
           const clientId = req.headers['x-qwen-client-id'] as
             | string
             | undefined;
-          const status = res.statusCode;
           const ctx = {
             route: `${method}:${reqPath}`,
             ...(sessionId ? { sessionId } : {}),
@@ -889,6 +880,21 @@ export function createServeApp(
       next();
     });
   }
+
+  app.use(bearerAuth(opts.token));
+
+  app.use(express.json({ limit: '10mb' }));
+  app.use(
+    (
+      err: unknown,
+      _req: import('express').Request,
+      res: import('express').Response,
+      next: import('express').NextFunction,
+    ) => {
+      if (sendJsonBodyParserError(res, err)) return;
+      next(err);
+    },
+  );
 
   if (!exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
@@ -1452,6 +1458,12 @@ export function createServeApp(
                 workspaceCwd: cwd,
                 ...(clientId !== undefined ? { clientId } : {}),
               });
+        if (daemonLog) {
+          daemonLog.info(
+            `session ${action}${session.attached ? ' (attached)' : ''}`,
+            { sessionId: session.sessionId, clientId: session.clientId },
+          );
+        }
         // Mirror the `POST /session` disconnect-cleanup path (see the
         // long comment above the matching `if (!res.writable)` there
         // for the rationale around `res.writable` vs `req.aborted` /
@@ -1650,6 +1662,21 @@ export function createServeApp(
         {
           ...(clientId !== undefined ? { clientId } : {}),
           promptId,
+        },
+      )
+      .then(
+        () => {
+          if (daemonLog) {
+            daemonLog.info('prompt turn completed', { sessionId, promptId });
+          }
+        },
+        (err) => {
+          if (daemonLog) {
+            daemonLog.warn(
+              `prompt turn failed: ${err instanceof Error ? err.message : String(err)}`,
+              { sessionId, promptId },
+            );
+          }
         },
       )
       .finally(() => {
