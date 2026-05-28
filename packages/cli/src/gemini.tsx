@@ -965,6 +965,33 @@ export async function main() {
     // Render UI, passing necessary config values. Check that there is no command line question.
     profileCheckpoint('before_render');
 
+    if (config.getListExtensions()) {
+      if (inputFormat === InputFormat.STREAM_JSON) {
+        await config.initialize();
+      }
+      const extensions = config.getExtensions();
+      if (extensions.length === 0) {
+        // eslint-disable-next-line no-console -- CLI flag output
+        console.log('No extensions installed.');
+      } else {
+        // eslint-disable-next-line no-console -- CLI flag output
+        console.log('Installed extensions:');
+        for (const extension of extensions) {
+          const safeVersion = extension.version.replace(
+            // eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
+            /[\x00-\x1f\x7f-\x9f]/g,
+            '',
+          );
+          // eslint-disable-next-line no-console -- CLI flag output
+          console.log(
+            `- ${extension.name} (v${safeVersion})${extension.isActive ? '' : ' [disabled]'}`,
+          );
+        }
+      }
+      await runExitCleanup();
+      process.exit(0);
+    }
+
     if (config.isInteractive()) {
       // --json-schema is a headless-only contract: the synthetic
       // structured_output tool only terminates the run inside
@@ -1049,32 +1076,6 @@ export async function main() {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       profileCheckpoint('config_initialize_end');
-
-      if (config.getListExtensions()) {
-        const extensions = config.getExtensions();
-        if (extensions.length === 0) {
-          // eslint-disable-next-line no-console -- CLI flag output
-          console.log('No extensions installed.');
-        } else {
-          // eslint-disable-next-line no-console -- CLI flag output
-          console.log('Installed extensions:');
-          for (const extension of extensions) {
-            // Strip non-printable characters from version to prevent
-            // terminal escape sequence injection.
-            const safeVersion = extension.version.replace(
-              // eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
-              /[\x00-\x1f\x7f-\x9f]/g,
-              '',
-            );
-            // eslint-disable-next-line no-console -- CLI flag output
-            console.log(
-              `- ${extension.name} (v${safeVersion})${extension.isActive ? '' : ' [disabled]'}`,
-            );
-          }
-        }
-        await runExitCleanup();
-        process.exit(0);
-      }
 
       // Non-interactive paths feed a prompt to the model immediately after
       // init. Under PR-A's progressive MCP availability,
