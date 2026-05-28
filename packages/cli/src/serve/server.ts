@@ -841,7 +841,10 @@ export function createServeApp(
     const SESSION_ID_RE = /\/session\/([^/]+)/;
     app.use((req, res, next) => {
       const { method, path: reqPath } = req;
-      if (method === 'GET' && reqPath === '/health') {
+      if (
+        (method === 'GET' && reqPath === '/health') ||
+        (method === 'POST' && reqPath.endsWith('/heartbeat'))
+      ) {
         return next();
       }
       const startMs = Date.now();
