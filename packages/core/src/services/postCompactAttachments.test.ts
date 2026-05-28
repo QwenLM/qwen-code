@@ -113,6 +113,44 @@ describe('extractRecentFilePaths', () => {
     expect(extractRecentFilePaths(history, 0)).toEqual([]);
     expect(extractRecentFilePaths(history, -1)).toEqual([]);
   });
+
+  it('treats parallel tool calls in one content as "last part is newest"', () => {
+    // Regression: discovered via real-session E2E. A model that issues
+    // 6 parallel ReadFile calls puts all 6 functionCall parts in ONE
+    // model+fc content. The previous implementation iterated parts
+    // forward and filled the cap with the FIRST 5, dropping the
+    // last-listed file. The cap-of-5 winner set must include the
+    // LAST 5 (newest) parts when overflow happens.
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: { name: 'read_file', args: { file_path: '/p1.ts' } },
+          },
+          {
+            functionCall: { name: 'read_file', args: { file_path: '/p2.ts' } },
+          },
+          {
+            functionCall: { name: 'read_file', args: { file_path: '/p3.ts' } },
+          },
+          {
+            functionCall: { name: 'read_file', args: { file_path: '/p4.ts' } },
+          },
+          {
+            functionCall: { name: 'read_file', args: { file_path: '/p5.ts' } },
+          },
+          {
+            functionCall: { name: 'read_file', args: { file_path: '/p6.ts' } },
+          },
+        ],
+      },
+    ];
+    const paths = extractRecentFilePaths(history, 5);
+    // Last 5 parts win, returned in newest-first order.
+    expect(paths).toEqual(['/p6.ts', '/p5.ts', '/p4.ts', '/p3.ts', '/p2.ts']);
+    expect(paths).not.toContain('/p1.ts');
+  });
 });
 
 import { extractRecentImages } from './postCompactAttachments.js';

@@ -47,7 +47,14 @@ export function extractRecentFilePaths(
   for (let i = history.length - 1; i >= 0; i--) {
     const content = history[i];
     if (content.role !== 'model') continue;
-    for (const part of content.parts ?? []) {
+    // Iterate parts in REVERSE within a single content so parallel tool
+    // calls (multiple functionCall parts in one model turn) are treated
+    // as "the last call is the most recent". Forward iteration here would
+    // pick the FIRST 5 of a 6-parallel batch, dropping the actually-most-
+    // recent call — discovered via real-session E2E.
+    const parts = content.parts ?? [];
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const part = parts[j];
       const call = part.functionCall;
       if (!call || !FILE_TOUCHING_TOOLS.has(call.name ?? '')) continue;
       const args = call.args as { file_path?: unknown } | undefined;
@@ -90,7 +97,14 @@ export function extractRecentImages(
 
   outer: for (let i = history.length - 1; i >= 0; i--) {
     const content = history[i];
-    for (const part of content.parts ?? []) {
+    // Iterate parts in REVERSE within a single content so when multiple
+    // inlineData parts share one content (e.g., one tool result returning
+    // several images, or a user paste with several images), "most recent"
+    // matches part order — last part wins. Symmetric with the
+    // file-extractor fix that was discovered via real-session E2E.
+    const parts = content.parts ?? [];
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const part = parts[j];
       if (!part.inlineData?.mimeType?.startsWith('image/')) continue;
 
       // Look backward for the most recent model+functionCall to attribute
