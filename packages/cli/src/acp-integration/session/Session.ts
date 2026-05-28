@@ -1682,7 +1682,8 @@ export class Session implements SessionContext {
               }
             }
           },
-          () => (cronHadError ? 'cancelled' : 'ok'),
+          () =>
+            ac.signal.aborted ? 'cancelled' : cronHadError ? 'cancelled' : 'ok',
         );
       },
     );
@@ -2031,7 +2032,7 @@ export class Session implements SessionContext {
       return earlyErrorResponse(new Error('Missing function name'));
     }
 
-    const toolName: string = fc.name;
+    const toolName = fc.name;
     const toolRegistry = this.config.getToolRegistry();
     const tool = toolRegistry.getTool(toolName);
 
@@ -2463,9 +2464,15 @@ export class Session implements SessionContext {
           let toolResult: ToolResult;
           try {
             toolResult = await invocation.execute(abortSignal);
+            const aborted = abortSignal.aborted;
             endToolExecutionSpan(execSpan, {
-              success: !toolResult.error,
-              error: toolResult.error ? 'tool_error' : undefined,
+              success: !toolResult.error && !aborted,
+              error: aborted
+                ? 'tool_cancelled'
+                : toolResult.error
+                  ? 'tool_error'
+                  : undefined,
+              cancelled: aborted,
             });
           } catch (execError) {
             endToolExecutionSpan(execSpan, {
