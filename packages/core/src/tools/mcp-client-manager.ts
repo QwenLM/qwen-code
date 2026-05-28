@@ -2825,6 +2825,7 @@ export class McpClientManager {
       // Clean up any partial state (including tools from partial discover)
       this.toolRegistry.removeMcpToolsByServer(name);
       this.pooledConnections.delete(name);
+      removeMCPServerStatus(name);
       const failedClient = this.clients.get(name);
       if (failedClient) {
         try {

@@ -2504,6 +2504,12 @@ class QwenAgent implements Agent {
             'Invalid or missing name',
           );
         }
+        if (name.length > 256 || !/^[A-Za-z0-9_-]+$/.test(name)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Server name must be ≤256 chars, alphanumeric + underscore/hyphen',
+          );
+        }
         if (!config || typeof config !== 'object' || Array.isArray(config)) {
           throw RequestError.invalidParams(
             undefined,
@@ -2537,6 +2543,7 @@ class QwenAgent implements Agent {
             includeTools: _inc,
             excludeTools: _exc,
             cwd: _cwd,
+            env: _env,
             ...safeConfig
           } = config as Record<string, unknown>;
           const result = await manager.addRuntimeMcpServer(
@@ -2576,6 +2583,12 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing name',
+          );
+        }
+        if (name.length > 256 || !/^[A-Za-z0-9_-]+$/.test(name)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Server name must be ≤256 chars, alphanumeric + underscore/hyphen',
           );
         }
         if (
