@@ -169,11 +169,70 @@ export class ComputerUseTool extends BaseDeclarativeTool<
     );
   }
 
+  /**
+   * Coerce numeric strings to actual numbers before schema validation.
+   * Some models (e.g. qwen3.6) produce JSON like `{"element_index": "11"}`
+   * even when the schema declares `type: "integer"`. Pre-coercing avoids
+   * spurious validation failures without loosening the schema types.
+   */
+  override validateToolParams(params: ComputerUseParams): string | null {
+    const coerced = coerceNumericStrings(
+      params,
+      this.parameterSchema as Record<string, unknown>,
+    );
+    return super.validateToolParams(coerced as ComputerUseParams);
+  }
+
+  override build(
+    params: ComputerUseParams,
+  ): ToolInvocation<ComputerUseParams, ToolResult> {
+    const coerced = coerceNumericStrings(
+      params,
+      this.parameterSchema as Record<string, unknown>,
+    );
+    return super.build(coerced as ComputerUseParams);
+  }
+
   protected createInvocation(
     params: ComputerUseParams,
   ): ToolInvocation<ComputerUseParams, ToolResult> {
     return new ComputerUseInvocation(this.upstreamName, params);
   }
+}
+
+/**
+ * Walk schema properties and coerce string values to integers/numbers when the
+ * schema declares `type: 'integer'` or `type: 'number'` and the value is a
+ * clean numeric string. Garbage strings (e.g. "abc") are left untouched so
+ * they still fail schema validation with a clear error.
+ */
+export function coerceNumericStrings(
+  params: Record<string, unknown>,
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const properties = (
+    schema as { properties?: Record<string, { type?: string }> }
+  ).properties;
+  if (!properties) return params;
+  const result: Record<string, unknown> = { ...params };
+  for (const [key, value] of Object.entries(result)) {
+    const fieldType = properties[key]?.type;
+    if (
+      (fieldType === 'integer' || fieldType === 'number') &&
+      typeof value === 'string'
+    ) {
+      const trimmed = value.trim();
+      // Only coerce if the string is a clean numeric — don't swallow garbage.
+      if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+        const parsed =
+          fieldType === 'integer' ? parseInt(trimmed, 10) : parseFloat(trimmed);
+        if (Number.isFinite(parsed)) {
+          result[key] = parsed;
+        }
+      }
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

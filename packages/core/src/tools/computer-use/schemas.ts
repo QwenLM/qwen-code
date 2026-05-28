@@ -51,7 +51,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   get_app_state: {
     description:
-      'Capture the current accessibility tree and a screenshot of the given application. Returns element_index values that subsequent actions (click, set_value, etc.) can target. Always call this before any element-targeted action; element_index values are valid only within the current snapshot.',
+      'REQUIRED: `app` (always). Capture the current accessibility tree and a screenshot of the given application. Returns element_index values (integers) that subsequent actions (click, set_value, etc.) can target. Always call this before any element-targeted action; element_index values are valid only within the current snapshot.',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -67,7 +67,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   click: {
     description:
-      'Left-click a target. Prefer element_index from a recent get_app_state result. Fall back to x/y screenshot pixel coordinates only when no AX element matches the target.',
+      'REQUIRED: `app` (always). Click a target inside a desktop application. Use `element_index` (an INTEGER, e.g. 11 not "11") from the latest get_app_state result, or coordinate x/y (INTEGERS) only when no AX element matches.',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -96,7 +96,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   perform_secondary_action: {
     description:
-      'Perform a non-click semantic action exposed by the target AX element (e.g. "Raise", "ShowMenu"). Returns an error if the action is not valid for the element.',
+      'REQUIRED: `app`, `element_index` (INTEGER), `action`. Perform a non-click semantic action exposed by the target AX element (e.g. "Raise", "ShowMenu"). Returns an error if the action is not valid for the element.',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -113,7 +113,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   scroll: {
     description:
-      'Scroll inside the target element or at the given coordinates. `pages` is a fractional page count (positive = down, negative = up).',
+      'REQUIRED: `app`, `pages` (number). Scroll inside the target element (element_index INTEGER) or at x/y coordinates (INTEGERS). `pages` is a fractional page count (positive = down, negative = up).',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -132,7 +132,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   drag: {
     description:
-      'Drag from one coordinate pair to another inside the target application window. Coordinates are in screenshot pixels.',
+      'REQUIRED: `app`, `from_x`, `from_y`, `to_x`, `to_y` (all INTEGERS). Drag from one coordinate pair to another inside the target application window. Coordinates are in screenshot pixels.',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -148,7 +148,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   type_text: {
     description:
-      'Type text into the currently-focused text input of the target application. Click the input area first if it is not focused. For unfocused text fields, prefer set_value instead.',
+      'REQUIRED: `app`, `text`. Type text into the currently-focused text input of the target application. Click the input area first if it is not focused. For unfocused text fields, prefer set_value instead.',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -164,7 +164,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   press_key: {
     description:
-      'Press a keyboard key or combo against the target application. Key names follow xdotool conventions (e.g. "Return", "BackSpace", "cmd+c", "Page_Up").',
+      'REQUIRED: `app`, `key`. Press a keyboard key or combo against the target application. Key names follow xdotool conventions (e.g. "Return", "BackSpace", "cmd+c", "Page_Up").',
     parameterSchema: {
       type: 'object',
       properties: {
@@ -177,7 +177,7 @@ export const COMPUTER_USE_SCHEMAS: Record<
   },
   set_value: {
     description:
-      'Directly set the value of a settable AX element (text fields, sliders, etc.). Returns an error if the target is not settable.',
+      'REQUIRED: `app`, `element_index` (INTEGER), `value`. Directly set the value of a settable AX element (text fields, sliders, etc.). Returns an error if the target is not settable.',
     parameterSchema: {
       type: 'object',
       properties: {
