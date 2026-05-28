@@ -151,12 +151,6 @@ export function recordDaemonHttpResponse(
 ): void {
   try {
     span?.setAttribute('http.response.status_code', statusCode);
-    if (statusCode >= 500) {
-      span?.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: `HTTP ${statusCode}`,
-      });
-    }
   } catch {
     // Telemetry must not affect request handling.
   }
@@ -315,6 +309,7 @@ export function createDaemonBridgeTelemetry(): {
     runWithContext: runWithDaemonTelemetryContext,
     withSpan: withDaemonBridgeSpan,
     event(name, attributes) {
+      if (!isTelemetrySdkInitialized()) return;
       try {
         const activeSpan = trace.getSpan(otelContext.active());
         if (activeSpan) {

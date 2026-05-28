@@ -11,6 +11,10 @@ import {
   type Span,
   type Tracer,
 } from '@opentelemetry/api';
+
+vi.mock('./sdk.js', () => ({
+  isTelemetrySdkInitialized: () => true,
+}));
 import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
