@@ -12,6 +12,7 @@ import {
   getSubagentSystemReminder,
   getPlanModeSystemReminder,
   resolvePathFromEnv,
+  getCompressionPrompt,
 } from './prompts.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
@@ -759,5 +760,35 @@ describe('New Applications workflow deferred to skill', () => {
     const prompt = getCoreSystemPrompt();
     expect(prompt).toContain('new-app');
     expect(prompt).toContain('## New Applications');
+  });
+});
+
+describe('getCompressionPrompt', () => {
+  it('contains all 9 required sections', () => {
+    const prompt = getCompressionPrompt();
+    expect(prompt).toContain('1. Primary Request and Intent');
+    expect(prompt).toContain('2. Key Technical Concepts');
+    expect(prompt).toContain('3. Files and Code Sections');
+    expect(prompt).toContain('4. Errors and fixes');
+    expect(prompt).toContain('5. Problem Solving');
+    expect(prompt).toContain('6. All user messages');
+    expect(prompt).toContain('7. Pending Tasks');
+    expect(prompt).toContain('8. Current Work');
+    expect(prompt).toContain('9. Optional Next Step');
+  });
+
+  it('mandates verbatim preservation of user messages', () => {
+    const prompt = getCompressionPrompt();
+    // Hardest part of the discipline: model must NOT paraphrase user input.
+    expect(prompt.toLowerCase()).toMatch(
+      /verbatim|word[\s-]for[\s-]word|exactly as|do not paraphrase/,
+    );
+  });
+
+  it('instructs the model to resume directly without acknowledging the summary', () => {
+    const prompt = getCompressionPrompt();
+    expect(prompt).toMatch(
+      /resume.*directly|do not acknowledge|without.*recap/i,
+    );
   });
 });

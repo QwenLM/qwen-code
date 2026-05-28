@@ -437,66 +437,50 @@ When you encounter an obstacle, do not use destructive actions as a shortcut to 
 
 /**
  * Provides the system prompt for the history compression process.
- * This prompt instructs the model to act as a specialized state manager,
- * think in a scratchpad, and produce a structured XML summary.
+ * This prompt instructs the model to produce a 9-section summary with
+ * verbatim preservation of user messages and clear resumption instructions.
  */
 export function getCompressionPrompt(): string {
   return `
-You are the component that summarizes internal chat history into a given structure.
+You are the component that summarizes a conversation when its context window is about to overflow. The summary you produce will become the agent's ONLY memory of everything that happened before this point. The agent will resume its work based solely on this summary plus a small number of restored file/image attachments that follow.
 
-When the conversation history grows too large, you will be invoked to distill the entire history into a concise, structured XML snapshot. This snapshot is CRITICAL, as it will become the agent's *only* memory of the past. The agent will resume its work based solely on this snapshot. All crucial details, plans, errors, and user directives MUST be preserved.
+First, think privately in a <scratchpad>. Review the user's overall goal, every action the agent took, every tool output, every error and recovery, and any unresolved questions. Identify the information that is essential for continuing the work.
 
-First, you will think through the entire history in a private <scratchpad>. Review the user's overall goal, the agent's actions, tool outputs, file modifications, and any unresolved questions. Identify every piece of information that is essential for future actions.
+Then produce the final summary in the EXACT structure below. Be dense with information. Omit conversational filler. Critically: **preserve every user message verbatim — do NOT paraphrase, summarize, or rewrite anything the user said**. The user's exact wording carries intent the agent must not lose.
 
-After your reasoning is complete, generate the final <state_snapshot> XML object. Be incredibly dense with information. Omit any irrelevant conversational filler.
+The structure MUST be:
 
-The structure MUST be as follows:
+Summary:
+1. Primary Request and Intent:
+   A prose paragraph describing the user's high-level goal and any sub-goals. Quote the user's exact phrasing where intent is at stake.
 
-<state_snapshot>
-    <overall_goal>
-        <!-- A single, concise sentence describing the user's high-level objective. -->
-        <!-- Example: "Refactor the authentication service to use a new JWT library." -->
-    </overall_goal>
+2. Key Technical Concepts:
+   Bullet list of concepts, libraries, conventions, and constraints established in the conversation.
 
-    <key_knowledge>
-        <!-- Crucial facts, conventions, and constraints the agent must remember based on the conversation history and interaction with the user. Use bullet points. -->
-        <!-- Example:
-         - Build Command: \`npm run build\`
-         - Testing: Tests are run with \`npm test\`. Test files must end in \`.test.ts\`.
-         - API Endpoint: The primary API endpoint is \`https://api.example.com/v2\`.
-         
-        -->
-    </key_knowledge>
+3. Files and Code Sections:
+   For each file touched, one block: file path, what was read / written / edited, the gist of the change, any critical learning (e.g., "this file expects UTF-8 with BOM").
 
-    <file_system_state>
-        <!-- List files that have been created, read, modified, or deleted. Note their status and critical learnings. -->
-        <!-- Example:
-         - CWD: \`/home/user/project/src\`
-         - READ: \`package.json\` - Confirmed 'axios' is a dependency.
-         - MODIFIED: \`services/auth.ts\` - Replaced 'jsonwebtoken' with 'jose'.
-         - CREATED: \`tests/new-feature.test.ts\` - Initial test structure for the new feature.
-        -->
-    </file_system_state>
+4. Errors and fixes:
+   Bullet list of errors encountered and how they were resolved. Include error messages verbatim when they were quoted to the agent.
 
-    <recent_actions>
-        <!-- A summary of the last few significant agent actions and their outcomes. Focus on facts. -->
-        <!-- Example:
-         - Ran \`grep 'old_function'\` which returned 3 results in 2 files.
-         - Ran \`npm run test\`, which failed due to a snapshot mismatch in \`UserProfile.test.ts\`.
-         - Ran \`ls -F static/\` and discovered image assets are stored as \`.webp\`.
-        -->
-    </recent_actions>
+5. Problem Solving:
+   Brief notes on non-trivial decisions and trade-offs that the agent made while working.
 
-    <current_plan>
-        <!-- The agent's step-by-step plan. Mark completed steps. -->
-        <!-- Example:
-         1. [DONE] Identify all files using the deprecated 'UserAPI'.
-         2. [IN PROGRESS] Refactor \`src/components/UserProfile.tsx\` to use the new 'ProfileAPI'.
-         3. [TODO] Refactor the remaining files.
-         4. [TODO] Update tests to reflect the API change.
-        -->
-    </current_plan>
-</state_snapshot>
+6. All user messages (chronological):
+   List EVERY message the user sent during the conversation, in order, VERBATIM. Do not paraphrase. Do not omit short messages like "ok" or "continue" — they are signal. Use quotation marks to preserve exact text.
+
+7. Pending Tasks:
+   Bullet list of work the user requested that has NOT yet been completed.
+
+8. Current Work:
+   What the agent was doing in the very last turn before compaction triggered. Include the verbatim last sentence or two of the agent's previous output so the next turn can pick up exactly where this one stopped.
+
+9. Optional Next Step:
+   A single concrete next action that directly continues #8, derived from the user's most recent intent. If the user's last message asked a clarifying question or signaled a pause, say so instead — do not invent forward motion.
+
+After the summary, append exactly:
+
+Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with "I'll continue" or similar. Pick up the last task as if the break never happened.
 `.trim();
 }
 
