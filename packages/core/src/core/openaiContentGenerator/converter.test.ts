@@ -12,6 +12,7 @@ import type { RequestContext } from './types.js';
 import {
   Type,
   FinishReason,
+  GenerateContentResponse,
   type GenerateContentParameters,
   type Content,
   type Part,
@@ -4228,6 +4229,40 @@ describe('Truncated tool call detection in streaming', () => {
     );
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
+  });
+});
+
+describe('mapGeminiFinishReasonToOpenAI', () => {
+  it.each([
+    [FinishReason.STOP, 'stop'],
+    [FinishReason.MAX_TOKENS, 'length'],
+    [FinishReason.SAFETY, 'content_filter'],
+    [FinishReason.RECITATION, 'content_filter'],
+    [FinishReason.IMAGE_SAFETY, 'content_filter'],
+    [FinishReason.IMAGE_RECITATION, 'content_filter'],
+    [FinishReason.IMAGE_PROHIBITED_CONTENT, 'content_filter'],
+    [FinishReason.IMAGE_OTHER, 'content_filter'],
+    [FinishReason.NO_IMAGE, 'stop'],
+    [undefined, 'stop'],
+  ])('maps %s to %s', (geminiReason, expected) => {
+    const response = OpenAIContentConverter.convertGeminiResponseToOpenAI(
+      {
+        candidates: [
+          { finishReason: geminiReason, content: { parts: [] } },
+        ],
+      } as GenerateContentResponse,
+      {
+        model: 'test-model',
+        modalities: {
+          image: true,
+          pdf: true,
+          audio: true,
+          video: true,
+        },
+        startTime: 0,
+      },
+    );
+    expect(response.choices[0].finish_reason).toBe(expected);
   });
 });
 

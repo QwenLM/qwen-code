@@ -1383,8 +1383,9 @@ function mapGeminiFinishReasonToOpenAI(
     case FinishReason.IMAGE_RECITATION:
     case FinishReason.IMAGE_PROHIBITED_CONTENT:
     case FinishReason.IMAGE_OTHER:
-    case FinishReason.NO_IMAGE:
       return 'content_filter';
+    case FinishReason.NO_IMAGE:
+      return 'stop';
     default:
       return 'stop';
   }

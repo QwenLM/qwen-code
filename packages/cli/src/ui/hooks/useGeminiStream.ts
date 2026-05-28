@@ -1164,15 +1164,15 @@ export const useGeminiStream = (
           'Response stopped due to malformed function call.',
         [FinishReason.IMAGE_SAFETY]:
           'Response stopped due to image safety violations.',
-        [FinishReason.UNEXPECTED_TOOL_CALL]:
-          'Response stopped due to unexpected tool call.',
         [FinishReason.IMAGE_PROHIBITED_CONTENT]:
           'Response stopped due to image prohibited content.',
-        [FinishReason.NO_IMAGE]: 'Response stopped due to no image.',
         [FinishReason.IMAGE_RECITATION]:
           'Response stopped due to image recitation policy.',
         [FinishReason.IMAGE_OTHER]:
           'Response stopped due to other image-related reasons.',
+        [FinishReason.NO_IMAGE]: 'Response stopped due to no image.',
+        [FinishReason.UNEXPECTED_TOOL_CALL]:
+          'Response stopped due to unexpected tool call.',
       };
 
       const message = finishReasonMessages[finishReason];
