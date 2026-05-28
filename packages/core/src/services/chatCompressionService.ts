@@ -414,7 +414,6 @@ export class ChatCompressionService {
       // real cost in newHistory is slightly lower than this count
       // suggests. We accept that inaccuracy in favor of avoiding local
       // token estimation.
-      // We accept these inaccuracies to avoid local token estimation.
       if (
         typeof compressionInputTokenCount === 'number' &&
         compressionInputTokenCount > 0 &&
