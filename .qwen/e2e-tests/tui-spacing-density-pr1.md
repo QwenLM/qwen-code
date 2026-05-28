@@ -32,9 +32,10 @@ Terminal capture:
 
 ```bash
 git checkout origin/main
-/tmp/qwen-pr1-spacing-evidence/run-tmux-capture.sh /Users/gawain/.codex/worktrees/tui-display-optimization-issue/qwen-code 'base origin/main 34b7d472e' base
-git switch codex/tui-spacing-density-pr1
-/tmp/qwen-pr1-spacing-evidence/run-tmux-capture.sh /Users/gawain/.codex/worktrees/tui-display-optimization-issue/qwen-code 'PR1 fixed 848d6a166' fixed
+REPO_ROOT="$PWD"
+/tmp/qwen-pr1-spacing-evidence/run-tmux-capture.sh "$REPO_ROOT" 'base origin/main 34b7d472e' base
+git switch feat/tui-spacing-density-pr1
+/tmp/qwen-pr1-spacing-evidence/run-tmux-capture.sh "$REPO_ROOT" 'PR1 fixed 848d6a166' fixed
 ```
 
 VHS visual capture:
@@ -42,20 +43,20 @@ VHS visual capture:
 ```bash
 git checkout origin/main
 PATH=/Users/gawain/.nvm/versions/node/v24.15.0/bin:$PATH vhs /tmp/qwen-pr1-spacing-evidence/base.tape
-git switch codex/tui-spacing-density-pr1
+git switch feat/tui-spacing-density-pr1
 PATH=/Users/gawain/.nvm/versions/node/v24.15.0/bin:$PATH vhs /tmp/qwen-pr1-spacing-evidence/fixed.tape
 ffmpeg -y -i /tmp/qwen-pr1-spacing-evidence/base.gif -i /tmp/qwen-pr1-spacing-evidence/fixed.gif -filter_complex "[0:v]fps=5,scale=780:-1:flags=lanczos[left];[1:v]fps=5,scale=780:-1:flags=lanczos[right];[left][right]hstack=inputs=2,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" /tmp/qwen-pr1-spacing-evidence/base-vs-fixed-optimized.gif
 ```
 
 ## Evidence Artifacts
 
-- Release: <https://github.com/chiga0/qwen-code/releases/tag/pr-4594-tui-spacing-evidence>
-- Side-by-side GIF: <https://github.com/chiga0/qwen-code/releases/download/pr-4594-tui-spacing-evidence/base-vs-fixed-optimized.gif>
-- Final screenshot: <https://github.com/chiga0/qwen-code/releases/download/pr-4594-tui-spacing-evidence/base-vs-fixed-final.png>
-- Base tmux capture: <https://github.com/chiga0/qwen-code/releases/download/pr-4594-tui-spacing-evidence/base.tmux.txt>
-- Fixed tmux capture: <https://github.com/chiga0/qwen-code/releases/download/pr-4594-tui-spacing-evidence/fixed.tmux.txt>
-- Base summary JSON: <https://github.com/chiga0/qwen-code/releases/download/pr-4594-tui-spacing-evidence/base.summary.json>
-- Fixed summary JSON: <https://github.com/chiga0/qwen-code/releases/download/pr-4594-tui-spacing-evidence/fixed.summary.json>
+- Release: <https://github.com/QwenLM/qwen-code/releases/tag/tui-spacing-density-pr1-evidence>
+- Side-by-side GIF: <https://github.com/QwenLM/qwen-code/releases/download/tui-spacing-density-pr1-evidence/base-vs-fixed-optimized.gif>
+- Final screenshot: <https://github.com/QwenLM/qwen-code/releases/download/tui-spacing-density-pr1-evidence/base-vs-fixed-final.png>
+- Base tmux capture: <https://github.com/QwenLM/qwen-code/releases/download/tui-spacing-density-pr1-evidence/base.tmux.txt>
+- Fixed tmux capture: <https://github.com/QwenLM/qwen-code/releases/download/tui-spacing-density-pr1-evidence/fixed.tmux.txt>
+- Base summary JSON: <https://github.com/QwenLM/qwen-code/releases/download/tui-spacing-density-pr1-evidence/base.summary.json>
+- Fixed summary JSON: <https://github.com/QwenLM/qwen-code/releases/download/tui-spacing-density-pr1-evidence/fixed.summary.json>
 
 ## Expected Results
 
