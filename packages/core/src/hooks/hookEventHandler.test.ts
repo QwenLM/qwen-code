@@ -1330,7 +1330,7 @@ describe('HookEventHandler', () => {
       });
     });
 
-    it('should block UserPromptExpansion when hook execution setup fails', async () => {
+    it('should fail open for UserPromptExpansion when hook execution setup fails', async () => {
       vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
         throw new Error('UserPromptExpansion planner error');
       });
@@ -1346,11 +1346,7 @@ describe('HookEventHandler', () => {
       expect(result.errors[0].message).toBe(
         'UserPromptExpansion planner error',
       );
-      expect(result.finalOutput).toEqual({
-        decision: 'block',
-        reason:
-          'Hook system failed while processing UserPromptExpansion: UserPromptExpansion planner error',
-      });
+      expect(result.finalOutput).toBeUndefined();
     });
 
     it('should redact sensitive todo fields from hook telemetry', async () => {

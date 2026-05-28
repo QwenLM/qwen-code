@@ -581,8 +581,7 @@ export class HookEventHandler {
       totalDuration: 0,
       finalOutput:
         eventName === HookEventName.TodoCreated ||
-        eventName === HookEventName.TodoCompleted ||
-        eventName === HookEventName.UserPromptExpansion
+        eventName === HookEventName.TodoCompleted
           ? {
               decision: 'block',
               reason: `Hook system failed while processing ${eventName}`,
