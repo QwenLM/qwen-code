@@ -112,6 +112,13 @@ export interface BridgeClientRequestContext {
    * dedicated daemon or `designated` policy instead).
    */
   fromLoopback?: boolean;
+  /**
+   * Caller-generated correlation id for non-blocking prompt mode.
+   * When present, the bridge stamps `turn_complete` / `turn_error` events
+   * with this id so the SDK's `prompt()` can match the SSE event to the
+   * pending HTTP 202 request.
+   */
+  promptId?: string;
 }
 
 /**
@@ -192,6 +199,13 @@ export interface HttpAcpBridge {
     sessionId: string,
     opts?: SubscribeOptions,
   ): AsyncIterable<BridgeEvent>;
+
+  /**
+   * Return the most recent monotonic event id for this session's bus.
+   * Used by non-blocking prompt responses to tell the client where to
+   * start SSE replay so no events are missed.
+   */
+  getSessionLastEventId(sessionId: string): number;
 
   /**
    * Explicitly close a live session. Force-closes even when other clients
