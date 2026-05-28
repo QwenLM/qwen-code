@@ -396,7 +396,6 @@ require_node() {
         print_node_help
         return 1
     fi
-
 }
 
 require_npm() {
@@ -446,7 +445,6 @@ create_source_json() {
   "source": "${escaped_source}"
 }
 EOF
-
 }
 
 detect_target() {
@@ -807,11 +805,11 @@ download_with_progress() {
         if [[ -f "${output}" ]]; then
             local file_size
             file_size=$(wc -c < "${output}" 2>/dev/null | tr -d ' ')
-            if [[ -n "${file_size}" ]]; then
+            if [[ -n "${file_size}" && "${file_size}" -gt 0 ]] 2>/dev/null; then
                 print_progress "${file_size}" "${content_length}"
             fi
         fi
-        sleep 0.3
+        sleep 1
     done
 
     wait "${ACTIVE_DOWNLOAD_PID}"
@@ -946,7 +944,6 @@ verify_checksum() {
         log_error "Checksum mismatch for ${archive_name}: expected ${expected}, got ${actual}."
         return 1
     fi
-
 }
 
 validate_archive_entry_path() {
@@ -1355,7 +1352,6 @@ install_standalone() {
 
     create_source_json
     rm -rf "${temp_dir}"
-
 }
 
 npm_package_spec() {
