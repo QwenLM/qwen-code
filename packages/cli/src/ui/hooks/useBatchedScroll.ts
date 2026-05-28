@@ -15,7 +15,6 @@ export function useBatchedScroll(currentScrollTop: number) {
   const pendingScrollTopRef = useRef<number | null>(null);
   const currentScrollTopRef = useRef(currentScrollTop);
 
-   
   useLayoutEffect(() => {
     currentScrollTopRef.current = currentScrollTop;
     pendingScrollTopRef.current = null;
