@@ -169,7 +169,10 @@ export const routes = {
     },
 
     /** Skill marketplace view (curated skill installer). */
-    skillMarketplace: () => 'skillMarketplace' as const,
+    skillMarketplace: (skillId?: string) =>
+      skillId
+        ? (`skillMarketplace/skill/${skillId}` as const)
+        : ('skillMarketplace' as const),
 
     /** Automations view (automations navigator) - supports type filtering */
     automations: (params?: {

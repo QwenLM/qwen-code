@@ -863,6 +863,66 @@ describe('QwenAgent slash command history', () => {
     ]);
   });
 
+  it('invalidates cached available commands after installing a skill', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals & {
+      latestAvailableCommandsSnapshot: {
+        availableCommands: Array<{ name: string; description?: string }>;
+        availableSkills?: string[];
+      } | null;
+    };
+    const calledMethods: string[] = [];
+    internals.qwenSessionId = 'qwen-session';
+    internals.latestAvailableCommandsSnapshot = {
+      availableCommands: [{ name: 'old:command' }],
+      availableSkills: ['old-skill'],
+    };
+    internals.ensureProcess = async () => {};
+    internals.callAcp = async (method, execute) => {
+      calledMethods.push(method);
+      if (method === 'qwen/skills/install') {
+        return execute({
+          extMethod: async () => ({
+            slug: 'pptx',
+            installed: true,
+          }),
+        });
+      }
+      if (method === 'session/load') {
+        internals.handleSessionUpdate({
+          sessionId: 'qwen-session',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [{ name: 'project:fix' }],
+            _meta: { availableSkills: ['pptx'] },
+          },
+        });
+        return execute({
+          loadSession: async () => ({ models: {}, modes: {} }),
+        });
+      }
+      throw new Error(`Unexpected ACP method ${method}`);
+    };
+
+    await agent.installSkill({
+      id: 'pptx',
+      slug: 'pptx',
+      name: 'PPTX',
+      description: 'Create and edit PowerPoint slide decks.',
+      sourceUrl:
+        'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+      scope: 'global',
+    });
+    const snapshot = await agent.refreshAvailableCommands();
+    agent.destroy();
+
+    expect(calledMethods).toEqual(['qwen/skills/install', 'session/load']);
+    expect(snapshot?.availableSkills).toEqual(['pptx']);
+  });
+
   it('deduplicates concurrent ACP session setup during command refresh', async () => {
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(cwd);

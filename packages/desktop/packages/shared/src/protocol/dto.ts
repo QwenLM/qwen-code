@@ -865,9 +865,19 @@ export interface SkillMarketplaceItem {
   id: string
   slug: string
   name: string
+  tagline: string
   description: string
+  iconKey: string
+  websiteUrl?: string
   sourceUrl: string
+  examples: SkillMarketplaceExample[]
+  heroImage?: string
   installed: boolean
+}
+
+export interface SkillMarketplaceExample {
+  title: string
+  prompt: string
 }
 
 export interface SkillMarketplaceInstallResult {

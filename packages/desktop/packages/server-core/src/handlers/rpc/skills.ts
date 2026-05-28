@@ -7,6 +7,10 @@ import {
   type SkillMarketplaceItem,
 } from '@craft-agent/shared/protocol'
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config'
+import {
+  getSkillMarketplaceDefinition,
+  SKILL_MARKETPLACE_DEFINITIONS,
+} from '@craft-agent/shared/skills'
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 import type { LoadedSkill } from '@craft-agent/shared/skills/types'
@@ -28,19 +32,6 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.skills.OPEN_EDITOR,
   RPC_CHANNELS.skills.OPEN_FINDER,
 ] as const
-
-const MARKETPLACE_SKILLS: ReadonlyArray<
-  Omit<SkillMarketplaceItem, 'installed'>
-> = [
-  {
-    id: 'pptx',
-    slug: 'pptx',
-    name: 'PPTX',
-    description: 'Create, inspect, and edit PowerPoint slide decks.',
-    sourceUrl:
-      'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
-  },
-]
 
 function providerSkillFromDetail(detail: AvailableSkillDetail): LoadedSkill {
   const skillDir = detail.filePath ? dirname(detail.filePath) : ''
@@ -72,7 +63,27 @@ function providerSkillFromName(
 function getMarketplaceDefinition(
   skillId: string,
 ): Omit<SkillMarketplaceItem, 'installed'> | undefined {
-  return MARKETPLACE_SKILLS.find((skill) => skill.id === skillId)
+  return getSkillMarketplaceDefinition(skillId)
+}
+
+function skillAcpSessionId(
+  fallbackPrefix: string,
+  workspaceId: string,
+  activeSessionId?: string,
+): string {
+  const trimmedSessionId = activeSessionId?.trim()
+  return trimmedSessionId || `${fallbackPrefix}:${workspaceId}`
+}
+
+function hasActiveAcpSession(activeSessionId?: string): boolean {
+  return Boolean(activeSessionId?.trim())
+}
+
+function normalizeSkillIdentifier(identifier: string): string {
+  return identifier
+    .trim()
+    .replace(/^[@/]+/, '')
+    .toLowerCase()
 }
 
 function providerSkillsFromAvailableCommands(
@@ -95,18 +106,24 @@ async function getInstalledMarketplaceSkillSlugs(
   deps: HandlerDeps,
   workspaceId: string,
   workingDirectory?: string,
+  activeSessionId?: string,
 ): Promise<Set<string>> {
   const workspace = getWorkspaceByNameOrId(workspaceId)
-  if (!workspace || !(await shouldLoadSkillsFromQwenAcp(workspace.rootPath))) {
+  if (!workspace) {
     return new Set()
   }
+
+  const shouldTryQwenAcp =
+    hasActiveAcpSession(activeSessionId) ||
+    (await shouldLoadSkillsFromQwenAcp(workspace.rootPath))
+  if (!shouldTryQwenAcp) return new Set()
 
   const effectiveWorkingDir =
     workingDirectory && existsSync(workingDirectory)
       ? workingDirectory
       : undefined
   const result = await deps.sessionManager.refreshAvailableCommands(
-    `skills-marketplace:${workspaceId}`,
+    skillAcpSessionId('skills-marketplace', workspaceId, activeSessionId),
     {
       workspaceId,
       workingDirectory: effectiveWorkingDir,
@@ -120,8 +137,10 @@ async function getInstalledMarketplaceSkillSlugs(
   }
 
   return new Set([
-    ...(result.availableSkills ?? []),
-    ...(result.availableSkillDetails ?? []).map((skill) => skill.name),
+    ...(result.availableSkills ?? []).map(normalizeSkillIdentifier),
+    ...(result.availableSkillDetails ?? []).map((skill) =>
+      normalizeSkillIdentifier(skill.name),
+    ),
   ])
 }
 
@@ -129,15 +148,19 @@ async function listMarketplaceSkills(
   deps: HandlerDeps,
   workspaceId: string,
   workingDirectory?: string,
+  activeSessionId?: string,
 ): Promise<SkillMarketplaceItem[]> {
   const installedSlugs = await getInstalledMarketplaceSkillSlugs(
     deps,
     workspaceId,
     workingDirectory,
+    activeSessionId,
   )
-  return MARKETPLACE_SKILLS.map((skill) => ({
+  return SKILL_MARKETPLACE_DEFINITIONS.map((skill) => ({
     ...skill,
-    installed: installedSlugs.has(skill.slug),
+    installed:
+      installedSlugs.has(normalizeSkillIdentifier(skill.slug)) ||
+      installedSlugs.has(normalizeSkillIdentifier(skill.name)),
   }))
 }
 
@@ -146,6 +169,7 @@ async function broadcastAvailableSkills(
   deps: HandlerDeps,
   workspaceId: string,
   workingDirectory?: string,
+  activeSessionId?: string,
 ): Promise<void> {
   const workspace = getWorkspaceByNameOrId(workspaceId)
   if (!workspace) return
@@ -155,7 +179,7 @@ async function broadcastAvailableSkills(
       ? workingDirectory
       : undefined
   const result = await deps.sessionManager.refreshAvailableCommands(
-    `skills-discovery:${workspaceId}`,
+    skillAcpSessionId('skills-discovery', workspaceId, activeSessionId),
     {
       workspaceId,
       workingDirectory: effectiveWorkingDir,
@@ -209,7 +233,12 @@ export function registerSkillsHandlers(
   // Get all skills for a workspace (and optionally project-level skills from workingDirectory)
   server.handle(
     RPC_CHANNELS.skills.GET,
-    async (_ctx, workspaceId: string, workingDirectory?: string) => {
+    async (
+      _ctx,
+      workspaceId: string,
+      workingDirectory?: string,
+      activeSessionId?: string,
+    ) => {
       deps.platform.logger?.info(
         `SKILLS_GET: Loading skills for workspace: ${workspaceId}${workingDirectory ? `, workingDirectory: ${workingDirectory}` : ''}`,
       )
@@ -227,9 +256,13 @@ export function registerSkillsHandlers(
           ? workingDirectory
           : undefined
 
-      if (await shouldLoadSkillsFromQwenAcp(workspace.rootPath)) {
+      const shouldTryQwenAcp =
+        hasActiveAcpSession(activeSessionId) ||
+        (await shouldLoadSkillsFromQwenAcp(workspace.rootPath))
+
+      if (shouldTryQwenAcp) {
         const result = await deps.sessionManager.refreshAvailableCommands(
-          `skills-discovery:${workspaceId}`,
+          skillAcpSessionId('skills-discovery', workspaceId, activeSessionId),
           {
             workspaceId,
             workingDirectory: effectiveWorkingDir,
@@ -260,8 +293,18 @@ export function registerSkillsHandlers(
 
   server.handle(
     RPC_CHANNELS.skills.MARKETPLACE_LIST,
-    async (_ctx, workspaceId: string, workingDirectory?: string) =>
-      listMarketplaceSkills(deps, workspaceId, workingDirectory),
+    async (
+      _ctx,
+      workspaceId: string,
+      workingDirectory?: string,
+      activeSessionId?: string,
+    ) =>
+      listMarketplaceSkills(
+        deps,
+        workspaceId,
+        workingDirectory,
+        activeSessionId,
+      ),
   )
 
   server.handle(
@@ -271,6 +314,7 @@ export function registerSkillsHandlers(
       workspaceId: string,
       skillId: string,
       workingDirectory?: string,
+      activeSessionId?: string,
     ): Promise<SkillMarketplaceInstallResult> => {
       const marketplaceSkill = getMarketplaceDefinition(skillId)
       if (!marketplaceSkill) {
@@ -278,7 +322,7 @@ export function registerSkillsHandlers(
       }
 
       const result = await deps.sessionManager.installQwenSkill(
-        `skills-marketplace:${workspaceId}`,
+        skillAcpSessionId('skills-marketplace', workspaceId, activeSessionId),
         {
           id: marketplaceSkill.id,
           slug: marketplaceSkill.slug,
@@ -300,6 +344,7 @@ export function registerSkillsHandlers(
         deps,
         workspaceId,
         workingDirectory,
+        activeSessionId,
       )
 
       deps.platform.logger?.info(
@@ -381,13 +426,18 @@ export function registerSkillsHandlers(
       workspaceId: string,
       skillSlug: string,
       workingDirectory?: string,
+      activeSessionId?: string,
     ) => {
       const workspace = getWorkspaceByNameOrId(workspaceId)
       if (!workspace) throw new Error('Workspace not found')
 
-      if (await shouldLoadSkillsFromQwenAcp(workspace.rootPath)) {
+      const shouldTryQwenAcp =
+        hasActiveAcpSession(activeSessionId) ||
+        (await shouldLoadSkillsFromQwenAcp(workspace.rootPath))
+
+      if (shouldTryQwenAcp) {
         const result = await deps.sessionManager.deleteQwenSkill(
-          `skills-discovery:${workspaceId}`,
+          skillAcpSessionId('skills-discovery', workspaceId, activeSessionId),
           { slug: skillSlug, scope: 'global' },
           { workspaceId, workingDirectory },
         )
@@ -399,6 +449,7 @@ export function registerSkillsHandlers(
           deps,
           workspaceId,
           workingDirectory,
+          activeSessionId,
         )
         deps.platform.logger?.info(`Deleted Qwen skill: ${skillSlug}`)
         return
@@ -418,15 +469,19 @@ export function registerSkillsHandlers(
       skillSlug: string,
       enabled: boolean,
       workingDirectory?: string,
+      activeSessionId?: string,
     ) => {
       const workspace = getWorkspaceByNameOrId(workspaceId)
       if (!workspace) throw new Error('Workspace not found')
-      if (!(await shouldLoadSkillsFromQwenAcp(workspace.rootPath))) {
+      const shouldTryQwenAcp =
+        hasActiveAcpSession(activeSessionId) ||
+        (await shouldLoadSkillsFromQwenAcp(workspace.rootPath))
+      if (!shouldTryQwenAcp) {
         throw new Error('Skill enablement is only supported for Qwen skills')
       }
 
       const result = await deps.sessionManager.setQwenSkillEnabled(
-        `skills-discovery:${workspaceId}`,
+        skillAcpSessionId('skills-discovery', workspaceId, activeSessionId),
         { slug: skillSlug, enabled, scope: 'global' },
         { workspaceId, workingDirectory },
       )
@@ -438,6 +493,7 @@ export function registerSkillsHandlers(
         deps,
         workspaceId,
         workingDirectory,
+        activeSessionId,
       )
       deps.platform.logger?.info(
         `Set Qwen skill ${skillSlug} enabled=${enabled}`,

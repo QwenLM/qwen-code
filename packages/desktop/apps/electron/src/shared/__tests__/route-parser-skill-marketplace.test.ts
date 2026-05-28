@@ -17,6 +17,7 @@ describe('route-parser: skill marketplace routes', () => {
   it('converts skillMarketplace to navigation state', () => {
     expect(parseRouteToNavigationState('skillMarketplace')).toEqual({
       navigator: 'skillMarketplace',
+      details: null,
     })
   })
 
@@ -24,7 +25,28 @@ describe('route-parser: skill marketplace routes', () => {
     const parsed = parseCompoundRoute('skillMarketplace')!
     expect(buildCompoundRoute(parsed)).toBe('skillMarketplace')
     expect(
-      buildRouteFromNavigationState({ navigator: 'skillMarketplace' }),
+      buildRouteFromNavigationState({
+        navigator: 'skillMarketplace',
+        details: null,
+      }),
     ).toBe('skillMarketplace')
+  })
+
+  it('roundtrips a selected marketplace skill', () => {
+    const parsed = parseCompoundRoute('skillMarketplace/skill/pptx')
+    expect(parsed).toEqual({
+      navigator: 'skillMarketplace',
+      details: { type: 'marketplaceSkill', id: 'pptx' },
+    })
+    expect(parseRouteToNavigationState('skillMarketplace/skill/pptx')).toEqual({
+      navigator: 'skillMarketplace',
+      details: { type: 'marketplaceSkill', skillId: 'pptx' },
+    })
+    expect(
+      buildRouteFromNavigationState({
+        navigator: 'skillMarketplace',
+        details: { type: 'marketplaceSkill', skillId: 'pptx' },
+      }),
+    ).toBe('skillMarketplace/skill/pptx')
   })
 })

@@ -1964,6 +1964,7 @@ function AppShellContent({
   )
   const shouldUseQwenAcpSkills =
     activeEffectiveConnection?.providerType === 'qwen'
+  const activeQwenSessionId = shouldUseQwenAcpSkills ? session.selected : null
   const shouldLoadSkills = shouldLoadWorkspaceSkills({
     isSkillsNavigation:
       isSkillsNavigation(navState) || isSkillMarketplaceNavigation(navState),
@@ -1997,12 +1998,18 @@ function AppShellContent({
       const loaded = await window.electronAPI.getSkills(
         activeWorkspaceId,
         activeSessionWorkingDirectory,
+        activeQwenSessionId ?? undefined,
       )
       setSkills(loaded || [])
     } catch (err) {
       console.error('[Chat] Failed to load skills:', err)
     }
-  }, [activeWorkspaceId, activeSessionWorkingDirectory, shouldLoadSkills])
+  }, [
+    activeWorkspaceId,
+    activeSessionWorkingDirectory,
+    activeQwenSessionId,
+    shouldLoadSkills,
+  ])
 
   React.useEffect(() => {
     void reloadSkills()
@@ -2543,9 +2550,11 @@ function AppShellContent({
     () => ({
       ...contextValue,
       activeSessionId: session.selected,
+      activeQwenSessionId,
       onDeleteSession: handleDeleteSession,
       enabledSources: sources,
       skills,
+      reloadSkills,
       activeSessionWorkingDirectory,
       labels: displayLabelConfigs,
       onSessionLabelsChange: handleSessionLabelsChange,
@@ -2570,9 +2579,11 @@ function AppShellContent({
     [
       contextValue,
       session.selected,
+      activeQwenSessionId,
       handleDeleteSession,
       sources,
       skills,
+      reloadSkills,
       activeSessionWorkingDirectory,
       displayLabelConfigs,
       handleSessionLabelsChange,
@@ -2701,6 +2712,10 @@ function AppShellContent({
 
   const handleSkillMarketplaceClick = useCallback(() => {
     navigate(routes.view.skillMarketplace())
+  }, [])
+
+  const handleMarketplaceSkillSelect = useCallback((skillId: string) => {
+    navigate(routes.view.skillMarketplace(skillId))
   }, [])
 
   // Handlers for automations view
@@ -2995,6 +3010,7 @@ function AppShellContent({
           activeWorkspace.id,
           skillSlug,
           activeSessionWorkingDirectory,
+          activeQwenSessionId ?? undefined,
         )
         await reloadSkills()
         toast.success(t('toast.deletedSkill', { slug: skillSlug }))
@@ -3003,7 +3019,13 @@ function AppShellContent({
         toast.error(t('toast.failedToDeleteSkill'))
       }
     },
-    [activeSessionWorkingDirectory, activeWorkspace, reloadSkills, t],
+    [
+      activeSessionWorkingDirectory,
+      activeQwenSessionId,
+      activeWorkspace,
+      reloadSkills,
+      t,
+    ],
   )
 
   const handleSetSkillEnabled = useCallback(
@@ -3015,6 +3037,7 @@ function AppShellContent({
           skillSlug,
           enabled,
           activeSessionWorkingDirectory,
+          activeQwenSessionId ?? undefined,
         )
         await reloadSkills()
       } catch (error) {
@@ -3023,7 +3046,13 @@ function AppShellContent({
         throw error
       }
     },
-    [activeSessionWorkingDirectory, activeWorkspace, reloadSkills, t],
+    [
+      activeSessionWorkingDirectory,
+      activeQwenSessionId,
+      activeWorkspace,
+      reloadSkills,
+      t,
+    ],
   )
 
   // Respond to menu bar "New Chat" trigger
@@ -3066,6 +3095,7 @@ function AppShellContent({
   }, [
     handleSkillsClick,
     handleSkillMarketplaceClick,
+    handleMarketplaceSkillSelect,
     handleAutomationsClick,
     handleSettingsClick,
   ])
@@ -4619,6 +4649,13 @@ function AppShellContent({
                     <SkillMarketplacePanel
                       workspaceId={activeWorkspaceId}
                       workingDirectory={activeSessionWorkingDirectory}
+                      activeSessionId={activeQwenSessionId}
+                      selectedSkillId={
+                        navState.details?.type === 'marketplaceSkill'
+                          ? navState.details.skillId
+                          : null
+                      }
+                      onSkillSelect={handleMarketplaceSkillSelect}
                       onInstalled={reloadSkills}
                     />
                   )}

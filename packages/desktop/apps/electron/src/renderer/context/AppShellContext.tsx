@@ -39,6 +39,7 @@ export interface AppShellContextType {
   workspaces: Workspace[]
   activeWorkspaceId: string | null
   activeSessionId?: string | null
+  activeQwenSessionId?: string | null
   /** Workspace slug for SDK skill qualification (derived from workspace path) */
   activeWorkspaceSlug: string | null
   /** All LLM connections with authentication status */
@@ -61,6 +62,8 @@ export interface AppShellContextType {
   enabledSources?: LoadedSource[]
   /** All skills for this workspace - provided by AppShell component (for @mentions) */
   skills?: LoadedSkill[]
+  /** Reload skills for the active workspace after install/delete/update operations. */
+  reloadSkills?: () => Promise<void> | void
   /** Working directory of the active session — needed for project-level skill resolution */
   activeSessionWorkingDirectory?: string
   /** All label configs (tree) for label menu and badge display */

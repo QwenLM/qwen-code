@@ -19,7 +19,6 @@ import * as React from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAtomValue } from 'jotai'
 import { useTranslation } from 'react-i18next'
-import { Store } from 'lucide-react'
 import { Panel } from './Panel'
 import { MultiSelectPanel } from './MultiSelectPanel'
 import { useAppShellContext } from '@/context/AppShellContext'
@@ -49,6 +48,7 @@ import { extractLabelId } from '@craft-agent/shared/labels'
 import type { SessionStatusId } from '@/config/session-status-config'
 import { SourceInfoPage, ChatPage, DraftChatPage } from '@/pages'
 import SkillInfoPage from '@/pages/SkillInfoPage'
+import { SkillMarketplaceDetailPanel } from './SkillMarketplaceDetailPanel'
 import { getSettingsPageComponent } from '@/pages/settings/settings-pages'
 import { AutomationInfoPage } from '../automations/AutomationInfoPage'
 import type { ExecutionEntry } from '../automations/types'
@@ -81,6 +81,7 @@ export function MainContentPanel({
   const navState = navStateOverride ?? globalNavState
   const {
     activeWorkspaceId,
+    activeQwenSessionId,
     workspaces,
     onSessionStatusChange,
     onArchiveSession,
@@ -95,6 +96,7 @@ export function MainContentPanel({
     automationTestResults,
     getAutomationHistory,
     activeSessionWorkingDirectory,
+    reloadSkills,
   } = useAppShellContext()
 
   // Session multi-select state
@@ -344,6 +346,7 @@ export function MainContentPanel({
             skillSlug={navState.details.skillSlug}
             workspaceId={activeWorkspaceId || ''}
             workingDirectory={activeSessionWorkingDirectory}
+            activeSessionId={activeQwenSessionId}
           />
         </Panel>,
       )
@@ -362,14 +365,17 @@ export function MainContentPanel({
   if (isSkillMarketplaceNavigation(navState)) {
     return wrapWithStoplight(
       <Panel variant="grow" className={className}>
-        <div className="flex h-full items-center justify-center text-muted-foreground">
-          <div className="flex flex-col items-center gap-2">
-            <Store className="h-5 w-5" />
-            <p className="text-sm">
-              {t('skillMarketplace.title', 'Skill Market')}
-            </p>
-          </div>
-        </div>
+        <SkillMarketplaceDetailPanel
+          workspaceId={activeWorkspaceId || undefined}
+          workingDirectory={activeSessionWorkingDirectory}
+          activeSessionId={activeQwenSessionId}
+          selectedSkillId={
+            navState.details?.type === 'marketplaceSkill'
+              ? navState.details.skillId
+              : null
+          }
+          onInstalled={reloadSkills}
+        />
       </Panel>,
     )
   }

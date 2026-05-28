@@ -1517,6 +1517,13 @@ export class QwenAgent extends BaseAgent {
     }
   }
 
+  private invalidateAvailableCommandsSnapshot(reason: string): void {
+    if (this.latestAvailableCommandsSnapshot) {
+      this.debug(`Qwen slash command snapshot invalidated: ${reason}`)
+    }
+    this.latestAvailableCommandsSnapshot = null
+  }
+
   protected async *chatImpl(
     messageParam: string,
     attachments?: FileAttachment[],
@@ -1945,6 +1952,7 @@ export class QwenAgent extends BaseAgent {
     request: QwenSkillInstallRequest,
   ): Promise<QwenSkillInstallResult> {
     await this.ensureProcess()
+    this.invalidateAvailableCommandsSnapshot('skill install')
     const result = await this.callAcp(
       'qwen/skills/install',
       (connection) =>
@@ -1977,6 +1985,7 @@ export class QwenAgent extends BaseAgent {
     request: QwenSkillDeleteRequest,
   ): Promise<QwenSkillDeleteResult> {
     await this.ensureProcess()
+    this.invalidateAvailableCommandsSnapshot('skill delete')
     const result = await this.callAcp(
       'qwen/skills/delete',
       (connection) =>
@@ -2003,6 +2012,7 @@ export class QwenAgent extends BaseAgent {
     request: QwenSkillSetEnabledRequest,
   ): Promise<QwenSkillSetEnabledResult> {
     await this.ensureProcess()
+    this.invalidateAvailableCommandsSnapshot('skill enabled state change')
     const result = await this.callAcp(
       'qwen/skills/setEnabled',
       (connection) =>

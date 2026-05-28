@@ -5,6 +5,7 @@
  */
 
 export * from './types.ts';
+export * from './marketplace.ts';
 export {
   GLOBAL_AGENT_SKILLS_DIR,
   GLOBAL_QWEN_SKILLS_DIR,

@@ -687,27 +687,32 @@ export interface ElectronAPI {
   getSkills(
     workspaceId: string,
     workingDirectory?: string,
+    activeSessionId?: string,
   ): Promise<LoadedSkill[]>
   getSkillFiles?(workspaceId: string, skillSlug: string): Promise<SkillFile[]>
   deleteSkill(
     workspaceId: string,
     skillSlug: string,
     workingDirectory?: string,
+    activeSessionId?: string,
   ): Promise<void>
   setSkillEnabled(
     workspaceId: string,
     skillSlug: string,
     enabled: boolean,
     workingDirectory?: string,
+    activeSessionId?: string,
   ): Promise<void>
   listSkillMarketplace(
     workspaceId: string,
     workingDirectory?: string,
+    activeSessionId?: string,
   ): Promise<SkillMarketplaceItem[]>
   installSkillFromMarketplace(
     workspaceId: string,
     skillId: string,
     workingDirectory?: string,
+    activeSessionId?: string,
   ): Promise<SkillMarketplaceInstallResult>
   openSkillInEditor(workspaceId: string, skillSlug: string): Promise<void>
   openSkillInFinder(workspaceId: string, skillSlug: string): Promise<void>
@@ -1203,6 +1208,7 @@ export interface SkillsNavigationState {
  */
 export interface SkillMarketplaceNavigationState {
   navigator: 'skillMarketplace'
+  details: { type: 'marketplaceSkill'; skillId: string } | null
   rightSidebar?: RightSidebarPanel
 }
 
@@ -1272,6 +1278,9 @@ export const getNavigationStateKey = (state: NavigationState): string => {
     return 'skills'
   }
   if (state.navigator === 'skillMarketplace') {
+    if (state.details?.type === 'marketplaceSkill') {
+      return `skillMarketplace/skill/${state.details.skillId}`
+    }
     return 'skillMarketplace'
   }
   if (state.navigator === 'automations') {
@@ -1320,7 +1329,19 @@ export const parseNavigationStateKey = (
   }
 
   // Handle skill marketplace
-  if (key === 'skillMarketplace') return { navigator: 'skillMarketplace' }
+  if (key === 'skillMarketplace') {
+    return { navigator: 'skillMarketplace', details: null }
+  }
+  if (key.startsWith('skillMarketplace/skill/')) {
+    const skillId = key.slice('skillMarketplace/skill/'.length)
+    if (skillId) {
+      return {
+        navigator: 'skillMarketplace',
+        details: { type: 'marketplaceSkill', skillId },
+      }
+    }
+    return { navigator: 'skillMarketplace', details: null }
+  }
 
   // Handle automations
   if (key === 'automations') return { navigator: 'automations', details: null }

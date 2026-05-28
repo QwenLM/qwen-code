@@ -179,7 +179,19 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
 
   // Skill marketplace navigator
   if (first === 'skillMarketplace') {
-    return { navigator: 'skillMarketplace', details: null }
+    if (segments.length === 1) {
+      return { navigator: 'skillMarketplace', details: null }
+    }
+
+    // skillMarketplace/skill/{skillId}
+    if (segments[1] === 'skill' && segments[2]) {
+      return {
+        navigator: 'skillMarketplace',
+        details: { type: 'marketplaceSkill', id: segments[2] },
+      }
+    }
+
+    return null
   }
 
   // Automations navigator - supports type filters (scheduled, event, agentic)
@@ -314,7 +326,8 @@ export function buildCompoundRoute(parsed: ParsedCompoundRoute): string {
   }
 
   if (parsed.navigator === 'skillMarketplace') {
-    return 'skillMarketplace'
+    if (!parsed.details) return 'skillMarketplace'
+    return `skillMarketplace/skill/${parsed.details.id}`
   }
 
   if (parsed.navigator === 'automations') {
@@ -455,7 +468,15 @@ function convertCompoundToViewRoute(
   }
 
   if (compound.navigator === 'skillMarketplace') {
-    return { type: 'view', name: 'skillMarketplace', params: {} }
+    if (!compound.details) {
+      return { type: 'view', name: 'skillMarketplace', params: {} }
+    }
+    return {
+      type: 'view',
+      name: 'skillMarketplace-info',
+      id: compound.details.id,
+      params: {},
+    }
   }
 
   // Automations
@@ -599,7 +620,13 @@ function convertCompoundToNavigationState(
   }
 
   if (compound.navigator === 'skillMarketplace') {
-    return { navigator: 'skillMarketplace' }
+    if (!compound.details) {
+      return { navigator: 'skillMarketplace', details: null }
+    }
+    return {
+      navigator: 'skillMarketplace',
+      details: { type: 'marketplaceSkill', skillId: compound.details.id },
+    }
   }
 
   // Automations - include filter if present
@@ -694,7 +721,18 @@ function convertParsedRouteToNavigationState(
     case 'skills':
       return { navigator: 'skills', details: null }
     case 'skillMarketplace':
-      return { navigator: 'skillMarketplace' }
+      return { navigator: 'skillMarketplace', details: null }
+    case 'skillMarketplace-info':
+      if (parsed.id) {
+        return {
+          navigator: 'skillMarketplace',
+          details: {
+            type: 'marketplaceSkill',
+            skillId: parsed.id,
+          },
+        }
+      }
+      return { navigator: 'skillMarketplace', details: null }
     case 'skill-info':
       if (parsed.id) {
         return {
@@ -845,7 +883,10 @@ function navigationStateToCompoundRoute(
   if (state.navigator === 'skillMarketplace') {
     return {
       navigator: 'skillMarketplace',
-      details: null,
+      details:
+        state.details?.type === 'marketplaceSkill'
+          ? { type: 'marketplaceSkill', id: state.details.skillId }
+          : null,
     }
   }
 

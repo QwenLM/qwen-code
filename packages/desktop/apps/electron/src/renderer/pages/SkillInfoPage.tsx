@@ -10,7 +10,11 @@ import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { useEffect, useState, useCallback } from 'react'
 import { Check, X, Minus } from 'lucide-react'
-import { EditPopover, EditButton, getEditConfig } from '@/components/ui/EditPopover'
+import {
+  EditPopover,
+  EditButton,
+  getEditConfig,
+} from '@/components/ui/EditPopover'
 import { toast } from 'sonner'
 import { SkillMenu } from '@/components/app-shell/SkillMenu'
 import { SkillAvatar } from '@/components/ui/skill-avatar'
@@ -28,9 +32,15 @@ interface SkillInfoPageProps {
   skillSlug: string
   workspaceId: string
   workingDirectory?: string
+  activeSessionId?: string | null
 }
 
-export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory }: SkillInfoPageProps) {
+export default function SkillInfoPage({
+  skillSlug,
+  workspaceId,
+  workingDirectory,
+  activeSessionId,
+}: SkillInfoPageProps) {
   const { t } = useTranslation()
   const [skill, setSkill] = useState<LoadedSkill | null>(null)
   const [loading, setLoading] = useState(true)
@@ -46,7 +56,11 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
 
     const loadSkill = async () => {
       try {
-        const skills = await window.electronAPI.getSkills(workspaceId, workingDirectory)
+        const skills = await window.electronAPI.getSkills(
+          workspaceId,
+          workingDirectory,
+          activeSessionId ?? undefined,
+        )
 
         if (!isMounted) return
 
@@ -59,7 +73,9 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
         }
       } catch (err) {
         if (!isMounted) return
-        setError(err instanceof Error ? err.message : t('skillInfo.failedToLoad'))
+        setError(
+          err instanceof Error ? err.message : t('skillInfo.failedToLoad'),
+        )
       } finally {
         if (isMounted) setLoading(false)
       }
@@ -68,19 +84,21 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
     loadSkill()
 
     // Subscribe to skill changes
-    const unsubscribe = window.electronAPI.onSkillsChanged?.((changedWorkspaceId, skills) => {
-      if (changedWorkspaceId !== workspaceId) return
-      const updated = skills.find((s) => s.slug === skillSlug)
-      if (updated) {
-        setSkill(updated)
-      }
-    })
+    const unsubscribe = window.electronAPI.onSkillsChanged?.(
+      (changedWorkspaceId, skills) => {
+        if (changedWorkspaceId !== workspaceId) return
+        const updated = skills.find((s) => s.slug === skillSlug)
+        if (updated) {
+          setSkill(updated)
+        }
+      },
+    )
 
     return () => {
       isMounted = false
       unsubscribe?.()
     }
-  }, [workspaceId, skillSlug, workingDirectory])
+  }, [workspaceId, skillSlug, workingDirectory, activeSessionId, t])
 
   // Handle open in finder
   const handleOpenInFinder = useCallback(async () => {
@@ -100,7 +118,12 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
 
     try {
       if (skill.source !== 'workspace') return
-      await window.electronAPI.deleteSkill(workspaceId, skillSlug)
+      await window.electronAPI.deleteSkill(
+        workspaceId,
+        skillSlug,
+        workingDirectory,
+        activeSessionId ?? undefined,
+      )
       toast.success(t('skillInfo.deletedSkill', { name: skill.metadata.name }))
       navigate(routes.view.skills())
     } catch (err) {
@@ -108,11 +131,13 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
         description: err instanceof Error ? err.message : undefined,
       })
     }
-  }, [skill, workspaceId, skillSlug])
+  }, [activeSessionId, skill, skillSlug, t, workingDirectory, workspaceId])
 
   // Handle opening in new window
   const handleOpenInNewWindow = useCallback(() => {
-    window.electronAPI.openUrl(`craftagents://skills/skill/${skillSlug}?window=focused`)
+    window.electronAPI.openUrl(
+      `craftagents://skills/skill/${skillSlug}?window=focused`,
+    )
   }, [skillSlug])
 
   // Get skill name for header
@@ -163,7 +188,9 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
         <Info_Page.Content>
           {/* Hero: Avatar, title, and description */}
           <Info_Page.Hero
-            avatar={<SkillAvatar skill={skill} fluid workspaceId={workspaceId} />}
+            avatar={
+              <SkillAvatar skill={skill} fluid workspaceId={workspaceId} />
+            }
             title={skill.metadata.name}
             tagline={skill.metadata.description}
           />
@@ -171,29 +198,36 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
           {/* Metadata */}
           <Info_Section
             title={t('skillInfo.metadata')}
-            actions={canEditSkill ? (
-              // EditPopover for AI-assisted metadata editing (name, description in frontmatter)
-              <EditPopover
-                trigger={<EditButton />}
-                {...getEditConfig('skill-metadata', skill.path)}
-                secondaryAction={{
-                  label: t('common.editFile'),
-                  filePath: `${skill.path}/SKILL.md`,
-                }}
-              />
-            ) : undefined}
+            actions={
+              canEditSkill ? (
+                // EditPopover for AI-assisted metadata editing (name, description in frontmatter)
+                <EditPopover
+                  trigger={<EditButton />}
+                  {...getEditConfig('skill-metadata', skill.path)}
+                  secondaryAction={{
+                    label: t('common.editFile'),
+                    filePath: `${skill.path}/SKILL.md`,
+                  }}
+                />
+              ) : undefined
+            }
           >
             <Info_Table>
               <Info_Table.Row label={t('common.slug')} value={skill.slug} />
-              <Info_Table.Row label={t('common.name')}>{skill.metadata.name}</Info_Table.Row>
+              <Info_Table.Row label={t('common.name')}>
+                {skill.metadata.name}
+              </Info_Table.Row>
               <Info_Table.Row label={t('common.description')}>
                 {skill.metadata.description}
               </Info_Table.Row>
               <Info_Table.Row label={t('common.source')}>
-                {skill.source === 'project' ? t('skillInfo.sourceProject') :
-                 skill.source === 'global' ? t('skillInfo.sourceGlobal') :
-                 skill.source === 'provider' ? 'Qwen Code' :
-                 t('skillInfo.sourceWorkspace')}
+                {skill.source === 'project'
+                  ? t('skillInfo.sourceProject')
+                  : skill.source === 'global'
+                    ? t('skillInfo.sourceGlobal')
+                    : skill.source === 'provider'
+                      ? 'Qwen Code'
+                      : t('skillInfo.sourceWorkspace')}
               </Info_Table.Row>
               {skill.path && (
                 <Info_Table.Row label={t('common.location')}>
@@ -205,72 +239,87 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
                   </button>
                 </Info_Table.Row>
               )}
-              {skill.metadata.requiredSources && skill.metadata.requiredSources.length > 0 && (
-                <Info_Table.Row label={t('skillInfo.requiredSources')}>
-                  {skill.metadata.requiredSources.join(', ')}
-                </Info_Table.Row>
-              )}
+              {skill.metadata.requiredSources &&
+                skill.metadata.requiredSources.length > 0 && (
+                  <Info_Table.Row label={t('skillInfo.requiredSources')}>
+                    {skill.metadata.requiredSources.join(', ')}
+                  </Info_Table.Row>
+                )}
             </Info_Table>
           </Info_Section>
 
           {/* Permission Modes */}
-          {skill.metadata.alwaysAllow && skill.metadata.alwaysAllow.length > 0 && (
-            <Info_Section title={t('skillInfo.permissionModes')}>
-              <div className="space-y-2 px-4 py-3">
-                <p className="text-xs text-muted-foreground mb-3">
-                  {t('skillInfo.permissionModesDesc')}
-                </p>
-                <div className="rounded-[8px] border border-border/50 overflow-hidden">
-                  <table className="w-full text-sm">
-                    <tbody>
-                      <tr className="border-b border-border/30">
-                        <td className="px-3 py-2 font-medium text-muted-foreground w-[140px]">{t('skillInfo.explore')}</td>
-                        <td className="px-3 py-2 flex items-center gap-2">
-                          <X className="h-3.5 w-3.5 text-destructive shrink-0" />
-                          <span className="text-foreground/80">{t('skillInfo.exploreDesc')}</span>
-                        </td>
-                      </tr>
-                      <tr className="border-b border-border/30">
-                        <td className="px-3 py-2 font-medium text-muted-foreground">{t('skillInfo.askToEdit')}</td>
-                        <td className="px-3 py-2 flex items-center gap-2">
-                          <Check className="h-3.5 w-3.5 text-success shrink-0" />
-                          <span className="text-foreground/80">{t('skillInfo.askToEditDesc')}</span>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td className="px-3 py-2 font-medium text-muted-foreground">{t('skillInfo.auto')}</td>
-                        <td className="px-3 py-2 flex items-center gap-2">
-                          <Minus className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                          <span className="text-foreground/80">{t('skillInfo.autoDesc')}</span>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
+          {skill.metadata.alwaysAllow &&
+            skill.metadata.alwaysAllow.length > 0 && (
+              <Info_Section title={t('skillInfo.permissionModes')}>
+                <div className="space-y-2 px-4 py-3">
+                  <p className="text-xs text-muted-foreground mb-3">
+                    {t('skillInfo.permissionModesDesc')}
+                  </p>
+                  <div className="rounded-[8px] border border-border/50 overflow-hidden">
+                    <table className="w-full text-sm">
+                      <tbody>
+                        <tr className="border-b border-border/30">
+                          <td className="px-3 py-2 font-medium text-muted-foreground w-[140px]">
+                            {t('skillInfo.explore')}
+                          </td>
+                          <td className="px-3 py-2 flex items-center gap-2">
+                            <X className="h-3.5 w-3.5 text-destructive shrink-0" />
+                            <span className="text-foreground/80">
+                              {t('skillInfo.exploreDesc')}
+                            </span>
+                          </td>
+                        </tr>
+                        <tr className="border-b border-border/30">
+                          <td className="px-3 py-2 font-medium text-muted-foreground">
+                            {t('skillInfo.askToEdit')}
+                          </td>
+                          <td className="px-3 py-2 flex items-center gap-2">
+                            <Check className="h-3.5 w-3.5 text-success shrink-0" />
+                            <span className="text-foreground/80">
+                              {t('skillInfo.askToEditDesc')}
+                            </span>
+                          </td>
+                        </tr>
+                        <tr>
+                          <td className="px-3 py-2 font-medium text-muted-foreground">
+                            {t('skillInfo.auto')}
+                          </td>
+                          <td className="px-3 py-2 flex items-center gap-2">
+                            <Minus className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                            <span className="text-foreground/80">
+                              {t('skillInfo.autoDesc')}
+                            </span>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
-            </Info_Section>
-          )}
+              </Info_Section>
+            )}
 
           {/* Instructions */}
           <Info_Section
             title={t('skillInfo.instructions')}
-            actions={canEditSkill ? (
-              // EditPopover for AI-assisted editing with "Edit File" as secondary action
-              <EditPopover
-                trigger={<EditButton />}
-                {...getEditConfig('skill-instructions', skill.path)}
-                secondaryAction={{
-                  label: t('common.editFile'),
-                  filePath: `${skill.path}/SKILL.md`,
-                }}
-              />
-            ) : undefined}
+            actions={
+              canEditSkill ? (
+                // EditPopover for AI-assisted editing with "Edit File" as secondary action
+                <EditPopover
+                  trigger={<EditButton />}
+                  {...getEditConfig('skill-instructions', skill.path)}
+                  secondaryAction={{
+                    label: t('common.editFile'),
+                    filePath: `${skill.path}/SKILL.md`,
+                  }}
+                />
+              ) : undefined
+            }
           >
             <Info_Markdown maxHeight={540} fullscreen>
               {skill.content || t('skillInfo.noInstructions')}
             </Info_Markdown>
           </Info_Section>
-
         </Info_Page.Content>
       )}
     </Info_Page>

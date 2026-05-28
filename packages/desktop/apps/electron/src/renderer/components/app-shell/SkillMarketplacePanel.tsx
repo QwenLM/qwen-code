@@ -18,6 +18,9 @@ import type { SkillMarketplaceItem } from '../../../shared/types'
 export interface SkillMarketplacePanelProps {
   workspaceId?: string
   workingDirectory?: string
+  activeSessionId?: string | null
+  selectedSkillId?: string | null
+  onSkillSelect?: (skillId: string) => void
   onInstalled?: () => Promise<void> | void
   className?: string
 }
@@ -30,9 +33,26 @@ function sourceHost(sourceUrl: string): string {
   }
 }
 
+function MarketplaceSkillIcon({ className }: { className?: string }) {
+  return (
+    <div
+      className={cn(
+        'flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px]',
+        'border border-amber-300/20 bg-[radial-gradient(circle_at_30%_20%,rgba(255,230,151,0.9),rgba(245,158,11,0.84)_48%,rgba(120,53,15,0.75))] shadow-sm',
+        className,
+      )}
+    >
+      <Presentation className="h-4 w-4 text-white drop-shadow" />
+    </div>
+  )
+}
+
 export function SkillMarketplacePanel({
   workspaceId,
   workingDirectory,
+  activeSessionId,
+  selectedSkillId,
+  onSkillSelect,
   onInstalled,
   className,
 }: SkillMarketplacePanelProps) {
@@ -56,6 +76,7 @@ export function SkillMarketplacePanel({
       const items = await window.electronAPI.listSkillMarketplace(
         workspaceId,
         workingDirectory,
+        activeSessionId ?? undefined,
       )
       setSkills(items)
     } catch (loadError) {
@@ -69,7 +90,7 @@ export function SkillMarketplacePanel({
     } finally {
       setLoading(false)
     }
-  }, [t, workingDirectory, workspaceId])
+  }, [activeSessionId, t, workingDirectory, workspaceId])
 
   React.useEffect(() => {
     void loadSkills()
@@ -85,6 +106,7 @@ export function SkillMarketplacePanel({
           workspaceId,
           skill.id,
           workingDirectory,
+          activeSessionId ?? undefined,
         )
         setSkills((items) =>
           items.map((item) =>
@@ -114,7 +136,14 @@ export function SkillMarketplacePanel({
         setInstallingSkillId(null)
       }
     },
-    [loadSkills, onInstalled, t, workingDirectory, workspaceId],
+    [
+      activeSessionId,
+      loadSkills,
+      onInstalled,
+      t,
+      workingDirectory,
+      workspaceId,
+    ],
   )
 
   return (
@@ -164,14 +193,27 @@ export function SkillMarketplacePanel({
         {!error &&
           skills.map((skill) => {
             const isInstalling = installingSkillId === skill.id
+            const isSelected = selectedSkillId === skill.id
             return (
               <div
                 key={skill.id}
-                className="flex min-h-[84px] items-center gap-3 border-b border-foreground/10 px-3 py-3"
+                role="button"
+                tabIndex={0}
+                className={cn(
+                  'group flex min-h-[88px] cursor-default items-center gap-3 border-b border-foreground/10 px-3 py-3 outline-none transition-colors',
+                  isSelected
+                    ? 'bg-foreground/[0.045]'
+                    : 'hover:bg-foreground/[0.025]',
+                )}
+                onClick={() => onSkillSelect?.(skill.id)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    onSkillSelect?.(skill.id)
+                  }
+                }}
               >
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-foreground/5">
-                  <Presentation className="h-4 w-4 text-muted-foreground" />
-                </div>
+                <MarketplaceSkillIcon />
 
                 <div className="min-w-0 flex-1">
                   <div className="flex min-w-0 items-center gap-2">
@@ -181,16 +223,19 @@ export function SkillMarketplacePanel({
                     <button
                       type="button"
                       className="shrink-0 text-muted-foreground hover:text-foreground"
-                      onClick={() =>
-                        void window.electronAPI.openUrl(skill.sourceUrl)
-                      }
-                      title={sourceHost(skill.sourceUrl)}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void window.electronAPI.openUrl(
+                          skill.websiteUrl ?? skill.sourceUrl,
+                        )
+                      }}
+                      title={sourceHost(skill.websiteUrl ?? skill.sourceUrl)}
                     >
                       <ExternalLink className="h-3.5 w-3.5" />
                     </button>
                   </div>
                   <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-                    {skill.description}
+                    {skill.tagline}
                   </div>
                   <div className="mt-1 truncate text-[11px] text-muted-foreground/70">
                     {sourceHost(skill.sourceUrl)}
@@ -199,10 +244,13 @@ export function SkillMarketplacePanel({
 
                 <Button
                   size="sm"
-                  className="w-24 shrink-0"
+                  className="w-[104px] shrink-0"
                   variant={skill.installed ? 'secondary' : 'default'}
                   disabled={skill.installed || Boolean(installingSkillId)}
-                  onClick={() => void handleInstall(skill)}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    void handleInstall(skill)
+                  }}
                 >
                   {isInstalling ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
