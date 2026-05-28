@@ -551,18 +551,27 @@ function parseJsonObjectFromText(
   }
 
   const jsonSlices = findJsonObjectSlices(withoutFence);
+  const hasStrictJsonCandidate = jsonSlices.some((jsonSlice) =>
+    parseJsonObjectSlice(jsonSlice, { allowUnquotedKeyStringValues: false }),
+  );
   let parsedObject: Record<string, unknown> | undefined;
   let validObjectCount = 0;
 
   for (const jsonSlice of jsonSlices) {
+    const isExactResponse = withoutFence.trim() === jsonSlice.trim();
+    const isAmbiguityProbe =
+      hasStrictJsonCandidate && canRepairUnquotedKeyStringValues(jsonSlice);
     const parsed = parseJsonObjectSlice(jsonSlice, {
-      allowUnquotedKeyStringValues:
-        jsonSlices.length > 1 || withoutFence.trim() === jsonSlice.trim(),
+      allowUnquotedKeyStringValues: isExactResponse || isAmbiguityProbe,
     });
     if (!parsed) continue;
 
     validObjectCount++;
     if (validObjectCount > 1) {
+      debugLogger.warn(
+        `generateJson: text-channel fallback rejected ambiguous JSON candidates. ` +
+          `Candidate count: ${validObjectCount}.`,
+      );
       return undefined;
     }
     parsedObject = parsed;
@@ -608,8 +617,12 @@ function shouldAttemptJsonRepair(
   }
   return Boolean(
     options.allowUnquotedKeyStringValues &&
-      /[{,]\s*[A-Za-z_$][\w$-]*\s*:\s*"[^"]*"\s*(?:[,}])/.test(jsonSlice),
+      canRepairUnquotedKeyStringValues(jsonSlice),
   );
+}
+
+function canRepairUnquotedKeyStringValues(jsonSlice: string): boolean {
+  return /[{,]\s*[A-Za-z_$][\w$-]*\s*:\s*"[^"]*"\s*(?:[,}])/.test(jsonSlice);
 }
 
 function findJsonObjectSlices(text: string): string[] {
@@ -647,6 +660,12 @@ function findJsonObjectSlices(text: string): string[] {
       squareDepth--;
       continue;
     }
+    if (char === '{' && squareDepth > 0) {
+      const previous = previousNonWhitespaceChar(text, i);
+      if (previous !== '[' && previous !== ',') {
+        squareDepth = 0;
+      }
+    }
     if (char !== '{' || squareDepth > 0) {
       continue;
     }
@@ -659,6 +678,18 @@ function findJsonObjectSlices(text: string): string[] {
   }
 
   return slices;
+}
+
+function previousNonWhitespaceChar(
+  text: string,
+  beforeIndex: number,
+): string | undefined {
+  for (let i = beforeIndex - 1; i >= 0; i--) {
+    if (!/\s/.test(text[i])) {
+      return text[i];
+    }
+  }
+  return undefined;
 }
 
 function findJsonObjectSliceFrom(

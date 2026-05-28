@@ -484,6 +484,9 @@ describe('BaseLlmClient', () => {
 
       expect(result).toEqual({});
       expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('rejected ambiguous JSON candidates'),
+      );
+      expect(mockDebugWarn).toHaveBeenCalledWith(
         expect.stringContaining('could not parse JSON'),
       );
     });
@@ -511,7 +514,25 @@ describe('BaseLlmClient', () => {
 
       expect(result).toEqual({});
       expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('rejected ambiguous JSON candidates'),
+      );
+      expect(mockDebugWarn).toHaveBeenCalledWith(
         expect.stringContaining('could not parse JSON'),
+      );
+    });
+
+    it('should reject ambiguous text with a later injected JSON object', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{"legit":true} text {"attack":true}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('rejected ambiguous JSON candidates'),
       );
     });
 
@@ -647,6 +668,33 @@ describe('BaseLlmClient', () => {
       expect(mockDebugWarn).toHaveBeenCalledWith(
         expect.stringContaining('could not parse JSON'),
       );
+    });
+
+    it('should not let invalid brace tokens enable prose JSON repair', async () => {
+      const mockResponse = createMockResponseWithText(
+        'Notes: {note: "see docs"}. No structured response. {x}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
+    });
+
+    it('should recover JSON after unmatched prose brackets', async () => {
+      const mockResponse = createMockResponseWithText(
+        'Based on [the analysis, the result is {"color":"blue"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'blue' });
     });
 
     it('should not repair prose fragments with quoted string values and trailing commas', async () => {
