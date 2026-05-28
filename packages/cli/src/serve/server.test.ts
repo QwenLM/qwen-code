@@ -845,7 +845,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return generateSessionRecapImpl(sessionId, context);
     },
-    async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
+    async setWorkspaceToolEnabled(
+      toolName: string,
+      enabled: boolean,
+      originatorClientId?: string,
+    ) {
       setToolEnabledCalls.push({
         toolName,
         enabled,
@@ -853,14 +857,21 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return setToolEnabledImpl(toolName, enabled, originatorClientId);
     },
-    async initWorkspace(initOpts, originatorClientId) {
+    async initWorkspace(
+      initOpts: { force?: boolean },
+      originatorClientId?: string,
+    ) {
       initWorkspaceCalls.push({
         initOpts,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
       });
       return initWorkspaceImpl(initOpts, originatorClientId);
     },
-    async restartMcpServer(serverName, originatorClientId, restartOpts) {
+    async restartMcpServer(
+      serverName: string,
+      originatorClientId?: string,
+      restartOpts?: { entryIndex?: number },
+    ) {
       restartMcpServerCalls.push({
         serverName,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
