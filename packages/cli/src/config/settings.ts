@@ -1077,8 +1077,10 @@ export function loadSettings(
   const workspaceOriginalSettings = structuredClone(workspaceResult.settings);
 
   // Resolve ${VAR} placeholders in settings using home .env as fallback.
-  // Returned dict excludes keys already in process.env so process.env
-  // takes precedence (customEnv is checked first by the resolver).
+  // getHomeEnvFallbackVars() excludes keys already in process.env, so
+  // effective precedence is: process.env > home .env > unresolved placeholder.
+  // The resolver checks customEnv before process.env, but since customEnv
+  // never contains a process.env key, process.env always wins.
   const homeEnvFallback = getHomeEnvFallbackVars();
   systemSettings = resolveEnvVarsInObject(
     systemResult.settings,
