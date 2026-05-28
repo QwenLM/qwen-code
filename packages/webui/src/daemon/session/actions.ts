@@ -69,6 +69,43 @@ export function createDaemonSessionActions({
   setRestoreSessionNonce,
   setNewSessionNonce,
 }: CreateDaemonSessionActionsArgs): DaemonSessionActions {
+  function startSessionSwitch(
+    sessionId: string,
+    mode: 'load' | 'resume',
+  ): Promise<void> {
+    const loadId = pendingSessionLoadIdRef.current + 1;
+    pendingSessionLoadIdRef.current = loadId;
+    if (pendingSessionLoadRef.current) {
+      clearTimeout(pendingSessionLoadRef.current.timeout);
+      pendingSessionLoadRef.current.reject(
+        new Error(`Session ${mode} superseded by a newer request`),
+      );
+    }
+    const loadPromise = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (pendingSessionLoadRef.current?.id === loadId) {
+          pendingSessionLoadRef.current = undefined;
+          reject(new Error(`Session ${mode} timed out`));
+        }
+      }, 30_000);
+      pendingSessionLoadRef.current = {
+        id: loadId,
+        sessionId,
+        mode,
+        timeout,
+        resolve,
+        reject,
+      };
+    });
+    setPromptStatus('idle');
+    clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+    store.reset();
+    setRestoreMode(mode);
+    setRestoreSessionId(sessionId);
+    setRestoreSessionNonce((nonce) => nonce + 1);
+    return loadPromise;
+  }
+
   return {
     async sendPrompt(text, options) {
       const session = requireSessionForAction(
@@ -257,71 +294,11 @@ export function createDaemonSessionActions({
     },
 
     async loadSession(sessionId) {
-      const loadId = pendingSessionLoadIdRef.current + 1;
-      pendingSessionLoadIdRef.current = loadId;
-      if (pendingSessionLoadRef.current) {
-        clearTimeout(pendingSessionLoadRef.current.timeout);
-        pendingSessionLoadRef.current.reject(
-          new Error('Session load superseded by a newer request'),
-        );
-      }
-      const loadPromise = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          if (pendingSessionLoadRef.current?.id === loadId) {
-            pendingSessionLoadRef.current = undefined;
-            reject(new Error('Session load timed out'));
-          }
-        }, 30_000);
-        pendingSessionLoadRef.current = {
-          id: loadId,
-          sessionId,
-          mode: 'load',
-          timeout,
-          resolve,
-          reject,
-        };
-      });
-      setPromptStatus('idle');
-      clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-      store.reset();
-      setRestoreMode('load');
-      setRestoreSessionId(sessionId);
-      setRestoreSessionNonce((nonce) => nonce + 1);
-      return loadPromise;
+      return startSessionSwitch(sessionId, 'load');
     },
 
     async resumeSession(sessionId) {
-      const loadId = pendingSessionLoadIdRef.current + 1;
-      pendingSessionLoadIdRef.current = loadId;
-      if (pendingSessionLoadRef.current) {
-        clearTimeout(pendingSessionLoadRef.current.timeout);
-        pendingSessionLoadRef.current.reject(
-          new Error('Session resume superseded by a newer request'),
-        );
-      }
-      const loadPromise = new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          if (pendingSessionLoadRef.current?.id === loadId) {
-            pendingSessionLoadRef.current = undefined;
-            reject(new Error('Session resume timed out'));
-          }
-        }, 30_000);
-        pendingSessionLoadRef.current = {
-          id: loadId,
-          sessionId,
-          mode: 'resume',
-          timeout,
-          resolve,
-          reject,
-        };
-      });
-      setPromptStatus('idle');
-      clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-      store.reset();
-      setRestoreMode('resume');
-      setRestoreSessionId(sessionId);
-      setRestoreSessionNonce((nonce) => nonce + 1);
-      return loadPromise;
+      return startSessionSwitch(sessionId, 'resume');
     },
 
     async newSession() {

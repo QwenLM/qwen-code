@@ -104,18 +104,45 @@ describe('sanitizeSvg', () => {
     expect(result).toContain('<rect');
   });
 
-  it('strips foreignObject elements (XSS vector)', () => {
+  it('keeps foreignObject elements (mermaid uses them for text labels)', () => {
     const svg =
       '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><div>Label</div></foreignObject></svg>';
     const result = sanitizeSvg(svg);
-    expect(result).not.toContain('foreignObject');
+    expect(result).toContain('foreignObject');
+    expect(result).toContain('Label');
   });
 
-  it('strips style elements (CSS injection vector)', () => {
+  it('strips on* handlers inside foreignObject', () => {
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><div onclick="alert(1)">Label</div></foreignObject></svg>';
+    const result = sanitizeSvg(svg);
+    expect(result).toContain('foreignObject');
+    expect(result).not.toContain('onclick');
+  });
+
+  it('keeps style elements with safe CSS (mermaid theming)', () => {
     const svg =
       '<svg xmlns="http://www.w3.org/2000/svg"><style>.node{fill:#fff}</style><rect/></svg>';
     const result = sanitizeSvg(svg);
-    expect(result).not.toContain('<style');
+    expect(result).toContain('<style');
+    expect(result).toContain('.node{fill:#fff}');
+  });
+
+  it('strips @import from style elements', () => {
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg"><style>@import url("https://evil.com/track.css"); .node{fill:#fff}</style><rect/></svg>';
+    const result = sanitizeSvg(svg);
+    expect(result).toContain('<style');
+    expect(result).not.toContain('@import');
+    expect(result).toContain('.node{fill:#fff}');
+  });
+
+  it('strips external url() from style elements but keeps local url(#id)', () => {
+    const svg =
+      '<svg xmlns="http://www.w3.org/2000/svg"><style>.bg{fill:url(https://evil.com/x)} .fg{fill:url(#grad)}</style><rect/></svg>';
+    const result = sanitizeSvg(svg);
+    expect(result).toContain('url(#grad)');
+    expect(result).not.toContain('url(https://');
   });
 
   it('strips image elements (external resource loading)', () => {

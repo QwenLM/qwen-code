@@ -187,6 +187,7 @@ function MermaidBlock({ code }: { code: string }) {
             startOnLoad: false,
             theme: mermaidTheme,
             securityLevel: 'strict',
+            suppressErrorRendering: true,
           });
           lastMermaidTheme = mermaidTheme;
         }

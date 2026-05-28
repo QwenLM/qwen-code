@@ -47,7 +47,7 @@ function getLastUserMessageId(messages: Message[]): string | null {
   return null;
 }
 
-type DisplayItem =
+export type DisplayItem =
   | { type: 'message'; key: string; message: Message }
   | { type: 'parallel_agents'; key: string; agents: ACPToolCall[] };
 
@@ -59,7 +59,7 @@ function isAgentOnlyToolGroup(msg: Message): boolean {
   );
 }
 
-function groupParallelAgents(messages: Message[]): DisplayItem[] {
+export function groupParallelAgents(messages: Message[]): DisplayItem[] {
   const items: DisplayItem[] = [];
   let i = 0;
   while (i < messages.length) {

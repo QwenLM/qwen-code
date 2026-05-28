@@ -272,7 +272,9 @@ export function DaemonSessionProvider({
                 token: resolvedToken,
                 sessionId: nextSession.sessionId,
                 clientId: nextSession.clientId,
-              }).catch(() => undefined);
+              }).catch((err) =>
+                console.warn('[DaemonSessionProvider] detach failed:', err),
+              );
               return;
             }
             const previousSessionId = lastSessionIdRef.current;
@@ -609,7 +611,9 @@ export function DaemonSessionProvider({
           token: resolvedToken,
           sessionId: session.sessionId,
           clientId: session.clientId,
-        }).catch(() => undefined);
+        }).catch((err) =>
+          console.warn('[DaemonSessionProvider] detach failed:', err),
+        );
       }
       sessionRef.current = undefined;
     };
