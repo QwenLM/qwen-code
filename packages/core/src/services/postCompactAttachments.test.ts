@@ -351,20 +351,56 @@ describe('buildFileRestorationBlocks', () => {
   });
 
   it('respects POST_COMPACT_TOKEN_BUDGET across embedded files', async () => {
-    const f1 = join(tmpDir, 'a.txt');
-    const f2 = join(tmpDir, 'b.txt');
-    const f3 = join(tmpDir, 'c.txt');
-    writeFileSync(f1, 'a'.repeat(3_000));
-    writeFileSync(f2, 'b'.repeat(3_000));
-    writeFileSync(f3, 'c'.repeat(3_000));
+    // POST_COMPACT_TOKEN_BUDGET (50_000) * CHARS_PER_TOKEN (4) = 200_000
+    // char global budget. POST_COMPACT_MAX_TOKENS_PER_FILE (5_000) *
+    // CHARS_PER_TOKEN (4) = 20_000 char per-file cap.
+    //
+    // Create 11 files at exactly the per-file cap (20_000 chars each).
+    // Total embeddable content = 220_000 chars; budget fits exactly 10
+    // (200_000 chars). The 11th must downgrade from embed to reference.
+    const files: string[] = [];
+    for (let i = 0; i < 11; i++) {
+      const p = join(tmpDir, `f${i}.txt`);
+      writeFileSync(
+        p,
+        String.fromCharCode('a'.charCodeAt(0) + i).repeat(20_000),
+      );
+      files.push(p);
+    }
 
-    const blocks = await buildFileRestorationBlocks([f1, f2, f3]);
-    const allText = blocks
-      .flatMap((b) => b.parts ?? [])
-      .map((p) => (p as { text?: string }).text ?? '')
-      .join('');
-    expect(allText).toContain('a'.repeat(3_000));
-    expect(allText).toContain('b'.repeat(3_000));
-    expect(allText).toContain('c'.repeat(3_000));
+    const blocks = await buildFileRestorationBlocks(files);
+
+    // The reference block must exist and must mention the 11th file.
+    const referenceBlock = blocks.find((b) =>
+      (b.parts?.[0] as { text?: string }).text?.includes('reference only'),
+    );
+    expect(referenceBlock).toBeDefined();
+    expect((referenceBlock!.parts?.[0] as { text: string }).text).toContain(
+      files[10],
+    );
+
+    // The first 10 files must be embedded (each as its own user message).
+    for (let i = 0; i < 10; i++) {
+      const ch = String.fromCharCode('a'.charCodeAt(0) + i);
+      const expectedSlice = ch.repeat(20_000);
+      const embedBlock = blocks.find((b) =>
+        (b.parts?.[0] as { text?: string }).text?.includes(expectedSlice),
+      );
+      expect(
+        embedBlock,
+        `expected file ${i} (${ch.repeat(3)}...) to be embedded`,
+      ).toBeDefined();
+    }
+
+    // The 11th file must NOT be embedded — it should only appear in the
+    // reference block. Verify it does not show up in any embed block.
+    const ch11 = String.fromCharCode('a'.charCodeAt(0) + 10);
+    const embed11 = blocks.find((b) => {
+      const text = (b.parts?.[0] as { text?: string }).text ?? '';
+      // The reference block contains the path, not the content. An embed
+      // block would contain a long run of the file's content characters.
+      return text.includes(ch11.repeat(20_000));
+    });
+    expect(embed11).toBeUndefined();
   });
 });
