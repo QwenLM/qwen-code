@@ -2216,6 +2216,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     async sendPrompt(sessionId, req, signal, context) {
+      opts.onDiagnosticLine?.(
+        `qwen serve: bridge sendPrompt for session=${sessionId}`,
+        'info',
+      );
       const capturedContext = telemetry.captureContext();
       const queuedAt = Date.now();
       const entry = byId.get(sessionId);
@@ -2400,6 +2404,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     async cancelSession(sessionId, req, context) {
+      opts.onDiagnosticLine?.(
+        `qwen serve: bridge cancelSession for session=${sessionId}`,
+        'info',
+      );
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const cancelOriginatorClientId = resolveTrustedClientId(
@@ -3436,6 +3444,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (!entry) throw new SessionNotFoundError(sessionId);
       const info = channelInfoForEntry(entry);
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      opts.onDiagnosticLine?.(
+        `qwen serve: bridge generateSessionRecap dispatching ext-method for session=${sessionId}`,
+        'info',
+      );
       const response = (await Promise.race([
         withTimeout(
           entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionRecap, {
@@ -3446,6 +3458,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         ),
         getTransportClosedReject(entry),
       ])) as { sessionId: string; recap: string | null };
+      opts.onDiagnosticLine?.(
+        `qwen serve: bridge generateSessionRecap completed for session=${sessionId} recap=${response.recap ? `len=${response.recap.length}` : 'null'}`,
+        'info',
+      );
       return {
         sessionId: entry.sessionId,
         recap: response.recap ?? null,
@@ -3458,6 +3474,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       signal,
       context,
     ): Promise<ShellCommandResult> {
+      opts.onDiagnosticLine?.(
+        `qwen serve: bridge executeShellCommand for session=${sessionId}`,
+        'info',
+      );
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const originatorClientId = resolveTrustedClientId(

@@ -2521,6 +2521,7 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
+        debugLogger.debug(`recap ext-method received for session=${sessionId}`);
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         // v1: no cross-process abort plumbing. The bridge does not listen
@@ -2535,6 +2536,9 @@ class QwenAgent implements Agent {
         const recap = await generateSessionRecap(
           config,
           new AbortController().signal,
+        );
+        debugLogger.debug(
+          `recap ext-method completed for session=${sessionId} result=${recap ? `len=${recap.length}` : 'null'}`,
         );
         return { sessionId, recap };
       }
