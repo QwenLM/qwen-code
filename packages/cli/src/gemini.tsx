@@ -966,8 +966,15 @@ export async function main() {
     profileCheckpoint('before_render');
 
     if (config.getListExtensions()) {
-      if (inputFormat === InputFormat.STREAM_JSON) {
+      // Always initialize config to populate extensionCache via refreshCache().
+      // Without this, getExtensions() returns [] because extensionCache is null.
+      try {
         await config.initialize();
+      } catch (err) {
+        debugLogger.warn(
+          'config.initialize() failed during --list-extensions:',
+          err,
+        );
       }
       const extensions = config.getExtensions();
       if (extensions.length === 0) {
@@ -982,9 +989,14 @@ export async function main() {
             /[\x00-\x1f\x7f-\x9f]/g,
             '',
           );
+          const safeName = extension.name.replace(
+            // eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
+            /[\x00-\x1f\x7f-\x9f]/g,
+            '',
+          );
           // eslint-disable-next-line no-console -- CLI flag output
           console.log(
-            `- ${extension.name} (v${safeVersion})${extension.isActive ? '' : ' [disabled]'}`,
+            `- ${safeName} (v${safeVersion})${extension.isActive ? '' : ' [disabled]'}`,
           );
         }
       }
