@@ -72,26 +72,31 @@ export class ComputerUseClient {
    * Start the upstream MCP server. Idempotent: concurrent callers share
    * the same in-flight start promise.
    *
+   * An optional `onProgress` callback can be supplied to receive download
+   * and startup messages during this call. It overrides the instance-level
+   * callback for the duration of the start operation only.
+   *
    * Throws on spawn failure (network down, npx missing, etc.). The
    * caller (bootstrap state machine) is responsible for mapping the
    * throw into user-facing UX.
    */
-  async start(): Promise<void> {
+  async start(onProgress?: (message: string) => void): Promise<void> {
     if (this.client) return;
     if (this.startPromise) return this.startPromise;
 
-    this.startPromise = this.doStart().finally(() => {
+    this.startPromise = this.doStart(onProgress).finally(() => {
       this.startPromise = undefined;
     });
     return this.startPromise;
   }
 
-  private async doStart(): Promise<void> {
-    this.onProgress('Starting Computer Use...');
+  private async doStart(onProgress?: (message: string) => void): Promise<void> {
+    const progress = onProgress ?? this.onProgress;
+    progress('Starting Computer Use...');
 
     // After ~3s, surface a hint that the slow path is download.
     const downloadHintTimer = setTimeout(() => {
-      this.onProgress(
+      progress(
         'Downloading Computer Use binary (this can take ~60s on first use)...',
       );
     }, 3000);

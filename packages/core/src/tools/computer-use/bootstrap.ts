@@ -39,6 +39,7 @@ import {
   detectPermissionError,
   type PermissionErrorKind,
 } from './permission-detector.js';
+import { resolveComputerUsePackageSpec } from './constants.js';
 
 export interface BootstrapContext {
   signal: AbortSignal;
@@ -82,8 +83,7 @@ export interface BootstrapDeps {
 
 /** Production defaults — instantiated lazily so tests can override per call. */
 function defaultDeps(): BootstrapDeps {
-  const packageSpec =
-    process.env['QWEN_COMPUTER_USE_PACKAGE'] ?? 'open-computer-use@latest';
+  const packageSpec = resolveComputerUsePackageSpec();
   return {
     homeDir: homedir(),
     packageSpec,
@@ -148,8 +148,7 @@ export async function runBootstrap(
 
   // Step 2: spawn (idempotent).
   if (!client.isStarted()) {
-    ctx.updateOutput?.('Starting Computer Use...');
-    await client.start();
+    await client.start(ctx.updateOutput);
   }
 
   // Step 3: macOS permission probe + guide.

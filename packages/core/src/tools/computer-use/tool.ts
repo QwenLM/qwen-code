@@ -21,16 +21,10 @@ import type { ComputerUseToolName, ComputerUseToolSchema } from './schemas.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { runBootstrap } from './bootstrap.js';
 import { isPackageSpecApproved, saveInstallState } from './install-state.js';
+import { resolveComputerUsePackageSpec } from './constants.js';
 import { homedir } from 'node:os';
 
 type ComputerUseParams = Record<string, unknown>;
-
-/**
- * The package spec used for install-state checks. Must stay in sync with
- * the default in bootstrap.ts defaultDeps().
- */
-const PACKAGE_SPEC =
-  process.env['QWEN_COMPUTER_USE_PACKAGE'] ?? 'open-computer-use@latest';
 
 const INSTALL_REASON =
   'This will install the open-computer-use binary (~50MB) via npx the first time. ' +
@@ -58,7 +52,10 @@ class ComputerUseInvocation extends BaseToolInvocation<
    * install state file exists (subsequent invocations after first-time setup).
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const approved = await isPackageSpecApproved(homedir(), PACKAGE_SPEC);
+    const approved = await isPackageSpecApproved(
+      homedir(),
+      resolveComputerUsePackageSpec(),
+    );
     return approved ? 'allow' : 'ask';
   }
 
@@ -90,7 +87,7 @@ class ComputerUseInvocation extends BaseToolInvocation<
         // without re-prompting.
         if (outcome !== ToolConfirmationOutcome.Cancel) {
           await saveInstallState(homedir(), {
-            approvedPackageSpec: PACKAGE_SPEC,
+            approvedPackageSpec: resolveComputerUsePackageSpec(),
             approvedAtIso: new Date().toISOString(),
           });
         }
