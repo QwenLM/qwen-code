@@ -1351,9 +1351,10 @@ export function NavigationProvider({
     reconcileFromUrlParamsRef.current(params)
     lastSemanticHistoryKeyRef.current = getSemanticHistoryKey()
 
-    // If nothing was in the URL, navigate to default
+    // If nothing was in the URL, start from the new-chat draft instead of
+    // auto-selecting an existing session.
     if (!params.get('route') && !params.get('panels')) {
-      navigate(routes.view.allSessions())
+      navigate(routes.action.newSession())
     }
 
     // Initialize history with seq=0 (replaceState so we don't create an extra entry)

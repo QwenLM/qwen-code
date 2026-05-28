@@ -337,42 +337,21 @@ async function createInitialWindows(options: { createDefaultWorkspace: boolean }
 
   const validWorkspaceIds = workspaces.map(ws => ws.id)
 
-  if (savedState?.windows.length) {
-    // Restore windows from saved state
-    let restoredCount = 0
+  const startupWorkspaceId = [
+    savedState?.lastFocusedWorkspaceId,
+    ...(savedState?.windows.map(saved => saved.workspaceId) ?? []),
+  ].find(id => !!id && validWorkspaceIds.includes(id))
 
-    for (const saved of savedState.windows) {
-      // Skip invalid workspaces
-      if (!validWorkspaceIds.includes(saved.workspaceId)) continue
-
-      // Restore main window with focused mode if it was saved
-      mainLog.info(`Restoring window: workspaceId=${saved.workspaceId}, focused=${saved.focused ?? false}, url=${saved.url ?? 'none'}`)
-      const win = windowManager.createWindow({
-        workspaceId: saved.workspaceId,
-        focused: saved.focused,
-        restoreUrl: saved.url,
-      })
-      win.setBounds(saved.bounds)
-
-      restoredCount++
-    }
-
-    if (restoredCount > 0) {
-      mainLog.info(`Restored ${restoredCount} window(s) from saved state`)
-      return
-    }
-  }
-
-  // Default: open window for first workspace
-  const firstWorkspace = workspaces[0]
-  if (!firstWorkspace) {
+  // Default: open one fresh window in the last focused workspace.
+  const startupWorkspace = workspaces.find(ws => ws.id === startupWorkspaceId) ?? workspaces[0]
+  if (!startupWorkspace) {
     windowManager.createWindow({ workspaceId: '' })
     mainLog.info('Created workspace-picker window because no workspaces are available')
     return
   }
 
-  windowManager.createWindow({ workspaceId: firstWorkspace.id })
-  mainLog.info(`Created window for first workspace: ${firstWorkspace.name}`)
+  windowManager.createWindow({ workspaceId: startupWorkspace.id })
+  mainLog.info(`Created startup window for workspace: ${startupWorkspace.name}`)
 }
 
 app.whenReady().then(async () => {
