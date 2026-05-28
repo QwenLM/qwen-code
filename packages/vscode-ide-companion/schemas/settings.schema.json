@@ -214,6 +214,14 @@
           "type": "boolean",
           "default": false
         },
+        "thinkingDisplayMode": {
+          "description": "Controls how model thinking is shown in the interactive TUI. Use \"preview\" for a bounded live preview, or \"loading\" for loading status only. The QWEN_TUI_THINKING_DISPLAY environment variable overrides this setting. Options: preview, loading",
+          "enum": [
+            "preview",
+            "loading"
+          ],
+          "default": "preview"
+        },
         "hideTips": {
           "description": "Hide helpful tips in the UI",
           "type": "boolean",

@@ -16,6 +16,7 @@ import { formatDuration, formatTokenCount } from '../utils/formatters.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useAnimationFrame } from '../hooks/useAnimationFrame.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
+import type { ThinkingDisplayMode } from '../utils/thinkingDisplayMode.js';
 import { t } from '../../i18n/index.js';
 
 interface LoadingIndicatorProps {
@@ -23,6 +24,7 @@ interface LoadingIndicatorProps {
   elapsedTime: number;
   rightContent?: React.ReactNode;
   thought?: ThoughtSummary | null;
+  thinkingDisplayMode?: ThinkingDisplayMode;
   candidatesTokens?: number;
   /**
    * Live-updating character counter for the streaming response. When provided
@@ -41,11 +43,38 @@ interface LoadingIndicatorProps {
   isReceivingContent?: boolean;
 }
 
+function normalizeThoughtLines(text?: string): string[] {
+  if (!text) {
+    return [];
+  }
+
+  return text
+    .replaceAll('\\n', '\n')
+    .split('\n')
+    .map((line) => line.trim().replace(/\s+/g, ' '))
+    .filter((line) => line.length > 0 && !/^\.+$/.test(line));
+}
+
+function getThoughtPreviewText(thought: ThoughtSummary | null | undefined): {
+  primary?: string;
+  secondary?: string;
+} {
+  const subjectLines = normalizeThoughtLines(thought?.subject);
+  const descriptionLines = normalizeThoughtLines(thought?.description);
+  const primary = subjectLines[0] ?? descriptionLines[0];
+  const secondary = primary
+    ? descriptionLines.find((line) => line !== primary)
+    : undefined;
+
+  return { primary, secondary };
+}
+
 export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   currentLoadingPhrase,
   elapsedTime,
   rightContent,
   thought,
+  thinkingDisplayMode = 'preview',
   candidatesTokens,
   streamingCharsRef,
   isStreaming,
@@ -69,7 +98,12 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
     return null;
   }
 
-  const primaryText = thought?.subject || currentLoadingPhrase;
+  const thoughtPreview =
+    thinkingDisplayMode === 'preview'
+      ? getThoughtPreviewText(thought)
+      : { primary: undefined, secondary: undefined };
+  const primaryText = thoughtPreview.primary ?? currentLoadingPhrase;
+  const secondaryText = thoughtPreview.secondary;
 
   const streamingTokens = streamingCharsRef ? Math.round(animatedChars / 4) : 0;
   const outputTokens = (candidatesTokens ?? 0) + streamingTokens;
@@ -109,10 +143,22 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
               }
             />
           </Box>
-          {primaryText && (
+          {primaryText && !secondaryText && (
             <Text color={theme.text.accent} wrap="truncate-end">
               {primaryText}
             </Text>
+          )}
+          {secondaryText && (
+            <Box flexDirection="column" flexShrink={1}>
+              {primaryText ? (
+                <Text color={theme.text.accent} wrap="truncate-end">
+                  {primaryText}
+                </Text>
+              ) : null}
+              <Text color={theme.text.secondary} wrap="truncate-end">
+                {secondaryText}
+              </Text>
+            </Box>
           )}
           {!isNarrow && cancelAndTimerContent && (
             <Text color={theme.text.secondary}> {cancelAndTimerContent}</Text>

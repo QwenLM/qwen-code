@@ -196,7 +196,7 @@ describe('<LoadingIndicator />', () => {
     expect(output).toContain('Loading...');
   });
 
-  it('should display the subject of a thought', () => {
+  it('should display a bounded preview of a thought', () => {
     const props = {
       thought: {
         subject: 'Thinking about something...',
@@ -212,8 +212,48 @@ describe('<LoadingIndicator />', () => {
     expect(output).toBeDefined();
     if (output) {
       expect(output).toContain('Thinking about something...');
-      expect(output).not.toContain('and other stuff.');
+      expect(output).toContain('and other stuff.');
+      expect(output.split('\n')).toHaveLength(2);
     }
+  });
+
+  it('should use the thought description when no subject is available', () => {
+    const props = {
+      thought: {
+        subject: '',
+        description: '\n\nThinking through the project layout\n...\nDone',
+      },
+      currentLoadingPhrase: 'Loading...',
+      elapsedTime: 5,
+    };
+    const { lastFrame } = renderWithContext(
+      <LoadingIndicator {...props} />,
+      StreamingState.Responding,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thinking through the project layout');
+    expect(output).not.toContain('...');
+    expect(output).not.toContain('Loading...');
+  });
+
+  it('should hide thought text in loading mode', () => {
+    const props = {
+      thought: {
+        subject: 'Hidden thought subject',
+        description: 'Hidden thought description',
+      },
+      currentLoadingPhrase: 'Loading...',
+      elapsedTime: 5,
+      thinkingDisplayMode: 'loading' as const,
+    };
+    const { lastFrame } = renderWithContext(
+      <LoadingIndicator {...props} />,
+      StreamingState.Responding,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Loading...');
+    expect(output).not.toContain('Hidden thought subject');
+    expect(output).not.toContain('Hidden thought description');
   });
 
   it('should prioritize thought.subject over currentLoadingPhrase', () => {

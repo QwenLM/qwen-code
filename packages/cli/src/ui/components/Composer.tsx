@@ -109,6 +109,7 @@ export const Composer = () => {
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
+          thinkingDisplayMode={uiState.thinkingDisplayMode}
           candidatesTokens={agentTokens}
           streamingCharsRef={streamingResponseLengthRef}
           isStreaming={isStreaming}

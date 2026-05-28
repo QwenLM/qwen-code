@@ -702,6 +702,20 @@ const SETTINGS_SCHEMA = {
           'Show Qwen Code status and thoughts in the terminal window title',
         showInDialog: false,
       },
+      thinkingDisplayMode: {
+        type: 'enum',
+        label: 'Thinking Display Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: 'preview',
+        description:
+          'Controls how model thinking is shown in the interactive TUI. Use "preview" for a bounded live preview, or "loading" for loading status only. The QWEN_TUI_THINKING_DISPLAY environment variable overrides this setting.',
+        showInDialog: false,
+        options: [
+          { value: 'preview', label: 'Preview' },
+          { value: 'loading', label: 'Loading' },
+        ],
+      },
       hideTips: {
         type: 'boolean',
         label: 'Hide Tips',

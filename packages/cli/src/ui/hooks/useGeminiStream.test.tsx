@@ -2318,12 +2318,7 @@ describe('useGeminiStream', () => {
         vi.advanceTimersByTime(60);
       });
 
-      expect(result.current.pendingHistoryItems).toEqual([
-        expect.objectContaining({
-          type: 'gemini_thought',
-          text: 'Thinking',
-        }),
-      ]);
+      expect(result.current.pendingHistoryItems).toEqual([]);
       expect(result.current.thought).toEqual({ description: 'Thinking' });
 
       act(() => {
@@ -2389,12 +2384,7 @@ describe('useGeminiStream', () => {
         vi.advanceTimersByTime(60);
       });
 
-      expect(result.current.pendingHistoryItems).toEqual([
-        expect.objectContaining({
-          type: 'gemini_thought',
-          text: 'Thinking',
-        }),
-      ]);
+      expect(result.current.pendingHistoryItems).toEqual([]);
       expect(result.current.thought).toEqual({ description: 'Thinking' });
 
       act(() => {
@@ -4255,6 +4245,11 @@ describe('useGeminiStream', () => {
     });
 
     it('should accumulate streamed thought descriptions', async () => {
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -4265,6 +4260,7 @@ describe('useGeminiStream', () => {
             type: ServerGeminiEventType.Thought,
             value: { subject: '', description: 'more' },
           };
+          await holdStream;
           yield {
             type: ServerGeminiEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
@@ -4296,15 +4292,30 @@ describe('useGeminiStream', () => {
       );
 
       await act(async () => {
-        await result.current.submitQuery('Streamed thought');
+        void result.current.submitQuery('Streamed thought');
+        await Promise.resolve();
+        await Promise.resolve();
       });
 
       await waitFor(() => {
         expect(result.current.thought?.description).toBe('thinking more');
       });
+      expect(result.current.pendingHistoryItems).toEqual([]);
+
+      await act(async () => {
+        releaseStream();
+        await Promise.resolve();
+      });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
     });
 
     it('should render descriptions from subject-bearing thought chunks', async () => {
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -4321,6 +4332,7 @@ describe('useGeminiStream', () => {
               description: ' user mentioned globally installed qwen,',
             },
           };
+          await holdStream;
           yield {
             type: ServerGeminiEventType.Finished,
             value: { reason: 'STOP', usageMetadata: undefined },
@@ -4331,22 +4343,32 @@ describe('useGeminiStream', () => {
       const { result } = renderTestHook();
 
       await act(async () => {
-        await result.current.submitQuery('Streamed thought');
+        void result.current.submitQuery('Streamed thought');
+        await Promise.resolve();
+        await Promise.resolve();
       });
 
       await waitFor(() => {
-        expect(mockAddItem).toHaveBeenCalledWith(
-          expect.objectContaining({
-            type: 'gemini_thought',
-            text: 'The user mentioned globally installed qwen,',
-          }),
-          expect.any(Number),
-        );
+        expect(result.current.thought).toEqual({
+          subject: 'Evaluating installation approach',
+          description: 'The user mentioned globally installed qwen,',
+        });
       });
-      expect(result.current.thought).toEqual({
-        subject: 'Evaluating installation approach',
-        description: 'The user mentioned globally installed qwen,',
+
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: expect.stringMatching(/^gemini_thought/),
+        }),
+        expect.any(Number),
+      );
+      expect(result.current.pendingHistoryItems).toEqual([]);
+
+      await act(async () => {
+        releaseStream();
+        await Promise.resolve();
       });
+
+      await waitFor(() => expect(result.current.thought).toBeNull());
     });
 
     it('should show a retry countdown and update pending history over time', async () => {

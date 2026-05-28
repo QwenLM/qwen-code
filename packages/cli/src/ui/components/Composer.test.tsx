@@ -36,9 +36,23 @@ import { StreamingState } from '../types.js';
 
 // Mock child components
 vi.mock('./LoadingIndicator.js', () => ({
-  LoadingIndicator: ({ thought }: { thought?: string }) => (
-    <Text>LoadingIndicator{thought ? `: ${thought}` : ''}</Text>
-  ),
+  LoadingIndicator: ({
+    thought,
+    thinkingDisplayMode,
+  }: {
+    thought?: { subject?: string; description?: string } | string;
+    thinkingDisplayMode?: string;
+  }) => {
+    const thoughtText =
+      typeof thought === 'string' ? thought : thought?.subject;
+    return (
+      <Text>
+        LoadingIndicator
+        {thinkingDisplayMode ? `:${thinkingDisplayMode}` : ''}
+        {thoughtText ? `: ${thoughtText}` : ''}
+      </Text>
+    );
+  },
 }));
 
 vi.mock('./ContextSummaryDisplay.js', () => ({
@@ -104,6 +118,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     shellModeActive: false,
     isFocused: true,
     thought: '',
+    thinkingDisplayMode: 'preview',
     currentLoadingPhrase: '',
     elapsedTime: 0,
     ctrlCPressedOnce: false,
@@ -195,6 +210,22 @@ describe('Composer', () => {
 
       const output = lastFrame();
       expect(output).toContain('LoadingIndicator');
+      expect(output).toContain('LoadingIndicator:preview: Processing');
+    });
+
+    it('passes the configured thinking display mode to LoadingIndicator', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        thought: {
+          subject: 'Processing',
+          description: 'Processing your request...',
+        },
+        thinkingDisplayMode: 'loading',
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).toContain('LoadingIndicator:loading: Processing');
     });
 
     it('renders LoadingIndicator without thought when accessibility disables loading phrases', () => {
