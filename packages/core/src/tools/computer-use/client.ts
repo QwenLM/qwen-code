@@ -132,16 +132,44 @@ export class ComputerUseClient {
    * Call a tool by upstream name (NOT the qwen-code-facing
    * `computer_use__` prefixed name). Returns the raw MCP result so the
    * caller can inspect `isError` and parse text content.
+   *
+   * On transport-closed errors (e.g. macOS kills the upstream binary after
+   * the user grants Screen Recording permission), this method transparently
+   * tears down the stale connection, reconnects, and retries the call once.
+   * If the retry also fails, the error is re-thrown without further
+   * reconnect attempts.
    */
   async callTool(
     name: string,
     args: Record<string, unknown>,
   ): Promise<CallToolResult> {
     if (!this.client) throw new Error('ComputerUseClient not started');
-    return this.client.callTool({
-      name,
-      arguments: args,
-    }) as Promise<CallToolResult>;
+    try {
+      return (await this.client.callTool({
+        name,
+        arguments: args,
+      })) as CallToolResult;
+    } catch (err) {
+      if (!isTransportClosedError(err)) throw err;
+      // Reconnect: upstream binary is commonly killed by macOS after the
+      // user grants Screen Recording (a TCC restart prompt). The child
+      // process is dead but the user's task is mid-flight. Transparent
+      // reconnect + single retry keeps the model's flow uninterrupted.
+      //
+      // Element index state lives in the upstream process and is therefore
+      // lost across the restart. The model is already instructed (via
+      // schema descriptions) to call get_app_state before any
+      // element-targeted action — if its retry uses a stale element_index
+      // it will get a normal upstream error ("element_index out of range")
+      // and naturally re-snapshot.
+      await this.stop();
+      await this.start();
+      if (!this.client) throw new Error('ComputerUseClient reconnect failed');
+      return (await this.client.callTool({
+        name,
+        arguments: args,
+      })) as CallToolResult;
+    }
   }
 
   /** Tear down the child process. Safe to call multiple times. */
@@ -156,4 +184,18 @@ export class ComputerUseClient {
       }
     }
   }
+}
+
+/**
+ * Returns true when `err` indicates the MCP transport closed unexpectedly
+ * (e.g. the upstream child process was killed by macOS after a TCC permission
+ * grant). The patterns below cover all observed SDK error messages:
+ *
+ *   "Connection closed"          – StdioClientTransport stream closed
+ *   "MCP error -32000: ..."      – JSON-RPC internal error, often wraps the above
+ *   "Not connected"              – Client.callTool guard before transport is open
+ */
+export function isTransportClosedError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /connection closed|not connected/i.test(msg);
 }
