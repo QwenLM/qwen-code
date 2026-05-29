@@ -176,7 +176,7 @@ export const shortTimeLocale = {
   },
 }
 
-const JUST_NOW_THRESHOLD_MS = 60 * 60 * 1000
+const JUST_NOW_THRESHOLD_MS = 60 * 1000
 
 export function formatSessionRelativeTime(timestamp: number): string {
   if (Date.now() - timestamp < JUST_NOW_THRESHOLD_MS) {
