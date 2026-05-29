@@ -4,7 +4,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentBackend } from '@craft-agent/shared/agent/backend';
 import type { Workspace } from '@craft-agent/shared/config';
-import { loadSession, saveSession } from '@craft-agent/shared/sessions';
+import {
+  loadSession,
+  saveSession,
+  sessionPersistenceQueue,
+} from '@craft-agent/shared/sessions';
 import { saveWorkspaceConfig } from '@craft-agent/shared/workspaces';
 import type { AgentEvent, Message } from '@craft-agent/core/types';
 import {
@@ -288,6 +292,98 @@ describe('Qwen native history loading', () => {
     expect(listed?.createdAt).toBe(createdTimestamp);
     expect(listed?.lastUsedAt).toBe(timestamp);
     expect(listed?.lastMessageAt).toBe(timestamp);
+  });
+
+  it('does not persist existing Qwen provider metadata during list refresh', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'));
+    tempRoots.push(workspaceRoot, projectRoot);
+
+    const sessionId = 'fd2803fd-1070-41da-b7c0-10d978f7128c';
+    const timestamp = Date.parse('2026-04-26T10:12:13.000Z');
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    const manager = new SessionManager({
+      createExternalSessionAgent: () =>
+        ({
+          listSessions: async () => ({
+            sessions: [
+              {
+                sessionId,
+                cwd: projectRoot,
+                title: 'qwen native conversation',
+                updatedAt: new Date(timestamp).toISOString(),
+              },
+            ],
+          }),
+          destroy: () => {},
+          dispose: () => {},
+        }) as unknown as AgentBackend,
+    });
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        sdkCwd: projectRoot,
+        workingDirectory: projectRoot,
+        name: 'qwen native conversation',
+        createdAt: timestamp,
+        lastUsedAt: timestamp,
+        lastMessageAt: timestamp,
+        llmConnection: 'qwen-code',
+        thinkingLevel: 'medium',
+      },
+      workspace,
+    );
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    const queue = sessionPersistenceQueue as unknown as {
+      enqueue: (session: unknown) => void;
+    };
+    const originalEnqueue = queue.enqueue;
+    let enqueueCalls = 0;
+    queue.enqueue = () => {
+      enqueueCalls += 1;
+    };
+
+    try {
+      await (
+        manager as unknown as {
+          doRefreshExternalSessionsForWorkspace: (
+            workspace: Workspace,
+          ) => Promise<void>;
+        }
+      ).doRefreshExternalSessionsForWorkspace(workspace);
+    } finally {
+      queue.enqueue = originalEnqueue;
+    }
+
+    expect(enqueueCalls).toBe(0);
+    expect(managed.lastUsedAt).toBe(timestamp);
+    expect(managed.lastMessageAt).toBe(timestamp);
   });
 
   it('removes provider-native mirrors once a Craft session owns the same SDK session ID', async () => {

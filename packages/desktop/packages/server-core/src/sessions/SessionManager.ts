@@ -2943,13 +2943,11 @@ export class SessionManager implements ISessionManager {
       if (!managed.llmConnection) managed.llmConnection = connectionSlug
       if (!managed.model && model) managed.model = model
       if (!managed.thinkingLevel) managed.thinkingLevel = defaultThinkingLevel
-      let shouldPersistManagedMetadata = false
       if (connectionSlug === QWEN_CODE_CONNECTION_SLUG) {
         managed.createdAt = createdTimestamp ?? managed.createdAt ?? timestamp
         managed.lastUsedAt = timestamp
         managed.lastMessageAt = timestamp
         delete managed.messageCount
-        shouldPersistManagedMetadata = true
       } else {
         managed.createdAt = createdTimestamp ?? managed.createdAt
         if (typeof info.messageCount === 'number')
@@ -2967,8 +2965,6 @@ export class SessionManager implements ISessionManager {
         this.applyLoadedExternalMessages(managed, inspectedMessages)
         this.markExternalMessagesLoadedThrough(managed)
         managed.messagesLoaded = true
-        this.persistSession(managed)
-      } else if (shouldPersistManagedMetadata) {
         this.persistSession(managed)
       }
       return true
