@@ -415,6 +415,20 @@ describe('readFileSizeAdaptive', () => {
       expect(result.content.length).toBe(10_000);
     }
   });
+
+  it('short-circuits oversized files to reference via stat, before reading (OOM guard)', async () => {
+    // maxTokens=10 → 40-char cap → 160-byte threshold. Write 4 KB of
+    // non-printable bytes. The stat pre-check must return 'reference'
+    // WITHOUT reading; without the pre-check the file would be read and
+    // binary-detected as 'binary'. Asserting 'reference' (not 'binary')
+    // proves the pre-check fired and no full read happened.
+    const path = join(tmpDir, 'huge.bin');
+    const buf = Buffer.alloc(4096);
+    for (let i = 0; i < buf.length; i++) buf[i] = i % 32; // control bytes
+    writeFileSync(path, buf);
+    const result = await readFileSizeAdaptive(path, 10);
+    expect(result.kind).toBe('reference');
+  });
 });
 
 import { buildFileRestorationBlocks } from './postCompactAttachments.js';
@@ -806,6 +820,54 @@ describe('composePostCompactHistory', () => {
     const last = result[result.length - 1];
     expect(last.role).toBe('model');
     expect(last.parts?.some((p) => !!p.functionCall)).toBe(true);
+  });
+
+  it('attachments + trailing functionCall produce a 4-entry, role-alternating output', async () => {
+    // The most complex branch: postAckParts.length > 0 AND a trailing
+    // model+functionCall, producing [user(summary), model(ack),
+    // user(attachments), model(fc)]. The prior trailing-fc test hits the
+    // 2-entry fold (no attachments); the cap tests hit the 3-entry shape
+    // (no trailing fc). This is the common production case — auto-compaction
+    // mid-tool-loop after the agent read files AND has an in-flight call —
+    // and a model→model adjacency here is a 400 from the provider.
+    const realFile = join(tmpDir, 'real.ts');
+    writeFileSync(realFile, 'export const x = 1;');
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'read it' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: { name: 'read_file', args: { file_path: realFile } },
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'ok' }] },
+      {
+        role: 'model',
+        parts: [
+          { text: 'editing' },
+          { functionCall: { name: 'edit', args: { file_path: realFile } } },
+        ],
+      },
+    ];
+    const result = await composePostCompactHistory(history, 'SUM', {
+      workspaceRoot: tmpDir,
+    });
+    expect(result).toHaveLength(4);
+    for (let i = 1; i < result.length; i++) {
+      expect(result[i].role).not.toBe(result[i - 1].role);
+    }
+    const last = result[result.length - 1];
+    expect(last.role).toBe('model');
+    expect(last.parts?.some((p) => !!p.functionCall)).toBe(true);
+    // The embedded file attachment is present, confirming postAckParts > 0
+    // (i.e. we really took the 4-entry branch, not the 2-entry fold).
+    const allText = result
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+    expect(allText).toContain('export const x = 1;');
   });
 
   it('skips files outside the workspace root (Finding 4)', async () => {

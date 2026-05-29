@@ -16,7 +16,7 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { resolve as resolvePath, sep as pathSep } from 'node:path';
 import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
@@ -242,6 +242,21 @@ export async function readFileSizeAdaptive(
   // Honor abort BEFORE issuing the I/O so a cancelled compaction does not
   // even start the read (per Finding 5).
   if (signal?.aborted) return { kind: 'missing' };
+
+  const maxChars = maxTokens * CHARS_PER_TOKEN;
+  // Byte-size pre-check: avoid loading a multi-GB file into a Buffer just to
+  // discover it's too large — that would exhaust the V8 heap mid-compaction,
+  // exactly when we're trying to REDUCE memory. UTF-8 is at most 4 bytes per
+  // char, so any file whose byte size exceeds maxChars*4 cannot fit within
+  // maxChars chars; short-circuit it to a reference without reading it.
+  try {
+    const { size } = await stat(filePath);
+    if (size > maxChars * 4) return { kind: 'reference' };
+  } catch {
+    // ENOENT / permission / etc. — treat as missing, same as the read path.
+    return { kind: 'missing' };
+  }
+
   let buffer: Buffer;
   try {
     buffer = await readFile(filePath, { signal });
@@ -286,7 +301,6 @@ export async function readFileSizeAdaptive(
   // be triple-counted against the budget. The decoded value is reused
   // for the embed branch so this costs nothing extra.
   const decoded = buffer.toString('utf-8');
-  const maxChars = maxTokens * CHARS_PER_TOKEN;
   if (decoded.length > maxChars) {
     return { kind: 'reference' };
   }
