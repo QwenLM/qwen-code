@@ -20,7 +20,7 @@
  */
 
 import type React from 'react';
-import { useCallback, useEffect } from 'react';
+import { useCallback, useLayoutEffect } from 'react';
 import { Box, Text, useCursor } from 'ink';
 import chalk from 'chalk';
 import cliCursor from 'cli-cursor';
@@ -255,7 +255,7 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
 
   // ── Physical cursor positioning for IME ──
   const { setCursorPosition } = useCursor();
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!showCursor) {
       setCursorPosition(undefined);
       return;
@@ -269,19 +269,11 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
     const physicalCol = stringWidth(textBeforeCursor);
     setCursorPosition({
       x: prefixWidth + physicalCol,
-      y: relativeRow + 2, // +1 for top border line, +1 for bottom border line
+      y: relativeRow + 2,
     });
     // Hide the physical cursor immediately after positioning - we use chalk.inverse for visual cursor
     cliCursor.hide();
-  }, [
-    showCursor,
-    cursorVisualRow,
-    cursorVisualCol,
-    scrollVisualRow,
-    prefixWidth,
-    setCursorPosition,
-    linesToRender,
-  ]);
+  });
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (
