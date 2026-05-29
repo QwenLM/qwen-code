@@ -109,6 +109,7 @@ import {
   formatAcpModelId,
   parseAcpBaseModelId,
 } from '../utils/acpModelUtils.js';
+import { updateOutputLanguageFile } from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { isWorkspaceTrusted } from '../config/trustedFolders.js';
@@ -3721,11 +3722,22 @@ class QwenAgent implements Agent {
           );
         }
         const settings = loadSettings(cwd);
+        const settingKey = key as QwenCoreSettingKey;
+        const normalizedValue = normalizeCoreSettingValue(
+          settingKey,
+          params['value'],
+        );
         settings.setValue(
           toSettingsScope(params['scope']),
           key,
-          normalizeCoreSettingValue(key as QwenCoreSettingKey, params['value']),
+          normalizedValue,
         );
+        if (
+          settingKey === 'general.outputLanguage' &&
+          typeof normalizedValue === 'string'
+        ) {
+          updateOutputLanguageFile(normalizedValue);
+        }
         const updated = loadSettings(cwd);
         this.settings = updated;
         return this.buildCoreSettings(updated, cwd);

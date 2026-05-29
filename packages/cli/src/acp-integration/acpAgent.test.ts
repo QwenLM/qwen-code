@@ -264,6 +264,9 @@ vi.mock('../utils/acpModelUtils.js', () => ({
     modelId.replace(/\([^)]+\)$/, ''),
   ),
 }));
+vi.mock('../utils/languageUtils.js', () => ({
+  updateOutputLanguageFile: vi.fn(),
+}));
 
 import {
   runAcpAgent,
@@ -293,6 +296,7 @@ import { loadSettings } from '../config/settings.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { SERVE_STATUS_EXT_METHODS } from '../serve/status.js';
+import { updateOutputLanguageFile } from '../utils/languageUtils.js';
 
 describe('runAcpAgent shutdown cleanup', () => {
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -948,6 +952,32 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     };
     return settings as unknown as LoadedSettings;
+  }
+
+  function makeCoreSettings(outputLanguage = 'English') {
+    const userSettings = { general: { outputLanguage } };
+    const workspaceSettings = {};
+    const mergedSettings = { general: { outputLanguage } };
+    const setValue = vi.fn((_scope: string, key: string, value: unknown) => {
+      if (key !== 'general.outputLanguage') return;
+      userSettings.general.outputLanguage = value as string;
+      mergedSettings.general.outputLanguage = value as string;
+    });
+    return {
+      merged: mergedSettings,
+      user: {
+        path: '/home/test/.qwen/settings.json',
+        settings: userSettings,
+      },
+      workspace: {
+        path: '/work/.qwen/settings.json',
+        settings: workspaceSettings,
+      },
+      isTrusted: true,
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+      setValue,
+    } as unknown as LoadedSettings;
   }
 
   async function setupSessionMocks(sessionId: string) {
@@ -1677,6 +1707,36 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'memory.enableAutoSkill',
       true,
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings setCoreValue syncs output language rule file', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.extMethod('qwen/settings/setCoreValue', {
+      scope: 'user',
+      key: 'general.outputLanguage',
+      value: 'Japanese',
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'general.outputLanguage',
+      'Japanese',
+    );
+    expect(updateOutputLanguageFile).toHaveBeenCalledWith('Japanese');
 
     mockConnectionState.resolve();
     await agentPromise;
