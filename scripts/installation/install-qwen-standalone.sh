@@ -1495,65 +1495,12 @@ print_final_instructions() {
     fi
 
     echo ""
-    print_logo
+    echo -e "${MUTED}Qwen Code ${installed_version} installed successfully, to start:${NC}"
     echo ""
-    echo -e "  ${MUTED}Qwen Code ${installed_version} installed successfully.${NC}"
+    echo -e "cd <project>  ${MUTED}# Open directory${NC}"
+    echo -e "qwen          ${MUTED}# Run command${NC}"
     echo ""
-
-    echo "To start:"
-    echo "  cd <project>"
-    echo "  qwen"
-
-    if [[ -n "${install_dir}" ]]; then
-        echo ""
-        echo "Installed to:"
-        echo "  ${install_dir}"
-    fi
-
-    echo ""
-    echo "Uninstall:"
-    if [[ "${install_method}" == "npm" ]]; then
-        echo "  npm uninstall -g @qwen-code/qwen-code"
-    elif [[ -n "${install_dir}" && -n "${install_bin_dir}" ]]; then
-        echo "  curl -fsSL ${standalone_uninstall_url} | QWEN_INSTALL_LIB_DIR=$(shell_quote "${install_dir}") QWEN_INSTALL_BIN_DIR=$(shell_quote "${install_bin_dir}") bash"
-    else
-        echo "  curl -fsSL ${standalone_uninstall_url} | bash"
-    fi
-
-    if [[ -n "${other_qwens}" ]]; then
-        echo ""
-        log_warning "Other 'qwen' executables exist on this system:"
-        local saved_ifs="${IFS}"
-        IFS=$'\n'
-        local path
-        for path in ${other_qwens}; do
-            [[ -z "${path}" ]] && continue
-            log_warning "  ${path}"
-        done
-        IFS="${saved_ifs}"
-        if [[ "${install_method}" == "standalone" ]]; then
-            echo ""
-            echo "Existing npm or package-manager installs are left unchanged."
-            if [[ "${PATH_UPDATE_APPLIED:-0}" == "1" ]]; then
-                echo "This standalone install is configured as the preferred qwen for new shells."
-                echo "Check active command with: command -v qwen"
-                echo "List all qwen commands with: which -a qwen"
-            else
-                echo "This standalone install was not added to your shell startup PATH automatically."
-                echo "Add this directory before older qwen commands in PATH to make it the default:"
-                echo "  ${install_bin_dir}"
-            fi
-            echo "Remove npm/global package install with: npm uninstall -g @qwen-code/qwen-code"
-            echo "To keep using npm, rerun this installer with --method npm."
-        fi
-        if [[ "${PATH_UPDATE_APPLIED:-0}" == "1" ]]; then
-            echo "To make this install take priority, restart your terminal."
-        fi
-        echo "Or invoke directly: ${installed_bin}"
-    fi
-
-    echo ""
-    echo -e "${MUTED}For more information visit${NC} https://qwenlm.github.io/qwen-code"
+    echo -e "${MUTED}For more information visit ${NC}https://qwenlm.github.io/qwen-code"
     echo ""
 }
 
