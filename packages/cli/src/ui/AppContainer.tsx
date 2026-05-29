@@ -1174,6 +1174,7 @@ export const AppContainer = (props: AppContainerProps) => {
     extensionsUpdateStateInternal,
     isConfigInitialized,
     logger,
+    historyManager.updateItem,
     setSessionName,
   );
 
