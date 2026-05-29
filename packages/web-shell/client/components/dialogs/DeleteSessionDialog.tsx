@@ -107,8 +107,15 @@ export function DeleteSessionDialog({
           const failed = res.errors.length;
 
           if (failed > 0 && succeeded > 0) {
-            onDeleted([...res.removed, ...res.notFound]);
-            onError(new Error(res.errors[0].error));
+            onError(
+              new Error(
+                t('delete.partialFail', {
+                  removed: succeeded,
+                  failed,
+                  detail: res.errors[0].error,
+                }),
+              ),
+            );
             onClose();
             return;
           }

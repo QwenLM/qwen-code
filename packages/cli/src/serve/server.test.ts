@@ -4171,6 +4171,25 @@ describe('createServeApp', () => {
         fsp.access(path.join(chatsDir, `${sid}.jsonl`)),
       ).resolves.toBeUndefined();
     });
+
+    it('returns 500 when removeSessions throws unexpectedly', async () => {
+      const { SessionService } = await import('@qwen-code/qwen-code-core');
+      const spy = vi
+        .spyOn(SessionService.prototype, 'removeSessions')
+        .mockRejectedValueOnce(new Error('disk on fire'));
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: ['aaaa0000-bbbb-cccc-dddd-eeeeeeeeeeee'] });
+      expect(res.status).toBe(500);
+      expect(res.body.code).toBe('sessions_delete_failed');
+      spy.mockRestore();
+    });
   });
 
   describe('PATCH /session/:id/metadata', () => {
