@@ -468,9 +468,12 @@ async function cpuProfileDoctorAction(
 
   // Check if already recording
   if (isCpuProfileRecording()) {
-    const errorMsg = t(
-      'CPU profiling is already in progress. Send SIGUSR1 or wait for it to complete.',
-    );
+    const errorMsg =
+      process.platform === 'win32'
+        ? t('CPU profiling is already in progress. Wait for it to complete.')
+        : t(
+            'CPU profiling is already in progress. Send SIGUSR1 or wait for it to complete.',
+          );
     if (executionMode === 'interactive') {
       context.ui.addItem({ type: 'error', text: errorMsg }, Date.now());
       return;
@@ -497,7 +500,14 @@ async function cpuProfileDoctorAction(
 
   if (abortSignal?.aborted) {
     const abortResult = await stopCpuProfile();
-    if (!abortResult.ok) {
+    if (abortResult.ok) {
+      const msg = t('CPU profile aborted early. Profile saved: {path}', {
+        path: abortResult.filePath,
+      });
+      if (executionMode === 'interactive') {
+        context.ui.addItem({ type: 'info', text: msg }, Date.now());
+      }
+    } else {
       const msg = `${t('CPU profile aborted but failed to stop cleanly')}: ${abortResult.error}`;
       if (executionMode === 'interactive') {
         context.ui.addItem({ type: 'error', text: msg }, Date.now());

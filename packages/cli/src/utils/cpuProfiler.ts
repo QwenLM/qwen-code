@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Qwen
+ * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -34,6 +34,9 @@ export type CpuProfileStopResult =
   | { ok: true; filePath: string }
   | { ok: false; error: string };
 
+// Custom interface rather than importing from node:inspector/promises because
+// the official Session.post() generic overload returns Promise<void>, making
+// dynamic method dispatch (Profiler.start/stop) cumbersome without per-call casts.
 interface InspectorSession {
   connect(): void;
   disconnect(): void;
@@ -112,7 +115,7 @@ export async function startCpuProfile(opts?: {
       error:
         state === 'recording'
           ? 'CPU profiling is already in progress.'
-          : 'CPU profiler is stopping, please wait.',
+          : 'CPU profiler is currently stopping. Please wait a moment and try again.',
     };
   }
 
@@ -172,7 +175,9 @@ export async function stopCpuProfile(options?: {
 
   try {
     if (!session) {
-      throw new Error('Inspector session lost unexpectedly.');
+      throw new Error(
+        'Inspector session lost unexpectedly during Profiler.stop; the profile data could not be retrieved.',
+      );
     }
 
     const result = (await session.post('Profiler.stop')) as {
@@ -383,7 +388,11 @@ function checkDiskSpace(outputDir: string): void {
     ) {
       throw error;
     }
-    // statfsSync may fail on some platforms; proceed anyway.
+    // statfsSync is not available on all platforms (e.g. Windows).
+    // Log a warning so it's not completely silent, but proceed anyway.
+    process.stderr.write(
+      '[cpu-profiler] Disk space check unavailable on this platform; skipping.\n',
+    );
   }
 }
 
@@ -406,7 +415,8 @@ function cleanupOldProfiles(outputDir: string, maxProfiles: number): void {
             path.basename(b).localeCompare(path.basename(a))
           );
         } catch {
-          return 0;
+          // Fall back to filename comparison if stat fails
+          return path.basename(b).localeCompare(path.basename(a));
         }
       });
   } catch {

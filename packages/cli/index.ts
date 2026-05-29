@@ -12,6 +12,8 @@ import { initStartupProfiler } from './src/utils/startupProfiler.js';
 initStartupProfiler();
 
 import { initCpuProfiler } from './src/utils/cpuProfiler.js';
+// Initialize early to register SIGUSR1 handler and start recording when
+// QWEN_CODE_CPU_PROFILE=1, capturing as much of the startup as possible.
 initCpuProfiler();
 
 import './src/gemini.js';
