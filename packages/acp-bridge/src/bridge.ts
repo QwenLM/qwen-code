@@ -3410,21 +3410,27 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         ),
         getTransportClosedReject(entry),
       ];
+      let cleanupAbort: (() => void) | undefined;
       if (signal) {
         races.push(
           new Promise<never>((_, reject) => {
-            signal.addEventListener(
-              'abort',
-              () => reject(new DOMException('Aborted', 'AbortError')),
-              { once: true },
-            );
+            const handler = () =>
+              reject(new DOMException('Aborted', 'AbortError'));
+            signal.addEventListener('abort', handler, { once: true });
+            cleanupAbort = () =>
+              signal.removeEventListener('abort', handler);
           }),
         );
       }
-      const response = (await Promise.race(races)) as {
-        sessionId: string;
-        answer: string | null;
-      };
+      let response: { sessionId: string; answer: string | null };
+      try {
+        response = (await Promise.race(races)) as {
+          sessionId: string;
+          answer: string | null;
+        };
+      } finally {
+        cleanupAbort?.();
+      }
       return {
         sessionId: entry.sessionId,
         answer: response.answer ?? null,

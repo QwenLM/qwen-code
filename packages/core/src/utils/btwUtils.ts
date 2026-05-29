@@ -8,6 +8,8 @@ import type { CacheSafeParams } from './forkedAgent.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
 
+const logger = createDebugLogger('btw');
+
 export function buildBtwPrompt(question: string): string {
   return [
     '<system-reminder>',
@@ -36,13 +38,13 @@ export function buildBtwCacheSafeParams(
     const maxHistoryEntries = 40;
     const history = geminiClient.getHistoryTail(maxHistoryEntries, true);
     return {
-      generationConfig,
+      generationConfig: structuredClone(generationConfig),
       history,
       model: config.getModel() ?? '',
       version: 0,
     };
   } catch (err) {
-    createDebugLogger('btw').debug(
+    logger.debug(
       `buildBtwCacheSafeParams failed: ${err instanceof Error ? err.message : String(err)}`,
     );
     return null;

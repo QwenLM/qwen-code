@@ -1799,9 +1799,14 @@ export function createServeApp(
     }
     const body = safeBody(req);
     const question = body['question'];
-    if (typeof question !== 'string' || question.trim().length === 0) {
+    if (
+      typeof question !== 'string' ||
+      question.trim().length === 0 ||
+      question.length > 4096
+    ) {
       res.status(400).json({
-        error: '`question` is required and must be a non-empty string',
+        error:
+          '`question` is required, must be a non-empty string, and at most 4096 characters',
       });
       return;
     }
