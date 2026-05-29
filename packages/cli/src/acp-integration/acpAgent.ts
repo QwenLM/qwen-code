@@ -2552,6 +2552,7 @@ class QwenAgent implements Agent {
             env: _env,
             oauth: _oauth,
             headers: _headers,
+            type: _type,
             ...safeConfig
           } = config as Record<string, unknown>;
           const result = await manager.addRuntimeMcpServer(

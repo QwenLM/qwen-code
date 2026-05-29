@@ -2039,10 +2039,15 @@ export function createServeApp(
         });
         return;
       }
-      if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+      if (
+        !/^[A-Za-z0-9_-]+$/.test(name) ||
+        name === '__proto__' ||
+        name === 'constructor' ||
+        name === 'prototype'
+      ) {
         res.status(400).json({
           error:
-            'Server name must contain only alphanumeric characters, underscores, and hyphens',
+            'Server name must contain only alphanumeric characters, underscores, and hyphens, and must not be a reserved JS property name',
           code: 'invalid_server_name',
         });
         return;
