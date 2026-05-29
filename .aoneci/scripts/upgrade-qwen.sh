@@ -69,16 +69,18 @@ parse_json_field() {
 
 if command -v node &>/dev/null; then
   LATEST_VERSION=$(echo "${METADATA}" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).version)")
-  BUILD_TIME=$(echo "${METADATA}" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).build_time||'')")
-  GIT_SHA=$(echo "${METADATA}" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).git_short_sha||'')")
+  BUILD_TIME=$(echo "${METADATA}" | node -e "const m=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); process.stdout.write(m.build_time||m.builtAt||'')")
+  GIT_SHA=$(echo "${METADATA}" | node -e "const m=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')); process.stdout.write(m.git_short_sha||m.gitSha||'')")
 elif command -v python3 &>/dev/null; then
   LATEST_VERSION=$(echo "${METADATA}" | python3 -c "import sys,json; print(json.load(sys.stdin)['version'],end='')")
-  BUILD_TIME=$(echo "${METADATA}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('build_time',''),end='')")
-  GIT_SHA=$(echo "${METADATA}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('git_short_sha',''),end='')")
+  BUILD_TIME=$(echo "${METADATA}" | python3 -c "import sys,json; m=json.load(sys.stdin); print(m.get('build_time',m.get('builtAt','')),end='')")
+  GIT_SHA=$(echo "${METADATA}" | python3 -c "import sys,json; m=json.load(sys.stdin); print(m.get('git_short_sha',m.get('gitSha','')),end='')")
 else
   LATEST_VERSION=$(parse_json_field "version")
   BUILD_TIME=$(parse_json_field "build_time")
+  [ -z "${BUILD_TIME}" ] && BUILD_TIME=$(parse_json_field "builtAt")
   GIT_SHA=$(parse_json_field "git_short_sha")
+  [ -z "${GIT_SHA}" ] && GIT_SHA=$(parse_json_field "gitSha")
 fi
 
 if [ -z "${LATEST_VERSION}" ]; then
@@ -97,13 +99,17 @@ echo -e "  Latest:     ${GREEN}${LATEST_VERSION}${NC}"
 # ── 获取当前版本号 ──
 INSTALL_DIR="${QWEN_INSTALL_DIR:-/usr/local/qwen-code}"
 CURRENT_VERSION=""
-if [ -f "${INSTALL_DIR}/metadata.json" ]; then
+LOCAL_META=""
+for f in "${INSTALL_DIR}/metadata.json" "${INSTALL_DIR}/META.json"; do
+  [ -f "$f" ] && LOCAL_META="$f" && break
+done
+if [ -n "${LOCAL_META}" ]; then
   if command -v node &>/dev/null; then
-    CURRENT_VERSION=$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('${INSTALL_DIR}/metadata.json','utf8')).version||'')" 2>/dev/null || true)
+    CURRENT_VERSION=$(LOCAL_META="$LOCAL_META" node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(process.env.LOCAL_META,'utf8')).version||'')" 2>/dev/null || true)
   elif command -v python3 &>/dev/null; then
-    CURRENT_VERSION=$(python3 -c "import json; print(json.load(open('${INSTALL_DIR}/metadata.json'))['version'],end='')" 2>/dev/null || true)
+    CURRENT_VERSION=$(LOCAL_META="$LOCAL_META" python3 -c "import os,json; print(json.load(open(os.environ['LOCAL_META']))['version'],end='')" 2>/dev/null || true)
   else
-    CURRENT_VERSION=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "${INSTALL_DIR}/metadata.json" \
+    CURRENT_VERSION=$(grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' "${LOCAL_META}" \
       | head -1 | sed 's/.*"version"[[:space:]]*:[[:space:]]*"//;s/".*//' || true)
   fi
 fi

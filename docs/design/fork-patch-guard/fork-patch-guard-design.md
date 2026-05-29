@@ -32,13 +32,30 @@
 
 验证逻辑基于 **commit diff 内容推导**，不需要手动维护文件路径和断言。
 
-### 2.2 组成部分
+### 2.2 组成部分（已实现）
 
 ```
 .fork/
-  patches.md         # fork 补丁清单（人工维护）
-  verify.sh          # 验证脚本（自动检查）
+  manifest.json             # 补丁定义、包名映射、registry 配置（source of truth）
+  patches/
+    series                  # 补丁应用顺序
+    0001-branding-header.patch
+    0002-branding-tips.patch
+    ...
+  apply.sh                  # 按顺序应用补丁栈
+  unapply.sh                # 反转所有补丁
+  verify.sh                 # 验证补丁是否在当前代码中存活
+  generate-patches.js       # 从 fork diff 生成补丁文件
+  generate-patches.sh       # shell 包装
+  create-patch.sh           # 创建新补丁
+  refresh-patch.sh          # 刷新已有补丁
+  rewrite-package-identity.js  # 包名/registry 正向和反向改写
+  sync-upstream.sh          # 本地 upstream sync 辅助
+  patches.md                # 自动生成的 fork 补丁清单
 ```
+
+> 注：此设计文档描述的是 v1 原始方案。实际实现参见
+> `docs/design/fork-patch-guard/fork-patch-stack-architecture.md`。
 
 ### 2.3 补丁清单格式 (`.fork/patches.md`)
 
@@ -47,6 +64,13 @@
 
 每次在 fork 上做定制改动后，在此记录 commit 信息。
 upstream sync 后运行 `bash .fork/verify.sh` 检查这些改动是否还在。
+
+当前第一阶段已经落地 `.fork/patches.md`，内容包括：
+
+- `origin/main` 相对 `upstream/main` 的 first-parent PR/MR 落地提交清单
+- patch-bearing commit inventory
+- snapshot 使用的 `origin/main`、`upstream/main`、`merge-base`
+- 后续 upstream sync 过程中如何新增、保留、退休条目的维护规则
 
 ## DataWorks Tips
 

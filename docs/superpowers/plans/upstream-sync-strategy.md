@@ -83,25 +83,31 @@ See `.qwen/upstream-sync-rules.yml` for the full rule set.
 
 ### Branch Strategy
 
-- `staging/upstream-sync`: Long-lived staging branch, CI syncs upstream here daily
 - `main`: Stable internal branch, only reviewed MRs merge in
-- Daily sync creates `sync/upstream-YYYY-MM-DD` -> MR to `staging/upstream-sync`
-- Per upstream release: `staging/upstream-sync` -> `main` batch MR
+- Daily sync creates `sync/upstream-YYYYMMDD` → MR to `main`
+- Checkpoint tag `sync-checkpoint-YYYYMMDD-HHMMSS-<sha>` before each merge attempt
 
 ### CI Pipeline (Aone CI)
 
-Two Aone CI workflows in `.aoneci/workflows/`:
+Two Aone CI workflows in `.aoneci/`:
 
-1. **`upstream-sync-analyze.yml`** - 每日分析 upstream 变更 + 钉钉通知
-2. **`upstream-sync-merge.yml`** - 合并 upstream + 验证 + 创建 MR
+1. **`upstream-sync-analyze.yml`** — 工作日 9:00 分析 upstream 变更 + 钉钉通知
+2. **`upstream-sync-merge.yml`** — 每天 22:20 合并 upstream + 验证 + 创建 MR
+
+Pipeline 使用 state-file 驱动多步骤：`skip → pending → clean/has_conflicts`。
+认证和 MR 发布通过 `.aoneci/scripts/upstream-sync-domain-auth.sh` helper（支持域账号 + 旧 token 回退）。
 
 ### Required Aone CI Variables
 
-| Variable                                  | Description                               |
-| ----------------------------------------- | ----------------------------------------- |
-| `CI_AONE_CODE_PRIVATE_TOKEN_{employeeId}` | GitLab private token（推送分支、创建 MR） |
-| `CI_QWEN_API_KEY`                         | Qwen API Key（LLM 辅助冲突解决，可选）    |
-| `CI_DINGTALK_WEBHOOK_URL`                 | 钉钉机器人 webhook 地址（可选）           |
+| Variable                                  | Description                                        |
+| ----------------------------------------- | -------------------------------------------------- |
+| `vars.username`                           | 域账号用户名（优先，用于 HTTPS push / MR）         |
+| `secrets.privateToken`                    | 域账号 private token（优先，用于 HTTPS push / MR） |
+| `CI_AONE_CODE_PRIVATE_TOKEN_{employeeId}` | 旧 GitLab private token（兼容回退）                |
+| `CI_QWEN_API_KEY`                         | Qwen API Key（LLM 辅助冲突解决，可选）             |
+| `CI_QWEN_BASE_URL`                        | Qwen API Base URL（默认 DashScope，可选）          |
+| `CI_DINGTALK_WEBHOOK_URL`                 | 钉钉机器人 webhook 地址（可选）                    |
+| `CI_DINGTALK_WEBHOOK_SECRET`              | 钉钉机器人加签密钥（可选）                         |
 
 ---
 
@@ -130,12 +136,38 @@ Fork 差异通过 CI 任务自动分析（`.aoneci/workflows/upstream-fork-diver
 
 ## Implementation Files
 
-- `.qwen/skills/upstream-sync/SKILL.md` - Cursor skill definition
-- `scripts/upstream-sync-analyze.sh` - Git diff analysis helper
-- `scripts/upstream-sync-verify.sh` - Post-merge verification pipeline
-- `scripts/upstream-fork-divergence.sh` - Fork 差异自动分析脚本
-- `.aoneci/workflows/upstream-fork-divergence.yml` - Fork 差异分析 CI
-- `.qwen/upstream-sync-rules.yml` - Conflict resolution rules for LLM
-- `.aoneci/workflows/upstream-sync-analyze.yml` - 每日分析 CI
-- `.aoneci/workflows/upstream-sync-merge.yml` - 合并验证 CI
-- `.qwen/settings.json` - Internal feature flags (project-level)
+### 核心配置
+
+- `.fork/manifest.json` — 补丁定义、包名映射、registry 配置（patch stack 的 source of truth）
+- `.fork/patches/series` — 补丁应用顺序
+- `.qwen/upstream-sync-rules.yml` — 冲突解决策略规则（用于 LLM 辅助）
+- `.qwen/settings.json` — Internal feature flags (project-level)
+
+### 补丁管理脚本 (`.fork/`)
+
+- `.fork/apply.sh` — 按顺序应用补丁栈
+- `.fork/unapply.sh` — 反转所有补丁
+- `.fork/verify.sh` — 验证补丁是否在当前代码中存活
+- `.fork/generate-patches.js` — 从 fork diff 生成补丁文件
+- `.fork/generate-patches.sh` — generate-patches.js 的 shell 包装
+- `.fork/create-patch.sh` — 创建新补丁
+- `.fork/refresh-patch.sh` — 刷新已有补丁
+- `.fork/rewrite-package-identity.js` — 包名/registry 正向和反向改写
+- `.fork/sync-upstream.sh` — 本地 upstream sync 辅助
+- `.fork/patches.md` — 自动生成的 fork 补丁清单（by `scripts/regen-fork-patches.sh`）
+
+### CI 流水线 (`.aoneci/`)
+
+- `.aoneci/upstream-sync-merge.yml` — 每天 22:20 自动合并 upstream + 验证 + 创建 MR
+- `.aoneci/upstream-sync-analyze.yml` — 工作日 9:00 分析 upstream 变更 + 钉钉通知
+- `.aoneci/scripts/upstream-sync-domain-auth.sh` — CI 认证/推送/MR 发布 helper
+
+### 辅助脚本 (`scripts/`)
+
+- `scripts/upstream-sync-analyze.sh` — Git diff 分析辅助
+- `scripts/upstream-sync-verify.sh` — Post-merge 验证流水线
+- `scripts/upstream-fork-divergence.sh` — Fork 差异自动分析
+
+### Skill 定义
+
+- `.qwen/skills/upstream-sync/SKILL.md` — Upstream sync skill definition

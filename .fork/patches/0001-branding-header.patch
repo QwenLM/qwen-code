@@ -1,0 +1,263 @@
+Subject: DataWorks branding header
+Reason: Keep DataWorks DataAgent branding in the CLI header and startup display.
+Owner: DataWorks Qwen Code maintainers
+Patch-Base: cc800d01322c3bf642b919425576da09f182c3d5
+Fork-Ref: origin/main (c6b168ec034253e76a07492a30cfb134eae47545)
+Upstream-Ref: upstream/main
+Paths:
+  - packages/cli/src/ui/components/AppHeader.test.tsx
+  - packages/cli/src/ui/components/AsciiArt.ts
+  - packages/cli/src/ui/components/ConfigInitDisplay.tsx
+  - packages/cli/src/ui/components/Header.test.tsx
+  - packages/cli/src/ui/components/Header.tsx
+Tests:
+  - cd packages/cli && npx vitest run src/ui/components/Header.test.tsx src/ui/components/AppHeader.test.tsx
+
+diff --git a/packages/cli/src/ui/components/AppHeader.test.tsx b/packages/cli/src/ui/components/AppHeader.test.tsx
+index 392d9f74b..e50998099 100644
+--- a/packages/cli/src/ui/components/AppHeader.test.tsx
++++ b/packages/cli/src/ui/components/AppHeader.test.tsx
+@@ -105,7 +105,7 @@ describe('<AppHeader />', () => {
+ 
+   it('shows the header with all info when banner is visible', () => {
+     const { lastFrame } = renderWithProviders(createMockUIState());
+-    expect(lastFrame()).toContain('>_ Qwen Code');
++    expect(lastFrame()).toContain('>_ DataWorks DataAgent');
+     expect(lastFrame()).toContain('gemini-pro');
+     expect(lastFrame()).toContain('/projects/qwen-code');
+   });
+@@ -115,8 +115,8 @@ describe('<AppHeader />', () => {
+       createMockUIState(),
+       createSettings({ hideTips: false, hideBanner: true }),
+     );
+-    expect(lastFrame()).not.toContain('>_ Qwen Code');
+-    expect(lastFrame()).not.toContain('██╔═══██╗');
++    expect(lastFrame()).not.toContain('>_ DataWorks DataAgent');
++    expect(lastFrame()).not.toContain('██████╗');
+   });
+ 
+   it('renders the custom subtitle end-to-end through resolveCustomBanner (replaces the blank spacer between title and auth line)', () => {
+diff --git a/packages/cli/src/ui/components/AsciiArt.ts b/packages/cli/src/ui/components/AsciiArt.ts
+index c70a38f4c..e78127c3d 100644
+--- a/packages/cli/src/ui/components/AsciiArt.ts
++++ b/packages/cli/src/ui/components/AsciiArt.ts
+@@ -5,10 +5,12 @@
+  */
+ 
+ export const shortAsciiLogo = `
+- ▄▄▄▄▄▄  ▄▄     ▄▄ ▄▄▄▄▄▄▄ ▄▄▄    ▄▄
+-██╔═══██╗██║    ██║██╔════╝████╗  ██║
+-██║   ██║██║ █╗ ██║█████╗  ██╔██╗ ██║
+-██║▄▄ ██║██║███╗██║██╔══╝  ██║╚██╗██║
+-╚██████╔╝╚███╔███╔╝███████╗██║ ╚████║
+- ╚══▀▀═╝  ╚══╝╚══╝ ╚══════╝╚═╝  ╚═══╝
+-`;
++██████╗  █████╗ ████████╗ █████╗      █████╗  ██████╗ ███████╗███╗   ██╗████████╗
++██╔══██╗██╔══██╗╚══██╔══╝██╔══██╗    ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝
++██║  ██║███████║   ██║   ███████║    ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   
++██║  ██║██╔══██║   ██║   ██╔══██║    ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   
++██████╔╝██║  ██║   ██║   ██║  ██║    ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   
++╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝    ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   
++                                                                                 
++                                                                                 
++       `;
+diff --git a/packages/cli/src/ui/components/ConfigInitDisplay.tsx b/packages/cli/src/ui/components/ConfigInitDisplay.tsx
+new file mode 100644
+index 000000000..264eeeafa
+--- /dev/null
++++ b/packages/cli/src/ui/components/ConfigInitDisplay.tsx
+@@ -0,0 +1,53 @@
++/**
++ * @license
++ * Copyright 2025 Google LLC
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++import { useEffect, useState } from 'react';
++import { appEvents } from './../../utils/events.js';
++import { Box, Text } from 'ink';
++import { useConfig } from '../contexts/ConfigContext.js';
++import { type McpClient, MCPServerStatus } from '@qwen-code/qwen-code-core';
++import { GeminiSpinner } from './GeminiRespondingSpinner.js';
++import { theme } from '../semantic-colors.js';
++import { t } from '../../i18n/index.js';
++
++export const ConfigInitDisplay = () => {
++  const config = useConfig();
++  const [message, setMessage] = useState(t('Initializing...'));
++
++  useEffect(() => {
++    const onChange = (clients?: Map<string, McpClient>) => {
++      if (!clients || clients.size === 0) {
++        setMessage(t('Initializing...'));
++        return;
++      }
++      let connected = 0;
++      for (const client of clients.values()) {
++        if (client.getStatus() === MCPServerStatus.CONNECTED) {
++          connected++;
++        }
++      }
++      setMessage(
++        t('Connecting to MCP servers... ({{connected}}/{{total}})', {
++          connected: String(connected),
++          total: String(clients.size),
++        }),
++      );
++    };
++
++    appEvents.on('mcp-client-update', onChange);
++    return () => {
++      appEvents.off('mcp-client-update', onChange);
++    };
++  }, [config]);
++
++  return (
++    <Box marginTop={1}>
++      <Text>
++        <GeminiSpinner /> <Text color={theme.text.primary}>{message}</Text>
++      </Text>
++    </Box>
++  );
++};
+diff --git a/packages/cli/src/ui/components/Header.test.tsx b/packages/cli/src/ui/components/Header.test.tsx
+index 833774d1f..11962e1cb 100644
+--- a/packages/cli/src/ui/components/Header.test.tsx
++++ b/packages/cli/src/ui/components/Header.test.tsx
+@@ -36,15 +36,16 @@ describe('<Header />', () => {
+   });
+ 
+   it('renders the ASCII logo on wide terminal', () => {
++    useTerminalSizeMock.mockReturnValue({ columns: 150, rows: 24 });
+     const { lastFrame } = render(<Header {...defaultProps} />);
+-    expect(lastFrame()).toContain('██╔═══██╗');
++    expect(lastFrame()).toContain('██████╗');
+   });
+ 
+   it('hides the ASCII logo on narrow terminal', () => {
+     useTerminalSizeMock.mockReturnValue({ columns: 60, rows: 24 });
+     const { lastFrame } = render(<Header {...defaultProps} />);
+-    expect(lastFrame()).not.toContain('██╔═══██╗');
+-    expect(lastFrame()).toContain('>_ Qwen Code');
++    expect(lastFrame()).not.toContain('██████╗');
++    expect(lastFrame()).toContain('>_ DataWorks DataAgent');
+   });
+ 
+   it('displays the version number', () => {
+@@ -104,9 +105,10 @@ describe('<Header />', () => {
+   it('renders plain text when NO_COLOR disables gradient colors', () => {
+     process.env['NO_COLOR'] = '1';
+ 
++    useTerminalSizeMock.mockReturnValue({ columns: 150, rows: 24 });
+     const { lastFrame } = render(<Header {...defaultProps} />);
+ 
+-    expect(lastFrame()).toContain('██╔═══██╗');
++    expect(lastFrame()).toContain('██████╗');
+   });
+ 
+   it('renders the custom subtitle in place of the blank spacer row', () => {
+@@ -119,7 +121,7 @@ describe('<Header />', () => {
+     const frame = lastFrame() ?? '';
+     expect(frame).toContain('Built-in DataWorks Official Skills');
+     // Subtitle sits between the title and the auth line.
+-    const titleIdx = frame.indexOf('>_ Qwen Code');
++    const titleIdx = frame.indexOf('>_ DataWorks DataAgent');
+     const subtitleIdx = frame.indexOf('Built-in DataWorks Official Skills');
+     const authIdx = frame.indexOf('Qwen OAuth');
+     expect(titleIdx).toBeLessThan(subtitleIdx);
+@@ -132,7 +134,7 @@ describe('<Header />', () => {
+     // Title and auth still both render at their usual positions; the
+     // spacer between them is just whitespace-padding, so we assert the
+     // visible chrome the user sees.
+-    expect(frame).toContain('>_ Qwen Code');
++    expect(frame).toContain('>_ DataWorks DataAgent');
+     expect(frame).toContain('Qwen OAuth');
+   });
+ 
+@@ -141,7 +143,7 @@ describe('<Header />', () => {
+       <Header {...defaultProps} customBannerTitle="Acme CLI" />,
+     );
+     expect(lastFrame()).toContain('Acme CLI');
+-    expect(lastFrame()).not.toContain('>_ Qwen Code');
++    expect(lastFrame()).not.toContain('>_ DataWorks DataAgent');
+     // version suffix is still appended
+     expect(lastFrame()).toContain('v1.0.0');
+   });
+@@ -154,7 +156,7 @@ describe('<Header />', () => {
+       />,
+     );
+     expect(lastFrame()).toContain('LARGE_LOGO');
+-    expect(lastFrame()).not.toContain('██╔═══██╗');
++    expect(lastFrame()).not.toContain('██████╗');
+   });
+ 
+   it('falls back to the small tier when the large one does not fit', () => {
+@@ -179,20 +181,20 @@ describe('<Header />', () => {
+         customAsciiArt={{ small: 'X'.repeat(150), large: 'Y'.repeat(150) }}
+       />,
+     );
+-    expect(lastFrame()).not.toContain('██╔═══██╗');
++    expect(lastFrame()).not.toContain('██████╗');
+     expect(lastFrame()).not.toContain('X'.repeat(150));
+     expect(lastFrame()).not.toContain('Y'.repeat(150));
+     // Info panel still renders.
+     expect(lastFrame()).toContain('Qwen OAuth');
+   });
+ 
+-  it('falls back to the default Qwen logo when no custom art was provided at all', () => {
++  it('falls back to the default logo when no custom art was provided at all', () => {
+     useTerminalSizeMock.mockReturnValue({ columns: 60, rows: 24 });
+     const { lastFrame } = render(<Header {...defaultProps} />);
+-    // With no customAsciiArt, narrow widths still hide the QWEN logo, but a
++    // With no customAsciiArt, narrow widths still hide the default logo, but a
+     // wide enough terminal would show it — the previous test already covers
+     // the wide case. This one just confirms the no-custom-art path doesn't
+     // incidentally hide the logo.
+-    expect(lastFrame()).toContain('>_ Qwen Code');
++    expect(lastFrame()).toContain('>_ DataWorks DataAgent');
+   });
+ });
+diff --git a/packages/cli/src/ui/components/Header.tsx b/packages/cli/src/ui/components/Header.tsx
+index 94ec21937..243c71f75 100644
+--- a/packages/cli/src/ui/components/Header.tsx
++++ b/packages/cli/src/ui/components/Header.tsx
+@@ -58,10 +58,9 @@ interface HeaderProps {
+    */
+   customAsciiArt?: { small?: string; large?: string };
+   /**
+-   * Sanitized replacement for the bold ">_ Qwen Code" title in the info
+-   * panel. The version suffix is always appended. When undefined or empty
+-   * the default title is used; the leading `>_` glyph is part of the
+-   * default brand and is dropped when a custom title is set.
++   * Sanitized replacement for the bold ">_ DataWorks DataAgent (Powered by
++   * Qwen Code)" title in the info panel. The version suffix is always
++   * appended. When undefined or empty the default title is used.
+    */
+   customBannerTitle?: string;
+   /**
+@@ -204,10 +203,12 @@ export const Header: React.FC<HeaderProps> = ({
+         width={showLogo ? availableInfoPanelWidth : undefined}
+       >
+         {/* Title line: customBannerTitle (already sanitized) or the default
+-            ">_ Qwen Code" brand. Version suffix is always appended. */}
++            DataWorks DataAgent brand. Version suffix is always appended. */}
+         <Text>
+           <Text bold color={theme.text.accent}>
+-            {customBannerTitle ? customBannerTitle : '>_ Qwen Code'}
++            {customBannerTitle
++              ? customBannerTitle
++              : '>_ DataWorks DataAgent (Powered by Qwen Code)'}
+           </Text>
+           <Text color={theme.text.secondary}> (v{version})</Text>
+         </Text>
+@@ -217,7 +218,9 @@ export const Header: React.FC<HeaderProps> = ({
+         {customBannerSubtitle ? (
+           <Text color={theme.text.secondary}>{customBannerSubtitle}</Text>
+         ) : (
+-          <Text> </Text>
++          <Text color={theme.text.secondary}>
++            Built-in DataWorks Official Skills
++          </Text>
+         )}
+         {/* Auth and Model line */}
+         <Text>

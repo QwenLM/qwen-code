@@ -29,8 +29,11 @@ jobs:
       - name: 'Fetch upstream'
         run: |
           git remote add upstream https://github.com/QwenLM/qwen-code.git 2>/dev/null || true
-          # CI 默认 shallow clone，需要 unshallow 才能让 merge-base 找到共同祖先
-          git fetch --unshallow origin 2>/dev/null || true
+          # CI 默认 shallow clone，需要 unshallow 才能让 merge-base 找到共同祖先。
+          # 仅在仓库实际为 shallow 时执行，避免在普通仓库上 unshallow 报错被静默吞掉。
+          if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
+            git fetch --unshallow origin || git fetch --deepen=2000 origin
+          fi
           git fetch upstream main --tags
           echo "✅ upstream/main fetched: $(git rev-parse --short upstream/main)"
 

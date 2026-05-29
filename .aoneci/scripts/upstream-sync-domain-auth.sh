@@ -7,6 +7,7 @@ COMMAND="${1:-}"
 WORK_DIR="${WORK_DIR:-${AONE_CI_SOURCE:-$PWD}}"
 REMOTE_HOST="${REMOTE_HOST:-code.alibaba-inc.com}"
 API_BASE="${API_BASE:-https://${REMOTE_HOST}/api/v4}"
+CODE_API_BASE="${CODE_API_BASE:-https://${REMOTE_HOST}/api/v5}"
 GIT_USER_NAME="${GIT_USER_NAME:-aone-ci-bot}"
 GIT_USER_EMAIL="${GIT_USER_EMAIL:-ci-bot@alibaba-inc.com}"
 
@@ -21,6 +22,7 @@ TARGET_BRANCH="${TARGET_BRANCH:-${AONECI_TARGET_BRANCH:-${CI_DEFAULT_BRANCH:-}}}
 MR_TITLE="${MR_TITLE:-}"
 MR_DESCRIPTION="${MR_DESCRIPTION:-Automated MR for CI sync}"
 MR_URL_OUTPUT_PATH="${MR_URL_OUTPUT_PATH:-}"
+MR_CONFLICT_FILES_OUTPUT_PATH="${MR_CONFLICT_FILES_OUTPUT_PATH:-}"
 SKIP_PUSH="${SKIP_PUSH:-0}"
 
 AUTH_USER=""
@@ -151,6 +153,108 @@ extract_json_field() {
   " "$key"
 }
 
+extract_first_mr_url() {
+  node -e "
+    const remoteHost = process.argv[1] || 'code.alibaba-inc.com';
+    const repoPath = process.argv[2] || '';
+    const raw = require('fs').readFileSync(0, 'utf8').trim();
+    if (!raw) {
+      process.exit(1);
+    }
+
+    const data = JSON.parse(raw);
+    const items = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.data?.list)
+        ? data.data.list
+      : Array.isArray(data?.list)
+        ? data.list
+        : data?.data?.mergeRequest
+          ? [data.data.mergeRequest]
+        : data?.mergeRequest
+          ? [data.mergeRequest]
+          : [data];
+    const keys = [
+      'detail_url',
+      'detailUrl',
+      'web_url',
+      'webUrl',
+      'html_url',
+      'url',
+    ];
+    for (const item of items) {
+      if (!item || typeof item !== 'object') {
+        continue;
+      }
+      for (const key of keys) {
+        if (typeof item[key] === 'string' && item[key].startsWith('http')) {
+          console.log(item[key]);
+          process.exit(0);
+        }
+      }
+      if (repoPath && item.id !== undefined && item.id !== null) {
+        const id = String(item.id);
+        if (/^[0-9]+$/.test(id)) {
+          console.log('https://' + remoteHost + '/' + repoPath + '/codereview/' + id);
+          process.exit(0);
+        }
+      }
+    }
+    process.exit(1);
+  " "$REMOTE_HOST" "$REPO_PATH"
+}
+
+write_conflict_files_from_mr_response() {
+  local response="$1"
+  if [ -z "$MR_CONFLICT_FILES_OUTPUT_PATH" ]; then
+    return 0
+  fi
+
+  printf '%s' "$response" | node -e "
+    const raw = require('fs').readFileSync(0, 'utf8').trim();
+    if (!raw) {
+      process.exit(0);
+    }
+
+    const data = JSON.parse(raw);
+    const items = Array.isArray(data)
+      ? data
+      : Array.isArray(data?.data?.list)
+        ? data.data.list
+      : Array.isArray(data?.list)
+        ? data.list
+        : data?.data?.mergeRequest
+          ? [data.data.mergeRequest]
+        : data?.mergeRequest
+          ? [data.mergeRequest]
+          : [data];
+    const description = items
+      .map((item) => (item && typeof item.description === 'string' ? item.description : ''))
+      .find(Boolean);
+    if (!description) {
+      process.exit(0);
+    }
+
+    const files = [];
+    const seen = new Set();
+    const tick = String.fromCharCode(96);
+    for (const line of description.split(/\\r?\\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('- ' + tick) || !trimmed.endsWith(tick)) {
+        continue;
+      }
+      const file = trimmed.slice(3, -1);
+      if (file && !seen.has(file)) {
+        seen.add(file);
+        files.push(file);
+      }
+    }
+    if (files.length > 0) {
+      console.log(files.join('\\n'));
+    }
+  " > "$MR_CONFLICT_FILES_OUTPUT_PATH"
+}
+
 ensure_repo() {
   cd "$WORK_DIR"
 
@@ -193,26 +297,62 @@ prepare_repo() {
   fi
 }
 
-find_existing_mr_url() {
-  local response
-  response="$(
+query_existing_mrs() {
+  local include_target="${1:-1}"
+  if [ "$include_target" = "1" ]; then
     curl -fsS -G \
       -H "PRIVATE-TOKEN: ${AUTH_TOKEN}" \
       --data-urlencode "state=opened" \
       --data-urlencode "source_branch=${SOURCE_BRANCH}" \
       --data-urlencode "target_branch=${TARGET_BRANCH}" \
       "${API_BASE}/projects/$(project_encoded)/merge_requests"
-  )"
+  else
+    curl -fsS -G \
+      -H "PRIVATE-TOKEN: ${AUTH_TOKEN}" \
+      --data-urlencode "state=opened" \
+      --data-urlencode "source_branch=${SOURCE_BRANCH}" \
+      "${API_BASE}/projects/$(project_encoded)/merge_requests"
+  fi
+}
 
-  printf '%s' "$response" | node -e "
-    const raw = require('fs').readFileSync(0, 'utf8').trim();
-    const items = raw ? JSON.parse(raw) : [];
-    const first = Array.isArray(items) ? items[0] : null;
-    if (!first?.web_url) {
-      process.exit(1);
-    }
-    console.log(first.web_url);
-  "
+query_existing_code_reviews() {
+  curl -fsS -G \
+    -H "PRIVATE-TOKEN: ${AUTH_TOKEN}" \
+    --data-urlencode "order_by=updated_at" \
+    --data-urlencode "page=1" \
+    --data-urlencode "per_page=20" \
+    --data-urlencode "q=repo:${REPO_PATH} AND state:opened,reopened AND target_branch:${TARGET_BRANCH} AND source_branch:${SOURCE_BRANCH}" \
+    --data-urlencode "sort=desc" \
+    --data-urlencode "v2=true" \
+    "${CODE_API_BASE}/code_review/search"
+}
+
+find_existing_mr_url() {
+  local response mr_url
+  if response="$(query_existing_mrs 1)" && \
+    mr_url="$(printf '%s' "$response" | extract_first_mr_url)"; then
+    write_conflict_files_from_mr_response "$response"
+    printf '%s\n' "$mr_url"
+    return 0
+  fi
+
+  log "existing MR exact lookup returned no URL; retrying by source branch only"
+  if response="$(query_existing_mrs 0)" && \
+    mr_url="$(printf '%s' "$response" | extract_first_mr_url)"; then
+    write_conflict_files_from_mr_response "$response"
+    printf '%s\n' "$mr_url"
+    return 0
+  fi
+
+  log "existing MR source lookup returned no URL; retrying code review search"
+  if response="$(query_existing_code_reviews)" && \
+    mr_url="$(printf '%s' "$response" | extract_first_mr_url)"; then
+    write_conflict_files_from_mr_response "$response"
+    printf '%s\n' "$mr_url"
+    return 0
+  fi
+
+  return 1
 }
 
 publish_mr() {
@@ -227,7 +367,7 @@ publish_mr() {
   configure_authenticated_origin
 
   if [ "$SKIP_PUSH" != "1" ]; then
-    git push --no-verify origin "$SOURCE_BRANCH" --force
+    git push origin "$SOURCE_BRANCH" --force
   else
     log "publish: skip push and reuse existing remote branch ${SOURCE_BRANCH}"
   fi
@@ -251,8 +391,11 @@ publish_mr() {
         die "merge request created but web_url missing: $body"
       ;;
     409)
-      mr_url="$(find_existing_mr_url)" || \
+      mr_url="$(printf '%s' "$body" | extract_first_mr_url 2>/dev/null || true)"
+      if [ -z "$mr_url" ]; then
+        mr_url="$(find_existing_mr_url)" || \
         die "merge request already exists but failed to query existing MR URL"
+      fi
       ;;
     *)
       die "merge request creation failed (HTTP ${http_code}): ${body}"

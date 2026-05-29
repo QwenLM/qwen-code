@@ -1,6 +1,6 @@
 # Upstream Sync Domain Auth MR Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **Status: COMPLETED** — All tasks implemented and verified. See `.aoneci/scripts/upstream-sync-domain-auth.sh`.
 
 **Goal:** Make `.aoneci/upstream-sync-merge.yml` reliably initialize a git repo in Aone CI, push the generated sync branch with domain auth, and create or reuse a GitLab MR.
 

@@ -53,7 +53,18 @@ esac
 VERSION=$(cat "${WORKSPACE_DIR}/.resolved_version")
 OSS_PREFIX="public-datasets/aone-release/${OSS_GROUP}/${OSS_PROJECT}/${VERSION}"
 OSS_PROJECT_ROOT="public-datasets/aone-release/${OSS_GROUP}/${OSS_PROJECT}"
-TARBALL="qwen-code-${VERSION}-${TARGET_PLATFORM}-${ARCH}.tar.gz"
+
+# 支持新旧 tarball 命名（新格式不含 arch）
+TARBALL_NEW="qwen-code-standalone-${VERSION}.tar.gz"
+TARBALL_OLD="qwen-code-${VERSION}-${TARGET_PLATFORM}-${ARCH}.tar.gz"
+if [ -f "${ARTIFACT_DIR}/${TARBALL_NEW}" ]; then
+  TARBALL="${TARBALL_NEW}"
+elif [ -f "${ARTIFACT_DIR}/${TARBALL_OLD}" ]; then
+  TARBALL="${TARBALL_OLD}"
+else
+  echo "ERROR: tarball not found (tried ${TARBALL_NEW} and ${TARBALL_OLD})" >&2
+  exit 1
+fi
 
 # ── 定位部署脚本 ──
 find_script() {

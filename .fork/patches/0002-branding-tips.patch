@@ -1,0 +1,124 @@
+Subject: DataWorks startup tips
+Reason: Keep startup tips and beta guidance tailored to DataWorks usage.
+Owner: DataWorks Qwen Code maintainers
+Patch-Base: cc800d01322c3bf642b919425576da09f182c3d5
+Fork-Ref: origin/main (c6b168ec034253e76a07492a30cfb134eae47545)
+Upstream-Ref: upstream/main
+Paths:
+  - packages/cli/src/services/tips/tipRegistry.ts
+  - packages/cli/src/ui/components/Tips.test.ts
+  - packages/cli/src/ui/components/Tips.tsx
+Tests:
+  - cd packages/cli && npx vitest run src/ui/components/Tips.test.ts
+
+diff --git a/packages/cli/src/services/tips/tipRegistry.ts b/packages/cli/src/services/tips/tipRegistry.ts
+index cb655783b..d19007377 100644
+--- a/packages/cli/src/services/tips/tipRegistry.ts
++++ b/packages/cli/src/services/tips/tipRegistry.ts
+@@ -184,4 +184,51 @@ export const tipRegistry: ContextualTip[] = [
+     cooldownPrompts: 0,
+     priority: 50,
+   },
++
++  // DataWorks usage examples (priority 75 to show before qwen-code native tips)
++  {
++    id: 'dw-identity',
++    content:
++      '👤 Identity: "Help me verify my identity and permissions in DataWorks?"',
++    trigger: 'startup',
++    isRelevant: () => true,
++    cooldownPrompts: 0,
++    priority: 75,
++  },
++  {
++    id: 'dw-analysis',
++    content:
++      '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"',
++    trigger: 'startup',
++    isRelevant: () => true,
++    cooldownPrompts: 0,
++    priority: 75,
++  },
++  {
++    id: 'dw-governance',
++    content:
++      '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."',
++    trigger: 'startup',
++    isRelevant: () => true,
++    cooldownPrompts: 0,
++    priority: 75,
++  },
++  {
++    id: 'dw-troubleshooting',
++    content:
++      '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"',
++    trigger: 'startup',
++    isRelevant: () => true,
++    cooldownPrompts: 0,
++    priority: 75,
++  },
++  {
++    id: 'dw-fix',
++    content:
++      '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."',
++    trigger: 'startup',
++    isRelevant: () => true,
++    cooldownPrompts: 0,
++    priority: 75,
++  },
+ ];
+diff --git a/packages/cli/src/ui/components/Tips.test.ts b/packages/cli/src/ui/components/Tips.test.ts
+index 9a93d7d2f..8ce19ed0a 100644
+--- a/packages/cli/src/ui/components/Tips.test.ts
++++ b/packages/cli/src/ui/components/Tips.test.ts
+@@ -129,9 +129,9 @@ describe('selectTip', () => {
+     const ctx = createContext({ sessionCount: 1 });
+     const history = createHistory();
+     const tip = selectTip('startup', ctx, tipRegistry, history);
+-    // New user tips have priority 70, so one of them should be selected
++    // DataWorks tips have priority 75, so one of them should be selected
+     expect(tip).not.toBeNull();
+-    expect(tip!.priority).toBe(70);
++    expect(tip!.priority).toBe(75);
+   });
+ 
+   it('rotates startup tips across sessions via LRU', () => {
+@@ -149,12 +149,12 @@ describe('selectTip', () => {
+     expect(tip2!.id).not.toBe(tip1!.id);
+   });
+ 
+-  it('returns a priority-70 tip for experienced users with insight available', () => {
++  it('returns a priority-75 tip for experienced users with insight available', () => {
+     const ctx = createContext({ sessionCount: 25 });
+     const history = createHistory();
+     const tip = selectTip('startup', ctx, tipRegistry, history);
+-    // insight-command has priority 70, same as other new-user tips
++    // DataWorks tips have priority 75, so one of them should be selected
+     expect(tip).not.toBeNull();
+-    expect(tip!.priority).toBe(70);
++    expect(tip!.priority).toBe(75);
+   });
+ });
+diff --git a/packages/cli/src/ui/components/Tips.tsx b/packages/cli/src/ui/components/Tips.tsx
+index 0c259b623..21b70f543 100644
+--- a/packages/cli/src/ui/components/Tips.tsx
++++ b/packages/cli/src/ui/components/Tips.tsx
+@@ -43,9 +43,16 @@ export const Tips: React.FC = () => {
+   const selectedTip = useMemo(() => pickStartupTip(), []);
+ 
+   return (
+-    <Box marginLeft={2} marginRight={2}>
++    <Box flexDirection="column" marginLeft={2} marginRight={2}>
+       <Text color={theme.text.secondary}>
+-        {t('Tips:')} {t(selectedTip)}
++        {t('Example: ')}
++        {t(selectedTip)}
++      </Text>
++      <Text> </Text>
++      <Text color={theme.text.secondary}>
++        {t(
++          'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.',
++        )}
+       </Text>
+     </Box>
+   );

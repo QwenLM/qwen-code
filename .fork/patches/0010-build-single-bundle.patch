@@ -1,0 +1,98 @@
+From: fork-maintainer <fork@qwen-code.local>
+Subject: [PATCH] build: use single-file bundle output and add feishu to build order
+
+Fork divergence from upstream esbuild config:
+- Remove code-splitting (no chunks/ directory)
+- Single outfile: dist/cli.js instead of outdir + entryNames
+- Remove __dirname/__filename → chunk shim rewrite (not needed without splitting)
+- Add feishu channel to build order, remove acp-bridge (not in fork)
+
+diff --git a/esbuild.config.js b/esbuild.config.js
+index bc50dc265..2b87c6ce9 100644
+--- a/esbuild.config.js
++++ b/esbuild.config.js
+@@ -72,22 +72,11 @@ const external = [
+   '@teddyzhu/clipboard-win32-arm64-msvc',
+ ];
+ 
+-// Name of the directory under `dist/` that esbuild emits shared chunks into.
+-// MUST stay in sync with `BUNDLE_CHUNK_DIR` in
+-// `packages/core/src/utils/bundlePaths.ts`, whose `resolveBundleDir` helper
+-// strips this exact segment when modules look up sibling assets at runtime.
+-// Renaming here without renaming there silently breaks bundled-binary lookup
+-// in skill-manager / ripgrepUtils / i18n / extensions/new.
+-const BUNDLE_CHUNK_DIR = 'chunks';
+-
+ esbuild
+   .build({
+-    entryPoints: { cli: 'packages/cli/index.ts' },
++    entryPoints: ['packages/cli/index.ts'],
+     bundle: true,
+-    outdir: 'dist',
+-    entryNames: '[name]',
+-    chunkNames: `${BUNDLE_CHUNK_DIR}/[name]-[hash]`,
+-    splitting: true,
++    outfile: 'dist/cli.js',
+     platform: 'node',
+     format: 'esm',
+     target: 'node22',
+@@ -119,29 +108,6 @@ esbuild
+       'process.env.NODE_ENV': JSON.stringify('production'),
+       // Make global available for compatibility
+       global: 'globalThis',
+-      // Redirect free __dirname/__filename references to the shim so that
+-      // vendored libraries that emit their own `var __dirname` locals don't
+-      // collide with our injected bindings when code-splitting is enabled.
+-      //
+-      // CONTRIBUTOR WARNING: this rewrite applies to *all* source files, so
+-      // any bare `__dirname` / `__filename` in our own code resolves to the
+-      // shim chunk's on-disk location (i.e. `dist/chunks/`), NOT the source
+-      // file's own directory. To get a per-file path, declare a local shadow
+-      // at the top of the module:
+-      //
+-      //   import { fileURLToPath } from 'node:url';
+-      //   const __filename = fileURLToPath(import.meta.url);
+-      //   const __dirname  = path.dirname(__filename);
+-      //
+-      // esbuild leaves the local binding alone (it's a declared identifier,
+-      // not a free reference). For sibling-asset lookups in modules that may
+-      // be hoisted into a shared chunk, prefer
+-      // `resolveBundleDir(import.meta.url)` from
+-      // `packages/core/src/utils/bundlePaths.ts` — it both produces a
+-      // per-file path and strips the chunk segment when the module ends up
+-      // under `dist/chunks/`.
+-      __dirname: '__qwen_dirname',
+-      __filename: '__qwen_filename',
+     },
+     loader: { '.node': 'file' },
+     plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],
+diff --git a/scripts/build.js b/scripts/build.js
+index 8bc39f2c1..03dc856e0 100644
+--- a/scripts/build.js
++++ b/scripts/build.js
+@@ -38,11 +38,10 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
+ // 2. web-templates (embeddable web templates - used by cli)
+ // 3. channel-base (base channel infrastructure - used by channel adapters and cli)
+ // 4. channel adapters (depend on channel-base)
+-// 5. acp-bridge (depends on core - used by cli)
+-// 6. cli (depends on core, acp-bridge, web-templates, channel packages)
+-// 7. webui (shared UI components - used by vscode companion)
+-// 8. sdk (no internal dependencies)
+-// 9. vscode-ide-companion (depends on webui)
++// 5. cli (depends on core, web-templates, channel packages)
++// 6. webui (shared UI components - used by vscode companion)
++// 7. sdk (no internal dependencies)
++// 8. vscode-ide-companion (depends on webui)
+ const buildOrder = [
+   'packages/core',
+   'packages/web-templates',
+@@ -50,8 +49,8 @@ const buildOrder = [
+   'packages/channels/telegram',
+   'packages/channels/weixin',
+   'packages/channels/dingtalk',
++  'packages/channels/feishu',
+   'packages/channels/plugin-example',
+-  'packages/acp-bridge',
+   'packages/cli',
+   'packages/webui',
+   'packages/sdk-typescript',

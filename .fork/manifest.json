@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "upstream": {
+    "remote": "https://github.com/QwenLM/qwen-code.git",
+    "branch": "main"
+  },
+  "patches": {
+    "directory": "patches/",
+    "seriesFile": "patches/series",
+    "definitions": [
+      {
+        "file": "0001-branding-header.patch",
+        "title": "DataWorks branding header",
+        "reason": "Keep DataWorks DataAgent branding in the CLI header and startup display.",
+        "paths": [
+          "packages/cli/src/ui/components/AppHeader.test.tsx",
+          "packages/cli/src/ui/components/AsciiArt.ts",
+          "packages/cli/src/ui/components/ConfigInitDisplay.tsx",
+          "packages/cli/src/ui/components/Header.test.tsx",
+          "packages/cli/src/ui/components/Header.tsx"
+        ],
+        "tests": [
+          "cd packages/cli && npx vitest run src/ui/components/Header.test.tsx src/ui/components/AppHeader.test.tsx"
+        ]
+      },
+      {
+        "file": "0002-branding-tips.patch",
+        "title": "DataWorks startup tips",
+        "reason": "Keep startup tips and beta guidance tailored to DataWorks usage.",
+        "paths": [
+          "packages/cli/src/services/tips/tipRegistry.ts",
+          "packages/cli/src/ui/components/Tips.test.ts",
+          "packages/cli/src/ui/components/Tips.tsx"
+        ],
+        "tests": [
+          "cd packages/cli && npx vitest run src/ui/components/Tips.test.ts"
+        ]
+      },
+      {
+        "file": "0003-i18n-dataworks.patch",
+        "title": "DataWorks i18n strings",
+        "reason": "Keep DataWorks-specific placeholders and usage examples.",
+        "paths": [
+          "packages/cli/src/i18n/locales/en.js",
+          "packages/cli/src/i18n/locales/zh.js"
+        ]
+      },
+      {
+        "file": "0004-dsw-oauth-redirect.patch",
+        "title": "DSW OAuth redirect rewrite",
+        "reason": "Rewrite MCP OAuth redirect URLs for the DSW proxy environment.",
+        "paths": [
+          "packages/core/src/mcp/constants.ts",
+          "packages/core/src/mcp/oauth-provider.ts"
+        ]
+      },
+      {
+        "file": "0005-osc8-internal.patch",
+        "title": "Internal OSC8 terminal links",
+        "reason": "Keep terminal hyperlink handling compatible with internal terminal environments.",
+        "paths": [
+          "packages/cli/src/ui/utils/osc8.test.ts",
+          "packages/cli/src/ui/utils/osc8.ts"
+        ],
+        "tests": ["cd packages/cli && npx vitest run src/ui/utils/osc8.test.ts"]
+      },
+      {
+        "file": "0006-dingtalk-channel-enhancements.patch",
+        "title": "DingTalk channel enhancements",
+        "reason": "Keep DingTalk channel card, markdown, and message routing behavior.",
+        "paths": [
+          "packages/channels/base/src/ChannelBase.ts",
+          "packages/channels/dingtalk/src/DingtalkAdapter.ts",
+          "packages/channels/dingtalk/src/markdown.ts"
+        ]
+      },
+      {
+        "file": "0007-feishu-channel.patch",
+        "title": "Feishu channel integration",
+        "reason": "Keep the fork-only Feishu channel package and CLI registry integration.",
+        "paths": [
+          "packages/channels/feishu",
+          "packages/cli/src/commands/channel/channel-registry.ts",
+          "packages/cli/tsconfig.json"
+        ]
+      },
+      {
+        "file": "0009-claude-websearch-compat.patch",
+        "title": "Claude WebSearch compatibility",
+        "reason": "Keep fork behavior around Claude WebSearch conversion and integration coverage.",
+        "paths": [
+          "packages/core/src/extension/claude-converter.ts",
+          "integration-tests/cli/web_search.test.ts"
+        ]
+      },
+      {
+        "file": "0010-build-single-bundle.patch",
+        "title": "Single-file bundle output",
+        "reason": "Fork uses single outfile (dist/cli.js) without code-splitting, and includes feishu in build order.",
+        "paths": ["esbuild.config.js", "scripts/build.js"]
+      },
+      {
+        "file": "0011-test-fork-adaptations.patch",
+        "title": "Test adaptations for fork UI and CI",
+        "reason": "Adapt tests for fork's OAuth menu structure, Aone CI runner detection, and static imports.",
+        "paths": [
+          "packages/cli/src/ui/auth/AuthDialog.test.tsx",
+          "packages/cli/src/ui/themes/detect-terminal-theme.test.ts",
+          "packages/cli/src/utils/doctorChecks.test.ts",
+          "packages/core/src/skills/skill-activation.test.ts"
+        ],
+        "tests": [
+          "cd packages/cli && npx vitest run src/ui/auth/AuthDialog.test.tsx src/ui/themes/detect-terminal-theme.test.ts src/utils/doctorChecks.test.ts",
+          "cd packages/core && npx vitest run src/skills/skill-activation.test.ts"
+        ]
+      }
+    ]
+  },
+  "packageIdentity": {
+    "registry": "https://registry.anpm.alibaba-inc.com",
+    "excludeRegistry": [
+      "package.json",
+      "packages/channels/plugin-example/package.json"
+    ],
+    "mappings": {
+      "package.json": "@alife/dataworks-qwen-code",
+      "packages/cli/package.json": "@alife/dataworks-qwen-code",
+      "packages/core/package.json": "@alife/dataworks-qwen-code-core",
+      "packages/webui/package.json": "@alife/dataworks-qwen-code-webui",
+      "packages/web-templates/package.json": "@alife/dataworks-qwen-code-web-templates",
+      "packages/channels/base/package.json": "@alife/dataworks-qwen-code-channel-base",
+      "packages/channels/dingtalk/package.json": "@alife/dataworks-qwen-code-channel-dingtalk",
+      "packages/channels/feishu/package.json": "@alife/dataworks-qwen-code-channel-feishu",
+      "packages/channels/telegram/package.json": "@alife/dataworks-qwen-code-channel-telegram",
+      "packages/channels/weixin/package.json": "@alife/dataworks-qwen-code-channel-weixin",
+      "packages/channels/plugin-example/package.json": "@alife/dataworks-qwen-code-channel-plugin-example"
+    }
+  }
+}
