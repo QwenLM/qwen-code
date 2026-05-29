@@ -831,6 +831,59 @@ export function createServeApp(
     app.get('/demo', demoHandler);
   }
 
+  // Access-log middleware. Registered BEFORE bearerAuth and JSON parser
+  // so auth rejections (401) and malformed-body errors (400) are also
+  // captured in the daemon log. Excluded:
+  //  - GET /health (high-frequency probe, would drown signal)
+  //  - Successful SSE streams (GET .../events with 200) — logged inline
+  //    at open/close; failed SSE handshakes (4xx) are still recorded.
+  if (daemonLog) {
+    const SESSION_ID_RE = /\/session\/([^/]+)/;
+    app.use((req, res, next) => {
+      const { method, path: reqPath } = req;
+      if (
+        (method === 'GET' && reqPath === '/health') ||
+        (method === 'POST' && reqPath.endsWith('/heartbeat'))
+      ) {
+        return next();
+      }
+      const startMs = Date.now();
+      res.on('finish', () => {
+        try {
+          const status = res.statusCode;
+          if (
+            method === 'GET' &&
+            reqPath.endsWith('/events') &&
+            status === 200
+          ) {
+            return;
+          }
+          const durationMs = Date.now() - startMs;
+          const sessionMatch = reqPath.match(SESSION_ID_RE);
+          const sessionId = sessionMatch?.[1];
+          const clientId = req.headers['x-qwen-client-id'] as
+            | string
+            | undefined;
+          const ctx = {
+            route: `${method} ${reqPath}`,
+            ...(sessionId ? { sessionId } : {}),
+            ...(clientId ? { clientId } : {}),
+            status,
+            durationMs,
+          };
+          if (status >= 400) {
+            daemonLog.warn('request completed', ctx);
+          } else {
+            daemonLog.info('request completed', ctx);
+          }
+        } catch {
+          // Logging failure must not affect the request.
+        }
+      });
+      next();
+    });
+  }
+
   app.use(bearerAuth(opts.token));
 
   app.use(express.json({ limit: '10mb' }));
@@ -1339,7 +1392,19 @@ export function createServeApp(
       // The disconnect-without-reap branch also needs to skip
       // `res.json` — writing to a closed socket would throw EPIPE
       // through Express's default error handler.
+      if (daemonLog) {
+        daemonLog.info(
+          session.attached ? 'session attached' : 'session spawned',
+          { sessionId: session.sessionId, clientId: session.clientId },
+        );
+      }
       if (!res.writable) {
+        if (daemonLog) {
+          daemonLog.warn('session reaped (client disconnected before response)', {
+            sessionId: session.sessionId,
+            attached: session.attached,
+          });
+        }
         if (!session.attached) {
           // `requireZeroAttaches: true` closes the BQ9tV race: if
           // a second client called `spawnOrAttach` for the same
@@ -1402,6 +1467,12 @@ export function createServeApp(
                 workspaceCwd: cwd,
                 ...(clientId !== undefined ? { clientId } : {}),
               });
+        if (daemonLog) {
+          daemonLog.info(
+            `session ${action}${session.attached ? ' (attached)' : ''}`,
+            { sessionId: session.sessionId, clientId: session.clientId },
+          );
+        }
         // Mirror the `POST /session` disconnect-cleanup path (see the
         // long comment above the matching `if (!res.writable)` there
         // for the rationale around `res.writable` vs `req.aborted` /
@@ -1602,11 +1673,34 @@ export function createServeApp(
           promptId,
         },
       )
+      .then(
+        () => {
+          if (daemonLog) {
+            daemonLog.info('prompt turn completed', {
+              sessionId,
+              promptId,
+              clientId,
+            });
+          }
+        },
+        (err) => {
+          if (daemonLog) {
+            const errName = err instanceof Error ? err.name : undefined;
+            daemonLog.warn(
+              `prompt turn failed: ${errName ? `[${errName}] ` : ''}${err instanceof Error ? err.message : String(err)}`,
+              { sessionId, promptId, clientId },
+            );
+          }
+        },
+      )
       .finally(() => {
         if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
       })
       .catch(() => {});
 
+    if (daemonLog) {
+      daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
+    }
     res.status(202).json({ promptId, lastEventId });
   });
 
@@ -1676,6 +1770,9 @@ export function createServeApp(
         } as Parameters<HttpAcpBridge['cancelSession']>[1],
         clientId !== undefined ? { clientId } : undefined,
       );
+      if (daemonLog) {
+        daemonLog.info('cancel sent', { sessionId, clientId });
+      }
       res.status(204).end();
     } catch (err) {
       sendBridgeError(res, err, {
@@ -1854,6 +1951,13 @@ export function createServeApp(
         sessionId,
         clientId !== undefined ? { clientId } : undefined,
       );
+      if (daemonLog) {
+        const recap = response.recap;
+        daemonLog.info(
+          recap ? `recap generated len=${recap.length}` : 'recap returned null',
+          { sessionId, clientId },
+        );
+      }
       res.status(200).json(response);
     } catch (err) {
       sendBridgeError(res, err, {
@@ -1890,6 +1994,13 @@ export function createServeApp(
         abort.signal,
         clientId !== undefined ? { clientId } : undefined,
       );
+      if (daemonLog) {
+        daemonLog.info('shell command completed', {
+          sessionId,
+          clientId,
+          exitCode: result.exitCode,
+        });
+      }
       res.status(200).json(result);
     } catch (err) {
       if (
@@ -2273,6 +2384,19 @@ export function createServeApp(
         sessionId,
       });
       return;
+    }
+
+    if (daemonLog) {
+      const sseOpenedAt = Date.now();
+      const sseClientId = req.headers['x-qwen-client-id'] as string | undefined;
+      daemonLog.info('SSE stream opened', { sessionId, clientId: sseClientId });
+      res.on('close', () => {
+        daemonLog.info('SSE stream closed', {
+          sessionId,
+          clientId: sseClientId,
+          durationMs: Date.now() - sseOpenedAt,
+        });
+      });
     }
 
     res.status(200);
