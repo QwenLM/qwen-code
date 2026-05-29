@@ -35,7 +35,6 @@ type ProviderGroup = 'alibaba' | 'third-party' | 'custom';
 
 interface ProviderConnectFormProps {
   onConnected: (result: QwenProviderConnectResult) => void;
-  activeSessionId?: string | null;
   onCancel?: () => void;
   showHeader?: boolean;
   className?: string;
@@ -114,7 +113,6 @@ function AnimatedSection({
 
 export function ProviderConnectForm({
   onConnected,
-  activeSessionId,
   onCancel,
   showHeader = true,
   className,
@@ -151,9 +149,7 @@ export function ProviderConnectForm({
     setLoading(true);
     setLoadError(null);
     try {
-      const result = await window.electronAPI.listQwenProviders(
-        activeSessionId ?? undefined,
-      );
+      const result = await window.electronAPI.listQwenProviders();
       setCatalog(result);
     } catch (error) {
       setLoadError(
@@ -164,7 +160,7 @@ export function ProviderConnectForm({
     } finally {
       setLoading(false);
     }
-  }, [activeSessionId, t]);
+  }, [t]);
 
   useEffect(() => {
     void loadCatalog();
@@ -244,10 +240,7 @@ export function ProviderConnectForm({
             }
           : {}),
       };
-      const result = await window.electronAPI.connectQwenProvider(
-        params,
-        activeSessionId ?? undefined,
-      );
+      const result = await window.electronAPI.connectQwenProvider(params);
       if (!result.success) {
         setFormError(result.error || t('providerConnect.errors.connectFailed'));
         return;
@@ -269,7 +262,6 @@ export function ProviderConnectForm({
     }
   }, [
     apiKey,
-    activeSessionId,
     baseUrl,
     contextWindowSize,
     enableThinking,

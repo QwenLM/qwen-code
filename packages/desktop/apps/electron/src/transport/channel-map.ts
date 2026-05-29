@@ -5,15 +5,15 @@
  * the method→channel mapping used by buildClientApi().
  */
 
-import { RPC_CHANNELS } from '../shared/types'
-import type { ChannelMap } from './build-api'
+import { RPC_CHANNELS } from '../shared/types';
+import type { ChannelMap } from './build-api';
 
 function invoke(channel: string, transform?: (result: unknown) => unknown) {
-  return { type: 'invoke' as const, channel, ...(transform && { transform }) }
+  return { type: 'invoke' as const, channel, ...(transform && { transform }) };
 }
 
 function listener(channel: string) {
-  return { type: 'listener' as const, channel }
+  return { type: 'listener' as const, channel };
 }
 
 export const CHANNEL_MAP = {
@@ -166,6 +166,21 @@ export const CHANNEL_MAP = {
   ),
   setDefaultThinkingLevel: invoke(
     RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL,
+  ),
+  getQwenCoreSettings: invoke(RPC_CHANNELS.settings.GET_QWEN_CORE_SETTINGS),
+  setQwenCoreSetting: invoke(RPC_CHANNELS.settings.SET_QWEN_CORE_SETTING),
+  setQwenMcpServer: invoke(RPC_CHANNELS.settings.SET_QWEN_MCP_SERVER),
+  removeQwenMcpServer: invoke(RPC_CHANNELS.settings.REMOVE_QWEN_MCP_SERVER),
+  setQwenHook: invoke(RPC_CHANNELS.settings.SET_QWEN_HOOK),
+  removeQwenHook: invoke(RPC_CHANNELS.settings.REMOVE_QWEN_HOOK),
+  setQwenExtensionSetting: invoke(
+    RPC_CHANNELS.settings.SET_QWEN_EXTENSION_SETTING,
+  ),
+  getQwenPermissionSettings: invoke(
+    RPC_CHANNELS.settings.GET_QWEN_PERMISSION_SETTINGS,
+  ),
+  setQwenPermissionRules: invoke(
+    RPC_CHANNELS.settings.SET_QWEN_PERMISSION_RULES,
   ),
   getGlobalPermissionMode: invoke(
     RPC_CHANNELS.settings.GET_GLOBAL_PERMISSION_MODE,
@@ -441,4 +456,4 @@ export const CHANNEL_MAP = {
   startWhatsAppConnect: invoke(RPC_CHANNELS.messaging.WA_START_CONNECT),
   submitWhatsAppPhone: invoke(RPC_CHANNELS.messaging.WA_SUBMIT_PHONE),
   onWhatsAppEvent: listener(RPC_CHANNELS.messaging.WA_UI_EVENT),
-} satisfies ChannelMap
+} satisfies ChannelMap;

@@ -73,8 +73,7 @@ function getModelOptionsForConnection(
 
 export default function AiSettingsPage() {
   const { t } = useTranslation();
-  const { activeSessionId, llmConnections, refreshLlmConnections } =
-    useAppShellContext();
+  const { llmConnections, refreshLlmConnections } = useAppShellContext();
   const [providerDialogOpen, setProviderDialogOpen] = useState(false);
 
   const qwenConnection = useMemo(
@@ -191,7 +190,6 @@ export default function AiSettingsPage() {
         open={providerDialogOpen}
         onOpenChange={setProviderDialogOpen}
         onConnected={handleProviderConnected}
-        activeSessionId={activeSessionId}
       />
     </div>
   );

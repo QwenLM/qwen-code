@@ -13,7 +13,6 @@ import {
   SettingsCard,
   SettingsSegmentedControl,
 } from '@/components/settings';
-import { useAppShellContext } from '@/context/AppShellContext';
 import { routes } from '@/lib/navigate';
 import type { DetailsPageMeta } from '@/lib/navigation-registry';
 import type {
@@ -57,7 +56,6 @@ function normalizeRules(rules: string[]): string[] {
 
 export default function PermissionsSettingsPage() {
   const { t } = useTranslation();
-  const { activeSessionId } = useAppShellContext();
   const [isLoading, setIsLoading] = useState(true);
   const [settings, setSettings] = useState<QwenPermissionSettings | null>(null);
   const [activeRuleType, setActiveRuleType] =
@@ -72,7 +70,7 @@ export default function PermissionsSettingsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const loadSettings = useCallback(async () => {
-    if (!activeSessionId || !window.electronAPI) {
+    if (!window.electronAPI) {
       setSettings(null);
       setIsLoading(false);
       return;
@@ -81,10 +79,8 @@ export default function PermissionsSettingsPage() {
     setIsLoading(true);
     setError(null);
     try {
-      const result = await window.electronAPI.sessionCommand(activeSessionId, {
-        type: 'getQwenPermissionSettings',
-      });
-      setSettings(result as QwenPermissionSettings);
+      const result = await window.electronAPI.getQwenPermissionSettings();
+      setSettings(result);
     } catch (loadError) {
       setError(
         loadError instanceof Error ? loadError.message : String(loadError),
@@ -93,7 +89,7 @@ export default function PermissionsSettingsPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [activeSessionId]);
+  }, []);
 
   useEffect(() => {
     void loadSettings();
@@ -114,21 +110,17 @@ export default function PermissionsSettingsPage() {
       ruleType: PermissionRuleType,
       rules: string[],
     ) => {
-      if (!activeSessionId || !window.electronAPI) return;
+      if (!window.electronAPI) return;
       const key = `${scope}:${ruleType}`;
       setSavingKey(key);
       setError(null);
       try {
-        const result = await window.electronAPI.sessionCommand(
-          activeSessionId,
-          {
-            type: 'setQwenPermissionRules',
-            scope,
-            ruleType,
-            rules: normalizeRules(rules),
-          },
+        const result = await window.electronAPI.setQwenPermissionRules(
+          scope,
+          ruleType,
+          normalizeRules(rules),
         );
-        setSettings(result as QwenPermissionSettings);
+        setSettings(result);
       } catch (saveError) {
         setError(
           saveError instanceof Error ? saveError.message : String(saveError),
@@ -137,7 +129,7 @@ export default function PermissionsSettingsPage() {
         setSavingKey(null);
       }
     },
-    [activeSessionId],
+    [],
   );
 
   const addRule = useCallback(
@@ -186,26 +178,16 @@ export default function PermissionsSettingsPage() {
               >
                 <SettingsCard className="px-4 py-3.5">
                   <div className="text-sm text-muted-foreground leading-relaxed space-y-2">
-                    <p>
-                      {t('settings.permissions.cliAlignedIntro')}
-                    </p>
-                    <p>
-                      {t('settings.permissions.cliAlignedFormat')}
-                    </p>
+                    <p>{t('settings.permissions.cliAlignedIntro')}</p>
+                    <p>{t('settings.permissions.cliAlignedFormat')}</p>
                     <div className="rounded-md border border-border/70 bg-muted/35 px-3 py-2.5 text-xs text-muted-foreground">
                       <div className="font-medium text-foreground/80">
                         {t('settings.permissions.quickGuideTitle')}
                       </div>
                       <div className="mt-1.5 space-y-1">
-                        <p>
-                          {t('settings.permissions.quickGuideTools')}
-                        </p>
-                        <p>
-                          {t('settings.permissions.quickGuideCommands')}
-                        </p>
-                        <p>
-                          {t('settings.permissions.quickGuideScopes')}
-                        </p>
+                        <p>{t('settings.permissions.quickGuideTools')}</p>
+                        <p>{t('settings.permissions.quickGuideCommands')}</p>
+                        <p>{t('settings.permissions.quickGuideScopes')}</p>
                       </div>
                     </div>
                     <button
@@ -225,11 +207,6 @@ export default function PermissionsSettingsPage() {
                 <div className="flex items-center justify-center py-12">
                   <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
                 </div>
-              ) : !activeSessionId ? (
-                <EmptyState
-                  title={t('settings.permissions.noSessionTitle')}
-                  description={t('settings.permissions.noSessionDesc')}
-                />
               ) : error && !settings ? (
                 <EmptyState
                   title={t('settings.permissions.unavailable')}

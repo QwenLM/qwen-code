@@ -8,7 +8,7 @@
  * An exhaustiveness test ensures new channels fail CI until classified.
  */
 
-import { RPC_CHANNELS } from './channels'
+import { RPC_CHANNELS } from './channels';
 
 // ---------------------------------------------------------------------------
 // LOCAL_ONLY — fundamentally requires local OS / Electron
@@ -216,7 +216,7 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   RPC_CHANNELS.settings.GET_SERVER_CONFIG,
   RPC_CHANNELS.settings.SET_SERVER_CONFIG,
   RPC_CHANNELS.settings.GET_SERVER_STATUS,
-])
+]);
 
 // ---------------------------------------------------------------------------
 // REMOTE_ELIGIBLE — runs on whichever server owns the workspace
@@ -309,6 +309,15 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.settings.CONNECT_QWEN_PROVIDER,
   RPC_CHANNELS.settings.GET_DEFAULT_THINKING_LEVEL,
   RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL,
+  RPC_CHANNELS.settings.GET_QWEN_CORE_SETTINGS,
+  RPC_CHANNELS.settings.SET_QWEN_CORE_SETTING,
+  RPC_CHANNELS.settings.SET_QWEN_MCP_SERVER,
+  RPC_CHANNELS.settings.REMOVE_QWEN_MCP_SERVER,
+  RPC_CHANNELS.settings.SET_QWEN_HOOK,
+  RPC_CHANNELS.settings.REMOVE_QWEN_HOOK,
+  RPC_CHANNELS.settings.SET_QWEN_EXTENSION_SETTING,
+  RPC_CHANNELS.settings.GET_QWEN_PERMISSION_SETTINGS,
+  RPC_CHANNELS.settings.SET_QWEN_PERMISSION_RULES,
   RPC_CHANNELS.settings.GET_GLOBAL_PERMISSION_MODE,
   RPC_CHANNELS.settings.SET_GLOBAL_PERMISSION_MODE,
 
@@ -424,16 +433,16 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.messaging.WA_START_CONNECT,
   RPC_CHANNELS.messaging.WA_SUBMIT_PHONE,
   RPC_CHANNELS.messaging.WA_UI_EVENT,
-])
+]);
 
 // ---------------------------------------------------------------------------
 // Query helpers
 // ---------------------------------------------------------------------------
 
 export function isLocalOnly(channel: string): boolean {
-  return LOCAL_ONLY_CHANNELS.has(channel)
+  return LOCAL_ONLY_CHANNELS.has(channel);
 }
 
 export function isRemoteEligible(channel: string): boolean {
-  return REMOTE_ELIGIBLE_CHANNELS.has(channel)
+  return REMOTE_ELIGIBLE_CHANNELS.has(channel);
 }

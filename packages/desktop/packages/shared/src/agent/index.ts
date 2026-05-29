@@ -1,6 +1,6 @@
 export * from './conversation-summary.ts';
 
-// eslint-disable-next-line import/no-internal-modules
+ 
 export {
   QwenAgent,
   QwenBackend,
@@ -9,6 +9,13 @@ export {
   getQwenSettingsPathViaAcp,
   getQwenCoreSettingsViaAcp,
   setQwenCoreSettingViaAcp,
+  setQwenMcpServerViaAcp,
+  removeQwenMcpServerViaAcp,
+  setQwenHookViaAcp,
+  removeQwenHookViaAcp,
+  setQwenExtensionSettingViaAcp,
+  getQwenPermissionSettingsViaAcp,
+  setQwenPermissionRulesViaAcp,
   getQwenMemoryPathsViaAcp,
   listQwenProvidersViaAcp,
   getQwenWorkspacePreflightViaAcp,

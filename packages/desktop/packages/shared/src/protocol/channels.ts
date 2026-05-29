@@ -190,6 +190,15 @@ export const RPC_CHANNELS = {
     CONNECT_QWEN_PROVIDER: 'settings:connectQwenProvider',
     GET_DEFAULT_THINKING_LEVEL: 'settings:getDefaultThinkingLevel',
     SET_DEFAULT_THINKING_LEVEL: 'settings:setDefaultThinkingLevel',
+    GET_QWEN_CORE_SETTINGS: 'settings:getQwenCoreSettings',
+    SET_QWEN_CORE_SETTING: 'settings:setQwenCoreSetting',
+    SET_QWEN_MCP_SERVER: 'settings:setQwenMcpServer',
+    REMOVE_QWEN_MCP_SERVER: 'settings:removeQwenMcpServer',
+    SET_QWEN_HOOK: 'settings:setQwenHook',
+    REMOVE_QWEN_HOOK: 'settings:removeQwenHook',
+    SET_QWEN_EXTENSION_SETTING: 'settings:setQwenExtensionSetting',
+    GET_QWEN_PERMISSION_SETTINGS: 'settings:getQwenPermissionSettings',
+    SET_QWEN_PERMISSION_RULES: 'settings:setQwenPermissionRules',
     GET_GLOBAL_PERMISSION_MODE: 'settings:getGlobalPermissionMode',
     SET_GLOBAL_PERMISSION_MODE: 'settings:setGlobalPermissionMode',
     GET_NETWORK_PROXY: 'settings:getNetworkProxy',
@@ -401,7 +410,7 @@ export const RPC_CHANNELS = {
     /** Broadcast to UI clients: QR string, pairing code, status, unavailable, error. */
     WA_UI_EVENT: 'messaging:wa:uiEvent',
   },
-} as const
+} as const;
 
 // IPC_CHANNELS compat alias removed — all consumers now use RPC_CHANNELS
 
@@ -410,11 +419,11 @@ export const RPC_CHANNELS = {
  * Used by the exhaustive routing test to ensure every channel is classified.
  */
 export function getAllChannelValues(): string[] {
-  const values: string[] = []
+  const values: string[] = [];
   for (const namespace of Object.values(RPC_CHANNELS)) {
     for (const channel of Object.values(namespace)) {
-      values.push(channel)
+      values.push(channel);
     }
   }
-  return values
+  return values;
 }

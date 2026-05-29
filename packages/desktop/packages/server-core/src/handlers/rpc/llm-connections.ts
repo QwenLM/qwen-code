@@ -12,6 +12,7 @@ import {
   getDefaultLlmConnection,
   getLlmConnection,
   getLlmConnections,
+  getWorkspaceByNameOrId,
   setDefaultLlmConnection,
   touchLlmConnection,
   updateLlmConnection,
@@ -38,7 +39,10 @@ import {
   getWorkspaceOrThrow,
   buildBackendHostRuntimeContext,
 } from '@craft-agent/server-core/handlers';
-import type { RpcServer } from '@craft-agent/server-core/transport';
+import type {
+  RequestContext,
+  RpcServer,
+} from '@craft-agent/server-core/transport';
 import type { HandlerDeps } from '../handler-deps';
 
 function attachRuntimeModelState<T extends LlmConnection>(connection: T): T {
@@ -88,6 +92,32 @@ function ensureQwenConnection(slug = QWEN_CODE_CONNECTION_SLUG): LlmConnection {
   );
 }
 
+async function getQwenWorkspaceAcpOptions(
+  deps: HandlerDeps,
+  ctx: RequestContext,
+) {
+  const workspaceId =
+    ctx.workspaceId ??
+    (ctx.webContentsId
+      ? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId)
+      : undefined);
+  const workspace = workspaceId ? getWorkspaceByNameOrId(workspaceId) : null;
+  const { loadWorkspaceConfig } = await import(
+    '@craft-agent/shared/workspaces'
+  );
+  const workspaceConfig = workspace
+    ? loadWorkspaceConfig(workspace.rootPath)
+    : null;
+  const projectRoot = workspace?.rootPath;
+  const cwd = workspaceConfig?.defaults?.workingDirectory || projectRoot;
+
+  return {
+    hostRuntime: buildBackendHostRuntimeContext(deps.platform),
+    ...(cwd ? { cwd } : {}),
+    ...(projectRoot ? { processCwd: projectRoot } : {}),
+  };
+}
+
 export function registerLlmConnectionsHandlers(
   server: RpcServer,
   deps: HandlerDeps,
@@ -96,56 +126,26 @@ export function registerLlmConnectionsHandlers(
 
   server.handle(
     RPC_CHANNELS.settings.LIST_QWEN_PROVIDERS,
-    async (_ctx, sessionId?: string): Promise<QwenProviderCatalog> => {
-      if (sessionId) {
-        try {
-          return await sessionManager.listSessionQwenProviders(sessionId);
-        } catch (error) {
-          deps.platform.logger?.warn(
-            `Qwen provider list via active session failed: ${error instanceof Error ? error.message : error}`,
-          );
-        }
-      }
-      return listQwenProvidersViaAcp({
-        hostRuntime: buildBackendHostRuntimeContext(deps.platform),
-      });
-    },
+    async (ctx): Promise<QwenProviderCatalog> =>
+      listQwenProvidersViaAcp(await getQwenWorkspaceAcpOptions(deps, ctx)),
   );
 
   server.handle(
     RPC_CHANNELS.settings.CONNECT_QWEN_PROVIDER,
     async (
-      _ctx,
+      ctx,
       params: QwenProviderConnectParams,
-      sessionId?: string,
+      _sessionId?: string,
     ): Promise<QwenProviderConnectResult> => {
       try {
         const scopedParams: QwenProviderConnectParams = {
           ...params,
           scope: 'user',
         };
-        let result: QwenProviderConnectResult;
-        if (sessionId) {
-          try {
-            result = await sessionManager.connectSessionQwenProvider(
-              sessionId,
-              scopedParams,
-            );
-          } catch (error) {
-            deps.platform.logger?.warn(
-              `Qwen provider connect via active session failed: ${error instanceof Error ? error.message : error}`,
-            );
-            result = await connectQwenProviderViaAcp(
-              { hostRuntime: buildBackendHostRuntimeContext(deps.platform) },
-              scopedParams,
-            );
-          }
-        } else {
-          result = await connectQwenProviderViaAcp(
-            { hostRuntime: buildBackendHostRuntimeContext(deps.platform) },
-            scopedParams,
-          );
-        }
+        const result = await connectQwenProviderViaAcp(
+          await getQwenWorkspaceAcpOptions(deps, ctx),
+          scopedParams,
+        );
         if (!result.success) return result;
 
         const existing = ensureQwenConnection();
