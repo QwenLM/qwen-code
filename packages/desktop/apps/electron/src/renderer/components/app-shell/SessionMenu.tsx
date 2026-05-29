@@ -174,6 +174,8 @@ export function SessionMenu({
 
   // Get menu components from context (works with both DropdownMenu and ContextMenu)
   const { MenuItem, Separator, Sub, SubTrigger, SubContent } = useMenuComponents()
+  const hasLeadingActions =
+    !hideMetadataActions || (hasRemoteWorkspaces && Boolean(onSendToWorkspace))
 
   return (
     <>
@@ -205,10 +207,11 @@ export function SessionMenu({
         </MenuItem>
       )}
 
-      {/* Connect to Messaging — pairing code flow */}
-      <MessagingSessionMenuItem sessionId={sessionId} />
+      {!hideMetadataActions && (
+        <MessagingSessionMenuItem sessionId={sessionId} />
+      )}
 
-      <Separator />
+      {hasLeadingActions && <Separator />}
 
       {!hideMetadataActions && (
         <>

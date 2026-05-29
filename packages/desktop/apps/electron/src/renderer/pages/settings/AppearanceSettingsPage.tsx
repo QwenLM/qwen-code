@@ -178,7 +178,7 @@ export default function AppearanceSettingsPage() {
           window.electronAPI.getToolIconMappings(),
           window.electronAPI.getHomeDir(),
         ])
-        setToolIcons(mappings)
+        setToolIcons(mappings.filter(mapping => mapping.id !== 'craft-agent'))
         setToolIconsJsonPath(`${homeDir}/.craft-agent/tool-icons/tool-icons.json`)
       } catch (error) {
         console.error('Failed to load tool icon mappings:', error)

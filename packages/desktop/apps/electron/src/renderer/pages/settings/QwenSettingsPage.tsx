@@ -140,15 +140,6 @@ function stringValue(
   return typeof value === 'string' ? value : fallback;
 }
 
-function numberValue(
-  snapshot: QwenCoreSettingsSnapshot | null,
-  key: QwenCoreSettingKey,
-  fallback: number,
-): number {
-  const value = valueOf(snapshot, key, fallback);
-  return typeof value === 'number' ? value : fallback;
-}
-
 function parseLines(value: string): string[] | undefined {
   const lines = value
     .split('\n')
@@ -655,35 +646,6 @@ function GeneralTab({
             onValueChange={(value) => void onSave('tools.approvalMode', value)}
           />
           <SettingsToggle
-            label={t('settings.qwen.general.autoUpdate')}
-            description={t('settings.qwen.general.autoUpdateDesc')}
-            checked={boolValue(snapshot, 'general.enableAutoUpdate', true)}
-            onCheckedChange={(checked) =>
-              void onSave('general.enableAutoUpdate', checked)
-            }
-          />
-          <SettingsToggle
-            label={t('settings.qwen.general.sessionRecap')}
-            description={t('settings.qwen.general.sessionRecapDesc')}
-            checked={boolValue(snapshot, 'general.showSessionRecap', false)}
-            onCheckedChange={(checked) =>
-              void onSave('general.showSessionRecap', checked)
-            }
-          />
-          <NumberSetting
-            label={t('settings.qwen.general.recapThreshold')}
-            description={t('settings.qwen.general.recapThresholdDesc')}
-            value={numberValue(
-              snapshot,
-              'general.sessionRecapAwayThresholdMinutes',
-              5,
-            )}
-            min={1}
-            onSave={(value) =>
-              onSave('general.sessionRecapAwayThresholdMinutes', value)
-            }
-          />
-          <SettingsToggle
             label={t('settings.qwen.general.commitAttribution')}
             description={t('settings.qwen.general.commitAttributionDesc')}
             checked={boolValue(snapshot, 'general.gitCoAuthor.commit', true)}
@@ -760,44 +722,6 @@ function GeneralTab({
         </SettingsCard>
       </SettingsSection>
     </>
-  );
-}
-
-function NumberSetting({
-  label,
-  description,
-  value,
-  min,
-  onSave,
-}: {
-  label: string;
-  description: string;
-  value: number;
-  min: number;
-  onSave: (value: number) => Promise<void>;
-}) {
-  const [draft, setDraft] = useState(String(value));
-  useEffect(() => setDraft(String(value)), [value]);
-  const parsed = Number(draft);
-  return (
-    <SettingsInput
-      inCard
-      label={label}
-      description={description}
-      value={draft}
-      onChange={setDraft}
-      action={
-        <Button
-          size="sm"
-          onClick={() => void onSave(parsed)}
-          disabled={
-            !Number.isFinite(parsed) || parsed < min || parsed === value
-          }
-        >
-          <Save className="w-4 h-4" />
-        </Button>
-      }
-    />
   );
 }
 
