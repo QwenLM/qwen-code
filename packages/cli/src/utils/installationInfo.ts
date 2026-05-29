@@ -215,8 +215,9 @@ function getStandaloneInstallInfo(
 }
 
 function standaloneInstallDirForCliPath(realPath: string): string | null {
+  const normalized = realPath.replace(/\\/g, '/');
   const suffix = '/lib/cli.js';
-  if (!realPath.endsWith(suffix)) {
+  if (!normalized.endsWith(suffix)) {
     return null;
   }
   return realPath.slice(0, -suffix.length);
