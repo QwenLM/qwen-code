@@ -95,7 +95,6 @@ export function DeleteSessionDialog({
     if (deleting) return;
 
     if (selectedIds.size > 0) {
-      if (!deleteSessions) return;
       const filteredSet = new Set(filtered.map((s) => s.sessionId));
       const idsToDelete = Array.from(selectedIds).filter((id) =>
         filteredSet.has(id),
@@ -108,15 +107,8 @@ export function DeleteSessionDialog({
           const failed = res.errors.length;
 
           if (failed > 0 && succeeded > 0) {
-            onError(
-              new Error(
-                t('delete.partialFail', {
-                  removed: succeeded,
-                  failed,
-                  detail: res.errors[0].error,
-                }),
-              ),
-            );
+            onDeleted([...res.removed, ...res.notFound]);
+            onError(new Error(res.errors[0].error));
             onClose();
             return;
           }
@@ -156,7 +148,6 @@ export function DeleteSessionDialog({
       setMessage(t('delete.cannotCurrent'));
       return;
     }
-    if (!deleteSession) return;
     setDeleting(true);
     deleteSession(session.sessionId)
       .then((removed) => {
@@ -203,6 +194,7 @@ export function DeleteSessionDialog({
           e.preventDefault();
           if (filtered.length > 0) {
             setSearchMode(false);
+            setSelectedIdx(0);
           }
           return;
         }

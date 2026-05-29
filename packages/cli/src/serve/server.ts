@@ -1650,6 +1650,7 @@ export function createServeApp(
       const uniqueIds = [...new Set(sessionIds as string[])];
       const closeResults = await Promise.allSettled(
         uniqueIds.map(async (id) => {
+          // Intentional: no clientId — batch delete bypasses per-tab ownership.
           await bridge.closeSession(id);
           return id;
         }),
@@ -1679,6 +1680,13 @@ export function createServeApp(
       const result = await new SessionService(boundWorkspace).removeSessions(
         closedIds,
       );
+      for (const e of result.errors) {
+        const msg =
+          e.error instanceof Error ? e.error.message : String(e.error);
+        writeStderrLine(
+          `qwen serve: removeSession failed for ${safeLogValue(e.sessionId)}: ${safeLogValue(msg)}`,
+        );
+      }
       res.status(200).json({
         removed: result.removed,
         notFound: result.notFound,

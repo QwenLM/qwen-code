@@ -45,7 +45,7 @@ export function createDaemonWorkspaceActions({
       if (result.errors.length > 0) {
         throw new Error(result.errors[0].error);
       }
-      return result.removed.length > 0;
+      return result.removed.length > 0 || result.notFound.length > 0;
     },
 
     async deleteSessions(sessionIds: string[]) {
