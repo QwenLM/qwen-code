@@ -12,7 +12,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import i18n from 'i18next'
 import { GripHorizontal } from 'lucide-react'
-import { motion, AnimatePresence } from 'motion/react' // motion used for backdrop only
+import { motion, AnimatePresence } from 'framer-motion' // motion used for backdrop only
 import { Popover, PopoverTrigger, PopoverContent } from './popover'
 import { Button } from './button'
 import { cn } from '@/lib/utils'
@@ -723,13 +723,13 @@ export function EditPopover({
   triggerClassName,
   side = 'bottom',
   align = 'end',
-  secondaryAction,
+  secondaryAction: _secondaryAction,
   overridePlaceholder,
   displayLabel,
   open: controlledOpen,
   onOpenChange: controlledOnOpenChange,
   modal = false,
-  defaultValue = '',
+  defaultValue: _defaultValue = '',
   inlineExecution = false,
 }: EditPopoverProps) {
   const { t } = useTranslation()
@@ -738,14 +738,16 @@ export function EditPopover({
 
   // Build placeholder: for inline execution use rotating array, otherwise build descriptive string
   // overridePlaceholder allows contexts like add-source/add-skill to say "add" instead of "change"
-  const placeholder = inlineExecution
-    ? COMPACT_PLACEHOLDER_KEYS.map(key => t(key))
-    : (() => {
-        const basePlaceholder = overridePlaceholder ?? t("editPopover.describePlaceholder")
-        return example
-          ? `${basePlaceholder.replace(/\.{3}$/, '')}, e.g., "${example}"`
-          : basePlaceholder
-      })()
+  const placeholder = useMemo(() => {
+    if (inlineExecution) {
+      return COMPACT_PLACEHOLDER_KEYS.map(key => t(key))
+    }
+
+    const basePlaceholder = overridePlaceholder ?? t("editPopover.describePlaceholder")
+    return example
+      ? `${basePlaceholder.replace(/\.{3}$/, '')}, e.g., "${example}"`
+      : basePlaceholder
+  }, [inlineExecution, overridePlaceholder, example, t])
 
   // Support both controlled and uncontrolled modes:
   // - Uncontrolled (default): internal state manages open/close
@@ -753,13 +755,13 @@ export function EditPopover({
   const [internalOpen, setInternalOpen] = useState(false)
   const isControlled = controlledOpen !== undefined
   const open = isControlled ? controlledOpen : internalOpen
-  const setOpen = (value: boolean) => {
+  const setOpen = useCallback((value: boolean) => {
     if (isControlled) {
       controlledOnOpenChange?.(value)
     } else {
       setInternalOpen(value)
     }
-  }
+  }, [isControlled, controlledOnOpenChange])
 
   // Use App context for session management (same code path as main chat)
   const { onCreateSession, onSendMessage, onRespondToPermission, onRespondToCredential } = useAppShellContext()
@@ -1099,7 +1101,7 @@ export function EditPopover({
 export const EditButton = React.forwardRef<
   HTMLButtonElement,
   React.ComponentPropsWithoutRef<typeof Button>
->(function EditButton({ className, ...props }, ref) {
+>(({ className, ...props }, ref) => {
   const { t } = useTranslation()
   return (
     <Button
@@ -1114,3 +1116,5 @@ export const EditButton = React.forwardRef<
     </Button>
   )
 })
+
+EditButton.displayName = 'EditButton'
