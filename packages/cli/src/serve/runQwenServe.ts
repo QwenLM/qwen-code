@@ -804,15 +804,23 @@ export async function runQwenServe(
       // resolution + audit emit) instead of `BridgeClient`'s inline
       // raw-fs proxy. Closes the `ws.ts:613` follow-up thread.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
-      ...(contextFilenameForInit !== undefined
-        ? { contextFilename: contextFilenameForInit }
-        : {}),
-      // `POST /session/:id/approval-mode` accepts an opt-in
-      // `persist: true` flag. We re-load settings on each persist call
-      // rather than caching a `LoadedSettings` handle — another writer
-      // could have touched the file between calls. Both persist
-      // callbacks run through `withSettingsLock` to serialize the
-      // read-modify-write cycle.
+      // #4175 Wave 4 PR 17: `POST /session/:id/approval-mode` accepts
+      // an opt-in `persist: true` flag. We re-load settings on each
+      // persist call rather than caching a `LoadedSettings` handle —
+      // another writer (CLI, another daemon, an editor) could have
+      // touched the file between calls, so the freshest state wins
+      // over a stale in-memory cache.
+      //
+      // #4282 fold-in 4 (qwen-latest C2): both persist callbacks run
+      // through `withSettingsLock` — a per-workspace promise chain that
+      // serializes the read-modify-write cycle. Without the lock, two
+      // concurrent `POST /workspace/tools/:name/enable` requests could
+      // both read the same pre-modification state and the second write
+      // would silently overwrite the first toggle, leaving the disk
+      // copy out of sync with the SDK reducer's view. The lock costs
+      // one tick of latency per call but eliminates the lost-update
+      // window for the entire process; cross-daemon races against the
+      // same workspace file remain (rare; documented).
       persistApprovalMode: (workspace, mode) =>
         withSettingsLock(workspace, async () => {
           const fresh = loadSettings(workspace);

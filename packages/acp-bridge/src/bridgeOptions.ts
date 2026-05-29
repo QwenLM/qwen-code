@@ -255,19 +255,7 @@ export interface BridgeOptions {
     enabled: boolean,
   ) => Promise<void>;
   /**
-   * Optional override for the basename
-   * (or single relative path) of the workspace context file written
-   * by `POST /workspace/init`. When omitted, falls back to
-   * `getCurrentGeminiMdFilename()` — the process-global value, which
-   * the daemon parent never updates because it doesn't go through
-   * `loadCliConfig`. Production callers (`runQwenServe`) snapshot the
-   * resolved filename from the workspace's merged settings at boot
-   * and pass it here so init writes the same file the ACP child
-   * reads. Bridge tests can pass any literal.
-   */
-  contextFilename?: string;
-  /**
-   * -- optional injection seam for daemon-host
+   * #4175 Wave 5 PR 22b/2 — optional injection seam for daemon-host
    * status cells (env snapshot, daemon preflight). Production
    * `qwen serve` provides
    * `createDaemonStatusProvider()` from
