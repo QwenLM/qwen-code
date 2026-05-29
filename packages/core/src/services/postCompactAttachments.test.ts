@@ -352,7 +352,7 @@ describe('countToolResponseImages', () => {
 });
 
 import { readFileSizeAdaptive } from './postCompactAttachments.js';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -902,6 +902,36 @@ describe('composePostCompactHistory', () => {
       .join('\n');
     expect(allText).toContain(inside);
     expect(allText).not.toContain('/etc/hosts');
+  });
+
+  it('rejects a symlink inside the workspace that points outside it', async () => {
+    // Security: a symlink LIVING in the workspace but pointing OUTSIDE
+    // (e.g. workspace/.env -> ~/.ssh/id_rsa) passes a lexical boundary
+    // check but must be rejected — realpath resolution catches it.
+    const outsideDir = mkdtempSync(join(tmpdir(), 'pca-outside-'));
+    const secret = join(outsideDir, 'secret.txt');
+    writeFileSync(secret, 'TOP_SECRET_CONTENT');
+    const link = join(tmpDir, 'innocent.ts');
+    symlinkSync(secret, link); // workspace/innocent.ts -> outsideDir/secret.txt
+
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { file_path: link } } },
+        ],
+      },
+    ];
+    const result = await composePostCompactHistory(history, 'SUM', {
+      workspaceRoot: tmpDir,
+    });
+    const allText = result
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+    // Lexical resolve would embed the secret; realpath rejects the link.
+    expect(allText).not.toContain('TOP_SECRET_CONTENT');
+    rmSync(outsideDir, { recursive: true, force: true });
   });
 
   it('honors AbortSignal — does not invoke file reads after abort (Finding 5)', async () => {

@@ -17,6 +17,7 @@
 
 import type { Content, Part } from '@google/genai';
 import { readFile, stat } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep as pathSep } from 'node:path';
 import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
@@ -563,8 +564,14 @@ function trailingFunctionCallContent(history: Content[]): Content | undefined {
  */
 function isInsideWorkspace(filePath: string, workspaceRoot?: string): boolean {
   if (!workspaceRoot) return true;
-  const resolvedFile = resolvePath(filePath);
-  const resolvedRoot = resolvePath(workspaceRoot);
+  // Resolve symlinks (not just lexical normalization) so a symlink that
+  // lives INSIDE the workspace but points OUTSIDE — e.g.
+  // `workspace/.env -> ~/.ssh/id_rsa` — cannot smuggle a sensitive file
+  // past the boundary and into the post-compact history sent to the
+  // provider. Mirrors WorkspaceContext.isPathWithinWorkspace's realpath
+  // handling.
+  const resolvedFile = safeRealpath(filePath);
+  const resolvedRoot = safeRealpath(workspaceRoot);
   // Append a trailing separator so a sibling path that shares a prefix
   // (e.g. workspace=/foo/bar, file=/foo/bar2/x.ts) is correctly
   // classified as outside.
@@ -572,6 +579,20 @@ function isInsideWorkspace(filePath: string, workspaceRoot?: string): boolean {
     ? resolvedRoot
     : resolvedRoot + pathSep;
   return resolvedFile === resolvedRoot || resolvedFile.startsWith(rootWithSep);
+}
+
+/**
+ * realpathSync that falls back to lexical resolution when the path does
+ * not exist (realpathSync throws ENOENT). A non-existent path can't leak
+ * content anyway — readFileSizeAdaptive returns 'missing' for it — so the
+ * lexical fallback only affects the boundary classification, not safety.
+ */
+function safeRealpath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return resolvePath(p);
+  }
 }
 
 export async function composePostCompactHistory(

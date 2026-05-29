@@ -24,6 +24,7 @@ import { CHARS_PER_TOKEN, estimatePromptTokens } from './tokenEstimation.js';
 import {
   composePostCompactHistory,
   countToolResponseImages,
+  postProcessSummary,
   stripAnalysisBlock,
 } from './postCompactAttachments.js';
 
@@ -417,12 +418,36 @@ export class ChatCompressionService {
     if (!isSummaryEmpty) {
       // Use the new composer — assembles summary + ack + file restores +
       // image restore. No tail preservation, no continuation bridge.
-      extraHistory = await composePostCompactHistory(curatedHistory, summary, {
-        workspaceRoot: config.getTargetDir(),
-        signal,
-        maxFiles: tuning.maxRecentFiles,
-        maxImages: tuning.maxRecentImages,
-      });
+      try {
+        extraHistory = await composePostCompactHistory(
+          curatedHistory,
+          summary,
+          {
+            workspaceRoot: config.getTargetDir(),
+            signal,
+            maxFiles: tuning.maxRecentFiles,
+            maxImages: tuning.maxRecentImages,
+          },
+        );
+      } catch (err) {
+        // The summary side-query already succeeded; only restoration
+        // assembly (disk I/O, history walking) failed. Degrade to
+        // summary + ack rather than letting the throw escape to
+        // sendMessageStream — an uncaught error there crashes the active
+        // turn AND bypasses the COMPRESSION_FAILED breaker. The summary
+        // still reduces context, so this is a degraded success, not a
+        // compression failure.
+        config
+          .getDebugLogger()
+          .warn(`[chat-compression] composePostCompactHistory failed: ${err}`);
+        extraHistory = [
+          { role: 'user', parts: [{ text: postProcessSummary(summary) }] },
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          },
+        ];
+      }
 
       // Best-effort token math using *only* model-reported token counts.
       //
