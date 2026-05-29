@@ -551,6 +551,7 @@ describe('useSlashCommandProcessor', () => {
           new Map(),
           true,
           null,
+          mockUpdateItem,
         ),
       );
 
@@ -670,6 +671,7 @@ describe('useSlashCommandProcessor', () => {
           new Map(),
           true,
           null,
+          mockUpdateItem,
         ),
       );
 
