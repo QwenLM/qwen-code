@@ -251,6 +251,9 @@ export type {
   DaemonTurnCompleteEvent,
   DaemonTurnErrorData,
   DaemonTurnErrorEvent,
+  // A5 — side-channel session snapshot
+  DaemonSessionSnapshotData,
+  DaemonSessionSnapshotEvent,
   DaemonDeviceFlowReducerState,
   DaemonAuthState,
   KnownDaemonEvent,

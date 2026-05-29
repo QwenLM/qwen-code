@@ -1814,6 +1814,16 @@ export class Session implements SessionContext {
 
     const approvalMode = modeMap[params.modeId as ApprovalModeValue];
     this.config.setApprovalMode(approvalMode);
+
+    // A2 (#4511): notify attached clients of an in-session mode switch.
+    // Mirrors the model-update extNotification in `setModel`.
+    void this.client
+      .extNotification('qwen/notify/session/mode-update', {
+        v: 1,
+        sessionId: this.sessionId,
+        currentModeId: params.modeId,
+      })
+      .catch(() => {});
   }
 
   /**
@@ -1927,6 +1937,17 @@ export class Session implements SessionContext {
     };
 
     await this.sendUpdate(update);
+
+    // A2 (#4511): promote the mode change to the bridge side-channel so
+    // it reaches `approval_mode_changed` on the SSE bus, matching the
+    // extNotification in `setMode`.
+    void this.client
+      .extNotification('qwen/notify/session/mode-update', {
+        v: 1,
+        sessionId: this.sessionId,
+        currentModeId: newModeId,
+      })
+      .catch(() => {});
   }
 
   /**

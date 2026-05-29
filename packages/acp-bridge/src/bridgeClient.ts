@@ -195,6 +195,8 @@ export interface BridgeClientSessionEntry {
    * in `bridge.ts`; surfaced here for the demux.
    */
   modelRoundtripInFlight?: boolean;
+  /** A2: mirrors `modelRoundtripInFlight` for approval-mode roundtrips. */
+  approvalModeRoundtripInFlight?: boolean;
 }
 
 /**
@@ -271,6 +273,28 @@ export class BridgeClient implements Client {
      * companion — preserves the inline proxy behavior.
      */
     private readonly fileSystem?: BridgeFileSystem,
+    /**
+     * §2.3 callback: centralised `model_switched` publish through the
+     * bridge factory's cache-updating helper. The BridgeClient calls
+     * this instead of inlining `entry.events.publish(...)` so the
+     * cache update + generation bump stays atomic in one place.
+     */
+    private readonly onModelPromoted?: (
+      entry: BridgeClientSessionEntry,
+      modelId: string,
+      originatorClientId: string | undefined,
+    ) => void,
+    /**
+     * §2.3 / A2 callback: centralised `approval_mode_changed` publish.
+     * Called by the A2 `current_mode_update` demux when the agent
+     * switches approval mode in-session (exit_plan_mode, ProceedAlways,
+     * /mode). `previous` is read from the bridge state cache.
+     */
+    private readonly onModePromoted?: (
+      entry: BridgeClientSessionEntry,
+      modeId: string,
+      originatorClientId: string | undefined,
+    ) => void,
   ) {}
 
   async requestPermission(
@@ -438,6 +462,10 @@ export class BridgeClient implements Client {
       this.handleInSessionModelUpdate(params);
       return;
     }
+    if (method === 'qwen/notify/session/mode-update') {
+      this.handleInSessionModeUpdate(params);
+      return;
+    }
     if (method === 'qwen/notify/session/prompt-suggestion') {
       const sessionId = params['sessionId'];
       const suggestion = params['suggestion'];
@@ -532,20 +560,99 @@ export class BridgeClient implements Client {
       );
       return;
     }
+    if (this.onModelPromoted) {
+      this.onModelPromoted(
+        entry,
+        currentModelId,
+        entry.activePromptOriginatorClientId,
+      );
+    } else {
+      try {
+        entry.events.publish({
+          type: 'model_switched',
+          data: { sessionId, modelId: currentModelId },
+          ...(entry.activePromptOriginatorClientId
+            ? { originatorClientId: entry.activePromptOriginatorClientId }
+            : {}),
+        });
+      } catch {
+        /* bus closed */
+      }
+    }
+    writeStderrLine(
+      `[demux] session=${sessionId} type=current_model_update action=promoted model=${currentModelId}`,
+    );
+  }
+
+  /**
+   * A2: promote an in-session `current_mode_update` extNotification to
+   * `approval_mode_changed`. Mirrors `handleInSessionModelUpdate` exactly:
+   * suppressed while the bridge is driving its own approval-mode roundtrip
+   * (`entry.approvalModeRoundtripInFlight`). Additionally emits a legacy
+   * `session_update{current_mode_update}` for IDE companion compat
+   * (dual-emit transition — see §6 of the design doc).
+   */
+  private handleInSessionModeUpdate(params: Record<string, unknown>): void {
+    const sessionId = params['sessionId'];
+    const currentModeId = params['currentModeId'];
+    if (typeof sessionId !== 'string' || typeof currentModeId !== 'string') {
+      return;
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_mode_update action=dropped reason=no_entry`,
+      );
+      return;
+    }
+    if (entry.approvalModeRoundtripInFlight) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_mode_update action=suppressed reason=bridge_roundtrip_in_flight`,
+      );
+      return;
+    }
+    if (this.onModePromoted) {
+      this.onModePromoted(
+        entry,
+        currentModeId,
+        entry.activePromptOriginatorClientId,
+      );
+    } else {
+      try {
+        entry.events.publish({
+          type: 'approval_mode_changed',
+          data: { sessionId, next: currentModeId },
+          ...(entry.activePromptOriginatorClientId
+            ? { originatorClientId: entry.activePromptOriginatorClientId }
+            : {}),
+        });
+      } catch {
+        /* bus closed */
+      }
+    }
+    // TODO(dual-emit-removal): also emit the legacy generic
+    // `session_update{current_mode_update}` for one release cycle so the
+    // VS Code IDE companion's existing `case 'current_mode_update'`
+    // handler keeps working. Remove this block (and its tracking issue)
+    // once the companion ships an `approval_mode_changed` handler.
     try {
       entry.events.publish({
-        type: 'model_switched',
-        data: { sessionId, modelId: currentModelId },
+        type: 'session_update',
+        data: {
+          sessionId,
+          sessionUpdate: 'current_mode_update',
+          currentModeId,
+        },
         ...(entry.activePromptOriginatorClientId
           ? { originatorClientId: entry.activePromptOriginatorClientId }
           : {}),
       });
-      writeStderrLine(
-        `[demux] session=${sessionId} type=current_model_update action=promoted model=${currentModelId}`,
-      );
     } catch {
       /* bus closed */
     }
+    writeStderrLine(
+      `[demux] session=${sessionId} type=current_mode_update action=promoted mode=${currentModeId}`,
+    );
   }
 
   /**

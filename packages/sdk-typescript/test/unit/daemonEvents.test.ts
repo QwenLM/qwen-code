@@ -2601,4 +2601,64 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.lastFollowupSuggestion).toBeUndefined();
     });
   });
+
+  describe('session_snapshot (A5 #4511)', () => {
+    it('asKnownDaemonEvent narrows session_snapshot', () => {
+      const event: DaemonEvent = {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: 'qwen-turbo',
+          currentApprovalMode: 'auto',
+        },
+      };
+      const known = asKnownDaemonEvent(event);
+      expect(known).toBeDefined();
+      expect(known!.type).toBe('session_snapshot');
+    });
+
+    it('reducer seeds currentModelId and approvalMode from snapshot', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: 'qwen-turbo',
+          currentApprovalMode: 'yolo',
+        },
+      });
+      expect(state.sessionId).toBe('s-1');
+      expect(state.currentModelId).toBe('qwen-turbo');
+      expect(state.approvalMode).toBe('yolo');
+    });
+
+    it('reducer does not overwrite model/mode with null snapshot values', () => {
+      const initial = {
+        ...createDaemonSessionViewState(),
+        currentModelId: 'existing-model',
+        approvalMode: 'default',
+      };
+      const state = reduceDaemonSessionEvent(initial, {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: null,
+          currentApprovalMode: null,
+        },
+      });
+      expect(state.currentModelId).toBe('existing-model');
+      expect(state.approvalMode).toBe('default');
+    });
+
+    it('drops malformed session_snapshot (missing sessionId)', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: { currentModelId: 'qwen-turbo' },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+    });
+  });
 });
