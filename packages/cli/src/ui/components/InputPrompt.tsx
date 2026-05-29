@@ -545,7 +545,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           setLivePanelFocused(false);
           return true;
         }
-        if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
+        if (
+          key.sequence &&
+          key.sequence.length === 1 &&
+          !key.ctrl &&
+          !key.meta
+        ) {
           setLivePanelFocused(false);
           return false;
         }
@@ -1575,6 +1580,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     </Text>
   );
 
+  // Calculate prefix width for physical cursor positioning
+  const prefixWidth = shellModeActive
+    ? reverseSearchActive
+      ? 5 // "(r:) " = 5 chars
+      : 2 // "! " = 2 chars
+    : commandSearchActive
+      ? 5 // "(r:) " = 5 chars
+      : showYoloStyling
+        ? 2 // "* " = 2 chars
+        : 2; // "> " = 2 chars
+
   return (
     <>
       {attachments.length > 0 && (
@@ -1605,6 +1621,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             : placeholder
         }
         prefix={prefixNode}
+        prefixWidth={prefixWidth}
         borderColor={borderColor}
         topRightLabel={uiState.sessionName || undefined}
         isActive={!isEmbeddedShellFocused}

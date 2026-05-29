@@ -20,9 +20,10 @@
  */
 
 import type React from 'react';
-import { useCallback } from 'react';
-import { Box, Text } from 'ink';
+import { useCallback, useEffect } from 'react';
+import { Box, Text, useCursor } from 'ink';
 import chalk from 'chalk';
+import cliCursor from 'cli-cursor';
 import type { TextBuffer } from './shared/text-buffer.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -68,6 +69,8 @@ export interface BaseTextInputProps {
   placeholder?: string;
   /** Custom prefix node (defaults to `> `). */
   prefix?: React.ReactNode;
+  /** Width of the prefix in terminal columns. Defaults to 2 (for "> "). */
+  prefixWidth?: number;
   /** Border color for the input box. */
   borderColor?: string;
   /** Label rendered on the top border line (right-aligned). Plain string for width calculation. */
@@ -131,6 +134,7 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
   showCursor = true,
   placeholder,
   prefix,
+  prefixWidth = 2,
   borderColor,
   topRightLabel,
   isActive = true,
@@ -248,6 +252,36 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
   const linesToRender = buffer.viewportVisualLines;
   const [cursorVisualRow, cursorVisualCol] = buffer.visualCursor;
   const scrollVisualRow = buffer.visualScrollRow;
+
+  // ── Physical cursor positioning for IME ──
+  const { setCursorPosition } = useCursor();
+  useEffect(() => {
+    if (!showCursor) {
+      setCursorPosition(undefined);
+      return;
+    }
+    // Calculate physical position for the terminal cursor
+    // x: prefix width + physical width of text before cursor (handles CJK chars)
+    // y: cursor row relative to viewport + 2 for top border line and bottom border
+    const relativeRow = cursorVisualRow - scrollVisualRow;
+    const lineText = linesToRender[relativeRow] || '';
+    const textBeforeCursor = cpSlice(lineText, 0, cursorVisualCol);
+    const physicalCol = stringWidth(textBeforeCursor);
+    setCursorPosition({
+      x: prefixWidth + physicalCol,
+      y: relativeRow + 2, // +1 for top border line, +1 for bottom border line
+    });
+    // Hide the physical cursor immediately after positioning - we use chalk.inverse for visual cursor
+    cliCursor.hide();
+  }, [
+    showCursor,
+    cursorVisualRow,
+    cursorVisualCol,
+    scrollVisualRow,
+    prefixWidth,
+    setCursorPosition,
+    linesToRender,
+  ]);
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (

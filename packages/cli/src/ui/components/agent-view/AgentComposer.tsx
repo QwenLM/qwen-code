@@ -260,6 +260,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   const prefixNode = (
     <Text color={statusColor ?? theme.text.accent}>{isYolo ? '*' : '>'} </Text>
   );
+  const prefixWidth = 2; // "> " or "* " = 2 chars
 
   return (
     <StreamingContext.Provider value={streamingState}>
@@ -292,6 +293,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
           showCursor={isInputActive && !agentTabBarFocused}
           placeholder={'  ' + t('Send a message to this agent')}
           prefix={prefixNode}
+          prefixWidth={prefixWidth}
           borderColor={inputBorderColor}
           isActive={isInputActive && !agentShellFocused}
         />
