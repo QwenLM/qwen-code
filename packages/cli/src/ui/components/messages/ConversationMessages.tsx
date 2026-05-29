@@ -18,6 +18,7 @@ import {
 } from '../../textConstants.js';
 interface UserMessageProps {
   text: string;
+  width?: number;
 }
 
 interface UserShellMessageProps {
@@ -184,16 +185,30 @@ const ContinuationMarkdownMessage: React.FC<
   );
 };
 
-export const UserMessage: React.FC<UserMessageProps> = ({ text }) => (
-  <PrefixedTextMessage
-    text={text}
-    prefix=">"
-    prefixColor={theme.text.accent}
-    textColor={theme.text.accent}
-    ariaLabel={SCREEN_READER_USER_PREFIX}
-    alignSelf="flex-start"
-  />
-);
+export const UserMessage: React.FC<UserMessageProps> = ({ text, width }) => {
+  const content = (
+    <PrefixedTextMessage
+      text={text}
+      prefix=">"
+      prefixColor={theme.text.accent}
+      textColor={theme.text.accent}
+      ariaLabel={SCREEN_READER_USER_PREFIX}
+      alignSelf="flex-start"
+    />
+  );
+
+  if (width === undefined) {
+    return content;
+  }
+
+  return (
+    <Box flexDirection="column" width={width}>
+      <Text dimColor>{'▄'.repeat(width)}</Text>
+      {content}
+      <Text dimColor>{'▀'.repeat(width)}</Text>
+    </Box>
+  );
+};
 
 export const UserShellMessage: React.FC<UserShellMessageProps> = ({ text }) => {
   const commandToDisplay = text.startsWith('!') ? text.substring(1) : text;
