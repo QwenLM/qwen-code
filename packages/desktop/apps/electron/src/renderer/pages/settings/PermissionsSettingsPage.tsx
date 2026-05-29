@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { AlertCircle, Loader2, Plus, ShieldCheck, Trash2 } from 'lucide-react';
 import { PanelHeader } from '@/components/app-shell/PanelHeader';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -31,42 +32,23 @@ const SCOPES: PermissionSettingsScope[] = ['user', 'workspace'];
 const QWEN_PERMISSIONS_DOC_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/#permissions';
 
-function ruleTypeLabel(type: PermissionRuleType): string {
-  switch (type) {
-    case 'allow':
-      return 'Allow';
-    case 'ask':
-      return 'Ask';
-    case 'deny':
-      return 'Deny';
-    default:
-      const _exhaustive: never = type;
-      return _exhaustive;
-  }
+function ruleTypeLabel(type: PermissionRuleType, t: TFunction): string {
+  return t(`settings.permissions.ruleType.${type}`);
 }
 
-function scopeLabel(scope: PermissionSettingsScope): string {
-  return scope === 'user' ? 'User settings' : 'Project settings';
+function scopeLabel(scope: PermissionSettingsScope, t: TFunction): string {
+  return t(`settings.permissions.scope.${scope}`);
 }
 
-function scopeDescription(scope: PermissionSettingsScope): string {
-  return scope === 'user'
-    ? 'Saved globally for your Qwen Code user.'
-    : 'Saved in this workspace project settings.';
+function scopeDescription(
+  scope: PermissionSettingsScope,
+  t: TFunction,
+): string {
+  return t(`settings.permissions.scopeDesc.${scope}`);
 }
 
-function ruleTypeDescription(type: PermissionRuleType): string {
-  switch (type) {
-    case 'allow':
-      return "Qwen Code won't ask before using matching tools or commands.";
-    case 'ask':
-      return 'Qwen Code always asks before using matching tools or commands.';
-    case 'deny':
-      return 'Qwen Code blocks matching tools or commands.';
-    default:
-      const _exhaustive: never = type;
-      return _exhaustive;
-  }
+function ruleTypeDescription(type: PermissionRuleType, t: TFunction): string {
+  return t(`settings.permissions.ruleTypeDesc.${type}`);
 }
 
 function normalizeRules(rules: string[]): string[] {
@@ -88,11 +70,6 @@ export default function PermissionsSettingsPage() {
   );
   const [savingKey, setSavingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const tr = useCallback(
-    (key: string, fallback: string) => t(key, { defaultValue: fallback }),
-    [t],
-  );
 
   const loadSettings = useCallback(async () => {
     if (!activeSessionId || !window.electronAPI) {
@@ -126,9 +103,9 @@ export default function PermissionsSettingsPage() {
     () =>
       RULE_TYPES.map((type) => ({
         value: type,
-        label: ruleTypeLabel(type),
+        label: ruleTypeLabel(type, t),
       })),
-    [],
+    [t],
   );
 
   const saveRules = useCallback(
@@ -205,50 +182,29 @@ export default function PermissionsSettingsPage() {
           <div className="px-5 py-7 max-w-3xl mx-auto">
             <div className="space-y-8">
               <SettingsSection
-                title={tr(
-                  'settings.permissions.aboutPermissions',
-                  'About Permissions',
-                )}
+                title={t('settings.permissions.aboutPermissions')}
               >
                 <SettingsCard className="px-4 py-3.5">
                   <div className="text-sm text-muted-foreground leading-relaxed space-y-2">
                     <p>
-                      {tr(
-                        'settings.permissions.cliAlignedIntro',
-                        'Manage Qwen Code permission policy for tool and command requests. Requests are evaluated in priority order: Deny, Ask, then Allow.',
-                      )}
+                      {t('settings.permissions.cliAlignedIntro')}
                     </p>
                     <p>
-                      {tr(
-                        'settings.permissions.cliAlignedFormat',
-                        'Rules may target an entire tool or a specific operation. Changes are persisted to Qwen settings through ACP and apply to subsequent tool requests.',
-                      )}
+                      {t('settings.permissions.cliAlignedFormat')}
                     </p>
                     <div className="rounded-md border border-border/70 bg-muted/35 px-3 py-2.5 text-xs text-muted-foreground">
                       <div className="font-medium text-foreground/80">
-                        {tr(
-                          'settings.permissions.quickGuideTitle',
-                          'How to write a rule',
-                        )}
+                        {t('settings.permissions.quickGuideTitle')}
                       </div>
                       <div className="mt-1.5 space-y-1">
                         <p>
-                          {tr(
-                            'settings.permissions.quickGuideTools',
-                            'Enter a tool name to cover all uses of that tool, for example WebFetch or Edit.',
-                          )}
+                          {t('settings.permissions.quickGuideTools')}
                         </p>
                         <p>
-                          {tr(
-                            'settings.permissions.quickGuideCommands',
-                            'Use ToolName(specifier) to restrict the rule to a specific operation, for example Bash(git status) or Bash(npm run build).',
-                          )}
+                          {t('settings.permissions.quickGuideCommands')}
                         </p>
                         <p>
-                          {tr(
-                            'settings.permissions.quickGuideScopes',
-                            'User rules apply across workspaces. Project rules apply only to this workspace and are merged with the user policy.',
-                          )}
+                          {t('settings.permissions.quickGuideScopes')}
                         </p>
                       </div>
                     </div>
@@ -271,28 +227,19 @@ export default function PermissionsSettingsPage() {
                 </div>
               ) : !activeSessionId ? (
                 <EmptyState
-                  title={tr(
-                    'settings.permissions.noSessionTitle',
-                    'Open a Qwen session to edit permissions',
-                  )}
-                  description={tr(
-                    'settings.permissions.noSessionDesc',
-                    'Permission settings are read and written through Qwen ACP, so this page needs an active session in the workspace.',
-                  )}
+                  title={t('settings.permissions.noSessionTitle')}
+                  description={t('settings.permissions.noSessionDesc')}
                 />
               ) : error && !settings ? (
                 <EmptyState
-                  title="Permission settings unavailable"
+                  title={t('settings.permissions.unavailable')}
                   description={error}
                 />
               ) : settings ? (
                 <>
                   <SettingsSection
-                    title={tr(
-                      'settings.permissions.ruleEditor',
-                      'Permission Rules',
-                    )}
-                    description={ruleTypeDescription(activeRuleType)}
+                    title={t('settings.permissions.ruleEditor')}
+                    description={ruleTypeDescription(activeRuleType, t)}
                   >
                     <div className="mb-3">
                       <SettingsSegmentedControl
@@ -331,14 +278,8 @@ export default function PermissionsSettingsPage() {
                   </SettingsSection>
 
                   <SettingsSection
-                    title={tr(
-                      'settings.permissions.effectiveRules',
-                      'Effective Rules',
-                    )}
-                    description={tr(
-                      'settings.permissions.effectiveRulesDesc',
-                      'Merged User and Project rules currently visible to Qwen Code.',
-                    )}
+                    title={t('settings.permissions.effectiveRules')}
+                    description={t('settings.permissions.effectiveRulesDesc')}
                   >
                     <SettingsCard className="px-4 py-3.5">
                       <div className="grid gap-3 sm:grid-cols-3">
@@ -346,7 +287,7 @@ export default function PermissionsSettingsPage() {
                           <div key={type} className="min-w-0">
                             <div className="flex items-center gap-2 text-sm font-medium">
                               <ShieldCheck className="w-4 h-4 text-muted-foreground" />
-                              <span>{ruleTypeLabel(type)}</span>
+                              <span>{ruleTypeLabel(type, t)}</span>
                               <Info_Badge color="muted">
                                 {settings.merged[type].length}
                               </Info_Badge>
@@ -363,10 +304,7 @@ export default function PermissionsSettingsPage() {
                               ))}
                               {settings.merged[type].length === 0 ? (
                                 <div className="text-xs text-muted-foreground/70">
-                                  {tr(
-                                    'settings.permissions.noRules',
-                                    'No rules',
-                                  )}
+                                  {t('settings.permissions.noRules')}
                                 </div>
                               ) : null}
                             </div>
@@ -424,10 +362,6 @@ function RuleScopeCard({
   onRemove: (rule: string) => void;
 }) {
   const { t } = useTranslation();
-  const tr = useCallback(
-    (key: string, fallback: string) => t(key, { defaultValue: fallback }),
-    [t],
-  );
   const placeholder =
     ruleType === 'allow' ? 'Bash(git status)' : 'Bash(rm -rf *)';
 
@@ -435,9 +369,9 @@ function RuleScopeCard({
     <SettingsCard className="px-4 py-3.5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="text-sm font-medium">{scopeLabel(scope)}</div>
+          <div className="text-sm font-medium">{scopeLabel(scope, t)}</div>
           <div className="text-xs text-muted-foreground mt-0.5">
-            {scopeDescription(scope)}
+            {scopeDescription(scope, t)}
           </div>
           <div className="text-[11px] text-muted-foreground/70 mt-1 truncate font-mono">
             {path}
@@ -469,10 +403,7 @@ function RuleScopeCard({
         </Button>
       </div>
       <div className="mt-1.5 text-[11px] text-muted-foreground">
-        {tr(
-          'settings.permissions.inputHint',
-          'Examples: WebFetch, Edit, Bash(git status), Bash(npm run build). Place a rule under Ask to require confirmation, or under Deny to block matching requests.',
-        )}
+        {t('settings.permissions.inputHint')}
       </div>
 
       <div className="mt-3 divide-y divide-border/60">
@@ -496,7 +427,7 @@ function RuleScopeCard({
           ))
         ) : (
           <div className="py-3 text-xs text-muted-foreground">
-            No {ruleTypeLabel(ruleType).toLowerCase()} rules in this scope.
+            {t(`settings.permissions.noRulesInScope.${ruleType}`)}
           </div>
         )}
       </div>

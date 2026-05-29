@@ -134,6 +134,7 @@ export const VALID_SETTINGS_SUBPAGES: readonly SettingsSubpage[] =
 const HIDDEN_SETTINGS_NAVIGATION_SUBPAGES = new Set<SettingsSubpage>([
   'workspace',
   'preferences',
+  'messaging',
 ]);
 
 /**

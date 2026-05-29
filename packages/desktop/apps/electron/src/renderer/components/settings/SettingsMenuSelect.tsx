@@ -56,7 +56,7 @@ export function SettingsMenuSelect({
   value,
   onValueChange,
   options,
-  placeholder = 'Select...',
+  placeholder,
   disabled,
   className,
   menuWidth = 280,
@@ -66,6 +66,7 @@ export function SettingsMenuSelect({
 }: SettingsMenuSelectProps) {
   const { t } = useTranslation()
   const effectiveSearchPlaceholder = searchPlaceholder ?? t("common.search")
+  const effectivePlaceholder = placeholder ?? t("common.select")
   const [isOpen, setIsOpen] = React.useState(false)
   const [searchQuery, setSearchQuery] = React.useState('')
   const searchInputRef = React.useRef<HTMLInputElement>(null)
@@ -121,7 +122,7 @@ export function SettingsMenuSelect({
             className
           )}
         >
-          <span className="truncate">{selectedOption?.label || placeholder}</span>
+          <span className="truncate">{selectedOption?.label || effectivePlaceholder}</span>
           <ChevronDown className="opacity-50 shrink-0 size-3.5" />
         </button>
       </PopoverTrigger>
@@ -154,7 +155,7 @@ export function SettingsMenuSelect({
         <div className="space-y-0.5 max-h-64 overflow-auto">
           {filteredOptions.length === 0 ? (
             <div className="px-2.5 py-3 text-sm text-muted-foreground text-center">
-              No results found
+              {t("common.noResultsFound")}
             </div>
           ) : (
             filteredOptions.map((option) => {
@@ -230,7 +231,7 @@ export function SettingsMenuSelectRow({
   value,
   onValueChange,
   options,
-  placeholder = 'Select...',
+  placeholder,
   disabled,
   className,
   inCard = true,

@@ -6,10 +6,10 @@
  */
 
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import { Eye, EyeOff } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { settingsUI } from './SettingsUIConstants'
 
@@ -68,6 +68,7 @@ export function SettingsInput({
   onBlur,
   onKeyDown,
 }: SettingsInputProps) {
+  const { t } = useTranslation()
   const id = React.useId()
   const [showPassword, setShowPassword] = React.useState(false)
   const isPassword = type === 'password'
@@ -114,6 +115,7 @@ export function SettingsInput({
             <button
               type="button"
               onClick={() => setShowPassword(!showPassword)}
+              aria-label={showPassword ? t("common.hidePassword") : t("common.showPassword")}
               className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
               tabIndex={-1}
             >
@@ -243,15 +245,17 @@ export function SettingsSecretInput({
   description,
   value,
   onChange,
-  placeholder = 'Enter value...',
+  placeholder,
   disabled,
   error,
   className,
   inCard = false,
   onBlur,
 }: SettingsSecretInputProps) {
+  const { t } = useTranslation()
   const id = React.useId()
   const [showValue, setShowValue] = React.useState(false)
+  const effectivePlaceholder = placeholder ?? t("common.enterValue")
 
   return (
     <div
@@ -280,7 +284,7 @@ export function SettingsSecretInput({
           type={showValue ? 'text' : 'password'}
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          placeholder={placeholder}
+          placeholder={effectivePlaceholder}
           disabled={disabled}
           onBlur={onBlur}
           className="pr-10 bg-transparent border-0 shadow-none focus-visible:ring-0 focus-visible:outline-none"
@@ -288,6 +292,7 @@ export function SettingsSecretInput({
         <button
           type="button"
           onClick={() => setShowValue(!showValue)}
+          aria-label={showValue ? t("common.hideValue") : t("common.showValue")}
           className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
           tabIndex={-1}
         >

@@ -88,11 +88,11 @@ export default function ServerSettingsPage() {
       setSavedForm(formState)
       setStatus(serverStatus)
     } catch (err) {
-      console.error('Failed to load server settings:', err)
+      setError(err instanceof Error ? err.message : t('toast.unknownError'))
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     loadSettings()
@@ -217,7 +217,7 @@ export default function ServerSettingsPage() {
                         <code className="text-xs font-mono text-muted-foreground bg-muted px-2 py-0.5 rounded">
                           {status.url}
                         </code>
-                        <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => handleCopy(status.url, 'URL')}>
+                        <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => handleCopy(status.url, t("common.url"))}>
                           <Copy className="h-3 w-3" />
                         </Button>
                       </div>
@@ -231,7 +231,7 @@ export default function ServerSettingsPage() {
                         <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => setTokenVisible(v => !v)}>
                           {tokenVisible ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
                         </Button>
-                        <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => handleCopy(status.token, 'Token')}>
+                        <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => handleCopy(status.token, t("settings.server.token"))}>
                           <Copy className="h-3 w-3" />
                         </Button>
                       </div>
@@ -242,10 +242,10 @@ export default function ServerSettingsPage() {
                 <SettingsRow label={t("settings.server.certificate")}>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-muted-foreground truncate max-w-[200px]">
-                      {form.tlsCertPath || 'Not configured'}
+                      {form.tlsCertPath || t("settings.server.notConfigured")}
                     </span>
                     <Button variant="outline" size="sm" className="h-6 text-[11px] px-2 shrink-0" onClick={handleBrowseCert}>
-                      Browse
+                      {t("common.browse")}
                     </Button>
                   </div>
                 </SettingsRow>
@@ -253,10 +253,10 @@ export default function ServerSettingsPage() {
                 <SettingsRow label={t("settings.server.privateKey")}>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-muted-foreground truncate max-w-[200px]">
-                      {form.tlsKeyPath || 'Not configured'}
+                      {form.tlsKeyPath || t("settings.server.notConfigured")}
                     </span>
                     <Button variant="outline" size="sm" className="h-6 text-[11px] px-2 shrink-0" onClick={handleBrowseKey}>
-                      Browse
+                      {t("common.browse")}
                     </Button>
                   </div>
                 </SettingsRow>
@@ -282,11 +282,11 @@ export default function ServerSettingsPage() {
           {(isDirty || error) && (
             <SettingsCardFooter>
               <Button variant="outline" size="sm" onClick={handleReset} disabled={isSaving}>
-                Reset
+                {t("common.reset")}
               </Button>
               <Button size="sm" onClick={handleSave} disabled={isSaving}>
                 {isSaving ? <Spinner className="mr-1.5" /> : null}
-                Save
+                {t("common.save")}
               </Button>
             </SettingsCardFooter>
           )}

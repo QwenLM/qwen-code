@@ -143,7 +143,7 @@ export function SearchableModelInput({
             <div className="max-h-64 overflow-auto space-y-0.5">
               {filteredModels.length === 0 ? (
                 <div className="px-2.5 py-3 text-sm text-muted-foreground text-center">
-                  No models found
+                  {t("settings.ai.noModelsFound")}
                 </div>
               ) : (
                 filteredModels.map((model) => (

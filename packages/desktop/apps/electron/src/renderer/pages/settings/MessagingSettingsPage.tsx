@@ -119,9 +119,9 @@ const PLATFORM_LABEL_KEYS: Record<Platform, string> = {
   whatsapp: 'settings.messaging.whatsapp.title',
 }
 
-const PLATFORM_API_DESCRIPTION: Record<Platform, string> = {
-  telegram: 'Bot API',
-  whatsapp: 'Unofficial Web API',
+const PLATFORM_API_DESCRIPTION_KEYS: Record<Platform, string> = {
+  telegram: 'settings.messaging.telegram.apiDescription',
+  whatsapp: 'settings.messaging.whatsapp.apiDescription',
 }
 
 function PlatformRow({ platform, workspaceId }: { platform: Platform; workspaceId: string }) {
@@ -181,11 +181,7 @@ function PlatformRow({ platform, workspaceId }: { platform: Platform; workspaceI
   const handleDisconnect = async () => {
     try {
       await window.electronAPI.disconnectMessagingPlatform(platform)
-      toast.success(
-        t(`settings.messaging.${platform}.disconnected`, {
-          defaultValue: 'Disconnected',
-        }),
-      )
+      toast.success(t(`settings.messaging.${platform}.disconnected`))
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'))
     }
@@ -194,11 +190,7 @@ function PlatformRow({ platform, workspaceId }: { platform: Platform; workspaceI
   const handleForget = async () => {
     try {
       await window.electronAPI.forgetMessagingPlatform(platform)
-      toast.success(
-        t(`settings.messaging.${platform}.disconnected`, {
-          defaultValue: 'Disconnected',
-        }),
-      )
+      toast.success(t(`settings.messaging.${platform}.disconnected`))
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'))
     }
@@ -223,7 +215,7 @@ function PlatformRow({ platform, workspaceId }: { platform: Platform; workspaceI
           <div className="min-w-0 flex-1">
             <div className="text-sm font-medium">{label}</div>
             <div className="mt-0.5 truncate text-xs text-muted-foreground">
-              {PLATFORM_API_DESCRIPTION[platform]} · {description}
+              {t(PLATFORM_API_DESCRIPTION_KEYS[platform])} · {description}
             </div>
           </div>
 
@@ -233,7 +225,7 @@ function PlatformRow({ platform, workspaceId }: { platform: Platform; workspaceI
                 <button
                   className="rounded-md p-1.5 transition-colors hover:bg-foreground/[0.05] data-[state=open]:bg-foreground/[0.05]"
                   data-state={menuOpen ? 'open' : 'closed'}
-                  aria-label={t('common.more', { defaultValue: 'More' })}
+                  aria-label={t('common.more')}
                 >
                   <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
                 </button>
@@ -244,9 +236,7 @@ function PlatformRow({ platform, workspaceId }: { platform: Platform; workspaceI
                     <StyledDropdownMenuItem onClick={() => runAfterMenuClose(handleReconfigure)}>
                       <Settings2 className="h-3.5 w-3.5" />
                       <span>
-                        {t('settings.messaging.telegram.reconfigure', {
-                          defaultValue: 'Reconfigure',
-                        })}
+                        {t('settings.messaging.telegram.reconfigure')}
                       </span>
                     </StyledDropdownMenuItem>
                     <StyledDropdownMenuSeparator />
@@ -277,7 +267,7 @@ function PlatformRow({ platform, workspaceId }: { platform: Platform; workspaceI
           ) : (
             <Button variant="outline" size="sm" onClick={handleConnect}>
               <Plus className="h-3.5 w-3.5" />
-              {t('common.connect', { defaultValue: 'Connect' })}
+              {t('common.connect')}
             </Button>
           )}
         </div>
@@ -355,15 +345,15 @@ function buildDescription(
     if (platform === 'telegram' && runtime.identity) {
       return t('settings.messaging.telegram.validBot', { username: runtime.identity })
     }
-    return t(`settings.messaging.${platform}.connected`, { defaultValue: 'Connected' })
+    return t(`settings.messaging.${platform}.connected`)
   }
   if (runtime.state === 'connecting') {
-    return t('dialog.whatsapp.starting', { defaultValue: 'Connecting…' })
+    return t('dialog.whatsapp.starting')
   }
   if (runtime.state === 'error' && runtime.lastError) {
     return runtime.lastError
   }
-  return t(`settings.messaging.${platform}.notConnected`, { defaultValue: 'Not connected' })
+  return t(`settings.messaging.${platform}.notConnected`)
 }
 
 function defaultRuntime(platform: Platform): MessagingPlatformRuntimeInfo {
