@@ -46,6 +46,7 @@ import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog'
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
+import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
   getTranslator,
@@ -64,7 +65,12 @@ import {
   type DaemonApprovalMode,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
-import type { ACPToolCall, Message, TodoItem } from './adapters/types';
+import type {
+  ACPToolCall,
+  Message,
+  PermissionRequest,
+  TodoItem,
+} from './adapters/types';
 import { extractTodosFromToolCall, hasActiveTodos } from './utils/todos';
 import { ThemeProvider } from './themeContext';
 import styles from './App.module.css';
@@ -133,6 +139,10 @@ function formatError(error: unknown, fallback: string): string {
 
 function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
   return DAEMON_APPROVAL_MODES.includes(mode as DaemonApprovalMode);
+}
+
+function isEditToolPermission(request: PermissionRequest): boolean {
+  return request.toolKind === 'edit';
 }
 
 function parseRenameArgument(
@@ -299,13 +309,30 @@ export function App({
     ];
   }, [messages, recapMessage]);
   const messageBlocks = useAnimationFrameValue(blocks);
-  const pendingApproval = useMemo(
+  const rawPendingApproval = useMemo(
     () => extractPendingPermission(messageBlocks),
     [messageBlocks],
   );
+  const pendingApproval = useShallowMemo(rawPendingApproval);
+  const pendingApprovalRef = useRef(pendingApproval);
+  pendingApprovalRef.current = pendingApproval;
   const shouldHideComposer = pendingApproval !== null;
-  const floatingTodos = useMemo(() => getFloatingTodos(messages), [messages]);
-  const floatingAgents = useMemo(() => getFloatingAgents(messages), [messages]);
+  const rawFloatingTodos = useMemo(
+    () => getFloatingTodos(messages),
+    [messages],
+  );
+  const floatingTodos = useStableArray(
+    rawFloatingTodos,
+    (t) => `${t.id}:${t.status}:${t.content}`,
+  );
+  const rawFloatingAgents = useMemo(
+    () => getFloatingAgents(messages),
+    [messages],
+  );
+  const floatingAgents = useStableArray(
+    rawFloatingAgents,
+    (a) => `${a.callId}:${a.status}`,
+  );
   const activeAgentsPanelRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorHandle>(null);
   const {
@@ -541,13 +568,39 @@ export function App({
       sessionActions
         .setApprovalMode(modeId)
         .then((result) => {
-          setCurrentMode(result.mode || modeId);
+          const effectiveMode = result.mode || modeId;
+          setCurrentMode(effectiveMode);
+          if (effectiveMode === 'auto') {
+            // TODO: CLI also shows stripped dangerous allow rules via
+            // PermissionManager.getStrippedDangerousRules(). The daemon
+            // API (DaemonApprovalModeResult) doesn't expose this info yet.
+            // Once the daemon returns strippedRules in the response, display
+            // them here like CLI's emitAutoModeEntryNotices does.
+            store.dispatch([{ type: 'status', text: t('mode.auto.notice') }]);
+          }
+          const approval = pendingApprovalRef.current;
+          if (!approval) return;
+          const shouldAutoApprove =
+            modeId === 'yolo' ||
+            (modeId === 'auto-edit' && isEditToolPermission(approval));
+          if (shouldAutoApprove) {
+            const allowOnce = approval.options.find(
+              (o) => o.kind === 'allow_once',
+            );
+            if (allowOnce) {
+              sessionActions
+                .submitPermission(approval.id, allowOnce.id)
+                .catch((error: unknown) => {
+                  reportError(error, 'Failed to auto-approve tool call');
+                });
+            }
+          }
         })
         .catch((error: unknown) => {
           reportError(error, t('local.approvalMode'));
         });
     },
-    [sessionActions, reportError, t],
+    [sessionActions, reportError, store, t],
   );
 
   useEffect(() => {
@@ -899,6 +952,7 @@ export function App({
               contextArg === 'detail' ||
               contextArg === '-d'
             ) {
+              store.appendLocalUserMessage(text);
               sessionActions
                 .getContextUsage({
                   detail: contextArg === 'detail' || contextArg === '-d',
@@ -1159,14 +1213,9 @@ export function App({
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
-      if (e.key === 'Tab' && e.shiftKey && pendingApproval && !dialogOpen) {
+      if (e.key === 'Tab' && e.shiftKey && !dialogOpen) {
         e.preventDefault();
-        const allowAlways = pendingApproval.options.find(
-          (o) => o.kind === 'allow_always',
-        );
-        if (allowAlways) {
-          handleConfirm(pendingApproval.id, allowAlways.id);
-        }
+        handleCycleMode();
         return;
       }
       if (
@@ -1193,7 +1242,7 @@ export function App({
   }, [
     streamingState,
     handleCancel,
-    handleConfirm,
+    handleCycleMode,
     pendingApproval,
     dialogOpen,
     clearQueuedPrompts,

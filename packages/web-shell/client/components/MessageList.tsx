@@ -6,6 +6,7 @@ import {
   useMemo,
   type ReactNode,
 } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Message, ACPToolCall } from '../adapters/types';
 import type { PermissionRequest } from '../adapters/types';
 import { isSubAgentToolCall } from '../adapters/toolClassification';
@@ -182,6 +183,11 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
   return items;
 }
 
+const HEADER_INDEX = 0;
+const ESTIMATE_HEADER = 120;
+const ESTIMATE_MESSAGE = 80;
+const ESTIMATE_APPROVAL = 200;
+
 export function MessageList({
   messages,
   pendingApproval,
@@ -208,6 +214,28 @@ export function MessageList({
     getLastUserMessageId(messages),
   );
 
+  const hasTailApproval = useMemo(() => {
+    if (!pendingApproval) return false;
+    if (isAskUserQuestion(pendingApproval)) return true;
+    return !approvalMatchesToolGroup(messages, pendingApproval);
+  }, [pendingApproval, messages]);
+
+  const hasHeader = !!welcomeHeader;
+  const headerOffset = hasHeader ? 1 : 0;
+  const totalCount =
+    headerOffset + displayItems.length + (hasTailApproval ? 1 : 0);
+
+  const virtualizer = useVirtualizer({
+    count: totalCount,
+    getScrollElement: () => containerRef.current,
+    estimateSize: (index) => {
+      if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
+      if (hasTailApproval && index === totalCount - 1) return ESTIMATE_APPROVAL;
+      return ESTIMATE_MESSAGE;
+    },
+    overscan: 5,
+  });
+
   const handleScroll = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -215,6 +243,7 @@ export function MessageList({
     shouldAutoScroll.current = atBottom;
   }, []);
 
+  // Reset auto-scroll on clear screen
   useEffect(() => {
     if (prevMsgCount.current > 0 && messages.length === 0) {
       shouldAutoScroll.current = true;
@@ -222,12 +251,20 @@ export function MessageList({
     prevMsgCount.current = messages.length;
   }, [messages.length]);
 
+  // Auto-scroll to bottom when content changes
+  const totalSize = virtualizer.getTotalSize();
   useEffect(() => {
-    if (shouldAutoScroll.current && containerRef.current) {
-      containerRef.current.scrollTop = containerRef.current.scrollHeight;
+    if (shouldAutoScroll.current) {
+      requestAnimationFrame(() => {
+        const el = containerRef.current;
+        if (el) {
+          el.scrollTop = el.scrollHeight;
+        }
+      });
     }
-  }, [messages, pendingApproval]);
+  }, [messages, pendingApproval, totalSize]);
 
+  // Force auto-scroll when user sends a new message
   useEffect(() => {
     const lastUserMessageId = getLastUserMessageId(messages);
     if (
@@ -235,51 +272,110 @@ export function MessageList({
       lastUserMessageId !== prevLastUserMessageId.current
     ) {
       shouldAutoScroll.current = true;
-      if (containerRef.current) {
-        containerRef.current.scrollTop = containerRef.current.scrollHeight;
-      }
+      requestAnimationFrame(() => {
+        const el = containerRef.current;
+        if (el) {
+          el.scrollTop = el.scrollHeight;
+        }
+      });
     }
     prevLastUserMessageId.current = lastUserMessageId;
   }, [messages]);
 
   useEffect(() => {
-    if (forceScrollToBottom && containerRef.current) {
+    if (forceScrollToBottom) {
       shouldAutoScroll.current = true;
-      containerRef.current.scrollTop = containerRef.current.scrollHeight;
+      requestAnimationFrame(() => {
+        const el = containerRef.current;
+        if (el) {
+          el.scrollTop = el.scrollHeight;
+        }
+      });
     }
   }, [forceScrollToBottom]);
 
-  return (
-    <div ref={containerRef} className={styles.list} onScroll={handleScroll}>
-      {welcomeHeader}
+  const renderVirtualItem = useCallback(
+    (index: number) => {
+      if (hasHeader && index === HEADER_INDEX) {
+        return welcomeHeader;
+      }
 
-      {displayItems.map((item) =>
-        item.type === 'parallel_agents' ? (
+      if (hasTailApproval && index === totalCount - 1) {
+        if (pendingApproval && isAskUserQuestion(pendingApproval)) {
+          return (
+            <AskUserQuestion request={pendingApproval} onConfirm={onConfirm} />
+          );
+        }
+        if (pendingApproval) {
+          return (
+            <ToolApproval request={pendingApproval} onConfirm={onConfirm} />
+          );
+        }
+        return null;
+      }
+
+      const itemIndex = index - headerOffset;
+      const item = displayItems[itemIndex];
+      if (!item) return null;
+
+      if (item.type === 'parallel_agents') {
+        return (
           <ParallelAgentsGroup
-            key={item.key}
             agents={item.agents}
             pendingApproval={pendingApproval}
             onConfirm={onConfirm}
           />
-        ) : (
-          <MessageItem
-            key={item.key}
-            message={item.message}
-            pendingApproval={pendingApproval}
-            onConfirm={onConfirm}
-          />
-        ),
-      )}
+        );
+      }
 
-      {pendingApproval && isAskUserQuestion(pendingApproval) && (
-        <AskUserQuestion request={pendingApproval} onConfirm={onConfirm} />
-      )}
+      return (
+        <MessageItem
+          message={item.message}
+          pendingApproval={pendingApproval}
+          onConfirm={onConfirm}
+        />
+      );
+    },
+    [
+      hasHeader,
+      welcomeHeader,
+      hasTailApproval,
+      totalCount,
+      pendingApproval,
+      onConfirm,
+      headerOffset,
+      displayItems,
+    ],
+  );
 
-      {pendingApproval &&
-        !isAskUserQuestion(pendingApproval) &&
-        !approvalMatchesToolGroup(messages, pendingApproval) && (
-          <ToolApproval request={pendingApproval} onConfirm={onConfirm} />
-        )}
+  const virtualItems = virtualizer.getVirtualItems();
+
+  return (
+    <div ref={containerRef} className={styles.list} onScroll={handleScroll}>
+      <div
+        style={{
+          height: virtualizer.getTotalSize(),
+          width: '100%',
+          position: 'relative',
+        }}
+      >
+        {virtualItems.map((virtualRow) => (
+          <div
+            key={virtualRow.key}
+            data-index={virtualRow.index}
+            ref={virtualizer.measureElement}
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              transform: `translateY(${virtualRow.start}px)`,
+            }}
+          >
+            {renderVirtualItem(virtualRow.index)}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

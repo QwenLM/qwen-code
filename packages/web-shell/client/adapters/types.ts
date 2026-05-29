@@ -49,6 +49,7 @@ export interface PermissionRequest {
   sessionId?: string;
   toolCallId?: string;
   title?: string;
+  toolKind?: string;
   content: ContentBlock[];
   options: PermissionOption[];
   rawInput?: Record<string, unknown>;

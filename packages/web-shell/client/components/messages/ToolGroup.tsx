@@ -379,6 +379,27 @@ function CompactToolGroup({
   );
 }
 
+function areToolLinePropsEqual(
+  prev: ToolLineProps,
+  next: ToolLineProps,
+): boolean {
+  if (prev.approval?.id !== next.approval?.id) return false;
+  if (prev.onConfirm !== next.onConfirm) return false;
+  if (prev.workspaceCwd !== next.workspaceCwd) return false;
+  const a = prev.tool;
+  const b = next.tool;
+  return (
+    a.callId === b.callId &&
+    a.toolName === b.toolName &&
+    a.status === b.status &&
+    a.startTime === b.startTime &&
+    a.endTime === b.endTime &&
+    a.subContent === b.subContent &&
+    a.rawOutput === b.rawOutput &&
+    a.title === b.title
+  );
+}
+
 const ToolLine = memo(function ToolLine({
   tool,
   approval,
@@ -390,9 +411,13 @@ const ToolLine = memo(function ToolLine({
     () => !compactMode && shouldAutoExpand(tool),
   );
 
-  useEffect(() => {
-    setExpanded(compactMode ? false : shouldAutoExpand(tool));
-  }, [compactMode, tool]);
+  useEffect(
+    () => {
+      setExpanded(compactMode ? false : shouldAutoExpand(tool));
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [compactMode, tool.callId, tool.toolName],
+  );
   if (isSubAgentToolCall(tool)) return <SubAgentPanel tool={tool} />;
 
   const description = getToolDescription(tool, workspaceCwd);
@@ -444,7 +469,7 @@ const ToolLine = memo(function ToolLine({
       )}
     </div>
   );
-});
+}, areToolLinePropsEqual);
 
 export const ToolGroup = memo(function ToolGroup({
   tools,

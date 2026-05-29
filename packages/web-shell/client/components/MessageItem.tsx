@@ -69,6 +69,7 @@ function areMessageItemPropsEqual(
 }
 
 function areMessagesEqual(prev: Message, next: Message): boolean {
+  if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
   switch (prev.role) {
     case 'user':
@@ -148,8 +149,21 @@ function areToolListsEqual(
   return prev.every((tool, index) => areToolCallsEqual(tool, next[index]));
 }
 
+const jsonCache = new WeakMap<object, string>();
+
 function stableJson(value: unknown): string {
   if (value === undefined) return '';
+  if (value !== null && typeof value === 'object') {
+    let cached = jsonCache.get(value);
+    if (cached !== undefined) return cached;
+    try {
+      cached = JSON.stringify(value);
+    } catch {
+      cached = String(value);
+    }
+    jsonCache.set(value, cached);
+    return cached;
+  }
   try {
     return JSON.stringify(value);
   } catch {

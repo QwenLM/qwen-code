@@ -25,6 +25,7 @@
     "@codemirror/language": "^6.10.0",
     "@codemirror/state": "^6.5.0",
     "@codemirror/view": "^6.35.0",
+    "@tanstack/react-virtual": "^3.13.26",
     "codemirror": "^6.0.0",
     "katex": "^0.16.47",
     "mermaid": "^11.15.0",

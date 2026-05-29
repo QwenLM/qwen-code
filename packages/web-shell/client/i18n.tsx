@@ -325,6 +325,8 @@ const EN: Messages = {
   'memory.write': 'Write memory content',
   'mode.auto': 'Auto mode',
   'mode.auto.desc': 'Automatically decide when approval is needed',
+  'mode.auto.notice':
+    'Auto mode enabled. An LLM classifier evaluates each tool call and auto-approves safe actions, blocks risky ones. To exit: Shift+Tab or /approval-mode default.',
   'mode.auto-edit': 'Auto-accept edits',
   'mode.auto-edit.desc': 'Automatically approve file read/write operations',
   'mode.default': 'Default mode',
@@ -702,6 +704,8 @@ const ZH: Messages = {
   'memory.write': '写入 memory 内容',
   'mode.auto': 'Auto 模式',
   'mode.auto.desc': '自动判断是否需要请求批准',
+  'mode.auto.notice':
+    'Auto 模式已启用。LLM 分类器会评估每个工具调用，自动批准安全操作，拦截危险操作。退出方式：Shift+Tab 或 /approval-mode default。',
   'mode.auto-edit': '自动编辑',
   'mode.auto-edit.desc': '自动批准文件读写操作',
   'mode.default': '默认模式',

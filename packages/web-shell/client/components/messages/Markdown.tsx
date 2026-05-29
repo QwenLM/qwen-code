@@ -160,6 +160,30 @@ export function isSafeImageSrc(url: string | undefined): boolean {
   return SAFE_HREF_SCHEMES.test(trimmed);
 }
 
+const SHIKI_CACHE_MAX = 128;
+const shikiCache = new Map<string, string>();
+
+function cachedCodeToHtml(
+  code: string,
+  lang: string,
+  theme: string,
+): Promise<string> {
+  const key = `${lang}\0${theme}\0${code}`;
+  const cached = shikiCache.get(key);
+  if (cached !== undefined) return Promise.resolve(cached);
+  return codeToHtml(code, {
+    lang: lang as BundledLanguage,
+    theme,
+  }).then((html) => {
+    if (shikiCache.size >= SHIKI_CACHE_MAX) {
+      const first = shikiCache.keys().next().value;
+      if (first !== undefined) shikiCache.delete(first);
+    }
+    shikiCache.set(key, html);
+    return html;
+  });
+}
+
 // Track last initialized theme to avoid redundant mermaid.initialize() calls.
 // mermaid.initialize() is idempotent but runs per-block; with N diagrams in a
 // transcript this saves N-1 redundant calls per render cycle.
@@ -305,13 +329,16 @@ function CodeBlock({
       return;
     }
 
+    const cacheKey = `${resolvedLang}\0${shikiTheme}\0${code}`;
+    if (shikiCache.has(cacheKey)) {
+      setHtml(shikiCache.get(cacheKey)!);
+      return;
+    }
+
     let cancelled = false;
     setHtml(null);
     const timer = setTimeout(() => {
-      codeToHtml(code, {
-        lang: resolvedLang as BundledLanguage,
-        theme: shikiTheme,
-      })
+      cachedCodeToHtml(code, resolvedLang, shikiTheme)
         .then((result) => {
           if (!cancelled) setHtml(result);
         })

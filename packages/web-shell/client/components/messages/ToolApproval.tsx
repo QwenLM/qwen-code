@@ -181,10 +181,6 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
               key={option.id}
               className={`${styles.option} ${isSelected ? styles.optionActive : ''}`}
               onClick={() => confirm(option.id)}
-              onMouseEnter={() => {
-                selectedRef.current = i;
-                setSelected(i);
-              }}
             >
               <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>
               <span className={styles.num}>{i + 1}.</span>
