@@ -107,6 +107,7 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'insight_progress':
     case 'btw':
     case 'away_recap':
+    case 'user':
     case 'user_prompt_submit_blocked':
     case 'stop_hook_loop':
     case 'stop_hook_system_message':

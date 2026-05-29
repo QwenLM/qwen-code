@@ -16,7 +16,6 @@ import {
   SCREEN_READER_MODEL_PREFIX,
   SCREEN_READER_USER_PREFIX,
 } from '../../textConstants.js';
-
 interface UserMessageProps {
   text: string;
 }
