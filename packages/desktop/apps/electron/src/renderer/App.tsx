@@ -1152,6 +1152,9 @@ export default function App() {
 
       if (event.type === 'session_deleted') {
         removeSession(sessionId)
+        if (sessionSelection.selected === sessionId) {
+          setSession({ selected: null })
+        }
         return
       }
 
@@ -1303,7 +1306,7 @@ export default function App() {
     })
 
     return cleanup
-  }, [store, sessionSelection.selected, refreshSessionFromServer, refreshSessionListMetadataFromServer])
+  }, [store, sessionSelection.selected, setSession, refreshSessionFromServer, refreshSessionListMetadataFromServer])
 
   // Listen for menu bar events
   useEffect(() => {
@@ -1367,9 +1370,12 @@ export default function App() {
 
   // Auto-delete handler for empty sessions (fire-and-forget, no confirmation)
   const handleAutoDeleteEmptySession = useCallback((sessionId: string) => {
+    if (sessionSelection.selected === sessionId) {
+      setSession({ selected: null })
+    }
     window.electronAPI.deleteSession(sessionId)
     removeSession(sessionId)
-  }, [removeSession])
+  }, [removeSession, sessionSelection.selected, setSession])
 
   const handleFlagSession = useCallback((sessionId: string) => {
     updateSessionById(sessionId, { isFlagged: true })

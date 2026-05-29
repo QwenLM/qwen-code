@@ -2750,7 +2750,7 @@ function AppShellContent({
 
   // Handler for settings view
   const handleSettingsClick = useCallback(
-    (subpage: SettingsSubpage = 'app') => {
+    (subpage?: SettingsSubpage) => {
       navigate(routes.view.settings(subpage))
     },
     [],
@@ -3101,7 +3101,7 @@ function AppShellContent({
     result.push({
       id: 'nav:settings',
       type: 'nav',
-      action: () => handleSettingsClick('app'),
+      action: () => handleSettingsClick(),
     })
 
     return result
@@ -3522,7 +3522,7 @@ function AppShellContent({
                           variant: isSettingsNavigation(navState)
                             ? 'default'
                             : 'ghost',
-                          onClick: () => handleSettingsClick('app'),
+                          onClick: () => handleSettingsClick(),
                         },
                       ]}
                     />
