@@ -1474,6 +1474,359 @@ describe('OpenAIContentConverter', () => {
       });
     });
 
+    it('should drop tool responses that are not adjacent to their assistant tool call', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  args: { path: 'a.txt' },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'call_b',
+                  name: 'grep',
+                  args: { pattern: 'needle' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [{ text: 'history text inserted between tool results' }],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_c',
+                  name: 'list_files',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_c',
+                  name: 'list_files',
+                  response: { output: 'C' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'call_b',
+                  name: 'grep',
+                  response: { output: 'B' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const assistantWithCallA = messages.find(
+        (message): message is OpenAI.Chat.ChatCompletionAssistantMessageParam =>
+          message.role === 'assistant' &&
+          'tool_calls' in message &&
+          Array.isArray(message.tool_calls) &&
+          message.tool_calls.some((toolCall) => toolCall.id === 'call_a'),
+      );
+
+      expect(
+        assistantWithCallA?.tool_calls?.map((toolCall) => toolCall.id),
+      ).toEqual(['call_a']);
+
+      const toolCallIds = messages
+        .filter(
+          (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+            message.role === 'tool' && 'tool_call_id' in message,
+        )
+        .map((message) => message.tool_call_id);
+
+      expect(toolCallIds).toEqual(['call_a', 'call_c']);
+    });
+
+    it('should keep assistant text when all tool calls are orphaned', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              { text: 'I can answer without the tool.' },
+              {
+                functionCall: {
+                  id: 'call_missing',
+                  name: 'read_file',
+                  args: { path: 'missing.txt' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [{ text: 'continue' }],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const assistant = messages.find(
+        (message): message is OpenAI.Chat.ChatCompletionAssistantMessageParam =>
+          message.role === 'assistant',
+      );
+
+      expect(assistant?.content).toBe('I can answer without the tool.');
+      expect('tool_calls' in (assistant ?? {})).toBe(false);
+      expect(messages.some((message) => message.role === 'tool')).toBe(false);
+    });
+
+    it('should drop assistant-only tool calls when all responses are orphaned', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_missing',
+                  name: 'read_file',
+                  args: { path: 'missing.txt' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [{ text: 'break adjacency' }],
+          },
+          {
+            role: 'user',
+            parts: [{ text: 'continue' }],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages.some((message) => message.role === 'assistant')).toBe(
+        false,
+      );
+      expect(messages.some((message) => message.role === 'tool')).toBe(false);
+    });
+
+    it('should keep a tool response after an empty-id tool message', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  args: { path: 'a.txt' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'empty_id',
+                  response: { output: 'no id' },
+                },
+              },
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const toolCallIds = messages
+        .filter(
+          (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+            message.role === 'tool' && 'tool_call_id' in message,
+        )
+        .map((message) => message.tool_call_id);
+
+      expect(toolCallIds).toEqual(['call_a']);
+    });
+
+    it('should clean after merging consecutive assistant turns', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  args: { path: 'a.txt' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'A short follow-up.' }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      expect(messages[0]).toMatchObject({
+        role: 'assistant',
+        content: 'A short follow-up.',
+      });
+      expect(
+        (
+          messages[0] as OpenAI.Chat.ChatCompletionAssistantMessageParam
+        ).tool_calls?.map((toolCall) => toolCall.id),
+      ).toEqual(['call_a']);
+      expect(messages[1]).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call_a',
+      });
+    });
+
+    it('should keep split media after all adjacent tool responses across content items', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { id: 'call_a', name: 'shot_a', args: {} },
+              },
+              {
+                functionCall: { id: 'call_b', name: 'shot_b', args: {} },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'shot_a',
+                  response: { output: 'A' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'aaa' } },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_b',
+                  name: 'shot_b',
+                  response: { output: 'B' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'bbb' } },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+      const assistantIndex = messages.findIndex(
+        (message) => message.role === 'assistant',
+      );
+
+      expect(messages[assistantIndex + 1]).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call_a',
+      });
+      expect(messages[assistantIndex + 2]).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call_b',
+      });
+      expect(messages[assistantIndex + 3]?.role).toBe('user');
+      expect(messages[assistantIndex + 4]?.role).toBe('user');
+    });
+
     describe('assistant message with reasoning-only content (issue #3421)', () => {
       /**
        * Regression tests for https://github.com/QwenLM/qwen-code/issues/3421
