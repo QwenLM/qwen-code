@@ -12,7 +12,7 @@ import type { RequestContext } from './types.js';
 import {
   Type,
   FinishReason,
-  GenerateContentResponse,
+  type GenerateContentResponse,
   type GenerateContentParameters,
   type Content,
   type Part,
@@ -4238,6 +4238,9 @@ describe('mapGeminiFinishReasonToOpenAI', () => {
     [FinishReason.MAX_TOKENS, 'length'],
     [FinishReason.SAFETY, 'content_filter'],
     [FinishReason.RECITATION, 'content_filter'],
+    [FinishReason.BLOCKLIST, 'content_filter'],
+    [FinishReason.PROHIBITED_CONTENT, 'content_filter'],
+    [FinishReason.SPII, 'content_filter'],
     [FinishReason.IMAGE_SAFETY, 'content_filter'],
     [FinishReason.IMAGE_RECITATION, 'content_filter'],
     [FinishReason.IMAGE_PROHIBITED_CONTENT, 'content_filter'],
@@ -4247,10 +4250,8 @@ describe('mapGeminiFinishReasonToOpenAI', () => {
   ])('maps %s to %s', (geminiReason, expected) => {
     const response = OpenAIContentConverter.convertGeminiResponseToOpenAI(
       {
-        candidates: [
-          { finishReason: geminiReason, content: { parts: [] } },
-        ],
-      } as GenerateContentResponse,
+        candidates: [{ finishReason: geminiReason, content: { parts: [] } }],
+      } as unknown as GenerateContentResponse,
       {
         model: 'test-model',
         modalities: {

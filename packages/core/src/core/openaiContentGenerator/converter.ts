@@ -1379,6 +1379,9 @@ function mapGeminiFinishReasonToOpenAI(
       return 'length';
     case FinishReason.SAFETY:
     case FinishReason.RECITATION:
+    case FinishReason.BLOCKLIST:
+    case FinishReason.PROHIBITED_CONTENT:
+    case FinishReason.SPII:
     case FinishReason.IMAGE_SAFETY:
     case FinishReason.IMAGE_RECITATION:
     case FinishReason.IMAGE_PROHIBITED_CONTENT:
