@@ -1,0 +1,273 @@
+
+[1] File existence
+  ✅ Source: chat.md
+  ✅ Production: chat.md
+  ✅ Source: chat-save.md
+  ✅ Production: chat-save.md
+  ✅ Source: chat-list.md
+  ✅ Production: chat-list.md
+  ✅ Source: chat-resume.md
+  ✅ Production: chat-resume.md
+  ✅ Source: chat-delete.md
+  ✅ Production: chat-delete.md
+  ✅ CHAT-DESIGN.md
+
+[2] Source has WHY comments (human-oriented)
+  ✅ chat.md source has WHY/rationale
+  ✅ chat-save.md source has WHY/rationale
+  ✅ chat-list.md source has WHY/rationale
+  ✅ chat-resume.md source has WHY/rationale
+  ✅ chat-delete.md source has WHY/rationale
+
+[3] Production chat.md: routing + common rules
+  ✅ Has -s/--save
+  ✅ Has -l/--list
+  ✅ Has -r/--resume
+  ✅ Has -d/--delete
+  ✅ Has -h/--help
+  ✅ Routes to chat-save.md
+  ✅ Routes to chat-list.md
+  ✅ Routes to chat-resume.md
+  ✅ Routes to chat-delete.md
+  ✅ Blocks __proto__
+  ✅ Blocks constructor
+  ✅ Blocks prototype
+  ✅ References index file
+  ✅ Has validation regex
+  ✅ Has max length rule
+
+[4] Token budget
+  Production: 7177 chars ≈ 2512 tokens
+  Note: Budget increased from 4000 to 9000 to accommodate security rules and error handling specs
+  ✅ Total < 9000 chars
+
+[5] Source file logic completeness
+  ✅ chat.md src: language detection
+  ✅ chat.md src: OS detection
+  ✅ chat.md src: routing section
+  ✅ chat.md src: hash calculation
+  ✅ chat-save src: validation
+  ✅ chat-save src: read index
+  ✅ chat-save src: overwrite check
+  ✅ chat-save src: find session ID
+  ✅ chat-save src: jsonl reference
+  ✅ chat-save src: write to index
+  ✅ chat-save src: confirmation output
+  ✅ chat-save src: 2-space indent
+  ✅ chat-list src: read index
+  ✅ chat-list src: empty state
+  ✅ chat-list src: sorted display
+  ✅ chat-list src: ID truncation
+  ✅ chat-resume src: validation
+  ✅ chat-resume src: lookup ID
+  ✅ chat-resume src: verify file
+  ✅ chat-resume src: Windows command
+  ✅ chat-resume src: macOS command
+  ✅ chat-resume src: Linux terminal detection
+  ✅ chat-resume src: --resume flag
+  ✅ chat-resume src: confirmation output
+  ✅ chat-resume src: rationale for --resume vs --continue
+  ✅ chat-delete src: validation
+  ✅ chat-delete src: lookup ID
+  ✅ chat-delete src: confirmation prompt
+  ✅ chat-delete src: remove from index
+  ✅ chat-delete src: file NOT deleted note
+  ✅ chat-delete src: rationale for not deleting file
+  ✅ chat-delete src: shared reference reasoning
+  ✅ chat.md source has ≥2 numbered steps (3)
+  ✅ chat-save.md source has ≥2 numbered steps (6)
+  ✅ chat-list.md source has ≥2 numbered steps (2)
+  ✅ chat-resume.md source has ≥2 numbered steps (5)
+  ✅ chat-delete.md source has ≥2 numbered steps (5)
+
+[6] Production file logic completeness
+  ✅ chat-save prod: validation
+  ✅ chat-save prod: index reference
+  ✅ chat-save prod: overwrite check
+  ✅ chat-save prod: session ID source
+  ✅ chat-save prod: write to index
+  ✅ chat-save prod: confirmation output
+  ✅ chat-list prod: read index
+  ✅ chat-list prod: display format
+  ✅ chat-resume prod: validation
+  ✅ chat-resume prod: lookup ID
+  ✅ chat-resume prod: file verification
+  ✅ chat-resume prod: launch command
+  ✅ chat-delete prod: validation
+  ✅ chat-delete prod: confirmation
+  ✅ chat-delete prod: remove from index
+  ✅ chat-delete prod: file NOT deleted note
+
+[7] Source ↔ Production consistency
+  ✅ Source blocks reserved: .
+  ✅ Production blocks reserved: .
+  ✅ Source blocks reserved: ..
+  ✅ Production blocks reserved: ..
+  ✅ Source blocks reserved: __proto__
+  ✅ Production blocks reserved: __proto__
+  ✅ Source blocks reserved: constructor
+  ✅ Production blocks reserved: constructor
+  ✅ Source blocks reserved: prototype
+  ✅ Production blocks reserved: prototype
+  ✅ Source has validation regex
+  ✅ Production has validation regex
+  ✅ Source references index
+  ✅ Production references index
+  ✅ Source references jsonl
+  ✅ Production references jsonl
+  ✅ Source has max length
+  ✅ Production has max length
+  ✅ Source has hash calc
+  ✅ Production has hash calc
+
+[8] Edge case data
+  ✅ Reserved names appear ≥5 times in production (found 120)
+  ✅ Production has Windows command
+  ✅ Production has macOS command
+  ✅ Production has Linux command
+  ✅ Source documents flat index format
+  ✅ Production uses yes/no confirmation
+
+[9] Design document (CHAT-DESIGN.md)
+  ✅ Documents PR #3105
+  ✅ Documents PR #1113
+  ✅ Documents prototype pollution
+  ✅ Documents __proto__ attack
+  ✅ Documents cross-platform
+  ✅ Documents all 3 platforms
+  ✅ Documents token metrics
+  ✅ Documents review rounds
+  ✅ Documents alternatives considered
+  ✅ Documents index format choice
+  ✅ Documents why not TOML/YAML
+  ✅ Documents security mechanisms
+  ✅ Documents shared reference protection
+  ✅ Documents overwrite protection
+
+[10] Markdown structure & formatting
+  ✅ chat.md src has H1 title
+  ✅ chat.md prod has H1 title
+  ✅ chat.md src has ≥2 numbered steps (3)
+  ✅ chat.md prod has ≥2 numbered steps (3)
+  ✅ chat.md src has ≥1 "Why" explanation (4)
+  ✅ chat.md prod has ≤2 verbose Why sections (0)
+  ✅ chat-save.md src has H1 title
+  ✅ chat-save.md prod has H1 title
+  ✅ chat-save.md src has ≥2 numbered steps (6)
+  ✅ chat-save.md prod has ≥2 numbered steps (6)
+  ✅ chat-save.md src has ≥1 "Why" explanation (8)
+  ✅ chat-save.md prod has ≤2 verbose Why sections (0)
+  ✅ chat-list.md src has H1 title
+  ✅ chat-list.md prod has H1 title
+  ✅ chat-list.md src has ≥2 numbered steps (2)
+  ✅ chat-list.md prod has ≥2 numbered steps (2)
+  ✅ chat-list.md src has ≥1 "Why" explanation (2)
+  ✅ chat-list.md prod has ≤2 verbose Why sections (0)
+  ✅ chat-resume.md src has H1 title
+  ✅ chat-resume.md prod has H1 title
+  ✅ chat-resume.md src has ≥2 numbered steps (5)
+  ✅ chat-resume.md prod has ≥2 numbered steps (5)
+  ✅ chat-resume.md src has ≥1 "Why" explanation (6)
+  ✅ chat-resume.md prod has ≤2 verbose Why sections (0)
+  ✅ chat-delete.md src has H1 title
+  ✅ chat-delete.md prod has H1 title
+  ✅ chat-delete.md src has ≥2 numbered steps (5)
+  ✅ chat-delete.md prod has ≥2 numbered steps (5)
+  ✅ chat-delete.md src has ≥1 "Why" explanation (3)
+  ✅ chat-delete.md prod has ≤2 verbose Why sections (0)
+  ✅ chat.md src has Architecture/Design section
+  ✅ chat.md prod has Route section
+  ✅ chat.md src has Route section
+  ✅ chat.md prod has Route section
+  ✅ chat.md src has routing table
+  ✅ chat.md prod has routing table
+  ✅ chat.md src has help text block
+  ✅ chat.md prod has help text block
+  ✅ chat.md src has common rules
+  ✅ chat.md prod has common rules
+
+[11] Behavioral specification (does the spec define correct behavior?)
+  ✅ chat.md src specifies behavior for unrecognized flags
+  ✅ chat.md prod specifies behavior for unrecognized flags
+  ✅ chat.md src specifies behavior for empty args
+  ✅ chat.md prod specifies behavior for empty args
+  ✅ chat-save src specifies finding most recent session
+  ✅ chat-save prod specifies finding most recent session
+  ✅ chat-save src specifies behavior when no session exists
+  ✅ chat-save prod specifies behavior when no session exists
+  ✅ chat-save src specifies 2-space indent for JSON output
+  ✅ chat-save prod specifies 2-space indent for JSON output
+  ✅ chat-save src explains UUID comes from filename
+  ✅ chat-save prod explains UUID comes from filename
+  ✅ chat-list src specifies alphabetical sorting
+  ✅ chat-list prod specifies alphabetical sorting
+  ✅ chat-list src specifies ID truncation to 8 chars
+  ✅ chat-list prod specifies ID truncation to 8 chars
+  ✅ chat-resume src has Windows command
+  ✅ chat-resume prod has Windows command
+  ✅ chat-resume src has macOS command
+  ✅ chat-resume prod has macOS command
+  ✅ chat-resume src has Linux command
+  ✅ chat-resume prod has Linux command
+  ✅ chat-resume src specifies --resume flag (not --continue)
+  ✅ chat-resume prod specifies --resume flag (not --continue)
+  ✅ chat-delete src specifies file NOT deleted
+  ✅ chat-delete prod specifies file NOT deleted
+  ✅ chat-delete src explains shared reference protection
+  ✅ chat-delete prod explains shared reference protection
+  ✅ chat-delete src explains safety rationale
+  ✅ chat-delete prod explains safety rationale
+
+[12] Error handling specification (are all error cases covered?)
+  ✅ chat-save.md src has validation regex
+  ✅ chat-save.md src has max length check
+  ✅ chat-save.md src blocks all reserved names
+  ✅ chat-list.md src has validation regex
+  ✅ chat-list.md src has max length check
+  ✅ chat-list.md src blocks all reserved names
+  ✅ chat-resume.md src has validation regex
+  ✅ chat-resume.md src has max length check
+  ✅ chat-resume.md src blocks all reserved names
+  ✅ chat-delete.md src has validation regex
+  ✅ chat-delete.md src has max length check
+  ✅ chat-delete.md src blocks all reserved names
+  ✅ chat-save.md prod has validation regex
+  ✅ chat-save.md prod has max length check
+  ✅ chat-save.md prod blocks all reserved names
+  ✅ chat-list.md prod has validation regex
+  ✅ chat-list.md prod has max length check
+  ✅ chat-list.md prod blocks all reserved names
+  ✅ chat-resume.md prod has validation regex
+  ✅ chat-resume.md prod has max length check
+  ✅ chat-resume.md prod blocks all reserved names
+  ✅ chat-delete.md prod has validation regex
+  ✅ chat-delete.md prod has max length check
+  ✅ chat-delete.md prod blocks all reserved names
+  ✅ chat-save src has overwrite confirmation prompt
+  ✅ chat-save prod has overwrite confirmation prompt
+  ✅ chat-delete src has delete confirmation prompt
+  ✅ chat-delete prod has delete confirmation prompt
+  ✅ chat-list src handles empty state
+  ✅ chat-list prod handles empty state
+  ✅ chat-resume src handles missing session
+  ✅ chat-resume prod handles missing session
+  ✅ chat-delete src handles missing session
+  ✅ chat-delete prod handles missing session
+  ✅ chat.md src clarifies project root vs home
+  ✅ chat-save.md src clarifies project root vs home
+  ✅ chat-resume.md src clarifies project root vs home
+  ✅ chat-delete.md src clarifies project root vs home
+  ✅ chat.md prod clarifies project root vs home
+  ✅ chat-save.md prod clarifies project root vs home
+  ✅ chat-resume.md prod clarifies project root vs home
+  ✅ chat-delete.md prod clarifies project root vs home
+  ✅ chat.md src specifies hash calculation
+  ✅ chat.md prod specifies hash calculation
+  ✅ chat.md src explains path→hash transformation
+  ✅ chat.md prod explains path→hash transformation
+
+==================================================
+  Passed: 241  Failed: 0  Total: 241
+==================================================
+
+✅ All tests passed!

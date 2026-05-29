@@ -29,6 +29,7 @@ CLAUDE.md
 .codex
 
 # Qwen Code Configs
+
 .qwen/*
 !.qwen/commands/
 !.qwen/commands/**
@@ -36,10 +37,15 @@ CLAUDE.md
 !.qwen/skills/**
 !.qwen/agents/
 !.qwen/agents/**
+!.qwen/chat-src/
+!.qwen/chat-src/**
 
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Log files
+logs/
 
 # TypeScript build info files
 *.tsbuildinfo
@@ -66,7 +72,8 @@ packages/web-templates/src/generated/
 .integration-tests/
 packages/vscode-ide-companion/*.vsix
 
-logs/
+# Qwen Code Configs
+
 # GHA credentials
 gha-creds-*.json
 
