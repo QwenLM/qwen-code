@@ -26,8 +26,35 @@ const debugLogger = createDebugLogger('INSTALLATION_INFO');
 export interface InstallationInfo {
   packageManager: PackageManager;
   isGlobal: boolean;
+  isStandalone?: boolean;
+  standaloneDir?: string;
   updateCommand?: string;
   updateMessage?: string;
+}
+
+function findStandaloneDir(realPath: string): string | null {
+  let dir = path.dirname(realPath);
+  for (let i = 0; i < 3; i++) {
+    const manifestPath = path.join(dir, 'manifest.json');
+    try {
+      if (fs.existsSync(manifestPath)) {
+        const raw = fs.readFileSync(manifestPath, 'utf-8');
+        const manifest = JSON.parse(raw) as {
+          name?: string;
+          target?: string;
+        };
+        if (manifest.name === '@qwen-code/qwen-code' && manifest.target) {
+          return dir;
+        }
+      }
+    } catch {
+      // ignore parse errors
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
 }
 
 export function getInstallationInfo(
@@ -158,6 +185,20 @@ export function getInstallationInfo(
         isGlobal: false,
         updateMessage:
           "Locally installed. Please update via your project's package.json.",
+      };
+    }
+
+    // Check for standalone install (manifest.json with @qwen-code/qwen-code)
+    const standaloneDir = findStandaloneDir(realPath);
+    if (standaloneDir) {
+      return {
+        packageManager: PackageManager.UNKNOWN,
+        isGlobal: true,
+        isStandalone: true,
+        standaloneDir,
+        updateMessage: isAutoUpdateEnabled
+          ? 'Standalone install detected. Attempting to automatically update now...'
+          : 'Standalone install detected. Re-run the installer to update.',
       };
     }
 
