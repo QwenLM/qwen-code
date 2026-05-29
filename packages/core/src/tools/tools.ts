@@ -699,6 +699,14 @@ export interface ToolExecuteConfirmationDetails {
   rootCommand: string;
   /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
   permissionRules?: string[];
+  /**
+   * Optional informational warnings to surface in the confirmation dialog,
+   * one short string per warning. Currently used to flag commands that
+   * contain shell command substitution (`$(...)`, backticks, `<(...)`,
+   * `>(...)`) so the user can review them before approving. Renderers
+   * should display these alongside the command, not as errors.
+   */
+  warnings?: string[];
 }
 
 export interface ToolMcpConfirmationDetails {

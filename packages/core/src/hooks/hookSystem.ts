@@ -22,6 +22,7 @@ import type {
   PreCompactTrigger,
   PostCompactTrigger,
   NotificationType,
+  PermissionDeniedReason,
   PermissionSuggestion,
   HookEventName,
   FunctionHookCallback,
@@ -406,6 +407,28 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('PermissionRequest', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PermissionDenied event
+   */
+  async firePermissionDeniedEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolUseId: string,
+    reason: PermissionDeniedReason,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePermissionDeniedEvent(
+      toolName,
+      toolInput,
+      toolUseId,
+      reason,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PermissionDenied', result.finalOutput)
       : undefined;
   }
 

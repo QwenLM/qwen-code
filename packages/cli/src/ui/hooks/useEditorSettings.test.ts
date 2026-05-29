@@ -18,7 +18,7 @@ import { renderHook } from '@testing-library/react';
 import { useEditorSettings } from './useEditorSettings.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
-import { MessageType, type HistoryItem } from '../types.js';
+import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
   type EditorType,
   checkHasEditorType,
@@ -41,7 +41,7 @@ describe('useEditorSettings', () => {
   let mockLoadedSettings: LoadedSettings;
   let mockSetEditorError: MockedFunction<(error: string | null) => void>;
   let mockAddItem: MockedFunction<
-    (item: Omit<HistoryItem, 'id'>, timestamp: number) => void
+    (item: HistoryItemWithoutId, timestamp: number) => void
   >;
 
   beforeEach(() => {

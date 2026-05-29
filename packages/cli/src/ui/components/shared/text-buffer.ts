@@ -12,6 +12,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   createDebugLogger,
   unescapePath,
+  escapePath,
   getExternalEditorCommand,
   type EditorType,
 } from '@qwen-code/qwen-code-core';
@@ -1899,6 +1900,166 @@ export function textBufferReducer(
 
 // --- End of reducer logic ---
 
+// --- Path extraction helpers (pure functions, outside useTextBuffer) ---
+
+/**
+ * Check if a string looks like a path prefix (starts with /, ./, ../, ~/, ., .., or drive letter).
+ * Strips surrounding quotes first to handle quoted paths.
+ * Used to pre-filter tokens before expensive fs calls.
+ */
+function looksLikePath(str: string): boolean {
+  // Strip surrounding quotes first to handle quoted paths
+  const unquoted = str.replace(/^'(.*)'$/, '$1');
+  // Also handle tokens that are the start of a quoted path split by whitespace
+  const inner = unquoted.startsWith("'") ? unquoted.slice(1) : unquoted;
+  return (
+    inner.startsWith('/') ||
+    inner.startsWith('./') ||
+    inner.startsWith('../') ||
+    inner.startsWith('~/') ||
+    inner.startsWith('.') ||
+    /^[A-Za-z]:/.test(inner)
+  );
+}
+
+/**
+ * Extract file paths from content and prepend @ prefix.
+ * Handles quoted paths, unquoted paths, whitespace-separated, and newline-separated.
+ * Supports file paths with spaces using greedy matching.
+ * IMPORTANT: Escapes shell-special characters (spaces, commas, parentheses,
+ * brackets, semicolons, etc.) with backslash so that the downstream
+ * `parseAllAtCommands` parser correctly includes the entire path.
+ *
+ * Only transforms when ALL non-whitespace tokens are valid paths. If any
+ * non-path, non-separator token exists, returns null to preserve original
+ * content (prevents silent data loss).
+ */
+function tryExtractFilePaths(
+  content: string,
+  isValidPath: (p: string) => boolean,
+): string[] | null {
+  const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const lines = normalized.split(/\n/).filter((s) => s.trim().length > 0);
+
+  const validPaths: string[] = [];
+  const hadNonPathToken = { value: false };
+
+  for (const line of lines) {
+    // Short-circuit: once any token is flagged as non-path, the result will be null
+    if (hadNonPathToken.value) break;
+
+    // Use a regex that only matches quoted content starting with path-like chars
+    // to avoid false matches on English contractions (e.g., "don't").
+    const quotedPathRegex = /'((?:[~/.]|[A-Za-z]:)[^']*)'/g;
+    let lastIndex = 0;
+    let match;
+    let hasQuotedPaths = false;
+
+    while ((match = quotedPathRegex.exec(line)) !== null) {
+      const gap = line.slice(lastIndex, match.index).trim();
+      if (gap) {
+        const gapPaths = extractPathsFromSegment(
+          gap,
+          isValidPath,
+          hadNonPathToken,
+        );
+        validPaths.push(...gapPaths);
+      }
+      const unescaped = unescapePath(match[1]);
+      if (isValidPath(unescaped)) {
+        validPaths.push(`@${escapePath(unescaped)}`);
+      } else {
+        // Quoted path found but not a valid path — mark as non-path
+        hadNonPathToken.value = true;
+      }
+      lastIndex = quotedPathRegex.lastIndex;
+      hasQuotedPaths = true;
+    }
+
+    if (hasQuotedPaths) {
+      const trailing = line.slice(lastIndex).trim();
+      if (trailing) {
+        const trailingPaths = extractPathsFromSegment(
+          trailing,
+          isValidPath,
+          hadNonPathToken,
+        );
+        validPaths.push(...trailingPaths);
+      }
+    } else {
+      const linePaths = extractPathsFromSegment(
+        line.trim(),
+        isValidPath,
+        hadNonPathToken,
+      );
+      validPaths.push(...linePaths);
+    }
+  }
+
+  // Only return paths if we extracted at least one AND the content looks like
+  // a pure list of paths (all non-whitespace tokens are valid paths).
+  // This prevents silent data loss when pasting prose mixed with paths.
+  if (validPaths.length > 0 && !hadNonPathToken.value) {
+    return validPaths;
+  }
+
+  return null;
+}
+
+/**
+ * Extract file paths from a whitespace-separated segment.
+ * Tries longest possible path first (greedy) so paths with spaces are matched
+ * before shorter prefixes.
+ * Pre-filters tokens that don't look like paths to avoid O(n²) fs calls.
+ * Sets `hadNonPathToken` to true if any token was skipped (not a valid path).
+ */
+function extractPathsFromSegment(
+  segment: string,
+  isValidPath: (p: string) => boolean,
+  hadNonPathToken: { value: boolean },
+): string[] {
+  const tokens = segment.split(/\s+/).filter(Boolean);
+  const paths: string[] = [];
+  let i = 0;
+  while (i < tokens.length) {
+    // Short-circuit: once any token is flagged as non-path, the result will be null
+    if (hadNonPathToken.value) break;
+
+    // Pre-filter: skip tokens that can't possibly be paths.
+    // For single-token segments, let isValidPath decide (preserves
+    // old behavior for bare filenames like README.md).
+    if (tokens.length > 1 && !looksLikePath(tokens[i])) {
+      hadNonPathToken.value = true;
+      i++;
+      continue;
+    }
+    let found = false;
+    // Try longest-match-first so paths with spaces are tried before shorter
+    // prefixes (e.g., "/tmp/a b.txt" before "/tmp/a").
+    for (let j = tokens.length; j >= i + 1; j--) {
+      const candidate = tokens.slice(i, j).join(' ');
+      let unquoted = candidate;
+      const quoteMatch = unquoted.match(/^'(.*)'$/);
+      if (quoteMatch) {
+        unquoted = quoteMatch[1];
+      }
+      const unescaped = unescapePath(unquoted);
+      if (isValidPath(unescaped)) {
+        paths.push(`@${escapePath(unescaped)}`);
+        i = j;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      // Token looked like a path but isn't valid — mark as non-path
+      hadNonPathToken.value = true;
+      i++;
+    }
+  }
+  return paths;
+}
+
 export function useTextBuffer({
   initialText = '',
   initialCursorOffset = 0,
@@ -2000,6 +2161,18 @@ export function useTextBuffer({
 
   const insert = useCallback(
     (ch: string, { paste = false }: { paste?: boolean } = {}): void => {
+      // Handle pastes that contain newlines (e.g., file paths separated by newlines).
+      // We need to process these before the newline check below, which would
+      // otherwise cause an early return and skip the @-path detection.
+      if (paste && /[\n\r]/.test(ch) && !shellModeActive) {
+        const validPaths = tryExtractFilePaths(ch, isValidPath);
+        if (validPaths) {
+          ch = `${validPaths.join(' ')} `;
+        }
+        dispatch({ type: 'insert', payload: ch });
+        return;
+      }
+
       if (/[\n\r]/.test(ch)) {
         dispatch({ type: 'insert', payload: ch });
         return;
@@ -2007,19 +2180,13 @@ export function useTextBuffer({
 
       const minLengthToInferAsDragDrop = 3;
       if (
+        paste &&
         ch.length >= minLengthToInferAsDragDrop &&
-        !shellModeActive &&
-        paste
+        !shellModeActive
       ) {
-        let potentialPath = ch.trim();
-        const quoteMatch = potentialPath.match(/^'(.*)'$/);
-        if (quoteMatch) {
-          potentialPath = quoteMatch[1];
-        }
-
-        potentialPath = potentialPath.trim();
-        if (isValidPath(unescapePath(potentialPath))) {
-          ch = `@${potentialPath} `;
+        const validPaths = tryExtractFilePaths(ch.trim(), isValidPath);
+        if (validPaths) {
+          ch = `${validPaths.join(' ')} `;
         }
       }
 

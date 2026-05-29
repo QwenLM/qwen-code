@@ -97,6 +97,16 @@ export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
   promptId?: string;
+  /**
+   * Whether this UI history item represents a user turn that reached the model.
+   *
+   * NOTE: This is set explicitly by slash command processing because visible
+   * slash-command invocations may be handled locally without entering API
+   * history. Regular user messages leave this undefined and are classified by
+   * the legacy lexical fallback in isRealUserTurn. New user-item paths with
+   * ambiguous model-history behavior must set this explicitly.
+   */
+  sentToModel?: boolean;
 };
 
 export type HistoryItemGemini = HistoryItemBase & {

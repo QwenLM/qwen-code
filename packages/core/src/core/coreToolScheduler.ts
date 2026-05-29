@@ -71,6 +71,8 @@ import {
 import {
   applyAutoModeDecision,
   evaluateAutoMode,
+  getAutoModePermissionDeniedReason,
+  shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from '../permissions/autoMode.js';
 import { MAX_TRANSCRIPT_MESSAGES } from '../permissions/classifier-transcript.js';
@@ -1097,6 +1099,7 @@ export class CoreToolScheduler {
         call.tool,
         args as Record<string, unknown>,
         targetCallId,
+        call.request.prompt_id,
       );
       if (invocationOrError instanceof Error) {
         const response = createErrorResponse(
@@ -1309,10 +1312,23 @@ export class CoreToolScheduler {
     }
   }
 
+  /**
+   * Builds a tool invocation and threads optional context (callId,
+   * promptId) into it via duck-typed setters when the invocation
+   * exposes them. Both setters are intentionally optional:
+   * - Existing tools whose invocations do not implement these setters
+   *   stay compatible without any change.
+   * - Future contexts (subagent / direct buildAndExecute / non-scheduler
+   *   callers) may invoke this with fewer arguments and still get a
+   *   valid invocation back.
+   * Production call sites in this scheduler always pass both — see
+   * the setArgs path at L1036 and the schedule path at L1497.
+   */
   private buildInvocation(
     tool: AnyDeclarativeTool,
     args: object,
     callId?: string,
+    promptId?: string,
   ): AnyToolInvocation | Error {
     try {
       const invocation = tool.build(structuredClone(args));
@@ -1320,6 +1336,14 @@ export class CoreToolScheduler {
         const maybeAware = invocation as { setCallId?: (id: string) => void };
         if (typeof maybeAware.setCallId === 'function') {
           maybeAware.setCallId(callId);
+        }
+      }
+      if (promptId) {
+        const maybeAware = invocation as {
+          setPromptId?: (id: string) => void;
+        };
+        if (typeof maybeAware.setPromptId === 'function') {
+          maybeAware.setPromptId(promptId);
         }
       }
       return invocation;
@@ -1558,6 +1582,7 @@ export class CoreToolScheduler {
           toolInstance,
           reqInfo.args,
           reqInfo.callId,
+          reqInfo.prompt_id,
         );
         if (invocationOrError instanceof Error) {
           const baseError = reqInfo.wasOutputTruncated
@@ -1764,6 +1789,20 @@ export class CoreToolScheduler {
               this.config,
               denialState,
             );
+            if (
+              !this.config.getDisableAllHooks() &&
+              shouldFirePermissionDeniedForAutoMode(decision, outcome)
+            ) {
+              await this.config
+                .getHookSystem?.()
+                ?.firePermissionDeniedEvent(
+                  canonicalName,
+                  toolParams,
+                  reqInfo.callId,
+                  getAutoModePermissionDeniedReason(decision),
+                  signal,
+                );
+            }
             switch (outcome.kind) {
               case 'approved':
                 this.setToolCallOutcome(

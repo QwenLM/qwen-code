@@ -26,6 +26,7 @@ import {
   HookCallEvent,
   ToolOutputTruncatedEvent,
   ToolOutputTruncationFailedEvent,
+  SkillLaunchEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
@@ -901,6 +902,49 @@ describe('QwenLogger', () => {
           }),
         );
       }
+    });
+  });
+
+  describe('logSkillLaunchEvent', () => {
+    it('writes skill_name, success and prompt_id into RUM event properties', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new SkillLaunchEvent('code-review', true, 'prompt-xyz');
+
+      logger.logSkillLaunchEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'misc',
+          name: 'skill_launch',
+          properties: expect.objectContaining({
+            skill_name: 'code-review',
+            success: 1,
+            prompt_id: 'prompt-xyz',
+          }),
+        }),
+      );
+    });
+
+    it('encodes failed launches with success=0 and still carries prompt_id', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new SkillLaunchEvent('missing-skill', false, 'prompt-fail');
+
+      logger.logSkillLaunchEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          properties: expect.objectContaining({
+            skill_name: 'missing-skill',
+            success: 0,
+            prompt_id: 'prompt-fail',
+          }),
+        }),
+      );
     });
   });
 });

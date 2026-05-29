@@ -175,6 +175,17 @@ export interface CliArgs {
   forkSession?: boolean | undefined;
   /** Internal: preserve the outer session ID when relaunching in a sandbox */
   sandboxSessionId?: string | undefined;
+  /**
+   * Start the session inside a git worktree. Accepted forms:
+   * - bare `--worktree` (empty string from yargs) → auto-generated slug
+   * - `--worktree foo` / `--worktree=foo` → explicit slug
+   * - `--worktree=#123` / `--worktree https://github.com/o/r/pull/123` → PR ref
+   *
+   * Consumed by `setupStartupWorktree()` before `loadCliConfig()`. When set,
+   * the CLI chdirs into `<repoRoot>/.qwen/worktrees/<slug>/` and the entire
+   * session runs inside that worktree.
+   */
+  worktree?: string | undefined;
   maxSessionTurns: number | undefined;
   maxWallTime: string | undefined;
   maxToolCalls: number | undefined;
@@ -830,6 +841,14 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('sandbox-session-id', {
           type: 'string',
           hidden: true,
+        })
+        .option('worktree', {
+          type: 'string',
+          description:
+            'Start the session inside a git worktree at <repoRoot>/.qwen/worktrees/<slug>/. ' +
+            'Pass a slug (`--worktree my-feature`), a PR reference (`--worktree=#123` or a full ' +
+            'GitHub pull-request URL), or use bare `--worktree` to auto-generate a slug. ' +
+            'On exit, the WorktreeExitDialog prompts to keep or remove the worktree.',
         })
         .option('max-session-turns', {
           type: 'number',
@@ -1812,6 +1831,7 @@ export async function loadCliConfig(
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? false,
+    computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
@@ -1850,10 +1870,12 @@ export async function loadCliConfig(
     enableManagedAutoMemory: bareMode
       ? false
       : (settings.memory?.enableManagedAutoMemory ?? true),
-    enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    enableManagedAutoDream: bareMode
+      ? false
+      : (settings.memory?.enableManagedAutoDream ?? true),
     enableAutoSkill: bareMode
       ? false
-      : (settings.memory?.enableAutoSkill ?? false),
+      : (settings.memory?.enableAutoSkill ?? true),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode
@@ -1891,6 +1913,11 @@ export async function loadCliConfig(
                   settings.agents.arena.preserveArtifacts ?? false,
               }
             : undefined,
+        }
+      : undefined,
+    worktree: settings.worktree
+      ? {
+          symlinkDirectories: settings.worktree.symlinkDirectories,
         }
       : undefined,
   };

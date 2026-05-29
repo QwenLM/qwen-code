@@ -33,6 +33,7 @@ import {
   EVENT_MALFORMED_JSON_RESPONSE,
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
+  EVENT_SKILL_LAUNCH,
   EVENT_EXTENSION_ENABLE,
   EVENT_EXTENSION_DISABLE,
   EVENT_EXTENSION_INSTALL,
@@ -49,6 +50,7 @@ import {
   logMalformedJsonResponse,
   logFileOperation,
   logRipgrepFallback,
+  logSkillLaunch,
   logToolOutputTruncated,
   logToolOutputTruncationFailed,
   logExtensionEnable,
@@ -70,6 +72,7 @@ import {
   ToolCallEvent,
   UserPromptEvent,
   RipgrepFallbackEvent,
+  SkillLaunchEvent,
   MalformedJsonResponseEvent,
   makeChatCompressionEvent,
   FileOperationEvent,
@@ -576,6 +579,53 @@ describe('loggers', () => {
           error: 'rg not found',
         }),
       );
+    });
+  });
+
+  describe('logSkillLaunch', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+    } as unknown as Config;
+
+    beforeEach(() => {
+      vi.spyOn(QwenLogger.prototype, 'logSkillLaunchEvent');
+    });
+
+    it('forwards the event to QwenLogger and emits an OTLP record', () => {
+      const event = new SkillLaunchEvent('test-skill', true, 'prompt-id-42');
+
+      logSkillLaunch(mockConfig, event);
+
+      expect(QwenLogger.prototype.logSkillLaunchEvent).toHaveBeenCalledWith(
+        event,
+      );
+
+      const emittedEvent = mockLogger.emit.mock.calls[0][0];
+      expect(emittedEvent.body).toBe(
+        'Skill launch: test-skill. Success: true.',
+      );
+      expect(emittedEvent.attributes).toEqual(
+        expect.objectContaining({
+          'session.id': 'test-session-id',
+          'event.name': EVENT_SKILL_LAUNCH,
+          skill_name: 'test-skill',
+          success: true,
+          prompt_id: 'prompt-id-42',
+        }),
+      );
+    });
+
+    it('forwards to QwenLogger even when OTLP SDK is not initialized', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const event = new SkillLaunchEvent('another-skill', false, 'prompt-id-7');
+
+      logSkillLaunch(mockConfig, event);
+
+      expect(QwenLogger.prototype.logSkillLaunchEvent).toHaveBeenCalledWith(
+        event,
+      );
+      expect(mockLogger.emit).not.toHaveBeenCalled();
     });
   });
 
