@@ -4,15 +4,15 @@
  * Handles workspace setup and configuration persistence.
  */
 import { getAuthState, getSetupNeeds } from '@craft-agent/shared/auth';
-import {
-  isSetupDeferred,
-  QWEN_CODE_CONNECTION_SLUG,
-  setSetupDeferred,
-} from '@craft-agent/shared/config';
+import { isSetupDeferred, setSetupDeferred } from '@craft-agent/shared/config';
 import { prepareMcpOAuth } from '@craft-agent/shared/auth';
 import { validateMcpConnection } from '@craft-agent/shared/mcp';
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol';
-import { getModelRefreshService } from '@craft-agent/server-core/model-fetchers';
+import {
+  getQwenWorkspacePreflightViaAcp,
+  listQwenProvidersViaAcp,
+} from '@craft-agent/shared/agent';
+import { buildBackendHostRuntimeContext } from '@craft-agent/server-core/handlers';
 import type { RpcServer } from '@craft-agent/server-core/transport';
 import type { HandlerDeps } from '../handler-deps';
 
@@ -27,39 +27,92 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.onboarding.DEFER_SETUP,
 ] as const;
 
-async function getQwenSetupNeeds() {
-  if (isSetupDeferred()) {
-    return {
-      needsBillingConfig: false,
-      needsCredentials: false,
-      isFullyConfigured: true,
-    };
-  }
+function completeSetupNeeds() {
+  return {
+    needsBillingConfig: false,
+    needsCredentials: false,
+    isFullyConfigured: true,
+  };
+}
 
-  try {
-    const service = getModelRefreshService();
-    let state = service.getRuntimeModelState(QWEN_CODE_CONNECTION_SLUG);
-    if (!state?.models.length) {
-      await service.refreshNow(QWEN_CODE_CONNECTION_SLUG);
-      state = service.getRuntimeModelState(QWEN_CODE_CONNECTION_SLUG);
-    }
-    if (state?.models.length) {
-      return {
-        needsBillingConfig: false,
-        needsCredentials: false,
-        isFullyConfigured: true,
-      };
-    }
-  } catch {
-    // Fall through to onboarding. The connect-provider screen can surface
-    // the concrete ACP/setup error when the user tries to configure it.
-  }
-
+function requiredSetupNeeds() {
   return {
     needsBillingConfig: true,
     needsCredentials: true,
     isFullyConfigured: false,
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function findPreflightCell(
+  preflight: Record<string, unknown>,
+  kind: string,
+): Record<string, unknown> | undefined {
+  const cells = Array.isArray(preflight.cells) ? preflight.cells : [];
+  return cells.filter(isRecord).find((cell) => cell.kind === kind);
+}
+
+type SetupSignal = 'complete' | 'maybe-required' | 'required';
+
+function preflightSetupSignal(
+  preflight: Record<string, unknown>,
+): SetupSignal {
+  const auth = findPreflightCell(preflight, 'auth');
+  const authDetail = isRecord(auth?.detail) ? auth.detail : {};
+  const authStatus = auth?.status;
+
+  if (authDetail.source === 'none') return 'required';
+  if (authStatus === 'warning' && authDetail.hasToken === false) {
+    return 'maybe-required';
+  }
+
+  const providers = findPreflightCell(preflight, 'providers');
+  const providersDetail = isRecord(providers?.detail) ? providers.detail : {};
+  return providers?.status === 'error' && providersDetail.count === 0
+    ? 'required'
+    : 'complete';
+}
+
+function hasExistingProviderConfig(catalog: {
+  providers: Array<{
+    existingConfig?: { apiKey?: string; modelIds?: string[] };
+  }>;
+}): boolean {
+  return catalog.providers.some((provider) => {
+    const config = provider.existingConfig;
+    return !!config?.apiKey || !!config?.modelIds?.length;
+  });
+}
+
+async function getQwenSetupNeeds(deps: HandlerDeps) {
+  if (isSetupDeferred()) {
+    return completeSetupNeeds();
+  }
+
+  try {
+    const preflight = await getQwenWorkspacePreflightViaAcp({
+      hostRuntime: buildBackendHostRuntimeContext(deps.platform),
+    });
+    const signal = preflightSetupSignal(preflight);
+    if (signal === 'complete') return completeSetupNeeds();
+    if (signal === 'required') return requiredSetupNeeds();
+
+    const catalog = await listQwenProvidersViaAcp({
+      hostRuntime: buildBackendHostRuntimeContext(deps.platform),
+    });
+    return hasExistingProviderConfig(catalog)
+      ? completeSetupNeeds()
+      : requiredSetupNeeds();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    deps.platform.logger?.warn(
+      `Qwen setup preflight failed; continuing to main UI: ${message}`,
+    );
+    return completeSetupNeeds();
+  }
 }
 
 export function registerOnboardingHandlers(
@@ -72,7 +125,7 @@ export function registerOnboardingHandlers(
   server.handle(RPC_CHANNELS.onboarding.GET_AUTH_STATE, async () => {
     const authState = await getAuthState();
     const setupNeeds = getSetupNeeds(authState).isFullyConfigured
-      ? await getQwenSetupNeeds()
+      ? await getQwenSetupNeeds(deps)
       : getSetupNeeds(authState);
     // Redact raw credentials — renderer only needs boolean flags (hasCredentials, setupNeeds)
     return {

@@ -13,10 +13,6 @@ import {
   isValidThinkingLevel,
   THINKING_LEVEL_IDS,
 } from '@craft-agent/shared/agent/thinking-levels';
-
-const VALID_THINKING_LEVELS_LIST = THINKING_LEVEL_IDS.map(
-  (id) => `'${id}'`,
-).join(', ');
 import {
   pushTyped,
   type RequestContext,
@@ -24,6 +20,55 @@ import {
 } from '@craft-agent/server-core/transport';
 import type { HandlerDeps } from '../handler-deps';
 import { setTransferableHandler } from './transfer';
+
+const VALID_THINKING_LEVELS_LIST = THINKING_LEVEL_IDS.map(
+  (id) => `'${id}'`,
+).join(', ');
+
+const SESSION_LIST_EXTERNAL_REFRESH_WAIT_MS = 30_000;
+const EXTERNAL_REFRESH_TIMED_OUT = Symbol('external-refresh-timed-out');
+
+type SessionListRefreshLogger = Pick<HandlerDeps['platform']['logger'], 'warn'>;
+
+export async function waitForSessionListExternalRefresh(
+  refreshPromise: Promise<void> | undefined,
+  {
+    log,
+    timeoutMs = SESSION_LIST_EXTERNAL_REFRESH_WAIT_MS,
+    workspaceId,
+  }: {
+    log: SessionListRefreshLogger;
+    timeoutMs?: number;
+    workspaceId?: string;
+  },
+): Promise<void> {
+  if (!refreshPromise) return;
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const guardedRefresh = refreshPromise.catch((error) => {
+    log.warn('Session list external refresh failed:', error);
+  });
+
+  try {
+    const result = await Promise.race([
+      guardedRefresh,
+      new Promise<typeof EXTERNAL_REFRESH_TIMED_OUT>((resolve) => {
+        timeout = setTimeout(
+          () => resolve(EXTERNAL_REFRESH_TIMED_OUT),
+          timeoutMs,
+        );
+      }),
+    ]);
+
+    if (result === EXTERNAL_REFRESH_TIMED_OUT) {
+      log.warn(
+        `Session list external refresh for workspace ${workspaceId ?? '(all)'} is still running after ${timeoutMs}ms; returning cached sessions`,
+      );
+    }
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 interface ClientSessionWatchState {
   watcher: import('fs').FSWatcher;
@@ -145,11 +190,10 @@ export function registerSessionsHandlers(
     const workspaceId =
       ctx.workspaceId ??
       deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!);
-    try {
-      await sessionManager.refreshExternalSessions?.(workspaceId ?? undefined);
-    } catch (error) {
-      log.warn('GET_SESSIONS external refresh failed:', error);
-    }
+    await waitForSessionListExternalRefresh(
+      sessionManager.refreshExternalSessions?.(workspaceId ?? undefined),
+      { log, workspaceId: workspaceId ?? undefined },
+    );
     const sessions = sessionManager.getSessions(workspaceId ?? undefined);
     end();
     return sessions;
@@ -175,7 +219,10 @@ export function registerSessionsHandlers(
       }
       const end = perf.start('rpc.getSessionsForWorkspace', { workspaceId });
       if (options?.refreshExternal !== false) {
-        await sessionManager.refreshExternalSessions?.(workspaceId);
+        await waitForSessionListExternalRefresh(
+          sessionManager.refreshExternalSessions?.(workspaceId),
+          { log, workspaceId },
+        );
       }
       const sessions = sessionManager.getSessions(workspaceId);
       end();

@@ -2225,11 +2225,24 @@ function AppShellContent({
 
   const projectTreeLoadingWorkspaceSessionIds = useMemo(() => {
     const next = new Set(workspaceSessionSnapshotLoadingIds)
+    if (
+      activeWorkspaceId &&
+      isSessionListLoading &&
+      (projectTreeWorkspaceSessions.get(activeWorkspaceId)?.length ?? 0) === 0
+    ) {
+      next.add(activeWorkspaceId)
+    }
     if (projectDraftTargetWorkspaceId) {
       next.delete(projectDraftTargetWorkspaceId)
     }
     return next
-  }, [projectDraftTargetWorkspaceId, workspaceSessionSnapshotLoadingIds])
+  }, [
+    activeWorkspaceId,
+    isSessionListLoading,
+    projectDraftTargetWorkspaceId,
+    projectTreeWorkspaceSessions,
+    workspaceSessionSnapshotLoadingIds,
+  ])
   const [projectSessionRevealRequest, setProjectSessionRevealRequest] =
     React.useState<ProjectSessionRevealRequest | null>(null)
 

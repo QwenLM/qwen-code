@@ -53,6 +53,7 @@ interface TransportClient extends RpcClient {
 
 const webContentsId: number = ipcRenderer.sendSync('__get-web-contents-id')
 const isClientOnly = !!process.env.CRAFT_SERVER_URL
+const DESKTOP_RPC_REQUEST_TIMEOUT_MS = 60_000
 
 let client: TransportClient
 
@@ -84,6 +85,7 @@ if (isClientOnly) {
     webContentsId,
     autoReconnect: true,
     mode: 'remote',
+    requestTimeout: DESKTOP_RPC_REQUEST_TIMEOUT_MS,
     clientCapabilities: [...LOCAL_CLIENT_CAPABILITIES],
   })
   wsClient.connect()
@@ -104,6 +106,7 @@ if (isClientOnly) {
     webContentsId,
     autoReconnect: true,
     mode: 'local',
+    requestTimeout: DESKTOP_RPC_REQUEST_TIMEOUT_MS,
     clientCapabilities: [...LOCAL_CLIENT_CAPABILITIES],
   })
 
@@ -119,6 +122,7 @@ if (isClientOnly) {
       webContentsId,
       autoReconnect: true,
       mode: 'remote',
+      requestTimeout: DESKTOP_RPC_REQUEST_TIMEOUT_MS,
       clientCapabilities: [...LOCAL_CLIENT_CAPABILITIES],
       tlsRejectUnauthorized: false,
     })
@@ -143,6 +147,7 @@ if (isClientOnly) {
       webContentsId,
       autoReconnect: true,
       mode: 'remote',
+      requestTimeout: DESKTOP_RPC_REQUEST_TIMEOUT_MS,
       clientCapabilities: [...LOCAL_CLIENT_CAPABILITIES],
       tlsRejectUnauthorized: false,
     })

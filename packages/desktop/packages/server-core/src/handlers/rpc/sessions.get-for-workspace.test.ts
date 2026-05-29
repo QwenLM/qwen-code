@@ -6,7 +6,10 @@ import type {
   RpcServer,
 } from '@craft-agent/server-core/transport';
 import type { HandlerDeps } from '../handler-deps';
-import { registerSessionsHandlers } from './sessions';
+import {
+  registerSessionsHandlers,
+  waitForSessionListExternalRefresh,
+} from './sessions';
 
 function deferred<T = void>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -130,6 +133,49 @@ describe('registerSessionsHandlers GET', () => {
     expect(result).toEqual([
       { id: 's1', workspaceId: 'current-workspace', messages: [] },
     ]);
+  });
+});
+
+describe('waitForSessionListExternalRefresh', () => {
+  it('returns after the wait timeout while the refresh keeps running', async () => {
+    const refresh = deferred();
+    const warnings: unknown[][] = [];
+
+    const result = await Promise.race([
+      waitForSessionListExternalRefresh(refresh.promise, {
+        log: { warn: (...args: unknown[]) => warnings.push(args) },
+        timeoutMs: 1,
+        workspaceId: 'current-workspace',
+      }).then(() => 'returned'),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve('still-waiting'), 50),
+      ),
+    ]);
+
+    expect(result).toBe('returned');
+    expect(warnings.length).toBe(1);
+    const [message] = warnings[0] ?? [];
+    expect(String(message)).toContain('current-workspace');
+
+    refresh.resolve();
+  });
+
+  it('logs refresh failures without failing the session list request', async () => {
+    const warnings: unknown[][] = [];
+
+    await waitForSessionListExternalRefresh(
+      Promise.reject(new Error('provider failed')),
+      {
+        log: { warn: (...args: unknown[]) => warnings.push(args) },
+        timeoutMs: 50,
+        workspaceId: 'current-workspace',
+      },
+    );
+
+    expect(warnings.length).toBe(1);
+    const [message, error] = warnings[0] ?? [];
+    expect(String(message)).toContain('failed');
+    expect(error).toBeInstanceOf(Error);
   });
 });
 

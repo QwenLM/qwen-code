@@ -107,6 +107,7 @@ class ModelRefreshService {
     let serverDefault: string | undefined
 
     // Layer 1: Provider API/SDK
+    let fetchError: Error | null = null
     try {
       const credentials = await this.getCredentials(slug)
       handlerLog.info(`Model refresh [${slug}]: fetching (provider=${connection.providerType})`)
@@ -116,6 +117,7 @@ class ModelRefreshService {
       handlerLog.info(`Model refresh [${slug}]: fetched ${newModels.length} models from provider: ${newModels.map(m => m.id).join(', ')}`)
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error)
+      fetchError = error instanceof Error ? error : new Error(msg)
       handlerLog.warn(`Model refresh [${slug}]: provider fetch failed: ${msg}`)
     }
 
@@ -123,6 +125,7 @@ class ModelRefreshService {
       this.setRuntimeModelState(slug, { models: newModels, serverDefault })
     } else {
       handlerLog.warn(`Model refresh [${slug}]: no ACP models available`)
+      throw fetchError ?? new Error(`Model refresh [${slug}]: no ACP models available`)
     }
   }
 

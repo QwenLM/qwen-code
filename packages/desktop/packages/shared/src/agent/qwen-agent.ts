@@ -39,6 +39,7 @@ import { getProxyEnvVars } from '../config/proxy-env.ts'
 import { getCoAuthorPreference } from '../config/preferences.ts'
 import { getSessionPlansPath } from '../sessions/storage.ts'
 import { getSystemPrompt } from '../prompts/system.ts'
+import type { ModelFetchResult } from '../config/model-fetcher.ts'
 import {
   resolveFileMentions,
   resolveSourceMentions,
@@ -672,6 +673,52 @@ export async function listQwenProvidersViaAcp(
   return normalizeQwenProviderCatalog(response)
 }
 
+export async function getQwenWorkspacePreflightViaAcp(
+  options: QwenSettingsAcpOptions,
+): Promise<Record<string, unknown>> {
+  return callQwenSettingsAcpMethod(
+    options,
+    'qwen/status/workspace/preflight',
+  )
+}
+
+export async function fetchQwenModelsViaSharedAcp(
+  options: QwenSettingsAcpOptions,
+): Promise<ModelFetchResult> {
+  const response = await callQwenSettingsAcpMethod(
+    options,
+    'qwen/status/workspace/providers',
+  )
+  const current = toRecord(response.current)
+  let serverDefault = asString(current.modelId)
+  const providers = Array.isArray(response.providers)
+    ? response.providers.filter(isRecord)
+    : []
+  const models: ModelDefinition[] = []
+  const seen = new Set<string>()
+
+  for (const provider of providers) {
+    const providerModels = Array.isArray(provider.models)
+      ? provider.models
+      : []
+    for (const value of providerModels) {
+      const model = toQwenModelDefinition(value)
+      if (!model || seen.has(model.id)) continue
+      seen.add(model.id)
+      models.push(model)
+      if (!serverDefault && toRecord(value).isCurrent === true) {
+        serverDefault = model.id
+      }
+    }
+  }
+
+  if (models.length === 0) {
+    throw new Error('Qwen ACP workspace providers did not return models')
+  }
+
+  return { models, serverDefault }
+}
+
 function normalizeQwenProviderCatalog(
   response: JsonRecord,
 ): QwenProviderCatalog {
@@ -836,6 +883,7 @@ function toQwenModelDefinition(value: unknown): ModelDefinition | null {
     meta.contextLimit,
     meta.contextWindowSize,
     meta.contextWindow,
+    model.contextLimit,
     model.contextWindowSize,
     model.contextWindow,
     model.maxContextWindowTokens,

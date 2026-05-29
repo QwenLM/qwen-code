@@ -11,6 +11,8 @@ export {
   setQwenCoreSettingViaAcp,
   getQwenMemoryPathsViaAcp,
   listQwenProvidersViaAcp,
+  getQwenWorkspacePreflightViaAcp,
+  fetchQwenModelsViaSharedAcp,
   connectQwenProviderViaAcp,
 } from './qwen-agent.ts';
 export * from './errors.ts';
