@@ -268,7 +268,6 @@ export interface BugCommandSettings {
 }
 
 export interface ChatCompressionSettings {
-  contextPercentageThreshold?: number;
   /**
    * Estimated tokens for a single inline image / document part when
    * apportioning chars across history in `findCompressSplitPoint`.
@@ -335,6 +334,42 @@ export interface TelemetryMetricsSettings {
    * short-term debugging — spans and logs still carry session.id.
    */
   includeSessionId?: boolean;
+}
+
+/**
+ * Security-relevant settings controlling what client-side correlation
+ * data qwen-code writes into outbound LLM API requests.
+ *
+ * **Why this is a separate namespace from `telemetry.*`:** telemetry
+ * controls data flow into the user's OWN observability backend (OTLP
+ * collector / file outfile). The settings here control data flow OUT of
+ * the qwen-code process and INTO third-party LLM provider request
+ * streams (DashScope, OpenAI, Anthropic, etc.). Different recipients =
+ * different consent decision, so a different settings tree. See PR
+ * #4390 review (LaZzyMan) for the framing rationale.
+ *
+ * All values default to off / no propagation. Operators who want to
+ * propagate trace context for server-side trace stitching (e.g. ARMS
+ * Tracing + DashScope) opt in explicitly.
+ */
+export interface OutboundCorrelationSettings {
+  /**
+   * Inject W3C `traceparent` header on outbound HTTP requests
+   * originated by undici / global `fetch` (LLM SDK calls, MCP
+   * StreamableHTTP clients, WebFetch tool, etc.). Default: `false`.
+   *
+   * When `false`, the SDK is configured with a no-op
+   * `TextMapPropagator` so trace context stays internal to the user's
+   * OTLP collector (operator still gets client HTTP spans, but the
+   * trace id is not written onto third-party request streams).
+   *
+   * When `true`, the OTel default W3C composite propagator
+   * (`tracecontext` + `baggage`) is installed and `traceparent` is
+   * written on every outbound `fetch`. Useful when the LLM provider
+   * also reports into the operator's OTel collector — e.g. ARMS
+   * Tracing + DashScope — for cross-process trace stitching.
+   */
+  propagateTraceContext?: boolean;
 }
 
 export interface OutputSettings {
@@ -493,6 +528,27 @@ export interface SandboxConfig {
  * Settings shared across multi-agent collaboration features
  * (Arena, Team, Swarm).
  */
+/**
+ * General-purpose worktree settings (Phase D-2). Distinct from
+ * {@link AgentsCollabSettings.arena.worktreeBaseDir}, which only governs
+ * Arena multi-model worktrees.
+ */
+export interface WorktreeSettings {
+  /**
+   * Directories under the main repository to symlink into every
+   * general-purpose worktree on creation (the `enter_worktree` tool,
+   * `agent isolation: "worktree"`, and the `--worktree` startup flag).
+   *
+   * Paths must be relative to the repo root; absolute paths and any
+   * entry containing `..` are rejected by the service. Entries that
+   * resolve to git-internal paths (`.git`, `.qwen`) are also rejected
+   * — symlinking those would either break git inside the worktree or
+   * create a worktrees-inside-worktrees loop. Missing source dirs and
+   * pre-existing destinations are silently skipped.
+   */
+  symlinkDirectories?: readonly string[];
+}
+
 export interface AgentsCollabSettings {
   /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
   displayMode?: string;
@@ -581,6 +637,7 @@ export interface ConfigParameters {
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
+  outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
   /**
@@ -609,10 +666,24 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  /**
+   * Wall-clock budget for an unattended run, in seconds. `-1` (default)
+   * means no limit. Enforced by the CLI's non-interactive run loop —
+   * see `RunBudgetEnforcer` in `packages/cli/src/utils/runBudget.ts`.
+   * Issue: QwenLM/qwen-code#4103.
+   */
+  maxWallTimeSeconds?: number;
+  /**
+   * Cumulative tool-call budget across the entire run. `-1` means no
+   * limit. Counts every `executeToolCall` invocation (incl. failed
+   * tools, since the model is still consuming tokens reading the error).
+   */
+  maxToolCalls?: number;
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -685,6 +756,8 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
+  /** General-purpose worktree settings (Phase D-2). */
+  worktree?: WorktreeSettings;
   /** Enable managed auto-memory background extraction and dream. Defaults to true. */
   enableManagedAutoMemory?: boolean;
   /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
@@ -797,6 +870,20 @@ const EMPTY_DISABLED_SKILL_NAMES: ReadonlySet<string> = Object.freeze(
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
+  /**
+   * One-shot notice produced by `setupStartupWorktree` (Phase D-1) when the
+   * CLI was launched with `--worktree`. The active entry point (TUI XOR
+   * headless) reads it via {@link consumePendingStartupWorktreeNotice} on
+   * the model's first prompt and skips Phase C's `restoreWorktreeContext`
+   * for that turn — startup wins over the resumed-session sidecar. ACP is
+   * gated out earlier in `gemini.tsx` (mutex with `--worktree`) so it
+   * never reaches this slot.
+   *
+   * @invariant At most one consumer per process. If a future entry path
+   * sets this slot without ever consuming, the string persists until
+   * process exit (which dies with the process — no leak).
+   */
+  private pendingStartupWorktreeNotice: string | null = null;
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   /**
@@ -880,6 +967,7 @@ export class Config {
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
+  private readonly outboundCorrelationSettings: OutboundCorrelationSettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private readonly fileReadCacheDisabled: boolean;
@@ -910,6 +998,8 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly maxWallTimeSeconds: number;
+  private readonly maxToolCalls: number;
   private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
@@ -919,6 +1009,7 @@ export class Config {
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
+  private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -937,6 +1028,7 @@ export class Config {
     | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
   private readonly agentsSettings: AgentsCollabSettings;
+  private readonly worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
@@ -1049,6 +1141,10 @@ export class Config {
       metrics: params.telemetry?.metrics,
       resourceAttributeWarnings: params.telemetry?.resourceAttributeWarnings,
     };
+    this.outboundCorrelationSettings = {
+      propagateTraceContext:
+        params.outboundCorrelation?.propagateTraceContext ?? false,
+    };
     this.gitCoAuthor = {
       ...normalizeGitCoAuthor(params.gitCoAuthor),
       name: 'Qwen-Coder',
@@ -1074,6 +1170,8 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
+    this.maxToolCalls = params.maxToolCalls ?? -1;
     this.clearContextOnIdle = {
       toolResultsThresholdMinutes:
         params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
@@ -1084,6 +1182,7 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
+    this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -1099,6 +1198,24 @@ export class Config {
     this.loadMemoryFromIncludeDirectories =
       params.loadMemoryFromIncludeDirectories ?? false;
     this.importFormat = params.importFormat ?? 'tree';
+    // Auto-compaction threshold moved to built-in constants (computeThresholds
+    // in chatCompressionService.ts). The old `contextPercentageThreshold`
+    // field is deprecated; if present in user settings, emit a one-time
+    // warning and ignore the value.
+    if (
+      params.chatCompression &&
+      typeof (params.chatCompression as Record<string, unknown>)[
+        'contextPercentageThreshold'
+      ] !== 'undefined'
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[qwen-code] chatCompression.contextPercentageThreshold has been removed ' +
+          'and is now controlled by built-in thresholds. Setting will be ignored. ' +
+          'Remove this key from your settings.json to silence this warning; ' +
+          'see docs/users/configuration/settings.md for current compaction behavior.',
+      );
+    }
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
@@ -1139,6 +1256,7 @@ export class Config {
     this.eventEmitter = params.eventEmitter;
     this.arenaAgentClient = ArenaAgentClient.create();
     this.agentsSettings = params.agents ?? {};
+    this.worktreeSettings = params.worktree ?? {};
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -1177,8 +1295,8 @@ export class Config {
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
-    this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
-    this.enableAutoSkill = params.enableAutoSkill ?? false;
+    this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
+    this.enableAutoSkill = params.enableAutoSkill ?? true;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -2191,6 +2309,14 @@ export class Config {
     return this.maxSessionTurns;
   }
 
+  getMaxWallTimeSeconds(): number {
+    return this.maxWallTimeSeconds;
+  }
+
+  getMaxToolCalls(): number {
+    return this.maxToolCalls;
+  }
+
   getClearContextOnIdle(): ClearContextOnIdleSettings {
     return this.clearContextOnIdle;
   }
@@ -2220,6 +2346,29 @@ export class Config {
 
   getTargetDir(): string {
     return this.targetDir;
+  }
+
+  /**
+   * Stashes a one-shot context message that the next user prompt will
+   * inject into the model (see {@link pendingStartupWorktreeNotice}). Called
+   * from `gemini.tsx` right after `loadCliConfig` when `--worktree` produced
+   * a valid worktree. Pass `null` to clear (rarely needed).
+   */
+  setPendingStartupWorktreeNotice(notice: string | null): void {
+    this.pendingStartupWorktreeNotice = notice;
+  }
+
+  /**
+   * Reads and clears the pending startup-worktree notice. Returns `null`
+   * when nothing is stashed (the common case). Each entry point (TUI /
+   * headless / ACP) calls this on the model's first prompt; a non-null
+   * return means the entry point should NOT additionally call
+   * `restoreWorktreeContext()` for that prompt — startup overrides resume.
+   */
+  consumePendingStartupWorktreeNotice(): string | null {
+    const v = this.pendingStartupWorktreeNotice;
+    this.pendingStartupWorktreeNotice = null;
+    return v;
   }
 
   getProjectRoot(): string {
@@ -2585,6 +2734,18 @@ export class Config {
   }
 
   /**
+   * Convenience accessor for `worktree.symlinkDirectories` — returns an
+   * empty array when the setting is unset, so callers can pass the
+   * result directly into the GitWorktreeService loop without nullchecks.
+   *
+   * (No general `getWorktreeSettings()` getter yet — add one when a
+   * second field on `WorktreeSettings` justifies the broader API.)
+   */
+  getWorktreeSymlinkDirectories(): readonly string[] {
+    return this.worktreeSettings.symlinkDirectories ?? [];
+  }
+
+  /**
    * Clean up Arena runtime. When `force` is true (e.g., /arena select --discard),
    * always removes worktrees regardless of preserveArtifacts.
    */
@@ -2892,6 +3053,15 @@ export class Config {
     return this.telemetrySettings.resourceAttributeWarnings ?? [];
   }
 
+  /**
+   * Whether to inject W3C `traceparent` on outbound `fetch` requests
+   * (LLM SDKs, MCP, WebFetch, etc.). Default false — see
+   * `OutboundCorrelationSettings` for rationale.
+   */
+  getOutboundCorrelationPropagateTraceContext(): boolean {
+    return this.outboundCorrelationSettings.propagateTraceContext ?? false;
+  }
+
   getTelemetryOutfile(): string | undefined {
     return this.telemetrySettings.outfile;
   }
@@ -2915,6 +3085,10 @@ export class Config {
     // Cron is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
     return this.cronEnabled;
+  }
+
+  isComputerUseEnabled(): boolean {
+    return this.computerUseEnabled;
   }
 
   /**
@@ -3835,6 +4009,21 @@ export class Config {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
       });
+    }
+
+    // Register computer-use tools unless disabled. All 9 are deferred —
+    // they surface only via ToolSearch keyword match
+    // (see packages/core/src/tools/computer-use/).
+    //
+    // Pass `registerLazy` (not the bare `registry`) so the same
+    // PermissionManager.isToolEnabled() check that gates every other
+    // built-in also gates these. Direct registry.registerFactory() would
+    // bypass coreTools allowlist + whole-tool deny rules.
+    if (this.isComputerUseEnabled()) {
+      const { registerComputerUseTools } = await import(
+        '../tools/computer-use/index.js'
+      );
+      await registerComputerUseTools(registerLazy);
     }
 
     // Register monitor tool

@@ -215,6 +215,50 @@ describe('useCommandCompletion', () => {
         });
       });
 
+      it('should not trigger AT completion when @ is not preceded by whitespace', async () => {
+        const text = 'cici@192.168.0.160';
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(text),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+      });
+
+      it('should not trigger AT completion for email-like patterns', async () => {
+        const text = 'user@example.com';
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(text),
+            testRootDir,
+            [],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useAtCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: false,
+            }),
+          );
+        });
+      });
+
       it('should correctly identify the completion context with multiple @ symbols', async () => {
         const text = '@file1 @file2';
         const cursorOffset = 3; // @fi|le1 @file2
@@ -555,7 +599,11 @@ describe('useCommandCompletion', () => {
     it('should not append trailing space for directory completions', async () => {
       setupMocks({
         atSuggestions: [
-          { label: 'src/components/', value: 'src/components/', isDirectory: true },
+          {
+            label: 'src/components/',
+            value: 'src/components/',
+            isDirectory: true,
+          },
         ],
       });
 
@@ -652,9 +700,7 @@ describe('useCommandCompletion', () => {
         result.current.handleAutocomplete(0);
       });
 
-      expect(result.current.textBuffer.text).toBe(
-        '@src/components/ is a dir',
-      );
+      expect(result.current.textBuffer.text).toBe('@src/components/ is a dir');
     });
   });
 

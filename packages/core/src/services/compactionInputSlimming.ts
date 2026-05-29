@@ -20,7 +20,13 @@ import type { ChatCompressionSettings } from '../config/config.js';
 
 export const DEFAULT_IMAGE_TOKEN_ESTIMATE = 1600;
 
-const TOKEN_TO_CHAR_RATIO = 4;
+/**
+ * Generic char/token conversion factor (claude-code's canonical heuristic).
+ * Exported so adjacent estimators (`tokenEstimation.ts`'s `CHARS_PER_TOKEN`)
+ * stay programmatically linked — if this ever moves, both sites move
+ * together rather than drifting silently.
+ */
+export const TOKEN_TO_CHAR_RATIO = 4;
 const DEFAULT_MIME = 'application/octet-stream';
 
 /**

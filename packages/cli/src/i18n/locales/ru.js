@@ -865,6 +865,7 @@ export default {
   'Auto-memory: {{status}}': 'Автопамять: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Автоконсолидация: {{status}} · {{lastDream}} · /dream для запуска',
+  'Auto-skill: {{status}}': 'Автонавык: {{status}}',
   never: 'никогда',
   on: 'вкл',
   off: 'выкл',

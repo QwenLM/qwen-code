@@ -800,6 +800,7 @@ export default {
   'Auto-memory: {{status}}': '自動記憶：{{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     '自動整理：{{status}} · {{lastDream}} · /dream 立即運行',
+  'Auto-skill: {{status}}': '自動技能：{{status}}',
   never: '從未',
   on: '開',
   off: '關',

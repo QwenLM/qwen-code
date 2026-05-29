@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { logSkillLaunch } from '../telemetry/index.js';
 import { SkillTool, type SkillParams } from './skill.js';
 import type { PartListUnion } from '@google/genai';
 import type { ToolResultDisplay } from './tools.js';
@@ -36,6 +37,7 @@ vi.mock('../telemetry/index.js', () => ({
     constructor(
       public skill_name: string,
       public success: boolean,
+      public prompt_id: string = '',
     ) {}
   },
 }));
@@ -658,6 +660,129 @@ describe('SkillTool', () => {
 
       expect(result.returnDisplay).toBe(
         'Specialized skill for reviewing code quality',
+      );
+    });
+
+    it('propagates prompt_id to SkillLaunchEvent when setPromptId is called', async () => {
+      const params: SkillParams = {
+        skill: 'code-review',
+      };
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation(params);
+      // setPromptId is intentionally a scheduler-only hook (duck-typed by
+      // CoreToolScheduler.buildInvocation; not on the public ToolInvocation
+      // interface). Tests cast through `unknown` to exercise it directly.
+      (
+        invocation as unknown as { setPromptId: (id: string) => void }
+      ).setPromptId('prompt-abc-123');
+      await invocation.execute();
+
+      expect(logSkillLaunch).toHaveBeenCalled();
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'code-review',
+          success: true,
+          prompt_id: 'prompt-abc-123',
+        }),
+      );
+    });
+
+    it('records empty prompt_id when setPromptId is never called (direct invocation)', async () => {
+      const params: SkillParams = {
+        skill: 'code-review',
+      };
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(logSkillLaunch).toHaveBeenCalled();
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'code-review',
+          success: true,
+          prompt_id: '',
+        }),
+      );
+    });
+
+    it('propagates prompt_id through the commandExecutor-success branch', async () => {
+      // skill not on disk → loadSkillForRuntime returns null → falls through
+      // to commandExecutor (the L386 branch in skill.ts).
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+      const executor = vi.fn().mockResolvedValue('content from executor');
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      (
+        invocation as unknown as { setPromptId: (id: string) => void }
+      ).setPromptId('prompt-via-executor');
+      await invocation.execute();
+
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'mcp-prompt-a',
+          success: true,
+          prompt_id: 'prompt-via-executor',
+        }),
+      );
+    });
+
+    it('propagates prompt_id through the not-found branch', async () => {
+      // Both loadSkillForRuntime and commandExecutor return null → L399
+      // branch in skill.ts logs a failed SkillLaunchEvent.
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'nonexistent' });
+      (
+        invocation as unknown as { setPromptId: (id: string) => void }
+      ).setPromptId('prompt-on-miss');
+      await invocation.execute();
+
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'nonexistent',
+          success: false,
+          prompt_id: 'prompt-on-miss',
+        }),
+      );
+    });
+
+    it('propagates prompt_id through the thrown-exception branch', async () => {
+      // loadSkillForRuntime throws → caught by L482 branch in skill.ts.
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockRejectedValue(
+        new Error('synthetic load failure'),
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      (
+        invocation as unknown as { setPromptId: (id: string) => void }
+      ).setPromptId('prompt-on-throw');
+      await invocation.execute();
+
+      const lastEvent = vi.mocked(logSkillLaunch).mock.calls.at(-1)?.[1];
+      expect(lastEvent).toEqual(
+        expect.objectContaining({
+          skill_name: 'code-review',
+          success: false,
+          prompt_id: 'prompt-on-throw',
+        }),
       );
     });
   });

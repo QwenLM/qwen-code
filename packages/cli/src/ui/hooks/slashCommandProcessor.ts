@@ -62,7 +62,7 @@ type SerializableHistoryItem = Record<string, unknown>;
 const debugLogger = createDebugLogger('SLASH_COMMAND_PROCESSOR');
 
 function serializeHistoryItemForRecording(
-  item: Omit<HistoryItem, 'id'>,
+  item: HistoryItemWithoutId,
 ): SerializableHistoryItem {
   const clone: SerializableHistoryItem = { ...item };
   if ('timestamp' in clone && clone['timestamp'] instanceof Date) {
@@ -133,6 +133,7 @@ export const useSlashCommandProcessor = (
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
   isConfigInitialized: boolean,
   logger: Logger | null,
+  updateItem: UseHistoryManagerReturn['updateItem'],
   setSessionName?: (name: string | null) => void,
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
@@ -521,6 +522,7 @@ export const useSlashCommandProcessor = (
       rawQuery: PartListUnion,
       oneTimeShellAllowlist?: Set<string>,
       overwriteConfirmed?: boolean,
+      existingInvocationItemId?: number,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {
         return false;
@@ -534,8 +536,8 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
-      const recordedItems: Array<Omit<HistoryItem, 'id'>> = [];
-      const recordItem = (item: Omit<HistoryItem, 'id'>) => {
+      const recordedItems: HistoryItemWithoutId[] = [];
+      const recordItem = (item: HistoryItemWithoutId) => {
         recordedItems.push(item);
       };
       const addItemWithRecording: UseHistoryManagerReturn['addItem'] = (
@@ -553,14 +555,17 @@ export const useSlashCommandProcessor = (
       abortControllerRef.current = abortController;
 
       const userMessageTimestamp = Date.now();
-      if (!isBtwCommand(trimmed)) {
-        addItemWithRecording(
-          { type: MessageType.USER, text: trimmed },
+      let invocationItemId = existingInvocationItemId;
+      let invocationSentToModel = false;
+      if (!isBtwCommand(trimmed) && invocationItemId === undefined) {
+        invocationItemId = addItemWithRecording(
+          { type: MessageType.USER, text: trimmed, sentToModel: false },
           userMessageTimestamp,
         );
       }
 
       let hasError = false;
+      let delegatedToRecursiveInvocation = false;
       const {
         commandToExecute,
         args,
@@ -778,6 +783,18 @@ export const useSlashCommandProcessor = (
                   return { type: 'handled' };
 
                 case 'submit_prompt':
+                  if (invocationItemId !== undefined) {
+                    invocationSentToModel = true;
+                    debugLogger.debug(
+                      `Marked slash command invocation as model-sent: /${resolvedCommandPath.join(
+                        ' ',
+                      )}`,
+                    );
+                    // React applies this update asynchronously. No same-turn
+                    // logic reads the UI history classification; rewind/resume
+                    // consumers observe it after state has rendered.
+                    updateItem(invocationItemId, { sentToModel: true });
+                  }
                   return {
                     type: 'submit_prompt',
                     content: result.content,
@@ -817,10 +834,13 @@ export const useSlashCommandProcessor = (
                     );
                   }
 
+                  delegatedToRecursiveInvocation = true;
                   return await handleSlashCommand(
                     result.originalInvocation.raw,
                     // Pass the approved commands as a one-time grant for this execution.
                     new Set(approvedCommands),
+                    undefined,
+                    invocationItemId,
                   );
                 }
                 case 'confirm_action': {
@@ -847,10 +867,12 @@ export const useSlashCommandProcessor = (
                     return { type: 'handled' };
                   }
 
+                  delegatedToRecursiveInvocation = true;
                   return await handleSlashCommand(
                     result.originalInvocation.raw,
                     undefined,
                     true,
+                    invocationItemId,
                   );
                 }
                 case 'stream_messages': {
@@ -917,15 +939,17 @@ export const useSlashCommandProcessor = (
           const chatRecorder = config.getChatRecordingService();
           const primaryCommand =
             resolvedCommandPath[0] ||
-            trimmed.replace(/^[/?]/, '').split(/\s+/)[0] ||
+            trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
             trimmed;
           const shouldRecord =
+            !delegatedToRecursiveInvocation &&
             !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
           try {
             if (shouldRecord) {
               chatRecorder?.recordSlashCommand({
                 phase: 'invocation',
                 rawCommand: trimmed,
+                sentToModel: invocationSentToModel,
               });
               const outputItems = recordedItems
                 .filter((item) => item.type !== 'user')
@@ -943,7 +967,12 @@ export const useSlashCommandProcessor = (
             );
           }
         }
-        if (config && resolvedCommandPath[0] && !hasError) {
+        if (
+          config &&
+          resolvedCommandPath[0] &&
+          !hasError &&
+          !delegatedToRecursiveInvocation
+        ) {
           const event = makeSlashCommandEvent({
             command: resolvedCommandPath[0],
             subcommand,
@@ -965,6 +994,7 @@ export const useSlashCommandProcessor = (
       setSessionShellAllowlist,
       setIsProcessing,
       setConfirmationRequest,
+      updateItem,
     ],
   );
 
