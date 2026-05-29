@@ -68,7 +68,9 @@ vi.mock('../utils/restoreGoal.js', () => ({
   restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
 }));
 
-vi.mock('@qwen-code/qwen-code-core', () => {
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   class SessionService {
     constructor(_cwd: string) {}
     async loadSession(_sessionId: string) {
@@ -85,6 +87,7 @@ vi.mock('@qwen-code/qwen-code-core', () => {
   }
 
   return {
+    ...original,
     SessionService,
   };
 });

@@ -1029,6 +1029,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { handleBranch } = useBranchCommand({
     config,
+    settings,
     historyManager,
     startNewSession,
     setSessionName,
@@ -2551,7 +2552,12 @@ export const AppContainer = (props: AppContainerProps) => {
           !(option === 'both' && hasRestoreFailure)
         ) {
           const originalHistory = historyManager.history;
-          const originalLength = originalHistory.length;
+          const hasSummary = originalHistory.some(
+            (h) => h.display?.kind === 'collapse-summary',
+          );
+          const effectiveLength = hasSummary
+            ? originalHistory.length - 1
+            : originalHistory.length;
 
           let targetTurnIndex = 0;
           for (const h of originalHistory) {
@@ -2585,7 +2591,7 @@ export const AppContainer = (props: AppContainerProps) => {
           );
 
           config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-            truncatedCount: originalLength - truncatedUi.length,
+            truncatedCount: effectiveLength - truncatedUi.length,
           });
         }
 

@@ -150,6 +150,7 @@ describe('useSlashCommandProcessor', () => {
     handleResume: vi.fn(),
     handleBranch: vi.fn().mockResolvedValue(undefined),
     openDeleteDialog: vi.fn(),
+    openDiffDialog: vi.fn(),
     quit: mockSetQuittingMessages,
     setDebugMessage: vi.fn(),
     dispatchExtensionStateUpdate: vi.fn(),
@@ -598,6 +599,7 @@ describe('useSlashCommandProcessor', () => {
         {
           type: MessageType.USER,
           text: '/history collapse-on-resume',
+          sentToModel: false,
         },
         expect.any(Number),
       );
@@ -636,6 +638,7 @@ describe('useSlashCommandProcessor', () => {
         {
           type: MessageType.USER,
           text: '/history expand-now',
+          sentToModel: false,
         },
         expect.any(Number),
       );

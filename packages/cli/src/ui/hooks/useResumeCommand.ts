@@ -86,7 +86,7 @@ export function useResumeCommand(
   const { addItem, clearItems, loadHistory } = historyManager;
   const handleResume = useCallback(
     async (sessionId: string) => {
-      if (!config || !startNewSession) {
+      if (!config) {
         return;
       }
 
@@ -95,7 +95,7 @@ export function useResumeCommand(
           type: MessageType.ERROR,
           text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
         };
-        addItem?.(blockedMessage, Date.now());
+        addItem(blockedMessage, Date.now());
         closeResumeDialog();
         return;
       }
@@ -129,8 +129,8 @@ export function useResumeCommand(
           collapseOnResume,
         );
 
-        clearItems?.();
-        loadHistory?.(uiHistoryItems);
+        clearItems();
+        loadHistory(uiHistoryItems);
 
         // Update session history core.
         resetBackgroundStateForSessionSwitch(config);
@@ -144,7 +144,7 @@ export function useResumeCommand(
         // (visible as "几十秒" elapsed immediately after /new + /resume) and
         // the Stop hook is silently dead until the user re-issues /goal.
         try {
-          if (addItem) restoreGoalFromHistory(uiHistoryItems, config, addItem);
+          restoreGoalFromHistory(uiHistoryItems, config, addItem);
         } catch {
           // Best-effort — never block resume on goal restoration.
         }
@@ -162,7 +162,7 @@ export function useResumeCommand(
               .getBackgroundAgentResumeService()
               .buildRecoveredBackgroundAgentsNotice(recovered.length),
           };
-          addItem?.(recoveredMessage, Date.now());
+          addItem(recoveredMessage, Date.now());
         }
 
         // SessionStart hook is handled during chat initialization so its
@@ -171,7 +171,7 @@ export function useResumeCommand(
         // Refresh terminal UI.
         remount?.();
       } catch (error) {
-        addItem?.(
+        addItem(
           {
             type: MessageType.ERROR,
             text: `Failed to resume session: ${error instanceof Error ? error.message : String(error)}`,
