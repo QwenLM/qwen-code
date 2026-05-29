@@ -42,8 +42,9 @@ import { TurnCardActionsMenu } from './TurnCardActionsMenu'
 import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, formatDuration, formatTokens, deriveTurnPhase, shouldShowThinkingIndicator, type ActivityGroup, type AssistantTurn } from './turn-utils'
 import {
   buildTurnTimelineItems,
+  formatProcessedDuration,
+  getProcessedDurationMs,
   splitTimelineAtFinalResponse,
-  type ResponseTimelineItem,
   type TurnTimelineItem,
 } from './turn-timeline'
 import { extractAnnotationSelectedText } from './follow-up-helpers'
@@ -788,57 +789,6 @@ function getPreviewText(
 
   return i18n.t('turnCard.starting')
 }
-
-function getTimelineItemTimestamp(item: TurnTimelineItem): number | undefined {
-  switch (item.type) {
-    case 'activity-section':
-      return item.activities[0]?.timestamp
-    case 'commentary':
-    case 'plan':
-      return item.activity.timestamp
-    case 'response':
-      return item.response.timestamp
-    default:
-      return undefined
-  }
-}
-
-function getProcessedDurationMs(
-  detailItems: TurnTimelineItem[],
-  finalResponseItem?: ResponseTimelineItem,
-): number {
-  const timestamps = detailItems
-    .map(getTimelineItemTimestamp)
-    .filter((timestamp): timestamp is number => Number.isFinite(timestamp))
-
-  const responseTimestamp = finalResponseItem?.response.timestamp
-  if (!Number.isFinite(responseTimestamp) || timestamps.length === 0) {
-    return 0
-  }
-
-  const startedAt = Math.min(...timestamps)
-  return Math.max(0, responseTimestamp! - startedAt)
-}
-
-function formatProcessedDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) {
-    return '0s'
-  }
-
-  const totalSeconds = Math.max(1, Math.round(ms / 1000))
-  const hours = Math.floor(totalSeconds / 3600)
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-  const seconds = totalSeconds % 60
-
-  if (hours > 0) {
-    return `${hours}h ${minutes}m ${seconds}s`
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${seconds}s`
-  }
-  return `${seconds}s`
-}
-
 
 // ============================================================================
 // Sub-Components

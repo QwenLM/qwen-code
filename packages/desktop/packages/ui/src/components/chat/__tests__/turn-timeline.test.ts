@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test';
 import {
   buildTurnTimelineItems,
+  formatProcessedDuration,
+  getProcessedDurationMs,
   splitTimelineAtFinalResponse,
 } from '../turn-timeline';
 import type { ActivityItem, ResponseContent } from '../TurnCard';
@@ -122,5 +124,38 @@ describe('buildTurnTimelineItems', () => {
       'commentary',
       'activity-section',
     ]);
+  });
+});
+
+describe('processed duration', () => {
+  it('formats sub-second or unknown durations without showing 0s', () => {
+    expect(formatProcessedDuration(0)).toBe('<1s');
+    expect(formatProcessedDuration(500)).toBe('<1s');
+    expect(formatProcessedDuration(Number.NaN)).toBe('<1s');
+  });
+
+  it('keeps normal second, minute, and hour formatting', () => {
+    expect(formatProcessedDuration(1_000)).toBe('1s');
+    expect(formatProcessedDuration(65_000)).toBe('1m 5s');
+    expect(formatProcessedDuration(3_661_000)).toBe('1h 1m 1s');
+  });
+
+  it('handles details and final response with identical timestamps', () => {
+    const timeline = buildTurnTimelineItems(
+      [activity({ id: 'tool', toolName: 'Read', timestamp: 1000 })],
+      {
+        text: 'Done',
+        isStreaming: false,
+        timestamp: 1000,
+        messageId: 'final',
+      },
+    );
+    const split = splitTimelineAtFinalResponse(timeline);
+
+    expect(
+      formatProcessedDuration(
+        getProcessedDurationMs(split.detailItems, split.finalResponseItem),
+      ),
+    ).toBe('<1s');
   });
 });

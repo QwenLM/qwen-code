@@ -54,6 +54,56 @@ export function splitTimelineAtFinalResponse(items: TurnTimelineItem[]): {
   };
 }
 
+function getTimelineItemTimestamp(item: TurnTimelineItem): number | undefined {
+  switch (item.type) {
+    case 'activity-section':
+      return item.activities[0]?.timestamp;
+    case 'commentary':
+    case 'plan':
+      return item.activity.timestamp;
+    case 'response':
+      return item.response.timestamp;
+    default:
+      return undefined;
+  }
+}
+
+export function getProcessedDurationMs(
+  detailItems: TurnTimelineItem[],
+  finalResponseItem?: ResponseTimelineItem,
+): number {
+  const timestamps = detailItems
+    .map(getTimelineItemTimestamp)
+    .filter((timestamp): timestamp is number => Number.isFinite(timestamp));
+
+  const responseTimestamp = finalResponseItem?.response.timestamp;
+  if (!Number.isFinite(responseTimestamp) || timestamps.length === 0) {
+    return 0;
+  }
+
+  const startedAt = Math.min(...timestamps);
+  return Math.max(0, responseTimestamp! - startedAt);
+}
+
+export function formatProcessedDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 1000) {
+    return '<1s';
+  }
+
+  const totalSeconds = Math.round(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
 /**
  * Build the visible assistant-turn timeline used by TurnCard.
  *
