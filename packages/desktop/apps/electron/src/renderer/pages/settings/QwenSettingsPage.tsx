@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertCircle,
@@ -24,7 +25,6 @@ import {
   SettingsTextarea,
   SettingsToggle,
 } from '@/components/settings';
-import { useAppShellContext } from '@/context/AppShellContext';
 import { routes } from '@/lib/navigate';
 import type { DetailsPageMeta } from '@/lib/navigation-registry';
 import { normalizeQwenSettingsSnapshot } from '@/lib/qwen-settings-snapshot';
@@ -371,10 +371,60 @@ function draftToHook(draft: HookDraft): QwenHookDefinition {
   };
 }
 
+async function runSharedQwenSettingsCommand(
+  command: SessionCommand,
+): Promise<QwenCoreSettingsSnapshot | null> {
+  if (!window.electronAPI) return null;
+
+  switch (command.type) {
+    case 'getQwenCoreSettings':
+      return window.electronAPI.getQwenCoreSettings();
+    case 'setQwenCoreSetting':
+      return window.electronAPI.setQwenCoreSetting(
+        command.scope,
+        command.key,
+        command.value,
+      );
+    case 'setQwenMcpServer':
+      return window.electronAPI.setQwenMcpServer(
+        command.scope,
+        command.name,
+        command.server,
+      );
+    case 'removeQwenMcpServer':
+      return window.electronAPI.removeQwenMcpServer(
+        command.scope,
+        command.name,
+      );
+    case 'setQwenHook':
+      return window.electronAPI.setQwenHook(
+        command.scope,
+        command.event,
+        command.index,
+        command.hook,
+      );
+    case 'removeQwenHook':
+      return window.electronAPI.removeQwenHook(
+        command.scope,
+        command.event,
+        command.index,
+      );
+    case 'setQwenExtensionSetting':
+      return window.electronAPI.setQwenExtensionSetting(
+        command.extensionId,
+        command.settingKey,
+        command.scope,
+        command.value,
+      );
+    default:
+      return null;
+  }
+}
+
 export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
   const { t } = useTranslation();
   const copy = PAGE_COPY[tab];
-  const { activeSessionId } = useAppShellContext();
+  const scrollViewportRef = useRef<HTMLDivElement>(null);
   const [snapshot, setSnapshot] = useState<QwenCoreSettingsSnapshot | null>(
     null,
   );
@@ -383,18 +433,15 @@ export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
 
   const runCommand = useCallback(
     async (command: SessionCommand) => {
-      if (!activeSessionId || !window.electronAPI) return null;
-      const result = await window.electronAPI.sessionCommand(
-        activeSessionId,
-        command,
-      );
+      if (!window.electronAPI) return null;
+      const result = await runSharedQwenSettingsCommand(command);
       return normalizeQwenSettingsSnapshot(result as QwenCoreSettingsSnapshot);
     },
-    [activeSessionId],
+    [],
   );
 
   const load = useCallback(async () => {
-    if (!activeSessionId || !window.electronAPI) {
+    if (!window.electronAPI) {
       setSnapshot(null);
       setLoading(false);
       return;
@@ -412,7 +459,7 @@ export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
     } finally {
       setLoading(false);
     }
-  }, [activeSessionId, runCommand]);
+  }, [runCommand]);
 
   useEffect(() => {
     void load();
@@ -455,7 +502,7 @@ export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
         actions={<HeaderMenu route={routes.view.settings(copy.slug)} />}
       />
       <div className="flex-1 min-h-0 mask-fade-y">
-        <ScrollArea className="h-full">
+        <ScrollArea className="h-full" viewportRef={scrollViewportRef}>
           <div className="px-5 py-7 max-w-3xl mx-auto">
             <div className="space-y-8">
               <SettingsSection
@@ -474,11 +521,6 @@ export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
                 <div className="flex items-center justify-center py-12">
                   <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
                 </div>
-              ) : !activeSessionId ? (
-                <EmptyState
-                  title={t('settings.qwen.openSessionTitle')}
-                  description={t('settings.qwen.openSessionDesc')}
-                />
               ) : !snapshot ? (
                 <EmptyState
                   title={t('settings.qwen.settingsUnavailableTitle')}
@@ -498,6 +540,7 @@ export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
                   runCommand={runCommand}
                   setSnapshot={setSnapshot}
                   onSave={saveSetting}
+                  scrollViewportRef={scrollViewportRef}
                 />
               ) : (
                 <ExtensionsTab
@@ -1031,6 +1074,7 @@ function HooksTab({
   runCommand,
   setSnapshot,
   onSave,
+  scrollViewportRef,
 }: {
   snapshot: QwenCoreSettingsSnapshot;
   runCommand: RunQwenSettingsCommand;
@@ -1040,10 +1084,13 @@ function HooksTab({
     value: QwenSettingValue,
     scope?: QwenSettingsScope,
   ) => Promise<void>;
+  scrollViewportRef: RefObject<HTMLDivElement>;
 }) {
   const { t } = useTranslation();
   const [draft, setDraft] = useState<HookDraft>(createEmptyHookDraft);
   const [showEditor, setShowEditor] = useState(false);
+  const [editorScrollRequest, setEditorScrollRequest] = useState(0);
+  const editorRef = useRef<HTMLDivElement | null>(null);
   const scopeOptions = useMemo(
     () => [
       { value: 'user', label: t('settings.qwen.scope.user') },
@@ -1066,6 +1113,31 @@ function HooksTab({
     ],
     [snapshot],
   );
+
+  const openEditor = useCallback((nextDraft: HookDraft) => {
+    setDraft(nextDraft);
+    setShowEditor(true);
+    setEditorScrollRequest((count) => count + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!showEditor) return;
+    const frameId = requestAnimationFrame(() => {
+      const viewport = scrollViewportRef.current;
+      const editor = editorRef.current;
+      if (!viewport || !editor) return;
+      const viewportRect = viewport.getBoundingClientRect();
+      const editorRect = editor.getBoundingClientRect();
+      viewport.scrollTo({
+        top: Math.max(
+          0,
+          viewport.scrollTop + editorRect.top - viewportRect.top - 8,
+        ),
+        behavior: 'smooth',
+      });
+    });
+    return () => cancelAnimationFrame(frameId);
+  }, [editorScrollRequest, scrollViewportRef, showEditor]);
 
   const save = async () => {
     if (!draft.commandOrUrl.trim()) return;
@@ -1120,8 +1192,7 @@ function HooksTab({
           <Button
             size="sm"
             onClick={() => {
-              setDraft(createEmptyHookDraft());
-              setShowEditor(true);
+              openEditor(createEmptyHookDraft());
             }}
           >
             <Plus className="w-4 h-4" />
@@ -1159,8 +1230,7 @@ function HooksTab({
                           size="sm"
                           variant="ghost"
                           onClick={() => {
-                            setDraft(hookToDraft(entry));
-                            setShowEditor(true);
+                            openEditor(hookToDraft(entry));
                           }}
                           aria-label={t('common.edit')}
                         >
@@ -1184,11 +1254,12 @@ function HooksTab({
       </SettingsSection>
 
       {showEditor ? (
-        <SettingsSection
-          title={t('settings.qwen.hooks.addOrEditHook')}
-          description={t('settings.qwen.hooks.addOrEditHookDesc')}
-        >
-          <SettingsCard className="p-4 space-y-3">
+        <div ref={editorRef}>
+          <SettingsSection
+            title={t('settings.qwen.hooks.addOrEditHook')}
+            description={t('settings.qwen.hooks.addOrEditHookDesc')}
+          >
+            <SettingsCard className="p-4 space-y-3">
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <SettingsSelect
                 label={t('settings.qwen.common.scope')}
@@ -1352,8 +1423,9 @@ function HooksTab({
                 {t('settings.qwen.hooks.saveHook')}
               </Button>
             </div>
-          </SettingsCard>
-        </SettingsSection>
+            </SettingsCard>
+          </SettingsSection>
+        </div>
       ) : null}
     </>
   );
