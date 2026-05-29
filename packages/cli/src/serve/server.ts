@@ -2024,10 +2024,15 @@ export function createServeApp(
     mutate({ strict: true }),
     async (req, res) => {
       const name = req.params['name'] ?? '';
-      // Validate name: must be non-empty string, alphanumeric + _ and -
-      if (name.length === 0) {
+      if (
+        name.length === 0 ||
+        !/^[A-Za-z0-9_-]+$/.test(name) ||
+        name === '__proto__' ||
+        name === 'constructor' ||
+        name === 'prototype'
+      ) {
         res.status(400).json({
-          error: 'Server name is required and must be a non-empty string',
+          error: 'Invalid server name',
           code: 'invalid_server_name',
         });
         return;
