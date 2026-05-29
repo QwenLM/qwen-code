@@ -11,6 +11,9 @@ import { initStartupProfiler } from './src/utils/startupProfiler.js';
 // Must run before any other imports to capture the earliest possible T0.
 initStartupProfiler();
 
+import { initCpuProfiler } from './src/utils/cpuProfiler.js';
+initCpuProfiler();
+
 import './src/gemini.js';
 import { main } from './src/gemini.js';
 import { FatalError } from '@qwen-code/qwen-code-core';
