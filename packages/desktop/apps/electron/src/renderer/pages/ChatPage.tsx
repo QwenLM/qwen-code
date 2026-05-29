@@ -20,7 +20,12 @@ import { useAppShellContext, usePendingPermission, usePendingCredential, useSess
 import { rendererPerf } from '@/lib/perf'
 import { routes } from '@/lib/navigate'
 import { coerceInputText } from '@/lib/input-text'
-import { formatSessionLoadFailure, hasSessionContentHint, shouldShowForegroundMessageLoading } from '@/lib/session-load'
+import {
+  formatSessionLoadFailure,
+  hasSessionContentHint,
+  shouldShowForegroundMessageLoading,
+  shouldShowMissingSessionState,
+} from '@/lib/session-load'
 import { ensureSessionMessagesLoadedAtom, loadedSessionsAtom, sessionMetaMapAtom } from '@/atoms/sessions'
 import { getSessionTitle } from '@/utils/session'
 // Model resolution: connection.defaultModel (no hardcoded defaults)
@@ -30,6 +35,8 @@ import type { Message } from '../../shared/types'
 export interface ChatPageProps {
   sessionId: string
 }
+
+const MISSING_SESSION_CONFIRMATION_DELAY_MS = 250
 
 function getConnectionModelIds(
   connection: { models?: Array<string | { id: string }> } | null | undefined,
@@ -122,6 +129,29 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   // Check if session exists in metadata (for loading state detection)
   const sessionMetaMap = useAtomValue(sessionMetaMapAtom)
   const sessionMeta = sessionMetaMap.get(sessionId)
+  const [missingSessionStartedAt, setMissingSessionStartedAt] = React.useState<
+    number | null
+  >(null)
+  const [missingSessionCheckAt, setMissingSessionCheckAt] = React.useState(
+    () => Date.now(),
+  )
+
+  React.useEffect(() => {
+    if (session || sessionMeta) {
+      setMissingSessionStartedAt(null)
+      return
+    }
+
+    const startedAt = Date.now()
+    setMissingSessionStartedAt(startedAt)
+    setMissingSessionCheckAt(startedAt)
+
+    const timeoutId = window.setTimeout(() => {
+      setMissingSessionCheckAt(Date.now())
+    }, MISSING_SESSION_CONFIRMATION_DELAY_MS)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [session, sessionId, sessionMeta])
 
   // Fallback: ensure messages are loaded when session is viewed
   const ensureMessagesLoaded = useSetAtom(ensureSessionMessagesLoadedAtom)
@@ -480,6 +510,15 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     : false
   // Use isAsyncOperationOngoing for shimmer effect (sharing, updating share, revoking, title regeneration)
   const isAsyncOperationOngoing = session?.isAsyncOperationOngoing || sessionMeta?.isAsyncOperationOngoing || false
+  const shouldShowMissingSession = shouldShowMissingSessionState({
+    hasSession: Boolean(session),
+    hasSessionMeta: Boolean(sessionMeta),
+    missingForMs:
+      missingSessionStartedAt === null
+        ? 0
+        : missingSessionCheckAt - missingSessionStartedAt,
+    confirmationDelayMs: MISSING_SESSION_CONFIRMATION_DELAY_MS,
+  })
 
   // Rename dialog state
   const [renameDialogOpen, setRenameDialogOpen] = React.useState(false)
@@ -694,6 +733,15 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             placeholder={t('chat.enterSessionName')}
           />
         </>
+      )
+    }
+
+    if (!shouldShowMissingSession) {
+      return (
+        <div className="h-full flex flex-col">
+          <PanelHeader title={displayTitle} leadingAction={leadingAction} />
+          <div className="flex-1" />
+        </div>
       )
     }
 

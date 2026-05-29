@@ -29,6 +29,21 @@ export function shouldShowForegroundMessageLoading(
   return true
 }
 
+export function shouldShowMissingSessionState({
+  hasSession,
+  hasSessionMeta,
+  missingForMs,
+  confirmationDelayMs,
+}: {
+  hasSession: boolean
+  hasSessionMeta: boolean
+  missingForMs: number
+  confirmationDelayMs: number
+}): boolean {
+  if (hasSession || hasSessionMeta) return false
+  return missingForMs >= confirmationDelayMs
+}
+
 export function shouldTreatSessionLoadFailureAsTransportFallback(
   state: TransportConnectionState | null | undefined,
 ): boolean {

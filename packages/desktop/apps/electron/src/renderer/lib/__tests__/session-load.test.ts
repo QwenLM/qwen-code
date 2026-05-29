@@ -3,6 +3,7 @@ import type { TransportConnectionState } from '../../../shared/types'
 import {
   formatSessionLoadFailure,
   hasSessionContentHint,
+  shouldShowMissingSessionState,
   shouldShowForegroundMessageLoading,
   shouldTreatSessionLoadFailureAsTransportFallback,
 } from '../session-load'
@@ -84,6 +85,42 @@ describe('shouldShowForegroundMessageLoading', () => {
 
   it('shows loading for unloaded sessions that metadata says have messages', () => {
     expect(shouldShowForegroundMessageLoading(false, 0, 2)).toBe(true)
+  })
+})
+
+describe('shouldShowMissingSessionState', () => {
+  it('waits before treating an absent session as deleted', () => {
+    expect(shouldShowMissingSessionState({
+      hasSession: false,
+      hasSessionMeta: false,
+      missingForMs: 120,
+      confirmationDelayMs: 250,
+    })).toBe(false)
+  })
+
+  it('shows missing state after the absence is confirmed', () => {
+    expect(shouldShowMissingSessionState({
+      hasSession: false,
+      hasSessionMeta: false,
+      missingForMs: 250,
+      confirmationDelayMs: 250,
+    })).toBe(true)
+  })
+
+  it('does not show missing state while session data or metadata exists', () => {
+    expect(shouldShowMissingSessionState({
+      hasSession: true,
+      hasSessionMeta: false,
+      missingForMs: 500,
+      confirmationDelayMs: 250,
+    })).toBe(false)
+
+    expect(shouldShowMissingSessionState({
+      hasSession: false,
+      hasSessionMeta: true,
+      missingForMs: 500,
+      confirmationDelayMs: 250,
+    })).toBe(false)
   })
 })
 
