@@ -37,6 +37,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   ApprovalMode,
+  SessionService,
   Storage,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
@@ -4173,7 +4174,6 @@ describe('createServeApp', () => {
     });
 
     it('returns 500 when removeSessions throws unexpectedly', async () => {
-      const { SessionService } = await import('@qwen-code/qwen-code-core');
       const spy = vi
         .spyOn(SessionService.prototype, 'removeSessions')
         .mockRejectedValueOnce(new Error('disk on fire'));
