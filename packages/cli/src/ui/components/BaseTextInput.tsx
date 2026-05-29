@@ -20,10 +20,9 @@
  */
 
 import type React from 'react';
-import { useCallback, useLayoutEffect } from 'react';
+import { useCallback } from 'react';
 import { Box, Text, useCursor } from 'ink';
 import chalk from 'chalk';
-import cliCursor from 'cli-cursor';
 import type { TextBuffer } from './shared/text-buffer.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -254,15 +253,10 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
   const scrollVisualRow = buffer.visualScrollRow;
 
   // ── Physical cursor positioning for IME ──
+  // Called in render phase so Ink's useCursor (which uses useInsertionEffect)
+  // propagates the position before onRender — no one-frame lag on first mount.
   const { setCursorPosition } = useCursor();
-  useLayoutEffect(() => {
-    if (!showCursor) {
-      setCursorPosition(undefined);
-      return;
-    }
-    // Calculate physical position for the terminal cursor
-    // x: prefix width + physical width of text before cursor (handles CJK chars)
-    // y: cursor row relative to viewport + 2 for top border line and bottom border
+  if (showCursor) {
     const relativeRow = cursorVisualRow - scrollVisualRow;
     const lineText = linesToRender[relativeRow] || '';
     const textBeforeCursor = cpSlice(lineText, 0, cursorVisualCol);
@@ -271,9 +265,9 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
       x: prefixWidth + physicalCol,
       y: relativeRow + 2,
     });
-    // Hide the physical cursor immediately after positioning - we use chalk.inverse for visual cursor
-    cliCursor.hide();
-  });
+  } else {
+    setCursorPosition(undefined);
+  }
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (
