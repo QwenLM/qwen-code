@@ -16,7 +16,7 @@ import {
 } from '../utils/resumeHistoryUtils.js';
 import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
-import { MessageType, type HistoryItem } from '../types.js';
+import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
   hasBlockingBackgroundWork,
   resetBackgroundStateForSessionSwitch,
@@ -86,26 +86,24 @@ export function useResumeCommand(
   const { addItem, clearItems, loadHistory } = historyManager;
   const handleResume = useCallback(
     async (sessionId: string) => {
-      try {
-        if (!config || !startNewSession) {
-          return;
-        }
+      if (!config || !startNewSession) {
+        return;
+      }
 
-        if (hasBlockingBackgroundWork(config)) {
-          closeResumeDialog();
-          addItem(
-            {
-              type: MessageType.ERROR,
-              text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
-            } as Omit<HistoryItem, 'id'>,
-            Date.now(),
-          );
-          return;
-        }
-
-        // Close dialog immediately to prevent input capture during async operations.
+      if (hasBlockingBackgroundWork(config)) {
+        const blockedMessage: HistoryItemWithoutId = {
+          type: MessageType.ERROR,
+          text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+        };
+        addItem?.(blockedMessage, Date.now());
         closeResumeDialog();
+        return;
+      }
 
+      // Close dialog immediately to prevent input capture during async operations.
+      closeResumeDialog();
+
+      try {
         const cwd = config.getTargetDir();
         const sessionService = new SessionService(cwd);
         const sessionData = await sessionService.loadSession(sessionId);
@@ -131,8 +129,8 @@ export function useResumeCommand(
           collapseOnResume,
         );
 
-        clearItems();
-        loadHistory(uiHistoryItems);
+        clearItems?.();
+        loadHistory?.(uiHistoryItems);
 
         // Update session history core.
         resetBackgroundStateForSessionSwitch(config);
@@ -158,15 +156,13 @@ export function useResumeCommand(
 
         const recovered = await config.loadPausedBackgroundAgents(sessionId);
         if (recovered.length > 0) {
-          addItem(
-            {
-              type: MessageType.INFO,
-              text: config
-                .getBackgroundAgentResumeService()
-                .buildRecoveredBackgroundAgentsNotice(recovered.length),
-            } as Omit<HistoryItem, 'id'>,
-            Date.now(),
-          );
+          const recoveredMessage: HistoryItemWithoutId = {
+            type: MessageType.INFO,
+            text: config
+              .getBackgroundAgentResumeService()
+              .buildRecoveredBackgroundAgentsNotice(recovered.length),
+          };
+          addItem?.(recoveredMessage, Date.now());
         }
 
         // SessionStart hook is handled during chat initialization so its
@@ -175,11 +171,11 @@ export function useResumeCommand(
         // Refresh terminal UI.
         remount?.();
       } catch (error) {
-        addItem(
+        addItem?.(
           {
             type: MessageType.ERROR,
             text: `Failed to resume session: ${error instanceof Error ? error.message : String(error)}`,
-          } as Omit<HistoryItem, 'id'>,
+          } as HistoryItemWithoutId,
           Date.now(),
         );
         closeResumeDialog();

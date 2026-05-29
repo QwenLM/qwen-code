@@ -667,6 +667,7 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -982,6 +983,7 @@ export class Config {
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
+  private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -1153,6 +1155,7 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
+    this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -3045,6 +3048,10 @@ export class Config {
     return this.cronEnabled;
   }
 
+  isComputerUseEnabled(): boolean {
+    return this.computerUseEnabled;
+  }
+
   /**
    * Whether the turn loop should fire a fast-model call after each tool batch
    * to emit a `tool_use_summary` message. Mirrors Claude Code's
@@ -3963,6 +3970,21 @@ export class Config {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
       });
+    }
+
+    // Register computer-use tools unless disabled. All 9 are deferred —
+    // they surface only via ToolSearch keyword match
+    // (see packages/core/src/tools/computer-use/).
+    //
+    // Pass `registerLazy` (not the bare `registry`) so the same
+    // PermissionManager.isToolEnabled() check that gates every other
+    // built-in also gates these. Direct registry.registerFactory() would
+    // bypass coreTools allowlist + whole-tool deny rules.
+    if (this.isComputerUseEnabled()) {
+      const { registerComputerUseTools } = await import(
+        '../tools/computer-use/index.js'
+      );
+      await registerComputerUseTools(registerLazy);
     }
 
     // Register monitor tool

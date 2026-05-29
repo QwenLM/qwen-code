@@ -12,6 +12,7 @@ import {
 } from './slashCommandProcessor.js';
 import type {
   CommandContext,
+  ConfirmActionReturn,
   ConfirmShellCommandsActionReturn,
   SlashCommand,
 } from '../commands/types.js';
@@ -29,8 +30,14 @@ import {
   makeFakeConfig,
 } from '@qwen-code/qwen-code-core';
 
-const { logSlashCommand } = vi.hoisted(() => ({
+const { logSlashCommand, debugLoggerMock } = vi.hoisted(() => ({
   logSlashCommand: vi.fn(),
+  debugLoggerMock: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -39,6 +46,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     logSlashCommand,
+    createDebugLogger: () => debugLoggerMock,
     getIdeInstaller: vi.fn().mockReturnValue(null),
   };
 });
@@ -110,6 +118,7 @@ function createTestCommand(
 
 describe('useSlashCommandProcessor', () => {
   const mockAddItem = vi.fn();
+  const mockUpdateItem = vi.fn();
   const mockClearItems = vi.fn();
   const mockLoadHistory = vi.fn();
   const mockOpenThemeDialog = vi.fn();
@@ -155,6 +164,8 @@ describe('useSlashCommandProcessor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    let nextHistoryItemId = 1;
+    mockAddItem.mockImplementation(() => nextHistoryItemId++);
     vi.mocked(BuiltinCommandLoader).mockClear();
     mockBuiltinLoadCommands.mockResolvedValue([]);
     mockFileLoadCommands.mockResolvedValue([]);
@@ -192,6 +203,7 @@ describe('useSlashCommandProcessor', () => {
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
         null, // logger
+        mockUpdateItem,
       ),
     );
 
@@ -302,6 +314,15 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(actionResult).toBe(false);
+
+      let absPathResult;
+      await act(async () => {
+        absPathResult = await result.current.handleSlashCommand(
+          '/Users/zhoushuo/Desktop/dw-operator-skill 帮我安装',
+        );
+      });
+
+      expect(absPathResult).toBe(false);
       expect(mockAddItem).not.toHaveBeenCalled();
     });
 
@@ -786,9 +807,21 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
-        { type: MessageType.USER, text: '/filecmd' },
+        { type: MessageType.USER, text: '/filecmd', sentToModel: false },
         expect.any(Number),
       );
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+      expect(debugLoggerMock.debug).toHaveBeenCalledWith(
+        'Marked slash command invocation as model-sent: /filecmd',
+      );
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      expect(recorder.recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: '/filecmd',
+        sentToModel: true,
+      });
     });
 
     it('should handle "submit_prompt" action returned from a mcp-based command', async () => {
@@ -818,9 +851,10 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
-        { type: MessageType.USER, text: '/mcpcmd' },
+        { type: MessageType.USER, text: '/mcpcmd', sentToModel: false },
         expect.any(Number),
       );
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
     });
   });
 
@@ -950,6 +984,107 @@ describe('useSlashCommandProcessor', () => {
       });
       const finalContext = result.current.commandContext;
       expect(finalContext.session.sessionShellAllowlist.size).toBe(0);
+    });
+
+    it('should not duplicate user history when a confirmed command submits a prompt', async () => {
+      mockCommandAction
+        .mockResolvedValueOnce({
+          type: 'confirm_shell_commands',
+          commandsToConfirm: ['rm -rf /'],
+          originalInvocation: { raw: '/shellcmd' },
+        } as ConfirmShellCommandsActionReturn)
+        .mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'run approved command' }],
+        });
+
+      const result = setupProcessorHook([shellCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      act(() => {
+        result.current.handleSlashCommand('/shellcmd');
+      });
+      await waitFor(() => {
+        expect(result.current.shellConfirmationRequest).not.toBeNull();
+      });
+
+      await act(async () => {
+        result.current.shellConfirmationRequest?.onConfirm(
+          ToolConfirmationOutcome.ProceedOnce,
+          ['rm -rf /'],
+        );
+      });
+
+      await waitFor(() => {
+        expect(mockCommandAction).toHaveBeenCalledTimes(2);
+      });
+      const userInvocationCalls = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === MessageType.USER && item.text === '/shellcmd',
+      );
+      expect(userInvocationCalls).toHaveLength(1);
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      expect(recorder.recordSlashCommand).toHaveBeenCalledTimes(2);
+      expect(recorder.recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: '/shellcmd',
+        sentToModel: true,
+      });
+    });
+
+    it('should not duplicate user history when a confirmed action submits a prompt', async () => {
+      const action = vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: 'confirm_action',
+          prompt: 'Continue?',
+          originalInvocation: { raw: '/actioncmd' },
+        } as ConfirmActionReturn)
+        .mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'run confirmed action' }],
+        });
+      const command = createTestCommand({
+        name: 'actioncmd',
+        action,
+      });
+
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      act(() => {
+        result.current.handleSlashCommand('/actioncmd');
+      });
+      await waitFor(() => {
+        expect(result.current.confirmationRequest).not.toBeNull();
+      });
+
+      await act(async () => {
+        result.current.confirmationRequest?.onConfirm(true);
+      });
+
+      await waitFor(() => {
+        expect(action).toHaveBeenCalledTimes(2);
+      });
+      const userInvocationCalls = mockAddItem.mock.calls.filter(
+        ([item]) =>
+          item.type === MessageType.USER && item.text === '/actioncmd',
+      );
+      expect(userInvocationCalls).toHaveLength(1);
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      expect(recorder.recordSlashCommand).toHaveBeenCalledTimes(2);
+      expect(recorder.recordSlashCommand).toHaveBeenCalledWith({
+        phase: 'invocation',
+        rawCommand: '/actioncmd',
+        sentToModel: true,
+      });
     });
 
     it('should re-run command and update session allowlist on "Proceed Always"', async () => {
@@ -1153,7 +1288,7 @@ describe('useSlashCommandProcessor', () => {
 
       // It should be added to the history.
       expect(mockAddItem).toHaveBeenCalledWith(
-        { type: MessageType.USER, text: '/exit' },
+        { type: MessageType.USER, text: '/exit', sentToModel: false },
         expect.any(Number),
       );
     });
@@ -1180,6 +1315,7 @@ describe('useSlashCommandProcessor', () => {
           new Map(), // extensionsUpdateState
           true, // isConfigInitialized
           null, // logger
+          mockUpdateItem,
         ),
       );
 
@@ -1223,6 +1359,7 @@ describe('useSlashCommandProcessor', () => {
             new Map(),
             true,
             null,
+            mockUpdateItem,
           ),
         );
 
@@ -1292,6 +1429,7 @@ describe('useSlashCommandProcessor', () => {
               new Map(),
               isConfigInitialized,
               null,
+              mockUpdateItem,
             );
           },
           { initialProps: { isConfigInitialized: false } },
@@ -1351,6 +1489,7 @@ describe('useSlashCommandProcessor', () => {
             new Map(),
             isConfigInitialized,
             null,
+            mockUpdateItem,
           ),
         { initialProps: { isConfigInitialized: false } },
       );

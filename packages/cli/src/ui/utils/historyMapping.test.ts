@@ -39,8 +39,17 @@ function startupPair(): [Content, Content] {
   ];
 }
 
-function userItem(id: number, text = `prompt ${id}`): HistoryItem {
-  return { type: 'user', id, text } as HistoryItem;
+function userItem(
+  id: number,
+  text = `prompt ${id}`,
+  sentToModel?: boolean,
+): HistoryItem {
+  return {
+    type: 'user',
+    id,
+    text,
+    ...(sentToModel === undefined ? {} : { sentToModel }),
+  } as HistoryItem;
 }
 
 function geminiItem(id: number): HistoryItem {
@@ -229,6 +238,27 @@ describe('computeApiTruncationIndex', () => {
 
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
     });
+
+    it('counts slash command invocations explicitly marked as sent to the model', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello'),
+        geminiItem(2),
+        userItem(3, '/filecmd', true),
+        geminiItem(4),
+        userItem(5, 'world'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('hello'),
+        modelContent('response 1'),
+        userContent('expanded file command prompt'),
+        modelContent('response 2'),
+        userContent('world'),
+        modelContent('response 3'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+    });
   });
 
   describe('single turn', () => {
@@ -252,6 +282,22 @@ describe('isRealUserTurn', () => {
     expect(isRealUserTurn(userItem(1, '/help'))).toBe(false);
     expect(isRealUserTurn(userItem(1, '/rewind'))).toBe(false);
     expect(isRealUserTurn(userItem(1, '/stats'))).toBe(false);
+  });
+
+  it('uses explicit model-sent metadata for slash commands', () => {
+    expect(isRealUserTurn(userItem(1, '/filecmd', true))).toBe(true);
+    expect(isRealUserTurn(userItem(1, '/help', false))).toBe(false);
+  });
+
+  it('ignores corrupted non-boolean sentToModel metadata', () => {
+    const item = {
+      type: 'user',
+      id: 1,
+      text: '/filecmd',
+      sentToModel: 'true',
+    } as unknown as HistoryItem;
+
+    expect(isRealUserTurn(item)).toBe(false);
   });
 
   it('returns true for path-like slash prompts', () => {
