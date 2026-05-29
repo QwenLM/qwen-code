@@ -291,7 +291,7 @@ function ProjectSessionRow({
       type="button"
       onClick={onSelect}
       className={cn(
-        "group/session relative ml-7 mr-2 grid h-8 min-w-0 grid-cols-[minmax(0,1fr)_2.5rem_0.375rem] items-center gap-2 rounded-[6px] px-2 text-left transition-colors",
+        "group/session relative ml-7 mr-2 grid h-8 min-w-0 grid-cols-[minmax(0,1fr)_minmax(2.5rem,max-content)_0.375rem] items-center gap-2 rounded-[6px] px-2 text-left transition-colors",
         "hover:bg-sidebar-hover data-[state=open]:bg-sidebar-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         isSelected ? "bg-foreground/[0.055] text-foreground" : "text-foreground/78",
       )}
@@ -311,7 +311,7 @@ function ProjectSessionRow({
           {title}
         </span>
       </span>
-      <span className="justify-self-end text-[11px] text-foreground/38 tabular-nums">
+      <span className="justify-self-end whitespace-nowrap text-[11px] text-foreground/38 tabular-nums">
         {session.lastMessageAt && (
           formatSessionRelativeTime(session.lastMessageAt)
         )}
