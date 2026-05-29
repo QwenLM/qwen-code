@@ -97,19 +97,12 @@ export const Composer = () => {
         <LoadingIndicator
           // Hide loading phrases when enableLoadingPhrases is explicitly false.
           // Using === false ensures phrases show by default when undefined.
-          thought={
-            uiState.streamingState === StreamingState.WaitingForConfirmation ||
-            config.getAccessibility()?.enableLoadingPhrases === false
-              ? undefined
-              : uiState.thought
-          }
           currentLoadingPhrase={
             config.getAccessibility()?.enableLoadingPhrases === false
               ? undefined
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
-          thinkingDisplayMode={uiState.thinkingDisplayMode}
           candidatesTokens={agentTokens}
           streamingCharsRef={streamingResponseLengthRef}
           isStreaming={isStreaming}

@@ -39,7 +39,6 @@ import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 import type { StatusLinePresetConfig } from '../statusLinePresets.js';
-import type { ThinkingDisplayMode } from '../utils/thinkingDisplayMode.js';
 
 export interface UIState {
   history: HistoryItem[];
@@ -84,7 +83,6 @@ export interface UIState {
   initError: string | null;
   pendingGeminiHistoryItems: HistoryItemWithoutId[];
   thought: ThoughtSummary | null;
-  thinkingDisplayMode: ThinkingDisplayMode;
   shellModeActive: boolean;
   userMessages: string[];
   buffer: TextBuffer;
