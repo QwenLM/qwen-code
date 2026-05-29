@@ -1240,51 +1240,6 @@ if not "!INSTALLED_BIN!"=="" if exist "!INSTALLED_BIN!" (
     for /f "delims=" %%i in ('"!INSTALLED_BIN!" --version 2^>nul') do set "INSTALLED_VERSION=%%i"
 )
 
-call :PrintLogo
-echo.
-echo   Qwen Code !INSTALLED_VERSION! installed successfully.
-echo.
-echo To start:
-echo   cd ^<project^>
-echo   qwen
-
-if not "!SUMMARY_INSTALL_DIR!"=="" (
-    echo.
-    echo Installed to:
-    echo   !SUMMARY_INSTALL_DIR!
-)
-
-echo.
-echo Uninstall:
-if /i "!SUMMARY_INSTALL_METHOD!"=="npm" (
-    echo   npm uninstall -g @qwen-code/qwen-code
-) else (
-    if not "!SUMMARY_INSTALL_DIR!"=="" (
-        if not "!EXTRA_BIN!"=="" (
-            echo   set "QWEN_INSTALL_LIB_DIR=!SUMMARY_INSTALL_DIR!" ^&^& set "QWEN_INSTALL_BIN_DIR=!EXTRA_BIN!" ^&^& powershell -ExecutionPolicy Bypass -c "irm !STANDALONE_UNINSTALL_URL! ^| iex"
-        ) else (
-            echo   powershell -ExecutionPolicy Bypass -c "irm !STANDALONE_UNINSTALL_URL! ^| iex"
-        )
-    ) else (
-        echo   powershell -ExecutionPolicy Bypass -c "irm !STANDALONE_UNINSTALL_URL! ^| iex"
-    )
-)
-
-rem Build OTHER_QWENS = PRE_INSTALL_QWENS_LIST minus the install we just made.
-set "OTHER_QWENS="
-if defined PRE_INSTALL_QWENS_LIST (
-    for %%i in ("!PRE_INSTALL_QWENS_LIST:|=" "!") do (
-        set "ENTRY=%%~i"
-        if not "!ENTRY!"=="" if /i not "!ENTRY!"=="!INSTALLED_BIN!" (
-            if "!OTHER_QWENS!"=="" (
-                set "OTHER_QWENS=!ENTRY!"
-            ) else (
-                set "OTHER_QWENS=!OTHER_QWENS!|!ENTRY!"
-            )
-        )
-    )
-)
-
 rem Persist the install bin to user PATH unless --no-modify-path is set.
 if not "!EXTRA_BIN!"=="" if /i not "!NO_MODIFY_PATH!"=="1" (
     call :MaybeUpdateUserPath "!EXTRA_BIN!"
@@ -1296,34 +1251,11 @@ if not "!EXTRA_BIN!"=="" if /i not "!NO_MODIFY_PATH!"=="1" (
     )
 )
 
-if defined OTHER_QWENS (
-    echo.
-    echo WARNING: Other 'qwen' executables exist on this system. Depending on
-    echo WARNING: your PATH order, one of these may run instead of the install above:
-    for %%i in ("!OTHER_QWENS:|=" "!") do (
-        set "OQ=%%~i"
-        if not "!OQ!"=="" echo WARNING:   !OQ!
-    )
-    echo.
-    if /i "!SUMMARY_INSTALL_METHOD!"=="standalone" (
-        echo Existing npm or package-manager installs are left unchanged.
-        if "!PATH_UPDATE_APPLIED!"=="1" (
-            echo This standalone install is configured as the preferred qwen for new command prompt or PowerShell sessions.
-            echo Check active command with: where qwen
-        ) else (
-            echo This standalone install was not added to your user PATH automatically.
-            echo Add this directory before older qwen commands in PATH to make it the default:
-            echo   !EXTRA_BIN!
-        )
-        echo Remove npm/global package install with: npm uninstall -g @qwen-code/qwen-code
-        echo To keep using npm, rerun this installer with --method npm.
-        echo.
-    )
-    if "!PATH_UPDATE_APPLIED!"=="1" echo To make this install take priority, restart your command prompt.
-    echo Or invoke directly: "!INSTALLED_BIN!"
-    exit /b 0
-)
-
+echo.
+echo Qwen Code !INSTALLED_VERSION! installed successfully, to start:
+echo.
+echo   cd ^<project^>
+echo   qwen
 echo.
 echo For more information visit https://qwenlm.github.io/qwen-code
 
