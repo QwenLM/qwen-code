@@ -279,6 +279,9 @@ describe('ChatCompressionService', () => {
 
       expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(generateText).toHaveBeenCalled();
+      // Screenshot trigger → reason must be image_overflow (not token_limit)
+      // so the UI notice is accurate when it fired below the token threshold.
+      expect(result.info.triggerReason).toBe('image_overflow');
     });
 
     it('does NOT fire when the trigger is disabled (NOOP below token threshold despite many images)', async () => {
@@ -349,6 +352,9 @@ describe('ChatCompressionService', () => {
 
       expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(generateText).toHaveBeenCalled();
+      // Screenshot trigger → reason must be image_overflow (not token_limit)
+      // so the UI notice is accurate when it fired below the token threshold.
+      expect(result.info.triggerReason).toBe('image_overflow');
     });
   });
 
@@ -541,6 +547,8 @@ describe('ChatCompressionService', () => {
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(mockGenerateContent).toHaveBeenCalled();
+    // Crossed the token threshold (not the screenshot trigger) → token_limit.
+    expect(result.info.triggerReason).toBe('token_limit');
   });
 
   it('should compress if over token threshold', async () => {
