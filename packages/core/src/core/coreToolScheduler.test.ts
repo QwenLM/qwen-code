@@ -784,6 +784,54 @@ describe('CoreToolScheduler', () => {
     expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
   });
 
+  it('does not fire PermissionDenied hooks when AUTO classifier approves', async () => {
+    runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'executed',
+      returnDisplay: 'executed',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+          execute,
+        }),
+      ],
+    ]);
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        hookSystem,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'auto-approved',
+          name: ToolNames.SHELL,
+          args: { command: 'echo ok' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-auto-approved',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
   it.each(Object.entries(ToolNamesMigration))(
     'sends canonical hook tool names for legacy %s calls',
     async (legacyName, canonicalName) => {
