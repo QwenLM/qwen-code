@@ -185,6 +185,11 @@
           "type": "string",
           "default": "Qwen Dark"
         },
+        "autoModeAcknowledged": {
+          "description": "True once the user has seen the first-time information message about the AUTO approval mode. Set automatically; not intended for manual configuration.",
+          "type": "boolean",
+          "default": false
+        },
         "statusLine": {
           "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
           "type": "object",
@@ -194,6 +199,11 @@
           "description": "Custom theme definitions.",
           "type": "object",
           "additionalProperties": true
+        },
+        "hideBuiltinWorktreeIndicator": {
+          "description": "When true, the built-in `⎇ worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself — otherwise an active worktree silently has no UI affordance.",
+          "type": "boolean",
+          "default": false
         },
         "hideWindowTitle": {
           "description": "Hide the window title bar",
@@ -416,10 +426,42 @@
           "description": "When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.",
           "type": "boolean",
           "default": false
+        },
+        "resourceAttributes": {
+          "description": "Static resource attributes attached to every span/log/metric the SDK exports (OTLP or file outfile — they share the same Resource). Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version, session.id) are dropped with a warning.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "metrics": {
+          "description": "Per-signal cardinality controls for exported metrics.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "includeSessionId": {
+              "description": "Include session.id on every metric data point. WARNING: each CLI session creates a new value, causing unbounded metric time-series fan-out at the backend. Only enable for short-term debugging — spans and logs still carry session.id.",
+              "type": "boolean",
+              "default": false
+            }
+          }
         }
       },
       "additionalProperties": true,
       "description": "Telemetry configuration."
+    },
+    "outboundCorrelation": {
+      "type": "object",
+      "properties": {
+        "propagateTraceContext": {
+          "description": "Requires `telemetry.enabled: true`. Inject W3C `traceparent` header on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...). Default: false — trace context stays internal to the operator's OTLP collector and is NOT written onto third-party request streams. Set true only when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope). Client HTTP spans are still emitted in either case; this flag only governs the wire `traceparent` header.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "description": "SECURITY-RELEVANT. Controls what client-side correlation data qwen-code writes into outbound LLM API requests (DashScope, OpenAI, Anthropic, etc.) — separate from `telemetry.*` which governs data flow into the operator's OWN OTLP collector. All values default to off. Opt in only when the LLM provider also reports into your OTel collector for cross-process trace stitching (e.g. ARMS Tracing + DashScope)."
     },
     "fastModel": {
       "description": "Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.",
@@ -439,6 +481,16 @@
           "type": "number",
           "default": -1
         },
+        "maxWallTimeSeconds": {
+          "description": "Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).",
+          "type": "number",
+          "default": -1
+        },
+        "maxToolCalls": {
+          "description": "Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means \"no tool calls allowed\" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.",
+          "type": "number",
+          "default": -1
+        },
         "chatCompression": {
           "description": "Chat compression settings.",
           "type": "object",
@@ -454,7 +506,7 @@
           "default": true
         },
         "skipLoopDetection": {
-          "description": "Disable all loop detection checks (streaming and LLM).",
+          "description": "Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.",
           "type": "boolean",
           "default": true
         },
@@ -596,12 +648,12 @@
         "enableManagedAutoDream": {
           "description": "Enable automatic consolidation (dream) of collected memories.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "enableAutoSkill": {
           "description": "Enable background review for reusable project skills after tool-heavy sessions.",
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
@@ -641,6 +693,39 @@
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "autoMode": {
+          "description": "Settings consumed by the AUTO approval mode classifier.",
+          "type": "object",
+          "properties": {
+            "hints": {
+              "description": "Natural-language hints injected into the classifier system prompt.",
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "description": "Natural-language descriptions of actions AUTO mode should allow.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "deny": {
+                  "description": "Natural-language descriptions of actions AUTO mode should block.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "environment": {
+              "description": "Environment / context lines injected into the classifier system prompt.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           }
         }
       }
@@ -711,12 +796,20 @@
             "type": "string"
           }
         },
+        "disabled": {
+          "description": "Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "approvalMode": {
-          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, yolo",
+          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, auto, yolo",
           "enum": [
             "plan",
             "default",
             "auto-edit",
+            "auto",
             "yolo"
           ],
           "default": "default"
@@ -2176,6 +2269,19 @@
           "description": "Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.",
           "type": "boolean",
           "default": true
+        }
+      }
+    },
+    "worktree": {
+      "description": "Configuration for general-purpose git worktrees created by the CLI (the `enter_worktree` tool, the `agent isolation: \"worktree\"` parameter, and the startup `--worktree` flag). Does NOT affect Agent Arena worktrees — see `agents.arena.worktreeBaseDir` for those.",
+      "type": "object",
+      "properties": {
+        "symlinkDirectories": {
+          "description": "Directories under the main repository to symlink into every general-purpose worktree on creation. Useful for sharing large opt-in dirs like `node_modules` so the model can run tests / builds inside the worktree without a fresh install. Paths must be relative to the repo root; absolute paths, anything containing `..`, and any path inside `.git` or `.qwen` (the CLI-managed metadata tree, which contains the worktrees directory itself) are rejected. Missing source dirs and existing destination paths are silently skipped (no overwrite, no failure).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },

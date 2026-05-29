@@ -98,6 +98,7 @@ describe('AgentTool', () => {
     // to surface the run in the pill+dialog. A no-op stub registry is
     // enough for these tests — they don't assert on registry behavior.
     const stubRegistry = {
+      assertCanStartBackgroundAgent: vi.fn(),
       register: vi.fn(),
       unregisterForeground: vi.fn(),
       complete: vi.fn(),
@@ -696,7 +697,13 @@ describe('AgentTool', () => {
       expect(result.returnDisplay).toHaveProperty('status', 'completed');
     });
 
-    it('should not require confirmation', async () => {
+    it("L3 default is 'ask' so AUTO mode routes through the classifier", async () => {
+      // Previously this returned 'allow', but launching a sub-agent
+      // hands control to a new instance with its own tool access — a
+      // privileged sink. The AUTO scheduler short-circuits at L4 when
+      // finalPermission === 'allow', so without this override the
+      // classifier projection added in PR #4151 would never be reached
+      // and arbitrary sub-agent spawns would bypass classifier review.
       const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
@@ -708,7 +715,7 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       const permission = await invocation.getDefaultPermission();
 
-      expect(permission).toBe('allow');
+      expect(permission).toBe('ask');
     });
 
     it('should provide correct description', async () => {
@@ -1757,6 +1764,7 @@ describe('AgentTool', () => {
     let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
     let mockRegistry: {
+      assertCanStartBackgroundAgent: ReturnType<typeof vi.fn>;
       register: ReturnType<typeof vi.fn>;
       unregisterForeground: ReturnType<typeof vi.fn>;
       complete: ReturnType<typeof vi.fn>;
@@ -1797,6 +1805,7 @@ describe('AgentTool', () => {
       MockedContextState.mockImplementation(() => mockContextState);
 
       mockRegistry = {
+        assertCanStartBackgroundAgent: vi.fn(),
         register: vi.fn(),
         unregisterForeground: vi.fn(),
         complete: vi.fn(),
@@ -1982,6 +1991,114 @@ describe('AgentTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Background agent launched');
       expect(mockRegistry.register).toHaveBeenCalled();
+    });
+
+    it('returns registry registration errors to the model without launching the background body', async () => {
+      const errorMessage =
+        'Cannot start background agent: maximum concurrent background agents ' +
+        '(1) reached. Stop an existing agent first.';
+      mockRegistry.register.mockImplementation(() => {
+        throw new Error(errorMessage);
+      });
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
+
+      try {
+        const params: AgentParams = {
+          description: 'Start monitor',
+          prompt: 'Watch for changes',
+          subagent_type: 'monitor',
+        };
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        const result = await invocation.execute();
+
+        expect(partToString(result.llmContent)).toBe(errorMessage);
+        expect((result.returnDisplay as AgentResultDisplay).status).toBe(
+          'failed',
+        );
+        expect(attachSpy).not.toHaveBeenCalled();
+        expect(mockAgent.execute).not.toHaveBeenCalled();
+        expect(mockRegistry.complete).not.toHaveBeenCalled();
+        expect(mockRegistry.fail).not.toHaveBeenCalled();
+      } finally {
+        attachSpy.mockRestore();
+      }
+    });
+
+    it('fires SubagentStop when the final background register check fails after SubagentStart', async () => {
+      const errorMessage =
+        'Cannot start background agent: maximum concurrent background agents ' +
+        '(1) reached. Stop an existing agent first.';
+      mockRegistry.register.mockImplementation(() => {
+        throw new Error(errorMessage);
+      });
+      const mockHookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HookSystem;
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(mockHookSystem);
+
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(errorMessage);
+      expect(mockHookSystem.fireSubagentStartEvent).toHaveBeenCalledOnce();
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledWith(
+        expect.stringContaining('monitor-'),
+        'monitor',
+        expect.stringMatching(
+          /subagents[\\/]test-session-id[\\/]agent-monitor-.*\.jsonl$/,
+        ),
+        'Monitor done',
+        false,
+        PermissionMode.AutoEdit,
+        undefined,
+      );
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+    });
+
+    it('preflights the background cap before hooks and subagent setup', async () => {
+      const errorMessage =
+        'Cannot start background agent: maximum concurrent background agents ' +
+        '(1) reached. Stop an existing agent first.';
+      mockRegistry.assertCanStartBackgroundAgent.mockImplementation(() => {
+        throw new Error(errorMessage);
+      });
+      const mockHookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HookSystem;
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(mockHookSystem);
+
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(errorMessage);
+      expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      expect(mockRegistry.register).not.toHaveBeenCalled();
     });
 
     it('passes the sidechain transcript path to SubagentStop hooks for fresh background agents', async () => {

@@ -169,8 +169,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'Vollständige Qwen Code Dokumentation im Browser öffnen',
   'Configuration not available.': 'Konfiguration nicht verfügbar.',
-  'Configure authentication information for login':
-    'Authentifizierungsinformationen für die Anmeldung konfigurieren',
+  'Connect an LLM provider': 'LLM-Anbieter verbinden',
   'Copy the last result or code snippet to clipboard':
     'Letztes Ergebnis oder Codeausschnitt in die Zwischenablage kopieren',
 
@@ -819,6 +818,7 @@ export default {
   'Auto-memory: {{status}}': 'Auto-Speicher: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Auto-Konsolidierung: {{status}} · {{lastDream}} · /dream zum Ausführen',
+  'Auto-skill: {{status}}': 'Auto-Skill: {{status}}',
   never: 'nie',
   on: 'ein',
   off: 'aus',
@@ -1078,9 +1078,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Willkommen zurück! (Zuletzt aktualisiert: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Gesamtziel:',
-  'Select Authentication Method': 'Authentifizierungsmethode auswählen',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'Sie müssen eine Authentifizierungsmethode wählen, um fortzufahren. Drücken Sie erneut Ctrl+C zum Beenden.',
+  'Connect a Provider': 'Anbieter verbinden',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'Sie müssen einen Anbieter verbinden, um fortzufahren. Drücken Sie erneut Ctrl+C zum Beenden.',
   'Terms of Services and Privacy Notice':
     'Nutzungsbedingungen und Datenschutzhinweis',
   'Qwen OAuth': 'Qwen OAuth',

@@ -5,6 +5,7 @@
  */
 
 import type {
+  CompactionThresholds,
   CompressionStatus,
   MCPServerConfig,
   ThoughtSummary,
@@ -356,6 +357,17 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
 
 // --- Context Usage types ---
 
+export type ContextTier = 'safe' | 'warn' | 'auto' | 'hard';
+
+/**
+ * Alias for the core compaction-thresholds shape. Re-exported under the
+ * CLI-friendly name so consumers in this package don't pull on the core
+ * module path; structurally identical to `CompactionThresholds`. The
+ * `readonly` modifiers on the core type are immaterial for UI rendering,
+ * but kept implicitly through the alias.
+ */
+export type ContextThresholds = CompactionThresholds;
+
 export interface ContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
@@ -364,7 +376,20 @@ export interface ContextCategoryBreakdown {
   skills: number;
   messages: number;
   freeSpace: number;
+  /**
+   * Distance from the auto-compaction threshold to the window edge.
+   * Derived from `thresholds.auto` (= `contextWindowSize - auto`); retained
+   * so the legacy three-segment progress bar in `ContextUsage.tsx` keeps
+   * working without a separate code path.
+   */
   autocompactBuffer: number;
+  /** Three-tier ladder used by auto-compaction (warn / auto / hard) plus the effective window. */
+  thresholds: ContextThresholds;
+  /**
+   * Which tier the current usage sits in. `safe` is below `warn`; `warn` /
+   * `auto` / `hard` mean `totalTokens` has crossed the corresponding tier.
+   */
+  currentTier: ContextTier;
 }
 
 export interface ContextToolDetail {
@@ -519,8 +544,23 @@ export type GoalStatusKind =
   | 'set'
   | 'achieved'
   | 'cleared'
+  | 'failed'
   | 'aborted'
   | 'checking';
+
+export const TERMINAL_GOAL_STATUS_KINDS = [
+  'achieved',
+  'aborted',
+  'failed',
+] as const satisfies readonly GoalStatusKind[];
+
+export function isTerminalGoalStatusKind(
+  kind: GoalStatusKind,
+): kind is (typeof TERMINAL_GOAL_STATUS_KINDS)[number] {
+  return TERMINAL_GOAL_STATUS_KINDS.includes(
+    kind as (typeof TERMINAL_GOAL_STATUS_KINDS)[number],
+  );
+}
 
 export type HistoryItemGoalStatus = HistoryItemBase & {
   type: 'goal_status';

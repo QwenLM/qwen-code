@@ -8,7 +8,7 @@
  * Contextual tip registry — defines tips, their conditions, and display rules.
  */
 
-import { DEFAULT_TOKEN_LIMIT } from '@qwen-code/qwen-code-core';
+import { type CompactionThresholds } from '@qwen-code/qwen-code-core';
 
 export type TipTrigger = 'startup' | 'post-response';
 
@@ -18,6 +18,12 @@ export interface TipContext {
   sessionPromptCount: number;
   sessionCount: number;
   platform: string;
+  /**
+   * Three-tier auto-compaction thresholds, computed by callers via
+   * `computeThresholds(contextWindowSize)`. Optional for backward compat;
+   * context-* tip checks return false when missing.
+   */
+  thresholds?: CompactionThresholds;
 }
 
 export interface ContextualTip {
@@ -29,19 +35,16 @@ export interface ContextualTip {
   priority: number;
 }
 
-export function getContextUsagePercent(ctx: TipContext): number {
-  const windowSize = ctx.contextWindowSize || DEFAULT_TOKEN_LIMIT;
-  return (ctx.lastPromptTokenCount / windowSize) * 100;
-}
-
 export const tipRegistry: ContextualTip[] = [
   // --- Post-response contextual tips (priority: higher = more urgent) ---
   {
     id: 'context-critical',
     content:
-      'Context is almost full! Run /compress now or start /new to continue.',
+      'Context near hard limit — auto-compact will force on next send. Consider /clear if you want to start fresh.',
     trigger: 'post-response',
-    isRelevant: (ctx) => getContextUsagePercent(ctx) >= 95,
+    isRelevant: (ctx) =>
+      ctx.thresholds !== undefined &&
+      ctx.lastPromptTokenCount >= ctx.thresholds.hard,
     cooldownPrompts: 3,
     priority: 100,
   },
@@ -49,10 +52,10 @@ export const tipRegistry: ContextualTip[] = [
     id: 'context-high',
     content: 'Context is getting full. Use /compress to free up space.',
     trigger: 'post-response',
-    isRelevant: (ctx) => {
-      const pct = getContextUsagePercent(ctx);
-      return pct >= 80 && pct < 95;
-    },
+    isRelevant: (ctx) =>
+      ctx.thresholds !== undefined &&
+      ctx.lastPromptTokenCount >= ctx.thresholds.auto &&
+      ctx.lastPromptTokenCount < ctx.thresholds.hard,
     cooldownPrompts: 5,
     priority: 90,
   },
@@ -60,10 +63,11 @@ export const tipRegistry: ContextualTip[] = [
     id: 'compress-intro',
     content: 'Long conversation? /compress summarizes history to free context.',
     trigger: 'post-response',
-    isRelevant: (ctx) => {
-      const pct = getContextUsagePercent(ctx);
-      return pct >= 50 && pct < 80 && ctx.sessionPromptCount > 5;
-    },
+    isRelevant: (ctx) =>
+      ctx.thresholds !== undefined &&
+      ctx.lastPromptTokenCount >= ctx.thresholds.warn &&
+      ctx.lastPromptTokenCount < ctx.thresholds.auto &&
+      ctx.sessionPromptCount > 5,
     cooldownPrompts: 10,
     priority: 50,
   },

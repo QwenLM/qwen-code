@@ -14,6 +14,7 @@ import {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
+  MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
@@ -29,6 +30,7 @@ export {
   type OpenAICompatibleProvider,
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
+  MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
@@ -74,6 +76,10 @@ export function determineProvider(
       contentGeneratorConfig,
       cliConfig,
     );
+  }
+
+  if (MiMoOpenAICompatibleProvider.isMiMoProvider(config)) {
+    return new MiMoOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
   }
 
   // Check for OpenRouter provider

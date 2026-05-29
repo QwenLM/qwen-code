@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpathSync } from 'node:fs';
+import { realpathSync, promises as fsp } from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -28,6 +29,7 @@ import type {
   SetSessionModelRequest,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
+import { ApprovalMode, TrustGateError } from '@qwen-code/qwen-code-core';
 import {
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -36,6 +38,7 @@ import {
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  WorkspaceInitConflictError,
   WorkspaceMismatchError,
   type BridgeHeartbeatResult,
   type BridgeHeartbeatState,
@@ -52,11 +55,14 @@ import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionSupportedCommandsStatus,
+  ServeWorkspaceEnvStatus,
   ServeWorkspaceMcpStatus,
+  ServeWorkspacePreflightStatus,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceSkillsStatus,
 } from './status.js';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
+import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -94,24 +100,64 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_mcp',
   'workspace_skills',
   'workspace_providers',
+  'workspace_memory',
+  'workspace_agents',
+  'workspace_env',
+  'workspace_preflight',
   'session_context',
   'session_supported_commands',
   'session_close',
   'session_metadata',
+  // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
+  // guardrail surface (`--mcp-client-budget`, `clientCount` /
+  // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
+  // refused per-server cells).
+  'mcp_guardrails',
+  // Issue #4175 PR 14b. Always-on. Daemon emits typed push events for
+  // MCP budget state crossings (`mcp_budget_warning` with hysteresis,
+  // `mcp_child_refused_batch` coalesced per pass).
+  'mcp_guardrail_events',
+  // Issue #4175 PR 19. Always-on. Daemon exposes the read-only file
+  // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`.
+  'workspace_file_read',
+  // Issue #4175 PR 20. Always-on. Daemon exposes raw byte windows and
+  // hash-aware text mutation routes behind the strict mutation gate.
+  'workspace_file_bytes',
+  'workspace_file_write',
+  // #4175 Wave 4 PR 17. Mutation control routes (approval mode toggle,
+  // workspace tool enable/disable, init scaffold, MCP server restart).
+  'session_approval_mode_control',
+  'workspace_tool_toggle',
+  'workspace_init',
+  'workspace_mcp_restart',
+  // Issue #4175 PR 21 — auth device-flow surface advertised unconditionally.
+  // Registry order on origin/main has PR 21 appended last, so the
+  // baseline assertion below mirrors that even though PR 21 landed
+  // before PR 17 chronologically.
+  'auth_device_flow',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
 // advertised (only when `--require-auth` is set), so the registry list
-// is a strict superset of the always-on list. Kept as a separate
-// constant rather than appended to `EXPECTED_STAGE1_FEATURES` so the
-// existing "advertised features" assertions stay tight against
-// surprise additions.
+// is a strict superset of the always-on list. The registry's source-of-
+// truth ORDER puts `require_auth` between PR 11 (`session_metadata`)
+// and PR 21 (`auth_device_flow`); reflect that here so the assertion
+// matches the real ordering.
 const EXPECTED_REGISTERED_FEATURES = [
-  ...EXPECTED_STAGE1_FEATURES,
+  // Same order as `SERVE_CAPABILITY_REGISTRY` declaration:
+  ...EXPECTED_STAGE1_FEATURES.filter((f) => f !== 'auth_device_flow'),
   'require_auth',
+  'auth_device_flow',
 ] as const;
 
 interface FakeBridgeOpts {
+  /**
+   * #4282 fold-in 1 (gpt-5.5 C2): tests that exercise workspace
+   * mutation routes with `X-Qwen-Client-Id` set need the fakeBridge
+   * to advertise those ids as "known", or the new client-id
+   * validator returns 400. Defaults to an empty set.
+   */
+  knownClientIds?: Iterable<string>;
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
   loadImpl?: (
     req: BridgeRestoreSessionRequest,
@@ -149,6 +195,8 @@ interface FakeBridgeOpts {
   workspaceMcpImpl?: () => Promise<ServeWorkspaceMcpStatus>;
   workspaceSkillsImpl?: () => Promise<ServeWorkspaceSkillsStatus>;
   workspaceProvidersImpl?: () => Promise<ServeWorkspaceProvidersStatus>;
+  workspaceEnvImpl?: () => Promise<ServeWorkspaceEnvStatus>;
+  workspacePreflightImpl?: () => Promise<ServeWorkspacePreflightStatus>;
   sessionContextImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionContextStatus>;
@@ -160,6 +208,38 @@ interface FakeBridgeOpts {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ) => Promise<SetSessionModelResponse>;
+  setApprovalModeImpl?: (
+    sessionId: string,
+    mode: ApprovalMode,
+    opts: { persist: boolean },
+    context?: BridgeClientRequestContext,
+  ) => Promise<{
+    sessionId: string;
+    mode: ApprovalMode;
+    previous: ApprovalMode;
+    persisted: boolean;
+  }>;
+  setToolEnabledImpl?: (
+    toolName: string,
+    enabled: boolean,
+    originatorClientId: string | undefined,
+  ) => Promise<{ toolName: string; enabled: boolean }>;
+  initWorkspaceImpl?: (
+    initOpts: { force?: boolean },
+    originatorClientId: string | undefined,
+  ) => Promise<{ path: string; action: 'created' | 'overwrote' | 'noop' }>;
+  restartMcpServerImpl?: (
+    serverName: string,
+    originatorClientId: string | undefined,
+  ) => Promise<
+    | { serverName: string; restarted: true; durationMs: number }
+    | {
+        serverName: string;
+        restarted: false;
+        skipped: true;
+        reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      }
+  >;
   closeImpl?: (
     sessionId: string,
     context?: BridgeClientRequestContext,
@@ -211,12 +291,33 @@ interface FakeBridge extends HttpAcpBridge {
   workspaceMcpCalls: number;
   workspaceSkillsCalls: number;
   workspaceProvidersCalls: number;
+  workspaceEnvCalls: number;
+  workspacePreflightCalls: number;
   sessionContextCalls: string[];
   sessionSupportedCommandsCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
+  }>;
+  setApprovalModeCalls: Array<{
+    sessionId: string;
+    mode: ApprovalMode;
+    opts: { persist: boolean };
+    context?: BridgeClientRequestContext;
+  }>;
+  setToolEnabledCalls: Array<{
+    toolName: string;
+    enabled: boolean;
+    originatorClientId?: string;
+  }>;
+  initWorkspaceCalls: Array<{
+    initOpts: { force?: boolean };
+    originatorClientId?: string;
+  }>;
+  restartMcpServerCalls: Array<{
+    serverName: string;
+    originatorClientId?: string;
   }>;
   closeCalls: Array<{
     sessionId: string;
@@ -252,6 +353,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   let workspaceMcpCalls = 0;
   let workspaceSkillsCalls = 0;
   let workspaceProvidersCalls = 0;
+  let workspaceEnvCalls = 0;
+  let workspacePreflightCalls = 0;
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
@@ -317,6 +420,24 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       initialized: false,
       providers: [],
     }));
+  const workspaceEnvImpl =
+    opts.workspaceEnvImpl ??
+    (async () => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      initialized: true as const,
+      acpChannelLive: false,
+      cells: [],
+    }));
+  const workspacePreflightImpl =
+    opts.workspacePreflightImpl ??
+    (async () => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      initialized: true as const,
+      acpChannelLive: false,
+      cells: [],
+    }));
   const sessionContextImpl =
     opts.sessionContextImpl ??
     (async (sessionId) => ({
@@ -334,6 +455,41 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       availableSkills: [],
     }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
+  const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
+  const setApprovalModeImpl =
+    opts.setApprovalModeImpl ??
+    (async (
+      sessionId: string,
+      mode: ApprovalMode,
+      o: { persist: boolean },
+    ) => ({
+      sessionId,
+      mode,
+      previous: ApprovalMode.DEFAULT,
+      persisted: o.persist,
+    }));
+  const setToolEnabledCalls: FakeBridge['setToolEnabledCalls'] = [];
+  const setToolEnabledImpl =
+    opts.setToolEnabledImpl ??
+    (async (toolName: string, enabled: boolean) => ({
+      toolName,
+      enabled,
+    }));
+  const initWorkspaceCalls: FakeBridge['initWorkspaceCalls'] = [];
+  const initWorkspaceImpl =
+    opts.initWorkspaceImpl ??
+    (async () => ({
+      path: path.resolve(WS_BOUND, 'QWEN.md'),
+      action: 'created' as const,
+    }));
+  const restartMcpServerCalls: FakeBridge['restartMcpServerCalls'] = [];
+  const restartMcpServerImpl =
+    opts.restartMcpServerImpl ??
+    (async (serverName: string) => ({
+      serverName,
+      restarted: true as const,
+      durationMs: 42,
+    }));
   const closeImpl = opts.closeImpl ?? (async () => {});
   const updateMetadataImpl =
     opts.updateMetadataImpl ??
@@ -369,6 +525,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionContextCalls,
     sessionSupportedCommandsCalls,
     setModelCalls,
+    setApprovalModeCalls,
+    setToolEnabledCalls,
+    initWorkspaceCalls,
+    restartMcpServerCalls,
     closeCalls,
     updateMetadataCalls,
     heartbeatCalls,
@@ -384,6 +544,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     get workspaceProvidersCalls() {
       return workspaceProvidersCalls;
+    },
+    get workspaceEnvCalls() {
+      return workspaceEnvCalls;
+    },
+    get workspacePreflightCalls() {
+      return workspacePreflightCalls;
     },
     get sessionCount() {
       return calls.length;
@@ -466,6 +632,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspaceProvidersCalls += 1;
       return workspaceProvidersImpl();
     },
+    async getWorkspaceEnvStatus() {
+      workspaceEnvCalls += 1;
+      return workspaceEnvImpl();
+    },
+    async getWorkspacePreflightStatus() {
+      workspacePreflightCalls += 1;
+      return workspacePreflightImpl();
+    },
     async getSessionContextStatus(sessionId) {
       sessionContextCalls.push(sessionId);
       return sessionContextImpl(sessionId);
@@ -477,6 +651,37 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    async setSessionApprovalMode(sessionId, mode, o, context) {
+      setApprovalModeCalls.push({
+        sessionId,
+        mode,
+        opts: o,
+        ...(context ? { context } : {}),
+      });
+      return setApprovalModeImpl(sessionId, mode, o, context);
+    },
+    async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
+      setToolEnabledCalls.push({
+        toolName,
+        enabled,
+        ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+      });
+      return setToolEnabledImpl(toolName, enabled, originatorClientId);
+    },
+    async initWorkspace(initOpts, originatorClientId) {
+      initWorkspaceCalls.push({
+        initOpts,
+        ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+      });
+      return initWorkspaceImpl(initOpts, originatorClientId);
+    },
+    async restartMcpServer(serverName, originatorClientId) {
+      restartMcpServerCalls.push({
+        serverName,
+        ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+      });
+      return restartMcpServerImpl(serverName, originatorClientId);
     },
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
@@ -500,6 +705,18 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     getHeartbeatState(sessionId) {
       heartbeatStateCalls.push(sessionId);
       return heartbeatStateImpl(sessionId);
+    },
+    publishWorkspaceEvent(_event) {
+      // Issue #4175 PR 16 — fakeBridge default is a no-op. Tests that
+      // assert on workspace fan-out override this through the dedicated
+      // route-level test files (workspaceMemory.test.ts /
+      // workspaceAgents.test.ts) where the real fan-out behavior is
+      // exercised against a live bridge.
+    },
+    knownClientIds() {
+      // Default empty set; tests pass `{knownClientIds: ['client-1']}`
+      // to opt into validation success on workspace mutation routes.
+      return new Set<string>(opts.knownClientIds ?? []);
     },
     async killSession(sessionId, opts) {
       killCalls.push({ sessionId, opts });
@@ -604,6 +821,31 @@ describe('createServeApp', () => {
       expect(
         Object.values(SERVE_CAPABILITY_REGISTRY).map(({ since }) => since),
       ).toEqual(EXPECTED_REGISTERED_FEATURES.map(() => 'v1'));
+    });
+
+    it('exposes `modes` metadata on mcp_guardrails (#4175 PR 14)', () => {
+      // `modes` is currently registry-only documentation (no wire
+      // surface yet) — a client wanting to feature-detect `enforce`
+      // semantics reads `caps.features.includes('mcp_guardrails')`,
+      // not a separate `featureModes` field. The descriptor still
+      // carries `modes` so future PRs that DO expose it on the wire
+      // don't have to chase down every entry to backfill metadata.
+      expect(SERVE_CAPABILITY_REGISTRY['mcp_guardrails']).toEqual({
+        since: 'v1',
+        modes: ['warn', 'enforce'],
+      });
+    });
+
+    it('registers mcp_guardrail_events as a baseline tag (#4175 PR 14b)', () => {
+      // PR 14b's push events are unconditional once advertised — there's
+      // no operator toggle. So no `modes`, no entry in
+      // `CONDITIONAL_SERVE_FEATURES`. SDK consumers feature-detect via
+      // `caps.features.includes('mcp_guardrail_events')` before
+      // narrowing `mcp_budget_warning` / `mcp_child_refused_batch`
+      // frames through `KnownDaemonEvent`.
+      expect(SERVE_CAPABILITY_REGISTRY['mcp_guardrail_events']).toEqual({
+        since: 'v1',
+      });
     });
 
     it('returns protocol version metadata with a fresh supported array', () => {
@@ -729,6 +971,86 @@ describe('createServeApp', () => {
       expect(bridge.workspaceMcpCalls).toBe(1);
     });
 
+    it('round-trips PR 14 budget fields on /workspace/mcp', async () => {
+      // Issue #4175 PR 14. The route is a thin JSON forwarder, so the
+      // assertion is structural: the new fields (`clientCount`,
+      // `clientBudget`, `budgetMode`, `budgets[]`, per-server
+      // `disabledReason`) must survive verbatim. Catches future
+      // serialization regressions that drop unknown optional fields.
+      const payload: ServeWorkspaceMcpStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        discoveryState: 'completed',
+        clientCount: 3,
+        clientBudget: 2,
+        budgetMode: 'enforce',
+        budgets: [
+          {
+            kind: 'mcp_budget',
+            scope: 'session',
+            status: 'error',
+            errorKind: 'budget_exhausted',
+            hint: 'Raise --mcp-client-budget or remove servers.',
+            liveCount: 2,
+            budget: 2,
+            mode: 'enforce',
+            refusedCount: 1,
+          },
+        ],
+        servers: [
+          {
+            kind: 'mcp_server',
+            status: 'ok',
+            name: 'a',
+            mcpStatus: 'connected',
+            transport: 'stdio',
+            disabled: false,
+          },
+          {
+            kind: 'mcp_server',
+            status: 'ok',
+            name: 'b',
+            mcpStatus: 'connected',
+            transport: 'stdio',
+            disabled: false,
+          },
+          {
+            kind: 'mcp_server',
+            status: 'error',
+            errorKind: 'budget_exhausted',
+            hint: 'Raise --mcp-client-budget or remove servers from mcpServers config.',
+            name: 'c',
+            mcpStatus: 'disconnected',
+            transport: 'stdio',
+            disabled: false,
+            disabledReason: 'budget',
+          },
+        ],
+      };
+      const bridge = fakeBridge({ workspaceMcpImpl: async () => payload });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/mcp')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(payload);
+      expect(res.body.budgets).toHaveLength(1);
+      expect(res.body.budgets[0]).toMatchObject({
+        kind: 'mcp_budget',
+        scope: 'session',
+        status: 'error',
+        errorKind: 'budget_exhausted',
+        refusedCount: 1,
+      });
+      expect(res.body.servers[2].disabledReason).toBe('budget');
+    });
+
     it('returns workspace skills and providers status from the bridge', async () => {
       const skills: ServeWorkspaceSkillsStatus = {
         v: 1,
@@ -793,6 +1115,82 @@ describe('createServeApp', () => {
       expect(providersRes.body).toEqual(providers);
       expect(bridge.workspaceSkillsCalls).toBe(1);
       expect(bridge.workspaceProvidersCalls).toBe(1);
+    });
+
+    it('returns workspace env status from the bridge', async () => {
+      const env: ServeWorkspaceEnvStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        acpChannelLive: false,
+        cells: [
+          { kind: 'runtime', name: 'node', status: 'ok', value: '22.4.0' },
+          {
+            kind: 'env_var',
+            name: 'OPENAI_API_KEY',
+            status: 'ok',
+            present: true,
+          },
+        ],
+      };
+      const bridge = fakeBridge({ workspaceEnvImpl: async () => env });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/env')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(env);
+      expect(bridge.workspaceEnvCalls).toBe(1);
+      // Strict assertion: env_var cells never carry a value field, even
+      // when the env var is set, to preserve the presence-only contract.
+      const envVarCell = (res.body as ServeWorkspaceEnvStatus).cells.find(
+        (c) => c.kind === 'env_var',
+      );
+      expect(envVarCell).toBeDefined();
+      expect('value' in envVarCell!).toBe(false);
+    });
+
+    it('returns workspace preflight status from the bridge', async () => {
+      const preflight: ServeWorkspacePreflightStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        acpChannelLive: false,
+        cells: [
+          {
+            kind: 'node_version',
+            status: 'ok',
+            locality: 'daemon',
+            detail: { version: '22.4.0', required: '>=22' },
+          },
+          {
+            kind: 'auth',
+            status: 'not_started',
+            locality: 'acp',
+            hint: 'spawn a session to populate',
+          },
+        ],
+      };
+      const bridge = fakeBridge({
+        workspacePreflightImpl: async () => preflight,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/preflight')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(preflight);
+      expect(bridge.workspacePreflightCalls).toBe(1);
     });
 
     it('returns session context and supported commands from the bridge', async () => {
@@ -1811,6 +2209,502 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /session/:id/approval-mode (#4175 Wave 4 PR 17)', () => {
+    // Strict-gated route: refuses on no-token loopback defaults. All
+    // tests configure a token and forward `Authorization: Bearer …`.
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/approval-mode')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ mode: 'yolo' });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('200 with the typed result on success and persist defaults to false', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'yolo' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        mode: 'yolo',
+        previous: 'default',
+        persisted: false,
+      });
+      expect(bridge.setApprovalModeCalls).toHaveLength(1);
+      expect(bridge.setApprovalModeCalls[0]).toMatchObject({
+        sessionId: 'session-A',
+        mode: 'yolo',
+        opts: { persist: false },
+      });
+    });
+
+    it('forwards persist:true to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'auto-edit', persist: true });
+      expect(res.status).toBe(200);
+      expect(res.body.persisted).toBe(true);
+      expect(bridge.setApprovalModeCalls[0]?.opts).toEqual({ persist: true });
+    });
+
+    it('passes client identity context into the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ mode: 'plan' });
+      expect(res.status).toBe(200);
+      expect(bridge.setApprovalModeCalls[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
+    it('400 on missing or unknown mode literal', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const missing = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('invalid_approval_mode');
+      expect(missing.body.allowed).toEqual([
+        'plan',
+        'default',
+        'auto-edit',
+        'auto',
+        'yolo',
+      ]);
+      const unknown = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'super-yolo' });
+      expect(unknown.status).toBe(400);
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('400 when persist is non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'yolo', persist: 'truthy' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_persist_flag');
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('403 with errorKind=auth_env_error when bridge throws TrustGateError', async () => {
+      const bridge = fakeBridge({
+        setApprovalModeImpl: async () => {
+          throw new TrustGateError(
+            'Cannot enable privileged approval modes in an untrusted folder.',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'yolo' });
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        code: 'trust_gate',
+        errorKind: 'auth_env_error',
+      });
+    });
+
+    it('404 when bridge reports unknown session', async () => {
+      const bridge = fakeBridge({
+        setApprovalModeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/missing/approval-mode'),
+      ).send({ mode: 'yolo' });
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /workspace/init (#4175 Wave 4 PR 17)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/init')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.initWorkspaceCalls).toHaveLength(0);
+    });
+
+    it('200 with action:created and force=false on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({});
+      expect(res.status).toBe(200);
+      expect(res.body.action).toBe('created');
+      expect(res.body.path).toContain('QWEN.md');
+      expect(bridge.initWorkspaceCalls[0]).toMatchObject({
+        initOpts: { force: false },
+      });
+    });
+
+    it('forwards force:true to the bridge', async () => {
+      const bridge = fakeBridge({
+        initWorkspaceImpl: async () => ({
+          path: path.resolve(WS_BOUND, 'QWEN.md'),
+          action: 'overwrote' as const,
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({
+        force: true,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.action).toBe('overwrote');
+      expect(bridge.initWorkspaceCalls[0]?.initOpts).toEqual({ force: true });
+    });
+
+    it('passes client identity into the bridge', async () => {
+      // #4282 fold-in 1 (gpt-5.5 C2): the workspace mutation route
+      // validates `X-Qwen-Client-Id` against `bridge.knownClientIds()`.
+      // Register `client-1` so the validation succeeds and the
+      // originator stamp lands on the bridge call.
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      await auth(request(app).post('/workspace/init'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
+      expect(bridge.initWorkspaceCalls[0]?.originatorClientId).toBe('client-1');
+    });
+
+    it('400 invalid_client_id when X-Qwen-Client-Id is not in knownClientIds', async () => {
+      // #4282 fold-in 1 (gpt-5.5 C2): the validator rejects forged
+      // headers with a structured 400 instead of stamping the
+      // originator on the SSE event.
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.initWorkspaceCalls).toHaveLength(0);
+    });
+
+    it('400 when force is non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({
+        force: 'yes',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_force_flag');
+      expect(bridge.initWorkspaceCalls).toHaveLength(0);
+    });
+
+    it('409 with structured payload when bridge throws WorkspaceInitConflictError', async () => {
+      const bridge = fakeBridge({
+        initWorkspaceImpl: async () => {
+          throw new WorkspaceInitConflictError('/work/bound/QWEN.md', 1234);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({});
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'workspace_init_conflict',
+        path: '/work/bound/QWEN.md',
+        existingSize: 1234,
+      });
+    });
+  });
+
+  describe('POST /workspace/mcp/:server/restart (#4175 Wave 4 PR 17)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/mcp/docs/restart')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(401);
+      expect(bridge.restartMcpServerCalls).toHaveLength(0);
+    });
+
+    it('200 with restarted:true on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        serverName: 'docs',
+        restarted: true,
+        durationMs: 42,
+      });
+      expect(bridge.restartMcpServerCalls).toHaveLength(1);
+      expect(bridge.restartMcpServerCalls[0]?.serverName).toBe('docs');
+    });
+
+    it('200 on soft skip with structured reason', async () => {
+      const bridge = fakeBridge({
+        restartMcpServerImpl: async (serverName) => ({
+          serverName,
+          restarted: false as const,
+          skipped: true as const,
+          reason: 'budget_would_exceed' as const,
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        serverName: 'docs',
+        restarted: false,
+        skipped: true,
+        reason: 'budget_would_exceed',
+      });
+    });
+
+    it('passes client identity into the bridge', async () => {
+      // #4282 fold-in 1 (gpt-5.5 C2): see /workspace/init test above.
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      await auth(request(app).post('/workspace/mcp/docs/restart'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
+      expect(bridge.restartMcpServerCalls[0]?.originatorClientId).toBe(
+        'client-1',
+      );
+    });
+
+    it('400 invalid_client_id on unknown X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/docs/restart'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.restartMcpServerCalls).toHaveLength(0);
+    });
+
+    it('decodes URL-encoded server names', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      // Server name with hyphen + dot is a legitimate stdio MCP config key.
+      const res = await auth(
+        request(app).post(
+          `/workspace/mcp/${encodeURIComponent('foo-bar.io')}/restart`,
+        ),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(bridge.restartMcpServerCalls[0]?.serverName).toBe('foo-bar.io');
+    });
+
+    it('404 when bridge reports SessionNotFoundError (no live channel)', async () => {
+      const bridge = fakeBridge({
+        restartMcpServerImpl: async () => {
+          throw new SessionNotFoundError('mcp:docs');
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart'),
+      ).send({});
+      expect(res.status).toBe(404);
+    });
+
+    it('400 when serverName exceeds 256 chars (#4282 fold-in 4 S1)', async () => {
+      // Mirror the existing tool-name length cap so an unbounded path
+      // parameter can't bloat SSE event bodies, ACP messages, or error
+      // responses with arbitrarily long server names.
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const overlong = 'a'.repeat(257);
+      const res = await auth(
+        request(app).post(`/workspace/mcp/${overlong}/restart`),
+      ).send({});
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.restartMcpServerCalls).toHaveLength(0);
+    });
+  });
+
+  describe('POST /workspace/tools/:name/enable (#4175 Wave 4 PR 17)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/tools/Bash/enable')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ enabled: false });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
+    });
+
+    it('200 with the typed result on success (disable)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ toolName: 'Bash', enabled: false });
+      expect(bridge.setToolEnabledCalls).toHaveLength(1);
+      expect(bridge.setToolEnabledCalls[0]).toMatchObject({
+        toolName: 'Bash',
+        enabled: false,
+      });
+    });
+
+    it('200 on enable=true (re-enable a previously disabled tool)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({ enabled: true });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ toolName: 'Bash', enabled: true });
+      expect(bridge.setToolEnabledCalls[0]?.enabled).toBe(true);
+    });
+
+    it('passes client identity into the bridge', async () => {
+      // #4282 fold-in 1 (gpt-5.5 C2): see /workspace/init test above.
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      await auth(request(app).post('/workspace/tools/Bash/enable'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ enabled: false });
+      expect(bridge.setToolEnabledCalls[0]?.originatorClientId).toBe(
+        'client-1',
+      );
+    });
+
+    it('400 invalid_client_id on unknown X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/tools/Bash/enable'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({ enabled: false });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
+    });
+
+    it('400 when enabled is missing or non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const missing = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('invalid_enabled_flag');
+      const bad = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({ enabled: 'truthy' });
+      expect(bad.status).toBe(400);
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
+    });
+
+    it('accepts URL-encoded MCP-qualified tool names', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      // The SDK helper `encodeURIComponent`s the tool name; the route
+      // path must round-trip the underscored MCP-qualified form
+      // (`mcp__github__create_issue`) without mangling it.
+      const res = await auth(
+        request(app).post('/workspace/tools/mcp__github__create_issue/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(bridge.setToolEnabledCalls[0]?.toolName).toBe(
+        'mcp__github__create_issue',
+      );
+    });
+
+    it('trims surrounding whitespace before persisting (#4282 fold-in 4 C3)', async () => {
+      // The disk read path (`loadCliConfig` → `Set` of trimmed strings)
+      // applies `.trim()` when consuming `tools.disabled`. Without
+      // matching the route's write path, disabling URL-encoded
+      // `%20Bash%20` would persist `" Bash "` verbatim and the next
+      // ACP child spawn would key on `"Bash"` — leaving the entry
+      // permanently stuck because re-enable for `"Bash"` would
+      // `.delete("Bash")` on a Set containing `" Bash "`.
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/tools/%20Bash%20/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(bridge.setToolEnabledCalls[0]?.toolName).toBe('Bash');
+    });
+
+    it('400 when whitespace-only path parameter trims to empty', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      // `%20%20` is two spaces — survives the path-segment guard but
+      // collapses to '' after trim. Surface the same 400 the
+      // routing layer would return for an empty segment.
+      const res = await auth(
+        request(app).post('/workspace/tools/%20%20/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_tool_name');
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
+    });
+  });
+
   describe('POST /session/:id/permission/:requestId', () => {
     it('200 when bridge accepts the scoped vote', async () => {
       const bridge = fakeBridge();
@@ -2563,6 +3457,91 @@ describe('runQwenServe', () => {
     ).rejects.toThrow(/--require-auth/);
   });
 
+  // PR 14 fix (review #4247): runQwenServe is the documented embedded
+  // entry point, so budget validation must live here, not just in the
+  // yargs CLI handler. Embedded callers (other tools wrapping the
+  // daemon, deps.bridge test injection) silently produced an uncapped
+  // child pre-fix despite requesting enforce.
+  it('rejects non-positive mcpClientBudget (#4175 PR 14)', async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        mcpClientBudget: 0,
+      }),
+    ).rejects.toThrow(/mcpClientBudget/);
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        mcpClientBudget: -5,
+      }),
+    ).rejects.toThrow(/mcpClientBudget/);
+  });
+
+  it('rejects mcpBudgetMode=enforce without a budget (#4175 PR 14)', async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        mcpBudgetMode: 'enforce',
+      }),
+    ).rejects.toThrow(/enforce.*requires.*mcpClientBudget/);
+  });
+
+  // Round 6 (wenshao R5 line 216): replaced the R3 `process.env`
+  // mutation tests. `runQwenServe` now passes per-handle env
+  // overrides via `BridgeOptions.childEnvOverrides`, NOT by mutating
+  // global `process.env` — so concurrent embedded daemons don't
+  // cross-contaminate each other's MCP budget env. The two tests
+  // below assert (a) runQwenServe doesn't touch process.env and
+  // (b) a pre-existing process.env value survives runQwenServe
+  // calls unrelated to MCP overrides (proving runQwenServe is no
+  // longer the source of env mutation).
+  it('does not mutate process.env when caller provides mcp budget options (#4247 R6 line 216)', async () => {
+    // Sanity-check: no MCP env vars set before.
+    delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+    delete process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      mcpClientBudget: 10,
+      mcpBudgetMode: 'warn',
+    });
+    // Pre-R6 this leaked into global process.env. Post-R6 the values
+    // travel via `BridgeOptions.childEnvOverrides` closure → only
+    // the spawned ACP child sees them.
+    expect(process.env['QWEN_SERVE_MCP_CLIENT_BUDGET']).toBeUndefined();
+    expect(process.env['QWEN_SERVE_MCP_BUDGET_MODE']).toBeUndefined();
+  });
+
+  it('preserves pre-existing process.env values (no longer wipes globals on omit) (#4247 R6 line 216)', async () => {
+    // Pre-R6 the "scrub on omit" code path delete'd these from
+    // process.env. Post-R6 runQwenServe doesn't touch process.env
+    // at all; the override mechanism handles "scrub" at the
+    // per-handle level inside the bridge's spawn factory. So if an
+    // operator had QWEN_SERVE_MCP_CLIENT_BUDGET exported in their
+    // shell BEFORE starting the daemon, it stays in their process
+    // env (and gets ignored by this daemon's child, which receives
+    // `undefined` via overrides to scrub it on spawn).
+    process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '99';
+    try {
+      handle = await runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        // No mcpClientBudget — override will scrub the var on spawn.
+      });
+      expect(process.env['QWEN_SERVE_MCP_CLIENT_BUDGET']).toBe('99');
+    } finally {
+      delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+    }
+  });
+
   it('starts with --require-auth + token on loopback', async () => {
     handle = await runQwenServe({
       hostname: '127.0.0.1',
@@ -2852,6 +3831,203 @@ describe('runQwenServe', () => {
     await handle.close();
     handle = undefined;
     expect(bridge.shutdownCalls).toBe(1);
+  });
+
+  it('wires fsFactory + emit through to the read routes (#4175 PR 19 follow-up #2)', async () => {
+    // Pin the contract that `runQwenServe` constructs the workspace
+    // filesystem boundary, threads its emit hook through to
+    // `createServeApp`, and that boundary actually drives the new
+    // PR 19 read routes. A regression that drops the `fsFactory`
+    // injection (or that swaps in a different emit channel) shows
+    // up here as either a 500 response or a missing audit event.
+    const captured: BridgeEvent[] = [];
+    const bridge = fakeBridge();
+    const wsRoot = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runqwen-fs-'),
+    );
+    await fsp.writeFile(path.join(wsRoot, 'a.txt'), 'hello');
+    try {
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          workspace: wsRoot,
+        },
+        { bridge, fsAuditEmit: (e) => captured.push(e) },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const ok = await fetch(`http://127.0.0.1:${port}/file?path=a.txt`);
+      expect(ok.status).toBe(200);
+      expect(
+        captured.find(
+          (e) =>
+            e.type === 'fs.access' &&
+            (e.data as { intent?: string }).intent === 'read',
+        ),
+      ).toBeDefined();
+
+      const bad = await fetch(`http://127.0.0.1:${port}/file?path=../escape`);
+      expect(bad.status).toBe(400);
+      const denied = captured.find(
+        (e) =>
+          e.type === 'fs.denied' &&
+          (e.data as { errorKind?: string }).errorKind ===
+            'path_outside_workspace',
+      );
+      expect(denied).toBeDefined();
+    } finally {
+      await fsp.rm(wsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('honors deps.fsFactory override (#4175 PR 19 follow-up #2)', async () => {
+    // The injection point exists so embedded callers (other tools
+    // wrapping the daemon, future runtime locality contracts) can
+    // swap in a remote-fronting factory. This test asserts
+    // `runQwenServe` does NOT silently shadow a caller-supplied
+    // factory with its built-in default. A regression that ignored
+    // `deps.fsFactory` and fell back to the built-in factory would
+    // resolve `a.txt` against `process.cwd()`, find no such file,
+    // and return 404 `path_not_found`. The sentinel-throwing
+    // factory ensures we see 400 with `sentinel-from-fake-factory`
+    // in the body — proof the override actually drives the request.
+    const sentinelMessage = 'sentinel-from-fake-factory';
+    const fsFactory: WorkspaceFileSystemFactory = {
+      forRequest: () => ({
+        resolve: async () => {
+          throw new FsError('parse_error', sentinelMessage);
+        },
+        readText: async () => {
+          throw new Error('unreachable');
+        },
+        readBytes: async () => {
+          throw new Error('unreachable');
+        },
+        readBytesWindow: async () => {
+          throw new Error('unreachable');
+        },
+        list: async () => {
+          throw new Error('unreachable');
+        },
+        glob: async () => {
+          throw new Error('unreachable');
+        },
+        stat: async () => {
+          throw new Error('unreachable');
+        },
+        writeText: async () => {
+          throw new Error('unreachable');
+        },
+        writeTextAtomic: async () => {
+          throw new Error('unreachable');
+        },
+        edit: async () => {
+          throw new Error('unreachable');
+        },
+        editAtomic: async () => {
+          throw new Error('unreachable');
+        },
+      }),
+    };
+    const bridge = fakeBridge();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        workspace: process.cwd(),
+      },
+      { bridge, fsFactory },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/file?path=a.txt`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; errorKind: string };
+    expect(body.errorKind).toBe('parse_error');
+    expect(body.error).toContain(sentinelMessage);
+  });
+
+  it('trust snapshot defaults to true (operator-chosen workspace)', async () => {
+    // The default trust value drives PR 20 write-route behavior
+    // even though PR 19 only exercises read intents. Pin the
+    // default here so a future contributor flipping it has to
+    // rewrite this test, surfacing the security-relevant change
+    // for review.
+    const bridge = fakeBridge();
+    const wsRoot = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runqwen-trust-'),
+    );
+    try {
+      const captured: BridgeEvent[] = [];
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          workspace: wsRoot,
+        },
+        { bridge, fsAuditEmit: (e) => captured.push(e) },
+      );
+      // Drive a read so the factory's `assertTrustedForIntent`
+      // gate fires. Read intents pass under both trusted and
+      // untrusted; the test signal is the absence of any
+      // `untrusted_workspace` denial event in the captured stream.
+      await fsp.writeFile(path.join(wsRoot, 'b.txt'), 'b');
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/file?path=b.txt`);
+      expect(res.status).toBe(200);
+      expect(
+        captured.find(
+          (e) =>
+            (e.data as { errorKind?: string }).errorKind ===
+            'untrusted_workspace',
+        ),
+      ).toBeUndefined();
+    } finally {
+      await fsp.rm(wsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('trust snapshot=false flows through deps.trustedWorkspace into the boundary (#4175 PR 19 follow-up #2)', async () => {
+    // PR 19 has no write routes, so the trust gate's effect on
+    // mutating intents can't be observed via HTTP. Instead, we
+    // construct the same factory that runQwenServe would build,
+    // with the same `trusted` value runQwenServe would pass, and
+    // assert the gate trips. The contract is: when
+    // `deps.trustedWorkspace = false`, the factory's
+    // `assertTrustedForIntent` rejects writes with
+    // `untrusted_workspace` — exactly what PR 20 will rely on.
+    const wsRoot = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runqwen-untrust-'),
+    );
+    try {
+      // Mirror runQwenServe's construction. If `runQwenServe`
+      // changes the call shape (different deps order, different
+      // fields), this test will start failing to type-check —
+      // which is the point: the failure is the audit trail.
+      const { createWorkspaceFileSystemFactory } = await import(
+        './fs/index.js'
+      );
+      const factory = createWorkspaceFileSystemFactory({
+        boundWorkspace: wsRoot,
+        trusted: false,
+        emit: () => undefined,
+      });
+      const fsApi = factory.forRequest({ route: 'TEST /op' });
+      // Read still passes — read intents are always trusted.
+      await fsp.writeFile(path.join(wsRoot, 'a.txt'), 'a');
+      const r = await fsApi.resolve('a.txt', 'read');
+      const out = await fsApi.readText(r);
+      expect(out.content).toBe('a');
+      // Write throws untrusted_workspace.
+      const w = await fsApi.resolve('out.txt', 'write');
+      await expect(fsApi.writeText(w, 'x')).rejects.toMatchObject({
+        kind: 'untrusted_workspace',
+      });
+    } finally {
+      await fsp.rm(wsRoot, { recursive: true, force: true });
+    }
   });
 
   it('handle.close() is idempotent — concurrent + repeat calls share one drain cycle', async () => {
@@ -3273,6 +4449,155 @@ describe('GET /session/:id/events (SSE)', () => {
   });
 });
 
+describe('GET /demo', () => {
+  it('returns 200 with text/html content type on loopback', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+    expect(res.text).toContain('Qwen Serve');
+    expect(res.text).toContain('<!DOCTYPE html>');
+  });
+
+  it('is accessible without bearer token on loopback even when --token is set', async () => {
+    // Loopback: /demo is registered BEFORE bearerAuth so browsers can
+    // reach the page via address-bar navigation (no Authorization header).
+    const app = createServeApp({ ...baseOpts, token: 'secret' }, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+  });
+
+  it('requires bearer token on non-loopback (401 without token)', async () => {
+    // Non-loopback: /demo is registered AFTER bearerAuth to prevent
+    // unauthenticated access on public interfaces.
+    const app = createServeApp(
+      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app).get('/demo').set('Host', '0.0.0.0:4170');
+    expect(res.status).toBe(401);
+  });
+
+  it('is accessible on non-loopback with valid bearer token', async () => {
+    const app = createServeApp(
+      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', '0.0.0.0:4170')
+      .set('Authorization', 'Bearer secret');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+  });
+
+  it('is guarded by CORS (rejects cross-origin requests)', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'https://evil.example.com');
+    expect(res.status).toBe(403);
+  });
+
+  it('sets anti-clickjacking headers (X-Frame-Options + CSP)', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['x-frame-options']).toBe('DENY');
+    expect(res.headers['content-security-policy']).toContain(
+      "frame-ancestors 'none'",
+    );
+  });
+});
+
+describe('same-origin Origin-stripping middleware', () => {
+  it('strips loopback Origin header matching daemon port', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    // A request with matching same-origin should pass CORS check
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://127.0.0.1:4170');
+    // Should NOT be rejected by denyBrowserOriginCors (status != 403)
+    expect(res.status).not.toBe(403);
+  });
+
+  it('does not strip non-loopback Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://evil.com:4170');
+    expect(res.status).toBe(403);
+  });
+
+  it('does not strip Origin with wrong port', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://127.0.0.1:9999');
+    expect(res.status).toBe(403);
+  });
+
+  it('strips host.docker.internal Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://host.docker.internal:4170');
+    expect(res.status).not.toBe(403);
+  });
+
+  it('strips localhost Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:4170');
+    expect(res.status).not.toBe(403);
+  });
+
+  it('strips [::1] Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://[::1]:4170');
+    expect(res.status).not.toBe(403);
+  });
+});
+
 describe('runQwenServe SIGINT handler', () => {
   it('does not register signal handlers until the listener is up', () => {
     // Sanity: we register `once` so we don't leak across test runs.
@@ -3280,5 +4605,713 @@ describe('runQwenServe SIGINT handler', () => {
     // is covered indirectly by the loopback boot test above.
     expect(typeof runQwenServe).toBe('function');
     void vi.fn(); // silence unused-import lint if vitest tree-shakes
+  });
+});
+
+describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
+  it('parks a default WorkspaceFileSystemFactory on app.locals when none is injected', async () => {
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/bound',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+    const fsFactory = (
+      app.locals as {
+        fsFactory?: { forRequest: (ctx: { route: string }) => unknown };
+      }
+    ).fsFactory;
+    expect(fsFactory).toBeDefined();
+    expect(typeof fsFactory!.forRequest).toBe('function');
+    // The factory is functional — it can build a per-request boundary.
+    const fs = fsFactory!.forRequest({ route: 'TEST /op' });
+    expect(fs).toBeDefined();
+  });
+
+  it('uses the injected fsFactory verbatim when supplied', async () => {
+    const { createServeApp } = await import('./server.js');
+    const sentinel = { forRequest: vi.fn(() => ({ marker: 'injected' })) };
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/bound',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { fsFactory: sentinel as any },
+    );
+    expect((app.locals as { fsFactory?: unknown }).fsFactory).toBe(sentinel);
+  });
+
+  it('default fsFactory is built with trusted=false (writes refused)', async () => {
+    const { createServeApp } = await import('./server.js');
+    const { isFsError } = await import('./fs/index.js');
+    const os = await import('node:os');
+    const tmp = await import('node:fs').then((m) =>
+      m.promises.mkdtemp(path.join(os.tmpdir(), 'qwen-serve-default-trust-')),
+    );
+    try {
+      const app = createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: tmp,
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+      );
+      type FsCtx = { route: string };
+      type WfsLite = {
+        resolve: (input: string, intent: 'write') => Promise<string>;
+        writeText: (p: string, content: string) => Promise<void>;
+      };
+      const fsFactory = (
+        app.locals as {
+          fsFactory?: { forRequest: (ctx: FsCtx) => WfsLite };
+        }
+      ).fsFactory;
+      expect(fsFactory).toBeDefined();
+      const fs = fsFactory!.forRequest({ route: 'TEST /op' });
+      // Resolve a write target inside the workspace; the resolve
+      // succeeds but writeText must throw `untrusted_workspace` —
+      // that's the safe-default behavior the strict-default factory
+      // exists to enforce.
+      const resolved = await fs.resolve('child.txt', 'write');
+      const err = await fs.writeText(resolved, 'x').catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('untrusted_workspace');
+    } finally {
+      await import('node:fs').then((m) =>
+        m.promises.rm(tmp, { recursive: true, force: true }),
+      );
+    }
+  });
+});
+
+// -- Issue #4175 PR 21 — auth device-flow integration tests ----------------
+
+describe('auth device-flow routes', () => {
+  // Build a fake provider whose `start` returns deterministic values and
+  // whose `poll` is scripted per-test. Lives at the top of the suite so
+  // every `it()` can compose it with the registry.
+  function makeFakeProvider(): {
+    provider: import('./auth/deviceFlow.js').DeviceFlowProvider;
+    startCount: () => number;
+  } {
+    let starts = 0;
+    return {
+      provider: {
+        providerId: 'qwen-oauth' as const,
+        async start() {
+          starts += 1;
+          return {
+            deviceCode:
+              // Use the brandSecret helper so the secret follows the same
+              // redaction shape the production provider produces.
+              (await import('./auth/deviceFlow.js')).brandSecret(
+                `device-${starts}`,
+              ),
+            pkceVerifier: (await import('./auth/deviceFlow.js')).brandSecret(
+              `pkce-${starts}`,
+            ),
+            userCode: `USER-${starts}`,
+            verificationUri: 'https://idp.example/verify',
+            verificationUriComplete: 'https://idp.example/verify?u=AB12',
+            expiresIn: 600,
+          };
+        },
+        async poll(_state: unknown, _opts: { signal: AbortSignal }) {
+          // Stays pending forever — tests don't need the upstream to
+          // succeed for the route-layer assertions to be meaningful.
+          return { kind: 'pending' as const };
+        },
+      },
+      startCount: () => starts,
+    };
+  }
+
+  function buildApp(
+    overrides: Partial<ServeOptions> = {},
+    fakeProvider = makeFakeProvider(),
+  ) {
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, ...overrides }, undefined, {
+      bridge,
+      deviceFlowProviders: [fakeProvider.provider],
+    });
+    return { app, bridge, fakeProvider };
+  }
+
+  it('POST /workspace/auth/device-flow returns 201 on fresh start with redacted body', async () => {
+    const { app, fakeProvider } = buildApp({ token: 'tkn' });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(res.status).toBe(201);
+    expect(res.body.providerId).toBe('qwen-oauth');
+    expect(res.body.userCode).toBe('USER-1');
+    expect(res.body.attached).toBe(false);
+    expect(typeof res.body.deviceFlowId).toBe('string');
+    // Critical: response body never contains device_code / pkce_verifier.
+    const json = JSON.stringify(res.body);
+    expect(json).not.toContain('device-1');
+    expect(json).not.toContain('pkce-1');
+    expect(fakeProvider.startCount()).toBe(1);
+  });
+
+  it('POST is rejected with 401 token_required on token-less loopback (strict gate)', async () => {
+    const { app } = buildApp({ token: undefined });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+  });
+
+  it('POST with unknown providerId returns 400 unsupported_provider', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'totally-fake' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_provider');
+    expect(res.body.supportedProviders).toContain('qwen-oauth');
+  });
+
+  it('POST is idempotent take-over for the same providerId — second POST returns 200 + attached:true', async () => {
+    const { app, fakeProvider } = buildApp({ token: 'tkn' });
+    const first = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(first.status).toBe(201);
+    const second = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(second.status).toBe(200);
+    expect(second.body.attached).toBe(true);
+    expect(second.body.deviceFlowId).toBe(first.body.deviceFlowId);
+    // Critical: provider.start is NOT called twice — the take-over is
+    // a daemon-internal operation, not a re-auth round trip.
+    expect(fakeProvider.startCount()).toBe(1);
+  });
+
+  it('POST take-over only echoes userCode/verificationUri/initiatorClientId to caller matching the initiator (#4291 follow-up review)', async () => {
+    // PR #4291 follow-up review (gpt-5.5, #3): policy consistency.
+    // The closed-out GET redaction (don't echo userCode to non-
+    // initiator callers) was bypassable via POST take-over —
+    // any bearer-token holder POSTing the same `providerId` got
+    // `attached: true` AND the original starter's verification
+    // material. Now the same caller-clientId gate applies. Fresh
+    // starts naturally pass (caller IS initiator); take-overs by
+    // a different clientId see only the public envelope.
+    const { app } = buildApp({ token: 'tkn' });
+    // Starter identifies as sdk-A.
+    const first = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-A')
+      .send({ providerId: 'qwen-oauth' });
+    expect(first.status).toBe(201);
+    // Fresh starter MUST see the verification material — they ARE
+    // the initiator.
+    expect(first.body.userCode).toBe('USER-1');
+    expect(first.body.verificationUri).toBe('https://idp.example/verify');
+    expect(first.body.initiatorClientId).toBe('sdk-A');
+
+    // Different SDK take-over — must NOT see verification fields.
+    const takeoverDifferent = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-B')
+      .send({ providerId: 'qwen-oauth' });
+    expect(takeoverDifferent.status).toBe(200);
+    expect(takeoverDifferent.body.attached).toBe(true);
+    expect(takeoverDifferent.body.deviceFlowId).toBe(first.body.deviceFlowId);
+    expect(takeoverDifferent.body).not.toHaveProperty('userCode');
+    expect(takeoverDifferent.body).not.toHaveProperty('verificationUri');
+    expect(takeoverDifferent.body).not.toHaveProperty(
+      'verificationUriComplete',
+    );
+    expect(takeoverDifferent.body).not.toHaveProperty('initiatorClientId');
+
+    // Anonymous take-over against an identified-start — must NOT see
+    // verification fields either (mismatched: identified vs anonymous).
+    const takeoverAnon = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(takeoverAnon.status).toBe(200);
+    expect(takeoverAnon.body.attached).toBe(true);
+    expect(takeoverAnon.body).not.toHaveProperty('userCode');
+
+    // Same-id take-over (sdk-A again) — DOES see the material.
+    const takeoverSame = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-A')
+      .send({ providerId: 'qwen-oauth' });
+    expect(takeoverSame.status).toBe(200);
+    expect(takeoverSame.body.attached).toBe(true);
+    expect(takeoverSame.body.userCode).toBe('USER-1');
+    expect(takeoverSame.body.initiatorClientId).toBe('sdk-A');
+  });
+
+  it('POST take-over preserves the anonymous-start → anonymous-reattach use case', async () => {
+    // PR #4291 follow-up review (gpt-5.5, #3): the both-undefined
+    // branch of `callerIsInitiator` keeps the legitimate "anonymous
+    // start, anonymous re-attach (e.g., process restart, no
+    // persisted clientId)" use case working. Without this, every
+    // anonymous re-attach would silently lose the userCode.
+    const { app } = buildApp({ token: 'tkn' });
+    const first = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(first.status).toBe(201);
+    expect(first.body.userCode).toBe('USER-1');
+
+    const reattach = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(reattach.status).toBe(200);
+    expect(reattach.body.attached).toBe(true);
+    expect(reattach.body.deviceFlowId).toBe(first.body.deviceFlowId);
+    // Both-undefined: anonymous initiator, anonymous re-attach → same
+    // caller. Verification fields ARE returned.
+    expect(reattach.body.userCode).toBe('USER-1');
+    expect(reattach.body.verificationUri).toBe('https://idp.example/verify');
+    // No initiatorClientId echoed (none was set originally).
+    expect(reattach.body).not.toHaveProperty('initiatorClientId');
+  });
+
+  it('GET /workspace/auth/device-flow/:id returns 200 for known + 404 for unknown', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const post = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    const id = post.body.deviceFlowId as string;
+    const ok = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(ok.status).toBe(200);
+    expect(ok.body.deviceFlowId).toBe(id);
+    expect(ok.body.status).toBe('pending');
+
+    const missing = await request(app)
+      .get('/workspace/auth/device-flow/nonexistent-id')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(missing.status).toBe(404);
+    expect(missing.body.code).toBe('device_flow_not_found');
+  });
+
+  it('DELETE on pending → 204; idempotent on already-cancelled → 204; unknown → 404', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const post = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    const id = post.body.deviceFlowId as string;
+    const first = await request(app)
+      .delete(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(first.status).toBe(204);
+    const second = await request(app)
+      .delete(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    // Idempotent: terminal entries return 204 no-op.
+    expect(second.status).toBe(204);
+    const missing = await request(app)
+      .delete('/workspace/auth/device-flow/nonexistent-id')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(missing.status).toBe(404);
+  });
+
+  it('GET /workspace/auth/status surfaces pending flows and supported providers', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const start = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    const id = start.body.deviceFlowId as string;
+    const status = await request(app)
+      .get('/workspace/auth/status')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(status.status).toBe(200);
+    expect(status.body.v).toBe(1);
+    expect(status.body.supportedDeviceFlowProviders).toContain('qwen-oauth');
+    expect(status.body.pendingDeviceFlows).toHaveLength(1);
+    expect(status.body.pendingDeviceFlows[0].deviceFlowId).toBe(id);
+    // Status payload MUST NOT echo userCode/verificationUri.
+    const json = JSON.stringify(status.body);
+    expect(json).not.toContain('USER-1');
+    expect(json).not.toContain('idp.example');
+  });
+
+  it('capability tag auth_device_flow is advertised unconditionally', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body.features).toContain('auth_device_flow');
+  });
+
+  it('upstream provider.start failure → 502 upstream_error, not 500', async () => {
+    // PR 21 fold-in 0 P1-14: provider throwing UpstreamDeviceFlowError
+    // must surface as 502 with code:'upstream_error' instead of falling
+    // through `sendBridgeError`'s generic 500 path. Build a fake
+    // provider whose start always throws.
+    const { UpstreamDeviceFlowError } = await import('./auth/deviceFlow.js');
+    const failingProvider: import('./auth/deviceFlow.js').DeviceFlowProvider = {
+      providerId: 'qwen-oauth',
+      async start() {
+        throw new UpstreamDeviceFlowError('mocked upstream outage');
+      },
+      async poll() {
+        return { kind: 'pending' as const };
+      },
+    };
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      deviceFlowProviders: [failingProvider],
+    });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('upstream_error');
+    expect(res.body.error).toContain('mocked upstream outage');
+  });
+
+  it('sweeper-driven auto-expiry transitions a stale entry to status:error and surfaces over GET', async () => {
+    // PR 21 fold-in 0 P1-13: cover the time-based expiry path via an
+    // injected registry with a controlled clock + manual sweeper trigger.
+    const { DeviceFlowRegistry, brandSecret } = await import(
+      './auth/deviceFlow.js'
+    );
+    const fakeProvider: import('./auth/deviceFlow.js').DeviceFlowProvider = {
+      providerId: 'qwen-oauth',
+      async start() {
+        return {
+          deviceCode: brandSecret('device-1'),
+          pkceVerifier: brandSecret('pkce-1'),
+          userCode: 'USER-1',
+          verificationUri: 'https://idp.example/verify',
+          expiresIn: 60, // 60 seconds
+        };
+      },
+      async poll() {
+        // Stays pending; the sweeper drives terminal state via expiresAt.
+        return { kind: 'pending' as const };
+      },
+    };
+
+    let now = 1_700_000_000_000;
+    const intervalsRegistered: Array<{ cb: () => void }> = [];
+    const registry = new DeviceFlowRegistry({
+      events: { publish: () => {} },
+      resolveProvider: (id) => (id === 'qwen-oauth' ? fakeProvider : undefined),
+      now: () => now,
+      // Run polls forever-deferred; sweeper interval is what we drive.
+      schedule: (_ms, _cb) => ({ cancelled: false }) as never,
+      clearScheduled: () => {},
+      scheduleInterval: (_ms, cb) => {
+        const handle = { cb, cancelled: false };
+        intervalsRegistered.push(handle);
+        return handle as never;
+      },
+      clearScheduledInterval: () => {},
+    });
+
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      deviceFlowRegistry: registry,
+    });
+
+    const startRes = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(startRes.status).toBe(201);
+    const id = startRes.body.deviceFlowId as string;
+
+    // Drive the clock past expiresAt and trigger the sweeper.
+    now += 61_000;
+    for (const interval of intervalsRegistered) interval.cb();
+
+    const stateRes = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(stateRes.status).toBe(200);
+    // Time-based expiry transitions to status='expired' with errorKind='expired_token'.
+    expect(stateRes.body.status).toBe('expired');
+    expect(stateRes.body.errorKind).toBe('expired_token');
+    registry.dispose();
+  });
+
+  // PR #4255 fold-in 10 #4 — HTTP route contract coverage. Round-8
+  // wenshao thread `Cvx93` flagged that the existing 4 it()'s
+  // covered the happy paths but missed the malformed-input,
+  // resource-cap, and strict-bearer error envelopes that SDK
+  // consumers depend on for retry / surface routing. Each case
+  // here is a supertest one-liner asserting status code + `code:`
+  // discriminator.
+
+  it('POST with missing providerId returns 400 invalid_request', async () => {
+    // PR 21 fold-in W2 split the 400 envelope into `invalid_request`
+    // (caller-shape error: missing/non-string body field) vs
+    // `unsupported_provider` (well-shaped but the providerId isn't
+    // in the supported tuple). This pins that split.
+    const { app } = buildApp({ token: 'tkn' });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({}); // no providerId at all
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_request');
+    expect(res.body.error).toContain('providerId');
+  });
+
+  it('POST with non-string providerId returns 400 invalid_request', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 42 });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_request');
+  });
+
+  it('POST returns 409 too_many_active_flows when registry cap is reached', async () => {
+    // Inject a fake registry whose `start` always throws the cap error.
+    const { TooManyActiveDeviceFlowsError } = await import(
+      './auth/deviceFlow.js'
+    );
+    const fakeRegistry = {
+      start: async () => {
+        throw new TooManyActiveDeviceFlowsError();
+      },
+      get: () => undefined,
+      cancel: () => undefined,
+      listPending: () => [],
+      dispose: () => {},
+    } as unknown as import('./auth/deviceFlow.js').DeviceFlowRegistry;
+
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      deviceFlowRegistry: fakeRegistry,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('too_many_active_flows');
+  });
+
+  it('DELETE without bearer is rejected 401 token_required (strict-mutation gate)', async () => {
+    const { app } = buildApp({ token: undefined });
+    const res = await request(app)
+      .delete('/workspace/auth/device-flow/some-id')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+  });
+
+  it('GET /workspace/auth/device-flow/:id is strict-gated; GET /workspace/auth/status is read-only', async () => {
+    // The two GETs have ASYMMETRIC auth posture by design:
+    // - `GET /workspace/auth/device-flow/:id` returns `userCode` for
+    //   pending entries (only when caller's clientId matches the
+    //   initiator — see follow-up review thread test below). fold-in
+    //   (round-4 #1) added `mutate({strict:true})` to close the
+    //   info-disclosure asymmetry vs. the strict POST/DELETE.
+    // - `GET /workspace/auth/status` intentionally redacts userCode
+    //   (lists only deviceFlowId/providerId/expiresAt) so it stays
+    //   bearer-only (passthrough on loopback no-token default).
+    const { app } = buildApp({ token: undefined });
+    const flowGet = await request(app)
+      .get('/workspace/auth/device-flow/no-such-id')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(flowGet.status).toBe(401);
+    expect(flowGet.body.code).toBe('token_required');
+    // Status, by contrast, is reachable on loopback without a token.
+    const status = await request(app)
+      .get('/workspace/auth/status')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(status.status).toBe(200);
+  });
+
+  it('GET /workspace/auth/device-flow/:id only echoes userCode/verificationUri/initiatorClientId to caller matching the initiator', async () => {
+    // PR #4255 follow-up review thread (deepseek-v4-pro): the GET
+    // response shape is symmetrized with the POST take-over response.
+    // An anonymous caller, or a caller identifying as a different
+    // client, only sees the public envelope (status/timestamps/error
+    // fields) — never the verification code or the initiator id.
+    const { app } = buildApp({ token: 'tkn' });
+    const post = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-A')
+      .send({ providerId: 'qwen-oauth' });
+    const id = post.body.deviceFlowId as string;
+    expect(typeof id).toBe('string');
+
+    const matchingCaller = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-A');
+    expect(matchingCaller.status).toBe(200);
+    expect(matchingCaller.body.deviceFlowId).toBe(id);
+    expect(matchingCaller.body.userCode).toBe('USER-1');
+    expect(matchingCaller.body.verificationUri).toBe(
+      'https://idp.example/verify',
+    );
+    expect(matchingCaller.body.initiatorClientId).toBe('sdk-A');
+
+    const anonymousCaller = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(anonymousCaller.status).toBe(200);
+    expect(anonymousCaller.body.deviceFlowId).toBe(id);
+    expect(anonymousCaller.body).not.toHaveProperty('userCode');
+    expect(anonymousCaller.body).not.toHaveProperty('verificationUri');
+    expect(anonymousCaller.body).not.toHaveProperty('verificationUriComplete');
+    expect(anonymousCaller.body).not.toHaveProperty('initiatorClientId');
+
+    const differentCaller = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-B');
+    expect(differentCaller.status).toBe(200);
+    expect(differentCaller.body.deviceFlowId).toBe(id);
+    expect(differentCaller.body).not.toHaveProperty('userCode');
+    expect(differentCaller.body).not.toHaveProperty('verificationUri');
+    expect(differentCaller.body).not.toHaveProperty('verificationUriComplete');
+    expect(differentCaller.body).not.toHaveProperty('initiatorClientId');
+  });
+
+  it('GET /workspace/auth/device-flow/:id returns 400 invalid_client_id when X-Qwen-Client-Id is malformed (qwen-latest review N3)', async () => {
+    // PR #4291 follow-up review (qwen-latest, N3): the GET handler's
+    // strict-clientId behavior — added in this PR to drive the
+    // `callerIsInitiator` gate — was documented in JSDoc but not
+    // pinned in CI. A future refactor that removes or reorders the
+    // `parseClientIdHeader` call would silently revert the contract
+    // change. Pin: a malformed header (>128 chars or invalid chars)
+    // returns 400 `invalid_client_id` from THIS specific GET route.
+    const { app } = buildApp({ token: 'tkn' });
+    const post = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    const id = post.body.deviceFlowId as string;
+
+    // Over-length: 129 chars.
+    const tooLong = 'a'.repeat(129);
+    const tooLongRes = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', tooLong);
+    expect(tooLongRes.status).toBe(400);
+    expect(tooLongRes.body.code).toBe('invalid_client_id');
+
+    // Invalid characters (spaces / quotes — anything outside the
+    // allowed token charset).
+    const badChars = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'has spaces and "quotes"');
+    expect(badChars.status).toBe(400);
+    expect(badChars.body.code).toBe('invalid_client_id');
+  });
+
+  it('GET /workspace/auth/device-flow/:id returns userCode for an anonymously-started flow when the GET caller is also anonymous', async () => {
+    // PR #4291 follow-up review (qwen-latest, #3): the original
+    // gate required both `initiatorClientId` AND `callerClientId`
+    // to be defined and equal — which silently locked anonymous-
+    // started flows out of their own data (the SDK that didn't
+    // pass `X-Qwen-Client-Id` on POST also doesn't pass it on
+    // GET, but the response body switched from "useful" to
+    // "redacted public envelope" with HTTP 200 and no error). Fix:
+    // also accept `both undefined` as the same caller. The gate's
+    // purpose is to prevent CROSS-client reads, not to lock
+    // anonymous flows out of themselves.
+    const { app } = buildApp({ token: 'tkn' });
+    // Start anonymously (no X-Qwen-Client-Id header).
+    const post = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    const id = post.body.deviceFlowId as string;
+    expect(typeof id).toBe('string');
+    // Anonymous GET — must still see the verification fields.
+    const anonGet = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(anonGet.status).toBe(200);
+    expect(anonGet.body.deviceFlowId).toBe(id);
+    expect(anonGet.body.userCode).toBe('USER-1');
+    expect(anonGet.body.verificationUri).toBe('https://idp.example/verify');
+    // No initiatorClientId — there wasn't one (anonymous start).
+    expect(anonGet.body).not.toHaveProperty('initiatorClientId');
+    // An IDENTIFIED caller, however, is NOT the same caller —
+    // they don't get the verification fields.
+    const identified = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-X');
+    expect(identified.status).toBe(200);
+    expect(identified.body).not.toHaveProperty('userCode');
+    expect(identified.body).not.toHaveProperty('verificationUri');
   });
 });

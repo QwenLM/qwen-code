@@ -14,13 +14,53 @@ import {
 } from './systemInfo.js';
 import type { CommandContext } from '../ui/commands/types.js';
 import { createMockCommandContext } from '../test-utils/mockCommandContext.js';
-import * as child_process from 'node:child_process';
+import type * as child_process from 'node:child_process';
 import os from 'node:os';
 import { IdeClient } from '@qwen-code/qwen-code-core';
 import * as versionUtils from './version.js';
-import type { ExecSyncOptions } from 'node:child_process';
 
-vi.mock('node:child_process');
+// `getNpmVersion` / `getGitVersion` use `execFile` callback-style. Mock
+// the named export via `vi.hoisted` so the spy reference is the same one
+// the module imports — the synchronous factory return ensures the mock is
+// applied before `systemInfo.ts` evaluates its imports.
+const { mockedExecFile } = vi.hoisted(() => ({
+  mockedExecFile: vi.fn(),
+}));
+vi.mock('node:child_process', async () => {
+  const actual =
+    await vi.importActual<typeof import('node:child_process')>(
+      'node:child_process',
+    );
+  return {
+    ...actual,
+    default: { ...actual, execFile: mockedExecFile },
+    execFile: mockedExecFile,
+  };
+});
+
+type ExecFileCb = (err: Error | null, stdout: string, stderr: string) => void;
+const setExecFileStdout = (stdout: string) => {
+  mockedExecFile.mockImplementation(((
+    _file: string,
+    _args: readonly string[],
+    _options: object,
+    callback: ExecFileCb,
+  ) => {
+    callback(null, stdout, '');
+    return {};
+  }) as unknown as typeof child_process.execFile);
+};
+const setExecFileError = (err: Error) => {
+  mockedExecFile.mockImplementation(((
+    _file: string,
+    _args: readonly string[],
+    _options: object,
+    callback: ExecFileCb,
+  ) => {
+    callback(err, '', '');
+    return {};
+  }) as unknown as typeof child_process.execFile);
+};
 
 vi.mock('node:os', () => ({
   default: {
@@ -76,19 +116,7 @@ describe('systemInfo', () => {
     } as unknown as CommandContext);
 
     vi.mocked(versionUtils.getCliVersion).mockResolvedValue('test-version');
-    vi.mocked(child_process.execSync).mockImplementation(
-      (command: string, options?: ExecSyncOptions) => {
-        if (
-          options &&
-          typeof options === 'object' &&
-          'encoding' in options &&
-          options.encoding === 'utf-8'
-        ) {
-          return '10.0.0';
-        }
-        return Buffer.from('10.0.0', 'utf-8');
-      },
-    );
+    setExecFileStdout('10.0.0');
     vi.mocked(os.release).mockReturnValue('22.0.0');
     process.env['GOOGLE_CLOUD_PROJECT'] = 'test-gcp-project';
     Object.defineProperty(process, 'platform', {
@@ -120,27 +148,13 @@ describe('systemInfo', () => {
 
   describe('getNpmVersion', () => {
     it('should return npm version when available', async () => {
-      vi.mocked(child_process.execSync).mockImplementation(
-        (command: string, options?: ExecSyncOptions) => {
-          if (
-            options &&
-            typeof options === 'object' &&
-            'encoding' in options &&
-            options.encoding === 'utf-8'
-          ) {
-            return '10.0.0';
-          }
-          return Buffer.from('10.0.0', 'utf-8');
-        },
-      );
+      setExecFileStdout('10.0.0\n');
       const version = await getNpmVersion();
       expect(version).toBe('10.0.0');
     });
 
     it('should return unknown when npm command fails', async () => {
-      vi.mocked(child_process.execSync).mockImplementation(() => {
-        throw new Error('npm not found');
-      });
+      setExecFileError(new Error('npm not found'));
       const version = await getNpmVersion();
       expect(version).toBe('unknown');
     });
@@ -208,19 +222,7 @@ describe('systemInfo', () => {
       vi.mocked(IdeClient.getInstance).mockResolvedValue({
         getDetectedIdeDisplayName: vi.fn().mockReturnValue('test-ide'),
       } as unknown as IdeClient);
-      vi.mocked(child_process.execSync).mockImplementation(
-        (command: string, options?: ExecSyncOptions) => {
-          if (
-            options &&
-            typeof options === 'object' &&
-            'encoding' in options &&
-            options.encoding === 'utf-8'
-          ) {
-            return '10.0.0';
-          }
-          return Buffer.from('10.0.0', 'utf-8');
-        },
-      );
+      setExecFileStdout('10.0.0');
 
       const systemInfo = await getSystemInfo(mockContext);
 
@@ -258,19 +260,7 @@ describe('systemInfo', () => {
       vi.mocked(IdeClient.getInstance).mockResolvedValue({
         getDetectedIdeDisplayName: vi.fn().mockReturnValue('test-ide'),
       } as unknown as IdeClient);
-      vi.mocked(child_process.execSync).mockImplementation(
-        (command: string, options?: ExecSyncOptions) => {
-          if (
-            options &&
-            typeof options === 'object' &&
-            'encoding' in options &&
-            options.encoding === 'utf-8'
-          ) {
-            return '10.0.0';
-          }
-          return Buffer.from('10.0.0', 'utf-8');
-        },
-      );
+      setExecFileStdout('10.0.0');
 
       const { AuthType } = await import('@qwen-code/qwen-code-core');
       // Update the mock context to use OpenAI auth
@@ -292,19 +282,7 @@ describe('systemInfo', () => {
       vi.mocked(IdeClient.getInstance).mockResolvedValue({
         getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
       } as unknown as IdeClient);
-      vi.mocked(child_process.execSync).mockImplementation(
-        (command: string, options?: ExecSyncOptions) => {
-          if (
-            options &&
-            typeof options === 'object' &&
-            'encoding' in options &&
-            options.encoding === 'utf-8'
-          ) {
-            return '10.0.0';
-          }
-          return Buffer.from('10.0.0', 'utf-8');
-        },
-      );
+      setExecFileStdout('10.0.0');
 
       const extendedInfo = await getExtendedSystemInfo(mockContext);
 
@@ -315,19 +293,7 @@ describe('systemInfo', () => {
       vi.mocked(IdeClient.getInstance).mockResolvedValue({
         getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
       } as unknown as IdeClient);
-      vi.mocked(child_process.execSync).mockImplementation(
-        (command: string, options?: ExecSyncOptions) => {
-          if (
-            options &&
-            typeof options === 'object' &&
-            'encoding' in options &&
-            options.encoding === 'utf-8'
-          ) {
-            return '10.0.0';
-          }
-          return Buffer.from('10.0.0', 'utf-8');
-        },
-      );
+      setExecFileStdout('10.0.0');
 
       const extendedInfo = await getExtendedSystemInfo(mockContext);
 

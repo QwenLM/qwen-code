@@ -128,20 +128,32 @@ export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 
 // ============================================================================
+// Providers
+// ============================================================================
+
+export * from './providers/index.js';
+
+// ============================================================================
 // Services
 // ============================================================================
 
+export {
+  computeThresholds,
+  type CompactionThresholds,
+} from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
+export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
 export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
+export * from './services/worktreeSessionService.js';
 export {
   stripTerminalControlSequences,
   TERMINAL_OSC_REGEX,
@@ -169,6 +181,10 @@ export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
 export * from './memory/const.js';
+// Issue #4175 PR 16: write helper for hierarchical context files,
+// re-exported so the `qwen serve` daemon can mutate workspace memory
+// via `POST /workspace/memory` without depending on internal paths.
+export * from './memory/writeContextFile.js';
 
 // ============================================================================
 // IDE Support
@@ -177,7 +193,11 @@ export * from './memory/const.js';
 export * from './ide/ide-client.js';
 export * from './ide/ideContext.js';
 export * from './ide/ide-installer.js';
-export { IDE_DEFINITIONS, type IdeInfo } from './ide/detect-ide.js';
+export {
+  detectIdeFromEnv,
+  IDE_DEFINITIONS,
+  type IdeInfo,
+} from './ide/detect-ide.js';
 export * from './ide/constants.js';
 export * from './ide/types.js';
 
@@ -279,6 +299,12 @@ export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
 export * from './utils/fileUtils.js';
 export * from './utils/filesearch/fileSearch.js';
+export * as crawlCache from './utils/filesearch/crawlCache.js';
+export {
+  Ignore,
+  loadIgnoreRules,
+  type LoadIgnoreRulesOptions,
+} from './utils/filesearch/ignore.js';
 export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
@@ -290,9 +316,14 @@ export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiagnostics.js';
 export * from './utils/memoryDiscovery.js';
 export * from './utils/modelId.js';
+export * from './utils/runtimeDiagnostics.js';
 export { ConditionalRulesRegistry } from './utils/rulesDiscovery.js';
 export type { RuleFile } from './utils/rulesDiscovery.js';
-export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
+export {
+  OpenAILogger,
+  openaiLogger,
+  resolveOpenAILogDir,
+} from './utils/openaiLogger.js';
 export * from './utils/partUtils.js';
 export * from './utils/sessionStorageUtils.js';
 export * from './utils/pathReader.js';

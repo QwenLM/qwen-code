@@ -25,6 +25,9 @@ import {
 import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import { vi, type Mock, type MockInstance } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { LoadedSettings } from './config/settings.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
@@ -171,6 +174,8 @@ describe('runNonInteractive', () => {
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getMaxSessionTurns: vi.fn().mockReturnValue(10),
+      getMaxWallTimeSeconds: vi.fn().mockReturnValue(-1),
+      getMaxToolCalls: vi.fn().mockReturnValue(-1),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getTargetDir: vi.fn().mockReturnValue('/test/project'),
       getMcpServers: vi.fn().mockReturnValue(undefined),
@@ -204,6 +209,16 @@ describe('runNonInteractive', () => {
         .fn()
         .mockReturnValue(mockBackgroundTaskRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
+      // Phase C: headless --resume reads the resumed session + sidecar to
+      // restore worktree context. These tests don't exercise resume, so
+      // return undefined to short-circuit the helper.
+      getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      // Phase D-1: nonInteractiveCli calls this on every prompt to pick
+      // up the one-shot startup-worktree notice (set by gemini.tsx
+      // when --worktree was passed). These tests don't exercise the
+      // --worktree flag, so return null to short-circuit injection
+      // and let the resume-restore branch run.
+      consumePendingStartupWorktreeNotice: vi.fn().mockReturnValue(null),
     } as unknown as Config;
 
     mockSettings = {
@@ -3418,6 +3433,185 @@ describe('runNonInteractive', () => {
       // a trailing newline — no JSON envelope, no extra event log.
       const stdout = writes.join('');
       expect(stdout).toBe(`${JSON.stringify(structuredArgs)}\n`);
+    });
+  });
+
+  // PR #4174 Phase C: `--resume` headless restore.
+  // Covers reviewer #4174 follow-up — "nonInteractiveCli.ts:375-408
+  // headless --resume worktree restore is stubbed out". Verifies the
+  // <system-reminder> injection + worktree_restored adapter event.
+  describe('--resume with active worktree (Phase C)', () => {
+    it('injects a <system-reminder> block into the user prompt when sidecar names a live worktree', async () => {
+      // Write a real sidecar pointing at a real directory so the
+      // restoreWorktreeContext helper (which fs.stat's the worktree
+      // path) reports it as alive.
+      const tmpDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'wt-headless-resume-'),
+      );
+      const realTmpDir = await fs.realpath(tmpDir);
+      // restoreWorktreeContext enforces a structural invariant:
+      // worktreePath MUST live under `<originalCwd>/.qwen/worktrees/`
+      // (PR #4174 review #3256839787). The test fixture mirrors that
+      // shape so the restore path isn't rejected as tampered.
+      const worktreeDir = path.join(
+        realTmpDir,
+        '.qwen',
+        'worktrees',
+        'worktree-real',
+      );
+      await fs.mkdir(worktreeDir, { recursive: true });
+      const sidecarPath = path.join(realTmpDir, 'sidecar.worktree.json');
+      const sidecar = {
+        slug: 'resume-test',
+        worktreePath: worktreeDir,
+        worktreeBranch: 'worktree-resume-test',
+        originalCwd: realTmpDir,
+        originalBranch: 'main',
+        originalHeadCommit: 'a'.repeat(40),
+      };
+      await fs.writeFile(sidecarPath, JSON.stringify(sidecar), 'utf-8');
+
+      // Wire mockConfig to indicate a resumed session + return a service
+      // whose getWorktreeSessionPath points at our real sidecar.
+      (mockConfig.getResumedSessionData as Mock).mockReturnValue({
+        sessionId: 'resume-session',
+        conversation: { messages: [] },
+      });
+      const sessionService = {
+        getWorktreeSessionPath: vi.fn().mockReturnValue(sidecarPath),
+      };
+      (mockConfig as { getSessionService?: () => unknown }).getSessionService =
+        vi.fn().mockReturnValue(sessionService);
+
+      setupMetricsMock();
+      const events: ServerGeminiStreamEvent[] = [
+        { type: GeminiEventType.Content, value: 'ok' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ];
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents(events),
+      );
+
+      try {
+        await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'continue work',
+          'prompt-id-resume',
+        );
+
+        // The user message sent to the model should now begin with a
+        // <system-reminder> block carrying the restore notice.
+        const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0] as [
+          Array<{ text?: string }>,
+        ];
+        expect(parts.length).toBeGreaterThanOrEqual(2);
+        expect(parts[0].text).toContain('<system-reminder>');
+        expect(parts[0].text).toContain('Active worktree: "resume-test"');
+        expect(parts[0].text).toContain(worktreeDir);
+        // User's actual prompt is preserved as the next part.
+        expect(parts[parts.length - 1].text).toBe('continue work');
+      } finally {
+        await fs.rm(realTmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not inject anything when sidecar is absent', async () => {
+      // No sidecar set up — getResumedSessionData also returns undefined
+      // by default, so the entire restore block is short-circuited.
+      (mockConfig.getResumedSessionData as Mock).mockReturnValue(undefined);
+
+      setupMetricsMock();
+      const events: ServerGeminiStreamEvent[] = [
+        { type: GeminiEventType.Content, value: 'ok' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ];
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents(events),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'plain prompt',
+        'prompt-id-no-resume',
+      );
+
+      const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0] as [
+        Array<{ text?: string }>,
+      ];
+      // Exactly one part — the user prompt, no reminder prefix.
+      expect(parts.length).toBe(1);
+      expect(parts[0].text).toBe('plain prompt');
+    });
+
+    it('cleans up the sidecar when the worktree dir is gone (stale --resume)', async () => {
+      const tmpDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'wt-headless-stale-'),
+      );
+      const realTmpDir = await fs.realpath(tmpDir);
+      const sidecarPath = path.join(realTmpDir, 'stale.worktree.json');
+      const sidecar = {
+        slug: 'stale-test',
+        // Points at a dir that does NOT exist on disk → restoreWorktreeContext
+        // treats it as stale and clears the sidecar.
+        worktreePath: path.join(realTmpDir, 'never-created'),
+        worktreeBranch: 'worktree-stale-test',
+        originalCwd: realTmpDir,
+        originalBranch: 'main',
+        originalHeadCommit: 'b'.repeat(40),
+      };
+      await fs.writeFile(sidecarPath, JSON.stringify(sidecar), 'utf-8');
+
+      (mockConfig.getResumedSessionData as Mock).mockReturnValue({
+        sessionId: 'resume-session',
+        conversation: { messages: [] },
+      });
+      const sessionService = {
+        getWorktreeSessionPath: vi.fn().mockReturnValue(sidecarPath),
+      };
+      (mockConfig as { getSessionService?: () => unknown }).getSessionService =
+        vi.fn().mockReturnValue(sessionService);
+
+      setupMetricsMock();
+      const events: ServerGeminiStreamEvent[] = [
+        { type: GeminiEventType.Content, value: 'ok' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ];
+      mockGeminiClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents(events),
+      );
+
+      try {
+        await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'hello',
+          'prompt-id-stale',
+        );
+
+        // Sidecar should be cleared.
+        await expect(fs.stat(sidecarPath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        // No <system-reminder> injected — the user prompt is the only part.
+        const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0] as [
+          Array<{ text?: string }>,
+        ];
+        expect(parts.length).toBe(1);
+        expect(parts[0].text).toBe('hello');
+      } finally {
+        await fs.rm(realTmpDir, { recursive: true, force: true });
+      }
     });
   });
 });

@@ -4,8 +4,116 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { shouldFilterSuggestion } from './suggestionGenerator.js';
+import type { Content } from '@google/genai';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import type { Config } from '../config/config.js';
+
+const { mockGetCacheSafeParams, mockRunForkedAgent, mockAddEvent } = vi.hoisted(
+  () => ({
+    mockGetCacheSafeParams: vi.fn(),
+    mockRunForkedAgent: vi.fn(),
+    mockAddEvent: vi.fn(),
+  }),
+);
+
+vi.mock('../utils/forkedAgent.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/forkedAgent.js')>();
+  return {
+    ...actual,
+    getCacheSafeParams: mockGetCacheSafeParams,
+    runForkedAgent: mockRunForkedAgent,
+  };
+});
+
+vi.mock('../telemetry/uiTelemetry.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../telemetry/uiTelemetry.js')>();
+  return {
+    ...actual,
+    uiTelemetryService: {
+      addEvent: mockAddEvent,
+    },
+  };
+});
+
+import {
+  generatePromptSuggestion,
+  shouldFilterSuggestion,
+} from './suggestionGenerator.js';
+
+const conversationHistory: Content[] = [
+  { role: 'user', parts: [{ text: 'fix this' }] },
+  { role: 'model', parts: [{ text: 'I fixed it.' }] },
+  { role: 'user', parts: [{ text: 'anything else?' }] },
+  { role: 'model', parts: [{ text: 'You could run tests.' }] },
+];
+
+describe('generatePromptSuggestion', () => {
+  beforeEach(() => {
+    mockGetCacheSafeParams.mockReset();
+    mockRunForkedAgent.mockReset();
+    mockAddEvent.mockReset();
+  });
+
+  it('passes cache-safe model in cache mode when no explicit or fast model exists', async () => {
+    mockGetCacheSafeParams.mockReturnValue({
+      generationConfig: {},
+      history: conversationHistory,
+      model: 'main-model',
+      version: 1,
+    });
+    mockRunForkedAgent.mockResolvedValue({
+      text: null,
+      jsonResult: { suggestion: 'run tests' },
+      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
+    });
+    const config = {
+      getFastModel: vi.fn(() => undefined),
+      getModel: vi.fn(() => 'main-model'),
+    } as unknown as Config;
+
+    await generatePromptSuggestion(
+      config,
+      conversationHistory,
+      new AbortController().signal,
+      { enableCacheSharing: true },
+    );
+
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'main-model' }),
+    );
+  });
+
+  it('passes the fast model in cache mode when one is configured', async () => {
+    mockGetCacheSafeParams.mockReturnValue({
+      generationConfig: {},
+      history: conversationHistory,
+      model: 'main-model',
+      version: 1,
+    });
+    mockRunForkedAgent.mockResolvedValue({
+      text: null,
+      jsonResult: { suggestion: 'run tests' },
+      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
+    });
+    const config = {
+      getFastModel: vi.fn(() => 'openai:fast-model'),
+      getModel: vi.fn(() => 'main-model'),
+    } as unknown as Config;
+
+    await generatePromptSuggestion(
+      config,
+      conversationHistory,
+      new AbortController().signal,
+      { enableCacheSharing: true },
+    );
+
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'openai:fast-model' }),
+    );
+  });
+});
 
 describe('shouldFilterSuggestion', () => {
   it('filters "done"', () => {

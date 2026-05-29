@@ -152,9 +152,9 @@ async function generateViaForkedQuery(
   abortSignal: AbortSignal,
   modelOverride?: string,
 ): Promise<string | null> {
-  const model = modelOverride || config.getModel();
   const cacheSafeParams = getCacheSafeParams();
   if (!cacheSafeParams) return null;
+  const model = modelOverride ?? config.getFastModel() ?? cacheSafeParams.model;
   const startTime = Date.now();
   const result = await runForkedAgent({
     config,
@@ -206,7 +206,7 @@ async function generateViaBaseLlm(
   abortSignal: AbortSignal,
   modelOverride?: string,
 ): Promise<string | null> {
-  const model = modelOverride || config.getModel();
+  const model = modelOverride ?? config.getFastModel() ?? config.getModel();
   const contents: Content[] = [
     ...conversationHistory,
     { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },

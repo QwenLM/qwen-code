@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { setMaxListeners } from 'node:events';
 import type OpenAI from 'openai';
 import {
   type GenerateContentParameters,
@@ -18,23 +17,7 @@ import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
-
-/**
- * The OpenAI SDK adds an abort listener for every `chat.completions.create`
- * call, and several layers (retryWithBackoff, LoggingContentGenerator, the
- * SDK's internal stream/fetch wrappers) each register their own listeners
- * on the same per-request AbortSignal. With 5 retries the count comfortably
- * exceeds Node's default 10-listener leak warning — and on top of that,
- * concurrent code paths (e.g., recap + followup speculation) can share or
- * compose signals, pushing it past any small cap.
- *
- * These signals are per-request and short-lived (GC'd when the request
- * settles), so accumulation here is structural, not a memory leak. Disable
- * the warning entirely for them. Idempotent.
- */
-function raiseAbortListenerCap(signal: AbortSignal | undefined): void {
-  if (signal) setMaxListeners(0, signal);
-}
+import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -64,7 +47,6 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    raiseAbortListenerCap(request.config?.abortSignal);
     return this.executeWithErrorHandling(
       request,
       userPromptId,
@@ -92,7 +74,6 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    raiseAbortListenerCap(request.config?.abortSignal);
     return this.executeWithErrorHandling(
       request,
       userPromptId,
@@ -515,6 +496,7 @@ export class ContentGenerationPipeline {
       // provider enhancement, post disable-reasoning) and before the SDK call
       // so the logger sees the exact bytes sent on the wire.
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
+      runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
 
       const result = await executor(openaiRequest, context);
       return result;
@@ -544,6 +526,8 @@ export class ContentGenerationPipeline {
     isStreaming: boolean,
   ): RequestContext {
     const effectiveModel = request.model || this.contentGeneratorConfig.model;
+    const providerOverrides =
+      this.config.provider.getRequestContextOverrides?.() ?? {};
     const toolCallParser = isStreaming
       ? new StreamingToolCallParser()
       : undefined;
@@ -558,7 +542,10 @@ export class ContentGenerationPipeline {
       model: effectiveModel,
       modalities: this.contentGeneratorConfig.modalities ?? {},
       startTime: Date.now(),
-      splitToolMedia: this.contentGeneratorConfig.splitToolMedia ?? false,
+      splitToolMedia:
+        providerOverrides.splitToolMedia ??
+        this.contentGeneratorConfig.splitToolMedia ??
+        false,
       ...(toolCallParser ? { toolCallParser } : {}),
       ...(responseParsingOptions ? { responseParsingOptions } : {}),
       ...(taggedThinkingParser ? { taggedThinkingParser } : {}),

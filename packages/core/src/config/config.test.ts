@@ -6,8 +6,18 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import type { ConfigParameters, SandboxConfig } from './config.js';
-import { Config, ApprovalMode, MCPServerConfig } from './config.js';
+import type {
+  ChatCompressionSettings,
+  ConfigParameters,
+  SandboxConfig,
+} from './config.js';
+import {
+  Config,
+  ApprovalMode,
+  APPROVAL_MODES,
+  APPROVAL_MODE_INFO,
+  MCPServerConfig,
+} from './config.js';
 import { Storage } from './storage.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -91,6 +101,34 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
+  // PR 14b fix (codex round 4): per-instance manager stub so the
+  // `setMcpBudgetEventCallback → createToolRegistry → manager.setOnBudgetEvent`
+  // integration test can observe each instance's callback wiring.
+  // The mock constructor stamps a fresh `__mcpManagerMock` onto each
+  // ToolRegistry instance so tests can inspect it via
+  // `(registry as unknown as { __mcpManagerMock }).__mcpManagerMock`
+  // (escape hatch — production code reads it via `getMcpClientManager`).
+  ToolRegistryMock.mockImplementation(function (this: {
+    __mcpManagerMock: {
+      setOnBudgetEvent: Mock;
+      discoverAllMcpToolsIncremental: Mock;
+    };
+  }) {
+    this.__mcpManagerMock = {
+      setOnBudgetEvent: vi.fn(),
+      // Stubbed so `Config.startMcpDiscoveryInBackground` (kicked off
+      // at the tail of `initialize`) doesn't crash on missing method.
+      // Test cares only about the `setOnBudgetEvent` wiring; discovery
+      // itself is a no-op here.
+      discoverAllMcpToolsIncremental: vi.fn().mockResolvedValue(undefined),
+    };
+    return this;
+  });
+  ToolRegistryMock.prototype.getMcpClientManager = function (this: {
+    __mcpManagerMock: { setOnBudgetEvent: Mock };
+  }) {
+    return this.__mcpManagerMock;
+  };
   return { ToolRegistry: ToolRegistryMock };
 });
 
@@ -590,7 +628,12 @@ describe('Server Config (config.ts)', () => {
         (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
           (call) => call[0],
         ),
-      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
+        ToolNames.SHELL,
+      ]);
     });
 
     it('skips inline MCP discovery by default (progressive availability)', async () => {
@@ -884,7 +927,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('model switching with different credentials (OpenAI)', () => {
-    it('keeps getFastModel current-auth-only for direct runtime callers', () => {
+    it('returns a bare fast model selector when the model is configured under another auth type', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_ANTHROPIC,
@@ -910,11 +953,10 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBe('deepseek-v4-flash');
+      expect(config.getFastModel()).toBe('deepseek-v4-flash');
     });
 
-    it('returns an authType-qualified fast model selector for side queries', () => {
+    it('returns an authType-qualified fast model selector', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_ANTHROPIC,
@@ -940,11 +982,10 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBe('openai:shared-model');
+      expect(config.getFastModel()).toBe('openai:shared-model');
     });
 
-    it('returns a bare fast model for getFastModel when authType-qualified selector matches the current auth type', () => {
+    it('keeps authType-qualified selectors when the auth type matches the current auth type', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_OPENAI,
@@ -962,10 +1003,7 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBe('deepseek-v4-flash');
-      expect(config.getFastModelForSideQuery()).toBe(
-        'openai:deepseek-v4-flash',
-      );
+      expect(config.getFastModel()).toBe('openai:deepseek-v4-flash');
     });
 
     it('accepts runtime fast models for authType-qualified selectors', () => {
@@ -996,10 +1034,7 @@ describe('Server Config (config.ts)', () => {
       });
       config.getModelsConfig().detectAndCaptureRuntimeModel();
 
-      expect(config.getFastModel()).toBe('runtime-fast-model');
-      expect(config.getFastModelForSideQuery()).toBe(
-        'openai:runtime-fast-model',
-      );
+      expect(config.getFastModel()).toBe('openai:runtime-fast-model');
     });
 
     it('returns undefined when the fast model is not configured for any auth type', () => {
@@ -1021,7 +1056,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('returns undefined when the fast model selector is malformed', () => {
@@ -1043,7 +1077,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('returns undefined when fastModel points back to the fast selector', () => {
@@ -1065,7 +1098,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('should refresh auth when switching to model with different envKey', async () => {
@@ -1627,6 +1659,37 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('OutboundCorrelation Configuration', () => {
+    // Default-to-false is security-relevant — controls whether
+    // `traceparent` is written onto outbound LLM/fetch request streams.
+    it.each<{
+      label: string;
+      outboundCorrelation: ConfigParameters['outboundCorrelation'];
+      expected: boolean;
+    }>([
+      { label: 'omitted', outboundCorrelation: undefined, expected: false },
+      { label: 'empty object', outboundCorrelation: {}, expected: false },
+      {
+        label: 'explicit true',
+        outboundCorrelation: { propagateTraceContext: true },
+        expected: true,
+      },
+      {
+        label: 'explicit false',
+        outboundCorrelation: { propagateTraceContext: false },
+        expected: false,
+      },
+    ])(
+      'propagateTraceContext resolves to $expected when $label',
+      ({ outboundCorrelation, expected }) => {
+        const config = new Config({ ...baseParams, outboundCorrelation });
+        expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(
+          expected,
+        );
+      },
+    );
+  });
+
   describe('UseRipgrep Configuration', () => {
     it('should default useRipgrep to true when not provided', () => {
       const config = new Config(baseParams);
@@ -1713,20 +1776,26 @@ describe('Server Config (config.ts)', () => {
       expect(config.getCoreTools()).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
       expect(
         (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
+        ToolNames.SHELL,
+      ]);
     });
 
     it('registers structured_output in bare mode when jsonSchema is set', async () => {
-      // Bare mode strips the toolset to READ_FILE/EDIT/SHELL, but the
+      // Bare mode strips the toolset to READ_FILE/EDIT/NOTEBOOK_EDIT/SHELL, but the
       // synthetic structured_output tool is the terminal contract for
       // --json-schema runs. Without it the model loops until
       // maxSessionTurns and exits via the "plain text" failure path —
       // expensive in tokens for what's almost always a CI use case. The
-      // synthetic tool must be registered alongside the bare three.
+      // synthetic tool must be registered alongside the bare toolset.
       const config = new Config({
         ...baseParams,
         bareMode: true,
@@ -1745,6 +1814,7 @@ describe('Server Config (config.ts)', () => {
       ).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
         ToolNames.STRUCTURED_OUTPUT,
       ]);
@@ -1773,8 +1843,8 @@ describe('Server Config (config.ts)', () => {
           ToolRegistry: { prototype: { registerFactory: Mock } };
         }
       ).ToolRegistry.prototype.registerFactory;
-      // Initial bare init registers READ_FILE / EDIT / SHELL /
-      // STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
+      // Initial bare init registers READ_FILE / EDIT / NOTEBOOK_EDIT /
+      // SHELL / STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
       // observe ONLY the forSubAgent rebuild's calls.
       (registerToolMock as Mock).mockClear();
 
@@ -1788,10 +1858,11 @@ describe('Server Config (config.ts)', () => {
         (call) => call[0],
       );
       expect(registeredNames).not.toContain(ToolNames.STRUCTURED_OUTPUT);
-      // The bare three still register so the subagent has its toolset.
+      // The bare tools still register so the subagent has its toolset.
       expect(registeredNames).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
     });
@@ -2079,6 +2150,116 @@ describe('Server Config (config.ts)', () => {
       );
     });
   });
+
+  // PR 14b fix (codex round 4 — wenshao gpt-5.5 review): the
+  // `Config.setMcpBudgetEventCallback → pendingMcpBudgetCallback →
+  // createToolRegistry → registry.getMcpClientManager().setOnBudgetEvent`
+  // boundary previously had NO test. The acpAgent test stubs the
+  // setter (proves QwenAgent calls it pre-`initialize`); the manager
+  // tests bypass Config by passing `onBudgetEvent` directly to
+  // `McpClientManager`. Neither covers the actual stash + apply path
+  // inside Config — and that path is the safety net that prevents
+  // startup-window MCP guardrail events from being dropped under
+  // legacy blocking discovery + closes the progressive-mode race
+  // window. These two tests exercise both call orderings (pre-init
+  // and late-call).
+  describe('setMcpBudgetEventCallback handoff to McpClientManager', () => {
+    it('applies pending callback when registry is created during initialize()', async () => {
+      const config = new Config(baseParams);
+      const cb = vi.fn();
+      // Setter called BEFORE initialize — value stashed on
+      // `pendingMcpBudgetCallback` and applied inside
+      // `createToolRegistry` after the manager is constructed but
+      // BEFORE `discoverAllTools` / background discovery fires.
+      config.setMcpBudgetEventCallback(cb);
+      await config.initialize();
+
+      const registry = config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).toHaveBeenCalledWith(
+        cb,
+      );
+      // Exactly once — the apply path fires only once per
+      // `createToolRegistry` invocation.
+      expect(
+        registry.__mcpManagerMock.setOnBudgetEvent.mock.calls,
+      ).toHaveLength(1);
+    });
+
+    it('applies callback directly to existing manager when called after initialize()', async () => {
+      const config = new Config(baseParams);
+      // Initialize WITHOUT a pending callback first — the
+      // createToolRegistry apply branch is a no-op.
+      await config.initialize();
+      const registry = config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+      // Sanity: no apply happened during init since callback was
+      // never registered.
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).not.toHaveBeenCalled();
+
+      // Late-call path: setter dispatches DIRECTLY to the existing
+      // manager via the `if (this.toolRegistry)` branch in
+      // `setMcpBudgetEventCallback`. This is the path tests/adapters
+      // use when they discover the manager only after Config is up.
+      const cb = vi.fn();
+      config.setMcpBudgetEventCallback(cb);
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).toHaveBeenCalledWith(
+        cb,
+      );
+
+      // Calling with `undefined` clears the registration on the
+      // manager (parity with the constructor-time `off`-mode strip
+      // in McpClientManager).
+      config.setMcpBudgetEventCallback(undefined);
+      expect(
+        registry.__mcpManagerMock.setOnBudgetEvent,
+      ).toHaveBeenLastCalledWith(undefined);
+    });
+
+    it('does NOT stash the callback when called after initialize() (codex round 7 fix — subagent isolation)', async () => {
+      // Codex round 7 finding: pre-fix, the late-call path assigned
+      // to `pendingMcpBudgetCallback` BEFORE applying directly to
+      // the existing manager. A subsequent `createToolRegistry`
+      // (e.g. subagent override via `createApprovalModeOverride` /
+      // `buildSubagentContextOverride`) would inherit the stash and
+      // wire the parent session's ACP push callback into the
+      // subagent's fresh manager, routing subagent telemetry
+      // through the wrong session.
+      //
+      // Fix: late-call path applies directly + sets
+      // `pendingMcpBudgetCallback = undefined`. Pre-init path still
+      // stashes (the only way to reach a manager that doesn't
+      // exist yet — round 1 fix #2 contract).
+      const config = new Config(baseParams);
+      await config.initialize();
+      const registry = config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+
+      // Late-call: apply.
+      const cb = vi.fn();
+      config.setMcpBudgetEventCallback(cb);
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).toHaveBeenCalledWith(
+        cb,
+      );
+
+      // Now rebuild a registry as if for a subagent override. With
+      // the round-7 fix, the new manager should NOT receive the
+      // parent session's callback — pre-fix this would re-apply
+      // `cb` to the new manager.
+      const subagentRegistry = (await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      })) as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+      expect(
+        subagentRegistry.__mcpManagerMock.setOnBudgetEvent,
+      ).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('setApprovalMode with folder trust', () => {
@@ -2174,6 +2355,140 @@ describe('setApprovalMode with folder trust', () => {
       // Setting PLAN again should not overwrite prePlanMode
       config.setApprovalMode(ApprovalMode.PLAN);
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    });
+  });
+
+  describe('AUTO mode', () => {
+    it('should throw an error when setting AUTO mode in an untrusted folder', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).toThrow(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      );
+    });
+
+    it('should NOT throw when setting AUTO mode in a trusted folder', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).not.toThrow();
+    });
+
+    it('should persist AUTO as the active mode', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getApprovalMode()).toBe(ApprovalMode.AUTO);
+    });
+
+    it('setApprovalMode resets the denial-tracking counters', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      // Enter AUTO and simulate having accumulated denial counters.
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setAutoModeDenialState({
+        consecutiveBlock: 3,
+        consecutiveUnavailable: 2,
+        totalBlock: 5,
+        totalUnavailable: 2,
+      });
+
+      // Switch away and back; the counters must be wiped clean.
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getAutoModeDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+
+      // And entering AUTO again should also start fresh (no leftover state).
+      config.setAutoModeDenialState({
+        consecutiveBlock: 1,
+        consecutiveUnavailable: 0,
+        totalBlock: 1,
+        totalUnavailable: 0,
+      });
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getAutoModeDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+    });
+
+    it('setApprovalMode(sameMode) does NOT reset counters', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      const populated = {
+        consecutiveBlock: 2,
+        consecutiveUnavailable: 0,
+        totalBlock: 2,
+        totalUnavailable: 0,
+      };
+      config.setAutoModeDenialState(populated);
+
+      // No-op mode set — state should be preserved.
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getAutoModeDenialState()).toEqual(populated);
+    });
+
+    it('should track AUTO as prePlanMode when entering PLAN from AUTO', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.AUTO);
+    });
+
+    it('AUTO appears in APPROVAL_MODES between AUTO_EDIT and YOLO', () => {
+      const autoEditIdx = APPROVAL_MODES.indexOf(ApprovalMode.AUTO_EDIT);
+      const autoIdx = APPROVAL_MODES.indexOf(ApprovalMode.AUTO);
+      const yoloIdx = APPROVAL_MODES.indexOf(ApprovalMode.YOLO);
+      expect(autoIdx).toBeGreaterThan(autoEditIdx);
+      expect(autoIdx).toBeLessThan(yoloIdx);
+    });
+
+    it('APPROVAL_MODE_INFO has an entry for AUTO', () => {
+      expect(APPROVAL_MODE_INFO[ApprovalMode.AUTO]).toEqual({
+        id: ApprovalMode.AUTO,
+        name: 'Auto',
+        description: expect.stringContaining('classifier'),
+      });
+    });
+  });
+
+  describe('getAutoModeSettings', () => {
+    it('returns an empty object when no autoMode settings are provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getAutoModeSettings()).toEqual({});
+    });
+
+    it('returns the provided autoMode hints and environment', () => {
+      const config = new Config({
+        ...baseParams,
+        permissions: {
+          autoMode: {
+            hints: {
+              allow: ['Allow xyz commands'],
+              deny: ['Block intranet calls'],
+            },
+            environment: ['Open-source monorepo'],
+          },
+        },
+      });
+      expect(config.getAutoModeSettings()).toEqual({
+        hints: {
+          allow: ['Allow xyz commands'],
+          deny: ['Block intranet calls'],
+        },
+        environment: ['Open-source monorepo'],
+      });
     });
   });
 
@@ -3051,6 +3366,57 @@ describe('Model Switching and Config Updates', () => {
           expect(config.getModel()).toBe(baseParams.model);
         },
       );
+    });
+  });
+
+  describe('chatCompression.contextPercentageThreshold deprecation', () => {
+    // The proportional-threshold knob `contextPercentageThreshold` was
+    // removed in the auto-compaction threshold redesign (Task 8) — the
+    // value is now derived from `computeThresholds(...)` in the
+    // ChatCompressionService and is no longer user-tunable. Existing
+    // settings.json files that still set the field should keep working
+    // but get a one-time stderr warning so users know to remove it.
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    it('logs a stderr warning when the deprecated field is set', () => {
+      new Config({
+        ...baseParams,
+        chatCompression: {
+          contextPercentageThreshold: 0.5,
+        } as ChatCompressionSettings,
+      });
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'chatCompression.contextPercentageThreshold has been removed',
+        ),
+      );
+    });
+
+    it('does not warn when chatCompression is absent', () => {
+      new Config({ ...baseParams });
+      const warnCalls = warnSpy.mock.calls.map((c) => String(c[0]));
+      expect(
+        warnCalls.some((m) => m.includes('contextPercentageThreshold')),
+      ).toBe(false);
+    });
+
+    it('does not warn when chatCompression is set without the deprecated field', () => {
+      new Config({
+        ...baseParams,
+        chatCompression: { imageTokenEstimate: 1600 },
+      });
+      const warnCalls = warnSpy.mock.calls.map((c) => String(c[0]));
+      expect(
+        warnCalls.some((m) => m.includes('contextPercentageThreshold')),
+      ).toBe(false);
     });
   });
 });

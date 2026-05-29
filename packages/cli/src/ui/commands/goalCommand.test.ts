@@ -31,8 +31,12 @@ describe('goalCommand', () => {
   beforeEach(() => __resetActiveGoalStoreForTests());
   afterEach(() => __resetActiveGoalStoreForTests());
 
-  it('is currently limited to interactive mode', () => {
-    expect(goalCommand.supportedModes).toEqual(['interactive']);
+  it('is available in interactive, non-interactive, and ACP modes', () => {
+    expect(goalCommand.supportedModes).toEqual([
+      'interactive',
+      'non_interactive',
+      'acp',
+    ]);
   });
 
   it('rejects when config is missing', async () => {
@@ -111,6 +115,21 @@ describe('goalCommand', () => {
       type: 'goal_status',
       kind: 'cleared',
       condition: 'write hello',
+    });
+  });
+
+  it('returns a clear message outside interactive mode', async () => {
+    const cfg = makeConfig();
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      services: { config: cfg as unknown as Config },
+    });
+    await goalCommand.action!(ctx, 'write hello');
+    const result = await goalCommand.action!(ctx, 'clear');
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: 'Goal cleared: write hello',
     });
   });
 
@@ -325,5 +344,28 @@ describe('goalCommand', () => {
       kind: 'aborted',
       lastReason: 'Goal max iterations reached',
     });
+  });
+
+  it('after impossible failure, empty /goal shows the failed summary', async () => {
+    const ctx = createMockCommandContext({
+      services: { config: makeConfig() as unknown as Config },
+    });
+    await goalCommand.action!(ctx, 'do x');
+    clearActiveGoal('sess-1');
+    notifyGoalTerminal('sess-1', {
+      kind: 'failed',
+      condition: 'do x',
+      iterations: 2,
+      durationMs: 12_000,
+      lastReason: 'the required branch does not exist',
+    });
+
+    const result = await goalCommand.action!(ctx, '');
+    const content = (result as { content: string }).content;
+    expect(content).toMatch(/Goal could not be achieved/);
+    expect(content).toMatch(/2 turns/);
+    expect(content).toMatch(/12s/);
+    expect(content).toMatch(/Goal: do x/);
+    expect(content).toMatch(/Last check: the required branch does not exist/);
   });
 });

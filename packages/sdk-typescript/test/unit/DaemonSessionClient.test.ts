@@ -254,6 +254,51 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBe('0');
   });
 
+  it('replays from id 0 on freshly-created sessions so startup-window guardrail events are observable (codex review fix #1)', async () => {
+    // Codex review round 2, finding #1: PR 14b's
+    // `mcp_budget_warning` / `mcp_child_refused_batch` events fire
+    // during the child's `newSession` handler and are buffered on
+    // `BridgeClient.earlyEvents` until `byId.set(sessionId, entry)`
+    // runs. The bridge drains them onto the per-session bus before
+    // `spawnOrAttach` returns, so they live in the replay ring with
+    // ids — but the SDK's old default of `lastEventId: undefined`
+    // started subscriptions live, so consumers never observed them.
+    //
+    // Fix: when `session.attached === false` (newly-created), seed
+    // `Last-Event-ID: 0` to replay the startup-window events. The
+    // existing `modelServiceId` carve-out still triggers seed for
+    // re-attached sessions where attach-time switch events need to
+    // replay.
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+        });
+      }
+      if (req.url.endsWith('/session/s-1/events')) {
+        return sseResponse('');
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.createOrAttach(client, {
+      workspaceCwd: '/work/a',
+      // No `modelServiceId` — the only signal that triggered seed
+      // pre-fix. With the fix, `attached: false` alone is enough.
+    });
+
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+
+    expect(session.attached).toBe(false);
+    expect(calls[1]?.url).toBe('http://daemon/session/s-1/events');
+    expect(calls[1]?.headers['last-event-id']).toBe('0');
+  });
+
   it('starts live when createOrAttach has no model service replay need', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session')) {

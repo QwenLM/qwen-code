@@ -14,6 +14,7 @@ import {
   type MockInstance,
 } from 'vitest';
 import {
+  createNonInteractivePromptId,
   main,
   setupUnhandledRejectionHandler,
   validateDnsResolutionOrder,
@@ -23,7 +24,7 @@ import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { OutputFormat } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
@@ -180,6 +181,7 @@ describe('gemini.tsx main function', () => {
         isInteractive: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
         getDebugMode: () => false,
         getListExtensions: () => false,
         getMcpServers: () => ({}),
@@ -259,6 +261,7 @@ describe('gemini.tsx main function', () => {
       isInteractive: () => false,
       getQuestion: () => 'bare prompt',
       getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
@@ -306,6 +309,12 @@ describe('gemini.tsx main function', () => {
         userHooks: undefined,
         projectHooks: undefined,
       },
+    );
+  });
+
+  it('creates non-interactive prompt ids that preserve session correlation', () => {
+    expect(createNonInteractivePromptId('test-session-id')).toBe(
+      'test-session-id########0',
     );
   });
 
@@ -562,6 +571,7 @@ describe('gemini.tsx main function', () => {
       isInteractive: () => false,
       getQuestion: () => '  hello stream  ',
       getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
@@ -766,6 +776,8 @@ describe('gemini.tsx main function kitty protocol', () => {
       disabledSlashCommands: undefined,
       authType: undefined,
       maxSessionTurns: undefined,
+      maxWallTime: undefined,
+      maxToolCalls: undefined,
       experimentalLsp: undefined,
       channel: undefined,
       chatRecording: undefined,

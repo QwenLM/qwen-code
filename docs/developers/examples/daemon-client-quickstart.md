@@ -109,6 +109,30 @@ function handleEvent(event: DaemonEvent): void {
 }
 ```
 
+## Workspace file helpers
+
+File routes are workspace-scoped, not session-scoped, so they live on
+`DaemonClient` directly:
+
+```ts
+const file = await client.readWorkspaceFile('src/main.ts');
+
+const updated = await client.editWorkspaceFile({
+  path: 'src/main.ts',
+  oldText: 'timeout: 30000',
+  newText: 'timeout: 60000',
+  expectedHash: file.hash!,
+});
+
+console.log(updated.hash);
+```
+
+`expectedHash` is SHA-256 over the raw on-disk bytes. `mode: "replace"` and
+`editWorkspaceFile()` require it so stale clients do not overwrite a file they
+did not just read. Write/edit require bearer-token configuration even on
+loopback; start the daemon with `--token` or `QWEN_SERVER_TOKEN` before using
+them.
+
 ## Reconnect with `Last-Event-ID`
 
 If your client process restarts mid-session, replay events you missed:
