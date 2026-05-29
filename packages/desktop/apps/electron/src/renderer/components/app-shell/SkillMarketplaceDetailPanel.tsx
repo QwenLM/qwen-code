@@ -1,5 +1,5 @@
-import * as React from 'react'
-import { useTranslation } from 'react-i18next'
+import * as React from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Check,
   Download,
@@ -7,33 +7,34 @@ import {
   Loader2,
   Presentation,
   Store,
-} from 'lucide-react'
-import { toast } from 'sonner'
-import { Button } from '@/components/ui/button'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import { cn } from '@/lib/utils'
-import { useNavigation, routes } from '@/contexts/NavigationContext'
-import { dispatchFocusInputEvent } from './input/focus-input-events'
-import skillMarketHero from '@/assets/skill-market-hero.webp'
+} from 'lucide-react';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { rendererLog } from '@/lib/logger';
+import { cn } from '@/lib/utils';
+import { useNavigation, routes } from '@/contexts/NavigationContext';
+import { dispatchFocusInputEvent } from './input/focus-input-events';
+import skillMarketHero from '@/assets/skill-market-hero.webp';
 import type {
   SkillMarketplaceExample,
   SkillMarketplaceItem,
-} from '../../../shared/types'
+} from '../../../shared/types';
 
 export interface SkillMarketplaceDetailPanelProps {
-  workspaceId?: string
-  workingDirectory?: string
-  activeSessionId?: string | null
-  selectedSkillId?: string | null
-  onInstalled?: () => Promise<void> | void
-  className?: string
+  workspaceId?: string;
+  workingDirectory?: string;
+  activeSessionId?: string | null;
+  selectedSkillId?: string | null;
+  onInstalled?: () => Promise<void> | void;
+  className?: string;
 }
 
 function sourceHost(sourceUrl: string): string {
   try {
-    return new URL(sourceUrl).host
+    return new URL(sourceUrl).host;
   } catch {
-    return sourceUrl
+    return sourceUrl;
   }
 }
 
@@ -41,8 +42,8 @@ function MarketplaceSkillIcon({
   className,
   iconClassName,
 }: {
-  className?: string
-  iconClassName?: string
+  className?: string;
+  iconClassName?: string;
 }) {
   return (
     <div
@@ -56,14 +57,14 @@ function MarketplaceSkillIcon({
         className={cn('text-white drop-shadow-sm', iconClassName)}
       />
     </div>
-  )
+  );
 }
 
 function buildExamplePrompt(
   skill: SkillMarketplaceItem,
   example: SkillMarketplaceExample,
 ): string {
-  return `@${skill.name} ${example.prompt}`.trim()
+  return `[skill:${skill.slug}] ${example.prompt}`.trim();
 }
 
 export function SkillMarketplaceDetailPanel({
@@ -74,99 +75,99 @@ export function SkillMarketplaceDetailPanel({
   onInstalled,
   className,
 }: SkillMarketplaceDetailPanelProps) {
-  const { t } = useTranslation()
-  const { navigate } = useNavigation()
-  const [skills, setSkills] = React.useState<SkillMarketplaceItem[]>([])
-  const [loading, setLoading] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
+  const { t } = useTranslation();
+  const { navigate } = useNavigation();
+  const [skills, setSkills] = React.useState<SkillMarketplaceItem[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
   const [installingSkillId, setInstallingSkillId] = React.useState<
     string | null
-  >(null)
+  >(null);
 
   const loadSkills = React.useCallback(async () => {
     if (!workspaceId) {
-      setSkills([])
-      return
+      setSkills([]);
+      return;
     }
 
-    setLoading(true)
-    setError(null)
+    setLoading(true);
+    setError(null);
     try {
       const items = await window.electronAPI.listSkillMarketplace(
         workspaceId,
         workingDirectory,
         activeSessionId ?? undefined,
-      )
-      setSkills(items)
+      );
+      setSkills(items);
     } catch (loadError) {
-      console.error(
+      rendererLog.error(
         '[SkillMarketplaceDetailPanel] Failed to load skill marketplace:',
         loadError,
-      )
+      );
       setError(
         t('skillMarketplace.loadFailed', 'Could not load the skill market.'),
-      )
+      );
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }, [activeSessionId, t, workingDirectory, workspaceId])
+  }, [activeSessionId, t, workingDirectory, workspaceId]);
 
   React.useEffect(() => {
-    void loadSkills()
-  }, [loadSkills])
+    void loadSkills();
+  }, [loadSkills]);
 
   React.useEffect(() => {
-    if (!workspaceId) return
+    if (!workspaceId) return;
     const cleanup = window.electronAPI.onSkillsChanged((changedWorkspaceId) => {
       if (changedWorkspaceId === workspaceId) {
-        void loadSkills()
+        void loadSkills();
       }
-    })
-    return cleanup
-  }, [loadSkills, workspaceId])
+    });
+    return cleanup;
+  }, [loadSkills, workspaceId]);
 
   const selectedSkill = selectedSkillId
     ? (skills.find((skill) => skill.id === selectedSkillId) ?? null)
-    : null
+    : null;
 
   const handleInstall = React.useCallback(
     async (skill: SkillMarketplaceItem) => {
-      if (!workspaceId) return
+      if (!workspaceId) return;
 
-      setInstallingSkillId(skill.id)
+      setInstallingSkillId(skill.id);
       try {
         await window.electronAPI.installSkillFromMarketplace(
           workspaceId,
           skill.id,
           workingDirectory,
           activeSessionId ?? undefined,
-        )
+        );
         setSkills((items) =>
           items.map((item) =>
             item.id === skill.id ? { ...item, installed: true } : item,
           ),
-        )
-        await onInstalled?.()
-        await loadSkills()
+        );
+        await onInstalled?.();
+        await loadSkills();
         toast.success(
           t('skillMarketplace.installedToast', {
             name: skill.name,
             defaultValue: '{{name}} installed',
           }),
-        )
+        );
       } catch (installError) {
-        console.error(
+        rendererLog.error(
           '[SkillMarketplaceDetailPanel] Failed to install marketplace skill:',
           installError,
-        )
+        );
         toast.error(
           t('skillMarketplace.installFailed', {
             name: skill.name,
             defaultValue: 'Failed to install {{name}}',
           }),
-        )
+        );
       } finally {
-        setInstallingSkillId(null)
+        setInstallingSkillId(null);
       }
     },
     [
@@ -177,7 +178,7 @@ export function SkillMarketplaceDetailPanel({
       workingDirectory,
       workspaceId,
     ],
-  )
+  );
 
   const handleUseExample = React.useCallback(
     (skill: SkillMarketplaceItem, example: SkillMarketplaceExample) => {
@@ -187,19 +188,19 @@ export function SkillMarketplaceDetailPanel({
             name: skill.name,
             defaultValue: 'Install {{name}} to use examples',
           }),
-        )
-        return
+        );
+        return;
       }
 
       void navigate(
         routes.action.newSession({
           input: buildExamplePrompt(skill, example),
         }),
-      )
-      window.setTimeout(() => dispatchFocusInputEvent(), 120)
+      );
+      window.setTimeout(() => dispatchFocusInputEvent(), 120);
     },
     [navigate, t],
-  )
+  );
 
   if (loading && !selectedSkill && !error) {
     return (
@@ -209,7 +210,7 @@ export function SkillMarketplaceDetailPanel({
           {t('skillMarketplace.loading', 'Loading skills...')}
         </div>
       </div>
-    )
+    );
   }
 
   if (error || !selectedSkill) {
@@ -217,7 +218,7 @@ export function SkillMarketplaceDetailPanel({
       error ??
       (skills.length === 0
         ? t('skillMarketplace.empty', 'No skills are available yet.')
-        : t('skillMarketplace.title', 'Skill Market'))
+        : t('skillMarketplace.title', 'Skill Market'));
 
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -226,11 +227,11 @@ export function SkillMarketplaceDetailPanel({
           <p className="max-w-xs text-sm">{emptyMessage}</p>
         </div>
       </div>
-    )
+    );
   }
 
-  const heroImage = selectedSkill.heroImage ?? skillMarketHero
-  const isInstalling = installingSkillId === selectedSkill.id
+  const heroImage = selectedSkill.heroImage ?? skillMarketHero;
+  const isInstalling = installingSkillId === selectedSkill.id;
 
   return (
     <ScrollArea className={cn('h-full', className)}>
@@ -334,5 +335,5 @@ export function SkillMarketplaceDetailPanel({
         </div>
       </div>
     </ScrollArea>
-  )
+  );
 }
