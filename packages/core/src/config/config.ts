@@ -109,6 +109,7 @@ import {
 import {
   PermissionMode,
   NotificationType,
+  type PermissionDeniedReason,
   type PermissionSuggestion,
   type HookEventName,
   type HookDefinition,
@@ -1430,6 +1431,16 @@ export class Config {
                   (input['permission_suggestions'] as
                     | PermissionSuggestion[]
                     | undefined) || undefined,
+                  signal,
+                );
+                break;
+              case 'PermissionDenied':
+                result = await hookSystem.firePermissionDeniedEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input['reason'] as PermissionDeniedReason) ||
+                    'classifier_blocked',
                   signal,
                 );
                 break;

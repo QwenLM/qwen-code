@@ -67,6 +67,8 @@ import {
 import {
   applyAutoModeDecision,
   evaluateAutoMode,
+  getAutoModePermissionDeniedReason,
+  shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from '../permissions/autoMode.js';
 import { MAX_TRANSCRIPT_MESSAGES } from '../permissions/classifier-transcript.js';
@@ -1727,6 +1729,20 @@ export class CoreToolScheduler {
               this.config,
               denialState,
             );
+            if (
+              !this.config.getDisableAllHooks() &&
+              shouldFirePermissionDeniedForAutoMode(decision, outcome)
+            ) {
+              await this.config
+                .getHookSystem?.()
+                ?.firePermissionDeniedEvent(
+                  canonicalName,
+                  toolParams,
+                  reqInfo.callId,
+                  getAutoModePermissionDeniedReason(decision),
+                  signal,
+                );
+            }
             switch (outcome.kind) {
               case 'approved':
                 this.setToolCallOutcome(

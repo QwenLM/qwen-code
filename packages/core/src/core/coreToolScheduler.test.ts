@@ -83,6 +83,7 @@ type ToolSpanRecord = {
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
 const shouldThrowToolSpanSetAttribute = vi.hoisted(() => ({ value: false }));
 const shouldThrowToolSpanSetStatus = vi.hoisted(() => ({ value: false }));
+const runSideQueryMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../telemetry/tracer.js', () => ({
   safeSetStatus: (
@@ -95,6 +96,10 @@ vi.mock('../telemetry/tracer.js', () => ({
       // Match production best-effort telemetry behavior.
     }
   },
+}));
+
+vi.mock('../utils/sideQuery.js', () => ({
+  runSideQuery: (...args: unknown[]) => runSideQueryMock(...args),
 }));
 
 function createMockToolSpan(
@@ -479,11 +484,18 @@ async function waitForStatus(
 }
 
 describe('CoreToolScheduler', () => {
+  beforeEach(() => {
+    runSideQueryMock.mockReset();
+  });
+
   function createSchedulerForLegacyToolTests(options: {
     toolsByName: Map<string, MockTool>;
     approvalMode?: ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
     messageBus?: { request: ReturnType<typeof vi.fn> };
+    hookSystem?: {
+      firePermissionDeniedEvent: ReturnType<typeof vi.fn>;
+    };
     disableHooks?: boolean;
     onAllToolCallsComplete?: ReturnType<typeof vi.fn>;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
@@ -522,6 +534,7 @@ describe('CoreToolScheduler', () => {
           model: 'test-model',
           authType: 'gemini',
         }),
+        getModel: () => 'test-model',
         getShellExecutionConfig: () => ({
           terminalWidth: 90,
           terminalHeight: 30,
@@ -537,9 +550,21 @@ describe('CoreToolScheduler', () => {
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
         getMessageBus: vi.fn().mockReturnValue(options.messageBus),
+        getHookSystem: vi.fn().mockReturnValue(options.hookSystem),
         getDisableAllHooks: vi
           .fn()
           .mockReturnValue(options.disableHooks ?? true),
+        getAutoModeDenialState: vi.fn().mockReturnValue({
+          consecutiveBlock: 0,
+          consecutiveUnavailable: 0,
+          totalBlock: 0,
+          totalUnavailable: 0,
+        }),
+        setAutoModeDenialState: vi.fn(),
+        getAutoModeSettings: () => ({}),
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: () => false,
+        }),
         isInteractive: () => true,
         getInputFormat: () => undefined,
         getExperimentalZedIntegration: () => false,
@@ -653,6 +678,221 @@ describe('CoreToolScheduler', () => {
     }
     expect(execute).not.toHaveBeenCalled();
     expect(ensureTool).not.toHaveBeenCalled();
+  });
+
+  it('fires PermissionDenied hooks for AUTO classifier blocks', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({
+        shouldBlock: true,
+        reason: 'dangerous shell command',
+      });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'should not execute',
+      returnDisplay: 'should not execute',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+          execute,
+        }),
+      ],
+    ]);
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        hookSystem,
+        disableHooks: false,
+      });
+    const abortController = new AbortController();
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'auto-denied',
+          name: ToolNames.SHELL,
+          args: { command: 'rm -rf /tmp/example' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-auto-denied',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalledWith(
+      ToolNames.SHELL,
+      { command: 'rm -rf /tmp/example' },
+      'auto-denied',
+      'classifier_blocked',
+      abortController.signal,
+    );
+    expect(execute).not.toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+  });
+
+  it('fires PermissionDenied hooks for AUTO classifier unavailable blocks', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockRejectedValueOnce(new Error('classifier timed out'));
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'should not execute',
+      returnDisplay: 'should not execute',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+          execute,
+        }),
+      ],
+    ]);
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        hookSystem,
+        disableHooks: false,
+      });
+    const abortController = new AbortController();
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'auto-unavailable',
+          name: ToolNames.SHELL,
+          args: { command: 'rm -rf /tmp/example' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-auto-unavailable',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalledWith(
+      ToolNames.SHELL,
+      { command: 'rm -rf /tmp/example' },
+      'auto-unavailable',
+      'classifier_unavailable',
+      abortController.signal,
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('skips PermissionDenied hooks when hooks are disabled', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({
+        shouldBlock: true,
+        reason: 'dangerous shell command',
+      });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+        }),
+      ],
+    ]);
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        hookSystem,
+        disableHooks: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'auto-denied-hooks-off',
+          name: ToolNames.SHELL,
+          args: { command: 'rm -rf /tmp/example' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-auto-denied-hooks-off',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not fire PermissionDenied hooks when AUTO classifier approves', async () => {
+    runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'executed',
+      returnDisplay: 'executed',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+          execute,
+        }),
+      ],
+    ]);
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        hookSystem,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'auto-approved',
+          name: ToolNames.SHELL,
+          args: { command: 'echo ok' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-auto-approved',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it.each(Object.entries(ToolNamesMigration))(

@@ -23,6 +23,8 @@ import type {
   MessageBus,
   StreamEvent,
   ChatCompressionInfo,
+  AutoModeDecision,
+  AutoModeOutcome,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -62,11 +64,13 @@ import {
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
   evaluateAutoMode,
+  getAutoModePermissionDeniedReason,
   isApproveOutcome,
   MAX_TRANSCRIPT_MESSAGES,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
+  shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from '@qwen-code/qwen-code-core';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
@@ -157,6 +161,31 @@ export function computeInitialTurnFromHistory(
   }
 
   return maxPromptTurn > 0 ? maxPromptTurn : userMessageCount;
+}
+
+export async function fireSessionPermissionDeniedForAutoMode(
+  config: Config,
+  decision: AutoModeDecision,
+  outcome: AutoModeOutcome,
+  toolName: string,
+  toolParams: Record<string, unknown>,
+  callId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (
+    !config.getDisableAllHooks?.() &&
+    shouldFirePermissionDeniedForAutoMode(decision, outcome)
+  ) {
+    await config
+      .getHookSystem?.()
+      ?.firePermissionDeniedEvent(
+        toolName,
+        toolParams,
+        callId,
+        getAutoModePermissionDeniedReason(decision),
+        signal,
+      );
+  }
 }
 
 function getRecordPromptIds(record: ChatRecord): string[] {
@@ -1979,6 +2008,15 @@ export class Session implements SessionContext {
           decision,
           this.config,
           denialState,
+        );
+        await fireSessionPermissionDeniedForAutoMode(
+          this.config,
+          decision,
+          outcome,
+          fc.name,
+          toolParams,
+          callId,
+          abortSignal,
         );
         switch (outcome.kind) {
           case 'approved':
