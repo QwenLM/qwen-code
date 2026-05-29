@@ -128,6 +128,7 @@ const EN: Messages = {
   'delete.notFound': 'Session not found — it may have been deleted already.',
   'delete.partialFail': (v) =>
     `${v?.removed ?? 0} deleted, ${v?.failed ?? 0} failed: ${v?.detail ?? 'unknown error'}`,
+  'delete.matches': (v) => `${v?.count ?? 0} matches`,
   'delete.pressSearch': 'Press / to search; Space to select; Enter to delete',
   'delete.selected': (v) => `${v?.count ?? 0} selected`,
   'delete.title': 'Delete Session',
@@ -507,6 +508,7 @@ const ZH: Messages = {
   'delete.notFound': '会话未找到，可能已被删除。',
   'delete.partialFail': (v) =>
     `已删除 ${v?.removed ?? 0} 个，${v?.failed ?? 0} 个失败: ${v?.detail ?? '未知错误'}`,
+  'delete.matches': (v) => `${v?.count ?? 0} 个匹配`,
   'delete.pressSearch': '按 / 搜索；Space 选择；Enter 删除',
   'delete.selected': (v) => `已选 ${v?.count ?? 0} 个`,
   'delete.title': '删除会话',

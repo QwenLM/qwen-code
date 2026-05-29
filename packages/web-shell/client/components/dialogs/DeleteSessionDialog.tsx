@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
-import {
-  useConnection,
-  useSessions,
-  type DaemonSessionSummary,
-} from '@qwen-code/webui/daemon-react-sdk';
+import { useConnection, useSessions } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
@@ -53,6 +49,16 @@ export function DeleteSessionDialog({
     : sessions;
 
   useEffect(() => {
+    if (searchQuery && selectedIds.size > 0) {
+      const filteredSet = new Set(filtered.map((s) => s.sessionId));
+      setSelectedIds((prev) => {
+        const pruned = new Set([...prev].filter((id) => filteredSet.has(id)));
+        return pruned.size === prev.size ? prev : pruned;
+      });
+    }
+  }, [searchQuery, filtered, selectedIds.size]);
+
+  useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {
       setSelectedIdx(filtered.length - 1);
     }
@@ -81,101 +87,100 @@ export function DeleteSessionDialog({
     [currentSessionId],
   );
 
-  const handleDelete = useCallback(
-    (targetSession?: DaemonSessionSummary) => {
-      if (deleting) return;
+  const handleDelete = useCallback(() => {
+    if (deleting) return;
 
-      if (selectedIds.size > 0 && !targetSession) {
-        if (!deleteSessions) return;
-        setDeleting(true);
-        deleteSessions(Array.from(selectedIds))
-          .then((res) => {
-            const failed = res.notFound.length + res.errors.length;
-
-            if (failed > 0 && res.removed.length > 0) {
-              const detail =
-                res.errors.length > 0
-                  ? res.errors[0].error
-                  : t('delete.notFound');
-              onDeleted(res.removed);
-              onError(
-                new Error(
-                  t('delete.partialFail', {
-                    removed: res.removed.length,
-                    failed,
-                    detail,
-                  }),
-                ),
-              );
-              onClose();
-              return;
-            }
-
-            if (failed > 0) {
-              const reason =
-                res.errors.length > 0
-                  ? res.errors[0].error
-                  : t('delete.notFound');
-              setMessage(t('delete.allFailed', { count: failed, reason }));
-              setDeleting(false);
-              setSelectedIds(new Set());
-              return;
-            }
-
-            if (res.removed.length === 0) {
-              setMessage(t('delete.nonRemoved'));
-              setDeleting(false);
-              setSelectedIds(new Set());
-              return;
-            }
-
-            onDeleted(res.removed);
-            onClose();
-          })
-          .catch((error: unknown) => {
-            onError(error);
-            setDeleting(false);
-          });
-        return;
-      }
-
-      const session = targetSession ?? filtered[selectedIdx];
-      if (!session) return;
-      if (session.sessionId === currentSessionId) {
-        setMessage(t('delete.cannotCurrent'));
-        return;
-      }
-      if (!deleteSession) return;
+    if (selectedIds.size > 0) {
+      if (!deleteSessions) return;
+      const filteredSet = new Set(filtered.map((s) => s.sessionId));
+      const idsToDelete = Array.from(selectedIds).filter((id) =>
+        filteredSet.has(id),
+      );
+      if (idsToDelete.length === 0) return;
       setDeleting(true);
-      deleteSession(session.sessionId)
-        .then((removed) => {
-          if (!removed) {
-            setMessage(t('delete.notFound'));
-            setDeleting(false);
+      deleteSessions(idsToDelete)
+        .then((res) => {
+          const succeeded = res.removed.length + res.notFound.length;
+          const failed = res.errors.length;
+
+          if (failed > 0 && succeeded > 0) {
+            onError(
+              new Error(
+                t('delete.partialFail', {
+                  removed: succeeded,
+                  failed,
+                  detail: res.errors[0].error,
+                }),
+              ),
+            );
+            onClose();
             return;
           }
-          onDeleted([session.sessionId]);
+
+          if (failed > 0) {
+            setMessage(
+              t('delete.allFailed', {
+                count: failed,
+                reason: res.errors[0].error,
+              }),
+            );
+            setDeleting(false);
+            setSelectedIds(new Set());
+            return;
+          }
+
+          if (succeeded === 0) {
+            setMessage(t('delete.nonRemoved'));
+            setDeleting(false);
+            setSelectedIds(new Set());
+            return;
+          }
+
+          onDeleted(res.removed);
           onClose();
         })
         .catch((error: unknown) => {
           onError(error);
           setDeleting(false);
         });
-    },
-    [
-      currentSessionId,
-      deleteSession,
-      deleteSessions,
-      deleting,
-      filtered,
-      onClose,
-      onDeleted,
-      onError,
-      selectedIdx,
-      selectedIds,
-      t,
-    ],
-  );
+      return;
+    }
+
+    const session = filtered[selectedIdx];
+    if (!session) return;
+    if (session.sessionId === currentSessionId) {
+      setMessage(t('delete.cannotCurrent'));
+      return;
+    }
+    if (!deleteSession) return;
+    setDeleting(true);
+    deleteSession(session.sessionId)
+      .then((removed) => {
+        if (!removed) {
+          setMessage(t('delete.notFound'));
+          setDeleting(false);
+          return;
+        }
+        onDeleted([session.sessionId]);
+        onClose();
+      })
+      .catch((error: unknown) => {
+        onError(error);
+        setDeleting(false);
+      });
+  }, [
+    currentSessionId,
+    deleteSession,
+    deleteSessions,
+    deleting,
+    filtered,
+    onClose,
+    onDeleted,
+    onError,
+    selectedIdx,
+    selectedIds,
+    t,
+  ]);
 
   useDelayedGlobalKeyDown(
     (e: KeyboardEvent) => {
@@ -272,7 +277,7 @@ export function DeleteSessionDialog({
         )}
         {!hasSelection && searchQuery && (
           <span className={dp('resume-picker-count')}>
-            ({filtered.length} matches)
+            ({t('delete.matches', { count: filtered.length })})
           </span>
         )}
         <button
@@ -328,7 +333,12 @@ export function DeleteSessionDialog({
         {loading && (
           <div className={dp('resume-picker-empty')}>{t('common.loading')}</div>
         )}
-        {!loading && filtered.length === 0 && (
+        {!loading && sessionsError && (
+          <div className={dp('resume-picker-empty')}>
+            {sessionsError.message}
+          </div>
+        )}
+        {!loading && !sessionsError && filtered.length === 0 && (
           <div className={dp('resume-picker-empty')}>
             {searchQuery
               ? t('delete.noMatch', { query: searchQuery })
@@ -339,7 +349,7 @@ export function DeleteSessionDialog({
           filtered.map((s, i) => {
             const isCurrent = s.sessionId === currentSessionId;
             const isChecked = selectedIds.has(s.sessionId);
-            const checkbox = isCurrent ? '   ' : isChecked ? '[✓]' : '[ ]';
+            const checkbox = isCurrent ? '[-]' : isChecked ? '[✓]' : '[ ]';
             return (
               <div
                 key={s.sessionId}

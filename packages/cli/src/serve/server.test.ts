@@ -3957,7 +3957,28 @@ describe('createServeApp', () => {
       expect(res.body.code).toBe('invalid_request');
     });
 
-    it('deletes inactive transcripts (bridge throws SessionNotFoundError)', async () => {
+    it('deletes active session and its transcript when bridge succeeds', async () => {
+      const sid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid);
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(res.status).toBe(200);
+      expect(res.body.removed).toEqual([sid]);
+      expect(res.body.notFound).toEqual([]);
+      expect(res.body.errors).toEqual([]);
+      const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
+      const filePath = path.join(chatsDir, `${sid}.jsonl`);
+      await expect(fsp.access(filePath)).rejects.toThrow();
+    });
+
+    it('deletes inactive session transcript when bridge throws SessionNotFoundError', async () => {
       const sid = 'deadbeef-dead-beef-dead-beefdeaddead';
       await writeSession(sid);
       const bridge = fakeBridge({
@@ -3976,6 +3997,9 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body.removed).toEqual([sid]);
       expect(res.body.errors).toEqual([]);
+      const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
+      const filePath = path.join(chatsDir, `${sid}.jsonl`);
+      await expect(fsp.access(filePath)).rejects.toThrow();
     });
 
     it('does not delete when bridge.closeSession throws InvalidClientIdError', async () => {

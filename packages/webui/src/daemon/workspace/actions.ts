@@ -36,10 +36,10 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async deleteSession(sessionId: string) {
+    async deleteSession(sessionId: string, clientId?: string) {
       const client = requireClient(getClient, 'Delete session failed');
       const result = await withActionTimeout(
-        client.deleteSessionsData([sessionId]),
+        client.deleteSessionsData([sessionId], clientId),
         'Delete session timed out',
       );
       if (result.errors.length > 0) {
@@ -48,10 +48,10 @@ export function createDaemonWorkspaceActions({
       return result.removed.length > 0;
     },
 
-    async deleteSessions(sessionIds: string[]) {
+    async deleteSessions(sessionIds: string[], clientId?: string) {
       const client = requireClient(getClient, 'Delete sessions failed');
       return withActionTimeout(
-        client.deleteSessionsData(sessionIds),
+        client.deleteSessionsData(sessionIds, clientId),
         'Delete sessions timed out',
       );
     },

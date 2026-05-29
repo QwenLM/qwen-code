@@ -1637,30 +1637,44 @@ export function createServeApp(
     if (
       !Array.isArray(sessionIds) ||
       sessionIds.length === 0 ||
+      sessionIds.length > 100 ||
       !sessionIds.every((id) => typeof id === 'string')
     ) {
       res.status(400).json({
-        error: '`sessionIds` must be a non-empty string array',
+        error: '`sessionIds` must be a non-empty string array (max 100)',
         code: 'invalid_request',
       });
       return;
     }
     try {
-      const closeErrors: Array<{ sessionId: string; error: string }> = [];
-      const closedIds: string[] = [];
-      for (const id of sessionIds as string[]) {
-        try {
+      const uniqueIds = [...new Set(sessionIds as string[])];
+      const closeResults = await Promise.allSettled(
+        uniqueIds.map(async (id) => {
           await bridge.closeSession(
             id,
             clientId !== undefined ? { clientId } : undefined,
           );
+          return id;
+        }),
+      );
+      const closeErrors: Array<{ sessionId: string; error: string }> = [];
+      const closedIds: string[] = [];
+      for (let i = 0; i < closeResults.length; i++) {
+        const r = closeResults[i];
+        const id = uniqueIds[i];
+        if (r.status === 'fulfilled') {
           closedIds.push(id);
-        } catch (closeErr) {
+        } else {
+          const closeErr = r.reason;
           if (closeErr instanceof SessionNotFoundError) {
+            // Session not active in bridge — still attempt to remove its transcript file
             closedIds.push(id);
           } else {
             const msg =
               closeErr instanceof Error ? closeErr.message : String(closeErr);
+            writeStderrLine(
+              `qwen serve: closeSession failed for ${safeLogValue(id)}: ${safeLogValue(msg)}`,
+            );
             closeErrors.push({ sessionId: id, error: msg });
           }
         }

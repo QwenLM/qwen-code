@@ -120,9 +120,10 @@ export interface DaemonGlobResult {
 export interface DaemonWorkspaceActions {
   // Sessions
   listSessions(): Promise<DaemonSessionSummary[]>;
-  deleteSession(sessionId: string): Promise<boolean>;
+  deleteSession(sessionId: string, clientId?: string): Promise<boolean>;
   deleteSessions(
     sessionIds: string[],
+    clientId?: string,
   ): Promise<{
     removed: string[];
     notFound: string[];
