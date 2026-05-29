@@ -41,6 +41,8 @@ function createMockWebContents() {
     canGoBack: mock(() => false),
     canGoForward: mock(() => false),
     isDestroyed: mock(() => false),
+    insertCSS: mock(async (_css: string, _opts?: unknown) => 'mock-css-key'),
+    removeInsertedCSS: mock(async (_key: string) => {}),
     goBack: mock(() => {}),
     goForward: mock(() => {}),
     reload: mock(() => {}),
@@ -312,7 +314,13 @@ describe('BrowserPaneManager', () => {
       width: 640,
       height: 800,
     })
-    expect(instance.containerView.setBorderRadius).toHaveBeenCalled()
+    expect(instance.containerView.setBorderRadius.mock.calls.at(-1)?.[0]).toBe(0)
+    expect(instance.toolbarView.setBorderRadius.mock.calls.at(-1)?.[0]).toBe(0)
+    expect(instance.pageView.setBorderRadius.mock.calls.at(-1)?.[0]).toBe(0)
+    expect(instance.nativeOverlayView.setBorderRadius.mock.calls.at(-1)?.[0]).toBe(0)
+    expect(instance.pageView.setBackgroundColor.mock.calls.at(-1)?.[0]).toBe('#00000000')
+    expect(instance.pageView.webContents.insertCSS).toHaveBeenCalled()
+    expect(instance.pageView.webContents.insertCSS.mock.calls[0][0]).toContain('inset(0 0 0 1px')
     expect(instance.toolbarView.setBounds.mock.calls.at(-1)?.[0]).toEqual({
       x: 0,
       y: 0,
@@ -325,6 +333,25 @@ describe('BrowserPaneManager', () => {
       width: 640,
       height: 800,
     })
+
+    manager.dock('dock-1', hostWindow as any, {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+    })
+    expect(manager.listInstances()[0].isVisible).toBe(true)
+    expect(instance.containerView.setBounds.mock.calls.at(-1)?.[0]).toEqual({
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+    })
+
+    const insertCallsBeforeNavigation = instance.pageView.webContents.insertCSS.mock.calls.length
+    instance.pageView.webContents._emit('did-start-loading')
+    instance.pageView.webContents._emit('dom-ready')
+    expect(instance.pageView.webContents.insertCSS.mock.calls.length).toBeGreaterThan(insertCallsBeforeNavigation)
   })
 
   it('allows http(s) popups with shared browser partition', () => {

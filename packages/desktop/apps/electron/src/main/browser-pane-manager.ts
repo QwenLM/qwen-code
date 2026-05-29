@@ -28,6 +28,15 @@ const TOOLBAR_LOAD_MAX_RETRIES = 4
 const TOOLBAR_LOAD_RETRY_DELAY_MS = 500
 const TOOLBAR_HEIGHT = 48
 const DOCK_CONTAINER_RADIUS = process.platform === 'darwin' ? 14 : 8
+const DOCK_PAGE_CLIP_LEFT_INSET = 1
+const DOCK_PAGE_CLIP_CSS = `
+html {
+  clip-path: inset(0 0 0 ${DOCK_PAGE_CLIP_LEFT_INSET}px round 0 0 ${DOCK_CONTAINER_RADIUS}px 0) !important;
+}
+body {
+  min-height: 100vh !important;
+}
+`
 const MAX_CONSOLE_LOG_ENTRIES = 500
 const MAX_NETWORK_LOG_ENTRIES = 500
 const MAX_DOWNLOAD_LOG_ENTRIES = 200
@@ -44,6 +53,10 @@ const THEME_OBSERVER_MIN_INTERVAL_MS = 120
 const EARLY_THEME_EXTRACTION_DELAY_MS = 100
 const BROWSER_EMPTY_STATE_PAGE = 'browser-empty-state.html'
 const CRAFT_DEEPLINK_SCHEME_PREFIX = `${process.env.CRAFT_DEEPLINK_SCHEME || 'craftagents'}://`
+
+function getBrowserViewBackgroundColor(): string {
+  return nativeTheme.shouldUseDarkColors ? '#2b292e' : '#fafafb'
+}
 
 const THEME_COLOR_EXTRACTOR_FN = String.raw`
 () => {
@@ -167,6 +180,9 @@ interface BrowserInstance {
   themeColor: string | null
   inPageThemeTimer: ReturnType<typeof setTimeout> | null
   themeObserverToken: string | null
+  dockClipCssKey: string | null
+  dockClipCssPending: boolean
+  dockClipGeneration: number
   consoleLogs: BrowserConsoleEntry[]
   networkLogs: BrowserNetworkEntry[]
   downloads: BrowserDownloadEntry[]
@@ -388,7 +404,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     this.setupSessionObservers(ses)
 
     // Match background to current OS theme to prevent black/white flash on open
-    const bgColor = nativeTheme.shouldUseDarkColors ? '#2b292e' : '#fafafb'
+    const bgColor = getBrowserViewBackgroundColor()
 
     const window = new BrowserWindow({
       width: 1200,
@@ -494,6 +510,9 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       themeColor: null,
       inPageThemeTimer: null,
       themeObserverToken: null,
+      dockClipCssKey: null,
+      dockClipCssPending: false,
+      dockClipGeneration: 0,
       consoleLogs: [],
       networkLogs: [],
       downloads: [],
@@ -838,7 +857,9 @@ export class BrowserPaneManager implements IBrowserPaneManager {
 
     instance.presentation = 'docked'
     instance.dockBounds = nextBounds
-    instance.isVisible = nextBounds.width > 0 && nextBounds.height > 0
+    if (nextBounds.width > 0 && nextBounds.height > 0) {
+      instance.isVisible = true
+    }
     instance.pendingShowOnReady = false
     instance.pendingShowToken += 1
 
@@ -2035,6 +2056,62 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     instance.containerView.addChildView(instance.toolbarView)
   }
 
+  private resetDockedPageClip(instance: BrowserInstance): void {
+    instance.dockClipCssKey = null
+    instance.dockClipCssPending = false
+    instance.dockClipGeneration += 1
+  }
+
+  private applyDockedPageClip(instance: BrowserInstance): void {
+    if (
+      instance.presentation !== 'docked'
+      || instance.dockClipCssKey
+      || instance.dockClipCssPending
+    ) {
+      return
+    }
+
+    const webContents = instance.pageView.webContents
+    if (webContents.isDestroyed()) return
+
+    const generation = instance.dockClipGeneration
+    instance.dockClipCssPending = true
+    void webContents
+      .insertCSS(DOCK_PAGE_CLIP_CSS, { cssOrigin: 'user' })
+      .then((key) => {
+        if (
+          instance.presentation === 'docked'
+          && instance.dockClipGeneration === generation
+          && !webContents.isDestroyed()
+        ) {
+          instance.dockClipCssKey = key
+          return
+        }
+
+        if (!webContents.isDestroyed()) {
+          void webContents.removeInsertedCSS(key).catch(() => {})
+        }
+      })
+      .catch((error) => {
+        mainLog.warn(`[browser-pane] dock page clip failed id=${instance.id}: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      .finally(() => {
+        if (instance.dockClipGeneration === generation) {
+          instance.dockClipCssPending = false
+        }
+      })
+  }
+
+  private removeDockedPageClip(instance: BrowserInstance): void {
+    const key = instance.dockClipCssKey
+    instance.dockClipCssKey = null
+    instance.dockClipCssPending = false
+    instance.dockClipGeneration += 1
+    if (!key || instance.pageView.webContents.isDestroyed()) return
+
+    void instance.pageView.webContents.removeInsertedCSS(key).catch(() => {})
+  }
+
   private layoutContainerView(instance: BrowserInstance): BrowserPaneDockBounds | null {
     const frame = this.getLayoutFrame(instance)
     if (!frame) {
@@ -2042,10 +2119,19 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       return null
     }
 
+    const isDocked = instance.presentation === 'docked'
     instance.containerView.setBounds(frame)
-    instance.containerView.setBorderRadius(
-      instance.presentation === 'docked' ? DOCK_CONTAINER_RADIUS : 0,
-    )
+    instance.containerView.setBorderRadius(0)
+    instance.toolbarView.setBorderRadius(0)
+    instance.pageView.setBorderRadius(0)
+    instance.nativeOverlayView.setBorderRadius(0)
+    instance.pageView.setBackgroundColor(isDocked ? '#00000000' : getBrowserViewBackgroundColor())
+
+    if (isDocked) {
+      this.applyDockedPageClip(instance)
+    } else {
+      this.removeDockedPageClip(instance)
+    }
 
     return frame
   }
@@ -2091,6 +2177,12 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     })
     this.raiseToolbarView(instance)
 
+    const dockedOverlayRadius = instance.presentation === 'docked' ? `${DOCK_CONTAINER_RADIUS}px` : ''
+    const dockedOverlaySquareRadius = instance.presentation === 'docked' ? '0px' : ''
+    const dockedOverlayClip = instance.presentation === 'docked'
+      ? `inset(0 0 0 ${DOCK_PAGE_CLIP_LEFT_INSET}px round 0 0 ${DOCK_CONTAINER_RADIUS}px 0)`
+      : ''
+
     if (agentActive) {
       const label = this.getAgentControlLabel(control)
       const accent = this.getResolvedAccentColor()
@@ -2101,6 +2193,11 @@ export class BrowserPaneManager implements IBrowserPaneManager {
         const shield = document.getElementById('shield');
         if (!overlay || !chip || !shield) return;
 
+        overlay.style.borderTopLeftRadius = ${JSON.stringify(dockedOverlaySquareRadius)};
+        overlay.style.borderTopRightRadius = ${JSON.stringify(dockedOverlaySquareRadius)};
+        overlay.style.borderBottomLeftRadius = ${JSON.stringify(dockedOverlaySquareRadius)};
+        overlay.style.borderBottomRightRadius = ${JSON.stringify(dockedOverlayRadius)};
+        overlay.style.clipPath = ${JSON.stringify(dockedOverlayClip)};
         overlay.style.borderColor = ${JSON.stringify(accent)};
         overlay.style.boxShadow = 'inset 0 0 0 1px color-mix(in oklab, ' + ${JSON.stringify(accent)} + ' 45%, transparent), inset 0 0 24px color-mix(in oklab, ' + ${JSON.stringify(accent)} + ' 28%, transparent)';
         chip.textContent = ${JSON.stringify(label)};
@@ -2119,6 +2216,11 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       const shield = document.getElementById('shield');
       if (!overlay || !chip || !shield) return;
 
+      overlay.style.borderTopLeftRadius = ${JSON.stringify(dockedOverlaySquareRadius)};
+      overlay.style.borderTopRightRadius = ${JSON.stringify(dockedOverlaySquareRadius)};
+      overlay.style.borderBottomLeftRadius = ${JSON.stringify(dockedOverlaySquareRadius)};
+      overlay.style.borderBottomRightRadius = ${JSON.stringify(dockedOverlayRadius)};
+      overlay.style.clipPath = ${JSON.stringify(dockedOverlayClip)};
       overlay.style.borderColor = 'transparent';
       overlay.style.boxShadow = 'none';
       chip.style.display = 'none';
@@ -3056,6 +3158,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
 
     pageWc.on('did-start-loading', () => {
       instance.isLoading = true
+      this.resetDockedPageClip(instance)
       this.emitStateChange(instance)
       void this.pushToolbarState(instance)
     })
@@ -3074,6 +3177,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     })
 
     pageWc.on('dom-ready', () => {
+      this.applyDockedPageClip(instance)
       this.installThemeObserver(instance)
       void this.extractThemeColor(instance)
     })

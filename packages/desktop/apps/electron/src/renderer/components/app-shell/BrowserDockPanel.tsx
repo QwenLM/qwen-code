@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { Maximize2, Minimize2, X } from 'lucide-react'
+import { fullscreenOverlayOpenAtom } from '@/atoms/overlay'
 import {
   activeBrowserInstanceIdAtom,
   browserInstancesAtom,
@@ -15,6 +16,7 @@ import type { BrowserInstanceInfo } from '../../../shared/types'
 
 const DOCK_WIDTH = 'clamp(480px, 42vw, 640px)'
 const DOCK_HEADER_HEIGHT = 48
+const DOCK_NATIVE_LEFT_INSET = 4
 
 type BrowserDockAction = 'expand' | 'close'
 
@@ -33,6 +35,7 @@ export function BrowserDockPanel({
   const removeBrowserInstance = useSetAtom(removeBrowserInstanceAtom)
   const setActiveBrowserInstanceId = useSetAtom(activeBrowserInstanceIdAtom)
   const [hoveredAction, setHoveredAction] = React.useState<BrowserDockAction | null>(null)
+  const fullscreenOverlayOpen = useAtomValue(fullscreenOverlayOpenAtom)
   const dockedInstance = React.useMemo(() => {
     return browserInstances.find(
       (instance) => instance.presentation === 'docked' && instance.isVisible,
@@ -41,6 +44,7 @@ export function BrowserDockPanel({
   const panelRef = React.useRef<HTMLDivElement | null>(null)
   const viewportRef = React.useRef<HTMLDivElement | null>(null)
   const lastBoundsKeyRef = React.useRef<string | null>(null)
+  const lastBoundsInstanceIdRef = React.useRef<string | null>(null)
 
   const expanded = isCompact || !!dockedInstance?.dockExpanded
 
@@ -118,18 +122,41 @@ export function BrowserDockPanel({
   ])
 
   React.useLayoutEffect(() => {
-    if (!dockedInstance) return
+    if (!dockedInstance) {
+      lastBoundsKeyRef.current = null
+      lastBoundsInstanceIdRef.current = null
+      return
+    }
+
+    if (lastBoundsInstanceIdRef.current !== dockedInstance.id) {
+      lastBoundsKeyRef.current = null
+      lastBoundsInstanceIdRef.current = dockedInstance.id
+    }
 
     const browserPaneApi = window.electronAPI?.browserPane
     if (!browserPaneApi?.dock) return
 
-    lastBoundsKeyRef.current = null
+    if (fullscreenOverlayOpen) {
+      const suspendedBoundsKey = 'suspended'
+      if (lastBoundsKeyRef.current === suspendedBoundsKey) return
+      lastBoundsKeyRef.current = suspendedBoundsKey
+
+      void browserPaneApi.dock(dockedInstance.id, {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+      }).catch((error) => {
+        console.warn('[BrowserDockPanel] Failed to suspend browser dock:', error)
+      })
+      return
+    }
 
     const syncBounds = () => {
       const rect = viewportRef.current?.getBoundingClientRect()
       if (!rect || rect.width <= 0 || rect.height <= 0) return
 
-      const left = Math.ceil(rect.left)
+      const left = Math.ceil(rect.left) + DOCK_NATIVE_LEFT_INSET
       const top = Math.ceil(rect.top)
       const right = Math.floor(rect.right)
       const bottom = Math.floor(rect.bottom)
@@ -170,9 +197,9 @@ export function BrowserDockPanel({
       observer.disconnect()
       window.removeEventListener('resize', syncBounds)
     }
-  }, [dockedInstance, expanded])
+  }, [dockedInstance, expanded, fullscreenOverlayOpen])
 
-  if (!dockedInstance) return null
+  if (!dockedInstance || fullscreenOverlayOpen) return null
 
   const expandLabel = expanded ? 'Restore panel width' : 'Expand panel'
   const tooltipLabel =
@@ -197,12 +224,10 @@ export function BrowserDockPanel({
               bottom: 0,
               left: Math.max(0, expandedLeft),
               right: 0,
-              borderTopRightRadius: RADIUS_EDGE,
               borderBottomRightRadius: RADIUS_EDGE,
             }
           : {
               width: DOCK_WIDTH,
-              borderTopRightRadius: RADIUS_EDGE,
               borderBottomRightRadius: RADIUS_EDGE,
             }
       }

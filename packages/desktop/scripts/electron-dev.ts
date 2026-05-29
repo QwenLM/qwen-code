@@ -43,6 +43,7 @@ const IS_WINDOWS = process.platform === 'win32';
 const BIN_EXT = IS_WINDOWS ? '.exe' : '';
 const VITE_BIN = join(ROOT_DIR, `node_modules/.bin/vite${BIN_EXT}`);
 const ELECTRON_BIN = join(ROOT_DIR, `node_modules/.bin/electron${BIN_EXT}`);
+const ELECTRON_CLI_ARGS = process.argv.slice(2).filter((arg) => arg !== '--');
 const QWEN_VENDOR_DIR = join(ELECTRON_DIR, 'vendor', 'qwen-code');
 const QWEN_VENDOR_CLI_CANDIDATES = [
   join(QWEN_VENDOR_DIR, 'dist', 'cli.js'),
@@ -698,10 +699,13 @@ async function main(): Promise<void> {
   console.log('👀 Watching browser toolbar preload...');
 
   // 5. Start Electron (build already verified)
+  if (ELECTRON_CLI_ARGS.length > 0) {
+    console.log(`🧭 Forwarding Electron args: ${ELECTRON_CLI_ARGS.join(' ')}`);
+  }
   console.log('🚀 Starting Electron...\n');
 
   const electronProc = spawn({
-    cmd: [ELECTRON_BIN, 'apps/electron'],
+    cmd: [ELECTRON_BIN, ...ELECTRON_CLI_ARGS, 'apps/electron'],
     cwd: ROOT_DIR,
     stdin: 'ignore',
     stdout: 'inherit',
