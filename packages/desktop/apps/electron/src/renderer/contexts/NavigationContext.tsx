@@ -411,8 +411,9 @@ export function NavigationProvider({
   const focusedPanelId = useAtomValue(focusedPanelIdAtom)
   useEffect(() => {
     if (!initialRouteRestoredRef.current) return
+    if (getSemanticHistoryKey() !== lastSemanticHistoryKeyRef.current) return
     syncUrlRef.current(false)
-  }, [panelStack, focusedPanelId, rightSidebar])
+  }, [panelStack, focusedPanelId, rightSidebar, getSemanticHistoryKey])
 
   // =========================================================================
   // ATOM SUBSCRIPTIONS FOR pushState (meaningful navigation)
