@@ -545,7 +545,7 @@ function parseJsonObjectFromText(
   let withoutFence = trimmed;
   if (withoutFence.startsWith('```')) {
     withoutFence = withoutFence.replace(/^```(?:json)?\s*/i, '');
-    const closingFence = withoutFence.indexOf('```');
+    const closingFence = findClosingCodeFenceIndex(withoutFence);
     if (closingFence !== -1) {
       withoutFence = withoutFence.slice(0, closingFence);
     }
@@ -567,7 +567,16 @@ function parseJsonObjectFromText(
     const parsed = parseJsonObjectSlice(jsonSlice, {
       allowUnquotedKeyStringValues: isExactResponse || isAmbiguityProbe,
     });
-    if (!parsed) continue;
+    if (!parsed) {
+      if (isAmbiguityProbe) {
+        debugLogger.warn(
+          `generateJson: text-channel fallback rejected ambiguous JSON candidates. ` +
+            `A loose JSON-like candidate could not be repaired alongside a strict candidate.`,
+        );
+        return undefined;
+      }
+      continue;
+    }
 
     validObjectCount++;
     if (validObjectCount > 1) {
@@ -581,6 +590,14 @@ function parseJsonObjectFromText(
   }
 
   return parsedObject;
+}
+
+function findClosingCodeFenceIndex(text: string): number {
+  const closingFence = /(^|\r?\n)[ \t]*```[ \t]*(?=\r?\n|$)/g.exec(text);
+  if (!closingFence) {
+    return -1;
+  }
+  return closingFence.index + closingFence[1].length;
 }
 
 function parseJsonObjectSlice(
@@ -632,8 +649,45 @@ function hasMissingJsonValue(jsonSlice: string): boolean {
 }
 
 function canRepairUnquotedKeyStringValues(jsonSlice: string): boolean {
-  return /[{,]\s*[A-Za-z_$][\w$-]*\s*:\s*"(?:[^"\\]|\\.)*"\s*(?:[,}])/.test(
-    jsonSlice,
+  const quotedStringValue =
+    String.raw`(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|` +
+    String.raw`\`(?:[^\`\\]|\\.)*\`)`;
+  return new RegExp(
+    String.raw`[{,]\s*[A-Za-z_$][\w$-]*\s*:\s*${quotedStringValue}\s*(?:[,}])`,
+  ).test(jsonSlice);
+}
+
+function isLikelyJsonArrayPrefix(
+  text: string,
+  start: number,
+  end: number,
+): boolean {
+  const prefix = text
+    .slice(start, end)
+    .replace(/"(?:[^"\\]|\\.)*"/g, '')
+    .replace(/'(?:[^'\\]|\\.)*'/g, '')
+    .replace(/`(?:[^`\\]|\\.)*`/g, '')
+    .replace(/\b(?:true|false|null)\b/g, '')
+    .replace(/-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g, '')
+    .replace(/[\s,[\]{}:]/g, '');
+
+  return prefix.length === 0;
+}
+
+function resetSquareContext(squareOpenIndices: number[]): number {
+  squareOpenIndices.length = 0;
+  return 0;
+}
+
+function shouldStayInSquareContext(
+  text: string,
+  squareOpenIndices: number[],
+  beforeIndex: number,
+): boolean {
+  const squareStart = squareOpenIndices[squareOpenIndices.length - 1];
+  return (
+    squareStart !== undefined &&
+    isLikelyJsonArrayPrefix(text, squareStart + 1, beforeIndex)
   );
 }
 
@@ -642,22 +696,24 @@ function findJsonObjectSlices(text: string): string[] {
 
   const slices: string[] = [];
   let squareDepth = 0;
+  const squareOpenIndices: number[] = [];
 
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
 
     if (char === '[') {
       squareDepth++;
+      squareOpenIndices.push(i);
       continue;
     }
     if (char === ']' && squareDepth > 0) {
       squareDepth--;
+      squareOpenIndices.pop();
       continue;
     }
     if (char === '{' && squareDepth > 0) {
-      const previous = previousNonWhitespaceChar(text, i);
-      if (previous !== '[' && previous !== ',' && previous !== ':') {
-        squareDepth = 0;
+      if (!shouldStayInSquareContext(text, squareOpenIndices, i)) {
+        squareDepth = resetSquareContext(squareOpenIndices);
       }
     }
     if (char !== '{' || squareDepth > 0) {
@@ -672,18 +728,6 @@ function findJsonObjectSlices(text: string): string[] {
   }
 
   return slices;
-}
-
-function previousNonWhitespaceChar(
-  text: string,
-  beforeIndex: number,
-): string | undefined {
-  for (let i = beforeIndex - 1; i >= 0; i--) {
-    if (!/\s/.test(text[i])) {
-      return text[i];
-    }
-  }
-  return undefined;
 }
 
 function findJsonObjectSliceFrom(

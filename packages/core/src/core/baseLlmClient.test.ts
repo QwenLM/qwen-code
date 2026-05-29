@@ -436,6 +436,24 @@ describe('BaseLlmClient', () => {
       );
     });
 
+    it('should not close a fenced JSON block on backticks inside a string value', async () => {
+      const mockResponse = createMockResponseWithText(
+        '```json\n{"code":"```python\\nprint(\\"hi\\")\\n```","value":42}\n```\nAlternative: {"value": 0}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([]);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({
+        code: '```python\nprint("hi")\n```',
+        value: 42,
+      });
+      expect(mockDebugWarn).not.toHaveBeenCalledWith(
+        expect.stringContaining('rejected ambiguous JSON candidates'),
+      );
+    });
+
     it('should treat an empty JSON object from text as a successful fallback parse', async () => {
       const mockResponse = createMockResponseWithText('{}');
       mockGenerateContent.mockResolvedValue(mockResponse);
@@ -536,6 +554,36 @@ describe('BaseLlmClient', () => {
       );
       expect(mockDebugWarn).toHaveBeenCalledWith(
         expect.stringContaining('could not parse JSON'),
+      );
+    });
+
+    it('should reject ambiguous text with single-quoted loose JSON values', async () => {
+      const mockResponse = createMockResponseWithText(
+        "{name: 'session-config', version: '2.0'} {\"isAdmin\":true}",
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('rejected ambiguous JSON candidates'),
+      );
+    });
+
+    it('should reject ambiguous text with backtick-quoted loose JSON values', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{name: `session-config`} {"isAdmin":true}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('rejected ambiguous JSON candidates'),
       );
     });
 
@@ -706,6 +754,18 @@ describe('BaseLlmClient', () => {
     it('should recover JSON after unmatched prose brackets', async () => {
       const mockResponse = createMockResponseWithText(
         'Based on [the analysis, the result is {"color":"blue"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'blue' });
+    });
+
+    it('should recover JSON after unmatched prose brackets before a comma', async () => {
+      const mockResponse = createMockResponseWithText(
+        'Based on [analysis, {"color":"blue"}',
       );
       mockGenerateContent.mockResolvedValue(mockResponse);
       vi.mocked(getFunctionCalls).mockReturnValue(undefined);
