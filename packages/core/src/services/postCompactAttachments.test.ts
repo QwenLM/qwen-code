@@ -151,6 +151,56 @@ describe('extractRecentFilePaths', () => {
     expect(paths).toEqual(['/p6.ts', '/p5.ts', '/p4.ts', '/p3.ts', '/p2.ts']);
     expect(paths).not.toContain('/p1.ts');
   });
+
+  it('excludes paths whose tool call was denied/errored (permission-bypass guard)', () => {
+    // A denied read_file leaves its functionCall in history with an error
+    // functionResponse. Restoring that path would read the file off disk
+    // during compaction, bypassing the denial. The successful read is kept;
+    // the denied one is dropped.
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call_ok',
+              name: 'read_file',
+              args: { file_path: '/ws/ok.ts' },
+            },
+          },
+          {
+            functionCall: {
+              id: 'call_denied',
+              name: 'read_file',
+              args: { file_path: '/ws/.env' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call_ok',
+              name: 'read_file',
+              response: { output: 'export const ok = 1;' },
+            },
+          },
+          {
+            functionResponse: {
+              id: 'call_denied',
+              name: 'read_file',
+              response: { error: 'Permission denied for tool' },
+            },
+          },
+        ],
+      },
+    ];
+    const paths = extractRecentFilePaths(history, 5);
+    expect(paths).toContain('/ws/ok.ts');
+    expect(paths).not.toContain('/ws/.env');
+  });
 });
 
 import {

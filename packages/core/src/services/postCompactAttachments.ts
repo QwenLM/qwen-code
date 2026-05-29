@@ -66,6 +66,27 @@ const FILE_TOUCHING_TOOLS = new Set<string>([
 ]);
 
 /**
+ * Collect the ids of tool calls whose `functionResponse` reported an error
+ * (`response.error` present) — denied, cancelled, or otherwise failed. A
+ * successful call carries `response.output` and no `error`, so it is not
+ * collected. Used to keep denied/failed file reads out of restoration.
+ */
+function collectFailedCallIds(history: Content[]): Set<string> {
+  const failed = new Set<string>();
+  for (const content of history) {
+    for (const part of content.parts ?? []) {
+      const fr = part.functionResponse as
+        | { id?: string; response?: Record<string, unknown> }
+        | undefined;
+      if (fr?.id && fr.response && 'error' in fr.response) {
+        failed.add(fr.id);
+      }
+    }
+  }
+  return failed;
+}
+
+/**
  * Walk the history newest-first, collect the most recently touched file
  * paths, deduplicated. Older mentions of the same path are dropped in
  * favor of the most recent one.
@@ -75,6 +96,14 @@ export function extractRecentFilePaths(
   maxFiles: number,
 ): string[] {
   if (maxFiles <= 0) return [];
+
+  // A denied / errored tool call still leaves its `functionCall` in history,
+  // paired with an error `functionResponse` (`response.error`). Restoring
+  // such a path would read the file straight off disk during compaction —
+  // bypassing the very permission the call was denied. Collect those failed
+  // call ids so we can skip them: never re-read a file the agent didn't
+  // successfully read.
+  const failedCallIds = collectFailedCallIds(history);
 
   const seen = new Set<string>();
   for (let i = history.length - 1; i >= 0; i--) {
@@ -90,6 +119,8 @@ export function extractRecentFilePaths(
       const part = parts[j];
       const call = part.functionCall;
       if (!call || !FILE_TOUCHING_TOOLS.has(call.name ?? '')) continue;
+      // Skip paths whose tool call failed (denied / errored).
+      if (call.id && failedCallIds.has(call.id)) continue;
       const args = call.args as { file_path?: unknown } | undefined;
       const filePath =
         typeof args?.file_path === 'string' ? args.file_path : undefined;
@@ -501,10 +532,12 @@ export function stripAnalysisBlock(rawSummary: string): string {
 
 export function postProcessSummary(rawSummary: string): string {
   const stripped = stripAnalysisBlock(rawSummary);
-  // Even if the strip leaves nothing, do NOT fall back to the raw
-  // analysis content — that would defeat the strip's purpose. Instead
-  // emit a sentinel so the resuming agent sees that the summary
-  // failed; the inflation guard upstream will already NOOP this round.
+  // Defensive sentinel only. Callers gate on `isSummaryEmpty`, which now
+  // checks the STRIPPED summary — so a response that strips to nothing is
+  // treated as an empty summary upstream (COMPRESSION_FAILED_EMPTY_SUMMARY)
+  // and never reaches here. The inflation guard does NOT catch this case
+  // (a tiny `[Summary unavailable]` is smaller than the original, so the
+  // guard wouldn't fire) — the upstream emptiness check is what prevents it.
   const body = stripped.length > 0 ? stripped : '[Summary unavailable]';
   return `${body}\n\n${RESUME_TRAILER}`;
 }

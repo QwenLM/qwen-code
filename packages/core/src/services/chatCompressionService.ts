@@ -352,7 +352,15 @@ export class ChatCompressionService {
       promptId,
     });
     const summary = summaryResult.text;
-    const isSummaryEmpty = !summary || summary.trim().length === 0;
+    // Check the PROCESSED summary: postProcessSummary strips <analysis>
+    // blocks, so a response that is ONLY <analysis>...</analysis> (no
+    // <state_snapshot>) has a non-empty RAW body but strips to nothing. If
+    // we gated on the raw body, compaction would "succeed" and the agent
+    // would resume with `[Summary unavailable]` as its only context — total
+    // amnesia with green metrics. Treat strip-to-empty as an empty summary
+    // so it takes the COMPRESSION_FAILED_EMPTY_SUMMARY path (NOOP) instead.
+    const isSummaryEmpty =
+      !summary || stripAnalysisBlock(summary).trim().length === 0;
     const compressionUsageMetadata = summaryResult.usage;
     const compressionInputTokenCount =
       compressionUsageMetadata?.promptTokenCount;
@@ -416,11 +424,26 @@ export class ChatCompressionService {
     let canCalculateNewTokenCount = false;
 
     if (!isSummaryEmpty) {
+      // Manual /compress has no pending functionResponse, so a trailing
+      // model+functionCall is an ORPHAN (e.g. an interrupted/cancelled tool
+      // call). Preserving it emits model[functionCall] immediately followed
+      // by the next user TEXT turn, which the API rejects (a functionCall
+      // must be followed by its functionResponse). Strip it for manual;
+      // auto-compaction keeps it because the pending functionResponse pairs
+      // with it (trailingFunctionCallContent).
+      const lastCurated = curatedHistory[curatedHistory.length - 1];
+      const historyForCompose =
+        compactTrigger === 'manual' &&
+        lastCurated?.role === 'model' &&
+        lastCurated.parts?.some((p) => !!p.functionCall)
+          ? curatedHistory.slice(0, -1)
+          : curatedHistory;
+
       // Use the new composer — assembles summary + ack + file restores +
       // image restore. No tail preservation, no continuation bridge.
       try {
         extraHistory = await composePostCompactHistory(
-          curatedHistory,
+          historyForCompose,
           summary,
           {
             workspaceRoot: config.getTargetDir(),
@@ -440,11 +463,24 @@ export class ChatCompressionService {
         config
           .getDebugLogger()
           .warn(`[chat-compression] composePostCompactHistory failed: ${err}`);
+        // Fold a trailing model+functionCall into the ack so a pending
+        // functionResponse (auto-compaction mid-tool-loop) keeps its matching
+        // call — otherwise the next request has an orphaned functionResponse
+        // → 400. (Manual orphans were already stripped above.) Folding into
+        // the ack avoids a model→model adjacency.
+        const trailingFc = historyForCompose[historyForCompose.length - 1];
+        const fcParts =
+          trailingFc?.role === 'model'
+            ? (trailingFc.parts ?? []).filter((p) => !!p.functionCall)
+            : [];
         extraHistory = [
           { role: 'user', parts: [{ text: postProcessSummary(summary) }] },
           {
             role: 'model',
-            parts: [{ text: 'Got it. Thanks for the additional context!' }],
+            parts: [
+              { text: 'Got it. Thanks for the additional context!' },
+              ...fcParts,
+            ],
           },
         ];
       }

@@ -351,6 +351,86 @@ describe('ChatCompressionService', () => {
     });
   });
 
+  it('treats an all-<analysis> summary as empty (no [Summary unavailable] silent success)', async () => {
+    // The side-query returns ONLY an <analysis> block (no <state_snapshot>).
+    // Raw body is non-empty but it strips to nothing. isSummaryEmpty must
+    // check the STRIPPED summary so this takes the FAILED_EMPTY path instead
+    // of "succeeding" with `[Summary unavailable]` as the agent's only context.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'do the thing' }] },
+      { role: 'model', parts: [{ text: 'working' }] },
+      { role: 'user', parts: [{ text: 'continue' }] },
+      { role: 'model', parts: [{ text: 'more' }] },
+    ]);
+    const generateText = vi.fn().mockResolvedValue({
+      text: '<analysis>thinking, but I never produced a state_snapshot</analysis>',
+      usage: {
+        promptTokenCount: 49_000,
+        candidatesTokenCount: 200,
+        totalTokenCount: 49_200,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      model: mockModel,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+    );
+    expect(result.newHistory).toBeNull();
+  });
+
+  it('manual /compress strips a trailing orphaned functionCall from the post-compact history', async () => {
+    // History ends with model+functionCall and NO functionResponse (an
+    // interrupted tool call). On manual /compress there is no pending
+    // response, so preserving it would emit model[fc] then the next user
+    // text turn → API 400. The post-compact history must not end with it.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'read the file' }] },
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { file_path: '/x.ts' } } },
+        ],
+      },
+    ]);
+    const generateText = vi.fn().mockResolvedValue({
+      text: '<state_snapshot><primary_request_and_intent>read</primary_request_and_intent></state_snapshot>',
+      usage: {
+        promptTokenCount: 49_000,
+        candidatesTokenCount: 1_500,
+        totalTokenCount: 50_500,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true, // → compactTrigger 'manual'
+      model: mockModel,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    const last = result.newHistory![result.newHistory!.length - 1];
+    const lastIsOrphanFc =
+      last.role === 'model' && (last.parts ?? []).some((p) => !!p.functionCall);
+    expect(lastIsOrphanFc).toBe(false);
+  });
+
   it('silently ignores the deprecated chatCompression.contextPercentageThreshold = 0 (no longer disables compaction)', async () => {
     // Pre-PR #4168, setting contextPercentageThreshold = 0 short-circuited
     // compress() at the cheap-gate (NOOP). The field was removed from
