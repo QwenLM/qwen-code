@@ -88,11 +88,11 @@ export default function ServerSettingsPage() {
       setSavedForm(formState)
       setStatus(serverStatus)
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('toast.unknownError'))
+      console.error('Failed to load server settings:', err)
     } finally {
       setIsLoading(false)
     }
-  }, [t])
+  }, [])
 
   useEffect(() => {
     loadSettings()
