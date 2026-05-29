@@ -815,9 +815,6 @@ export async function runQwenServe(
       // resolution + audit emit) instead of `BridgeClient`'s inline
       // raw-fs proxy. Closes the `ws.ts:613` follow-up thread.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
-      ...(contextFilenameForInit !== undefined
-        ? { contextFilename: contextFilenameForInit }
-        : {}),
       // #4175 Wave 4 PR 17: `POST /session/:id/approval-mode` accepts
       // an opt-in `persist: true` flag. We re-load settings on each
       // persist call rather than caching a `LoadedSettings` handle —
