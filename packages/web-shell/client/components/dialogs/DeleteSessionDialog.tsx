@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
 import { useConnection, useSessions } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
@@ -38,15 +38,19 @@ export function DeleteSessionDialog({
     if (sessionsError) setMessage(sessionsError.message);
   }, [sessionsError]);
 
-  const filtered = searchQuery
-    ? sessions.filter((s) => {
-        const q = searchQuery.toLowerCase();
-        return (
-          (s.displayName || s.title || '').toLowerCase().includes(q) ||
-          s.sessionId.toLowerCase().includes(q)
-        );
-      })
-    : sessions;
+  const filtered = useMemo(
+    () =>
+      searchQuery
+        ? sessions.filter((s) => {
+            const q = searchQuery.toLowerCase();
+            return (
+              (s.displayName || s.title || '').toLowerCase().includes(q) ||
+              s.sessionId.toLowerCase().includes(q)
+            );
+          })
+        : sessions,
+    [sessions, searchQuery],
+  );
 
   useEffect(() => {
     if (searchQuery && selectedIds.size > 0) {
@@ -136,7 +140,7 @@ export function DeleteSessionDialog({
             return;
           }
 
-          onDeleted(res.removed);
+          onDeleted([...res.removed, ...res.notFound]);
           onClose();
         })
         .catch((error: unknown) => {

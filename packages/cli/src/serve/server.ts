@@ -1650,10 +1650,7 @@ export function createServeApp(
       const uniqueIds = [...new Set(sessionIds as string[])];
       const closeResults = await Promise.allSettled(
         uniqueIds.map(async (id) => {
-          await bridge.closeSession(
-            id,
-            clientId !== undefined ? { clientId } : undefined,
-          );
+          await bridge.closeSession(id);
           return id;
         }),
       );
