@@ -138,6 +138,9 @@ import {
 } from '../ui/commands/contextCommand.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
+// Must be less than SESSION_BTW_TIMEOUT_MS (60s) in bridge.ts so the child
+// aborts before the bridge's backstop timer fires.
+const BTW_CHILD_TIMEOUT_MS = 55_000;
 
 /**
  * Env-var candidates per auth method, used by `buildAuthPreflightCell` for
@@ -2570,7 +2573,7 @@ class QwenAgent implements Agent {
             config,
             userMessage: buildBtwPrompt(question.trim()),
             cacheSafeParams,
-            abortSignal: AbortSignal.timeout(55_000),
+            abortSignal: AbortSignal.timeout(BTW_CHILD_TIMEOUT_MS),
           });
         } catch (err) {
           if (err instanceof DOMException && err.name === 'TimeoutError') {
