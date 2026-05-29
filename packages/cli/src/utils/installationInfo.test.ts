@@ -212,9 +212,9 @@ describe('getInstallationInfo', () => {
     mockedRealPathSync.mockReturnValue(cliPath);
     mockedExistsSync.mockImplementation((candidate) =>
       [
-        path.join(installDir, 'manifest.json'),
-        path.join(installDir, 'bin', 'qwen.cmd'),
-        path.join(installDir, 'node', 'node.exe'),
+        `${installDir}/manifest.json`,
+        `${installDir}/bin/qwen.cmd`,
+        `${installDir}/node/node.exe`,
       ].includes(String(candidate).replace(/\\/g, '/')),
     );
     mockedReadFileSync.mockImplementation((candidate) => {
