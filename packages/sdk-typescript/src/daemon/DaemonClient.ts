@@ -1246,7 +1246,7 @@ export class DaemonClient {
    */
   async removeRuntimeMcpServer(
     name: string,
-    opts?: { clientId?: string },
+    opts?: { clientId?: string; timeoutMs?: number },
   ): Promise<DaemonRuntimeMcpRemoveResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp/servers/${encodeURIComponent(name)}`,
@@ -1263,6 +1263,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonRuntimeMcpRemoveResult;
       },
+      opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
     );
   }
 

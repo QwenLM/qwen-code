@@ -522,13 +522,12 @@ Request:
   "name": "my-server",
   "config": {
     "command": "npx",
-    "args": ["-y", "@my-org/mcp-server"],
-    "env": { "TOKEN": "..." }
+    "args": ["-y", "@my-org/mcp-server"]
   }
 }
 ```
 
-`name` must be alphanumeric plus `_` and `-` (max 256 characters). `config` is the same MCP server configuration object used in `settings.json` `mcpServers` entries (transport-dependent fields: `command`/`args`/`env` for stdio, `url` for SSE/HTTP).
+`name` must be alphanumeric plus `_` and `-` (max 256 characters). `config` is the same MCP server configuration object used in `settings.json` `mcpServers` entries (transport-dependent fields: `command`/`args` for stdio, `url` for SSE/HTTP). Security-sensitive fields (`trust`, `env`, `cwd`, `oauth`, `headers`, `authProviderType`) are stripped by the daemon and ignored.
 
 Response (200) — success:
 

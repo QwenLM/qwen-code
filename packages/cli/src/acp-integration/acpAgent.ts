@@ -2504,10 +2504,16 @@ class QwenAgent implements Agent {
             'Invalid or missing name',
           );
         }
-        if (name.length > 256 || !/^[A-Za-z0-9_-]+$/.test(name)) {
+        if (
+          name.length > 256 ||
+          !/^[A-Za-z0-9_-]+$/.test(name) ||
+          name === '__proto__' ||
+          name === 'constructor' ||
+          name === 'prototype'
+        ) {
           throw RequestError.invalidParams(
             undefined,
-            'Server name must be ≤256 chars, alphanumeric + underscore/hyphen',
+            'Server name must be ≤256 chars, alphanumeric + underscore/hyphen, and not a reserved JS property name',
           );
         }
         if (!config || typeof config !== 'object' || Array.isArray(config)) {
@@ -2544,6 +2550,8 @@ class QwenAgent implements Agent {
             excludeTools: _exc,
             cwd: _cwd,
             env: _env,
+            oauth: _oauth,
+            headers: _headers,
             ...safeConfig
           } = config as Record<string, unknown>;
           const result = await manager.addRuntimeMcpServer(
@@ -2585,10 +2593,16 @@ class QwenAgent implements Agent {
             'Invalid or missing name',
           );
         }
-        if (name.length > 256 || !/^[A-Za-z0-9_-]+$/.test(name)) {
+        if (
+          name.length > 256 ||
+          !/^[A-Za-z0-9_-]+$/.test(name) ||
+          name === '__proto__' ||
+          name === 'constructor' ||
+          name === 'prototype'
+        ) {
           throw RequestError.invalidParams(
             undefined,
-            'Server name must be ≤256 chars, alphanumeric + underscore/hyphen',
+            'Server name must be ≤256 chars, alphanumeric + underscore/hyphen, and not a reserved JS property name',
           );
         }
         if (
