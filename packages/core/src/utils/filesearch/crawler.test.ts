@@ -905,6 +905,94 @@ describe('crawler', () => {
       expect(results).toContain('vendor/lib/inner.txt');
     });
 
+    it('should skip missing tracked paths from submodule indexes', async () => {
+      tmpDir = await createTmpDir({});
+      await fs.mkdir(path.join(tmpDir, 'vendor', 'lib'), { recursive: true });
+      await fs.writeFile(path.join(tmpDir, 'vendor', 'lib', 'alive.txt'), '');
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command !== 'git') {
+          return { success: false, lines: [] };
+        }
+        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+          return { success: true, lines: [tmpDir] };
+        }
+        if (args.includes('ls-files') && args.includes('--others')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--deleted')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--cached')) {
+          return {
+            success: true,
+            lines: ['H vendor/lib/alive.txt', 'H vendor/lib/deleted.txt'],
+          };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('vendor/lib/alive.txt');
+      expect(results).not.toContain('vendor/lib/deleted.txt');
+    });
+
+    it('should skip cached gitlink directories from uninitialized submodules', async () => {
+      tmpDir = await createTmpDir({});
+      await fs.mkdir(path.join(tmpDir, 'vendor', 'lib'), { recursive: true });
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command !== 'git') {
+          return { success: false, lines: [] };
+        }
+        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+          return { success: true, lines: [tmpDir] };
+        }
+        if (args.includes('ls-files') && args.includes('--others')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--deleted')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--cached')) {
+          return { success: true, lines: ['H vendor/lib'] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).not.toContain('vendor/lib');
+      expect(results).not.toContain('vendor/lib/');
+    });
+
     it('should resolve the git root from a subdirectory crawl', async () => {
       tmpDir = await createTmpDir({
         src: ['file2.js'],

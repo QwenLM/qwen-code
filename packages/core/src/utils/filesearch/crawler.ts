@@ -1082,6 +1082,16 @@ async function crawlWithGitLsFiles(
       return true;
     }
 
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(path.join(gitRoot, ...normalizedFile.split('/')));
+    } catch {
+      return true;
+    }
+    if (stat.isDirectory()) {
+      return true;
+    }
+
     if (
       relativeToGitRoot &&
       relativeToGitRoot !== '.' &&
