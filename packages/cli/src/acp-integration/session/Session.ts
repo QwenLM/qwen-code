@@ -72,6 +72,8 @@ import {
   recordFallbackApprove,
   shouldFallback,
   shouldRunAutoModeForCall,
+  extractDaemonTraceContext,
+  withInteractionSpan,
 } from '@qwen-code/qwen-code-core';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
@@ -687,270 +689,290 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
+        const parentContext = extractDaemonTraceContext(params);
 
-        // Extract text from all text blocks to construct the full prompt text for logging
-        const promptText = params.prompt
-          .filter((block) => block.type === 'text')
-          .map((block) => (block.type === 'text' ? block.text : ''))
-          .join(' ');
-
-        // Log user prompt
-        logUserPrompt(
+        return await withInteractionSpan(
           this.config,
-          new UserPromptEvent(
-            promptText.length,
+          {
             promptId,
-            this.config.getContentGeneratorConfig()?.authType,
-            promptText,
-          ),
-        );
+            model: this.config.getModel(),
+            messageType: 'acp_prompt',
+            ...(parentContext ? { parentContext } : {}),
+          },
+          async () => {
+            // Extract text from all text blocks to construct the full prompt text for logging
+            const promptText = params.prompt
+              .filter((block) => block.type === 'text')
+              .map((block) => (block.type === 'text' ? block.text : ''))
+              .join(' ');
 
-        // record user message for session management
-        this.config.getChatRecordingService()?.recordUserMessage(promptText);
-
-        // Check if the input contains a slash command
-        // Extract text from the first text block if present
-        const firstTextBlock = params.prompt.find(
-          (block) => block.type === 'text',
-        );
-        const inputText = firstTextBlock?.text || '';
-
-        let parts: Part[] | null;
-
-        if (isSlashCommand(inputText)) {
-          // Handle slash command in ACP mode using capability-based filtering
-          const slashCommandResult = await handleSlashCommand(
-            inputText,
-            pendingSend,
-            this.config,
-            this.settings,
-          );
-
-          parts = await this.#processSlashCommandResult(
-            slashCommandResult,
-            params.prompt,
-          );
-
-          // If parts is null, the command was fully handled (e.g., /summary completed)
-          // Return early without sending to the model
-          if (parts === null) {
-            return { stopReason: 'end_turn' };
-          }
-        } else {
-          // Normal processing for non-slash commands
-          parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
-        }
-
-        // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
-        const hooksEnabled = !this.config.getDisableAllHooks?.();
-        const messageBus = this.config.getMessageBus?.();
-        if (
-          hooksEnabled &&
-          messageBus &&
-          this.config.hasHooksForEvent?.('UserPromptSubmit')
-        ) {
-          const response = await messageBus.request<
-            HookExecutionRequest,
-            HookExecutionResponse
-          >(
-            {
-              type: MessageBusType.HOOK_EXECUTION_REQUEST,
-              eventName: 'UserPromptSubmit',
-              input: {
-                prompt: promptText,
-              },
-              signal: pendingSend.signal,
-            },
-            MessageBusType.HOOK_EXECUTION_RESPONSE,
-          );
-          const hookOutput = response.output
-            ? createHookOutput('UserPromptSubmit', response.output)
-            : undefined;
-
-          if (
-            hookOutput?.isBlockingDecision() ||
-            hookOutput?.shouldStopExecution()
-          ) {
-            // Hook blocked the prompt - send notification to UI and return
-            const blockReason =
-              hookOutput?.getEffectiveReason() || 'No reason provided';
-            await this.messageEmitter.emitAgentMessage(
-              `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
+            // Log user prompt
+            logUserPrompt(
+              this.config,
+              new UserPromptEvent(
+                promptText.length,
+                promptId,
+                this.config.getContentGeneratorConfig()?.authType,
+                promptText,
+              ),
             );
-            return { stopReason: 'end_turn' };
-          }
 
-          // Add additional context from hooks to the request
-          const additionalContext = hookOutput?.getAdditionalContext();
-          if (additionalContext) {
-            parts = [...parts, { text: additionalContext }];
-          }
-        }
+            // record user message for session management
+            this.config
+              .getChatRecordingService()
+              ?.recordUserMessage(promptText);
 
-        // Prepend session-level system reminders (plan mode / subagent /
-        // arena) so the model sees them, matching the behaviour of
-        // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
-        // plan mode in ACP has no effect because the model never learns it
-        // should avoid edits (#1151).
-        const systemReminders = await this.#buildInitialSystemReminders();
-        if (systemReminders.length > 0) {
-          parts = [...systemReminders, ...parts];
-        }
-
-        // Phase C: one-shot worktree restore notice, set by acpAgent on
-        // --resume / loadSession when the session's worktree is still alive.
-        // Prepended exactly once, then cleared so it doesn't repeat on
-        // subsequent turns.
-        if (this.pendingWorktreeNotice) {
-          parts = [
-            {
-              text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
-            },
-            ...parts,
-          ];
-          this.pendingWorktreeNotice = null;
-        }
-
-        let nextMessage: Content | null = { role: 'user', parts };
-
-        while (nextMessage !== null) {
-          if (pendingSend.signal.aborted) {
-            this.#getCurrentChat().addHistory(nextMessage);
-            return { stopReason: 'cancelled' };
-          }
-
-          const functionCalls: FunctionCall[] = [];
-          let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
-          const streamStartTime = Date.now();
-
-          try {
-            const sendResult = await this.#sendMessageStreamWithAutoCompression(
-              promptId,
-              nextMessage?.parts ?? [],
-              pendingSend.signal,
+            // Check if the input contains a slash command
+            // Extract text from the first text block if present
+            const firstTextBlock = params.prompt.find(
+              (block) => block.type === 'text',
             );
-            if (!sendResult.responseStream) {
-              this.#preserveUnsentMessageHistory(
-                nextMessage,
-                sendResult.stopReason === 'cancelled',
+            const inputText = firstTextBlock?.text || '';
+
+            let parts: Part[] | null;
+
+            if (isSlashCommand(inputText)) {
+              // Handle slash command in ACP mode using capability-based filtering
+              const slashCommandResult = await handleSlashCommand(
+                inputText,
+                pendingSend,
+                this.config,
+                this.settings,
               );
-              return { stopReason: sendResult.stopReason };
-            }
-            const responseStream = sendResult.responseStream;
-            nextMessage = null;
 
-            for await (const resp of responseStream) {
+              parts = await this.#processSlashCommandResult(
+                slashCommandResult,
+                params.prompt,
+              );
+
+              // If parts is null, the command was fully handled (e.g., /summary completed)
+              // Return early without sending to the model
+              if (parts === null) {
+                return { stopReason: 'end_turn' };
+              }
+            } else {
+              // Normal processing for non-slash commands
+              parts = await this.#resolvePrompt(
+                params.prompt,
+                pendingSend.signal,
+              );
+            }
+
+            // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
+            const hooksEnabled = !this.config.getDisableAllHooks?.();
+            const messageBus = this.config.getMessageBus?.();
+            if (
+              hooksEnabled &&
+              messageBus &&
+              this.config.hasHooksForEvent?.('UserPromptSubmit')
+            ) {
+              const response = await messageBus.request<
+                HookExecutionRequest,
+                HookExecutionResponse
+              >(
+                {
+                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
+                  eventName: 'UserPromptSubmit',
+                  input: {
+                    prompt: promptText,
+                  },
+                  signal: pendingSend.signal,
+                },
+                MessageBusType.HOOK_EXECUTION_RESPONSE,
+              );
+              const hookOutput = response.output
+                ? createHookOutput('UserPromptSubmit', response.output)
+                : undefined;
+
+              if (
+                hookOutput?.isBlockingDecision() ||
+                hookOutput?.shouldStopExecution()
+              ) {
+                // Hook blocked the prompt - send notification to UI and return
+                const blockReason =
+                  hookOutput?.getEffectiveReason() || 'No reason provided';
+                await this.messageEmitter.emitAgentMessage(
+                  `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
+                );
+                return { stopReason: 'end_turn' };
+              }
+
+              // Add additional context from hooks to the request
+              const additionalContext = hookOutput?.getAdditionalContext();
+              if (additionalContext) {
+                parts = [...parts, { text: additionalContext }];
+              }
+            }
+
+            // Prepend session-level system reminders (plan mode / subagent /
+            // arena) so the model sees them, matching the behaviour of
+            // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
+            // plan mode in ACP has no effect because the model never learns it
+            // should avoid edits (#1151).
+            const systemReminders = await this.#buildInitialSystemReminders();
+            if (systemReminders.length > 0) {
+              parts = [...systemReminders, ...parts];
+            }
+
+            // Phase C: one-shot worktree restore notice, set by acpAgent on
+            // --resume / loadSession when the session's worktree is still alive.
+            // Prepended exactly once, then cleared so it doesn't repeat on
+            // subsequent turns.
+            if (this.pendingWorktreeNotice) {
+              parts = [
+                {
+                  text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
+                },
+                ...parts,
+              ];
+              this.pendingWorktreeNotice = null;
+            }
+
+            let nextMessage: Content | null = { role: 'user', parts };
+
+            while (nextMessage !== null) {
               if (pendingSend.signal.aborted) {
+                this.#getCurrentChat().addHistory(nextMessage);
                 return { stopReason: 'cancelled' };
               }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.candidates &&
-                resp.value.candidates.length > 0
-              ) {
-                const candidate = resp.value.candidates[0];
-                for (const part of candidate.content?.parts ?? []) {
-                  if (!part.text) {
-                    continue;
+              const functionCalls: FunctionCall[] = [];
+              let usageMetadata: GenerateContentResponseUsageMetadata | null =
+                null;
+              const streamStartTime = Date.now();
+
+              try {
+                const sendResult =
+                  await this.#sendMessageStreamWithAutoCompression(
+                    promptId,
+                    nextMessage?.parts ?? [],
+                    pendingSend.signal,
+                  );
+                if (!sendResult.responseStream) {
+                  this.#preserveUnsentMessageHistory(
+                    nextMessage,
+                    sendResult.stopReason === 'cancelled',
+                  );
+                  return { stopReason: sendResult.stopReason };
+                }
+                const responseStream = sendResult.responseStream;
+                nextMessage = null;
+
+                for await (const resp of responseStream) {
+                  if (pendingSend.signal.aborted) {
+                    return { stopReason: 'cancelled' };
                   }
 
-                  this.messageEmitter.emitMessage(
-                    part.text,
-                    'assistant',
-                    part.thought,
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.candidates &&
+                    resp.value.candidates.length > 0
+                  ) {
+                    const candidate = resp.value.candidates[0];
+                    for (const part of candidate.content?.parts ?? []) {
+                      if (!part.text) {
+                        continue;
+                      }
+
+                      this.messageEmitter.emitMessage(
+                        part.text,
+                        'assistant',
+                        part.thought,
+                      );
+                    }
+                  }
+
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.usageMetadata
+                  ) {
+                    usageMetadata = resp.value.usageMetadata;
+                  }
+
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.functionCalls
+                  ) {
+                    functionCalls.push(...resp.value.functionCalls);
+                  }
+                }
+              } catch (error) {
+                // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+                // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
+                const errorStatus = getErrorStatus(error);
+                const errorMessage =
+                  error instanceof Error ? error.message : String(error);
+                const errorType = classifyApiError({
+                  message: errorMessage,
+                  status: errorStatus,
+                });
+
+                const hookSystem = this.config.getHookSystem?.();
+                const hooksEnabledForStopFailure =
+                  !this.config.getDisableAllHooks?.();
+                if (
+                  hooksEnabledForStopFailure &&
+                  hookSystem &&
+                  this.config.hasHooksForEvent?.('StopFailure')
+                ) {
+                  // Fire-and-forget: don't wait for hook to complete
+                  hookSystem
+                    .fireStopFailureEvent(errorType, errorMessage)
+                    .catch((err) => {
+                      debugLogger.warn(`StopFailure hook failed: ${err}`);
+                    });
+                }
+
+                if (errorStatus === 429) {
+                  throw new RequestError(
+                    429,
+                    'Rate limit exceeded. Try again later.',
                   );
                 }
+
+                throw error;
               }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.usageMetadata
-              ) {
-                usageMetadata = resp.value.usageMetadata;
+              if (usageMetadata) {
+                this.#recordPromptTokenCount(usageMetadata);
+                // Kick off rewrite in background (non-blocking, runs parallel to tools)
+                if (this.messageRewriter) {
+                  this.messageRewriter.flushTurn(pendingSend.signal);
+                }
+
+                const durationMs = Date.now() - streamStartTime;
+                await this.messageEmitter.emitUsageMetadata(
+                  usageMetadata,
+                  '',
+                  durationMs,
+                );
               }
 
-              if (
-                resp.type === StreamEventType.CHUNK &&
-                resp.value.functionCalls
-              ) {
-                functionCalls.push(...resp.value.functionCalls);
+              if (functionCalls.length > 0) {
+                const toolResponseParts = await this.runToolCalls(
+                  pendingSend.signal,
+                  promptId,
+                  functionCalls,
+                );
+                nextMessage = { role: 'user', parts: toolResponseParts };
               }
             }
-          } catch (error) {
-            // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-            // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
-            const errorStatus = getErrorStatus(error);
-            const errorMessage =
-              error instanceof Error ? error.message : String(error);
-            const errorType = classifyApiError({
-              message: errorMessage,
-              status: errorStatus,
-            });
 
-            const hookSystem = this.config.getHookSystem?.();
-            const hooksEnabledForStopFailure =
-              !this.config.getDisableAllHooks?.();
-            if (
-              hooksEnabledForStopFailure &&
-              hookSystem &&
-              this.config.hasHooksForEvent?.('StopFailure')
-            ) {
-              // Fire-and-forget: don't wait for hook to complete
-              hookSystem
-                .fireStopFailureEvent(errorType, errorMessage)
-                .catch((err) => {
-                  debugLogger.warn(`StopFailure hook failed: ${err}`);
-                });
-            }
-
-            if (errorStatus === 429) {
-              throw new RequestError(
-                429,
-                'Rate limit exceeded. Try again later.',
-              );
-            }
-
-            throw error;
-          }
-
-          if (usageMetadata) {
-            this.#recordPromptTokenCount(usageMetadata);
-            // Kick off rewrite in background (non-blocking, runs parallel to tools)
+            // Wait for any pending rewrite before returning
             if (this.messageRewriter) {
-              this.messageRewriter.flushTurn(pendingSend.signal);
+              await this.messageRewriter.waitForPendingRewrites();
             }
 
-            const durationMs = Date.now() - streamStartTime;
-            await this.messageEmitter.emitUsageMetadata(
-              usageMetadata,
-              '',
-              durationMs,
-            );
-          }
-
-          if (functionCalls.length > 0) {
-            const toolResponseParts = await this.runToolCalls(
-              pendingSend.signal,
+            // Fire Stop hook loop (aligned with core path in client.ts)
+            // This is triggered after model response completes with no pending tool calls
+            return this.#handleStopHookLoop(
+              pendingSend,
               promptId,
-              functionCalls,
+              hooksEnabled,
+              messageBus,
             );
-            nextMessage = { role: 'user', parts: toolResponseParts };
-          }
-        }
-
-        // Wait for any pending rewrite before returning
-        if (this.messageRewriter) {
-          await this.messageRewriter.waitForPendingRewrites();
-        }
-
-        // Fire Stop hook loop (aligned with core path in client.ts)
-        // This is triggered after model response completes with no pending tool calls
-        return this.#handleStopHookLoop(
-          pendingSend,
-          promptId,
-          hooksEnabled,
-          messageBus,
+          },
+          (result) => (result.stopReason === 'cancelled' ? 'cancelled' : 'ok'),
         );
       },
     );

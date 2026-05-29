@@ -7,12 +7,17 @@
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import express from 'express';
-import type { Application } from 'express';
+import type { Application, NextFunction, Request, Response } from 'express';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
   APPROVAL_MODES,
   SessionService,
   TrustGateError,
+  emitDaemonLog,
+  hashDaemonWorkspace,
+  recordDaemonError,
+  recordDaemonHttpResponse,
+  withDaemonRequestSpan,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { DaemonLogger } from './daemonLogger.js';
@@ -270,6 +275,73 @@ export interface ServeAppDeps {
    * stderr-only behavior.
    */
   daemonLog?: DaemonLogger;
+}
+
+function resolveDaemonTelemetryRoute(
+  req: Request,
+): { route: string; sessionId?: string } | undefined {
+  if (req.method === 'POST' && req.path === '/session') {
+    return { route: 'POST /session' };
+  }
+  const sessionAction = req.path.match(
+    /^\/session\/([^/]+)\/(load|resume|prompt|cancel)$/,
+  );
+  const sessionActionId = sessionAction?.[1];
+  const sessionActionName = sessionAction?.[2];
+  if (sessionActionId && sessionActionName && req.method === 'POST') {
+    return {
+      route: `POST /session/:id/${sessionActionName}`,
+      sessionId: sessionActionId,
+    };
+  }
+  const deleteSession = req.path.match(/^\/session\/([^/]+)$/);
+  const deleteSessionId = deleteSession?.[1];
+  if (deleteSessionId && req.method === 'DELETE') {
+    return { route: 'DELETE /session/:id', sessionId: deleteSessionId };
+  }
+  if (req.method === 'GET' && /^\/workspace\/.+\/sessions$/.test(req.path)) {
+    return { route: 'GET /workspace/:id/sessions' };
+  }
+  return undefined;
+}
+
+function daemonTelemetryMiddleware(
+  boundWorkspace: string,
+): (req: Request, res: Response, next: NextFunction) => void {
+  const workspaceHash = hashDaemonWorkspace(boundWorkspace);
+  return (req, res, next) => {
+    const route = resolveDaemonTelemetryRoute(req);
+    if (!route) {
+      next();
+      return;
+    }
+    void withDaemonRequestSpan(
+      {
+        method: req.method,
+        route: route.route,
+        workspaceHash,
+        ...(route.sessionId ? { sessionId: route.sessionId } : {}),
+      },
+      async (span) =>
+        await new Promise<void>((resolve, reject) => {
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            recordDaemonHttpResponse(span, res.statusCode);
+            resolve();
+          };
+          res.once('finish', finish);
+          res.once('close', finish);
+          try {
+            next();
+          } catch (error) {
+            recordDaemonError(span, error);
+            reject(error);
+          }
+        }),
+    ).catch(next);
+  };
 }
 
 /**
@@ -795,6 +867,8 @@ export function createServeApp(
     tokenConfigured: opts.token !== undefined,
     requireAuth: opts.requireAuth === true,
   });
+
+  app.use(daemonTelemetryMiddleware(boundWorkspace));
 
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
@@ -3390,6 +3464,19 @@ function sendBridgeErrorImpl(
   // structured daemon logger (which tees to stderr + log file). When
   // absent (tests, direct embeds), fall back to the legacy stderr-only
   // `writeStderrLine` path.
+  recordDaemonError(undefined, err, {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+  });
+  emitDaemonLog('Daemon bridge error.', {
+    ...(ctx?.route ? { 'http.route': ctx.route } : {}),
+    ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),
+    'error.type': err instanceof Error ? err.name : typeof err,
+    'error.message': (err instanceof Error ? err.message : String(err)).slice(
+      0,
+      1024,
+    ),
+  });
   if (daemonLog) {
     daemonLog.error(
       err instanceof Error ? err.message : String(err),

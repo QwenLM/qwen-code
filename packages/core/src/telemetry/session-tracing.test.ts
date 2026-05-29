@@ -125,6 +125,7 @@ import type { Config } from '../config/config.js';
 import {
   startInteractionSpan,
   endInteractionSpan,
+  withInteractionSpan,
   startLLMRequestSpan,
   endLLMRequestSpan,
   startToolSpan,
@@ -189,6 +190,31 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.ended).toBe(true);
       expect(mockSpans[0]!.statuses).toHaveLength(1);
       expect(mockSpans[0]!.statuses[0]!.code).toBe(SpanStatusCode.OK);
+    });
+
+    it('runs scoped interaction spans without mutating the global interaction context', async () => {
+      const config = createMockConfig({ sessionId: 'scoped-session' });
+      const result = await withInteractionSpan(
+        config,
+        {
+          promptId: 'prompt-scoped',
+          model: 'test-model',
+          messageType: 'acp_prompt',
+          parentContext: { parent: 'daemon' } as never,
+        },
+        async () => 'done',
+      );
+
+      expect(result).toBe('done');
+      expect(mockSpans).toHaveLength(1);
+      expect(mockSpans[0]!.name).toBe('qwen-code.interaction');
+      expect(mockSpans[0]!.parentContext).toEqual({ parent: 'daemon' });
+      expect(mockSpans[0]!.attributes['session.id']).toBe('scoped-session');
+      expect(mockSpans[0]!.attributes['qwen-code.message_type']).toBe(
+        'acp_prompt',
+      );
+      expect(mockSpans[0]!.ended).toBe(true);
+      expect(mockSpans[0]!.statuses.at(-1)?.code).toBe(SpanStatusCode.OK);
     });
 
     it('ends interaction span with error status', () => {

@@ -19,6 +19,8 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
+  DAEMON_TRACEPARENT_META_KEY,
+  DAEMON_TRACESTATE_META_KEY,
   TrustGateError,
   getCurrentGeminiMdFilename,
   ShellExecutionService,
@@ -76,7 +78,7 @@ import type {
   BridgeSessionSummary,
   HttpAcpBridge,
 } from './bridgeTypes.js';
-import type { BridgeOptions } from './bridgeOptions.js';
+import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 import { BridgeClient } from './bridgeClient.js';
@@ -87,6 +89,34 @@ import {
   type PermissionAuditPublisher,
 } from './permissionMediator.js';
 import { PermissionForbiddenError } from './bridgeErrors.js';
+
+const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
+  captureContext: () => undefined,
+  runWithContext(_captured, fn) {
+    return fn();
+  },
+  withSpan(_operation, _attributes, fn) {
+    return fn();
+  },
+  event() {},
+  injectPromptContext(request) {
+    const meta = (request as { _meta?: unknown })._meta;
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+      return request;
+    }
+    const record = meta as Record<string, unknown>;
+    if (
+      !(DAEMON_TRACEPARENT_META_KEY in record) &&
+      !(DAEMON_TRACESTATE_META_KEY in record)
+    ) {
+      return request;
+    }
+    const nextMeta = { ...record };
+    delete nextMeta[DAEMON_TRACEPARENT_META_KEY];
+    delete nextMeta[DAEMON_TRACESTATE_META_KEY];
+    return { ...request, _meta: nextMeta };
+  },
+};
 
 /**
  * Stage 1 HTTP→ACP bridge factory + supporting helpers, lifted from
@@ -732,6 +762,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   const contextFilename = opts.contextFilename ?? getCurrentGeminiMdFilename();
   const persistApprovalMode = opts.persistApprovalMode;
   const persistDisabledTools = opts.persistDisabledTools;
+  const telemetry = opts.telemetry ?? NOOP_BRIDGE_TELEMETRY;
 
   // #3803 §02 single-workspace model: the bridge hosts AT MOST one
   // ATTACH-AVAILABLE channel and one default attach-target entry.
@@ -968,7 +999,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
     const promise = (async () => {
-      const channel = await channelFactory(boundWorkspace, childEnvOverrides);
+      const channel = await telemetry.withSpan(
+        'channel.spawn',
+        {
+          'qwen-code.daemon.bridge.operation': 'channel.spawn',
+          'qwen-code.daemon.channel.reused': false,
+        },
+        async () => await channelFactory(boundWorkspace, childEnvOverrides),
+      );
       const client = new BridgeClient(
         // BfFut: ACP today carries a sessionId on every per-session
         // notification / request, so the no-sessionId branch is
@@ -1085,6 +1123,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // context line in that flow, and the message confirms the
         // cleanup actually ran.
         if (!shuttingDown) {
+          telemetry.event('channel.exited', {
+            'qwen-code.daemon.channel.exit_code': exitInfo?.exitCode ?? -1,
+            'qwen-code.daemon.channel.session_count': sessions.length,
+            ...(exitInfo?.signalCode
+              ? { 'qwen-code.daemon.channel.signal': exitInfo.signalCode }
+              : {}),
+          });
           writeStderrLine(
             `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, ${sessions.length} session(s) torn down)`,
           );
@@ -1124,16 +1169,23 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // shutdown) only need to mark dying + kill — the handler does
       // the alive-set cleanup when the OS reaps the child.
       try {
-        await withTimeout(
-          connection.initialize({
-            protocolVersion: PROTOCOL_VERSION,
-            clientCapabilities: {
-              fs: { readTextFile: true, writeTextFile: true },
-            },
-            clientInfo: { name: 'qwen-serve-bridge', version: '0' },
-          }),
-          initTimeoutMs,
-          'initialize',
+        await telemetry.withSpan(
+          'channel.initialize',
+          {
+            'qwen-code.daemon.bridge.operation': 'channel.initialize',
+          },
+          async () =>
+            await withTimeout(
+              connection.initialize({
+                protocolVersion: PROTOCOL_VERSION,
+                clientCapabilities: {
+                  fs: { readTextFile: true, writeTextFile: true },
+                },
+                clientInfo: { name: 'qwen-serve-bridge', version: '0' },
+              }),
+              initTimeoutMs,
+              'initialize',
+            ),
         );
       } catch (err) {
         // Mark the half-initialized channel as dying/unavailable, then
@@ -1205,13 +1257,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     const ci = await ensureChannel();
     let newSessionResp: { sessionId: string };
     try {
-      newSessionResp = await withTimeout(
-        ci.connection.newSession({
-          cwd: boundWorkspace,
-          mcpServers: [],
-        }),
-        initTimeoutMs,
-        'newSession',
+      newSessionResp = await telemetry.withSpan(
+        'session.new',
+        {
+          'qwen-code.daemon.bridge.operation': 'session.new',
+          'qwen-code.daemon.session_scope': effectiveScope,
+        },
+        async () =>
+          await withTimeout(
+            ci.connection.newSession({
+              cwd: boundWorkspace,
+              mcpServers: [],
+            }),
+            initTimeoutMs,
+            'newSession',
+          ),
       );
     } catch (err) {
       // Only reap when this newSession was the channel's first/only
@@ -2156,6 +2216,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     async sendPrompt(sessionId, req, signal, context) {
+      const capturedContext = telemetry.captureContext();
+      const queuedAt = Date.now();
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const originatorClientId = resolveTrustedClientId(
@@ -2173,162 +2235,139 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
-      const normalized: PromptRequest = { ...req, sessionId };
-      const result = entry.promptQueue.then(() => {
-        // If the caller aborted while we were queued behind earlier
-        // prompts, don't even start this one.
-        if (signal?.aborted) {
-          throw new DOMException('Prompt aborted', 'AbortError');
-        }
-        if (originatorClientId === undefined) {
-          delete entry.activePromptOriginatorClientId;
-        } else {
-          entry.activePromptOriginatorClientId = originatorClientId;
-        }
-        // Echo the user prompt to the session bus so other SSE-subscribed
-        // clients see the input alongside the agent response.
-        //
-        // The interactive prompt path was the only one not emitting
-        // `user_message_chunk` — `Session#executePrompt` (the agent
-        // side) forwards the prompt directly to the LLM; the cron path
-        // (Session.ts:1402) and `HistoryReplayer` (line 65) emit it
-        // explicitly. Without this echo, multi-client UIs only saw
-        // assistant text from peer prompts — no record of who said what.
-        //
-        // Originator dedup: SDK consumers' `normalizeDaemonEvent` with
-        // `suppressOwnUserEcho: true` filters the echo when
-        // `event.originatorClientId === opts.clientId`. So the
-        // originator's local UI doesn't double-render its own input.
-        //
-        // Multi-modal: one envelope per content block. Non-text blocks
-        // pass through verbatim (the agent's Core multimodal echo is a
-        // separate follow-up tracked in PR #4353 §D); for now the
-        // common text path is the immediate fix.
-        // A fresh prompt starts: clear the D2 cancel-broadcast latch so a
-        // cancel for THIS turn can broadcast (a stale latch from the prior
-        // turn must not suppress it).
-        entry.cancelBroadcast = false;
-        echoPromptToSessionBus(entry, normalized, originatorClientId);
-        const promptPromise = entry.connection
-          .prompt(normalized)
-          .finally(() => {
-            delete entry.activePromptOriginatorClientId;
-          });
+      const result = entry.promptQueue.then(() =>
+        telemetry.runWithContext(
+          capturedContext,
+          async () =>
+            await telemetry.withSpan(
+              'prompt.dispatch',
+              {
+                'qwen-code.daemon.bridge.operation': 'prompt.dispatch',
+                'session.id': sessionId,
+                'qwen-code.daemon.prompt.queue_wait_ms': Date.now() - queuedAt,
+              },
+              async () => {
+                const normalized: PromptRequest = telemetry.injectPromptContext(
+                  {
+                    ...req,
+                    sessionId,
+                  },
+                );
+                // If the caller aborted while we were queued behind earlier
+                // prompts, don't even start this one.
+                if (signal?.aborted) {
+                  throw new DOMException('Prompt aborted', 'AbortError');
+                }
+                if (originatorClientId === undefined) {
+                  delete entry.activePromptOriginatorClientId;
+                } else {
+                  entry.activePromptOriginatorClientId = originatorClientId;
+                }
+                // Echo the user prompt to the session bus so other SSE-subscribed
+                // clients see the input alongside the agent response.
+                //
+                // The interactive prompt path was the only one not emitting
+                // `user_message_chunk` — `Session#executePrompt` (the agent
+                // side) forwards the prompt directly to the LLM; the cron path
+                // (Session.ts:1402) and `HistoryReplayer` (line 65) emit it
+                // explicitly. Without this echo, multi-client UIs only saw
+                // assistant text from peer prompts — no record of who said what.
+                //
+                // Originator dedup: SDK consumers' `normalizeDaemonEvent` with
+                // `suppressOwnUserEcho: true` filters the echo when
+                // `event.originatorClientId === opts.clientId`. So the
+                // originator's local UI doesn't double-render its own input.
+                //
+                // Multi-modal: one envelope per content block. Non-text blocks
+                // pass through verbatim (the agent's Core multimodal echo is a
+                // separate follow-up tracked in PR #4353 §D); for now the
+                // common text path is the immediate fix.
+                entry.cancelBroadcast = false;
+                echoPromptToSessionBus(entry, normalized, originatorClientId);
+                const promptPromise = entry.connection
+                  .prompt(normalized)
+                  .finally(() => {
+                    delete entry.activePromptOriginatorClientId;
+                  });
 
-        // Race against channel termination: if the underlying transport
-        // dies (child crashed, stream torn down) WHILE the prompt is in
-        // flight, the SDK's pending-request promise can hang because the
-        // wire never delivers a response. Make the prompt fail-fast in
-        // that case so the per-session FIFO doesn't poison the next
-        // queued prompt with an unbounded await. See
-        // `getTransportClosedReject` for the single-listener invariant.
-        //
-        // FIXME(stage-2): no absolute prompt deadline. A buggy agent
-        // that ignores `cancel()` while keeping the channel alive can
-        // hold this race open indefinitely — the abort path fires
-        // `cancel()` and resolves pending permissions, but the
-        // `promptPromise` itself only settles when the agent
-        // cooperates. Stage 2 should add a configurable per-prompt
-        // wall clock (e.g. `--prompt-deadline 30m`) into this race so
-        // a wedged agent can't slow-leak prompt promises. Tracked
-        // under #3803 follow-ups.
-        const racedPromise = Promise.race([
-          promptPromise,
-          getTransportClosedReject(entry),
-        ]);
+                // Race against channel termination: if the underlying transport
+                // dies (child crashed, stream torn down) WHILE the prompt is in
+                // flight, the SDK's pending-request promise can hang because the
+                // wire never delivers a response. Make the prompt fail-fast in
+                // that case so the per-session FIFO doesn't poison the next
+                // queued prompt with an unbounded await. See
+                // `getTransportClosedReject` for the single-listener invariant.
+                //
+                // FIXME(stage-2): no absolute prompt deadline. A buggy agent
+                // that ignores `cancel()` while keeping the channel alive can
+                // hold this race open indefinitely — the abort path fires
+                // `cancel()` and resolves pending permissions, but the
+                // `promptPromise` itself only settles when the agent
+                // cooperates. Stage 2 should add a configurable per-prompt
+                // wall clock (e.g. `--prompt-deadline 30m`) into this race so
+                // a wedged agent can't slow-leak prompt promises. Tracked
+                // under #3803 follow-ups.
+                const racedPromise = Promise.race([
+                  promptPromise,
+                  getTransportClosedReject(entry),
+                ]);
 
-        // C3 (doudouOUC #4484 post-merge review): the user echo
-        // (`echoPromptToSessionBus`) was already published BEFORE the
-        // forward. If the forward itself fails (transport died, ACP child
-        // error) and it wasn't a user-initiated cancel that already
-        // broadcast, peers would be stuck having seen the echoed input with
-        // no response and no terminal signal — permanent silence. Emit a
-        // compensating `prompt_cancelled{reason:'forward_failed'}` so the
-        // turn visibly ends. The `…Once` latch dedups against the abort
-        // path (a normal cancel resolves rather than rejects, so this only
-        // fires on genuine forward failures). Side-effect only — the
-        // caller's `racedPromise` reference still surfaces the rejection.
-        void racedPromise
-          .then(
-            () => {},
-            (err) => {
-              // Log the root cause — without this a production
-              // `prompt_cancelled{forward_failed}` has no diagnostic trail
-              // (transport death vs ACP child crash vs timeout). Matches
-              // the bridge's other `writeStderrLine` error paths.
-              writeStderrLine(
-                `sendPrompt: forward failed for session ${sessionId}: ${
-                  err instanceof Error ? err.message : String(err)
-                }`,
-              );
-              broadcastPromptCancelledOnce(
-                entry,
-                sessionId,
-                originatorClientId,
-                'forward_failed',
-              );
-              cancelPendingForSession(sessionId);
-              entry.connection.cancel({ sessionId }).catch(() => {});
-            },
-          )
-          .catch(() => {});
+                // C3 (doudouOUC #4484 post-merge review): the user echo
+                // (`echoPromptToSessionBus`) was already published BEFORE the
+                // forward. If the forward itself fails (transport died, ACP child
+                // error) and it wasn't a user-initiated cancel that already
+                // broadcast, peers would be stuck having seen the echoed input with
+                // no response and no terminal signal — permanent silence. Emit a
+                // compensating `prompt_cancelled{reason:'forward_failed'}` so the
+                // turn visibly ends. The `…Once` latch dedups against the abort
+                // path (a normal cancel resolves rather than rejects, so this only
+                // fires on genuine forward failures). Side-effect only — the
+                // caller's `racedPromise` reference still surfaces the rejection.
+                void racedPromise
+                  .then(
+                    () => {},
+                    (err) => {
+                      writeStderrLine(
+                        `sendPrompt: forward failed for session ${sessionId}: ${
+                          err instanceof Error ? err.message : String(err)
+                        }`,
+                      );
+                      broadcastPromptCancelledOnce(
+                        entry,
+                        sessionId,
+                        originatorClientId,
+                        'forward_failed',
+                      );
+                      cancelPendingForSession(sessionId);
+                      entry.connection.cancel({ sessionId }).catch(() => {});
+                    },
+                  )
+                  .catch(() => {});
 
-        if (!signal) return racedPromise;
-        // Wire the abort: when the signal fires (e.g. SSE route's
-        // req.on('close')), tell the agent to wind down. ACP cancel is a
-        // notification — the active prompt resolves with
-        // stopReason: 'cancelled', then the next queued prompt can run.
-        //
-        // Also resolve any pending permission requests as `cancelled`.
-        // ACP spec requires `cancel` to settle outstanding
-        // `requestPermission` calls — `cancelSession()` already does
-        // this; the abort path here was missing the call. Without it,
-        // a client disconnecting while the agent is inside
-        // `requestPermission` leaves the permission promise unresolved
-        // forever (the agent is stuck waiting on a vote that no SSE
-        // subscriber will ever cast).
-        const onAbort = () => {
-          // Broadcast the cancel on the abort path too — client
-          // disconnect (SSE drop / tab close / laptop sleep) is the most
-          // common cancel trigger in production, and previously this path
-          // resolved permissions + forwarded ACP cancel WITHOUT telling
-          // peer SSE subscribers, leaving them in the exact
-          // silent-absence-of-chunks state this work set out to fix.
-          // `originatorClientId` here is the prompt's own originator (the
-          // client whose connection dropped). `…Once` dedups against an
-          // explicit `cancelSession` for the same turn (D2).
-          broadcastPromptCancelledOnce(entry, sessionId, originatorClientId);
-          cancelPendingForSession(sessionId);
-          entry.connection.cancel({ sessionId }).catch(() => {
-            // Cancel is fire-and-forget; the agent may already be dead.
-          });
-        };
-        if (signal.aborted) {
-          onAbort();
-        } else {
-          signal.addEventListener('abort', onAbort, { once: true });
-          // The aborted state can flip synchronously between the early-exit
-          // check at the top of `sendPrompt` and addEventListener — re-check
-          // after registration so a microsecond-window abort still fires
-          // `cancel()` instead of letting the prompt run uncancellable.
-          if (signal.aborted) onAbort();
-          // Detach the listener once the prompt resolves so the
-          // AbortController can be GC'd. The `.finally()` returns a
-          // promise chained on `racedPromise`; if `racedPromise`
-          // rejects, that returned promise rejects too — and we
-          // never await it, so under Node's default
-          // unhandled-rejection behavior the daemon could terminate
-          // even though the route's own catch handles the original
-          // rejection. Attach `.catch(() => {})` to the
-          // listener-cleanup chain only — the caller's reference to
-          // `racedPromise` (via `return racedPromise` below) still
-          // surfaces failures normally.
-          racedPromise
-            .finally(() => signal.removeEventListener('abort', onAbort))
-            .catch(() => {});
-        }
-        return racedPromise;
-      });
+                if (!signal) return racedPromise;
+                const onAbort = () => {
+                  broadcastPromptCancelledOnce(
+                    entry,
+                    sessionId,
+                    originatorClientId,
+                  );
+                  cancelPendingForSession(sessionId);
+                  entry.connection.cancel({ sessionId }).catch(() => {});
+                };
+                if (signal.aborted) {
+                  onAbort();
+                } else {
+                  signal.addEventListener('abort', onAbort, { once: true });
+                  if (signal.aborted) onAbort();
+                  racedPromise
+                    .finally(() => signal.removeEventListener('abort', onAbort))
+                    .catch(() => {});
+                }
+                return racedPromise;
+              },
+            ),
+        ),
+      );
       const promptId = context?.promptId;
       result.then(
         (promptResult) => {
@@ -2413,12 +2452,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       const notif: CancelNotification = req
         ? { ...req, sessionId }
         : { sessionId };
-      try {
-        await entry.connection.cancel(notif);
-      } catch (err) {
-        if (isNotCurrentlyGeneratingCancelError(err)) return;
-        throw err;
-      }
+      await telemetry.withSpan(
+        'session.cancel',
+        {
+          'qwen-code.daemon.bridge.operation': 'session.cancel',
+          'session.id': sessionId,
+        },
+        async () => {
+          try {
+            await entry.connection.cancel(notif);
+          } catch (err) {
+            if (isNotCurrentlyGeneratingCancelError(err)) return;
+            throw err;
+          }
+        },
+      );
     },
 
     subscribeEvents(sessionId, subOpts) {
@@ -2610,6 +2658,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             ? ` by client ${JSON.stringify(originatorClientId)}`
             : ''),
       );
+      telemetry.event('session.close', {
+        'qwen-code.daemon.bridge.operation': 'session.close',
+        'session.id': sessionId,
+      });
       if (defaultEntry === entry) defaultEntry = undefined;
       // #4325 fix: resolve the channel via `channelInfoForEntry(entry)`
       // (search `aliveChannels` for the entry's actual channel) instead
@@ -2688,7 +2740,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // late cancellation frames from the agent are intentionally dropped.
       entry.events.close();
       try {
-        await entry.connection.cancel({ sessionId });
+        await telemetry.withSpan(
+          'session.close.cancel_active_prompt',
+          {
+            'qwen-code.daemon.bridge.operation':
+              'session.close.cancel_active_prompt',
+            'session.id': sessionId,
+          },
+          async () => await entry.connection.cancel({ sessionId }),
+        );
       } catch {
         /* no active prompt or session already torn down */
       }

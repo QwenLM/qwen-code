@@ -92,6 +92,23 @@ export interface DaemonStatusProvider {
   ): Promise<ServePreflightCell[]>;
 }
 
+export type BridgeTelemetryAttributes = Record<
+  string,
+  string | number | boolean
+>;
+
+export interface BridgeTelemetry {
+  captureContext(): unknown;
+  runWithContext<T>(captured: unknown, fn: () => Promise<T>): Promise<T>;
+  withSpan<T>(
+    operation: string,
+    attributes: BridgeTelemetryAttributes,
+    fn: () => Promise<T>,
+  ): Promise<T>;
+  event(name: string, attributes: BridgeTelemetryAttributes): void;
+  injectPromptContext<T extends object>(request: T): T;
+}
+
 /**
  * Construction options for `createHttpAcpBridge`. Most fields are
  * tuning knobs with sensible defaults; `boundWorkspace` is the only
@@ -266,6 +283,8 @@ export interface BridgeOptions {
    * still query the routes; they'll see empty/idle cells.
    */
   statusProvider?: DaemonStatusProvider;
+  /** Optional daemon telemetry seam. Omitted callers get no-op spans/logs. */
+  telemetry?: BridgeTelemetry;
 
   /**
    * Optional fs injection seam (#4175 PR F1 step 5, originally the

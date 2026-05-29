@@ -19,6 +19,7 @@ import type {
   Agent,
   InitializeResponse,
   LoadSessionResponse,
+  PromptRequest,
   PromptResponse,
   ResumeSessionResponse,
   RequestPermissionResponse,
@@ -42,6 +43,7 @@ import {
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 import { createHttpAcpBridge } from './bridge.js';
 import type { ChannelFactory } from './channel.js';
+import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
 import type { BridgeEvent } from './eventBus.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
@@ -88,6 +90,60 @@ describe('createHttpAcpBridge', () => {
     expect(() => makeBridge({ eventRingSize: 80_000_000 })).toThrow(
       /Invalid eventRingSize/,
     );
+  });
+
+  it('uses bridge telemetry for channel/session/prompt dispatch and prompt metadata injection', async () => {
+    const handle = makeChannel();
+    const operations: string[] = [];
+    const telemetry: BridgeTelemetry = {
+      captureContext: () => ({ captured: true }),
+      async runWithContext(_captured, fn) {
+        return await fn();
+      },
+      async withSpan(operation, _attributes, fn) {
+        operations.push(operation);
+        return await fn();
+      },
+      event() {},
+      injectPromptContext(request) {
+        const meta =
+          (request as { _meta?: Record<string, unknown> })._meta ?? {};
+        return {
+          ...request,
+          _meta: {
+            ...meta,
+            'qwen.telemetry.traceparent': 'daemon-traceparent',
+          },
+        };
+      },
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      telemetry,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'hello' }],
+      _meta: {
+        keep: 'value',
+        'qwen.telemetry.traceparent': 'client-spoof',
+      },
+    } as PromptRequest);
+
+    expect(operations).toEqual(
+      expect.arrayContaining([
+        'channel.spawn',
+        'channel.initialize',
+        'session.new',
+        'prompt.dispatch',
+      ]),
+    );
+    expect(handle.agent.promptCalls[0]!._meta).toMatchObject({
+      keep: 'value',
+      'qwen.telemetry.traceparent': 'daemon-traceparent',
+    });
   });
 
   it('forwards childEnvOverrides to the channelFactory at spawn time (#4247 R6 line 216)', async () => {
