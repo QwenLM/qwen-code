@@ -9,6 +9,7 @@ import type { BackendConfig } from '../backend/types.ts';
 import {
   QwenAgent,
   extractQwenParentToolUseId,
+  formatQwenAcpErrorMessage,
   resolveQwenParentToolUseId,
 } from '../qwen-agent.ts';
 
@@ -77,6 +78,33 @@ async function readNextQueuedEvent(agent: QwenAgent): Promise<unknown> {
   await iterator.return?.(undefined);
   return next.value;
 }
+
+describe('QwenAgent ACP error formatting', () => {
+  it('includes ACP internal error details in user-visible messages', () => {
+    const error = Object.assign(new Error('Internal error'), {
+      data: { details: '401 Unauthorized' },
+    });
+
+    expect(formatQwenAcpErrorMessage(error)).toBe(
+      'Internal error: 401 Unauthorized',
+    );
+  });
+
+  it('uses nested provider messages from ACP internal error data', () => {
+    const error = Object.assign(new Error('Internal error'), {
+      data: {
+        error: {
+          message: 'Model access denied',
+          code: 'PermissionDenied',
+        },
+      },
+    });
+
+    expect(formatQwenAcpErrorMessage(error)).toBe(
+      'Internal error: Model access denied',
+    );
+  });
+});
 
 describe('QwenAgent model metadata', () => {
   it('extracts subagent parent metadata from Qwen ACP updates', () => {
@@ -201,8 +229,10 @@ describe('QwenAgent model metadata', () => {
           setModelParams.push(params);
           return undefined as Awaited<ReturnType<typeof execute>>;
         },
-        setSessionConfigOption: async () => undefined as Awaited<ReturnType<typeof execute>>,
-        setSessionMode: async () => undefined as Awaited<ReturnType<typeof execute>>,
+        setSessionConfigOption: async () =>
+          undefined as Awaited<ReturnType<typeof execute>>,
+        setSessionMode: async () =>
+          undefined as Awaited<ReturnType<typeof execute>>,
       });
     };
 

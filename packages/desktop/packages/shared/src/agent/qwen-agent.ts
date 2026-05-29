@@ -100,6 +100,44 @@ import { normalizeQwenMemorySettings } from '../config/qwen-settings.ts';
 
 type JsonRecord = Record<string, unknown>;
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function getAcpErrorDetail(data: unknown): string | undefined {
+  if (data == null) return undefined;
+  if (typeof data === 'string') return data.trim() || undefined;
+  if (typeof data !== 'object') return String(data);
+
+  const record = data as JsonRecord;
+  for (const key of ['details', 'message', 'error_description']) {
+    const value = record[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+
+  const nested = getAcpErrorDetail(record.error);
+  if (nested) return nested;
+
+  try {
+    const serialized = JSON.stringify(data);
+    return serialized === '{}' ? undefined : serialized;
+  } catch {
+    return undefined;
+  }
+}
+
+export function formatQwenAcpErrorMessage(error: unknown): string {
+  const message = getErrorMessage(error);
+  const data =
+    error && typeof error === 'object'
+      ? (error as { data?: unknown }).data
+      : undefined;
+  const detail = getAcpErrorDetail(data);
+
+  if (!detail || detail === message) return message;
+  return `${message}: ${detail}`;
+}
+
 type AcpPermissionOption = {
   optionId?: string;
   name?: string;
@@ -1769,8 +1807,7 @@ export class QwenAgent extends BaseAgent {
             this.eventQueue.complete();
             return;
           }
-          const message =
-            error instanceof Error ? error.message : String(error);
+          const message = formatQwenAcpErrorMessage(error);
           persistTranscriptTextElements();
           this.eventQueue.enqueue({ type: 'error', message });
           this.eventQueue.enqueue({ type: 'complete' });
@@ -1793,7 +1830,7 @@ export class QwenAgent extends BaseAgent {
         }
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = formatQwenAcpErrorMessage(error);
       yield { type: 'error', message };
       yield { type: 'complete' };
     } finally {
@@ -2612,8 +2649,7 @@ export class QwenAgent extends BaseAgent {
       );
       this.connection = this.acpLease.connection;
     } catch (error) {
-      const originalMessage =
-        error instanceof Error ? error.message : String(error);
+      const originalMessage = formatQwenAcpErrorMessage(error);
       const recentStderr = this.getRecentStderr().trim();
       const message = [
         originalMessage,
