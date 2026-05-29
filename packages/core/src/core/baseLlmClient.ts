@@ -545,8 +545,11 @@ function parseJsonObjectFromText(
   let withoutFence = trimmed;
   if (withoutFence.startsWith('```')) {
     withoutFence = withoutFence.replace(/^```(?:json)?\s*/i, '');
-  }
-  if (withoutFence.endsWith('```')) {
+    const closingFence = withoutFence.indexOf('```');
+    if (closingFence !== -1) {
+      withoutFence = withoutFence.slice(0, closingFence);
+    }
+  } else if (withoutFence.endsWith('```')) {
     withoutFence = withoutFence.replace(/\s*```$/i, '');
   }
 
@@ -609,6 +612,9 @@ function shouldAttemptJsonRepair(
   jsonSlice: string,
   options: { allowUnquotedKeyStringValues?: boolean } = {},
 ): boolean {
+  if (hasMissingJsonValue(jsonSlice)) {
+    return false;
+  }
   if (/"[^"]+"\s*:/.test(jsonSlice)) {
     return true;
   }
@@ -621,36 +627,24 @@ function shouldAttemptJsonRepair(
   );
 }
 
+function hasMissingJsonValue(jsonSlice: string): boolean {
+  return /:\s*(?=[,}])/.test(jsonSlice);
+}
+
 function canRepairUnquotedKeyStringValues(jsonSlice: string): boolean {
-  return /[{,]\s*[A-Za-z_$][\w$-]*\s*:\s*"[^"]*"\s*(?:[,}])/.test(jsonSlice);
+  return /[{,]\s*[A-Za-z_$][\w$-]*\s*:\s*"(?:[^"\\]|\\.)*"\s*(?:[,}])/.test(
+    jsonSlice,
+  );
 }
 
 function findJsonObjectSlices(text: string): string[] {
   if (!text.includes('{')) return [];
 
   const slices: string[] = [];
-  let inString = false;
-  let escaped = false;
   let squareDepth = 0;
 
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
-
-    if (inString) {
-      if (escaped) {
-        escaped = false;
-      } else if (char === '\\') {
-        escaped = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inString = true;
-      continue;
-    }
 
     if (char === '[') {
       squareDepth++;
@@ -662,7 +656,7 @@ function findJsonObjectSlices(text: string): string[] {
     }
     if (char === '{' && squareDepth > 0) {
       const previous = previousNonWhitespaceChar(text, i);
-      if (previous !== '[' && previous !== ',') {
+      if (previous !== '[' && previous !== ',' && previous !== ':') {
         squareDepth = 0;
       }
     }
@@ -697,6 +691,7 @@ function findJsonObjectSliceFrom(
   start: number,
 ): string | undefined {
   let depth = 0;
+  let squareDepth = 0;
   let inString = false;
   let escaped = false;
 
@@ -716,9 +711,13 @@ function findJsonObjectSliceFrom(
 
     if (char === '"') {
       inString = true;
-    } else if (char === '{') {
+    } else if (char === '[') {
+      squareDepth++;
+    } else if (char === ']' && squareDepth > 0) {
+      squareDepth--;
+    } else if (char === '{' && squareDepth === 0) {
       depth++;
-    } else if (char === '}') {
+    } else if (char === '}' && squareDepth === 0) {
       depth--;
       if (depth === 0) {
         return text.slice(start, i + 1);

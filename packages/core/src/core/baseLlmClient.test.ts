@@ -418,6 +418,24 @@ describe('BaseLlmClient', () => {
       expect(result).toEqual({ color: 'violet' });
     });
 
+    it('should parse only the first fenced JSON block before trailing prose', async () => {
+      const mockResponse = createMockResponseWithText(
+        '```json\n{"answer":"Paris"}\n```\nAlternative: {"answer":"London"} would be wrong.',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([]);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ answer: 'Paris' });
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('generateJson used text-channel fallback'),
+      );
+      expect(mockDebugWarn).not.toHaveBeenCalledWith(
+        expect.stringContaining('rejected ambiguous JSON candidates'),
+      );
+    });
+
     it('should treat an empty JSON object from text as a successful fallback parse', async () => {
       const mockResponse = createMockResponseWithText('{}');
       mockGenerateContent.mockResolvedValue(mockResponse);
@@ -697,6 +715,45 @@ describe('BaseLlmClient', () => {
       expect(result).toEqual({ color: 'blue' });
     });
 
+    it('should recover JSON after unmatched prose quotes', async () => {
+      const mockResponse = createMockResponseWithText(
+        'He said "hello and the result is {"color":"blue"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'blue' });
+    });
+
+    it('should reject loose JSON objects with missing values', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{action: , target: "users"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
+    });
+
+    it('should repair unquoted keys with escaped quotes in string values', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{foo: "bar\\"baz", color: "blue"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ foo: 'bar"baz', color: 'blue' });
+    });
+
     it('should not repair prose fragments with quoted string values and trailing commas', async () => {
       const mockResponse = createMockResponseWithText(
         'Notes: {note: "see docs",}. No structured response.',
@@ -789,6 +846,36 @@ describe('BaseLlmClient', () => {
 
     it('should reject loose JSON arrays containing objects', async () => {
       const mockResponse = createMockResponseWithText('[{"color":"blue"}]');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
+    });
+
+    it('should reject nested objects inside loose JSON arrays', async () => {
+      const mockResponse = createMockResponseWithText(
+        '[{"wrapper":{"color":"blue"}}]',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
+    });
+
+    it('should reject malformed arrays instead of returning truncated fields', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{"items": [1, 2, 3} ], "ok": true, "count": 42}',
+      );
       mockGenerateContent.mockResolvedValue(mockResponse);
       vi.mocked(getFunctionCalls).mockReturnValue(undefined);
 
