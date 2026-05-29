@@ -684,8 +684,12 @@ export async function composePostCompactHistory(
     out.push({ role: 'user', parts: postAckParts });
     if (trailingFc) out.push(trailingFc);
   } else if (trailingFc) {
-    // Fold the trailing functionCall into the ack's own Content so we
-    // don't produce model→model adjacency.
+    // Fold the trailing functionCall into the ack's own Content so we don't
+    // produce model→model adjacency. Intentionally keep ONLY the
+    // functionCall parts: the trailing turn's text was already captured in
+    // the summary, and merging it into the ack would muddy both. (The
+    // with-attachments branch above keeps trailingFc as its own model turn,
+    // so text survives there — the asymmetry is deliberate, not a bug.)
     const fcParts = (trailingFc.parts ?? []).filter((p) => !!p.functionCall);
     out.push({ role: 'model', parts: [...ackParts, ...fcParts] });
   } else {

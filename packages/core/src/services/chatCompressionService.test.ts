@@ -19,6 +19,7 @@ import type { Config } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
+import * as postCompactModule from './postCompactAttachments.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
 vi.mock('../core/tokenLimits.js');
@@ -429,6 +430,62 @@ describe('ChatCompressionService', () => {
     const lastIsOrphanFc =
       last.role === 'model' && (last.parts ?? []).some((p) => !!p.functionCall);
     expect(lastIsOrphanFc).toBe(false);
+  });
+
+  it('degrades to summary+ack (folding trailing fc) when composePostCompactHistory throws', async () => {
+    // A restoration-assembly throw must NOT escape to sendMessageStream
+    // (which would crash the turn AND bypass the COMPRESSION_FAILED breaker).
+    // It degrades to a valid post-compact history; an auto-compaction trailing
+    // functionCall is folded into the ack so a pending functionResponse keeps
+    // its match (and the trailing turn's text is dropped, per the composer).
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      { role: 'user', parts: [{ text: 'go' }] },
+      { role: 'model', parts: [{ text: 'thinking' }] },
+      { role: 'user', parts: [{ text: 'go on' }] },
+      {
+        role: 'model',
+        parts: [
+          { text: 'let me read it' },
+          { functionCall: { name: 'read_file', args: { file_path: '/x.ts' } } },
+        ],
+      },
+    ]);
+    const generateText = vi.fn().mockResolvedValue({
+      text: '<state_snapshot><primary_request_and_intent>x</primary_request_and_intent></state_snapshot>',
+      usage: {
+        promptTokenCount: 49_000,
+        candidatesTokenCount: 1_500,
+        totalTokenCount: 50_500,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText,
+    } as unknown as BaseLlmClient);
+    const composeSpy = vi
+      .spyOn(postCompactModule, 'composePostCompactHistory')
+      .mockRejectedValue(new Error('EACCES: simulated disk failure'));
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      trigger: 'auto', // keep the trailing fc (manual would strip it)
+      model: mockModel,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100_000,
+    });
+
+    expect(composeSpy).toHaveBeenCalled();
+    // Degraded success — not an escape, not a compression failure.
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    const last = result.newHistory![result.newHistory!.length - 1];
+    expect(last.role).toBe('model');
+    expect(last.parts?.some((p) => p.text)).toBe(true); // ack text
+    expect(last.parts?.some((p) => !!p.functionCall)).toBe(true); // folded fc
+    const ackText = (last.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join(' ');
+    expect(ackText).not.toContain('let me read it'); // trailing text dropped
   });
 
   it('silently ignores the deprecated chatCompression.contextPercentageThreshold = 0 (no longer disables compaction)', async () => {
