@@ -24,7 +24,7 @@ import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import {
-  type ApprovalMode,
+  ApprovalMode,
   type Config,
   Storage,
   createDebugLogger,
@@ -1541,11 +1541,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     statusText = t('Shell mode');
   } else if (approvalModePromptStyle?.color) {
     statusColor = approvalModePromptStyle.color;
-    if (approvalModePromptStyle.label === 'yolo') {
+    if (approvalMode === ApprovalMode.YOLO) {
       statusText = t('YOLO mode');
-    } else if (approvalModePromptStyle.label === 'edits') {
+    } else if (approvalMode === ApprovalMode.AUTO_EDIT) {
       statusText = t('Accepting edits');
-    } else if (approvalModePromptStyle.label === 'auto') {
+    } else if (approvalMode === ApprovalMode.AUTO) {
       statusText = t('Auto mode');
     }
   }

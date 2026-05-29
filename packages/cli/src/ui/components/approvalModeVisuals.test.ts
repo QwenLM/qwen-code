@@ -26,12 +26,10 @@ describe('approval mode visuals', () => {
     expect(getApprovalModePromptStyle(ApprovalMode.AUTO_EDIT)).toEqual({
       color: theme.status.warningDim,
       prefix: '>',
-      label: 'edits',
     });
     expect(getApprovalModePromptStyle(ApprovalMode.AUTO)).toEqual({
       color: theme.text.link,
       prefix: '>',
-      label: 'auto',
     });
   });
 
@@ -39,7 +37,6 @@ describe('approval mode visuals', () => {
     expect(getApprovalModePromptStyle(ApprovalMode.YOLO)).toEqual({
       color: theme.status.errorDim,
       prefix: '*',
-      label: 'yolo',
     });
   });
 });

@@ -28,15 +28,14 @@ export function getApprovalModeIndicatorColor(
 export function getApprovalModePromptStyle(approvalMode: ApprovalMode): {
   color?: string;
   prefix: '>' | '*';
-  label?: string;
 } {
   switch (approvalMode) {
     case ApprovalMode.AUTO_EDIT:
-      return { color: theme.status.warningDim, prefix: '>', label: 'edits' };
+      return { color: theme.status.warningDim, prefix: '>' };
     case ApprovalMode.AUTO:
-      return { color: theme.text.link, prefix: '>', label: 'auto' };
+      return { color: theme.text.link, prefix: '>' };
     case ApprovalMode.YOLO:
-      return { color: theme.status.errorDim, prefix: '*', label: 'yolo' };
+      return { color: theme.status.errorDim, prefix: '*' };
     case ApprovalMode.PLAN:
     case ApprovalMode.DEFAULT:
     default:
