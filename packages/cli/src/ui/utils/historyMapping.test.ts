@@ -198,6 +198,45 @@ describe('computeApiTruncationIndex', () => {
     });
   });
 
+  describe('mid-turn user messages (notification type)', () => {
+    it('skips notification items so btw merged into functionResponse does not cause mismatch', () => {
+      // Mid-turn messages are type 'notification' in UI (not counted by
+      // isRealUserTurn) and merged into tool_result in API (skipped by
+      // isUserTextContent). Both sides agree → correct truncation index.
+      const ui: HistoryItem[] = [
+        userItem(1, 'first prompt'),
+        geminiItem(2),
+        {
+          type: 'notification',
+          id: 3,
+          text: 'btw side question',
+        } as HistoryItem,
+        userItem(5, 'next prompt'),
+        geminiItem(6),
+      ];
+      const btwMergedIntoToolResult: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: { name: 'tool', response: { result: 'ok' } },
+          } as unknown as Part,
+          { text: 'btw side question' } as Part,
+        ],
+      };
+      const api: Content[] = [
+        userContent('first prompt'),
+        modelContent('response with tool call'),
+        btwMergedIntoToolResult,
+        modelContent('response after btw'),
+        userContent('next prompt'),
+        modelContent('response 5'),
+      ];
+      // notification is not counted → uiUserTurnCount=1 before 'next prompt'
+      // API has 2 user text entries (idx 0 and 4) → finds idx 4 correctly
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+    });
+  });
+
   describe('with slash-command items in UI history', () => {
     it('ignores slash-command items when counting user turns', () => {
       const ui: HistoryItem[] = [
