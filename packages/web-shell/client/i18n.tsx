@@ -167,8 +167,10 @@ const EN: Messages = {
   'dialog.footer.navOpenMenu': '↑↓ to navigate · Enter to open · Esc to menu',
   'dialog.footer.back': 'Esc to go back',
   'dialog.footer.backClose': 'Esc to close',
-  'dialog.footer.saveClose': '⌘/Ctrl+Enter to save · Esc to close',
-  'dialog.footer.saveMenu': '⌘/Ctrl+Enter to save · Esc to menu',
+  'dialog.footer.saveClose':
+    '↑↓ switch fields · ⌘/Ctrl+Enter to save · Esc to close',
+  'dialog.footer.saveMenu':
+    '↑↓ switch fields · ⌘/Ctrl+Enter to save · Esc to menu',
   'dialog.footer.search': 'Type to search · Enter to commit · Esc to clear',
   'dialog.footer.select': 'Enter to select',
   'editor.noHistory': 'No matching history',
@@ -251,7 +253,7 @@ const EN: Messages = {
   'local.resume': 'Resume a previous session',
   'local.skills': 'View available skills',
   'local.theme': 'Change theme',
-  'local.tools': 'View tools and descriptions',
+  'local.tools': 'List available tools. Usage: /tools [desc]',
   'loadWarning.commands':
     'Failed to load command list; slash commands may be incomplete.',
   'loadWarning.context':
@@ -379,6 +381,8 @@ const EN: Messages = {
   'todo.title': 'Current tasks',
   'tips.items':
     'Type / to see all available commands.|Use @ to reference file paths.|Press Esc to cancel an in-flight request.|Use Shift+Enter for a newline.|Press ↑↓ to browse message history.',
+  'tools.available': 'Available tools:',
+  'tools.none': 'No tools available.',
   'tools.empty': 'No built-in tools available. Open a session first.',
   'tools.footer': (v) =>
     v?.name
@@ -548,8 +552,8 @@ const ZH: Messages = {
   'dialog.footer.navOpenMenu': '↑↓ 导航 · Enter 打开 · Esc 返回菜单',
   'dialog.footer.back': 'Esc 返回',
   'dialog.footer.backClose': 'Esc 关闭',
-  'dialog.footer.saveClose': '⌘/Ctrl+Enter 保存 · Esc 关闭',
-  'dialog.footer.saveMenu': '⌘/Ctrl+Enter 保存 · Esc 返回菜单',
+  'dialog.footer.saveClose': '↑↓ 切换输入框 · ⌘/Ctrl+Enter 保存 · Esc 关闭',
+  'dialog.footer.saveMenu': '↑↓ 切换输入框 · ⌘/Ctrl+Enter 保存 · Esc 返回菜单',
   'dialog.footer.search': '输入搜索 · Enter 确认 · Esc 清空',
   'dialog.footer.select': 'Enter 选择',
   'editor.noHistory': '没有匹配的历史记录',
@@ -631,7 +635,7 @@ const ZH: Messages = {
   'local.resume': '恢复历史会话',
   'local.skills': '查看可用 skills',
   'local.theme': '切换主题',
-  'local.tools': '查看工具及描述',
+  'local.tools': '列出可用工具。用法: /tools [desc]',
   'loadWarning.commands': '命令列表加载失败，斜杠命令可能不完整。',
   'loadWarning.context': '会话上下文加载失败，当前模式可能不准确。',
   'loadWarning.models': '模型列表加载失败，部分模型详情可能不可用。',
@@ -754,6 +758,8 @@ const ZH: Messages = {
   'todo.title': '当前任务',
   'tips.items':
     '输入 / 查看所有可用命令。|使用 @ 引用文件路径。|按 Esc 取消正在进行的请求。|使用 Shift+Enter 换行。|按 ↑↓ 浏览历史消息。',
+  'tools.available': '可用工具:',
+  'tools.none': '没有可用工具。',
   'tools.empty': '没有可用的内置工具。请先打开一个会话。',
   'tools.footer': (v) =>
     v?.name

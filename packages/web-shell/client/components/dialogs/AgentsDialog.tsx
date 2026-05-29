@@ -24,6 +24,7 @@ export type AgentsDialogInitialMode =
 
 interface AgentsDialogProps {
   initialMode?: AgentsDialogInitialMode;
+  onMessage?: (text: string, type?: 'status' | 'error') => void;
   onClose: () => void;
 }
 
@@ -55,6 +56,7 @@ function initialScope(mode: AgentsDialogInitialMode): 'workspace' | 'global' {
 
 export function AgentsDialog({
   initialMode = 'menu',
+  onMessage,
   onClose,
 }: AgentsDialogProps) {
   const { t } = useI18n();
@@ -184,11 +186,13 @@ export function AgentsDialog({
       scope,
     })
       .then((result) => {
+        const msg = t('agent.created', { name: result.agent.name });
+        onMessage?.(msg);
         if (directCreateMode) {
           onClose();
           return;
         }
-        setMessage(t('agent.created', { name: result.agent.name }));
+        setMessage(msg);
         setName('');
         setDescription('');
         setSystemPrompt('');
@@ -205,6 +209,7 @@ export function AgentsDialog({
     directCreateMode,
     name,
     onClose,
+    onMessage,
     reload,
     scope,
     systemPrompt,
@@ -318,12 +323,21 @@ export function AgentsDialog({
         setScope(nextScope);
         setMode('create');
       }
+      if (e.key === 'd' && e.ctrlKey && mode === 'manage' && selected) {
+        e.preventDefault();
+        if (!busy && canDeleteAgent(selected)) {
+          handleDelete(selected);
+        }
+      }
     },
     [
       agents.length,
+      busy,
+      handleDelete,
       initialMode,
       menuItems,
       mode,
+      selected,
       onClose,
       scopeItems,
       selectedIdx,
@@ -493,7 +507,12 @@ export function AgentsDialog({
           <div className={dp('dialog-detail')}>
             {detail ? (
               <>
-                <div className={dp('dialog-detail-title')}>{detail.name}</div>
+                <div className={dp('dialog-detail-title')}>
+                  {detail.name}
+                  {canDeleteAgent(detail) && (
+                    <span className={dp('dialog-detail-shortcut')}>Ctrl+D</span>
+                  )}
+                </div>
                 <div className={dp('dialog-detail-meta')}>
                   {detail.level}
                   {detail.model ? ` · ${detail.model}` : ''}
@@ -505,15 +524,6 @@ export function AgentsDialog({
                   <div className={dp('dialog-detail-meta')}>
                     {t('agent.tools')}: {detail.tools.join(', ')}
                   </div>
-                )}
-                {canDeleteAgent(detail) && (
-                  <button
-                    className={dp('dialog-danger-button')}
-                    disabled={busy}
-                    onClick={() => handleDelete(detail)}
-                  >
-                    {busy ? t('agent.delete.loading') : t('agent.delete')}
-                  </button>
                 )}
               </>
             ) : (

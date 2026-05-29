@@ -21,7 +21,6 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
     autoLoad: true,
   });
   const [selectedIdx, setSelectedIdx] = useState(0);
-  const [busyTool, setBusyTool] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -39,14 +38,12 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
 
   const handleToggle = useCallback(
     (tool: DaemonWorkspaceToolStatus) => {
-      setBusyTool(tool.name);
       setMessage(null);
       setEnabled(tool.name, !tool.enabled)
         .then(() => reload())
         .catch((err: unknown) => {
           setMessage(err instanceof Error ? err.message : String(err));
-        })
-        .finally(() => setBusyTool(null));
+        });
     },
     [reload, setEnabled],
   );
@@ -173,31 +170,6 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
                 <div className={dp('dialog-detail-body')}>
                   {tool.description}
                 </div>
-              </div>
-            )}
-            {i === selectedIdx && (
-              <div className={dp('dialog-inline-actions')}>
-                {tool.description && (
-                  <button
-                    className={dp('dialog-inline-button')}
-                    onClick={() => toggleDetails(tool)}
-                  >
-                    {expandedTools.has(tool.name)
-                      ? t('tools.details.hide')
-                      : t('tools.details.show')}
-                  </button>
-                )}
-                <button
-                  className={dp('dialog-inline-button')}
-                  disabled={busyTool === tool.name}
-                  onClick={() => handleToggle(tool)}
-                >
-                  {busyTool === tool.name
-                    ? t('tools.updating')
-                    : tool.enabled
-                      ? t('tools.update.disable')
-                      : t('tools.update.enable')}
-                </button>
               </div>
             )}
           </div>

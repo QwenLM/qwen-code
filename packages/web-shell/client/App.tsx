@@ -511,22 +511,22 @@ export function App({
   }, []);
 
   const [compactMode, setCompactMode] = useState(false);
+  const compactModeRef = useRef(compactMode);
+  compactModeRef.current = compactMode;
 
   const handleClearScreen = useCallback(() => {
     store.reset();
   }, [store]);
 
   const handleToggleCompact = useCallback(() => {
-    setCompactMode((prev) => {
-      const next = !prev;
-      store.dispatch([
-        {
-          type: 'status',
-          text: next ? t('compact.enabled') : t('compact.disabled'),
-        },
-      ]);
-      return next;
-    });
+    const next = !compactModeRef.current;
+    setCompactMode(next);
+    store.dispatch([
+      {
+        type: 'status',
+        text: next ? t('compact.enabled') : t('compact.disabled'),
+      },
+    ]);
   }, [store, t]);
 
   const handleSetMode = useCallback(
@@ -831,6 +831,7 @@ export function App({
                 reportError(error, 'Failed to send /skills command'),
               );
             } else {
+              store.appendLocalUserMessage(text);
               workspaceActions
                 .loadSkillsStatus()
                 .then((status) => {
@@ -862,7 +863,33 @@ export function App({
             return true;
           }
           if (cmd === 'tools') {
-            setShowToolsDialog(true);
+            const toolsArg = text.slice(match[0].length).trim().toLowerCase();
+            if (toolsArg === 'desc' || toolsArg === 'descriptions') {
+              setShowToolsDialog(true);
+            } else {
+              store.appendLocalUserMessage(text);
+              workspaceActions
+                .loadToolsStatus()
+                .then((status) => {
+                  const tools = status?.tools ?? [];
+                  if (tools.length === 0) {
+                    store.dispatch([{ type: 'status', text: t('tools.none') }]);
+                  } else {
+                    const list = tools
+                      .map((tool) => `- ${tool.displayName || tool.name}`)
+                      .join('\n');
+                    store.dispatch([
+                      {
+                        type: 'status',
+                        text: `${t('tools.available')}\n\n${list}`,
+                      },
+                    ]);
+                  }
+                })
+                .catch((error: unknown) => {
+                  reportError(error, 'Failed to load tools');
+                });
+            }
             return true;
           }
           if (cmd === 'context') {
@@ -1334,6 +1361,9 @@ export function App({
               {agentsDialogMode && (
                 <AgentsDialog
                   initialMode={agentsDialogMode}
+                  onMessage={(text, type = 'status') => {
+                    store.dispatch([{ type, text }]);
+                  }}
                   onClose={() => setAgentsDialogMode(null)}
                 />
               )}

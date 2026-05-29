@@ -45,7 +45,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     },
     { name: 'mcp', description: t('local.mcp') },
     { name: 'skills', description: t('local.skills') },
-    { name: 'tools', description: t('local.tools') },
+    { name: 'tools', description: t('local.tools'), argumentHint: '[desc]' },
     {
       name: 'memory',
       description: t('local.memory'),
