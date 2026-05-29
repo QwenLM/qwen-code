@@ -619,9 +619,23 @@ export class BridgeClient implements Client {
       );
     } else {
       try {
+        // Fallback path (no `onModePromoted` injected — tests / non-bridge
+        // consumers; production always wires the bridge callback). Mirror
+        // the main path's full payload: the SDK's
+        // `isApprovalModeChangedData` requires `previous` (non-empty
+        // string) and `persisted` (boolean), so a `{ sessionId, next }`
+        // shape fails validation and `asKnownDaemonEvent` drops the event.
+        // `previous` is unavailable on this path (the cache lives on the
+        // bridge's `SessionEntry`, not the demux interface), so seed it
+        // with the protocol default.
         entry.events.publish({
           type: 'approval_mode_changed',
-          data: { sessionId, next: currentModeId },
+          data: {
+            sessionId,
+            previous: 'default',
+            next: currentModeId,
+            persisted: false,
+          },
           ...(entry.activePromptOriginatorClientId
             ? { originatorClientId: entry.activePromptOriginatorClientId }
             : {}),
@@ -635,13 +649,24 @@ export class BridgeClient implements Client {
     // VS Code IDE companion's existing `case 'current_mode_update'`
     // handler keeps working. Remove this block (and its tracking issue)
     // once the companion ships an `approval_mode_changed` handler.
+    //
+    // Use the canonical ACP-nested shape (`data.update.sessionUpdate`),
+    // matching what `BridgeClient.sessionUpdate` publishes for a real
+    // `current_mode_update` notification. A flat
+    // `{ sessionId, sessionUpdate, currentModeId }` would (a) not be
+    // recognised by the companion's standard `data.update.sessionUpdate`
+    // switch, and (b) collide structurally with the real `session_update`
+    // the agent already emits on the `exit_plan_mode` path — leaving two
+    // incompatible shapes on the bus for one change.
     try {
       entry.events.publish({
         type: 'session_update',
         data: {
           sessionId,
-          sessionUpdate: 'current_mode_update',
-          currentModeId,
+          update: {
+            sessionUpdate: 'current_mode_update',
+            currentModeId,
+          },
         },
         ...(entry.activePromptOriginatorClientId
           ? { originatorClientId: entry.activePromptOriginatorClientId }

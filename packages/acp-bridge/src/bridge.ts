@@ -1773,28 +1773,45 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       target === 'model'
         ? 'modelReconciliationInFlight'
         : 'approvalModeReconciliationInFlight';
-    if (entry[flagKey]) return;
-    entry[flagKey] = true;
-    const genBefore =
+    const genOf = () =>
       target === 'model'
         ? entry.modelPublishGeneration
         : entry.approvalModePublishGeneration;
+    if (entry[flagKey]) return;
+    entry[flagKey] = true;
+    const genBefore = genOf();
+    // Set when a newer change published while our status read was in
+    // flight; we re-run once after releasing the guard (see `finally`).
+    let rerun = false;
     try {
       const status = await requestSessionStatus<ServeSessionContextStatus>(
         entry.sessionId,
         SERVE_STATUS_EXT_METHODS.sessionContext,
       );
-      const genAfter =
-        target === 'model'
-          ? entry.modelPublishGeneration
-          : entry.approvalModePublishGeneration;
-      if (genAfter !== genBefore) return;
+      if (genOf() !== genBefore) {
+        // A newer change published during our RPC; its own
+        // `reconcileAfterRoundtrip` bailed on the in-flight guard above,
+        // so without a re-run the latest change would never be
+        // reconciled. Skip this (now-stale) read and re-run once. The
+        // re-run is gated on this generation-change signal — NOT on a
+        // bare `genOf() !== genBefore` at `finally` time — because a
+        // corrective publish below bumps the generation itself and would
+        // otherwise self-trigger an unbounded reconcile loop.
+        rerun = true;
+        writeStderrLine(
+          `[reconcile] session=${entry.sessionId} target=${target} action=skipped reason=generation_changed genBefore=${genBefore} genAfter=${genOf()}`,
+        );
+        return;
+      }
 
       if (target === 'model') {
         const actual = (
           status?.state?.models as { currentModelId?: string } | undefined
         )?.currentModelId;
         if (actual && actual !== entry.currentModelId) {
+          writeStderrLine(
+            `[reconcile] session=${entry.sessionId} target=model action=corrected cached=${entry.currentModelId ?? '<unset>'} actual=${actual}`,
+          );
           publishModelSwitched(entry, actual, undefined);
         }
       } else {
@@ -1802,6 +1819,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           status?.state?.modes as { currentModeId?: string } | undefined
         )?.currentModeId;
         if (actual && actual !== entry.currentApprovalMode) {
+          writeStderrLine(
+            `[reconcile] session=${entry.sessionId} target=approvalMode action=corrected cached=${entry.currentApprovalMode ?? '<unset>'} actual=${actual}`,
+          );
           publishApprovalModeChanged(
             entry,
             {
@@ -1814,20 +1834,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
       }
     } catch (err) {
-      try {
-        entry.events.publish({
-          type: 'reconciliation_failed',
-          data: {
-            sessionId: entry.sessionId,
-            target,
-            error: err instanceof Error ? err.message : String(err),
-          },
-        });
-      } catch {
-        /* bus closed */
-      }
+      // The status read failed — drift can be neither confirmed nor
+      // corrected. Keep the signal in the operator log rather than
+      // emitting a bus event no client can decode: `reconciliation_failed`
+      // is not a known SDK event type, so `asKnownDaemonEvent` drops it
+      // and the reducer never sees it. The client-facing "your state may
+      // be stale" path is already covered by `state_resync_required` on
+      // reconnect.
+      writeStderrLine(
+        `[reconcile] session=${entry.sessionId} target=${target} action=failed error=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     } finally {
       entry[flagKey] = false;
+      if (rerun) void reconcileAfterRoundtrip(entry, target);
     }
   };
 
@@ -2663,22 +2684,38 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!subOpts?.snapshot) return raw;
 
       // A5: wrap the iterator to inject a synthetic `session_snapshot`
-      // frame immediately after `replay_complete`. Captures cached
-      // side-channel state synchronously at yield time so the client
-      // can seed its reducer without an extra round-trip.
+      // frame so a freshly attached / reconnecting client can seed its
+      // side-channel reducer without an extra round-trip. Captures cached
+      // state synchronously at yield time.
+      //
+      // The bus only emits `replay_complete` on the `Last-Event-ID`
+      // resume path (`eventBus.subscribe` gates the whole replay block on
+      // `opts.lastEventId !== undefined`). A fresh connection has no
+      // `Last-Event-ID`, so it never sees `replay_complete` — keying the
+      // snapshot solely off that sentinel silently no-ops on the primary
+      // use case (initial attach). So inject up front when there is no
+      // resume cursor, and otherwise after `replay_complete` so the
+      // client applies replayed deltas before the snapshot seeds state.
+      const snapshotFrame = (): BridgeEvent => ({
+        v: EVENT_SCHEMA_VERSION,
+        type: 'session_snapshot',
+        data: {
+          sessionId: entry!.sessionId,
+          currentModelId: entry!.currentModelId ?? null,
+          currentApprovalMode: entry!.currentApprovalMode ?? null,
+        },
+      });
       async function* withSnapshot(): AsyncIterable<BridgeEvent> {
+        let injected = false;
+        if (subOpts?.lastEventId === undefined) {
+          yield snapshotFrame();
+          injected = true;
+        }
         for await (const event of raw) {
           yield event;
-          if (event.type === 'replay_complete') {
-            yield {
-              v: EVENT_SCHEMA_VERSION,
-              type: 'session_snapshot',
-              data: {
-                sessionId: entry!.sessionId,
-                currentModelId: entry!.currentModelId ?? null,
-                currentApprovalMode: entry!.currentApprovalMode ?? null,
-              },
-            };
+          if (!injected && event.type === 'replay_complete') {
+            yield snapshotFrame();
+            injected = true;
           }
         }
       }
@@ -3386,6 +3423,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // `applyModelServiceId`, so the agent notification can never slip
         // through after the flag clears even if transport ordering changes.
         entry.modelRoundtripInFlight = true;
+        // Only reconcile after a change that actually landed. If the
+        // roundtrip rejects (timeout / transport close) `publishModelSwitched`
+        // never ran and the cache is unchanged, so a reconcile would just emit
+        // a confusing corrective `model_switched` alongside the
+        // `model_switch_failed` the catch block already publishes.
+        let succeeded = false;
         try {
           const result = await Promise.race([
             withTimeout(
@@ -3396,10 +3439,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             transportClosed,
           ]);
           publishModelSwitched(entry, req.modelId, originatorClientId);
+          succeeded = true;
           return result;
         } finally {
           entry.modelRoundtripInFlight = false;
-          void reconcileAfterRoundtrip(entry, 'model');
+          if (succeeded) void reconcileAfterRoundtrip(entry, 'model');
         }
       });
       // Tail-swallow on the queue so a model-change failure doesn't poison
@@ -3477,6 +3521,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // The flag stays true through persist + publish so the notification
         // cannot slip through during the persist phase (review finding #3).
         entry.approvalModeRoundtripInFlight = true;
+        // See setSessionModel: only reconcile after a change that landed, so
+        // a rejected roundtrip can't pair a corrective event with the failure.
+        let succeeded = false;
         try {
           const response = (await Promise.race([
             withTimeout(
@@ -3536,6 +3583,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               entry.sessionId,
             );
           }
+          succeeded = true;
           return {
             sessionId: entry.sessionId,
             mode: response.current,
@@ -3544,7 +3592,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           };
         } finally {
           entry.approvalModeRoundtripInFlight = false;
-          void reconcileAfterRoundtrip(entry, 'approvalMode');
+          if (succeeded) void reconcileAfterRoundtrip(entry, 'approvalMode');
         }
       });
       // Tail-swallow so a failed change doesn't poison subsequent ones.

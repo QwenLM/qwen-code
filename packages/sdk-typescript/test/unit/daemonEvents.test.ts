@@ -2660,5 +2660,35 @@ describe('PR 21 — auth device-flow events', () => {
       });
       expect(state.unrecognizedKnownEventCount).toBe(1);
     });
+
+    it('drops session_snapshot with a non-string currentModelId', () => {
+      // Guards the reducer's `!= null` propagation: an unchecked non-string
+      // would land in `state.currentModelId` and crash downstream string ops.
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's1',
+          currentModelId: 42 as unknown as string,
+          currentApprovalMode: null,
+        },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.currentModelId).toBeUndefined();
+    });
+
+    it('drops session_snapshot with a non-string currentApprovalMode', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's1',
+          currentModelId: null,
+          currentApprovalMode: {} as unknown as string,
+        },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.approvalMode).toBeUndefined();
+    });
   });
 });

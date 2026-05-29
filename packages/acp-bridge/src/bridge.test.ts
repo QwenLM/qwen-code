@@ -7940,6 +7940,302 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       abort.abort();
       await bridge.shutdown();
     });
+
+    it('yields session_snapshot up front on a fresh connection (no Last-Event-ID)', async () => {
+      // Regression for the A5 primary use case: a fresh attach has no
+      // `Last-Event-ID`, so the bus never emits `replay_complete` (the whole
+      // replay block is gated on `lastEventId !== undefined`). Keying the
+      // snapshot solely off `replay_complete` made it silently no-op exactly
+      // when a client most needs to seed state — on initial attach.
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      void capturedConn!.extNotification('qwen/notify/session/model-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModelId: 'qwen-turbo',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Fresh subscribe — snapshot=true, NO lastEventId.
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+        snapshot: true,
+      });
+
+      const it2 = iter[Symbol.asyncIterator]();
+      const first = await it2.next();
+      // The very first frame must be the snapshot (no replay precedes it).
+      expect(first.value?.type).toBe('session_snapshot');
+      expect(
+        (first.value?.data as { currentModelId: string | null }).currentModelId,
+      ).toBe('qwen-turbo');
+      abort.abort();
+      await bridge.shutdown();
+    });
+  });
+
+  describe('§2.2 — post-roundtrip reconciliation', () => {
+    const makeReconcileFactory = (
+      sessionContextModelId: string | undefined,
+      opts: { throwOnStatus?: boolean } = {},
+    ): ChannelFactory => async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/status/session/context') {
+              if (opts.throwOnStatus) {
+                throw new Error('status read failed');
+              }
+              return Promise.resolve({
+                state: { models: { currentModelId: sessionContextModelId } },
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async () => ({});
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+
+    it('publishes a corrective model_switched when the agent state drifted from cache', async () => {
+      // Switch to qwen-max, but the agent's real state is qwen-turbo (e.g.
+      // an agent-side override). Reconciliation must emit a corrective
+      // model_switched so peers converge on the agent's truth.
+      const bridge = makeBridge({
+        channelFactory: makeReconcileFactory('qwen-turbo'),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      await bridge.setSessionModel(
+        session.sessionId,
+        { sessionId: session.sessionId, modelId: 'qwen-max' },
+        undefined,
+      );
+
+      const seen: Array<{ type: string; modelId?: string }> = [];
+      for await (const e of iter) {
+        seen.push({
+          type: e.type,
+          modelId: (e.data as { modelId?: string })?.modelId,
+        });
+        if (seen.filter((s) => s.type === 'model_switched').length === 2) break;
+      }
+      const switches = seen.filter((s) => s.type === 'model_switched');
+      // First the requested change, then the corrective one from reconcile.
+      expect(switches[0]?.modelId).toBe('qwen-max');
+      expect(switches[1]?.modelId).toBe('qwen-turbo');
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('does NOT publish a corrective event when agent state matches cache', async () => {
+      // Stateful agent: `sessionContext` echoes the last model the bridge
+      // set, so reconciliation always finds cache == agent truth and never
+      // emits a corrective. Two distinct changes must therefore produce
+      // exactly two model_switched events, with no duplicates in between.
+      let lastModel: string | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/status/session/context') {
+              return Promise.resolve({
+                state: { models: { currentModelId: lastModel } },
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async (p: { modelId: string }) => {
+                lastModel = p.modelId;
+                return {};
+              };
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      await bridge.setSessionModel(
+        session.sessionId,
+        { sessionId: session.sessionId, modelId: 'qwen-max' },
+        undefined,
+      );
+      // Second distinct change terminates the iterator; a spurious
+      // corrective would surface as a duplicate model_switched.
+      await bridge.setSessionModel(
+        session.sessionId,
+        { sessionId: session.sessionId, modelId: 'qwen-plus' },
+        undefined,
+      );
+
+      const switches: string[] = [];
+      for await (const e of iter) {
+        if (e.type === 'model_switched') {
+          switches.push((e.data as { modelId: string }).modelId);
+          if (switches.includes('qwen-plus')) break;
+        }
+      }
+      expect(switches).toEqual(['qwen-max', 'qwen-plus']);
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('swallows a failed status read without crashing or masking the original change', async () => {
+      const bridge = makeBridge({
+        channelFactory: makeReconcileFactory(undefined, {
+          throwOnStatus: true,
+        }),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      await expect(
+        bridge.setSessionModel(
+          session.sessionId,
+          { sessionId: session.sessionId, modelId: 'qwen-max' },
+          undefined,
+        ),
+      ).resolves.toBeDefined();
+
+      const it2 = iter[Symbol.asyncIterator]();
+      const next = await it2.next();
+      // The original model_switched is delivered; reconcile failure stays in
+      // the operator log (no bus event the SDK cannot decode).
+      expect(next.value?.type).toBe('model_switched');
+      expect((next.value?.data as { modelId: string }).modelId).toBe(
+        'qwen-max',
+      );
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('does NOT reconcile when the model roundtrip itself fails', async () => {
+      // The agent's unstable_setSessionModel rejects, so publishModelSwitched
+      // never runs and the cache is unchanged. Reconciliation must be skipped
+      // (no status read), and the only bus event is model_switch_failed —
+      // never a corrective model_switched paired with the failure.
+      let statusReads = 0;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/status/session/context') {
+              statusReads += 1;
+              return Promise.resolve({
+                state: { models: { currentModelId: 'qwen-turbo' } },
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async () => {
+                throw new Error('agent refused model switch');
+              };
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      await expect(
+        bridge.setSessionModel(
+          session.sessionId,
+          { sessionId: session.sessionId, modelId: 'qwen-max' },
+          undefined,
+        ),
+      ).rejects.toThrow();
+
+      const it2 = iter[Symbol.asyncIterator]();
+      const next = await it2.next();
+      expect(next.value?.type).toBe('model_switch_failed');
+      // Give any (incorrectly) scheduled reconcile a tick to fire.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(statusReads).toBe(0);
+      abort.abort();
+      await bridge.shutdown();
+    });
   });
 });
 

@@ -2544,7 +2544,18 @@ function isSessionBranchedData(
 function isSessionSnapshotData(
   value: unknown,
 ): value is DaemonSessionSnapshotData {
-  return isRecord(value) && isNonEmptyString(value['sessionId']);
+  // `currentModelId` / `currentApprovalMode` are `string | null` on the
+  // wire. Validate the types here, not just `sessionId`: the reducer
+  // propagates these into `state.currentModelId` / `state.approvalMode`
+  // on a `!= null` check alone, so an unchecked non-string (e.g. `42`,
+  // `{}`) would land in state and crash downstream `.trim()`-style calls.
+  if (!isRecord(value) || !isNonEmptyString(value['sessionId'])) return false;
+  const model = value['currentModelId'];
+  const mode = value['currentApprovalMode'];
+  return (
+    (model === null || typeof model === 'string') &&
+    (mode === null || typeof mode === 'string')
+  );
 }
 
 function isPermissionOption(value: unknown): value is DaemonPermissionOption {
