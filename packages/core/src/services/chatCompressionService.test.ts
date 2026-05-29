@@ -181,6 +181,176 @@ describe('ChatCompressionService', () => {
     expect(result.newHistory).toBeNull();
   });
 
+  describe('screenshot-overflow trigger', () => {
+    const SCREENSHOT_ENV = [
+      'QWEN_COMPACT_SCREENSHOT_TRIGGER',
+      'QWEN_COMPACT_SCREENSHOT_THRESHOLD',
+      'QWEN_COMPACT_MAX_RECENT_FILES',
+      'QWEN_COMPACT_MAX_RECENT_IMAGES',
+    ];
+    beforeEach(() => {
+      for (const k of SCREENSHOT_ENV) delete process.env[k];
+    });
+    afterEach(() => {
+      for (const k of SCREENSHOT_ENV) delete process.env[k];
+    });
+
+    // 4-entry history whose single tool result nests `imageCount`
+    // screenshots inside functionResponse.parts (the real shape from
+    // coreToolScheduler.convertToFunctionResponse).
+    function historyWithToolImages(imageCount: number): Content[] {
+      const imageParts = Array.from({ length: imageCount }, (_, i) => ({
+        inlineData: { mimeType: 'image/png', data: `shot${i}` },
+      }));
+      return [
+        { role: 'user', parts: [{ text: 'take screenshots' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'computer_use__get_app_state',
+                args: { app: 'Safari' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'computer_use__get_app_state',
+                response: { output: '' },
+                parts: imageParts,
+              } as unknown as NonNullable<
+                Content['parts']
+              >[number]['functionResponse'],
+            },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'captured' }] },
+      ];
+    }
+
+    function mockSummarySideQuery() {
+      const generateText = vi.fn().mockResolvedValue({
+        text: 'Summary',
+        usage: {
+          promptTokenCount: 49_000,
+          candidatesTokenCount: 1_500,
+          totalTokenCount: 50_500,
+        },
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText,
+      } as unknown as BaseLlmClient);
+      return generateText;
+    }
+
+    function setWindow128k() {
+      // 128K window → auto ≈ 95K. originalTokenCount 50K is below auto, so
+      // the token gate alone would NOOP; only the screenshot trigger can
+      // force compression in these tests.
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'gemini-pro',
+        contextWindowSize: 128_000,
+      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+    }
+
+    it('fires compaction when tool-image count reaches the threshold, even below the token threshold', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue(historyWithToolImages(3));
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        enableScreenshotTrigger: true,
+        screenshotTriggerThreshold: 3,
+      } as ReturnType<typeof mockConfig.getChatCompression>);
+      setWindow128k();
+      const generateText = mockSummarySideQuery();
+
+      const result = await service.compress(mockChat, {
+        promptId: mockPromptId,
+        force: false,
+        model: mockModel,
+        config: mockConfig,
+        consecutiveFailures: 0,
+        originalTokenCount: 50_000,
+      });
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(generateText).toHaveBeenCalled();
+    });
+
+    it('does NOT fire when the trigger is disabled (NOOP below token threshold despite many images)', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue(historyWithToolImages(20));
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        enableScreenshotTrigger: false,
+        screenshotTriggerThreshold: 3,
+      } as ReturnType<typeof mockConfig.getChatCompression>);
+      setWindow128k();
+      const generateText = mockSummarySideQuery();
+
+      const result = await service.compress(mockChat, {
+        promptId: mockPromptId,
+        force: false,
+        model: mockModel,
+        config: mockConfig,
+        consecutiveFailures: 0,
+        originalTokenCount: 50_000,
+      });
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+      expect(generateText).not.toHaveBeenCalled();
+    });
+
+    it('does NOT fire when tool-image count is below the threshold', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue(historyWithToolImages(2));
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        enableScreenshotTrigger: true,
+        screenshotTriggerThreshold: 50,
+      } as ReturnType<typeof mockConfig.getChatCompression>);
+      setWindow128k();
+      const generateText = mockSummarySideQuery();
+
+      const result = await service.compress(mockChat, {
+        promptId: mockPromptId,
+        force: false,
+        model: mockModel,
+        config: mockConfig,
+        consecutiveFailures: 0,
+        originalTokenCount: 50_000,
+      });
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+      expect(generateText).not.toHaveBeenCalled();
+    });
+
+    it('reads threshold + enable flag from QWEN_COMPACT_* env over settings', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue(historyWithToolImages(4));
+      // Settings would NOT trigger (threshold 50); env lowers it to 4 and
+      // force-enables, so the env values must win.
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        enableScreenshotTrigger: false,
+        screenshotTriggerThreshold: 50,
+      } as ReturnType<typeof mockConfig.getChatCompression>);
+      process.env['QWEN_COMPACT_SCREENSHOT_TRIGGER'] = 'true';
+      process.env['QWEN_COMPACT_SCREENSHOT_THRESHOLD'] = '4';
+      setWindow128k();
+      const generateText = mockSummarySideQuery();
+
+      const result = await service.compress(mockChat, {
+        promptId: mockPromptId,
+        force: false,
+        model: mockModel,
+        config: mockConfig,
+        consecutiveFailures: 0,
+        originalTokenCount: 50_000,
+      });
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(generateText).toHaveBeenCalled();
+    });
+  });
+
   it('silently ignores the deprecated chatCompression.contextPercentageThreshold = 0 (no longer disables compaction)', async () => {
     // Pre-PR #4168, setting contextPercentageThreshold = 0 short-circuited
     // compress() at the cheap-gate (NOOP). The field was removed from
@@ -1849,6 +2019,10 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
     // contains the user prompt verbatim (via 9-section prompt template's
     // "All user messages" section) + 3 most recent screenshots attached
     // as the image restoration block.
+    // Real shape: the screenshot is nested inside functionResponse.parts,
+    // exactly as coreToolScheduler.convertToFunctionResponse emits it — NOT
+    // a top-level sibling. (The earlier sibling shape masked the bug where
+    // extractRecentImages restored zero screenshots.)
     const screenshot = (data: string): Content => ({
       role: 'user',
       parts: [
@@ -1856,9 +2030,11 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
           functionResponse: {
             name: 'computer_use__get_app_state',
             response: { output: 'ok' },
-          },
+            parts: [{ inlineData: { mimeType: 'image/png', data } }],
+          } as unknown as NonNullable<
+            Content['parts']
+          >[number]['functionResponse'],
         },
-        { inlineData: { mimeType: 'image/png', data } },
       ],
     });
     const callScreenshot = (app: string): Content => ({

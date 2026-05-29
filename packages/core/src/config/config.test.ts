@@ -6,11 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import type {
-  ChatCompressionSettings,
-  ConfigParameters,
-  SandboxConfig,
-} from './config.js';
+import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
   ApprovalMode,
@@ -3366,57 +3362,6 @@ describe('Model Switching and Config Updates', () => {
           expect(config.getModel()).toBe(baseParams.model);
         },
       );
-    });
-  });
-
-  describe('chatCompression.contextPercentageThreshold deprecation', () => {
-    // The proportional-threshold knob `contextPercentageThreshold` was
-    // removed in the auto-compaction threshold redesign (Task 8) — the
-    // value is now derived from `computeThresholds(...)` in the
-    // ChatCompressionService and is no longer user-tunable. Existing
-    // settings.json files that still set the field should keep working
-    // but get a one-time stderr warning so users know to remove it.
-    let warnSpy: ReturnType<typeof vi.spyOn>;
-
-    beforeEach(() => {
-      warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    });
-
-    afterEach(() => {
-      warnSpy.mockRestore();
-    });
-
-    it('logs a stderr warning when the deprecated field is set', () => {
-      new Config({
-        ...baseParams,
-        chatCompression: {
-          contextPercentageThreshold: 0.5,
-        } as ChatCompressionSettings,
-      });
-      expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'chatCompression.contextPercentageThreshold has been removed',
-        ),
-      );
-    });
-
-    it('does not warn when chatCompression is absent', () => {
-      new Config({ ...baseParams });
-      const warnCalls = warnSpy.mock.calls.map((c) => String(c[0]));
-      expect(
-        warnCalls.some((m) => m.includes('contextPercentageThreshold')),
-      ).toBe(false);
-    });
-
-    it('does not warn when chatCompression is set without the deprecated field', () => {
-      new Config({
-        ...baseParams,
-        chatCompression: { imageTokenEstimate: 1600 },
-      });
-      const warnCalls = warnSpy.mock.calls.map((c) => String(c[0]));
-      expect(
-        warnCalls.some((m) => m.includes('contextPercentageThreshold')),
-      ).toBe(false);
     });
   });
 });

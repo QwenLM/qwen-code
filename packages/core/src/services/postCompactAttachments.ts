@@ -19,6 +19,7 @@ import type { Content, Part } from '@google/genai';
 import { readFile } from 'node:fs/promises';
 import { resolve as resolvePath, sep as pathSep } from 'node:path';
 import { CHARS_PER_TOKEN } from './tokenEstimation.js';
+import { getFunctionResponseParts } from './compactionInputSlimming.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 
@@ -111,9 +112,47 @@ export interface ExtractedImage {
 }
 
 /**
- * Walk the history newest-first, collect up to `maxImages` inlineData
- * parts whose mimeType starts with "image/", and pair each one with the
- * preceding model+functionCall (if any) as source-tool metadata.
+ * Walk a single content's parts in REVERSE and return every image part
+ * it carries — both top-level `inlineData` (user-pasted images) and
+ * images nested inside `functionResponse.parts` (qwen-code's tool-media
+ * carrier; see coreToolScheduler.convertToFunctionResponse). Reverse
+ * order means the last-emitted image is treated as the most recent.
+ *
+ * Walking only the top-level shape — as this module originally did —
+ * silently drops every tool-returned screenshot, because
+ * `convertToFunctionResponse` ALWAYS nests tool media under
+ * `functionResponse.parts` and never at the top level. That made the
+ * whole screenshot-restoration feature a no-op for real computer-use
+ * sessions while the unit tests (which fabricated a top-level shape)
+ * stayed green.
+ */
+function imagePartsInContentReverse(content: Content): Part[] {
+  const result: Part[] = [];
+  const parts = content.parts ?? [];
+  for (let j = parts.length - 1; j >= 0; j--) {
+    const part = parts[j];
+    if (part.inlineData?.mimeType?.startsWith('image/')) {
+      result.push(part);
+      continue;
+    }
+    const nested = getFunctionResponseParts(part);
+    if (nested) {
+      for (let k = nested.length - 1; k >= 0; k--) {
+        const inner = nested[k];
+        if (inner.inlineData?.mimeType?.startsWith('image/')) {
+          result.push(inner);
+        }
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Walk the history newest-first, collect up to `maxImages` image parts
+ * (top-level user-pasted images AND tool-returned images nested in
+ * `functionResponse.parts`), and pair each with the preceding
+ * model+functionCall (if any) as source-tool metadata.
  *
  * Returns oldest-first so callers can compose a chronological strip
  * (last user-visible state ends up at the bottom of the attachment).
@@ -128,42 +167,53 @@ export function extractRecentImages(
 
   outer: for (let i = history.length - 1; i >= 0; i--) {
     const content = history[i];
-    // Iterate parts in REVERSE within a single content so when multiple
-    // inlineData parts share one content (e.g., one tool result returning
-    // several images, or a user paste with several images), "most recent"
-    // matches part order — last part wins. Symmetric with the
-    // file-extractor fix that was discovered via real-session E2E.
-    const parts = content.parts ?? [];
-    for (let j = parts.length - 1; j >= 0; j--) {
-      const part = parts[j];
-      if (!part.inlineData?.mimeType?.startsWith('image/')) continue;
+    const imageParts = imagePartsInContentReverse(content);
+    if (imageParts.length === 0) continue;
 
-      // Look backward for the most recent model+functionCall to attribute
-      // this image. Only count a call as the source if it sits at i-1
-      // (the typical (model+fc, user+fr) pair shape).
-      let sourceToolName: string | undefined;
-      let sourceToolArgs: Record<string, unknown> | undefined;
-      const prev = history[i - 1];
-      if (prev?.role === 'model') {
-        const fc = prev.parts?.find((p) => p.functionCall)?.functionCall;
-        if (fc) {
-          sourceToolName = fc.name ?? undefined;
-          sourceToolArgs =
-            (fc.args as Record<string, unknown> | undefined) ?? undefined;
-        }
+    // Attribute via the most recent model+functionCall sitting at i-1
+    // (the typical (model+fc, user+fr) pair shape). Shared across every
+    // image in this turn — for parallel tool calls this attributes all
+    // images to the first call, an accepted simplification.
+    let sourceToolName: string | undefined;
+    let sourceToolArgs: Record<string, unknown> | undefined;
+    const prev = history[i - 1];
+    if (prev?.role === 'model') {
+      const fc = prev.parts?.find((p) => p.functionCall)?.functionCall;
+      if (fc) {
+        sourceToolName = fc.name ?? undefined;
+        sourceToolArgs =
+          (fc.args as Record<string, unknown> | undefined) ?? undefined;
       }
+    }
 
-      collected.unshift({
-        part,
-        turnIndex: i,
-        sourceToolName,
-        sourceToolArgs,
-      });
+    for (const part of imageParts) {
+      collected.unshift({ part, turnIndex: i, sourceToolName, sourceToolArgs });
       if (collected.length >= maxImages) break outer;
     }
   }
 
   return collected;
+}
+
+/**
+ * Count images RETURNED BY TOOLS across the whole history — inlineData
+ * image parts nested inside `functionResponse.parts`. User-pasted
+ * top-level images are intentionally excluded: this drives the
+ * computer-use screenshot-overflow auto-compact trigger, whose concern
+ * is screenshot accumulation from tool results, not occasional pastes.
+ */
+export function countToolResponseImages(history: Content[]): number {
+  let count = 0;
+  for (const content of history) {
+    for (const part of content.parts ?? []) {
+      const nested = getFunctionResponseParts(part);
+      if (!nested) continue;
+      for (const inner of nested) {
+        if (inner.inlineData?.mimeType?.startsWith('image/')) count++;
+      }
+    }
+  }
+  return count;
 }
 
 export type FileEmbedResult =
@@ -459,6 +509,20 @@ export interface ComposePostCompactOptions {
    * `readFile(path, { signal })`.
    */
   signal?: AbortSignal;
+  /**
+   * Max recent files to restore. Defaults to
+   * `POST_COMPACT_MAX_FILES_TO_RESTORE`. Configurable via
+   * `chatCompression.maxRecentFilesToRetain` (env
+   * `QWEN_COMPACT_MAX_RECENT_FILES`).
+   */
+  maxFiles?: number;
+  /**
+   * Max recent images to restore. Defaults to
+   * `POST_COMPACT_MAX_IMAGES_TO_RESTORE`. Configurable via
+   * `chatCompression.maxRecentImagesToRetain` (env
+   * `QWEN_COMPACT_MAX_RECENT_IMAGES`).
+   */
+  maxImages?: number;
 }
 
 /**
@@ -501,19 +565,20 @@ export async function composePostCompactHistory(
   summary: string,
   options: ComposePostCompactOptions = {},
 ): Promise<Content[]> {
-  const { workspaceRoot, signal } = options;
+  const {
+    workspaceRoot,
+    signal,
+    maxFiles = POST_COMPACT_MAX_FILES_TO_RESTORE,
+    maxImages = POST_COMPACT_MAX_IMAGES_TO_RESTORE,
+  } = options;
 
   // Workspace-boundary filter on the extracted file paths (Finding 4).
-  const filePaths = extractRecentFilePaths(
-    history,
-    POST_COMPACT_MAX_FILES_TO_RESTORE,
-  ).filter((p) => isInsideWorkspace(p, workspaceRoot));
+  const filePaths = extractRecentFilePaths(history, maxFiles).filter((p) =>
+    isInsideWorkspace(p, workspaceRoot),
+  );
   const fileBlocks = await buildFileRestorationBlocks(filePaths, signal);
 
-  const images = extractRecentImages(
-    history,
-    POST_COMPACT_MAX_IMAGES_TO_RESTORE,
-  );
+  const images = extractRecentImages(history, maxImages);
   const imageBlock = buildImageRestorationBlock(images);
 
   // Merge every file restoration block AND the image block into a

@@ -16,12 +16,14 @@ import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import {
   estimateContentChars,
+  resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
 import { CHARS_PER_TOKEN, estimatePromptTokens } from './tokenEstimation.js';
 import {
   composePostCompactHistory,
+  countToolResponseImages,
   stripAnalysisBlock,
 } from './postCompactAttachments.js';
 
@@ -193,6 +195,7 @@ export class ChatCompressionService {
     const compactTrigger = trigger ?? (force ? 'manual' : 'auto');
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
+    const tuning = resolveCompactionTuning(chatCompressionSettings);
 
     // Cheap gates first — these don't need the curated history. Forward
     // originalTokenCount on NOOP (matching the threshold-gate branch below)
@@ -233,14 +236,26 @@ export class ChatCompressionService {
               )
             : originalTokenCount;
       if (effectiveTokens < auto) {
-        return {
-          newHistory: null,
-          info: {
-            originalTokenCount,
-            newTokenCount: originalTokenCount,
-            compressionStatus: CompressionStatus.NOOP,
-          },
-        };
+        // Screenshot-overflow trigger: even below the token threshold,
+        // compact once tool-returned images accumulate past the configured
+        // count, so computer-use sessions don't drown the model in stale
+        // screenshots. Only counted in the would-be-NOOP path and only when
+        // enabled, so the common case pays nothing. Counts NESTED tool media
+        // only (countToolResponseImages), not user-pasted top-level images.
+        const screenshotOverflow =
+          tuning.enableScreenshotTrigger &&
+          countToolResponseImages(chat.getHistoryShallow(true)) >=
+            tuning.screenshotTriggerThreshold;
+        if (!screenshotOverflow) {
+          return {
+            newHistory: null,
+            info: {
+              originalTokenCount,
+              newTokenCount: originalTokenCount,
+              compressionStatus: CompressionStatus.NOOP,
+            },
+          };
+        }
       }
     }
 
@@ -405,6 +420,8 @@ export class ChatCompressionService {
       extraHistory = await composePostCompactHistory(curatedHistory, summary, {
         workspaceRoot: config.getTargetDir(),
         signal,
+        maxFiles: tuning.maxRecentFiles,
+        maxImages: tuning.maxRecentImages,
       });
 
       // Best-effort token math using *only* model-reported token counts.
@@ -434,9 +451,10 @@ export class ChatCompressionService {
             (compressionInputTokenCount - 1000) +
             compressionOutputTokenCount,
         );
-        // The composer injects file-restoration blocks (up to 5 files
-        // × 5K tokens) and an image-restoration block (up to 3 images)
-        // that are NOT in compressionOutputTokenCount. Estimate their
+        // The composer injects file-restoration blocks (up to
+        // maxRecentFiles × 5K tokens) and an image-restoration block (up to
+        // maxRecentImages images) that are NOT in
+        // compressionOutputTokenCount. Estimate their
         // cost locally so the inflation guard below
         // (newTokenCount > originalTokenCount) actually fires when
         // attachments dominate the post-compact size, and so

@@ -153,7 +153,10 @@ describe('extractRecentFilePaths', () => {
   });
 });
 
-import { extractRecentImages } from './postCompactAttachments.js';
+import {
+  countToolResponseImages,
+  extractRecentImages,
+} from './postCompactAttachments.js';
 
 function modelCallScreenshot(app: string): Content {
   return {
@@ -169,6 +172,11 @@ function modelCallScreenshot(app: string): Content {
   };
 }
 
+// Mirrors the REAL shape coreToolScheduler.convertToFunctionResponse
+// builds: the image is nested inside functionResponse.parts, NOT a
+// top-level sibling. (The earlier top-level-sibling fixture never occurs
+// in production and masked a bug where extractRecentImages found zero
+// screenshots.)
 function userToolResultWithImage(mimeType: string, data: string): Content {
   return {
     role: 'user',
@@ -177,9 +185,11 @@ function userToolResultWithImage(mimeType: string, data: string): Content {
         functionResponse: {
           name: 'computer_use__get_app_state',
           response: { output: 'screenshot returned' },
-        },
+          parts: [{ inlineData: { mimeType, data } }],
+        } as unknown as NonNullable<
+          Content['parts']
+        >[number]['functionResponse'],
       },
-      { inlineData: { mimeType, data } },
     ],
   };
 }
@@ -254,6 +264,90 @@ describe('extractRecentImages', () => {
       },
     ];
     expect(extractRecentImages(history, 3)).toEqual([]);
+  });
+
+  it('extracts tool images nested in functionResponse.parts (regression: real screenshot shape)', () => {
+    // No top-level inlineData anywhere — the image lives ONLY inside
+    // functionResponse.parts, exactly as convertToFunctionResponse emits.
+    // The pre-fix extractRecentImages returned [] here.
+    const history: Content[] = [
+      modelCallScreenshot('Safari'),
+      userToolResultWithImage('image/png', 'nestedshot'),
+    ];
+    const result = extractRecentImages(history, 3);
+    expect(result).toHaveLength(1);
+    expect(result[0].part.inlineData?.data).toBe('nestedshot');
+    expect(result[0].sourceToolName).toBe('computer_use__get_app_state');
+  });
+
+  it('collects both nested tool images and top-level user pastes', () => {
+    const history: Content[] = [
+      modelCallScreenshot('Safari'),
+      userToolResultWithImage('image/png', 'toolshot'),
+      {
+        role: 'user',
+        parts: [
+          { text: 'and this' },
+          { inlineData: { mimeType: 'image/png', data: 'pasted' } },
+        ],
+      },
+    ];
+    const result = extractRecentImages(history, 3);
+    expect(result.map((r) => r.part.inlineData?.data)).toEqual([
+      'toolshot',
+      'pasted',
+    ]);
+  });
+});
+
+describe('countToolResponseImages', () => {
+  it('counts only images nested in functionResponse.parts', () => {
+    const history: Content[] = [
+      modelCallScreenshot('Safari'),
+      userToolResultWithImage('image/png', 'a'),
+      modelCallScreenshot('Mail'),
+      userToolResultWithImage('image/png', 'b'),
+    ];
+    expect(countToolResponseImages(history)).toBe(2);
+  });
+
+  it('excludes top-level user-pasted images', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'pasted' } }],
+      },
+    ];
+    expect(countToolResponseImages(history)).toBe(0);
+  });
+
+  it('counts multiple images within a single tool result, ignoring non-images', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'computer_use__get_app_state',
+              response: { output: '' },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'x' } },
+                { inlineData: { mimeType: 'image/jpeg', data: 'y' } },
+                { text: 'not an image' },
+                { inlineData: { mimeType: 'application/pdf', data: 'doc' } },
+              ],
+            } as unknown as NonNullable<
+              Content['parts']
+            >[number]['functionResponse'],
+          },
+        ],
+      },
+    ];
+    expect(countToolResponseImages(history)).toBe(2);
+  });
+
+  it('returns 0 for empty history', () => {
+    expect(countToolResponseImages([])).toBe(0);
   });
 });
 
@@ -814,6 +908,98 @@ describe('composePostCompactHistory', () => {
     expect(summaryText).toMatch(
       /do not acknowledge|do not re-introduce|do not greet/i,
     );
+  });
+
+  it('respects maxFiles / maxImages caps from options', async () => {
+    const f1 = join(tmpDir, 'one.ts');
+    const f2 = join(tmpDir, 'two.ts');
+    writeFileSync(f1, 'export const one = 1;');
+    writeFileSync(f2, 'export const two = 2;');
+
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { file_path: f1 } } },
+          { functionCall: { name: 'read_file', args: { file_path: f2 } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'computer_use__get_app_state',
+              response: { output: '' },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'img1' } },
+                { inlineData: { mimeType: 'image/png', data: 'img2' } },
+              ],
+            } as unknown as NonNullable<
+              Content['parts']
+            >[number]['functionResponse'],
+          },
+        ],
+      },
+    ];
+
+    const result = await composePostCompactHistory(history, 'SUM', {
+      workspaceRoot: tmpDir,
+      maxFiles: 1,
+      maxImages: 1,
+    });
+
+    const inlineImages = result
+      .flatMap((c) => c.parts ?? [])
+      .filter((p) => (p as { inlineData?: unknown }).inlineData);
+    expect(inlineImages).toHaveLength(1);
+
+    const allText = result
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+    // Parallel calls in one model turn: the last (two.ts) is most recent,
+    // so the single retained file is two.ts; one.ts is dropped. Assert on
+    // embedded CONTENT, not the path — the path can also surface in image
+    // attribution metadata, which isn't what this cap controls.
+    expect(allText).toContain('export const two = 2;');
+    expect(allText).not.toContain('export const one = 1;');
+  });
+
+  it('restores no attachments when maxFiles and maxImages are 0', async () => {
+    const f1 = join(tmpDir, 'z.ts');
+    writeFileSync(f1, 'export const z = 1;');
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { file_path: f1 } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'computer_use__get_app_state',
+              response: { output: '' },
+              parts: [{ inlineData: { mimeType: 'image/png', data: 'i' } }],
+            } as unknown as NonNullable<
+              Content['parts']
+            >[number]['functionResponse'],
+          },
+        ],
+      },
+    ];
+    const result = await composePostCompactHistory(history, 'SUM', {
+      workspaceRoot: tmpDir,
+      maxFiles: 0,
+      maxImages: 0,
+    });
+    // Only [summary(user), ack(model)] — no attachment Content appended.
+    expect(result).toHaveLength(2);
+    expect(result[0].role).toBe('user');
+    expect(result[1].role).toBe('model');
   });
 });
 
