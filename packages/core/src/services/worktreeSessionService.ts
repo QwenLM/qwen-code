@@ -102,19 +102,7 @@ export async function readWorktreeSession(
   return parsed;
 }
 
-/**
- * Writes the sidecar through `atomicWriteJSON`. In the common case
- * (sidecar owned by the writing process) the write is atomic
- * (write-to-temp + rename) so a crash mid-write cannot leave a
- * half-written file that subsequent reads would reject as malformed.
- *
- * When the existing sidecar's uid/gid differs from the writing
- * process — for example a worktree created by one user and later
- * resumed by another — `atomicWriteJSON` falls back to in-place
- * truncate+write to preserve ownership, at the cost of crash atomicity
- * on that specific write. See {@link atomicWriteFile} for the full
- * trade-off list.
- */
+/** Writes the worktree session sidecar via `atomicWriteJSON`. */
 export async function writeWorktreeSession(
   filePath: string,
   session: WorktreeSession,
