@@ -17,6 +17,7 @@
 
 import type { Content, Part } from '@google/genai';
 import { readFile } from 'node:fs/promises';
+import { resolve as resolvePath, sep as pathSep } from 'node:path';
 import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
@@ -186,12 +187,19 @@ const BINARY_NONPRINTABLE_THRESHOLD = 0.3;
 export async function readFileSizeAdaptive(
   filePath: string,
   maxTokens: number,
+  signal?: AbortSignal,
 ): Promise<FileEmbedResult> {
+  // Honor abort BEFORE issuing the I/O so a cancelled compaction does not
+  // even start the read (per Finding 5).
+  if (signal?.aborted) return { kind: 'missing' };
   let buffer: Buffer;
   try {
-    buffer = await readFile(filePath);
+    buffer = await readFile(filePath, { signal });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { kind: 'missing' };
+    }
+    if ((err as { name?: string }).name === 'AbortError') {
       return { kind: 'missing' };
     }
     // Permission errors, IO errors, etc. — treat as missing for the
@@ -250,6 +258,7 @@ export async function readFileSizeAdaptive(
  */
 export async function buildFileRestorationBlocks(
   filePaths: string[],
+  signal?: AbortSignal,
 ): Promise<Content[]> {
   const references: string[] = [];
   const embeds: Array<{ path: string; content: string }> = [];
@@ -258,9 +267,11 @@ export async function buildFileRestorationBlocks(
   const budgetChars = POST_COMPACT_TOKEN_BUDGET * CHARS_PER_TOKEN;
 
   for (const filePath of filePaths) {
+    if (signal?.aborted) break;
     const result = await readFileSizeAdaptive(
       filePath,
       POST_COMPACT_MAX_TOKENS_PER_FILE,
+      signal,
     );
     if (result.kind === 'missing' || result.kind === 'binary') continue;
     if (result.kind === 'reference') {
@@ -390,32 +401,114 @@ const RESUME_TRAILER =
  * guard upstream will still NOOP this round, but we don't want to silently
  * lose the entire model response.
  */
+/**
+ * Strip `<analysis>...</analysis>` chain-of-thought blocks from raw
+ * summary text. Exposed separately from `postProcessSummary` so the
+ * PostCompact hook event can receive the same stripped text that
+ * enters history — without the resume trailer, which is wrapper
+ * decoration meant for the next agent turn only (Finding 8a).
+ *
+ * NOTE on the regex:
+ *  - `[\s\S]*?` (non-greedy) handles newlines inside the block AND
+ *    stops at the first `</analysis>` — so multiple non-overlapping
+ *    blocks each get stripped via the `/g` flag.
+ *  - It matches the exact tag `<analysis>` only. If the prompt ever
+ *    evolves to use attributes (e.g. `<analysis type="...">`) or
+ *    nested `<analysis>` tags, this pattern will leak content. The
+ *    compression prompt is under our control, so we keep the pattern
+ *    strict rather than over-engineering.
+ *  - The unclosed-tag fallback (`<analysis>[\s\S]*$`) catches the case
+ *    where the model started an `<analysis>` block and ran out of
+ *    output tokens before closing it. Without this, the closed-tag
+ *    regex above misses and the entire scratchpad leaks into history
+ *    via the fallback path in `postProcessSummary`.
+ */
+export function stripAnalysisBlock(rawSummary: string): string {
+  // First pass: strip well-formed `<analysis>...</analysis>` blocks
+  // (handles multiple via `/g`, newlines via `[\s\S]`).
+  let result = rawSummary.replace(/<analysis>[\s\S]*?<\/analysis>\s*/g, '');
+  // Second pass: strip any remaining unclosed `<analysis>` tag (the
+  // model ran out of output tokens before closing). Uses an
+  // end-of-string anchor since there's no closing tag to stop at.
+  result = result.replace(/<analysis>[\s\S]*$/g, '');
+  return result.trim();
+}
+
 export function postProcessSummary(rawSummary: string): string {
-  // NOTE on the regex:
-  //  - `[\s\S]*?` (non-greedy) handles newlines inside the block AND
-  //    stops at the first `</analysis>` — so multiple non-overlapping
-  //    blocks each get stripped via the `/g` flag.
-  //  - It matches the exact tag `<analysis>` only. If the prompt ever
-  //    evolves to use attributes (e.g. `<analysis type="...">`) or
-  //    nested `<analysis>` tags, this pattern will leak content. The
-  //    compression prompt is under our control, so we keep the
-  //    pattern strict rather than over-engineering.
-  const stripped = rawSummary
-    .replace(/<analysis>[\s\S]*?<\/analysis>\s*/g, '')
-    .trim();
-  const body = stripped.length > 0 ? stripped : rawSummary.trim();
+  const stripped = stripAnalysisBlock(rawSummary);
+  // Even if the strip leaves nothing, do NOT fall back to the raw
+  // analysis content — that would defeat the strip's purpose. Instead
+  // emit a sentinel so the resuming agent sees that the summary
+  // failed; the inflation guard upstream will already NOOP this round.
+  const body = stripped.length > 0 ? stripped : '[Summary unavailable]';
   return `${body}\n\n${RESUME_TRAILER}`;
+}
+
+export interface ComposePostCompactOptions {
+  /**
+   * Workspace root. When set, file paths from history that resolve
+   * outside this root are silently skipped (Finding 4). Without this,
+   * an adversarial model that issued `read_file('/etc/passwd')` —
+   * even one denied by the permission system — would have its path
+   * extracted and re-read off disk into the next prompt.
+   */
+  workspaceRoot?: string;
+  /**
+   * Cancels in-progress file reads (Finding 5). Propagated to
+   * `buildFileRestorationBlocks` → `readFileSizeAdaptive` →
+   * `readFile(path, { signal })`.
+   */
+  signal?: AbortSignal;
+}
+
+/**
+ * Trailing `model+functionCall` content from the pre-compact history,
+ * to be preserved in the post-compact output so a pending
+ * `functionResponse` (sitting in `sendMessageStream`'s
+ * `pendingUserMessage` waiting to be pushed) has a matching call
+ * (Finding 3). Returns `undefined` if the last history entry is not
+ * a model turn with a functionCall part.
+ */
+function trailingFunctionCallContent(history: Content[]): Content | undefined {
+  const last = history[history.length - 1];
+  if (!last || last.role !== 'model') return undefined;
+  if (!last.parts?.some((p) => !!p.functionCall)) return undefined;
+  return last;
+}
+
+/**
+ * Resolve and validate a file path against an optional workspace
+ * root. Returns `true` if the file path lies under `workspaceRoot`
+ * (or if no root was supplied — caller chose not to enforce). Used
+ * to skip out-of-workspace paths that a model emitted via a denied
+ * tool call (Finding 4).
+ */
+function isInsideWorkspace(filePath: string, workspaceRoot?: string): boolean {
+  if (!workspaceRoot) return true;
+  const resolvedFile = resolvePath(filePath);
+  const resolvedRoot = resolvePath(workspaceRoot);
+  // Append a trailing separator so a sibling path that shares a prefix
+  // (e.g. workspace=/foo/bar, file=/foo/bar2/x.ts) is correctly
+  // classified as outside.
+  const rootWithSep = resolvedRoot.endsWith(pathSep)
+    ? resolvedRoot
+    : resolvedRoot + pathSep;
+  return resolvedFile === resolvedRoot || resolvedFile.startsWith(rootWithSep);
 }
 
 export async function composePostCompactHistory(
   history: Content[],
   summary: string,
+  options: ComposePostCompactOptions = {},
 ): Promise<Content[]> {
+  const { workspaceRoot, signal } = options;
+
+  // Workspace-boundary filter on the extracted file paths (Finding 4).
   const filePaths = extractRecentFilePaths(
     history,
     POST_COMPACT_MAX_FILES_TO_RESTORE,
-  );
-  const fileBlocks = await buildFileRestorationBlocks(filePaths);
+  ).filter((p) => isInsideWorkspace(p, workspaceRoot));
+  const fileBlocks = await buildFileRestorationBlocks(filePaths, signal);
 
   const images = extractRecentImages(
     history,
@@ -423,15 +516,48 @@ export async function composePostCompactHistory(
   );
   const imageBlock = buildImageRestorationBlock(images);
 
+  // Merge every file restoration block AND the image block into a
+  // single user Content (Finding 2). Pushing them as separate user
+  // Contents produces consecutive same-role entries, which
+  // geminiChat.test.ts:6289 enforces against and which Gemini
+  // providers reject as 400 "consecutive same-role content".
+  const postAckParts: Part[] = [];
+  for (const block of fileBlocks) {
+    for (const part of block.parts ?? []) postAckParts.push(part);
+  }
+  if (imageBlock) {
+    for (const part of imageBlock.parts ?? []) postAckParts.push(part);
+  }
+
+  // Preserve trailing model+functionCall so a pending functionResponse
+  // has a matching call (Finding 3). Place it AFTER any merged
+  // attachments so role alternation holds:
+  //  - with attachments:  [user(sum), model(ack), user(attach), model(fc)]
+  //  - without:           [user(sum), model(ack + fc)] — fc lands in
+  //                       the ack's own model Content to avoid the
+  //                       model→model adjacency that would otherwise
+  //                       arise from a separate appended entry.
+  const trailingFc = trailingFunctionCallContent(history);
+  const ackParts: Part[] = [
+    { text: 'Got it. Thanks for the additional context!' },
+  ];
+
   const out: Content[] = [
     { role: 'user', parts: [{ text: postProcessSummary(summary) }] },
-    {
-      role: 'model',
-      parts: [{ text: 'Got it. Thanks for the additional context!' }],
-    },
-    ...fileBlocks,
   ];
-  if (imageBlock) out.push(imageBlock);
+
+  if (postAckParts.length > 0) {
+    out.push({ role: 'model', parts: ackParts });
+    out.push({ role: 'user', parts: postAckParts });
+    if (trailingFc) out.push(trailingFc);
+  } else if (trailingFc) {
+    // Fold the trailing functionCall into the ack's own Content so we
+    // don't produce model→model adjacency.
+    const fcParts = (trailingFc.parts ?? []).filter((p) => !!p.functionCall);
+    out.push({ role: 'model', parts: [...ackParts, ...fcParts] });
+  } else {
+    out.push({ role: 'model', parts: ackParts });
+  }
 
   return out;
 }

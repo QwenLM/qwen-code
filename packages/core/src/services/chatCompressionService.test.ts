@@ -53,6 +53,7 @@ describe('ChatCompressionService', () => {
         warn: vi.fn(),
         debug: vi.fn(),
       }),
+      getTargetDir: () => '/tmp/test-workspace',
     } as unknown as Config;
 
     vi.mocked(tokenLimit).mockReturnValue(1000);
@@ -1381,6 +1382,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
       getModel: () => 'test-model',
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
     } as unknown as Config;
 
     const service = new ChatCompressionService();
@@ -1445,6 +1447,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
       getModel: () => 'test-model',
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn, debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
     } as unknown as Config;
 
     const result = await new ChatCompressionService().compress(mockChat, {
@@ -1502,6 +1505,7 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
       getModel: () => 'test-model',
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
     } as unknown as Config;
   }
 
@@ -1648,6 +1652,7 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
       getModel: () => 'test-model',
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
     } as unknown as Config;
   }
 
@@ -1758,6 +1763,7 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
       getModel: () => 'test-model',
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
     } as unknown as Config;
   }
 
@@ -1831,6 +1837,7 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
       getModel: () => 'test-model',
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
     } as unknown as Config;
   }
 

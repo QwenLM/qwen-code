@@ -15,11 +15,15 @@ import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import {
+  estimateContentChars,
   resolveSlimmingConfig,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
-import { estimatePromptTokens } from './tokenEstimation.js';
-import { composePostCompactHistory } from './postCompactAttachments.js';
+import { CHARS_PER_TOKEN, estimatePromptTokens } from './tokenEstimation.js';
+import {
+  composePostCompactHistory,
+  stripAnalysisBlock,
+} from './postCompactAttachments.js';
 
 /**
  * Hard cap on the compression sideQuery output (summary text only, since
@@ -398,7 +402,10 @@ export class ChatCompressionService {
     if (!isSummaryEmpty) {
       // Use the new composer — assembles summary + ack + file restores +
       // image restore. No tail preservation, no continuation bridge.
-      extraHistory = await composePostCompactHistory(curatedHistory, summary);
+      extraHistory = await composePostCompactHistory(curatedHistory, summary, {
+        workspaceRoot: config.getTargetDir(),
+        signal,
+      });
 
       // Best-effort token math using *only* model-reported token counts.
       //
@@ -427,6 +434,22 @@ export class ChatCompressionService {
             (compressionInputTokenCount - 1000) +
             compressionOutputTokenCount,
         );
+        // The composer injects file-restoration blocks (up to 5 files
+        // × 5K tokens) and an image-restoration block (up to 3 images)
+        // that are NOT in compressionOutputTokenCount. Estimate their
+        // cost locally so the inflation guard below
+        // (newTokenCount > originalTokenCount) actually fires when
+        // attachments dominate the post-compact size, and so
+        // `lastPromptTokenCount` doesn't under-report the next auto-
+        // compaction cheap-gate input (Finding 1).
+        const restorationChars = extraHistory
+          .slice(2) // skip [summary, model ack]
+          .reduce(
+            (acc, c) =>
+              acc + estimateContentChars(c, slimmingConfig.imageTokenEstimate),
+            0,
+          );
+        newTokenCount += Math.ceil(restorationChars / CHARS_PER_TOKEN);
       }
     }
 
@@ -476,9 +499,18 @@ export class ChatCompressionService {
           compactTrigger === 'manual'
             ? PostCompactTrigger.Manual
             : PostCompactTrigger.Auto;
+        // Pass the stripped summary (Finding 8a) so hook consumers see
+        // the same text that lands in history — not the raw side-query
+        // output with the <analysis> scratchpad still attached. The
+        // resume trailer is NOT included; it is wrapper decoration for
+        // the next agent turn, not state for downstream consumers.
         await config
           .getHookSystem()
-          ?.firePostCompactEvent(postCompactTrigger, summary, signal);
+          ?.firePostCompactEvent(
+            postCompactTrigger,
+            stripAnalysisBlock(summary),
+            signal,
+          );
       } catch (err) {
         config.getDebugLogger().warn(`PostCompact hook failed: ${err}`);
       }

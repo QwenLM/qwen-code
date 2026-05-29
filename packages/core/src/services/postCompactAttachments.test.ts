@@ -641,6 +641,155 @@ describe('composePostCompactHistory', () => {
     );
   });
 
+  it('emits role-alternating history with multiple file/image attachments merged into a single user Content (Finding 2)', async () => {
+    // Regression: prior implementation pushed each file restoration block
+    // as its own user Content, producing consecutive user roles which
+    // violates geminiChat.test.ts:6289 strict-alternation assertion and
+    // is rejected by Gemini API with "consecutive same-role content".
+    const small = join(tmpDir, 'a.ts');
+    writeFileSync(small, 'export const a = 1;');
+    const small2 = join(tmpDir, 'b.ts');
+    writeFileSync(small2, 'export const b = 2;');
+    const big = join(tmpDir, 'big.ts');
+    writeFileSync(big, 'x'.repeat(30_000));
+
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { file_path: small } } },
+          { functionCall: { name: 'read_file', args: { file_path: small2 } } },
+          { functionCall: { name: 'read_file', args: { file_path: big } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'shot' } }],
+      },
+    ];
+
+    const result = await composePostCompactHistory(history, 'SUM');
+    // Strict alternation: no two adjacent entries share a role.
+    for (let i = 1; i < result.length; i++) {
+      expect(result[i].role).not.toBe(result[i - 1].role);
+    }
+  });
+
+  it('preserves a trailing model+functionCall so a pending functionResponse has its match (Finding 3)', async () => {
+    // Regression: the old split-point fallback explicitly retained
+    // trailing model+functionCall so that a pending functionResponse
+    // (sitting in sendMessageStream's pendingUserMessage) had a
+    // matching call. The full-history rewrite dropped the entire
+    // history including that call, producing user+functionResponse
+    // with no preceding model+functionCall → API 400.
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'use the tool' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: 'read_file',
+              args: { file_path: '/some/file.ts' },
+            },
+          },
+        ],
+      },
+    ];
+    const result = await composePostCompactHistory(history, 'SUM');
+    // SOMEWHERE in the output the trailing functionCall must survive
+    // so that a pending functionResponse has its match.
+    const hasTrailingFuncCall = result.some(
+      (c) => c.role === 'model' && c.parts?.some((p) => !!p.functionCall),
+    );
+    expect(hasTrailingFuncCall).toBe(true);
+    // And strict alternation must still hold.
+    for (let i = 1; i < result.length; i++) {
+      expect(result[i].role).not.toBe(result[i - 1].role);
+    }
+    // The very last entry must be the model funcCall (so the next
+    // appended user+functionResponse pairs with it).
+    const last = result[result.length - 1];
+    expect(last.role).toBe('model');
+    expect(last.parts?.some((p) => !!p.functionCall)).toBe(true);
+  });
+
+  it('skips files outside the workspace root (Finding 4)', async () => {
+    // Security: extractRecentFilePaths collects ALL functionCall paths
+    // including model attempts at /etc/passwd that the permission
+    // system already denied. readFileSizeAdaptive would happily read
+    // those off disk. Filter at the composer with a workspace boundary.
+    const inside = join(tmpDir, 'inside.ts');
+    writeFileSync(inside, 'export const inside = true;');
+    const outside = '/etc/hosts'; // exists on every system; outside tmpDir
+
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: { name: 'read_file', args: { file_path: outside } },
+          },
+          {
+            functionCall: { name: 'read_file', args: { file_path: inside } },
+          },
+        ],
+      },
+    ];
+
+    const result = await composePostCompactHistory(history, 'SUM', {
+      workspaceRoot: tmpDir,
+    });
+    const allText = result
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+    expect(allText).toContain(inside);
+    expect(allText).not.toContain('/etc/hosts');
+  });
+
+  it('honors AbortSignal — does not invoke file reads after abort (Finding 5)', async () => {
+    const small = join(tmpDir, 'small.ts');
+    writeFileSync(small, 'tiny');
+
+    const history: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: { name: 'read_file', args: { file_path: small } },
+          },
+        ],
+      },
+    ];
+
+    const ctrl = new AbortController();
+    ctrl.abort();
+    // Should reject with AbortError (or similar) — readFileSizeAdaptive
+    // must observe the signal. We accept either rejection OR a clean
+    // empty restoration (no file content embedded), depending on where
+    // the signal check fires. The contract: NEVER embed file content
+    // after abort.
+    let result: Content[] = [];
+    let threw = false;
+    try {
+      result = await composePostCompactHistory(history, 'SUM', {
+        signal: ctrl.signal,
+      });
+    } catch {
+      threw = true;
+    }
+    if (!threw) {
+      const allText = result
+        .flatMap((c) => c.parts ?? [])
+        .map((p) => (p as { text?: string }).text ?? '')
+        .join('\n');
+      // Aborted before reading: file path / content must not appear in
+      // an embed block. (A bare reference is fine — that's just the path.)
+      expect(allText).not.toContain('tiny');
+    }
+  });
+
   it('strips the <analysis> block from the raw summary before placing it in newHistory', async () => {
     const history: Content[] = [{ role: 'user', parts: [{ text: 'do x' }] }];
     const raw =
@@ -693,14 +842,29 @@ describe('postProcessSummary', () => {
     expect(out).not.toContain('second');
   });
 
-  it('falls back to the raw summary when stripping leaves nothing', () => {
-    // Pathological case: model produced only an <analysis> block. We should
-    // NOT return only the trailer — that would lose the entire model
-    // response. Fall back to the raw text so caller has something to
-    // inspect / log.
+  it('does NOT re-inject the <analysis> body when the model emits only scratchpad (Finding 6)', () => {
+    // Regression: prior implementation fell back to `rawSummary.trim()`
+    // which re-injected the entire <analysis> block when strip left
+    // an empty result. The whole point of the strip is to keep the
+    // scratchpad out of the next agent's context.
     const raw = '<analysis>nothing else</analysis>';
     const out = postProcessSummary(raw);
-    expect(out).toContain('nothing else');
+    expect(out).not.toContain('<analysis>');
+    expect(out).not.toContain('nothing else');
+    // Trailer must still be appended so the resuming agent gets clear
+    // continuation guidance even when the summary body is missing.
+    expect(out).toMatch(/resume.*prior task/i);
+  });
+
+  it('strips an unclosed <analysis> block in the fallback path (Finding 6)', () => {
+    // Pathological: model emits <analysis> tag but never closes it.
+    // The closed-tag regex misses → stripped non-empty → no fallback.
+    // The unclosed-tag fallback regex must catch this case so the
+    // <analysis> body never leaks into history.
+    const raw = '<analysis>still thinking about the answer';
+    const out = postProcessSummary(raw);
+    expect(out).not.toContain('<analysis>');
+    expect(out).not.toContain('still thinking');
     expect(out).toMatch(/resume.*prior task/i);
   });
 });
