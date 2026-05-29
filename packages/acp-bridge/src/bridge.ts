@@ -3399,7 +3399,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (signal?.aborted) return { sessionId, answer: null };
       const info = channelInfoForEntry(entry);
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
-      const races: Promise<unknown>[] = [
+      const races: Array<Promise<unknown>> = [
         withTimeout(
           entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBtw, {
             sessionId,

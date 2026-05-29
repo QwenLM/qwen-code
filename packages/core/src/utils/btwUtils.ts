@@ -6,6 +6,7 @@
 
 import type { CacheSafeParams } from './forkedAgent.js';
 import type { Config } from '../config/config.js';
+import { createDebugLogger } from './debugLogger.js';
 
 export function buildBtwPrompt(question: string): string {
   return [
@@ -32,19 +33,18 @@ export function buildBtwCacheSafeParams(
     const chat = geminiClient.getChat();
     const generationConfig = chat.getGenerationConfig();
     if (!generationConfig) return null;
-    const fullHistory = geminiClient.getHistory(true);
     const maxHistoryEntries = 40;
-    const history =
-      fullHistory.length > maxHistoryEntries
-        ? fullHistory.slice(-maxHistoryEntries)
-        : fullHistory;
+    const history = geminiClient.getHistoryTail(maxHistoryEntries, true);
     return {
       generationConfig,
       history,
       model: config.getModel() ?? '',
       version: 0,
     };
-  } catch {
+  } catch (err) {
+    createDebugLogger('btw').debug(
+      `buildBtwCacheSafeParams failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return null;
   }
 }

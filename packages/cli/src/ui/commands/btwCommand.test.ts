@@ -444,6 +444,44 @@ describe('btwCommand', () => {
       });
     });
 
+    it('should return fallback text when result.text is null', async () => {
+      mockRunForkedAgent.mockResolvedValue({
+        text: null,
+        usage: { inputTokens: 5, outputTokens: 0, cacheHitTokens: 0 },
+      });
+
+      const acpContext = createMockCommandContext({
+        executionMode: 'acp',
+        services: { config: createConfig() },
+      });
+
+      const result = await btwCommand.action!(acpContext, 'question');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'No response received.',
+      });
+    });
+
+    it('should return error when no cache params available', async () => {
+      mockBuildBtwCacheSafeParams.mockReturnValue(null);
+      mockGetCacheSafeParams.mockReturnValue(null);
+
+      const acpContext = createMockCommandContext({
+        executionMode: 'acp',
+        services: { config: createConfig() },
+      });
+
+      const result = await btwCommand.action!(acpContext, 'question');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Failed to answer btw question: No conversation context available for /btw',
+      });
+    });
+
     it('should not use fire-and-forget pattern', async () => {
       mockRunForkedAgent.mockResolvedValue({
         text: 'answer',

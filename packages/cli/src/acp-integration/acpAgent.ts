@@ -10,6 +10,7 @@ import {
   AuthType,
   buildBtwCacheSafeParams,
   buildBtwPrompt,
+  getCacheSafeParams,
   clearCachedCredentialFile,
   createDebugLogger,
   generateSessionRecap,
@@ -2558,7 +2559,8 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        const cacheSafeParams = buildBtwCacheSafeParams(config);
+        const cacheSafeParams =
+          buildBtwCacheSafeParams(config) ?? getCacheSafeParams();
         if (!cacheSafeParams) {
           return { sessionId, answer: null };
         }
