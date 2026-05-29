@@ -98,12 +98,88 @@ function resolveNumber(
   return defaultValue;
 }
 
+export const DEFAULT_MAX_RECENT_FILES = 5;
+export const DEFAULT_MAX_RECENT_IMAGES = 3;
+export const DEFAULT_SCREENSHOT_TRIGGER_ENABLED = true;
+export const DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD = 50;
+
+export interface ResolvedCompactionTuning {
+  /** Recent files restored after compaction (0 = restore none). */
+  maxRecentFiles: number;
+  /** Recent images restored after compaction (0 = restore none). */
+  maxRecentImages: number;
+  /** Whether tool-image accumulation can trigger auto-compaction. */
+  enableScreenshotTrigger: boolean;
+  /** Tool-image count at or above which the trigger fires (≥ 1). */
+  screenshotTriggerThreshold: number;
+}
+
+/**
+ * Resolves the post-compact retention + screenshot-trigger knobs in
+ * priority order env > settings > default, reusing the same validation
+ * rules as `resolveSlimmingConfig`.
+ *
+ * The screenshot trigger counts only images nested in
+ * `functionResponse.parts` (tool results). Compaction replaces those with
+ * the summary, and the surviving images are re-embedded as TOP-LEVEL parts
+ * in the restoration block — which the counter ignores. So compaction
+ * always resets the tool-image count to ~0 and the trigger cannot
+ * immediately re-fire, independent of `maxRecentImages`.
+ */
+export function resolveCompactionTuning(
+  settings: ChatCompressionSettings | undefined,
+): ResolvedCompactionTuning {
+  return {
+    maxRecentFiles: resolveNumber(
+      process.env['QWEN_COMPACT_MAX_RECENT_FILES'],
+      settings?.maxRecentFilesToRetain,
+      DEFAULT_MAX_RECENT_FILES,
+      { minInclusive: 0 },
+    ),
+    maxRecentImages: resolveNumber(
+      process.env['QWEN_COMPACT_MAX_RECENT_IMAGES'],
+      settings?.maxRecentImagesToRetain,
+      DEFAULT_MAX_RECENT_IMAGES,
+      { minInclusive: 0 },
+    ),
+    enableScreenshotTrigger: resolveBoolean(
+      process.env['QWEN_COMPACT_SCREENSHOT_TRIGGER'],
+      settings?.enableScreenshotTrigger,
+      DEFAULT_SCREENSHOT_TRIGGER_ENABLED,
+    ),
+    screenshotTriggerThreshold: resolveNumber(
+      process.env['QWEN_COMPACT_SCREENSHOT_THRESHOLD'],
+      settings?.screenshotTriggerThreshold,
+      DEFAULT_SCREENSHOT_TRIGGER_THRESHOLD,
+      { minInclusive: 1 },
+    ),
+  };
+}
+
+/**
+ * Resolves a boolean knob in priority order env > settings > default.
+ * Accepts `1`/`true` and `0`/`false` (case-sensitive, matching the
+ * existing `getEmitToolUseSummaries` convention); any other env string
+ * is ignored so a typo falls through rather than silently flipping the
+ * flag.
+ */
+function resolveBoolean(
+  envValue: string | undefined,
+  settingsValue: boolean | undefined,
+  defaultValue: boolean,
+): boolean {
+  if (envValue === '1' || envValue === 'true') return true;
+  if (envValue === '0' || envValue === 'false') return false;
+  if (typeof settingsValue === 'boolean') return settingsValue;
+  return defaultValue;
+}
+
 /**
  * Approximate char count for a single `Part`, used by
- * `findCompressSplitPoint` and by the slimming module's own budget
+ * `estimateContentChars` and by the slimming module's own budget
  * accounting. Binary parts get a fixed budget (in chars) derived from
  * the configured token estimate; this keeps base64 payloads from
- * skewing the split point or token-budget math.
+ * skewing compression size estimation or token-budget math.
  */
 export function estimatePartChars(
   part: Part,
@@ -144,8 +220,12 @@ export function estimatePartChars(
  * qwen-code attaches media here (see
  * `coreToolScheduler.createFunctionResponsePart`); the standard
  * `@google/genai` FunctionResponse type does not declare it.
+ *
+ * Exported so post-compact image extraction/counting walks the SAME
+ * carrier the slimmer strips — otherwise the two disagree on where tool
+ * media lives and screenshots silently vanish from restoration.
  */
-function getFunctionResponseParts(part: Part): Part[] | undefined {
+export function getFunctionResponseParts(part: Part): Part[] | undefined {
   const fr = part.functionResponse as { parts?: unknown } | undefined;
   return Array.isArray(fr?.parts) ? (fr.parts as Part[]) : undefined;
 }

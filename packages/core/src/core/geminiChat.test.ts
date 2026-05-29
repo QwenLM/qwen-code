@@ -123,6 +123,7 @@ describe('GeminiChat', async () => {
       getModel: vi.fn().mockReturnValue('gemini-pro'),
       setModel: vi.fn(),
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
+      getTargetDir: vi.fn().mockReturnValue('/test/project/root'),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       storage: {
         getProjectTempDir: vi.fn().mockReturnValue('/test/temp'),
