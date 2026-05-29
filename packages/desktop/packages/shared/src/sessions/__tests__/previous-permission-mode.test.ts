@@ -20,8 +20,9 @@ describe('session persistence: previousPermissionMode', () => {
     } as const;
 
     const picked = pickSessionFields(source);
-    expect(picked.permissionMode).toBeUndefined();
-    expect(picked.previousPermissionMode).toBeUndefined();
-    expect((picked as Record<string, unknown>).ignoredRuntimeField).toBeUndefined();
+    const pickedRecord = picked as Record<string, unknown>;
+    expect(pickedRecord.permissionMode).toBeUndefined();
+    expect(pickedRecord.previousPermissionMode).toBeUndefined();
+    expect(pickedRecord.ignoredRuntimeField).toBeUndefined();
   });
 });

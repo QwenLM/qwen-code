@@ -55,6 +55,13 @@ mock.module('@craft-agent/shared/config', () => ({
 mock.module('@craft-agent/shared/agent', () => ({
   getQwenCoreSettingsViaAcp: getQwenCoreSettingsViaAcpMock,
   setQwenCoreSettingViaAcp: setQwenCoreSettingViaAcpMock,
+  setQwenMcpServerViaAcp: mock(async () => ({})),
+  removeQwenMcpServerViaAcp: mock(async () => ({})),
+  setQwenHookViaAcp: mock(async () => ({})),
+  removeQwenHookViaAcp: mock(async () => ({})),
+  setQwenExtensionSettingViaAcp: mock(async () => ({})),
+  getQwenPermissionSettingsViaAcp: mock(async () => ({})),
+  setQwenPermissionRulesViaAcp: mock(async () => ({})),
   getQwenMemorySettingsViaAcp: mock(async () => ({})),
   setQwenMemorySettingsViaAcp: mock(async () => ({})),
   getQwenSettingsPathViaAcp: mock(async () => ''),
@@ -168,6 +175,20 @@ describe('settings default thinking RPC handlers', () => {
       'tools.approvalMode',
       'yolo',
     ])
+    expect(applyGlobalPermissionModeMock).toHaveBeenCalledWith('allow-all')
+  })
+
+  it('syncs global permission mode when approval mode is saved as a Qwen core setting', async () => {
+    const setHandler = handlers.get(RPC_CHANNELS.settings.SET_QWEN_CORE_SETTING)
+    expect(setHandler).toBeTruthy()
+
+    await setHandler!(
+      requestContext,
+      'user',
+      'tools.approvalMode',
+      'yolo',
+    )
+
     expect(applyGlobalPermissionModeMock).toHaveBeenCalledWith('allow-all')
   })
 })

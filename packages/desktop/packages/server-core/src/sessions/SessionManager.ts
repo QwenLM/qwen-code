@@ -910,7 +910,7 @@ interface ManagedSession {
   archivedAt?: number
   /** Permission mode for this session */
   permissionMode?: PermissionMode
-  /** Previous permission mode (preserved across restarts for session_state modeTransition context) */
+  /** Previous permission mode (runtime-only session_state modeTransition context) */
   previousPermissionMode?: PermissionMode
   /** Centralized MCP client pool for this session's source connections */
   mcpPool?: McpClientPool
@@ -9031,8 +9031,22 @@ export class SessionManager implements ISessionManager {
   ): Promise<void> {
     this.currentGlobalPermissionMode = mode
     const changedBy = options.changedBy ?? 'user'
+    let changedCount = 0
     for (const managed of this.sessions.values()) {
-      this.applyPermissionModeToManagedSession(managed, mode, changedBy)
+      if (
+        this.applyPermissionModeToManagedSession(managed, mode, changedBy, {
+          suppressLog: true,
+        })
+      ) {
+        changedCount += 1
+      }
+    }
+    if (changedCount > 0 && changedBy !== 'restore') {
+      sessionLog.info('Global permission mode applied', {
+        permissionMode: mode,
+        changedBy,
+        changedCount,
+      })
     }
   }
 
@@ -9068,6 +9082,7 @@ export class SessionManager implements ISessionManager {
     managed: ManagedSession,
     mode: PermissionMode,
     changedBy: 'user' | 'system' | 'restore' | 'automation' | 'unknown',
+    options: { suppressLog?: boolean } = {},
   ): boolean {
     const sessionId = managed.id
     const previousManagedMode = managed.permissionMode ?? 'ask'
@@ -9099,18 +9114,21 @@ export class SessionManager implements ISessionManager {
     if (previousEffectiveMode !== mode) {
       setPermissionMode(sessionId, mode, {
         changedBy: previousManagedMode === mode ? 'restore' : changedBy,
+        suppressLog: options.suppressLog,
       })
     }
 
     const diagnostics = getPermissionModeDiagnostics(sessionId)
     managed.previousPermissionMode = diagnostics.previousPermissionMode
-    sessionLog.info('Permission mode changed', {
-      sessionId,
-      permissionMode: mode,
-      modeVersion: diagnostics.modeVersion,
-      changedBy: diagnostics.lastChangedBy,
-      changedAt: diagnostics.lastChangedAt,
-    })
+    if (!options.suppressLog) {
+      sessionLog.info('Permission mode changed', {
+        sessionId,
+        permissionMode: mode,
+        modeVersion: diagnostics.modeVersion,
+        changedBy: diagnostics.lastChangedBy,
+        changedAt: diagnostics.lastChangedAt,
+      })
+    }
 
     if (managed.agent) {
       managed.agent.setPermissionMode(mode)
@@ -9129,7 +9147,6 @@ export class SessionManager implements ISessionManager {
       },
       managed.workspace.id,
     )
-    this.persistSession(managed)
     return true
   }
 

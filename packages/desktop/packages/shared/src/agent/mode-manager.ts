@@ -83,6 +83,12 @@ export {
  */
 export type PermissionModeChangedBy = 'user' | 'system' | 'restore' | 'automation' | 'unknown';
 
+type PermissionModeChangeMetadata = {
+  changedBy?: PermissionModeChangedBy;
+  changedAt?: string;
+  suppressLog?: boolean;
+};
+
 export interface ModeState {
   /** Session ID */
   sessionId: string;
@@ -275,7 +281,7 @@ class ModeManager {
   setPermissionMode(
     sessionId: string,
     mode: PermissionMode,
-    metadata?: { changedBy?: PermissionModeChangedBy; changedAt?: string }
+    metadata?: PermissionModeChangeMetadata
   ): boolean {
     const existing = this.getState(sessionId);
 
@@ -287,7 +293,8 @@ class ModeManager {
     const changedAt = metadata?.changedAt ?? new Date().toISOString();
     const changedBy = metadata?.changedBy ?? 'unknown';
 
-    const shouldTrackTransition = !(existing.modeVersion === 0 && changedBy === 'restore');
+    const isInitialRestore = existing.modeVersion === 0 && changedBy === 'restore';
+    const shouldTrackTransition = !isInitialRestore;
 
     const newState: ModeState = {
       ...existing,
@@ -299,7 +306,9 @@ class ModeManager {
     };
     this.states.set(sessionId, newState);
 
-    debug(`[Mode] Set permission mode to ${mode} for session ${sessionId} (changedBy=${changedBy}, modeVersion=${newState.modeVersion})`);
+    if (!isInitialRestore && !metadata?.suppressLog) {
+      debug(`[Mode] Set permission mode to ${mode} for session ${sessionId} (changedBy=${changedBy}, modeVersion=${newState.modeVersion})`);
+    }
 
     // Notify callbacks (for CraftAgent internal sync)
     const callbacks = this.callbacks.get(sessionId);
@@ -394,7 +403,7 @@ export function getPermissionMode(sessionId: string): PermissionMode {
 export function setPermissionMode(
   sessionId: string,
   mode: PermissionMode,
-  metadata?: { changedBy?: PermissionModeChangedBy; changedAt?: string }
+  metadata?: PermissionModeChangeMetadata
 ): boolean {
   return modeManager.setPermissionMode(sessionId, mode, metadata);
 }

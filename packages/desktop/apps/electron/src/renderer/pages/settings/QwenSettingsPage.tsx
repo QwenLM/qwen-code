@@ -42,7 +42,6 @@ import type {
   QwenSettingsScope,
   SessionCommand,
 } from '@craft-agent/shared/protocol';
-import { parsePermissionMode } from '@craft-agent/shared/agent/modes';
 
 export type QwenSettingsTab = 'general' | 'mcpServers' | 'hooks' | 'extensions';
 
@@ -469,12 +468,6 @@ export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
           key,
           value,
         });
-        if (key === 'tools.approvalMode' && typeof value === 'string') {
-          const mode = parsePermissionMode(value);
-          if (mode) {
-            await window.electronAPI.setGlobalPermissionMode(mode);
-          }
-        }
         if (result) setSnapshot(result);
       } catch (saveError) {
         toast.error(t('settings.qwen.failedToSaveSetting'), {
