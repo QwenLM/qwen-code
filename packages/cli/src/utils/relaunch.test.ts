@@ -20,9 +20,12 @@ import { spawn } from 'node:child_process';
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
+  const mockSpawn = vi.fn();
+  // Named re-exports must be spelled out for vitest ESM mocking to rebind them.
   return {
     ...actual,
-    spawn: vi.fn(),
+    default: { ...actual, spawn: mockSpawn },
+    spawn: mockSpawn,
   };
 });
 
@@ -289,12 +292,13 @@ describe('relaunchAppInChildProcess', () => {
 
       const promise = relaunchAppInChildProcess([], [], { afterSpawn });
 
-      // Wait a tick so spawn + afterSpawn fire
-      await new Promise(setImmediate);
+      // Wait until spawn has been called
+      await vi.waitFor(() => {
+        expect(spawned).toBe(true);
+      });
 
       // afterSpawn must have been called before child exits
       expect(afterSpawn).toHaveBeenCalledTimes(1);
-      expect(spawned).toBe(true);
 
       // Close the child so the promise resolves
       mockChild.emit('close', 0);
