@@ -38,6 +38,8 @@ export interface DaemonRequestSpanOptions {
   route: string;
   workspaceHash?: string;
   sessionId?: string;
+  clientId?: string;
+  permissionRequestId?: string;
 }
 
 function errorMessage(error: unknown): string {
@@ -124,6 +126,13 @@ export async function withDaemonRequestSpan<T>(
         ? { 'qwen-code.workspace.hash': options.workspaceHash }
         : {}),
       ...(options.sessionId ? { 'session.id': options.sessionId } : {}),
+      ...(options.clientId ? { 'qwen-code.client_id': options.clientId } : {}),
+      ...(options.permissionRequestId
+        ? {
+            'qwen-code.daemon.permission.request_id':
+              options.permissionRequestId,
+          }
+        : {}),
     },
     fn,
     { autoOkOnSuccess: false },
@@ -151,6 +160,17 @@ export function recordDaemonHttpResponse(
 ): void {
   try {
     span?.setAttribute('http.response.status_code', statusCode);
+  } catch {
+    // Telemetry must not affect request handling.
+  }
+}
+
+export function addDaemonRequestAttribute(
+  key: string,
+  value: string | number | boolean,
+): void {
+  try {
+    trace.getSpan(otelContext.active())?.setAttribute(key, value);
   } catch {
     // Telemetry must not affect request handling.
   }

@@ -170,6 +170,7 @@ export type { TelemetryRuntimeConfig } from './runtime-config.js';
 export {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
+  addDaemonRequestAttribute,
   captureDaemonTelemetryContext,
   createDaemonBridgeTelemetry,
   emitDaemonLog,
