@@ -117,10 +117,14 @@ export interface ResolvedCompactionTuning {
 /**
  * Resolves the post-compact retention + screenshot-trigger knobs in
  * priority order env > settings > default, reusing the same validation
- * rules as `resolveSlimmingConfig`. Keep `maxRecentImages` well below
- * `screenshotTriggerThreshold`: restoring at or above the threshold lets
- * the very next turn re-trigger, so a misconfigured pair can compact on
- * every turn.
+ * rules as `resolveSlimmingConfig`.
+ *
+ * The screenshot trigger counts only images nested in
+ * `functionResponse.parts` (tool results). Compaction replaces those with
+ * the summary, and the surviving images are re-embedded as TOP-LEVEL parts
+ * in the restoration block — which the counter ignores. So compaction
+ * always resets the tool-image count to ~0 and the trigger cannot
+ * immediately re-fire, independent of `maxRecentImages`.
  */
 export function resolveCompactionTuning(
   settings: ChatCompressionSettings | undefined,

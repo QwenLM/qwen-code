@@ -1001,6 +1001,28 @@ describe('composePostCompactHistory', () => {
     expect(result[0].role).toBe('user');
     expect(result[1].role).toBe('model');
   });
+
+  it('output is not re-counted by the screenshot trigger (restored images are top-level)', async () => {
+    // The screenshot trigger counts only images nested in
+    // functionResponse.parts. composePostCompactHistory re-embeds surviving
+    // images as TOP-LEVEL parts, so countToolResponseImages() on its output
+    // must be 0 — otherwise a freshly compacted history could immediately
+    // re-trigger compaction. Locks in the no-loop invariant.
+    const history: Content[] = [
+      modelCallScreenshot('Safari'),
+      userToolResultWithImage('image/png', 'a'),
+      modelCallScreenshot('Mail'),
+      userToolResultWithImage('image/png', 'b'),
+    ];
+    const result = await composePostCompactHistory(history, 'SUM', {
+      maxImages: 5,
+    });
+    const restoredImages = result
+      .flatMap((c) => c.parts ?? [])
+      .filter((p) => (p as { inlineData?: unknown }).inlineData);
+    expect(restoredImages.length).toBeGreaterThan(0); // images survived...
+    expect(countToolResponseImages(result)).toBe(0); // ...but top-level, uncounted
+  });
 });
 
 describe('postProcessSummary', () => {
