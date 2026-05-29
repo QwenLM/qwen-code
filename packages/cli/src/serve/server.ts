@@ -2037,26 +2037,6 @@ export function createServeApp(
         });
         return;
       }
-      if (name.length > MAX_SERVER_NAME_LENGTH) {
-        res.status(400).json({
-          error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
-          code: 'invalid_server_name',
-        });
-        return;
-      }
-      if (
-        !/^[A-Za-z0-9_-]+$/.test(name) ||
-        name === '__proto__' ||
-        name === 'constructor' ||
-        name === 'prototype'
-      ) {
-        res.status(400).json({
-          error:
-            'Server name must contain only alphanumeric characters, underscores, and hyphens, and must not be a reserved JS property name',
-          code: 'invalid_server_name',
-        });
-        return;
-      }
       // Validate client identity (required for runtime MCP mutation)
       const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
