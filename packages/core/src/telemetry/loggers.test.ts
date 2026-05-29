@@ -1283,7 +1283,7 @@ describe('loggers', () => {
     it('should log a tool output truncation failed event', () => {
       const fsError = Object.assign(
         new Error(
-          "EACCES: permission denied, open '/Users/alice/.qwen/tmp/test-tool.output'",
+          "EACCES: permission denied, open '/Users/Mary Jane/Library/Application Support/Qwen/test-tool.output'",
         ),
         { code: 'EACCES' },
       );

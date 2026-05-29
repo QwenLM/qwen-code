@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { truncateAndSaveToFile, truncateToolOutput } from './truncation.js';
+import {
+  truncateAndSaveToFile,
+  truncateContentInMemory,
+  truncateToolOutput,
+} from './truncation.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
@@ -55,6 +59,30 @@ vi.mock('./debugLogger.js', () => ({
     },
   }),
 }));
+
+describe('truncateContentInMemory', () => {
+  it('returns content unchanged when below threshold and line limit', () => {
+    expect(truncateContentInMemory('small', 100, 10)).toBe('small');
+  });
+
+  it('truncates with a custom content label', () => {
+    const result = truncateContentInMemory(
+      Array.from({ length: 20 }, (_, i) => `line-${i}`).join('\n'),
+      40,
+      4,
+      'PostToolUse hook context',
+    );
+
+    expect(result).toContain(
+      'PostToolUse hook context was too large and has been truncated.',
+    );
+    expect(result).toContain(
+      '[Note: Could not save full posttooluse hook context to file]',
+    );
+    expect(result).toContain('Truncated part of the posttooluse hook context:');
+    expect(result).not.toContain('Truncated part of the output:');
+  });
+});
 
 describe('truncateAndSaveToFile', () => {
   const mockWriteFile = vi.mocked(fs.writeFile);
@@ -390,6 +418,32 @@ describe('truncateAndSaveToFile', () => {
     expect(result.content).toContain(
       'The truncated output below shows the beginning and end of the content',
     );
+  });
+
+  it('should use custom content labels in saved-file truncation messages', async () => {
+    const content = 'a'.repeat(2_000_000);
+    mockWriteFile.mockResolvedValue(undefined);
+
+    const result = await truncateAndSaveToFile(
+      content,
+      'hook-context',
+      '/tmp',
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'PostToolUse hook context',
+    );
+
+    expect(result.content).toContain(
+      'The full posttooluse hook context has been saved to:',
+    );
+    expect(result.content).toContain(
+      'To read the complete posttooluse hook context, use the read_file tool',
+    );
+    expect(result.content).toContain(
+      'Truncated part of the posttooluse hook context:',
+    );
+    expect(result.content).not.toContain('The full output has been saved to:');
+    expect(result.content).not.toContain('Truncated part of the output:');
   });
 
   it('should sanitize fileName to prevent path traversal', async () => {

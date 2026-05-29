@@ -7486,7 +7486,7 @@ describe('CoreToolScheduler tool output truncation', () => {
     expect(output).toContain('[CONTENT TRUNCATED]');
     expect(output).not.toContain('A'.repeat(500));
     expect(output.length).toBeLessThan(largeOutput.length);
-    expect(completedCalls[0].response.contentLength).toBe(output.length);
+    expect(completedCalls[0].response.contentLength).toBe(largeOutput.length);
   });
 
   it('passes through small model-facing tool output unchanged', async () => {
@@ -7548,6 +7548,9 @@ describe('CoreToolScheduler tool output truncation', () => {
     expect(output).toContain('[CONTENT TRUNCATED]');
     expect(output).toContain('[Note: Could not save full tool output to file]');
     expect(output.length).toBeLessThan(largeOutput.length);
+    expect(completedCalls[0].response.resultDisplay).toContain(
+      'Output too long (truncated in memory)',
+    );
     expect(mockLogToolOutputTruncationFailed).toHaveBeenCalledWith(
       mockConfig,
       expect.objectContaining({
@@ -7602,9 +7605,7 @@ describe('CoreToolScheduler tool output truncation', () => {
     const expectedOutput = `${smallOutput}\n\n${hookContext}`;
 
     expect(output).toBe(expectedOutput);
-    expect(completedCalls[0].response.contentLength).toBe(
-      expectedOutput.length,
-    );
+    expect(completedCalls[0].response.contentLength).toBe(smallOutput.length);
   });
 
   it('preserves hook context outside truncated tool output', async () => {
@@ -7659,7 +7660,7 @@ describe('CoreToolScheduler tool output truncation', () => {
     expect(output).toContain(escapedHookContext);
     expect(output.endsWith(`\n\n${escapedHookContext}`)).toBe(true);
     expect(output).not.toContain('...context that must stay intact');
-    expect(completedCalls[0].response.contentLength).toBe(output.length);
+    expect(completedCalls[0].response.contentLength).toBe(largeOutput.length);
   });
 
   it('bounds large PostToolUse hook context before appending it', async () => {
@@ -7713,7 +7714,7 @@ describe('CoreToolScheduler tool output truncation', () => {
     );
     expect(output).toContain('[CONTENT TRUNCATED]');
     expect(output.length).toBeLessThan(smallOutput.length + hookContext.length);
-    expect(completedCalls[0].response.contentLength).toBe(output.length);
+    expect(completedCalls[0].response.contentLength).toBe(smallOutput.length);
     expect(mockWriteFile).toHaveBeenCalledTimes(1);
     const savedFileName = path.basename(String(mockWriteFile.mock.calls[0][0]));
     expect(savedFileName).toContain(
@@ -8018,6 +8019,9 @@ describe('CoreToolScheduler tool output truncation', () => {
 
     expect(output).toContain('The full output has been saved to:');
     expect(completedCalls[0].response.resultDisplay).toBe(structuredDisplay);
+    expect(mockDebugLogger.info).toHaveBeenCalledWith(
+      expect.stringContaining('not surfaced in TUI'),
+    );
   });
 
   it('passes non-string Part output through without truncation', async () => {

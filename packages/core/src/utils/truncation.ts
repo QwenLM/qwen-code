@@ -102,21 +102,23 @@ function formatTruncatedContent(
     contentLabel === 'Tool output'
       ? TOOL_OUTPUT_TRUNCATED_PREFIX
       : `${contentLabel} was too large and has been truncated.`;
+  const contentName =
+    contentLabel === 'Tool output' ? 'output' : contentLabel.toLowerCase();
 
   if (!outputFile) {
     return `${prefix}
 [Note: Could not save full ${contentLabel.toLowerCase()} to file]
 
-Truncated part of the output:
+Truncated part of the ${contentName}:
 ${truncatedContent}`;
   }
 
   return `${prefix}
-The full output has been saved to: ${outputFile}
-To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
-The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
+The full ${contentName} has been saved to: ${outputFile}
+To read the complete ${contentName}, use the ${ReadFileTool.Name} tool with the absolute file path above.
+The truncated ${contentName} below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
 
-Truncated part of the output:
+Truncated part of the ${contentName}:
 ${truncatedContent}`;
 }
 

@@ -2852,6 +2852,8 @@ export class CoreToolScheduler {
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
         let resultDisplay = toolResult.returnDisplay;
+        const originalContentLength =
+          typeof content === 'string' ? content.length : undefined;
         let postToolUseAdditionalContext: string | undefined;
 
         // PostToolUse Hook
@@ -2956,12 +2958,26 @@ export class CoreToolScheduler {
                 callId: scheduledCall.request.callId,
               },
             );
+            const originalContent = content;
             content = truncated.content;
-            if (truncated.outputFile && typeof resultDisplay === 'string') {
+            if (truncated.outputFile) {
+              if (typeof resultDisplay === 'string') {
+                const separator = resultDisplay.length > 0 ? '\n' : '';
+                resultDisplay =
+                  `${resultDisplay}${separator}` +
+                  `Output too long and was saved to: ${truncated.outputFile}`;
+              } else {
+                debugLogger.info(
+                  `Truncation file path ${truncated.outputFile} not surfaced in TUI: ` +
+                    `resultDisplay is ${typeof resultDisplay} (${toolName})`,
+                );
+              }
+            } else if (
+              content !== originalContent &&
+              typeof resultDisplay === 'string'
+            ) {
               const separator = resultDisplay.length > 0 ? '\n' : '';
-              resultDisplay =
-                `${resultDisplay}${separator}` +
-                `Output too long and was saved to: ${truncated.outputFile}`;
+              resultDisplay = `${resultDisplay}${separator}Output too long (truncated in memory)`;
             }
           } catch (truncationError) {
             debugLogger.warn(
@@ -2988,11 +3004,19 @@ export class CoreToolScheduler {
               useSplitBudget,
             );
             if (fallbackLimits) {
-              content = truncateContentInMemory(
+              const fallbackContent = truncateContentInMemory(
                 content,
                 fallbackLimits.threshold,
                 fallbackLimits.lines,
               );
+              if (
+                fallbackContent !== content &&
+                typeof resultDisplay === 'string'
+              ) {
+                const separator = resultDisplay.length > 0 ? '\n' : '';
+                resultDisplay = `${resultDisplay}${separator}Output too long (truncated in memory)`;
+              }
+              content = fallbackContent;
             }
           }
         } else if (typeof content !== 'string') {
@@ -3137,8 +3161,7 @@ export class CoreToolScheduler {
             );
           }
         }
-        const contentLength =
-          typeof content === 'string' ? content.length : undefined;
+        const contentLength = originalContentLength;
 
         // Guard the JSON serialization for non-string content. Tool
         // results can contain Part[] with large inlineData/media payloads

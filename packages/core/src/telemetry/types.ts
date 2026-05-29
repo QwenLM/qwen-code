@@ -787,7 +787,14 @@ function getTelemetryErrorCode(error: unknown): string | undefined {
 }
 
 function sanitizeTelemetryErrorMessage(message: string): string {
-  return message.replace(
+  const sanitizedQuotedPaths = message.replace(/'([^']+)'/g, (match, p) => {
+    if (!p.includes('/') && !p.includes('\\')) {
+      return match;
+    }
+    return `'${p.includes('\\') ? path.win32.basename(p) : path.posix.basename(p)}'`;
+  });
+
+  return sanitizedQuotedPaths.replace(
     /(?:[A-Za-z]:)?[\\/](?:[^\\/\s'"]+[\\/])*[^\\/\s'"]+/g,
     (match) =>
       match.includes('\\')

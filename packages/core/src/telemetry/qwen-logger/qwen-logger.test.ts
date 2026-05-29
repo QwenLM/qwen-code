@@ -436,7 +436,7 @@ describe('QwenLogger', () => {
 
       const fsError = Object.assign(
         new Error(
-          "EACCES: permission denied, open 'C:\\Users\\alice\\.qwen\\tmp\\test-tool.output'",
+          "EACCES: permission denied, open 'C:\\Users\\Mary Jane\\AppData\\Roaming\\Qwen\\test-tool.output'",
         ),
         { code: 'EACCES' },
       );
