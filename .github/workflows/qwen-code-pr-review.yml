@@ -43,21 +43,24 @@ jobs:
         github.event.issue.pull_request &&
         github.event.issue.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
-         startsWith(github.event.comment.body, '@qwen-code /review ')) &&
+         startsWith(github.event.comment.body, '@qwen-code /review ') ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request_review_comment' &&
         github.event.pull_request.state == 'open' &&
         (github.event.comment.body == '@qwen-code /review' ||
-         startsWith(github.event.comment.body, '@qwen-code /review ')) &&
+         startsWith(github.event.comment.body, '@qwen-code /review ') ||
+         startsWith(github.event.comment.body, format('@qwen-code /review{0}', '\n'))) &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request_review' &&
         github.event.pull_request.state == 'open' &&
         (github.event.review.body == '@qwen-code /review' ||
-         startsWith(github.event.review.body, '@qwen-code /review ')) &&
+         startsWith(github.event.review.body, '@qwen-code /review ') ||
+         startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
         (github.event.review.author_association == 'OWNER' ||
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR'))
