@@ -2247,8 +2247,8 @@ describe('HookEventHandler', () => {
 
       const result = await hookEventHandler.firePermissionDeniedEvent(
         'Bash',
-        { command: 'rm -rf /tmp/example' },
-        'tool-use-1',
+        { command: 'rm -rf /tmp/project' },
+        'toolu-denied-1',
         'classifier_blocked',
       );
 
@@ -2259,7 +2259,7 @@ describe('HookEventHandler', () => {
       expect(result.success).toBe(true);
     });
 
-    it('should include all parameters in the hook input', async () => {
+    it('should include the denied tool payload and reason in hook input', async () => {
       const mockPlan = createMockExecutionPlan([
         {
           type: HookType.Command,
@@ -2276,7 +2276,7 @@ describe('HookEventHandler', () => {
       await hookEventHandler.firePermissionDeniedEvent(
         'Write',
         { file_path: '/test.txt', content: 'hello' },
-        'tool-use-2',
+        'toolu-denied-2',
         'classifier_unavailable',
       );
 
@@ -2294,7 +2294,7 @@ describe('HookEventHandler', () => {
         file_path: '/test.txt',
         content: 'hello',
       });
-      expect(input.tool_use_id).toBe('tool-use-2');
+      expect(input.tool_use_id).toBe('toolu-denied-2');
       expect(input.reason).toBe('classifier_unavailable');
     });
   });

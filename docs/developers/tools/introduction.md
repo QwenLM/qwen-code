@@ -45,6 +45,7 @@ Qwen Code's built-in tools can be broadly categorized as follows:
 
 - **[File System Tools](./file-system.md):** For interacting with files and directories (reading, writing, listing, searching, etc.).
 - **[Shell Tool](./shell.md) (`run_shell_command`):** For executing shell commands.
+- **[Monitor Tool](./monitor.md) (`monitor`):** For running long-lived shell commands that stream output back as background task notifications.
 - **[Web Fetch Tool](./web-fetch.md) (`web_fetch`):** For retrieving content from URLs.
 - **[Multi-File Read Tool](./multi-file.md) (`read_many_files`):** A specialized tool for reading content from multiple files or directories, often used by the `@` command.
 - **[Memory Tool](./memory.md) (`save_memory`):** For saving and recalling information across sessions.

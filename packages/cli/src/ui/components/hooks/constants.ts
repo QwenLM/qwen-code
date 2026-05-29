@@ -95,7 +95,7 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
       { code: 'Other', description: t('show stderr to user only') },
     ],
     [HookEventName.PermissionDenied]: [
-      { code: 0, description: t('observe permission denial') },
+      { code: 0, description: t('stdout/stderr not shown') },
       { code: 'Other', description: t('show stderr to user only') },
     ],
     [HookEventName.TodoCreated]: [
@@ -141,7 +141,9 @@ export function getHookShortDescription(eventName: string): string {
     [HookEventName.PermissionRequest]: t(
       'When a permission dialog is displayed',
     ),
-    [HookEventName.PermissionDenied]: t('When auto mode denies a tool call'),
+    [HookEventName.PermissionDenied]: t(
+      'When a tool call is denied before a permission dialog is displayed',
+    ),
     [HookEventName.TodoCreated]: t('When a new todo item is created'),
     [HookEventName.TodoCompleted]: t('When a todo item is marked as completed'),
   };

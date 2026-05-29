@@ -22,7 +22,7 @@ import type {
   PreCompactTrigger,
   PostCompactTrigger,
   NotificationType,
-  PermissionDeniedInput,
+  PermissionDeniedReason,
   PermissionSuggestion,
   HookEventName,
   FunctionHookCallback,
@@ -417,7 +417,7 @@ export class HookSystem {
     toolName: string,
     toolInput: Record<string, unknown>,
     toolUseId: string,
-    reason: PermissionDeniedInput['reason'],
+    reason: PermissionDeniedReason,
     signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
     const result = await this.hookEventHandler.firePermissionDeniedEvent(

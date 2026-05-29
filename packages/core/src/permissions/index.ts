@@ -15,6 +15,7 @@ export {
   evaluateAutoMode,
   formatClassifierBlockMessage,
   type AutoModeUnavailableReason,
+  getAutoModePermissionDeniedReason,
   type AutoModeDecision,
   type FallbackToAskReason,
   type AutoModeOutcome,
@@ -23,6 +24,7 @@ export {
   SAFE_TOOL_ALLOWLIST,
   isInSafeToolAllowlist,
   passesAcceptEditsFastPath,
+  shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
 export {

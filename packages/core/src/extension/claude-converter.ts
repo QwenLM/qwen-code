@@ -549,7 +549,9 @@ export async function convertClaudePluginPackage(
 
 /**
  * Collects resources (commands, skills, agents) to a destination folder.
- * If a resource is already in the destination folder, it will be skipped.
+ * Resources are always copied unconditionally — the caller
+ * (`convertClaudePluginPackage`) clears `destDir` beforehand so it can
+ * honor selective sub-entry lists.
  * @param resourcePaths String or array of resource paths
  * @param pluginRoot Root directory of the plugin
  * @param destDir Destination directory for collected resources
@@ -582,22 +584,25 @@ async function collectResources(
     const stat = fs.statSync(resolvedPath);
 
     if (stat.isDirectory()) {
-      // If it's a directory, check if it's already the destination folder
       const dirName = path.basename(resolvedPath);
-      const parentDir = path.dirname(resolvedPath);
 
-      // If the directory is already named as the destination folder (e.g., 'commands')
-      // and it's at the plugin root level, skip it
-      if (dirName === destFolderName && parentDir === pluginRoot) {
-        debugLogger.debug(
-          `Skipping ${resolvedPath} as it's already in the correct location`,
-        );
-        continue;
-      }
-
-      // Determine destination: preserve the directory name
-      // e.g., ./skills/xlsx -> tmpDir/skills/xlsx/
-      const finalDestDir = path.join(destDir, dirName);
+      // Determine destination layout.
+      //
+      // When the marketplace entry points at the *whole* resource folder
+      // (e.g. `commands: ["./commands/"]`, deep-wiki style), the source
+      // directory name matches the destination folder name and we want to
+      // copy the directory's contents *flat* into destDir — otherwise we'd
+      // end up with `tmpDir/commands/commands/...`.
+      //
+      // When the entry points at a sub-folder (e.g. `skills: ["./skills/xlsx"]`,
+      // anthropics/skills style), we preserve the sub-folder name so each
+      // entry lands at `tmpDir/skills/<sub>/`.
+      //
+      // Note: the caller (`convertClaudePluginPackage`) deletes destDir
+      // before invoking us, so we always copy unconditionally; there is no
+      // safe "already in the correct location" shortcut.
+      const finalDestDir =
+        dirName === destFolderName ? destDir : path.join(destDir, dirName);
 
       // Copy all files from the directory
       const files = await glob('**/*', {
@@ -631,20 +636,10 @@ async function collectResources(
         fs.copyFileSync(srcFile, destFile);
       }
     } else {
-      // If it's a file, check if it's already in the destination folder
-      const relativePath = path.relative(pluginRoot, resolvedPath);
-
-      // Check if the file path starts with the destination folder name
-      // e.g., 'commands/test1.md' or 'commands/me/test.md' should be skipped
-      const segments = relativePath.split(path.sep);
-      if (segments.length > 0 && segments[0] === destFolderName) {
-        debugLogger.debug(
-          `Skipping ${resolvedPath} as it's already in ${destFolderName}/`,
-        );
-        continue;
-      }
-
-      // Copy the file to destination
+      // File entry (e.g. `agents: ["./agents/wiki-architect.md"]`).
+      // Always copy — the caller has already cleared destDir, so the
+      // file is missing even when the relative path looks like it's
+      // "already in the destination folder".
       const fileName = path.basename(resolvedPath);
       const destFile = path.join(destDir, fileName);
       fs.copyFileSync(resolvedPath, destFile);

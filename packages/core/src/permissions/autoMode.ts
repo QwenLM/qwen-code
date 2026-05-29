@@ -19,6 +19,8 @@
 
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
+import type { PermissionDeniedReason } from '../hooks/types.js';
+export type { PermissionDeniedReason } from '../hooks/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { classifyAction, type ClassifierResult } from './classifier.js';
@@ -191,14 +193,6 @@ export type FallbackToAskReason =
   | DenialFallbackReason;
 
 /**
- * Reasons AUTO mode denies a call outright. These map to PermissionDenied hook
- * payloads in the follow-up hook-surface work.
- */
-export type PermissionDeniedReason =
-  | 'classifier_blocked'
-  | 'classifier_unavailable';
-
-/**
  * Outcome of {@link applyAutoModeDecision}. Boils the union of
  * `AutoModeDecision` plus denial-tracking state updates down to a
  * three-way "what should the caller do" instruction so the scheduler /
@@ -271,6 +265,25 @@ export function applyAutoModeDecision(
       return { kind: 'fallback', reason: 'safety_check' };
     }
   }
+}
+
+export function shouldFirePermissionDeniedForAutoMode(
+  decision: AutoModeDecision,
+  outcome: AutoModeOutcome,
+): decision is Extract<AutoModeDecision, { via: 'classifier' }> {
+  // The type predicate narrows callers to classifier decisions so reason
+  // mapping can safely read classifier-only fields such as `unavailable`.
+  return (
+    decision.via === 'classifier' &&
+    decision.shouldBlock &&
+    outcome.kind === 'blocked'
+  );
+}
+
+export function getAutoModePermissionDeniedReason(
+  decision: Extract<AutoModeDecision, { via: 'classifier' }>,
+): PermissionDeniedReason {
+  return decision.unavailable ? 'classifier_unavailable' : 'classifier_blocked';
 }
 
 /**

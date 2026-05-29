@@ -32,6 +32,7 @@ import type {
   NotificationInput,
   NotificationType,
   PermissionDeniedInput,
+  PermissionDeniedReason,
   PermissionRequestInput,
   PermissionSuggestion,
   SubagentStartInput,
@@ -367,14 +368,16 @@ export class HookEventHandler {
   }
 
   /**
-   * Fire a PermissionDenied event
-   * Called when AUTO mode denies a tool call without asking the user
+   * Fire a PermissionDenied event for tool calls rejected before manual
+   * permission handling starts. Unlike PermissionRequest, this event does not
+   * ask hooks to approve or modify the call; it reports AUTO-mode denials that
+   * happen before any permission dialog would be shown.
    */
   async firePermissionDeniedEvent(
     toolName: string,
     toolInput: Record<string, unknown>,
     toolUseId: string,
-    reason: PermissionDeniedInput['reason'],
+    reason: PermissionDeniedReason,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: PermissionDeniedInput = {
