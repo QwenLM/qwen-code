@@ -42,6 +42,7 @@ import {
   getErrorStatus,
   UserPromptEvent,
   readManyFiles,
+  clampInlineMediaPart,
   Storage,
   ToolNames,
   fireNotificationHook,
@@ -2709,12 +2710,12 @@ export class Session implements SessionContext {
           return { text: part.text };
         case 'image':
         case 'audio':
-          return {
+          return clampInlineMediaPart({
             inlineData: {
               mimeType: part.mimeType,
               data: part.data,
             },
-          };
+          });
         case 'resource_link': {
           if (part.uri.startsWith(FILE_URI_SCHEME)) {
             return {
@@ -2812,12 +2813,14 @@ export class Session implements SessionContext {
       }
       // Type guard for blob resources
       if ('blob' in contextPart && contextPart.blob) {
-        processedQueryParts.push({
-          inlineData: {
-            mimeType: contextPart.mimeType ?? 'application/octet-stream',
-            data: contextPart.blob,
-          },
-        });
+        processedQueryParts.push(
+          clampInlineMediaPart({
+            inlineData: {
+              mimeType: contextPart.mimeType ?? 'application/octet-stream',
+              data: contextPart.blob,
+            },
+          }),
+        );
       }
     }
 

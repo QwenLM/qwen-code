@@ -863,6 +863,49 @@ describe('Session', () => {
       );
     });
 
+    it('degrades an oversized inline image to a text placeholder before sending to the model', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = '8';
+      try {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'QUJDREVGR0hJSktMTU5PUFFSU1Q=', // ~20 decoded bytes, over the 8-byte cap
+            },
+          ],
+        });
+
+        const sendMessageStream = mockChat.sendMessageStream as ReturnType<
+          typeof vi.fn
+        >;
+        const request = sendMessageStream.mock.calls[0]?.[1] as {
+          message: Array<Record<string, unknown>>;
+        };
+        const parts = request.message;
+        expect(parts.some((p) => 'inlineData' in p)).toBe(false);
+        expect(
+          parts.some(
+            (p) =>
+              typeof p['text'] === 'string' &&
+              (p['text'] as string).includes('image/png') &&
+              (p['text'] as string).toLowerCase().includes('omitted'),
+          ),
+        ).toBe(true);
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+    });
+
     describe('auto-compress', () => {
       it('runs automatic compression before sending an ACP prompt', async () => {
         mockChat.sendMessageStream = vi
