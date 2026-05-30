@@ -8042,6 +8042,60 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       await bridge.shutdown();
     });
 
+    it('carries currentApprovalMode in the snapshot when an approval-mode change was promoted', async () => {
+      // The other A5 tests only seed currentModelId, so the
+      // publishApprovalModeChanged → entry.currentApprovalMode → snapshot
+      // pipeline is otherwise untested at the bridge level: a typo writing
+      // the wrong field would leave currentApprovalMode null and slip past.
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // Promote an in-session mode change to populate currentApprovalMode
+      // (flows through onModePromoted → publishApprovalModeChanged).
+      void capturedConn!.extNotification('qwen/notify/session/mode-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        currentModeId: 'auto-edit',
+      });
+      await new Promise((r) => setTimeout(r, 20));
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+        snapshot: true,
+      });
+
+      const collected: BridgeEvent[] = [];
+      for await (const e of iter) {
+        collected.push(e);
+        if (e.type === 'session_snapshot') break;
+      }
+      const snap = collected.find((e) => e.type === 'session_snapshot');
+      expect(snap).toBeDefined();
+      expect(
+        (snap!.data as { currentApprovalMode: string | null })
+          .currentApprovalMode,
+      ).toBe('auto-edit');
+      abort.abort();
+      await bridge.shutdown();
+    });
+
     it('does NOT yield session_snapshot when snapshot is not set', async () => {
       let capturedConn: AgentSideConnection | undefined;
       const factory: ChannelFactory = async () => {
