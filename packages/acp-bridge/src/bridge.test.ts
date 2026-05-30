@@ -95,13 +95,15 @@ describe('createHttpAcpBridge', () => {
   it('uses bridge telemetry for channel/session/prompt dispatch and prompt metadata injection', async () => {
     const handle = makeChannel();
     const operations: string[] = [];
+    const spanAttributes = new Map<string, Record<string, unknown>>();
     const telemetry: BridgeTelemetry = {
       captureContext: () => ({ captured: true }),
       async runWithContext(_captured, fn) {
         return await fn();
       },
-      async withSpan(operation, _attributes, fn) {
+      async withSpan(operation, attributes, fn) {
         operations.push(operation);
+        spanAttributes.set(operation, attributes);
         return await fn();
       },
       event() {},
@@ -123,14 +125,19 @@ describe('createHttpAcpBridge', () => {
     });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-    await bridge.sendPrompt(session.sessionId, {
-      sessionId: session.sessionId,
-      prompt: [{ type: 'text', text: 'hello' }],
-      _meta: {
-        keep: 'value',
-        'qwen.telemetry.traceparent': 'client-spoof',
-      },
-    } as PromptRequest);
+    await bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: {
+          keep: 'value',
+          'qwen.telemetry.traceparent': 'client-spoof',
+        },
+      } as PromptRequest,
+      undefined,
+      { clientId: session.clientId },
+    );
 
     expect(operations).toEqual(
       expect.arrayContaining([
@@ -143,6 +150,10 @@ describe('createHttpAcpBridge', () => {
     expect(handle.agent.promptCalls[0]!._meta).toMatchObject({
       keep: 'value',
       'qwen.telemetry.traceparent': 'daemon-traceparent',
+    });
+    expect(session.clientId).toBeDefined();
+    expect(spanAttributes.get('prompt.dispatch')).toMatchObject({
+      'qwen-code.client_id': session.clientId,
     });
   });
 

@@ -279,7 +279,9 @@ export interface ServeAppDeps {
 
 function resolveDaemonTelemetryRoute(
   req: Request,
-): { route: string; sessionId?: string } | undefined {
+):
+  | { route: string; sessionId?: string; permissionRequestId?: string }
+  | undefined {
   if (req.method === 'POST' && req.path === '/session') {
     return { route: 'POST /session' };
   }
@@ -292,6 +294,27 @@ function resolveDaemonTelemetryRoute(
     return {
       route: `POST /session/:id/${sessionActionName}`,
       sessionId: sessionActionId,
+    };
+  }
+  const sessionPermission = req.path.match(
+    /^\/session\/([^/]+)\/permission\/([^/]+)$/,
+  );
+  if (
+    sessionPermission?.[1] &&
+    sessionPermission?.[2] &&
+    req.method === 'POST'
+  ) {
+    return {
+      route: 'POST /session/:id/permission/:requestId',
+      sessionId: sessionPermission[1],
+      permissionRequestId: sessionPermission[2],
+    };
+  }
+  const globalPermission = req.path.match(/^\/permission\/([^/]+)$/);
+  if (globalPermission?.[1] && req.method === 'POST') {
+    return {
+      route: 'POST /permission/:requestId',
+      permissionRequestId: globalPermission[1],
     };
   }
   const deleteSession = req.path.match(/^\/session\/([^/]+)$/);
@@ -315,12 +338,24 @@ function daemonTelemetryMiddleware(
       next();
       return;
     }
+    const rawClientId = req.get(CLIENT_ID_HEADER);
+    const clientId =
+      rawClientId !== undefined &&
+      rawClientId !== '' &&
+      rawClientId.length <= MAX_CLIENT_ID_LENGTH &&
+      CLIENT_ID_RE.test(rawClientId)
+        ? rawClientId
+        : undefined;
     void withDaemonRequestSpan(
       {
         method: req.method,
         route: route.route,
         workspaceHash,
         ...(route.sessionId ? { sessionId: route.sessionId } : {}),
+        ...(route.permissionRequestId
+          ? { permissionRequestId: route.permissionRequestId }
+          : {}),
+        ...(clientId ? { clientId } : {}),
       },
       async (span) =>
         await new Promise<void>((resolve, reject) => {

@@ -2250,6 +2250,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
                 'qwen-code.daemon.bridge.operation': 'prompt.dispatch',
                 'session.id': sessionId,
                 'qwen-code.daemon.prompt.queue_wait_ms': Date.now() - queuedAt,
+                ...(context?.clientId
+                  ? { 'qwen-code.client_id': context.clientId }
+                  : {}),
               },
               async () => {
                 const normalized: PromptRequest = telemetry.injectPromptContext(

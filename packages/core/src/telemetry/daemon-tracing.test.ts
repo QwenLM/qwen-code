@@ -18,10 +18,12 @@ vi.mock('./sdk.js', () => ({
 import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
+  addDaemonRequestAttribute,
   createDaemonBridgeTelemetry,
   extractDaemonTraceContext,
   hashDaemonWorkspace,
   injectDaemonTraceContext,
+  withDaemonRequestSpan,
 } from './daemon-tracing.js';
 
 describe('daemon-tracing', () => {
@@ -98,5 +100,90 @@ describe('daemon-tracing', () => {
     });
     expect(setStatus).toHaveBeenCalledWith({ code: SpanStatusCode.OK });
     expect(end).toHaveBeenCalled();
+  });
+
+  function mockTracerStartActiveSpan() {
+    const startActiveSpan = vi.fn(
+      (_name: string, _opts: unknown, fn: (span: Span) => Promise<void>) =>
+        fn({
+          setStatus: vi.fn(),
+          end: vi.fn(),
+          setAttribute: vi.fn(),
+          setAttributes: vi.fn(),
+          recordException: vi.fn(),
+        } as unknown as Span),
+    );
+    vi.spyOn(trace, 'getTracer').mockReturnValue({
+      startActiveSpan,
+    } as unknown as Tracer);
+    return startActiveSpan;
+  }
+
+  it('includes clientId and permissionRequestId in request span attributes', async () => {
+    const startActiveSpan = mockTracerStartActiveSpan();
+
+    await withDaemonRequestSpan(
+      {
+        method: 'POST',
+        route: 'POST /session/:id/permission/:requestId',
+        workspaceHash: 'abc123',
+        sessionId: 'sess-1',
+        clientId: 'client-42',
+        permissionRequestId: 'perm-99',
+      },
+      async () => {},
+    );
+
+    expect(startActiveSpan).toHaveBeenCalledWith(
+      'qwen-code.daemon.request',
+      expect.objectContaining({
+        attributes: expect.objectContaining({
+          'http.request.method': 'POST',
+          'http.route': 'POST /session/:id/permission/:requestId',
+          'session.id': 'sess-1',
+          'qwen-code.client_id': 'client-42',
+          'qwen-code.daemon.permission.request_id': 'perm-99',
+        }),
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('omits clientId and permissionRequestId when not provided', async () => {
+    const startActiveSpan = mockTracerStartActiveSpan();
+
+    await withDaemonRequestSpan(
+      { method: 'POST', route: 'POST /session' },
+      async () => {},
+    );
+
+    const attrs = (
+      startActiveSpan.mock.calls[0]![1] as {
+        attributes: Record<string, unknown>;
+      }
+    ).attributes;
+    expect(attrs).not.toHaveProperty('qwen-code.client_id');
+    expect(attrs).not.toHaveProperty('qwen-code.daemon.permission.request_id');
+  });
+
+  it('addDaemonRequestAttribute sets attribute on the active span', () => {
+    const setAttribute = vi.fn();
+    vi.spyOn(trace, 'getSpan').mockReturnValue({
+      setAttribute,
+    } as unknown as Span);
+
+    addDaemonRequestAttribute('qwen-code.prompt_id', 'test-prompt-id');
+
+    expect(setAttribute).toHaveBeenCalledWith(
+      'qwen-code.prompt_id',
+      'test-prompt-id',
+    );
+  });
+
+  it('addDaemonRequestAttribute is a no-op without an active span', () => {
+    vi.spyOn(trace, 'getSpan').mockReturnValue(undefined);
+    expect(() =>
+      addDaemonRequestAttribute('qwen-code.prompt_id', 'orphan'),
+    ).not.toThrow();
   });
 });
