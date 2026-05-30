@@ -196,6 +196,8 @@ describe('Session', () => {
       sendMessageStream: vi.fn(),
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      getHistoryShallow: vi.fn().mockReturnValue([]),
+      getLastModelMessageText: vi.fn().mockReturnValue(''),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
@@ -329,6 +331,7 @@ describe('Session', () => {
         { role: 'model', parts: [{ text: 'second reply' }] },
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       const result = session.rewindToTurn(1);
 
@@ -348,6 +351,7 @@ describe('Session', () => {
         { role: 'model', parts: [{ text: 'first reply' }] },
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       const result = session.rewindToTurn(0);
 
@@ -356,9 +360,9 @@ describe('Session', () => {
     });
 
     it('rejects unreachable user turns', () => {
-      vi.mocked(mockChat.getHistory).mockReturnValue([
-        { role: 'user', parts: [{ text: 'first' }] },
-      ]);
+      const history: Content[] = [{ role: 'user', parts: [{ text: 'first' }] }];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       expect(() => session.rewindToTurn(2)).toThrow(
         'Cannot rewind to the requested turn',
@@ -853,6 +857,8 @@ describe('Session', () => {
           sendMessageStream: vi.fn().mockResolvedValue(createEmptyStream()),
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
+          getHistoryShallow: vi.fn().mockReturnValue([]),
+          getLastModelMessageText: vi.fn().mockReturnValue(''),
         } as unknown as GeminiChat;
 
         mockChat.sendMessageStream = vi
@@ -1207,6 +1213,8 @@ describe('Session', () => {
           sendMessageStream: vi.fn().mockResolvedValue(createEmptyStream()),
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
+          getHistoryShallow: vi.fn().mockReturnValue([]),
+          getLastModelMessageText: vi.fn().mockReturnValue(''),
         } as unknown as GeminiChat;
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockGeminiClient.tryCompressChat
@@ -1523,6 +1531,9 @@ describe('Session', () => {
           .mockReturnValue([
             { role: 'model', parts: [{ text: 'response text' }] },
           ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
         mockChat.sendMessageStream = vi
           .fn()
           .mockResolvedValueOnce(createEmptyStream())
@@ -1584,6 +1595,9 @@ describe('Session', () => {
           .mockReturnValue([
             { role: 'model', parts: [{ text: 'response text' }] },
           ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
         mockChat.sendMessageStream = vi
           .fn()
           .mockResolvedValueOnce(createEmptyStream())
@@ -1655,6 +1669,9 @@ describe('Session', () => {
           .mockReturnValue([
             { role: 'model', parts: [{ text: 'response text' }] },
           ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('response text');
         mockChat.sendMessageStream = vi
           .fn()
           .mockResolvedValue(createEmptyStream());
@@ -2405,6 +2422,9 @@ describe('Session', () => {
             .mockReturnValue([
               { role: 'model', parts: [{ text: 'response text' }] },
             ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
 
           mockChat.sendMessageStream = vi.fn().mockResolvedValue(
             createStreamWithChunks([
@@ -2458,6 +2478,9 @@ describe('Session', () => {
             .mockReturnValue([
               { role: 'model', parts: [{ text: 'response text' }] },
             ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
           mockChat.sendMessageStream = vi
             .fn()
             .mockResolvedValue(createEmptyStream());
@@ -2503,6 +2526,9 @@ describe('Session', () => {
             .mockReturnValue([
               { role: 'model', parts: [{ text: 'response text' }] },
             ]);
+          mockChat.getLastModelMessageText = vi
+            .fn()
+            .mockReturnValue('response text');
           mockChat.sendMessageStream = vi
             .fn()
             .mockResolvedValue(createEmptyStream());

@@ -55,7 +55,7 @@ function getBtwCacheSafeParams(
     geminiClient &&
     typeof geminiClient === 'object' &&
     typeof geminiClient.getChat === 'function' &&
-    typeof geminiClient.getHistory === 'function'
+    typeof geminiClient.getHistoryTail === 'function'
   ) {
     const chat = geminiClient.getChat();
     if (
