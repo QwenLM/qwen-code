@@ -1827,6 +1827,151 @@ describe('OpenAIContentConverter', () => {
       expect(messages[assistantIndex + 4]?.role).toBe('user');
     });
 
+    it('should not keep split media from orphaned tool responses', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { id: 'call_a', name: 'shot_a', args: {} },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_x',
+                  name: 'shot_x',
+                  response: { output: 'X' },
+                  parts: [
+                    { inlineData: { mimeType: 'image/png', data: 'xxx' } },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'shot_a',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+      const strictContext: RequestContext = {
+        ...requestContext,
+        splitToolMedia: true,
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        strictContext,
+      );
+
+      expect(messages.map((message) => message.role)).toEqual([
+        'assistant',
+        'tool',
+      ]);
+      expect(messages[1]).toMatchObject({
+        role: 'tool',
+        tool_call_id: 'call_a',
+      });
+    });
+
+    it('should merge assistant turns created by orphan cleanup', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { id: 'call_a', name: 'read_file', args: {} },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'read_file',
+                  response: { output: 'A' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Next I will call another tool.' }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_orphan',
+                  name: 'stale_tool',
+                  response: { output: 'stale' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: { id: 'call_b', name: 'grep', args: {} },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_b',
+                  name: 'grep',
+                  response: { output: 'B' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      for (let index = 1; index < messages.length; index += 1) {
+        expect([messages[index - 1].role, messages[index].role]).not.toEqual([
+          'assistant',
+          'assistant',
+        ]);
+      }
+      expect(
+        messages
+          .filter(
+            (message): message is OpenAI.Chat.ChatCompletionToolMessageParam =>
+              message.role === 'tool' && 'tool_call_id' in message,
+          )
+          .map((message) => message.tool_call_id),
+      ).toEqual(['call_a', 'call_b']);
+    });
+
     describe('assistant message with reasoning-only content (issue #3421)', () => {
       /**
        * Regression tests for https://github.com/QwenLM/qwen-code/issues/3421
@@ -1865,6 +2010,41 @@ describe('OpenAIContentConverter', () => {
         expect(
           (assistantMsg as { reasoning_content?: string }).reasoning_content,
         ).toBe('I reasoned about it.');
+      });
+
+      it('should keep reasoning content when orphaned tool calls are removed', () => {
+        const request: GenerateContentParameters = {
+          model: 'models/test',
+          contents: [
+            {
+              role: 'model',
+              parts: [
+                { text: 'I need to inspect this.', thought: true },
+                {
+                  functionCall: {
+                    id: 'call_missing',
+                    name: 'read_file',
+                    args: {},
+                  },
+                },
+              ],
+            },
+            { role: 'user', parts: [{ text: 'break adjacency' }] },
+          ],
+        };
+
+        const messages = converter.convertGeminiRequestToOpenAI(
+          request,
+          requestContext,
+        );
+
+        const assistantMsg = messages.find((m) => m.role === 'assistant');
+        expect(assistantMsg).toBeDefined();
+        expect((assistantMsg as { content: unknown }).content).toBe('');
+        expect(
+          (assistantMsg as { reasoning_content?: string }).reasoning_content,
+        ).toBe('I need to inspect this.');
+        expect('tool_calls' in (assistantMsg ?? {})).toBe(false);
       });
 
       it('should keep content null when assistant has only tool_calls and no reasoning', () => {

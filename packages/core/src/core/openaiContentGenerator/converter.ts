@@ -384,6 +384,7 @@ export function convertGeminiRequestToOpenAI(
   messages = mergeConsecutiveAssistantMessages(messages);
   if (options.cleanOrphanToolCalls) {
     messages = cleanOrphanedToolCalls(messages);
+    messages = mergeConsecutiveAssistantMessages(messages);
   }
 
   return messages;
@@ -1387,9 +1388,7 @@ function mapGeminiFinishReasonToOpenAI(
   }
 }
 
-/**
- * Clean up orphaned tool calls from message history to prevent OpenAI API errors.
- */
+/** Type guard: is this an assistant message with at least one tool call? */
 function hasToolCalls(
   message: OpenAI.Chat.ChatCompletionMessageParam,
 ): message is OpenAI.Chat.ChatCompletionAssistantMessageParam & {
@@ -1420,7 +1419,11 @@ function isSplitToolMediaMessage(
   return firstPart?.type === 'text' && firstPart.text === SPLIT_TOOL_MEDIA_TEXT;
 }
 
-// Assumes consecutive assistant messages have already been merged.
+/**
+ * Clean up orphaned tool calls from message history to prevent OpenAI API errors.
+ *
+ * Assumes consecutive assistant messages have already been merged.
+ */
 function cleanOrphanedToolCalls(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
@@ -1441,6 +1444,7 @@ function cleanOrphanedToolCalls(
       const adjacentToolResponseIds = new Set<string>();
       const toolResponseIndexes: number[] = [];
       const splitMediaIndexes: number[] = [];
+      let lastToolResponseMatchesAssistant = false;
 
       for (
         let nextIndex = index + 1;
@@ -1450,12 +1454,16 @@ function cleanOrphanedToolCalls(
         const nextMessage = messages[nextIndex];
         if (nextMessage.role === 'tool' && 'tool_call_id' in nextMessage) {
           if (!nextMessage.tool_call_id) {
+            lastToolResponseMatchesAssistant = false;
             continue;
           }
 
           if (toolCallIds.has(nextMessage.tool_call_id)) {
             adjacentToolResponseIds.add(nextMessage.tool_call_id);
             toolResponseIndexes.push(nextIndex);
+            lastToolResponseMatchesAssistant = true;
+          } else {
+            lastToolResponseMatchesAssistant = false;
           }
 
           // Other tool responses in this block may belong to another assistant.
@@ -1463,7 +1471,9 @@ function cleanOrphanedToolCalls(
         }
 
         if (isSplitToolMediaMessage(nextMessage)) {
-          splitMediaIndexes.push(nextIndex);
+          if (lastToolResponseMatchesAssistant) {
+            splitMediaIndexes.push(nextIndex);
+          }
           continue;
         }
 
@@ -1488,6 +1498,9 @@ function cleanOrphanedToolCalls(
 
     const message = messages[index];
     if (hasToolCalls(message)) {
+      const reasoningContent = (
+        message as ExtendedChatCompletionAssistantMessageParam
+      ).reasoning_content;
       const adjacentToolResponseIds =
         adjacentToolResponseIdsByAssistant.get(index) ?? new Set<string>();
       const validToolCalls = message.tool_calls.filter(
@@ -1522,10 +1535,10 @@ function cleanOrphanedToolCalls(
           }
         }
       } else if (
-        typeof message.content === 'string' &&
-        message.content.trim()
+        (typeof message.content === 'string' && message.content.trim()) ||
+        reasoningContent
       ) {
-        // Keep the message if it has text content, but remove tool calls
+        // Keep text/reasoning content, but remove orphaned tool calls.
         const cleanedMessage = { ...message };
         delete (
           cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
@@ -1533,6 +1546,10 @@ function cleanOrphanedToolCalls(
           }
         ).tool_calls;
         cleaned.push(cleanedMessage);
+      } else {
+        debugLogger.debug(
+          `cleanOrphanedToolCalls: dropping assistant with ${message.tool_calls.length} orphaned tool call(s) and no text/reasoning content`,
+        );
       }
     } else if (message.role === 'tool' && 'tool_call_id' in message) {
       debugLogger.debug(
