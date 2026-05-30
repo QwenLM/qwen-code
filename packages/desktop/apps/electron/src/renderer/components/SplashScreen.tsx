@@ -1,9 +1,10 @@
-import { motion } from 'motion/react'
-import { CraftAgentsSymbol } from './icons/CraftAgentsSymbol'
+// eslint-disable-next-line
+import { motion } from 'motion/react';
+import { CraftAgentsSymbol } from './icons/CraftAgentsSymbol';
 
 interface SplashScreenProps {
-  isExiting: boolean
-  onExitComplete?: () => void
+  isExiting: boolean;
+  onExitComplete?: () => void;
 }
 
 /**
@@ -15,13 +16,13 @@ interface SplashScreenProps {
 export function SplashScreen({ isExiting, onExitComplete }: SplashScreenProps) {
   return (
     <motion.div
-      className="fixed inset-0 z-splash flex items-center justify-center bg-background"
+      className="titlebar-drag-region fixed inset-0 z-splash flex items-center justify-center bg-background"
       initial={{ opacity: 1 }}
       animate={{ opacity: isExiting ? 0 : 1 }}
       transition={{ duration: 0.5, ease: 'easeOut' }}
       onAnimationComplete={() => {
         if (isExiting && onExitComplete) {
-          onExitComplete()
+          onExitComplete();
         }
       }}
     >
@@ -29,15 +30,15 @@ export function SplashScreen({ isExiting, onExitComplete }: SplashScreenProps) {
         initial={{ scale: 1.5, opacity: 1 }}
         animate={{
           scale: isExiting ? 3 : 1.5,
-          opacity: isExiting ? 0 : 1
+          opacity: isExiting ? 0 : 1,
         }}
         transition={{
           duration: 0.2,
-          ease: [0.16, 1, 0.3, 1] // Exponential out curve
+          ease: [0.16, 1, 0.3, 1], // Exponential out curve
         }}
       >
         <CraftAgentsSymbol className="h-8 text-accent" />
       </motion.div>
     </motion.div>
-  )
+  );
 }
