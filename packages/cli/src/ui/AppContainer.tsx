@@ -2110,9 +2110,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
       // Only clone the tail — full structuredClone of a large resumed session
       // causes transient heap peaks that trigger OOM (#4624).
-      const conversationHistory = geminiClient
-        .getChat()
-        .getHistoryTail(40, true);
+      const conversationHistory = geminiClient.getHistoryTail(40, true);
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
       })
