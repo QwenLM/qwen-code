@@ -217,6 +217,37 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.statuses.at(-1)?.code).toBe(SpanStatusCode.OK);
     });
 
+    it('marks the interaction span ERROR when getResultStatus returns "error"', async () => {
+      const config = createMockConfig();
+      await withInteractionSpan(
+        config,
+        { promptId: 'p-cron-err', model: 'm', messageType: 'cron' },
+        async () => 'done',
+        () => 'error',
+      );
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.attributes['qwen-code.turn_status']).toBe('error');
+      expect(span?.statuses.at(-1)?.code).toBe(SpanStatusCode.ERROR);
+    });
+
+    it('keeps a thrown error message instead of the generic error-status message', async () => {
+      const config = createMockConfig();
+      await expect(
+        withInteractionSpan(
+          config,
+          { promptId: 'p-throw', model: 'm', messageType: 'cron' },
+          async () => {
+            throw new Error('boom from fn');
+          },
+        ),
+      ).rejects.toThrow('boom from fn');
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.statuses.at(-1)?.code).toBe(SpanStatusCode.ERROR);
+      expect(span?.statuses.at(-1)?.message).toBe('boom from fn');
+    });
+
     it('ends interaction span with error status', () => {
       const config = createMockConfig();
       startInteractionSpan(config, {
@@ -731,6 +762,103 @@ describe('session-tracing', () => {
       expect(bashSpan?.statuses[0]?.code).toBe(SpanStatusCode.OK);
       expect(readSpan?.statuses[0]?.code).toBe(SpanStatusCode.ERROR);
       expect(readSpan?.statuses[0]?.message).toBe('timeout');
+    });
+  });
+
+  describe('session.id derives from the owning session, not the process-global (#4602 review)', () => {
+    it('stamps a tool span with the interaction session.id even when the process-global belongs to another session', () => {
+      // Daemon scenario: telemetry init left the process-global pointing at
+      // session B, but the active interaction belongs to session A.
+      setSessionContext(undefined, 'session-B-global');
+      startInteractionSpan(createMockConfig({ sessionId: 'session-A' }), {
+        promptId: 'p-a',
+        model: 'm',
+        messageType: 'acp_prompt',
+      });
+
+      const span = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      endToolSpan(span, { success: true });
+
+      const toolSpan = mockSpans.find((s) => s.name === 'qwen-code.tool');
+      expect(toolSpan?.attributes['session.id']).toBe('session-A');
+    });
+
+    it('stamps an llm_request span with the interaction session.id, not the global', () => {
+      setSessionContext(undefined, 'session-B-global');
+      startInteractionSpan(createMockConfig({ sessionId: 'session-A' }), {
+        promptId: 'p-a',
+        model: 'm',
+        messageType: 'acp_prompt',
+      });
+
+      const span = startLLMRequestSpan('m', 'p-a');
+      endLLMRequestSpan(span, { success: true });
+
+      const llmSpan = mockSpans.find((s) => s.name === 'qwen-code.llm_request');
+      expect(llmSpan?.attributes['session.id']).toBe('session-A');
+    });
+
+    it('stamps a tool.execution span with the owning session id via the tool span context', () => {
+      setSessionContext(undefined, 'session-B-global');
+      startInteractionSpan(createMockConfig({ sessionId: 'session-A' }), {
+        promptId: 'p-a',
+        model: 'm',
+        messageType: 'acp_prompt',
+      });
+
+      const toolSpan = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      let execSpan!: ReturnType<typeof startToolExecutionSpan>;
+      runInToolSpanContext(toolSpan, () => {
+        execSpan = startToolExecutionSpan();
+      });
+      endToolExecutionSpan(execSpan, { success: true });
+      endToolSpan(toolSpan, { success: true });
+
+      const exec = mockSpans.find((s) => s.name === 'qwen-code.tool.execution');
+      expect(exec?.attributes['session.id']).toBe('session-A');
+    });
+
+    it('isolates concurrent sessions: each tool span carries its own session id', async () => {
+      // Two interactions for two different sessions while the global is stale.
+      setSessionContext(undefined, 'stale-global');
+
+      await withInteractionSpan(
+        createMockConfig({ sessionId: 'session-A' }),
+        { promptId: 'pa', model: 'm', messageType: 'acp_prompt' },
+        async () => {
+          endToolSpan(startToolSpan('Read', { 'tool.call_id': 'a1' }), {
+            success: true,
+          });
+        },
+      );
+      await withInteractionSpan(
+        createMockConfig({ sessionId: 'session-B' }),
+        { promptId: 'pb', model: 'm', messageType: 'acp_prompt' },
+        async () => {
+          endToolSpan(startToolSpan('Write', { 'tool.call_id': 'b1' }), {
+            success: true,
+          });
+        },
+      );
+
+      const readSpan = mockSpans.find(
+        (s) => s.attributes['tool.name'] === 'Read',
+      );
+      const writeSpan = mockSpans.find(
+        (s) => s.attributes['tool.name'] === 'Write',
+      );
+      expect(readSpan?.attributes['session.id']).toBe('session-A');
+      expect(writeSpan?.attributes['session.id']).toBe('session-B');
+    });
+
+    it('falls back to the process-global session id for standalone spans (single-session CLI path)', () => {
+      // No interaction context — single-session CLI: the global is correct.
+      setSessionContext(undefined, 'cli-session');
+      const span = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      endToolSpan(span, { success: true });
+
+      const toolSpan = mockSpans.find((s) => s.name === 'qwen-code.tool');
+      expect(toolSpan?.attributes['session.id']).toBe('cli-session');
     });
   });
 
