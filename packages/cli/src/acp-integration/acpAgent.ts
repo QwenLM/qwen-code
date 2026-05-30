@@ -2554,10 +2554,14 @@ class QwenAgent implements Agent {
           );
         }
         const question = params['question'];
-        if (typeof question !== 'string' || !question.trim()) {
+        if (
+          typeof question !== 'string' ||
+          !question.trim() ||
+          question.length > 4096
+        ) {
           throw RequestError.invalidParams(
             undefined,
-            'Invalid or missing question',
+            'Invalid or missing question (max 4096 chars)',
           );
         }
         const session = this.sessionOrThrow(sessionId);

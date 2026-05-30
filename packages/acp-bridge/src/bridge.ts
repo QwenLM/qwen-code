@@ -3396,9 +3396,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     async generateSessionBtw(sessionId, question, signal, _context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      if (signal?.aborted) return { sessionId, answer: null };
       const info = channelInfoForEntry(entry);
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      if (signal?.aborted) return { sessionId, answer: null };
       const races: Array<Promise<unknown>> = [
         withTimeout(
           entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBtw, {
@@ -3417,8 +3417,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             const handler = () =>
               reject(new DOMException('Aborted', 'AbortError'));
             signal.addEventListener('abort', handler, { once: true });
-            cleanupAbort = () =>
-              signal.removeEventListener('abort', handler);
+            cleanupAbort = () => signal.removeEventListener('abort', handler);
           }),
         );
       }
