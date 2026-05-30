@@ -1968,15 +1968,21 @@ export function createServeApp(
         });
         return;
       }
+      if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+        res.status(400).json({
+          error:
+            'Server name must contain only alphanumeric characters, underscores, and hyphens',
+          code: 'invalid_server_name',
+        });
+        return;
+      }
       if (
-        !/^[A-Za-z0-9_-]+$/.test(name) ||
         name === '__proto__' ||
         name === 'constructor' ||
         name === 'prototype'
       ) {
         res.status(400).json({
-          error:
-            'Server name must contain only alphanumeric characters, underscores, and hyphens, and must not be a reserved JS property name',
+          error: 'Server name must not be a reserved JS property name',
           code: 'invalid_server_name',
         });
         return;
@@ -2029,16 +2035,35 @@ export function createServeApp(
     mutate({ strict: true }),
     async (req, res) => {
       const name = req.params['name'] ?? '';
+      if (name.length === 0) {
+        res.status(400).json({
+          error: 'Server name is required',
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      if (name.length > MAX_SERVER_NAME_LENGTH) {
+        res.status(400).json({
+          error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+        res.status(400).json({
+          error:
+            'Server name must contain only alphanumeric characters, underscores, and hyphens',
+          code: 'invalid_server_name',
+        });
+        return;
+      }
       if (
-        name.length === 0 ||
-        name.length > MAX_SERVER_NAME_LENGTH ||
-        !/^[A-Za-z0-9_-]+$/.test(name) ||
         name === '__proto__' ||
         name === 'constructor' ||
         name === 'prototype'
       ) {
         res.status(400).json({
-          error: 'Invalid server name',
+          error: 'Server name must not be a reserved JS property name',
           code: 'invalid_server_name',
         });
         return;

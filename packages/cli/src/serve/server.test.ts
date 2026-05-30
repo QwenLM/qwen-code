@@ -3418,6 +3418,23 @@ describe('createServeApp', () => {
       expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
     });
 
+    it('400 invalid_server_name when name is a reserved JS property', async () => {
+      for (const name of ['__proto__', 'constructor', 'prototype']) {
+        const bridge = fakeBridge();
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const res = await auth(
+          request(app).post('/workspace/mcp/servers'),
+        ).send({
+          name,
+          config: { command: 'echo' },
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_server_name');
+        expect(res.body.error).toContain('reserved');
+        expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+      }
+    });
+
     it('400 missing_required_field when config is absent', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
@@ -3604,6 +3621,36 @@ describe('createServeApp', () => {
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_server_name');
       expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_server_name when name exceeds MAX_SERVER_NAME_LENGTH', async () => {
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const overlong = 'a'.repeat(257);
+      const res = await auth(
+        request(app).delete(`/workspace/mcp/servers/${overlong}`),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send();
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_server_name when name is a reserved JS property', async () => {
+      for (const name of ['__proto__', 'constructor', 'prototype']) {
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const res = await auth(
+          request(app).delete(`/workspace/mcp/servers/${name}`),
+        )
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send();
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_server_name');
+        expect(res.body.error).toContain('reserved');
+        expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
+      }
     });
 
     it('401 auth_required when no bearer token (strict gate)', async () => {
