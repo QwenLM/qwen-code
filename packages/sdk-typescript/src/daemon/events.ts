@@ -11,7 +11,7 @@ import type {
   PermissionOutcome,
 } from './types.js';
 
-const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
+export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_update',
   'permission_request',
   'permission_resolved',
@@ -64,6 +64,14 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'workspace_initialized',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
+  // T2.8 (#4514) — runtime MCP server add/remove events. Fired by
+  // `POST /workspace/mcp/servers` on success (including replace and
+  // same-fingerprint no-op).
+  'mcp_server_added',
+  // T2.8 (#4514) — counterpart of `mcp_server_added`. Fired by
+  // `DELETE /workspace/mcp/servers/:name` when an entry was actually
+  // removed. Idempotent skip ('not_present') does NOT emit.
+  'mcp_server_removed',
   // #4175 F3 (Commit 7) — multi-client permission coordination events.
   // `permission_partial_vote` only fires under `consensus` policy;
   // `permission_forbidden` fires under `designated` (originator
@@ -639,6 +647,47 @@ export interface DaemonTurnErrorData {
   [key: string]: unknown;
 }
 
+/**
+ * T2.8 (#4514). Fired when `POST /workspace/mcp/servers` succeeds,
+ * including both fresh additions and replace-on-existing-name. The
+ * event fans out to every active session SSE bus.
+ */
+export interface DaemonMcpServerAddedData {
+  readonly name: string;
+  readonly transport: DaemonMcpTransport;
+  readonly replaced: boolean;
+  readonly shadowedSettings: boolean;
+  readonly toolCount: number;
+  readonly originatorClientId: string;
+  [key: string]: unknown;
+}
+
+export type DaemonMcpServerAddedEvent = DaemonEventEnvelope<
+  'mcp_server_added',
+  DaemonMcpServerAddedData
+>;
+
+/**
+ * T2.8 (#4514). Fired when `DELETE /workspace/mcp/servers/:name`
+ * actually drops an entry. Idempotent skip ('not_present') does NOT
+ * emit this event. The event fans out to every active session SSE bus.
+ *
+ * `wasShadowingSettings`: true when the removed runtime server was
+ *   masking a settings-defined server of the same name — the settings
+ *   entry now takes effect again.
+ */
+export interface DaemonMcpServerRemovedData {
+  readonly name: string;
+  readonly wasShadowingSettings: boolean;
+  readonly originatorClientId: string;
+  [key: string]: unknown;
+}
+
+export type DaemonMcpServerRemovedEvent = DaemonEventEnvelope<
+  'mcp_server_removed',
+  DaemonMcpServerRemovedData
+>;
+
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -796,7 +845,9 @@ export type DaemonControlEvent =
   | DaemonToolToggledEvent
   | DaemonWorkspaceInitializedEvent
   | DaemonMcpServerRestartedEvent
-  | DaemonMcpServerRestartRefusedEvent;
+  | DaemonMcpServerRestartRefusedEvent
+  | DaemonMcpServerAddedEvent
+  | DaemonMcpServerRemovedEvent;
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
@@ -1292,6 +1343,14 @@ export function asKnownDaemonEvent(
       return isFollowupSuggestionData(event.data)
         ? (event as DaemonFollowupSuggestionEvent)
         : undefined;
+    case 'mcp_server_added':
+      return isMcpServerAddedData(event.data)
+        ? (event as DaemonMcpServerAddedEvent)
+        : undefined;
+    case 'mcp_server_removed':
+      return isMcpServerRemovedData(event.data)
+        ? (event as DaemonMcpServerRemovedEvent)
+        : undefined;
     case 'turn_complete':
       return isTurnCompleteData(event.data)
         ? (event as DaemonTurnCompleteEvent)
@@ -1659,6 +1718,9 @@ export function reduceDaemonSessionEvent(
         ...base,
         lastTurnError: event.data,
       };
+    case 'mcp_server_added':
+    case 'mcp_server_removed':
+      return base;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;
@@ -2361,6 +2423,28 @@ function isFollowupSuggestionData(
   );
 }
 
+function isMcpServerAddedData(
+  value: unknown,
+): value is DaemonMcpServerAddedData {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['name'])) return false;
+  if (typeof value['replaced'] !== 'boolean') return false;
+  if (typeof value['shadowedSettings'] !== 'boolean') return false;
+  if (!isFiniteNumber(value['toolCount'])) return false;
+  if (!isNonEmptyString(value['originatorClientId'])) return false;
+  // Transport family must be one of the known kinds. Reject silently
+  // for forward-compat (mirrors `isMcpRefusedServerEntry`).
+  const transport = value['transport'];
+  return (
+    transport === 'stdio' ||
+    transport === 'sse' ||
+    transport === 'http' ||
+    transport === 'websocket' ||
+    transport === 'sdk' ||
+    transport === 'unknown'
+  );
+}
+
 function isTurnCompleteData(value: unknown): value is DaemonTurnCompleteData {
   return (
     isRecord(value) &&
@@ -2375,6 +2459,16 @@ function isTurnErrorData(value: unknown): value is DaemonTurnErrorData {
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['message'])
   );
+}
+
+function isMcpServerRemovedData(
+  value: unknown,
+): value is DaemonMcpServerRemovedData {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['name'])) return false;
+  if (typeof value['wasShadowingSettings'] !== 'boolean') return false;
+  if (!isNonEmptyString(value['originatorClientId'])) return false;
+  return true;
 }
 
 function isPermissionOption(value: unknown): value is DaemonPermissionOption {

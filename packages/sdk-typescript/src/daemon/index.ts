@@ -29,6 +29,7 @@ export {
 } from './DaemonSessionClient.js';
 export {
   asKnownDaemonEvent,
+  DAEMON_KNOWN_EVENT_TYPE_VALUES,
   createDaemonAuthState,
   createDaemonSessionViewState,
   isDaemonEventType,
@@ -165,6 +166,10 @@ export type {
   // signal for SSE reconnects past the ring eviction boundary.
   DaemonStateResyncRequiredData,
   DaemonStateResyncRequiredEvent,
+  DaemonMcpServerAddedData,
+  DaemonMcpServerAddedEvent,
+  DaemonMcpServerRemovedData,
+  DaemonMcpServerRemovedEvent,
   DaemonMcpServerRestartedData,
   DaemonMcpServerRestartedEvent,
   DaemonMcpServerRestartRefusedData,
@@ -255,6 +260,9 @@ export type {
   DaemonMcpRestartResult,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
+  DaemonRuntimeMcpAddRequest,
+  DaemonRuntimeMcpAddResult,
+  DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
   DaemonAvailableCommand,
   DaemonCapabilities,
@@ -330,6 +338,7 @@ export type {
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
   HeartbeatResult,
+  MCPServerConfigShape,
   PermissionOutcome,
   PermissionOutcomeCancelled,
   PermissionOutcomeSelected,

@@ -33,6 +33,11 @@ import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 // runtime side effects, so a static value import is fine.
 import { connectionIdOf } from './mcp-pool-key.js';
 import type { ConnectionId } from './mcp-pool-events.js';
+import {
+  McpBudgetWouldExceedError,
+  McpServerSpawnFailedError,
+  InvalidMcpConfigError,
+} from './mcp-errors.js';
 
 const debugLogger = createDebugLogger('MCP');
 
@@ -2623,4 +2628,349 @@ export class McpClientManager {
 
     return client.readResource(uri, options);
   }
+
+  // ────────────────────────────────────────────────────────────────────
+  // T2.8: Runtime MCP server lifecycle (add / remove)
+  // ────────────────────────────────────────────────────────────────────
+
+  /**
+   * Add (or replace) a runtime MCP server, wiring:
+   *   1. Config runtime overlay (shadow-over-settings detection)
+   *   2. Budget guard (enforce throws, warn returns skipped)
+   *   3. Pool acquire (or standalone McpClient connect + discover)
+   *
+   * Returns a result object describing what happened. Throws
+   * `McpBudgetWouldExceedError` on hard-cap violations,
+   * `McpServerSpawnFailedError` on transport failures,
+   * `InvalidMcpConfigError` on bad config.
+   */
+  async addRuntimeMcpServer(
+    name: string,
+    config: MCPServerConfig,
+    originatorClientId: string,
+  ): Promise<AddRuntimeMcpServerResult> {
+    // Reject explicitly excluded servers
+    if (this.cliConfig.isMcpServerDisabled(name)) {
+      throw new InvalidMcpConfigError(
+        name,
+        `server '${name}' is in excludedMcpServers and cannot be added at runtime`,
+      );
+    }
+
+    debugLogger.info(
+      `addRuntimeMcpServer: ${name} (transport=${mcpTransportOf(config)}, client=${originatorClientId})`,
+    );
+
+    // Validate config minimally: must have at least one transport field
+    const transport = mcpTransportOf(config);
+    if (transport === 'unknown') {
+      throw new InvalidMcpConfigError(
+        name,
+        'config must specify at least one of: command, url, httpUrl, tcp',
+      );
+    }
+
+    // Detect shadow-over-settings
+    const settingsServers = this.cliConfig.getSettingsMcpServers() ?? {};
+    const shadowedSettings = name in settingsServers;
+
+    // Check for idempotent replace: same name + same fingerprint means
+    // no pool churn needed. Compare against the existing pooled
+    // connection (if any).
+    const newConnId = connectionIdOf(name, config);
+    const existingConn = this.pooledConnections.get(name);
+    if (existingConn && existingConn.id === newConnId) {
+      // Same fingerprint — no transport churn, just update Config overlay
+      this.cliConfig.addRuntimeMcpServer(name, config);
+      const toolCount = existingConn.toolsSnapshot.length;
+      return {
+        name,
+        transport,
+        replaced: false,
+        shadowedSettings,
+        toolCount,
+        originatorClientId,
+      };
+    }
+
+    // Budget guard — check using the appropriate budget layer
+    const budget = this.pool?.getBudget();
+    if (budget) {
+      // Pool mode: use workspace budget
+      const mode = budget.getMode();
+      if (mode === 'enforce' || mode === 'warn') {
+        // Only apply budget check if this is a genuinely NEW name
+        // (not a re-add of the same name already holding a slot)
+        const reservation = budget.tryReserve(name);
+        if (reservation === 'refused') {
+          // Hard cap — enforce mode
+          throw new McpBudgetWouldExceedError(name);
+        }
+        // In warn mode, if the budget is at or above capacity and this
+        // is a new reservation, return a soft refusal
+        if (
+          mode === 'warn' &&
+          reservation === 'reserved' &&
+          budget.getBudget() !== undefined &&
+          budget.getReservedCount() > budget.getBudget()!
+        ) {
+          // Roll back the reservation — we're not actually spawning
+          budget.release(name);
+          return {
+            name,
+            skipped: true,
+            reason: 'budget_warning_only',
+          };
+        }
+      }
+    } else if (this.budgetMode !== 'off') {
+      // Standalone mode: use manager-level budget
+      const reservation = this.tryReserveSlot(name);
+      if (reservation === 'refused') {
+        throw new McpBudgetWouldExceedError(name);
+      }
+      if (
+        this.budgetMode === 'warn' &&
+        reservation === 'reserved' &&
+        this.clientBudget !== undefined &&
+        this.reservedSlots.size > this.clientBudget
+      ) {
+        this.releaseSlotName(name);
+        return {
+          name,
+          skipped: true,
+          reason: 'budget_warning_only',
+        };
+      }
+    }
+
+    // Release existing connection for this name (if replacing with
+    // different fingerprint)
+    const replaced = this.pooledConnections.has(name) || this.clients.has(name);
+    if (existingConn) {
+      try {
+        existingConn.release();
+      } catch {
+        /* best effort */
+      }
+      this.pooledConnections.delete(name);
+      this.toolRegistry.removeMcpToolsByServer(name);
+      this.stopHealthCheck(name);
+    }
+    const existingClient = this.clients.get(name);
+    if (existingClient) {
+      this.stopHealthCheck(name);
+      try {
+        await existingClient.disconnect();
+      } catch {
+        /* best effort */
+      }
+      this.clients.delete(name);
+      this.toolRegistry.removeMcpToolsByServer(name);
+      // Do NOT releaseSlotName here — the budget slot carries over to
+      // the new entry being spawned. Releasing + not re-reserving would
+      // leave the running server unaccounted in the budget.
+    }
+
+    // Write the Config runtime overlay BEFORE spawning so
+    // `getMcpServers()` reflects the new entry immediately (the pool
+    // acquire + discover may read config for trust/filters).
+    this.cliConfig.addRuntimeMcpServer(name, config);
+
+    // Acquire the transport
+    let toolCount = 0;
+    try {
+      if (this.pool && !isSdkMcpServerConfig(config)) {
+        // Pool mode: acquire through the shared pool
+        const sessionId = this.cliConfig.getSessionId();
+        const promptRegistry = this.cliConfig.getPromptRegistry();
+        const conn = await this.pool.acquire(
+          name,
+          config,
+          sessionId,
+          this.toolRegistry,
+          promptRegistry,
+        );
+        this.pooledConnections.set(name, conn);
+        toolCount = conn.toolsSnapshot.length;
+      } else {
+        // Standalone mode: create a per-session McpClient
+        const sdkCallback = isSdkMcpServerConfig(config)
+          ? this.sendSdkMcpMessage
+          : undefined;
+        const client = new McpClient(
+          name,
+          config,
+          this.toolRegistry,
+          this.cliConfig.getPromptRegistry(),
+          this.cliConfig.getWorkspaceContext(),
+          this.cliConfig.getDebugMode(),
+          sdkCallback,
+        );
+        this.clients.set(name, client);
+        this.eventEmitter?.emit('mcp-client-update', this.clients);
+        await client.connect();
+        await client.discover(this.cliConfig);
+        this.eventEmitter?.emit('mcp-client-update', this.clients);
+        toolCount = this.toolRegistry.getToolsByServer(name).length;
+      }
+    } catch (err) {
+      // Spawn failed — roll back Config overlay + budget reservation
+      this.cliConfig.removeRuntimeMcpServer(name);
+      if (budget) {
+        budget.release(name);
+      } else if (this.budgetMode !== 'off') {
+        this.releaseSlotName(name);
+      }
+      // Clean up any partial state (including tools from partial discover)
+      this.toolRegistry.removeMcpToolsByServer(name);
+      this.pooledConnections.delete(name);
+      removeMCPServerStatus(name);
+      const failedClient = this.clients.get(name);
+      if (failedClient) {
+        try {
+          await failedClient.disconnect();
+        } catch {
+          /* best effort */
+        }
+      }
+      this.clients.delete(name);
+      this.stopHealthCheck(name);
+      this.eventEmitter?.emit('mcp-client-update', this.clients);
+
+      const message = err instanceof Error ? err.message : String(err);
+      const isTimeout = message.includes('timed out');
+      const exitCode =
+        err instanceof Error && 'exitCode' in err
+          ? (err as { exitCode?: number }).exitCode
+          : undefined;
+      throw new McpServerSpawnFailedError(name, {
+        exitCode,
+        stderr: message,
+        timeout: isTimeout,
+      });
+    }
+
+    return {
+      name,
+      transport,
+      replaced,
+      shadowedSettings,
+      toolCount,
+      originatorClientId,
+    };
+  }
+
+  /**
+   * Remove a runtime MCP server previously added via
+   * `addRuntimeMcpServer`. Drops the Config overlay, releases the
+   * pool connection (or disconnects the standalone client), and
+   * releases the budget slot.
+   *
+   * Idempotent: returns `{skipped: true, reason: 'not_present'}` when
+   * no runtime entry exists for `name`.
+   */
+  async removeRuntimeMcpServer(
+    name: string,
+    originatorClientId: string,
+  ): Promise<RemoveRuntimeMcpServerResult> {
+    // Check whether this name is a runtime entry
+    // Config.removeRuntimeMcpServer returns true only if the entry was
+    // in the runtime map.
+    const wasRuntime = this.cliConfig.removeRuntimeMcpServer(name);
+    if (!wasRuntime) {
+      return { name, skipped: true, reason: 'not_present' };
+    }
+
+    // Detect whether this was shadowing a settings-layer entry
+    const settingsServers = this.cliConfig.getSettingsMcpServers() ?? {};
+    const wasShadowingSettings = name in settingsServers;
+
+    // Release pool connection (identity-check prevents race with concurrent add)
+    const poolConn = this.pooledConnections.get(name);
+    if (poolConn) {
+      try {
+        poolConn.release();
+      } catch {
+        /* best effort */
+      }
+      if (this.pooledConnections.get(name) === poolConn) {
+        this.pooledConnections.delete(name);
+      }
+    }
+
+    // Disconnect standalone client
+    const client = this.clients.get(name);
+    if (client) {
+      try {
+        await client.disconnect();
+      } catch {
+        /* best effort */
+      }
+      this.clients.delete(name);
+      this.eventEmitter?.emit('mcp-client-update', this.clients);
+    }
+
+    // Cleanup: tool registry, status, health check, diagnostics (mirrors removeServer)
+    this.toolRegistry.removeMcpToolsByServer(name);
+    removeMCPServerStatus(name);
+    this.stopHealthCheck(name);
+    this.consecutiveFailures.delete(name);
+    this.isReconnecting.delete(name);
+    this.dropRefusalEntry(name);
+
+    // Release budget slot
+    const budget = this.pool?.getBudget();
+    if (budget) {
+      budget.release(name);
+    } else if (this.budgetMode !== 'off') {
+      this.releaseSlotName(name);
+    }
+
+    return {
+      name,
+      removed: true,
+      wasShadowingSettings,
+      originatorClientId,
+    };
+  }
 }
+
+// ────────────────────────────────────────────────────────────────────
+// T2.8: Result types for runtime MCP server add/remove
+// ────────────────────────────────────────────────────────────────────
+
+export type AddRuntimeMcpServerResult =
+  | {
+      name: string;
+      transport: McpTransportKind;
+      replaced: boolean;
+      shadowedSettings: boolean;
+      toolCount: number;
+      originatorClientId: string;
+    }
+  | {
+      name: string;
+      skipped: true;
+      reason: 'budget_warning_only';
+    };
+
+export type RemoveRuntimeMcpServerResult =
+  | {
+      name: string;
+      removed: true;
+      wasShadowingSettings: boolean;
+      originatorClientId: string;
+    }
+  | {
+      name: string;
+      skipped: true;
+      reason: 'not_present';
+    };
+
+// Re-export error classes for convenience
+export {
+  McpBudgetWouldExceedError,
+  McpServerSpawnFailedError,
+  InvalidMcpConfigError,
+} from './mcp-errors.js';

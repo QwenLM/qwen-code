@@ -3787,6 +3787,122 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return response;
     },
 
+    async addRuntimeMcpServer(name, config, originatorClientId) {
+      // T2.8 (#4514). Round-trip the runtime-add ext-method through the
+      // live ACP child and broadcast an `mcp_server_added` event on
+      // success. Soft-refuse (`budget_warning_only`) returns the skip
+      // shape without emitting — the caller (HTTP route) decides how to
+      // surface the skip to the SDK consumer.
+      const info = liveChannelInfo();
+      if (!info) {
+        throw Object.assign(
+          new Error(`No live ACP channel for runtime MCP add: ${name}`),
+          { data: { errorKind: 'acp_channel_unavailable' } },
+        );
+      }
+      type AddOk = {
+        name: string;
+        transport: 'stdio' | 'sse' | 'http' | 'tcp' | 'sdk';
+        replaced: boolean;
+        shadowedSettings: boolean;
+        toolCount: number;
+        originatorClientId: string;
+      };
+      type AddSkip = {
+        name: string;
+        skipped: true;
+        reason: 'budget_warning_only';
+      };
+      const response = (await Promise.race([
+        withTimeout(
+          info.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
+            { name, config, originatorClientId },
+          ),
+          MCP_RESTART_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
+        ),
+        getChannelClosedReject(info),
+      ])) as AddOk | AddSkip;
+      // Emit event on success (non-skip)
+      const addSkipped = (response as { skipped?: boolean }).skipped === true;
+      if (!addSkipped) {
+        const ok = response as AddOk;
+        broadcastWorkspaceEvent({
+          type: 'mcp_server_added',
+          data: {
+            name: ok.name,
+            transport: ok.transport,
+            replaced: ok.replaced,
+            shadowedSettings: ok.shadowedSettings,
+            toolCount: ok.toolCount,
+            originatorClientId: ok.originatorClientId,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      }
+      return response;
+    },
+
+    async removeRuntimeMcpServer(name, originatorClientId) {
+      // T2.8 (#4514). Round-trip the runtime-remove ext-method through
+      // the live ACP child and broadcast `mcp_server_removed` on success.
+      // Idempotent skip (`not_present`) returns without emitting.
+      const info = liveChannelInfo();
+      if (!info) {
+        throw Object.assign(
+          new Error(`No live ACP channel for runtime MCP remove: ${name}`),
+          { data: { errorKind: 'acp_channel_unavailable' } },
+        );
+      }
+      type RemoveOk = {
+        name: string;
+        removed: true;
+        wasShadowingSettings: boolean;
+        originatorClientId: string;
+      };
+      type RemoveSkip = { name: string; skipped: true; reason: 'not_present' };
+      let response: RemoveOk | RemoveSkip;
+      try {
+        response = (await Promise.race([
+          withTimeout(
+            info.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
+              { name, originatorClientId },
+            ),
+            MCP_RESTART_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
+          ),
+          getChannelClosedReject(info),
+        ])) as RemoveOk | RemoveSkip;
+      } catch (err) {
+        const data = (err as { data?: unknown })?.data;
+        if (data && typeof data === 'object') {
+          const kind = (data as { errorKind?: unknown }).errorKind;
+          if (kind === 'acp_channel_unavailable') {
+            throw err;
+          }
+        }
+        throw err;
+      }
+      // Emit event on success (non-skip)
+      const removeSkipped =
+        (response as { skipped?: boolean }).skipped === true;
+      if (!removeSkipped) {
+        const ok = response as RemoveOk;
+        broadcastWorkspaceEvent({
+          type: 'mcp_server_removed',
+          data: {
+            name: ok.name,
+            wasShadowingSettings: ok.wasShadowingSettings,
+            originatorClientId: ok.originatorClientId,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      }
+      return response;
+    },
+
     async initWorkspace(initOpts, originatorClientId) {
       // #4175 Wave 4 PR 17. Mechanical scaffold of an empty `QWEN.md`
       // (or whatever `getCurrentGeminiMdFilename()` returns under

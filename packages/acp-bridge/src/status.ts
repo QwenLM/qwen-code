@@ -28,18 +28,12 @@ export const SERVE_ERROR_KINDS = [
   // Surfaced on per-server `mcp_server` cells (refused at discovery)
   // and on the workspace-level `mcp_budget` cell (any refusal this pass).
   'budget_exhausted',
-  // Issue #4514 T2.9: a prompt exceeded the server-configured wallclock
-  // cap (`--prompt-deadline-ms`) or the request's own `deadlineMs`
-  // (capped at the server flag). Surfaced on the
-  // `POST /session/:id/prompt` 504 response so callers can branch on a
-  // typed kind instead of regex-matching the message.
+  // Issue #4514 T2.8: runtime MCP mutation routes
+  'mcp_budget_would_exceed',
+  'mcp_server_spawn_failed',
+  'invalid_config',
+  // Issue #4514 T2.9: prompt deadline + writer idle timeout
   'prompt_deadline_exceeded',
-  // Issue #4514 T2.9: an SSE writer's last successful flush was older
-  // than `--writer-idle-timeout-ms`. The daemon emits a terminal
-  // `client_evicted` frame with `reason: 'writer_idle_timeout'` before
-  // tearing the connection down; the kind appears on the frame payload
-  // (not an HTTP response — by the time we detect the stall the stream
-  // is already in flight).
   'writer_idle_timeout',
 ] as const;
 
@@ -127,6 +121,9 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionRecap: 'qwen/control/session/recap',
   sessionShellHistory: 'qwen/control/session/shell_history',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
+  // T2.8 (#4514): runtime MCP server mutation ext-methods
+  workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
+  workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
 } as const;
 
 export type ServeStatus =

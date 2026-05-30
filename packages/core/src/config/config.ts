@@ -862,6 +862,7 @@ export class Config {
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
   private mcpServers: Record<string, MCPServerConfig> | undefined;
+  private readonly runtimeMcpServers = new Map<string, MCPServerConfig>();
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
   private lspInitializationError?: string;
@@ -2462,6 +2463,17 @@ export class Config {
     return this.mcpTransportPool;
   }
 
+  /**
+   * T2.8: return the raw settings-layer MCP servers map (without the
+   * runtime overlay or extension contributions).  Used by
+   * `McpClientManager.addRuntimeMcpServer` to detect shadow-over-
+   * settings (a runtime entry whose name collides with a pre-existing
+   * settings entry).
+   */
+  getSettingsMcpServers(): Record<string, MCPServerConfig> | undefined {
+    return this.mcpServers;
+  }
+
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
     let mcpServers = { ...(this.mcpServers || {}) };
     const extensions = this.getActiveExtensions();
@@ -2475,6 +2487,11 @@ export class Config {
           };
         },
       );
+    }
+
+    // T2.8 — runtime layer wins over settings + extensions (shadow semantics)
+    for (const [name, cfg] of this.runtimeMcpServers) {
+      mcpServers[name] = cfg;
     }
 
     if (this.allowedMcpServers) {
@@ -2509,6 +2526,26 @@ export class Config {
       throw new Error('Cannot modify mcpServers after initialization');
     }
     this.mcpServers = { ...this.mcpServers, ...servers };
+  }
+
+  /**
+   * Add a runtime-only MCP server. Unlike `addMcpServers`, this does NOT
+   * touch `this.mcpServers` (settings layer) and does not enforce the
+   * `initialized` guard — the whole point is post-init mutation from the
+   * daemon surface.  `getMcpServers()` will overlay these entries on top
+   * of the settings layer (Task 5).
+   */
+  addRuntimeMcpServer(name: string, config: MCPServerConfig): void {
+    this.runtimeMcpServers.set(name, config);
+  }
+
+  /**
+   * Remove a runtime-only MCP server previously added via
+   * `addRuntimeMcpServer`.  Returns `true` if the entry existed and was
+   * removed, `false` otherwise.
+   */
+  removeRuntimeMcpServer(name: string): boolean {
+    return this.runtimeMcpServers.delete(name);
   }
 
   isLspEnabled(): boolean {

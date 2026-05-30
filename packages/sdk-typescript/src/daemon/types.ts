@@ -195,16 +195,16 @@ export const DAEMON_ERROR_KINDS = [
   // Issue #4175 PR 14: budget refusal under `--mcp-budget-mode=enforce`.
   // Mirrors the serve-side `SERVE_ERROR_KINDS` addition.
   'budget_exhausted',
+  // Issue #4514 T2.8: runtime MCP mutation routes
+  // (POST/DELETE /workspace/mcp/servers). Mirrors `SERVE_ERROR_KINDS`.
+  'mcp_budget_would_exceed',
+  'mcp_server_spawn_failed',
+  'invalid_config',
   // Issue #4514 T2.9: a prompt exceeded the daemon-configured wallclock
   // cap (or the request's own `deadlineMs`, capped at the server flag).
-  // Surfaced on the `POST /session/:id/prompt` 504 response. Mirrors
-  // the serve-side `SERVE_ERROR_KINDS` addition.
   'prompt_deadline_exceeded',
   // Issue #4514 T2.9: an SSE writer's last successful flush was older
-  // than the daemon's writer-idle deadline. Daemon emits a terminal
-  // `client_evicted` frame with `reason: 'writer_idle_timeout'`; the
-  // kind appears on that frame's `errorKind` field. Mirrors the
-  // serve-side `SERVE_ERROR_KINDS` addition.
+  // than the daemon's writer-idle deadline.
   'writer_idle_timeout',
 ] as const;
 
@@ -991,6 +991,84 @@ export type DaemonMcpRestartResult =
       restarted: false;
       skipped: true;
       reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+    };
+
+/**
+ * T2.8 (#4514). Structural subset of core's `MCPServerConfig` exposed
+ * on the `POST /workspace/mcp/servers` route body. Covers all wire-
+ * relevant transport fields without pulling in core-only concerns
+ * (e.g. `includeTools` / `excludeTools` filtering, `extensionName`).
+ *
+ * All fields are optional — the daemon infers transport family from
+ * whichever set of fields is populated (stdio: `command`; SSE: `url`;
+ * HTTP: `httpUrl`; WebSocket: `tcp`; SDK: `type: 'sdk'`).
+ */
+export interface MCPServerConfigShape {
+  readonly type?: 'stdio' | 'sse' | 'http' | 'websocket' | 'sdk';
+  readonly command?: string;
+  readonly args?: string[];
+  readonly env?: Record<string, string>;
+  readonly cwd?: string;
+  readonly url?: string;
+  readonly httpUrl?: string;
+  readonly headers?: Record<string, string>;
+  readonly tcp?: string;
+  readonly timeout?: number;
+  readonly discoveryTimeoutMs?: number;
+  readonly trust?: boolean;
+  readonly description?: string;
+  readonly oauth?: Record<string, unknown>;
+}
+
+/**
+ * T2.8 (#4514). Body of `POST /workspace/mcp/servers` — adds (or
+ * replaces) a runtime MCP server.
+ */
+export interface DaemonRuntimeMcpAddRequest {
+  readonly name: string;
+  readonly config: MCPServerConfigShape;
+  readonly displayName?: string;
+}
+
+/**
+ * T2.8 (#4514). Response of `POST /workspace/mcp/servers`.
+ * Discriminated union: `.skipped` is absent (or `never`) on the
+ * success branch and `true` on the soft-refuse branch. Callers
+ * narrow with `if ('skipped' in res && res.skipped)`.
+ */
+export type DaemonRuntimeMcpAddResult =
+  | {
+      readonly name: string;
+      readonly transport: DaemonMcpTransport;
+      readonly replaced: boolean;
+      readonly shadowedSettings: boolean;
+      readonly toolCount: number;
+      readonly originatorClientId: string;
+      readonly skipped?: never;
+    }
+  | {
+      readonly name: string;
+      readonly skipped: true;
+      readonly reason: 'budget_warning_only';
+    };
+
+/**
+ * T2.8 (#4514). Response of `DELETE /workspace/mcp/servers/:name`.
+ * Discriminated union: `.skipped` absent on success, `true` on
+ * soft-refuse (server was not present — idempotent skip).
+ */
+export type DaemonRuntimeMcpRemoveResult =
+  | {
+      readonly name: string;
+      readonly removed: true;
+      readonly wasShadowingSettings: boolean;
+      readonly originatorClientId: string;
+      readonly skipped?: never;
+    }
+  | {
+      readonly name: string;
+      readonly skipped: true;
+      readonly reason: 'not_present';
     };
 
 /**

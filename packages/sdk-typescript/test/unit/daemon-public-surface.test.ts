@@ -6,6 +6,10 @@
 
 import { describe, it, expect, expectTypeOf } from 'vitest';
 import * as Public from '../../src/index.js';
+import {
+  DAEMON_KNOWN_EVENT_TYPE_VALUES,
+  asKnownDaemonEvent,
+} from '../../src/daemon/events.js';
 // Type-only imports also exercise the public entry: any name missing
 // from `src/index.ts` is a tsc compile error and the suite refuses to
 // build, which is the regression fence for the kind of "exists in
@@ -27,6 +31,9 @@ import type {
   DaemonPermissionRequestEvent,
   DaemonPermissionResolvedData,
   DaemonPermissionResolvedEvent,
+  DaemonRuntimeMcpAddRequest,
+  DaemonRuntimeMcpAddResult,
+  DaemonRuntimeMcpRemoveResult,
   DaemonSessionDiedData,
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
@@ -138,5 +145,103 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     // mismatch.
     expect(Public.DAEMON_ERROR_KINDS).toContain('prompt_deadline_exceeded');
     expect(Public.DAEMON_ERROR_KINDS).toContain('writer_idle_timeout');
+  });
+});
+
+describe('mcp_server_added event drift insurance', () => {
+  it('is exported in DAEMON_KNOWN_EVENT_TYPE_VALUES', () => {
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain('mcp_server_added');
+  });
+
+  it('asKnownDaemonEvent returns the right discriminator', () => {
+    const evt: DaemonEvent = {
+      v: 1,
+      type: 'mcp_server_added',
+      data: {
+        name: 'echo',
+        transport: 'stdio',
+        replaced: false,
+        shadowedSettings: false,
+        toolCount: 3,
+        originatorClientId: 'client-1',
+      },
+    };
+    const known = asKnownDaemonEvent(evt);
+    expect(known?.type).toBe('mcp_server_added');
+    if (known?.type === 'mcp_server_added') {
+      expect(known.data.name).toBe('echo');
+      expect(known.data.transport).toBe('stdio');
+      expect(known.data.replaced).toBe(false);
+      expect(known.data.shadowedSettings).toBe(false);
+      expect(known.data.toolCount).toBe(3);
+      expect(known.data.originatorClientId).toBe('client-1');
+    }
+  });
+});
+
+describe('mcp_server_removed event drift insurance', () => {
+  it('is exported in DAEMON_KNOWN_EVENT_TYPE_VALUES', () => {
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain('mcp_server_removed');
+  });
+
+  it('asKnownDaemonEvent returns the right discriminator', () => {
+    const evt: DaemonEvent = {
+      v: 1,
+      type: 'mcp_server_removed',
+      data: {
+        name: 'echo',
+        wasShadowingSettings: true,
+        originatorClientId: 'client-2',
+      },
+    };
+    const known = asKnownDaemonEvent(evt);
+    expect(known?.type).toBe('mcp_server_removed');
+    if (known?.type === 'mcp_server_removed') {
+      expect(known.data.name).toBe('echo');
+      expect(known.data.wasShadowingSettings).toBe(true);
+      expect(known.data.originatorClientId).toBe('client-2');
+    }
+  });
+});
+
+describe('runtime MCP add/remove SDK types', () => {
+  it('request type compiles', () => {
+    const req: DaemonRuntimeMcpAddRequest = {
+      name: 'echo',
+      config: { command: 'node', args: ['echo.js'], type: 'stdio' },
+      displayName: 'Echo Server',
+    };
+    expect(req.name).toBe('echo');
+  });
+
+  it('add result has right shape', () => {
+    const res: DaemonRuntimeMcpAddResult = {
+      name: 'echo',
+      transport: 'stdio',
+      replaced: false,
+      shadowedSettings: false,
+      toolCount: 0,
+      originatorClientId: 'client-x',
+    };
+    expect(res.replaced).toBe(false);
+  });
+
+  it('add soft-refuse has right shape', () => {
+    const res: DaemonRuntimeMcpAddResult = {
+      name: 'echo',
+      skipped: true,
+      reason: 'budget_warning_only',
+    };
+    expect(res.skipped).toBe(true);
+  });
+
+  it('remove result has right shape', () => {
+    const res: DaemonRuntimeMcpRemoveResult = {
+      name: 'echo',
+      removed: true,
+      wasShadowingSettings: false,
+      originatorClientId: 'client-x',
+    };
+    expect(res.removed).toBe(true);
   });
 });

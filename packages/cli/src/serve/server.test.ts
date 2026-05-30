@@ -141,6 +141,9 @@ const EXPECTED_STAGE1_FEATURES = [
   // MCP budget state crossings (`mcp_budget_warning` with hysteresis,
   // `mcp_child_refused_batch` coalesced per pass).
   'mcp_guardrail_events',
+  // T2.8 (#4514). Always-on. Daemon supports runtime MCP server
+  // mutation (add / remove) via POST/DELETE /workspace/mcp/servers.
+  'mcp_server_runtime_mutation',
   // Issue #4175 PR 19. Always-on. Daemon exposes the read-only file
   // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`.
   'workspace_file_read',
@@ -313,6 +316,33 @@ interface FakeBridgeOpts {
         reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
       }
   >;
+  addRuntimeMcpServerImpl?: (
+    name: string,
+    config: Record<string, unknown>,
+    originatorClientId: string,
+  ) => Promise<
+    | {
+        name: string;
+        transport: string;
+        replaced: boolean;
+        shadowedSettings: boolean;
+        toolCount: number;
+        originatorClientId: string;
+      }
+    | { name: string; skipped: true; reason: 'budget_warning_only' }
+  >;
+  removeRuntimeMcpServerImpl?: (
+    name: string,
+    originatorClientId: string,
+  ) => Promise<
+    | {
+        name: string;
+        removed: true;
+        wasShadowingSettings: boolean;
+        originatorClientId: string;
+      }
+    | { name: string; skipped: true; reason: 'not_present' }
+  >;
   closeImpl?: (
     sessionId: string,
     context?: BridgeClientRequestContext,
@@ -400,6 +430,15 @@ interface FakeBridge extends HttpAcpBridge {
     serverName: string;
     originatorClientId?: string;
     opts?: { entryIndex?: number };
+  }>;
+  addRuntimeMcpServerCalls: Array<{
+    name: string;
+    config: Record<string, unknown>;
+    originatorClientId: string;
+  }>;
+  removeRuntimeMcpServerCalls: Array<{
+    name: string;
+    originatorClientId: string;
   }>;
   closeCalls: Array<{
     sessionId: string;
@@ -637,6 +676,31 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       restarted: true as const,
       durationMs: 42,
     }));
+  const addRuntimeMcpServerCalls: FakeBridge['addRuntimeMcpServerCalls'] = [];
+  const addRuntimeMcpServerImpl =
+    opts.addRuntimeMcpServerImpl ??
+    (async (
+      name: string,
+      _config: Record<string, unknown>,
+      originatorClientId: string,
+    ) => ({
+      name,
+      transport: 'stdio' as const,
+      replaced: false,
+      shadowedSettings: false,
+      toolCount: 3,
+      originatorClientId,
+    }));
+  const removeRuntimeMcpServerCalls: FakeBridge['removeRuntimeMcpServerCalls'] =
+    [];
+  const removeRuntimeMcpServerImpl =
+    opts.removeRuntimeMcpServerImpl ??
+    (async (name: string, originatorClientId: string) => ({
+      name,
+      removed: true as const,
+      wasShadowingSettings: false,
+      originatorClientId,
+    }));
   const closeImpl = opts.closeImpl ?? (async () => {});
   const updateMetadataImpl =
     opts.updateMetadataImpl ??
@@ -685,6 +749,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
+    addRuntimeMcpServerCalls,
+    removeRuntimeMcpServerCalls,
     closeCalls,
     updateMetadataCalls,
     heartbeatCalls,
@@ -871,6 +937,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(restartOpts !== undefined ? { opts: restartOpts } : {}),
       });
       return restartMcpServerImpl(serverName, originatorClientId, restartOpts);
+    },
+    async addRuntimeMcpServer(name, config, originatorClientId) {
+      addRuntimeMcpServerCalls.push({ name, config, originatorClientId });
+      return addRuntimeMcpServerImpl(name, config, originatorClientId);
+    },
+    async removeRuntimeMcpServer(name, originatorClientId) {
+      removeRuntimeMcpServerCalls.push({ name, originatorClientId });
+      return removeRuntimeMcpServerImpl(name, originatorClientId);
     },
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
@@ -1142,6 +1216,18 @@ describe('createServeApp', () => {
       expect(SERVE_CAPABILITY_REGISTRY['mcp_guardrail_events']).toEqual({
         since: 'v1',
       });
+    });
+
+    it('registers mcp_server_runtime_mutation as a baseline tag (T2.8 #4514)', () => {
+      // Always-on tag. SDK clients pre-flight
+      // `caps.features.includes('mcp_server_runtime_mutation')` before
+      // calling `POST /workspace/mcp/servers` — older daemons silently 404.
+      expect(SERVE_CAPABILITY_REGISTRY['mcp_server_runtime_mutation']).toEqual({
+        since: 'v1',
+      });
+      expect(getAdvertisedServeFeatures()).toContain(
+        'mcp_server_runtime_mutation',
+      );
     });
 
     it('returns protocol version metadata with a fresh supported array', () => {
@@ -3372,6 +3458,355 @@ describe('createServeApp', () => {
         serverName: 'docs',
         mcpStatus: 'DISCONNECTED',
       });
+    });
+  });
+
+  describe('POST /workspace/mcp/servers (T2.8 #4514)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('200 fresh add returns structured result', async () => {
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ name: 'echo', config: { command: 'echo', args: ['hello'] } });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        name: 'echo',
+        transport: 'stdio',
+        replaced: false,
+        shadowedSettings: false,
+        toolCount: 3,
+        originatorClientId: 'client-1',
+      });
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(1);
+      expect(bridge.addRuntimeMcpServerCalls[0]).toMatchObject({
+        name: 'echo',
+        config: { command: 'echo', args: ['hello'] },
+        originatorClientId: 'client-1',
+      });
+    });
+
+    it('200 soft refuse (skipped:true, reason:budget_warning_only)', async () => {
+      const bridge = fakeBridge({
+        knownClientIds: ['client-1'],
+        addRuntimeMcpServerImpl: async (name) => ({
+          name,
+          skipped: true as const,
+          reason: 'budget_warning_only' as const,
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ name: 'echo', config: { command: 'echo' } });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        name: 'echo',
+        skipped: true,
+        reason: 'budget_warning_only',
+      });
+    });
+
+    it('400 invalid_server_name when name is empty', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers')).send({
+        name: '',
+        config: { command: 'echo' },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_server_name when name exceeds MAX_SERVER_NAME_LENGTH', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const overlong = 'a'.repeat(257);
+      const res = await auth(request(app).post('/workspace/mcp/servers')).send({
+        name: overlong,
+        config: { command: 'echo' },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_server_name when name contains illegal chars (slash)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers')).send({
+        name: 'foo/bar',
+        config: { command: 'echo' },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_server_name when name is a reserved JS property', async () => {
+      for (const name of ['__proto__', 'constructor', 'prototype']) {
+        const bridge = fakeBridge();
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const res = await auth(
+          request(app).post('/workspace/mcp/servers'),
+        ).send({
+          name,
+          config: { command: 'echo' },
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_server_name');
+        expect(res.body.error).toContain('reserved');
+        expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+      }
+    });
+
+    it('400 missing_required_field when config is absent', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers')).send({
+        name: 'echo',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('missing_required_field');
+      expect(res.body.field).toBe('config');
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('401 auth_required when no bearer token (strict gate)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/mcp/servers')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ name: 'echo', config: { command: 'echo' } });
+      expect(res.status).toBe(401);
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_client_id on unknown X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({ name: 'echo', config: { command: 'echo' } });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.addRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('409 mcp_budget_would_exceed when bridge throws with that errorKind', async () => {
+      const bridge = fakeBridge({
+        knownClientIds: ['client-1'],
+        addRuntimeMcpServerImpl: async () => {
+          throw Object.assign(new Error('Budget exceeded'), {
+            data: { errorKind: 'mcp_budget_would_exceed', serverName: 'echo' },
+          });
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ name: 'echo', config: { command: 'echo' } });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('mcp_budget_would_exceed');
+    });
+
+    it('502 mcp_server_spawn_failed with body details', async () => {
+      const bridge = fakeBridge({
+        knownClientIds: ['client-1'],
+        addRuntimeMcpServerImpl: async () => {
+          throw Object.assign(new Error('Spawn failed'), {
+            data: {
+              errorKind: 'mcp_server_spawn_failed',
+              serverName: 'broken',
+              exitCode: 1,
+              stderr: 'module not found',
+              timeout: false,
+            },
+          });
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ name: 'broken', config: { command: 'bad-cmd' } });
+      expect(res.status).toBe(502);
+      expect(res.body).toMatchObject({
+        code: 'mcp_server_spawn_failed',
+        serverName: 'broken',
+        exitCode: 1,
+        stderr: 'module not found',
+      });
+    });
+
+    it('503 acp_channel_unavailable when bridge throws with that errorKind', async () => {
+      const bridge = fakeBridge({
+        knownClientIds: ['client-1'],
+        addRuntimeMcpServerImpl: async () => {
+          throw Object.assign(new Error('No ACP channel'), {
+            data: { errorKind: 'acp_channel_unavailable' },
+          });
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/servers'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ name: 'echo', config: { command: 'echo' } });
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('acp_channel_unavailable');
+    });
+  });
+
+  describe('DELETE /workspace/mcp/servers/:name (T2.8 #4514)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('200 removed:true with wasShadowingSettings:false', async () => {
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).delete('/workspace/mcp/servers/echo'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send();
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        name: 'echo',
+        removed: true,
+        wasShadowingSettings: false,
+        originatorClientId: 'client-1',
+      });
+      expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(1);
+      expect(bridge.removeRuntimeMcpServerCalls[0]).toMatchObject({
+        name: 'echo',
+        originatorClientId: 'client-1',
+      });
+    });
+
+    it('200 skipped:true when server not present (idempotent)', async () => {
+      const bridge = fakeBridge({
+        knownClientIds: ['client-1'],
+        removeRuntimeMcpServerImpl: async (name) => ({
+          name,
+          skipped: true as const,
+          reason: 'not_present' as const,
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).delete('/workspace/mcp/servers/ghost'),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send();
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        name: 'ghost',
+        skipped: true,
+        reason: 'not_present',
+      });
+    });
+
+    it('200 removed:true with wasShadowingSettings:true', async () => {
+      const bridge = fakeBridge({
+        knownClientIds: ['client-1'],
+        removeRuntimeMcpServerImpl: async (name, originatorClientId) => ({
+          name,
+          removed: true as const,
+          wasShadowingSettings: true,
+          originatorClientId,
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).delete('/workspace/mcp/servers/shadowed-srv'),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send();
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        name: 'shadowed-srv',
+        removed: true,
+        wasShadowingSettings: true,
+        originatorClientId: 'client-1',
+      });
+    });
+
+    it('400 invalid_server_name when path param has illegal chars', async () => {
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).delete('/workspace/mcp/servers/bad%2Fname'),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send();
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_server_name when name exceeds MAX_SERVER_NAME_LENGTH', async () => {
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const overlong = 'a'.repeat(257);
+      const res = await auth(
+        request(app).delete(`/workspace/mcp/servers/${overlong}`),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send();
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_server_name when name is a reserved JS property', async () => {
+      for (const name of ['__proto__', 'constructor', 'prototype']) {
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(tokenOpts, undefined, { bridge });
+        const res = await auth(
+          request(app).delete(`/workspace/mcp/servers/${name}`),
+        )
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send();
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_server_name');
+        expect(res.body.error).toContain('reserved');
+        expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
+      }
+    });
+
+    it('401 auth_required when no bearer token (strict gate)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .delete('/workspace/mcp/servers/echo')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send();
+      expect(res.status).toBe(401);
+      expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_client_id on unknown X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).delete('/workspace/mcp/servers/echo'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send();
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.removeRuntimeMcpServerCalls).toHaveLength(0);
     });
   });
 

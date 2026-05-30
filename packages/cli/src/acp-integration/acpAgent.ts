@@ -28,6 +28,9 @@ import {
   WorkspaceMcpBudget,
   DiscoveredMCPTool,
   restoreWorktreeContext,
+  McpBudgetWouldExceedError,
+  McpServerSpawnFailedError,
+  InvalidMcpConfigError,
 } from '@qwen-code/qwen-code-core';
 import type {
   ApprovalMode,
@@ -2571,6 +2574,140 @@ class QwenAgent implements Agent {
           ],
         });
         return { sessionId, injected: true };
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
+        const name = params['name'];
+        const config = params['config'];
+        const originatorClientId = params['originatorClientId'];
+        if (typeof name !== 'string' || name.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing name',
+          );
+        }
+        if (
+          name.length > 256 ||
+          !/^[A-Za-z0-9_-]+$/.test(name) ||
+          name === '__proto__' ||
+          name === 'constructor' ||
+          name === 'prototype'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Server name must be ≤256 chars, alphanumeric + underscore/hyphen, and not a reserved JS property name',
+          );
+        }
+        if (!config || typeof config !== 'object' || Array.isArray(config)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing config',
+          );
+        }
+        if (
+          typeof originatorClientId !== 'string' ||
+          originatorClientId.length === 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing originatorClientId',
+          );
+        }
+        const manager = this.config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw RequestError.internalError(
+            undefined,
+            'McpClientManager unavailable on this Config',
+          );
+        }
+        try {
+          // Strip security-sensitive fields — runtime-added servers must
+          // not bypass permission gates via trust:true, leak cloud creds
+          // via authProviderType, manipulate tool filtering, or spawn in
+          // arbitrary directories
+          const {
+            trust: _trust,
+            authProviderType: _auth,
+            includeTools: _inc,
+            excludeTools: _exc,
+            cwd: _cwd,
+            env: _env,
+            oauth: _oauth,
+            headers: _headers,
+            type: _type,
+            ...safeConfig
+          } = config as Record<string, unknown>;
+          const result = await manager.addRuntimeMcpServer(
+            name,
+            safeConfig as MCPServerConfig,
+            originatorClientId,
+          );
+          return result as unknown as Record<string, unknown>;
+        } catch (err) {
+          if (err instanceof McpBudgetWouldExceedError) {
+            throw new RequestError(-32099, err.message, {
+              errorKind: err.code,
+              serverName: err.serverName,
+            });
+          }
+          if (err instanceof McpServerSpawnFailedError) {
+            throw new RequestError(-32099, err.message, {
+              errorKind: err.code,
+              serverName: err.serverName,
+              ...err.details,
+            });
+          }
+          if (err instanceof InvalidMcpConfigError) {
+            throw new RequestError(-32099, err.message, {
+              errorKind: err.code,
+              serverName: err.serverName,
+              reason: err.reason,
+            });
+          }
+          throw err;
+        }
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove: {
+        const name = params['name'];
+        const originatorClientId = params['originatorClientId'];
+        if (typeof name !== 'string' || name.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing name',
+          );
+        }
+        if (
+          name.length > 256 ||
+          !/^[A-Za-z0-9_-]+$/.test(name) ||
+          name === '__proto__' ||
+          name === 'constructor' ||
+          name === 'prototype'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Server name must be ≤256 chars, alphanumeric + underscore/hyphen, and not a reserved JS property name',
+          );
+        }
+        if (
+          typeof originatorClientId !== 'string' ||
+          originatorClientId.length === 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing originatorClientId',
+          );
+        }
+        const manager = this.config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw RequestError.internalError(
+            undefined,
+            'McpClientManager unavailable on this Config',
+          );
+        }
+        const result = await manager.removeRuntimeMcpServer(
+          name,
+          originatorClientId,
+        );
+        return result as unknown as Record<string, unknown>;
       }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
