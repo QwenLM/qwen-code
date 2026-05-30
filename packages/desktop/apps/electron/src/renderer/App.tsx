@@ -31,6 +31,7 @@ import type { ViewRoute } from '../shared/routes'
 import { attachmentFromContentRef, toDraftRef } from './lib/drafts'
 import { getSessionDeleteNavigationRoute } from './lib/session-delete-navigation'
 import { stripMarkdown } from './utils/text'
+import { getSessionTitle } from './utils/session'
 import { coerceInputText } from './lib/input-text'
 import { getSessionsToRefreshAfterStaleReconnect } from './lib/reconnect-recovery'
 import { formatSessionLoadFailure, shouldTreatSessionLoadFailureAsTransportFallback } from './lib/session-load'
@@ -1334,20 +1335,13 @@ export default function App() {
   // Deep link navigation is initialized later after handleInputChange is defined
 
   const handleDeleteSession = useCallback(async (sessionId: string, skipConfirmation = false): Promise<boolean> => {
-    // Show confirmation dialog before deleting (unless skipped or session is empty)
     if (!skipConfirmation) {
-      // Check if session has any messages using session metadata from Jotai store
-      // We use store.get() instead of closing over sessions to prevent memory leaks
-      // (closures would retain the full sessions array with all messages)
       const metaMap = store.get(sessionMetaMapAtom)
       const meta = metaMap.get(sessionId)
-      // Session is empty if it has no lastFinalMessageId (no assistant responses) and no name (set on first user message)
-      const isEmpty = !meta || (!meta.lastFinalMessageId && !meta.name)
-
-      if (!isEmpty) {
-        const confirmed = await window.electronAPI.showDeleteSessionConfirmation(meta?.name || 'Untitled')
-        if (!confirmed) return false
-      }
+      const confirmed = await window.electronAPI.showDeleteSessionConfirmation(
+        meta ? getSessionTitle(meta) : 'Untitled',
+      )
+      if (!confirmed) return false
     }
 
     await window.electronAPI.deleteSession(sessionId)
