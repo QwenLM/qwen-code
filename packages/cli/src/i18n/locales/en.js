@@ -1898,6 +1898,8 @@ export default {
   'Open the memory manager.': 'Open the memory manager.',
   'Show current process memory diagnostics':
     'Show current process memory diagnostics',
+  'Record a CPU profile for Chrome DevTools analysis':
+    'Record a CPU profile for Chrome DevTools analysis',
   'Save a durable memory to the memory system.':
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':
