@@ -838,145 +838,152 @@ export class Session implements SessionContext {
             let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
 
-            while (nextMessage !== null) {
-              turnCount++;
-              if (pendingSend.signal.aborted) {
-                this.#getCurrentChat().addHistory(nextMessage);
-                return { stopReason: 'cancelled' };
-              }
-
-              const functionCalls: FunctionCall[] = [];
-              let usageMetadata: GenerateContentResponseUsageMetadata | null =
-                null;
-              const streamStartTime = Date.now();
-
-              try {
-                const sendResult =
-                  await this.#sendMessageStreamWithAutoCompression(
-                    promptId,
-                    nextMessage?.parts ?? [],
-                    pendingSend.signal,
-                  );
-                if (!sendResult.responseStream) {
-                  this.#preserveUnsentMessageHistory(
-                    nextMessage,
-                    sendResult.stopReason === 'cancelled',
-                  );
-                  return { stopReason: sendResult.stopReason };
+            // conversation_finished must fire on every terminal path of the
+            // turn — the loop below has cancel/abort/no-stream early-returns
+            // and API-error throws — so the emission lives in a finally that
+            // wraps the whole turn, not just the stop-hook loop. Daemon turns
+            // run autonomously in all approval modes (approvals are mediated by
+            // the ACP client rather than by gating this loop), so unlike the
+            // CLI reference (useGeminiStream.ts, which only emits in YOLO) this
+            // is intentionally emitted for every mode.
+            try {
+              while (nextMessage !== null) {
+                turnCount++;
+                if (pendingSend.signal.aborted) {
+                  this.#getCurrentChat().addHistory(nextMessage);
+                  return { stopReason: 'cancelled' };
                 }
-                const responseStream = sendResult.responseStream;
-                nextMessage = null;
 
-                for await (const resp of responseStream) {
-                  if (pendingSend.signal.aborted) {
-                    return { stopReason: 'cancelled' };
+                const functionCalls: FunctionCall[] = [];
+                let usageMetadata: GenerateContentResponseUsageMetadata | null =
+                  null;
+                const streamStartTime = Date.now();
+
+                try {
+                  const sendResult =
+                    await this.#sendMessageStreamWithAutoCompression(
+                      promptId,
+                      nextMessage?.parts ?? [],
+                      pendingSend.signal,
+                    );
+                  if (!sendResult.responseStream) {
+                    this.#preserveUnsentMessageHistory(
+                      nextMessage,
+                      sendResult.stopReason === 'cancelled',
+                    );
+                    return { stopReason: sendResult.stopReason };
                   }
+                  const responseStream = sendResult.responseStream;
+                  nextMessage = null;
 
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.candidates &&
-                    resp.value.candidates.length > 0
-                  ) {
-                    const candidate = resp.value.candidates[0];
-                    for (const part of candidate.content?.parts ?? []) {
-                      if (!part.text) {
-                        continue;
+                  for await (const resp of responseStream) {
+                    if (pendingSend.signal.aborted) {
+                      return { stopReason: 'cancelled' };
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.candidates &&
+                      resp.value.candidates.length > 0
+                    ) {
+                      const candidate = resp.value.candidates[0];
+                      for (const part of candidate.content?.parts ?? []) {
+                        if (!part.text) {
+                          continue;
+                        }
+
+                        this.messageEmitter.emitMessage(
+                          part.text,
+                          'assistant',
+                          part.thought,
+                        );
                       }
+                    }
 
-                      this.messageEmitter.emitMessage(
-                        part.text,
-                        'assistant',
-                        part.thought,
-                      );
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.usageMetadata
+                    ) {
+                      usageMetadata = resp.value.usageMetadata;
+                    }
+
+                    if (
+                      resp.type === StreamEventType.CHUNK &&
+                      resp.value.functionCalls
+                    ) {
+                      functionCalls.push(...resp.value.functionCalls);
                     }
                   }
+                } catch (error) {
+                  // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+                  // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
+                  const errorStatus = getErrorStatus(error);
+                  const errorMessage =
+                    error instanceof Error ? error.message : String(error);
+                  const errorType = classifyApiError({
+                    message: errorMessage,
+                    status: errorStatus,
+                  });
 
+                  const hookSystem = this.config.getHookSystem?.();
+                  const hooksEnabledForStopFailure =
+                    !this.config.getDisableAllHooks?.();
                   if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.usageMetadata
+                    hooksEnabledForStopFailure &&
+                    hookSystem &&
+                    this.config.hasHooksForEvent?.('StopFailure')
                   ) {
-                    usageMetadata = resp.value.usageMetadata;
+                    // Fire-and-forget: don't wait for hook to complete
+                    hookSystem
+                      .fireStopFailureEvent(errorType, errorMessage)
+                      .catch((err) => {
+                        debugLogger.warn(`StopFailure hook failed: ${err}`);
+                      });
                   }
 
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.functionCalls
-                  ) {
-                    functionCalls.push(...resp.value.functionCalls);
+                  if (errorStatus === 429) {
+                    throw new RequestError(
+                      429,
+                      'Rate limit exceeded. Try again later.',
+                    );
                   }
-                }
-              } catch (error) {
-                // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
-                // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
-                const errorStatus = getErrorStatus(error);
-                const errorMessage =
-                  error instanceof Error ? error.message : String(error);
-                const errorType = classifyApiError({
-                  message: errorMessage,
-                  status: errorStatus,
-                });
 
-                const hookSystem = this.config.getHookSystem?.();
-                const hooksEnabledForStopFailure =
-                  !this.config.getDisableAllHooks?.();
-                if (
-                  hooksEnabledForStopFailure &&
-                  hookSystem &&
-                  this.config.hasHooksForEvent?.('StopFailure')
-                ) {
-                  // Fire-and-forget: don't wait for hook to complete
-                  hookSystem
-                    .fireStopFailureEvent(errorType, errorMessage)
-                    .catch((err) => {
-                      debugLogger.warn(`StopFailure hook failed: ${err}`);
-                    });
+                  throw error;
                 }
 
-                if (errorStatus === 429) {
-                  throw new RequestError(
-                    429,
-                    'Rate limit exceeded. Try again later.',
+                if (usageMetadata) {
+                  this.#recordPromptTokenCount(usageMetadata);
+                  // Kick off rewrite in background (non-blocking, runs parallel to tools)
+                  if (this.messageRewriter) {
+                    this.messageRewriter.flushTurn(pendingSend.signal);
+                  }
+
+                  const durationMs = Date.now() - streamStartTime;
+                  await this.messageEmitter.emitUsageMetadata(
+                    usageMetadata,
+                    '',
+                    durationMs,
                   );
                 }
 
-                throw error;
-              }
-
-              if (usageMetadata) {
-                this.#recordPromptTokenCount(usageMetadata);
-                // Kick off rewrite in background (non-blocking, runs parallel to tools)
-                if (this.messageRewriter) {
-                  this.messageRewriter.flushTurn(pendingSend.signal);
+                if (functionCalls.length > 0) {
+                  const toolResponseParts = await this.runToolCalls(
+                    pendingSend.signal,
+                    promptId,
+                    functionCalls,
+                  );
+                  nextMessage = { role: 'user', parts: toolResponseParts };
                 }
-
-                const durationMs = Date.now() - streamStartTime;
-                await this.messageEmitter.emitUsageMetadata(
-                  usageMetadata,
-                  '',
-                  durationMs,
-                );
               }
 
-              if (functionCalls.length > 0) {
-                const toolResponseParts = await this.runToolCalls(
-                  pendingSend.signal,
-                  promptId,
-                  functionCalls,
-                );
-                nextMessage = { role: 'user', parts: toolResponseParts };
+              // Wait for any pending rewrite before returning
+              if (this.messageRewriter) {
+                await this.messageRewriter.waitForPendingRewrites();
               }
-            }
 
-            // Wait for any pending rewrite before returning
-            if (this.messageRewriter) {
-              await this.messageRewriter.waitForPendingRewrites();
-            }
-
-            // Fire Stop hook loop (aligned with core path in client.ts)
-            // This is triggered after model response completes with no pending tool calls
-            let stopResult: { stopReason: PromptResponse['stopReason'] };
-            try {
-              stopResult = await this.#handleStopHookLoop(
+              // Fire Stop hook loop (aligned with core path in client.ts)
+              // This is triggered after model response completes with no pending tool calls
+              return await this.#handleStopHookLoop(
                 pendingSend,
                 promptId,
                 hooksEnabled,
@@ -991,7 +998,6 @@ export class Session implements SessionContext {
                 ),
               );
             }
-            return stopResult;
           },
           (result) => (result.stopReason === 'cancelled' ? 'cancelled' : 'ok'),
         );
@@ -1570,6 +1576,7 @@ export class Session implements SessionContext {
             messageType: 'cron',
           },
           async () => {
+            let turnCount = 0;
             try {
               // Echo the cron prompt as a user message so the client sees it
               await this.sendUpdate({
@@ -1587,6 +1594,7 @@ export class Session implements SessionContext {
               };
 
               while (nextMessage !== null) {
+                turnCount++;
                 if (ac.signal.aborted) return;
 
                 const functionCalls: FunctionCall[] = [];
@@ -1680,6 +1688,16 @@ export class Session implements SessionContext {
               if (this.cronAbortController === ac) {
                 this.cronAbortController = null;
               }
+              // Mirror the user-query path: emit conversation_finished on every
+              // terminal cron path (clean finish, abort, or caught error) so
+              // cron turns are not silently missing from conversation metrics.
+              logConversationFinishedEvent(
+                this.config,
+                new ConversationFinishedEvent(
+                  this.config.getApprovalMode(),
+                  turnCount,
+                ),
+              );
             }
           },
           () =>
@@ -2044,6 +2062,10 @@ export class Session implements SessionContext {
 
     const toolSpan = startToolSpan(toolName, {
       'tool.call_id': callId,
+      // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
+      // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
+      // matching daemon/ACP tool spans during the migration window.
+      call_id: callId,
       tool_name: toolName,
     });
     let spanSuccess = false;
@@ -2393,8 +2415,13 @@ export class Session implements SessionContext {
 
               switch (outcome) {
                 case ToolConfirmationOutcome.Cancel:
-                  return errorResponse(
+                  // Route through earlyErrorResponse so spanError carries the
+                  // cancellation reason (plain errorResponse leaves it unset,
+                  // which makes endToolSpan fall back to the generic 'tool
+                  // error' message) and the declined call is still recorded.
+                  return earlyErrorResponse(
                     new Error(`Tool "${toolName}" was canceled by the user.`),
+                    toolName,
                   );
                 case ToolConfirmationOutcome.ProceedOnce:
                 case ToolConfirmationOutcome.ProceedAlways:
@@ -2585,14 +2612,28 @@ export class Session implements SessionContext {
           }
 
           const durationMs = Date.now() - startTime;
+          // A tool can fail "softly" by returning toolResult.error without
+          // throwing (and can be cancelled mid-flight). Reflect that real
+          // outcome on logToolCall / recordToolResult / the tool span instead
+          // of hardcoding success — otherwise failed daemon/ACP tools are
+          // mislabeled as successful in telemetry and session replay.
+          const aborted = abortSignal.aborted;
+          const status: 'success' | 'error' | 'cancelled' = aborted
+            ? 'cancelled'
+            : toolResult.error
+              ? 'error'
+              : 'success';
+          const succeeded = status === 'success';
           logToolCall(this.config, {
             'event.name': 'tool_call',
             'event.timestamp': new Date().toISOString(),
             function_name: toolName,
             function_args: args,
             duration_ms: durationMs,
-            status: 'success',
-            success: true,
+            status,
+            success: succeeded,
+            error: toolResult.error?.message,
+            error_type: toolResult.error?.type,
             prompt_id: promptId,
             tool_type:
               typeof tool !== 'undefined' && tool instanceof DiscoveredMCPTool
@@ -2605,13 +2646,18 @@ export class Session implements SessionContext {
             .getChatRecordingService()
             ?.recordToolResult(responseParts, {
               callId,
-              status: 'success',
+              status,
               resultDisplay: toolResult.returnDisplay,
-              error: undefined,
-              errorType: undefined,
+              error: toolResult.error
+                ? new Error(toolResult.error.message)
+                : undefined,
+              errorType: toolResult.error?.type,
             });
 
-          spanSuccess = true;
+          spanSuccess = succeeded;
+          if (toolResult.error) {
+            spanError = toolResult.error.message;
+          }
           return responseParts;
         } catch (e) {
           // Ensure cleanup on error

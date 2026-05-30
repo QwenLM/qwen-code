@@ -158,6 +158,29 @@ const NOOP_SPAN = trace.wrapSpanContext({
 const interactionContext = new AsyncLocalStorage<SpanContext | undefined>();
 const toolContext = new AsyncLocalStorage<SpanContext | undefined>();
 
+/**
+ * Resolve the session.id for a child span (llm_request / tool / tool.execution)
+ * from the per-session value carried on the parent span context, falling back
+ * to the process-global getCurrentSessionId() only when no parent is present.
+ *
+ * A daemon hosts many sessions in one process, but getCurrentSessionId() is a
+ * single module-global set at telemetry init — so reading it directly would
+ * stamp a child span with whichever session last touched the global rather than
+ * the session that owns the parenting interaction span. The interaction span
+ * sets 'session.id' from the per-session config.getSessionId(), so deriving it
+ * from the parent context keeps multi-session traces correctly attributed. The
+ * global fallback preserves the single-session CLI path, where no interaction
+ * span context exists around standalone spans.
+ */
+function resolveSessionId(
+  parentCtx: SpanContext | undefined,
+): string | undefined {
+  const fromParent = parentCtx?.attributes?.['session.id'];
+  return typeof fromParent === 'string' && fromParent
+    ? fromParent
+    : getCurrentSessionId();
+}
+
 const activeSpans = new Map<string, WeakRef<SpanContext>>();
 const strongSpans = new Map<string, SpanContext>();
 
@@ -441,7 +464,7 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
   // attaches to the tool span instead of skipping back to the session root.
   const ctx = resolveParentContext(parentCtx);
 
-  const sessionId = getCurrentSessionId();
+  const sessionId = resolveSessionId(parentCtx);
   const attributes: Attributes = {
     ...(sessionId ? { 'session.id': sessionId } : {}),
     'qwen-code.model': model,
@@ -591,7 +614,7 @@ export function startToolSpan(
   // tools-inside-tools cases before falling back to the session root.
   const ctx = resolveParentContext(parentCtx);
 
-  const sessionId = getCurrentSessionId();
+  const sessionId = resolveSessionId(parentCtx);
   const attributes: Attributes = {
     ...(sessionId ? { 'session.id': sessionId } : {}),
     'tool.name': toolName,
@@ -707,7 +730,9 @@ export function startToolExecutionSpan(): Span {
   // subsystem) before falling back to the session root.
   const ctx = resolveParentContext(parentCtx);
 
-  const sessionId = getCurrentSessionId();
+  const sessionId = resolveSessionId(
+    parentCtx ?? interactionContext.getStore(),
+  );
   const span = getTracer().startSpan(
     SPAN_TOOL_EXECUTION,
     {
