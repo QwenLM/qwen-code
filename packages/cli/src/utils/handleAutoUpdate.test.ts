@@ -288,7 +288,7 @@ describe('setUpdateHandler', () => {
     expect(addItem).toHaveBeenCalledWith(
       {
         type: MessageType.INFO,
-        text: 'Update successful! The new version will be used on your next run.',
+        text: 'Update successful!',
       },
       expect.any(Number),
     );
@@ -342,7 +342,7 @@ describe('setUpdateHandler', () => {
     expect(addItem).toHaveBeenCalledWith(
       {
         type: MessageType.INFO,
-        text: 'Update successful! The new version will be used on your next run.',
+        text: 'Update successful!',
       },
       expect.any(Number),
     );
@@ -369,7 +369,7 @@ describe('setUpdateHandler', () => {
     expect(addItem).toHaveBeenCalledWith(
       {
         type: MessageType.ERROR,
-        text: 'Automatic update failed. Please try updating manually',
+        text: 'Update failed',
       },
       expect.any(Number),
     );
@@ -402,7 +402,7 @@ describe('setUpdateHandler', () => {
       2,
       {
         type: MessageType.INFO,
-        text: 'Update successful! The new version will be used on your next run.',
+        text: 'Success!',
       },
       expect.any(Number),
     );
