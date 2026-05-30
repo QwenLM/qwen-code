@@ -2749,7 +2749,7 @@ export class Session implements SessionContext {
     // Extract paths from @ commands - pass directly to readManyFiles without filtering
     // since this is user-triggered behavior, not LLM-triggered
     const pathSpecsToRead: string[] = atPathCommandParts.map(
-      (part) => part.fileData!.fileUri,
+      (part) => part.fileData!.fileUri!,
     );
 
     // Construct the initial part of the query for the LLM
