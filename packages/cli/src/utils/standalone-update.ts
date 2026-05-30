@@ -57,6 +57,8 @@ async function tryFetch(url: string): Promise<UndiciResponse | null> {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (res.ok) return res;
+    // Consume body to release the socket back to the connection pool
+    await res.body?.cancel().catch(() => {});
   } catch (err) {
     debugLogger.debug(`Fetch failed for ${url}: ${err}`);
   }
@@ -112,7 +114,10 @@ async function verifyChecksum(
 
   const expectedLine = text.split('\n').find((line) => {
     const parts = line.trim().split(/\s+/);
-    return parts.length >= 2 && parts[parts.length - 1] === filename;
+    if (parts.length < 2) return false;
+    // Handle GNU coreutils binary-mode prefix: "hash *filename"
+    const name = parts[parts.length - 1]!.replace(/^\*/, '');
+    return name === filename;
   });
   if (!expectedLine) {
     throw new Error(`No checksum found for ${filename} in SHA256SUMS`);
@@ -250,7 +255,8 @@ function acquireLock(lockPath: string): boolean {
     try {
       const pidStr = fs.readFileSync(lockPath, 'utf-8').trim();
       const pid = parseInt(pidStr, 10);
-      if (pid && !isProcessAlive(pid)) {
+      // NaN (empty/corrupt file) or dead PID → stale lock, reclaim it
+      if (Number.isNaN(pid) || !isProcessAlive(pid)) {
         fs.unlinkSync(lockPath);
         try {
           fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
@@ -319,8 +325,12 @@ function atomicReplace(
     const lockFile = lockPath;
     const script = [
       '@echo off',
+      'set /a TRIES=0',
       ':wait',
+      'set /a TRIES+=1',
+      'if %TRIES% GTR 30 goto proceed',
       `tasklist /FI "PID eq ${process.pid}" 2>nul | find "${process.pid}" >nul && (timeout /t 1 >nul & goto wait)`,
+      ':proceed',
       `move /Y "${standaloneDir}" "${oldDir}"`,
       `move /Y "${pendingDir}" "${standaloneDir}"`,
       'rem Keep .old for rollback; release update lock',
@@ -451,6 +461,11 @@ export async function performStandaloneUpdate(
     fs.rmSync(tempDir, { recursive: true, force: true });
     if (fs.existsSync(extractDir)) {
       fs.rmSync(extractDir, { recursive: true, force: true });
+    }
+    // Clean orphaned pendingDir if it exists (from a failed Windows path validation)
+    const pendingDir = `${standaloneDir}.new`;
+    if (fs.existsSync(pendingDir)) {
+      fs.rmSync(pendingDir, { recursive: true, force: true });
     }
   }
 }
