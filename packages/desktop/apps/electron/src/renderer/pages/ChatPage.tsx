@@ -624,6 +624,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   const titleMenu = React.useMemo(() => sessionMeta ? (
     <SessionMenu
       item={sessionMeta}
+      hideShareAction
+      hideMessagingAction
+      hideStatusAction
       sessionStatuses={sessionStatuses ?? []}
       labels={labels ?? []}
       onLabelsChange={handleLabelsChange}

@@ -62,6 +62,8 @@ export function isEmbeddedServerEnabled(): boolean {
 export const FEATURE_FLAGS = {
   /** Enable Opus 4.7 fast mode (speed:"fast" + beta header). 6x pricing. */
   fastMode: false,
+  /** Show session label/tag management UI. */
+  sessionLabelsUi: false,
   /**
    * Enable agent developer feedback tool.
    *

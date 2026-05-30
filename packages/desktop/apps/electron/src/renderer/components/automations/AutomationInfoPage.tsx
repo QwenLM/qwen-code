@@ -16,7 +16,11 @@ import {
   Info_Badge,
   Info_Markdown,
 } from '@/components/info'
-import { EditPopover, EditButton, getEditConfig } from '@/components/ui/EditPopover'
+import {
+  EditPopover,
+  EditButton,
+  getEditConfig,
+} from '@/components/ui/EditPopover'
 import { useActiveWorkspace } from '@/context/AppShellContext'
 import { AutomationAvatar } from './AutomationAvatar'
 import { AutomationMenu } from './AutomationMenu'
@@ -24,8 +28,16 @@ import { AutomationActionRow } from './AutomationActionRow'
 import { AutomationTestPanel } from './AutomationTestPanel'
 import { AutomationEventTimeline } from './AutomationEventTimeline'
 import { PhaseBadge } from './PhaseBadge'
-import { getEventDisplayName, getPermissionDisplayName, flattenConditions, type AutomationListItem, type ExecutionEntry, type TestResult } from './types'
+import {
+  getEventDisplayName,
+  getPermissionDisplayName,
+  flattenConditions,
+  type AutomationListItem,
+  type ExecutionEntry,
+  type TestResult,
+} from './types'
 import { describeCron, computeNextRuns } from './utils'
+import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags'
 
 // ============================================================================
 // Component
@@ -61,7 +73,10 @@ export function AutomationInfoPage({
     <EditPopover
       trigger={<EditButton />}
       {...getEditConfig('automation-config', workspace.rootPath)}
-      secondaryAction={{ label: t('automations.editFile'), filePath: `${workspace.rootPath}/automations.json` }}
+      secondaryAction={{
+        label: t('automations.editFile'),
+        filePath: `${workspace.rootPath}/automations.json`,
+      }}
     />
   ) : undefined
 
@@ -95,7 +110,10 @@ export function AutomationInfoPage({
 
         {/* Disabled warning */}
         {!automation.enabled && (
-          <Info_Alert variant="warning" icon={<PauseCircle className="h-4 w-4" />}>
+          <Info_Alert
+            variant="warning"
+            icon={<PauseCircle className="h-4 w-4" />}
+          >
             <Info_Alert.Title>{t('automations.pausedTitle')}</Info_Alert.Title>
             <Info_Alert.Description>
               {t('automations.pausedDescription')}
@@ -111,7 +129,9 @@ export function AutomationInfoPage({
         >
           <Info_Table>
             <Info_Table.Row label={t('automations.labelEvent')}>
-              <Info_Badge color="default">{getEventDisplayName(automation.event)}</Info_Badge>
+              <Info_Badge color="default">
+                {getEventDisplayName(automation.event)}
+              </Info_Badge>
             </Info_Table.Row>
             <Info_Table.Row label={t('automations.labelTiming')}>
               <PhaseBadge event={automation.event} />
@@ -125,8 +145,13 @@ export function AutomationInfoPage({
             )}
             {automation.cron && (
               <>
-                <Info_Table.Row label={t('automations.labelRepeats')} value={describeCron(automation.cron)} />
-                <Info_Table.Row label={t('automations.labelScheduleExpression')}>
+                <Info_Table.Row
+                  label={t('automations.labelRepeats')}
+                  value={describeCron(automation.cron)}
+                />
+                <Info_Table.Row
+                  label={t('automations.labelScheduleExpression')}
+                >
                   <code className="text-xs font-mono bg-foreground/5 px-1.5 py-0.5 rounded">
                     {automation.cron}
                   </code>
@@ -135,18 +160,32 @@ export function AutomationInfoPage({
                   <Info_Table.Row label={t('automations.labelNextRuns')}>
                     <div className="flex flex-col gap-0.5">
                       {(() => {
-                        const spansYears = nextRuns.length > 1 && nextRuns[0].getFullYear() !== nextRuns[nextRuns.length - 1].getFullYear()
+                        const spansYears =
+                          nextRuns.length > 1 &&
+                          nextRuns[0].getFullYear() !==
+                            nextRuns[nextRuns.length - 1].getFullYear()
                         return nextRuns.map((date, i) => (
                           <span key={i} className="text-sm text-foreground/70">
-                            {date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', ...(spansYears && { year: 'numeric' }) })}{' '}
-                            {date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })}
+                            {date.toLocaleDateString('en-US', {
+                              month: 'short',
+                              day: 'numeric',
+                              ...(spansYears && { year: 'numeric' }),
+                            })}{' '}
+                            {date.toLocaleTimeString('en-US', {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              hour12: false,
+                            })}
                           </span>
                         ))
                       })()}
                     </div>
                   </Info_Table.Row>
                 )}
-                <Info_Table.Row label={t('automations.labelTimezone')} value={automation.timezone || t('automations.systemDefault')} />
+                <Info_Table.Row
+                  label={t('automations.labelTimezone')}
+                  value={automation.timezone || t('automations.systemDefault')}
+                />
               </>
             )}
           </Info_Table>
@@ -174,7 +213,9 @@ export function AutomationInfoPage({
         {/* Section: Then */}
         <Info_Section
           title={t('automations.sectionThen')}
-          description={t('automations.sectionThenDescription', { count: automation.actions.length })}
+          description={t('automations.sectionThenDescription', {
+            count: automation.actions.length,
+          })}
           actions={editActions}
         >
           <div className="divide-y divide-border/30">
@@ -190,30 +231,46 @@ export function AutomationInfoPage({
         )}
 
         {/* Section: Settings */}
-        <Info_Section title={t('automations.sectionSettings')} actions={editActions}>
+        <Info_Section
+          title={t('automations.sectionSettings')}
+          actions={editActions}
+        >
           <Info_Table>
-            <Info_Table.Row label={t('automations.labelAccessLevel')} value={getPermissionDisplayName(automation.permissionMode)} />
+            <Info_Table.Row
+              label={t('automations.labelAccessLevel')}
+              value={getPermissionDisplayName(automation.permissionMode)}
+            />
             <Info_Table.Row label={t('automations.labelStatus')}>
               <Info_Badge color={automation.enabled ? 'success' : 'muted'}>
-                {automation.enabled ? t('automations.statusActive') : t('automations.statusDisabled')}
+                {automation.enabled
+                  ? t('automations.statusActive')
+                  : t('automations.statusDisabled')}
               </Info_Badge>
             </Info_Table.Row>
-            {automation.labels && automation.labels.length > 0 && (
-              <Info_Table.Row label={t('automations.labelLabels')}>
-                <div className="flex gap-1.5 flex-wrap">
-                  {automation.labels.map((l) => (
-                    <Info_Badge key={l} color="muted">{l}</Info_Badge>
-                  ))}
-                </div>
-              </Info_Table.Row>
-            )}
+            {FEATURE_FLAGS.sessionLabelsUi &&
+              automation.labels &&
+              automation.labels.length > 0 && (
+                <Info_Table.Row label={t('automations.labelLabels')}>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {automation.labels.map((l) => (
+                      <Info_Badge key={l} color="muted">
+                        {l}
+                      </Info_Badge>
+                    ))}
+                  </div>
+                </Info_Table.Row>
+              )}
           </Info_Table>
         </Info_Section>
 
         {/* Section: Recent Activity */}
         <Info_Section
           title={t('automations.sectionRecentActivity')}
-          description={executions.length > 0 ? t('automations.lastNRuns', { count: executions.length }) : undefined}
+          description={
+            executions.length > 0
+              ? t('automations.lastNRuns', { count: executions.length })
+              : undefined
+          }
         >
           <AutomationEventTimeline entries={executions} onReplay={onReplay} />
         </Info_Section>
@@ -222,17 +279,23 @@ export function AutomationInfoPage({
         <Info_Section title={t('automations.sectionRawConfig')}>
           <div className="rounded-[8px] shadow-minimal overflow-hidden [&_pre]:!bg-transparent [&_.relative]:!bg-transparent [&_.relative]:!border-0 [&_.relative>div:first-child]:!bg-transparent [&_.relative>div:first-child]:!border-0">
             <Info_Markdown maxHeight={300} fullscreen>
-              {`\`\`\`json\n${JSON.stringify({
-                event: automation.event,
-                matcher: automation.matcher,
-                conditions: automation.conditions,
-                cron: automation.cron,
-                timezone: automation.timezone,
-                permissionMode: automation.permissionMode,
-                labels: automation.labels,
-                enabled: automation.enabled,
-                actions: automation.actions,
-              }, null, 2)}\n\`\`\``}
+              {`\`\`\`json\n${JSON.stringify(
+                {
+                  event: automation.event,
+                  matcher: automation.matcher,
+                  conditions: automation.conditions,
+                  cron: automation.cron,
+                  timezone: automation.timezone,
+                  permissionMode: automation.permissionMode,
+                  ...(FEATURE_FLAGS.sessionLabelsUi
+                    ? { labels: automation.labels }
+                    : {}),
+                  enabled: automation.enabled,
+                  actions: automation.actions,
+                },
+                null,
+                2,
+              )}\n\`\`\``}
             </Info_Markdown>
           </div>
         </Info_Section>

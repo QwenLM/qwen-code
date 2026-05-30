@@ -50,6 +50,7 @@ import {
 } from '../../shared/route-parser'
 import { routes, type Route, type ViewRoute } from '../../shared/routes'
 import { parsePermissionMode } from '@craft-agent/shared/agent/mode-types'
+import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags'
 import { contentBadgesToTextElements } from '@craft-agent/core/utils'
 import { NAVIGATE_EVENT, type NavigateOptions } from '../lib/navigate'
 import { normalizePanelRouteForReconcile } from './navigation-reconcile'
@@ -77,6 +78,7 @@ import {
   DEFAULT_NAVIGATION_STATE,
 } from '../../shared/types'
 import {
+  DEFAULT_SETTINGS_SUBPAGE,
   isValidSettingsSubpage,
   isVisibleSettingsSubpage,
   type SettingsSubpage,
@@ -257,9 +259,16 @@ export function NavigationProvider({
 
   // NavigationState derived from the focused panel's route
   const navigationState: NavigationState = useMemo(() => {
-    const base = focusedRoute
+    let base = focusedRoute
       ? (parseRouteToNavigationState(focusedRoute) ?? DEFAULT_NAVIGATION_STATE)
       : DEFAULT_NAVIGATION_STATE
+    if (
+      isSessionsNavigation(base) &&
+      base.filter.kind === 'label' &&
+      !FEATURE_FLAGS.sessionLabelsUi
+    ) {
+      base = { ...base, filter: { kind: 'allSessions' } }
+    }
     return rightSidebar ? { ...base, rightSidebar } : base
   }, [focusedRoute, rightSidebar])
 
@@ -1121,10 +1130,30 @@ export function NavigationProvider({
 
       // Parse route to NavigationState
       let newNavState = parseRouteToNavigationState(route)
+      if (
+        newNavState &&
+        isSessionsNavigation(newNavState) &&
+        newNavState.filter.kind === 'label' &&
+        !FEATURE_FLAGS.sessionLabelsUi
+      ) {
+        newNavState = {
+          ...newNavState,
+          filter: { kind: 'allSessions' },
+        }
+      }
 
       // Settings subpage persistence
       if (newNavState && isSettingsNavigation(newNavState)) {
         const isBareSettingsRoute = route === 'settings'
+        if (
+          newNavState.subpage === 'labels' &&
+          !isVisibleSettingsSubpage('labels')
+        ) {
+          newNavState = {
+            ...newNavState,
+            subpage: DEFAULT_SETTINGS_SUBPAGE,
+          }
+        }
         if (isBareSettingsRoute) {
           const savedSubpage = storage.get<string>(
             storage.KEYS.lastSettingsSubpage,

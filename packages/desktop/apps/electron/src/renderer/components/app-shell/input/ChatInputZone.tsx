@@ -8,6 +8,7 @@ import type { BackgroundTask } from '../ActiveTasksBar'
 import { ActiveOptionBadges } from '../ActiveOptionBadges'
 import { InputContainer } from './InputContainer'
 import { InputErrorBoundary } from './InputErrorBoundary'
+import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags'
 
 interface ChatInputZoneProps {
   compactMode?: boolean
@@ -48,34 +49,47 @@ export function ChatInputZone({
   className,
   inputProps,
 }: ChatInputZoneProps) {
-  const [autoOpenLabelId, setAutoOpenLabelId] = React.useState<string | null>(null)
+  const [autoOpenLabelId, setAutoOpenLabelId] = React.useState<string | null>(
+    null,
+  )
   const shouldShowOptionBadges = showOptionBadges ?? !compactMode
   const inputResetKey = `${sessionId}::${inputProps.structuredInput?.type ?? 'freeform'}`
+  const visibleLabels = FEATURE_FLAGS.sessionLabelsUi ? labels : []
+  const visibleSessionLabels = FEATURE_FLAGS.sessionLabelsUi
+    ? sessionLabels
+    : []
 
   const handleClearDraft = React.useCallback(() => {
     inputProps.onInputChange?.('')
     inputProps.onAttachmentsChange?.([])
   }, [inputProps])
 
-  const handleLabelAdd = React.useCallback((labelId: string) => {
-    const current = sessionLabels || []
-    if (current.includes(labelId)) return
+  const handleLabelAdd = React.useCallback(
+    (labelId: string) => {
+      const current = sessionLabels || []
+      if (current.includes(labelId)) return
 
-    onLabelsChange?.([...current, labelId])
+      onLabelsChange?.([...current, labelId])
 
-    const config = flattenLabels(labels || []).find(label => label.id === labelId)
-    if (config?.valueType) {
-      setAutoOpenLabelId(labelId)
-    }
-  }, [labels, onLabelsChange, sessionLabels])
+      const config = flattenLabels(labels || []).find(
+        (label) => label.id === labelId,
+      )
+      if (config?.valueType) {
+        setAutoOpenLabelId(labelId)
+      }
+    },
+    [labels, onLabelsChange, sessionLabels],
+  )
 
   return (
-    <div className={cn(
-      CHAT_LAYOUT.maxWidth,
-      'mx-auto w-full mt-1',
-      compactMode ? 'px-2 pb-3' : 'px-3 @xs/panel:px-4 pb-4',
-      className,
-    )}>
+    <div
+      className={cn(
+        CHAT_LAYOUT.maxWidth,
+        'mx-auto w-full mt-1',
+        compactMode ? 'px-2 pb-3' : 'px-3 @xs/panel:px-4 pb-4',
+        className,
+      )}
+    >
       {shouldShowOptionBadges && (
         <ActiveOptionBadges
           permissionMode={permissionMode}
@@ -85,14 +99,20 @@ export function ChatInputZone({
           sessionFolderPath={sessionFolderPath}
           onKillTask={onKillTask}
           onInsertMessage={onInsertMessage ?? inputProps.onInputChange}
-          sessionLabels={sessionLabels}
-          labels={labels}
-          onLabelsChange={onLabelsChange}
+          sessionLabels={visibleSessionLabels}
+          labels={visibleLabels}
+          onLabelsChange={
+            FEATURE_FLAGS.sessionLabelsUi ? onLabelsChange : undefined
+          }
           onRemoveLabel={(labelId) => {
-            const next = (sessionLabels || []).filter(entry => entry !== labelId && !entry.startsWith(`${labelId}::`))
+            const next = (sessionLabels || []).filter(
+              (entry) => entry !== labelId && !entry.startsWith(`${labelId}::`),
+            )
             onLabelsChange?.(next)
           }}
-          autoOpenLabelId={autoOpenLabelId}
+          autoOpenLabelId={
+            FEATURE_FLAGS.sessionLabelsUi ? autoOpenLabelId : null
+          }
           onAutoOpenConsumed={() => setAutoOpenLabelId(null)}
           sessionStatuses={sessionStatuses}
           currentSessionStatus={currentSessionStatus}
@@ -110,9 +130,11 @@ export function ChatInputZone({
           compactMode={compactMode}
           permissionMode={permissionMode}
           onPermissionModeChange={onPermissionModeChange}
-          labels={labels}
-          sessionLabels={sessionLabels}
-          onLabelAdd={handleLabelAdd}
+          labels={visibleLabels}
+          sessionLabels={visibleSessionLabels}
+          onLabelAdd={
+            FEATURE_FLAGS.sessionLabelsUi ? handleLabelAdd : undefined
+          }
           sessionFolderPath={sessionFolderPath}
           sessionId={sessionId}
           currentSessionStatus={currentSessionStatus}

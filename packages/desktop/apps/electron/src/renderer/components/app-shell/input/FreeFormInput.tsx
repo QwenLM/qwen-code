@@ -100,6 +100,7 @@ import {
   removeRecentWorkingDir,
 } from './working-directory-history';
 import { CompactPermissionModeSelector } from './CompactPermissionModeSelector';
+import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags';
 
 /**
  * Format token count for display (e.g., 1500 -> "1.5k", 200000 -> "200k")
@@ -480,20 +481,27 @@ export function FreeFormInput({
   availableSkills = EMPTY_AVAILABLE_SKILLS,
 }: FreeFormInputProps) {
   const { t } = useTranslation();
+  const showSessionLabelsUi = FEATURE_FLAGS.sessionLabelsUi;
+  const visibleLabels = showSessionLabelsUi ? labels : [];
+  const visibleSessionLabels = showSessionLabelsUi ? sessionLabels : [];
 
   // Default rotating placeholders for onboarding/empty state (i18n-aware)
-  const defaultPlaceholders = React.useMemo(
-    () => [
+  const defaultPlaceholders = React.useMemo(() => {
+    const placeholders = [
       t('chatInput.placeholder.workOn'),
       t('chatInput.placeholder.shiftTab'),
       t('chatInput.placeholder.mention'),
-      t('chatInput.placeholder.labels'),
+    ];
+    if (showSessionLabelsUi) {
+      placeholders.push(t('chatInput.placeholder.labels'));
+    }
+    placeholders.push(
       t('chatInput.placeholder.newLine'),
       t('chatInput.placeholder.sidebar', { key: cmdKey }),
       t('chatInput.placeholder.focusMode', { key: cmdKey }),
-    ],
-    [t],
-  );
+    );
+    return placeholders;
+  }, [showSessionLabelsUi, t]);
 
   const effectivePlaceholderProp = placeholder ?? defaultPlaceholders;
 
@@ -1464,8 +1472,8 @@ export function FreeFormInput({
 
   const inlineLabel = useInlineLabelMenu({
     inputRef: richInputRef,
-    labels,
-    sessionLabels,
+    labels: visibleLabels,
+    sessionLabels: visibleSessionLabels,
     onSelect: handleLabelSelect,
     sessionStatuses,
     activeStateId: currentSessionStatus,
@@ -2213,7 +2221,7 @@ export function FreeFormInput({
           onOpenChange={(open) => !open && inlineLabel.close()}
           items={inlineLabel.items}
           onSelect={handleInlineLabelSelect}
-          onAddLabel={handleAddLabel}
+          onAddLabel={showSessionLabelsUi ? handleAddLabel : undefined}
           filter={inlineLabel.filter}
           position={inlineLabel.position}
           states={inlineLabel.states}
@@ -2229,7 +2237,7 @@ export function FreeFormInput({
             fall back to the same-window deep-link path; that worked inside
             Electron but launched the desktop app from the WebUI via `craftagents://`.
             Match the AppShell pattern (which already uses spread). */}
-        {addLabelEditConfig && (
+        {showSessionLabelsUi && addLabelEditConfig && (
           <EditPopover
             trigger={
               <span className="absolute top-0 left-0 w-0 h-0 overflow-hidden" />

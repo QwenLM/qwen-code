@@ -18,11 +18,20 @@ import { toast } from 'sonner'
 import { useMenuComponents } from '@/components/ui/menu-context'
 import { useSelectedIds } from '@/hooks/useSession'
 import { useSessionSelection } from '@/hooks/useSession'
-import { sessionMetaMapAtom, sendToWorkspaceAtom, type SessionMeta } from '@/atoms/sessions'
+import {
+  sessionMetaMapAtom,
+  sendToWorkspaceAtom,
+  type SessionMeta,
+} from '@/atoms/sessions'
 import { useAppShellContext } from '@/context/AppShellContext'
-import { getStateColor, getStateIcon, type SessionStatusId } from '@/config/session-status-config'
+import {
+  getStateColor,
+  getStateIcon,
+  type SessionStatusId,
+} from '@/config/session-status-config'
 import { extractLabelId } from '@craft-agent/shared/labels'
 import { LabelMenuItems, StatusMenuItems } from './SessionMenuParts'
+import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags'
 
 export interface BatchSessionMenuProps {
   /** Callback to open Send to Workspace dialog for the selected sessions */
@@ -31,9 +40,13 @@ export interface BatchSessionMenuProps {
   hideMetadataActions?: boolean
 }
 
-export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = false }: BatchSessionMenuProps = {}) {
+export function BatchSessionMenu({
+  onSendToWorkspace,
+  hideMetadataActions = false,
+}: BatchSessionMenuProps = {}) {
   const { t } = useTranslation()
-  const { MenuItem, Separator, Sub, SubTrigger, SubContent } = useMenuComponents()
+  const { MenuItem, Separator, Sub, SubTrigger, SubContent } =
+    useMenuComponents()
 
   const selectedIds = useSelectedIds()
   const setSendToWorkspace = useSetAtom(sendToWorkspaceAtom)
@@ -53,7 +66,7 @@ export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = fals
     labels = [],
   } = useAppShellContext()
 
-  const hasRemoteWorkspaces = workspaces?.some(w => w.remoteServer) ?? false
+  const hasRemoteWorkspaces = workspaces?.some((w) => w.remoteServer) ?? false
 
   // Hydrate selected session metadata
   const selectedMetas = useMemo(() => {
@@ -69,7 +82,9 @@ export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = fals
   const activeStatusId = useMemo((): SessionStatusId | null => {
     if (selectedMetas.length === 0) return null
     const first = (selectedMetas[0].sessionStatus || 'todo') as SessionStatusId
-    const allSame = selectedMetas.every(meta => (meta.sessionStatus || 'todo') === first)
+    const allSame = selectedMetas.every(
+      (meta) => (meta.sessionStatus || 'todo') === first,
+    )
     return allSame ? first : null
   }, [selectedMetas])
 
@@ -77,7 +92,7 @@ export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = fals
   const appliedLabelIds = useMemo(() => {
     if (selectedMetas.length === 0) return new Set<string>()
     const toLabelSet = (meta: SessionMeta) =>
-      new Set((meta.labels || []).map(entry => extractLabelId(entry)))
+      new Set((meta.labels || []).map((entry) => extractLabelId(entry)))
     const [first, ...rest] = selectedMetas.map(toLabelSet)
     const intersection = new Set(first)
     for (const labelSet of rest) {
@@ -90,50 +105,68 @@ export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = fals
 
   // Check flag state: all flagged, or some/none flagged
   const allFlagged = useMemo(
-    () => selectedMetas.length > 0 && selectedMetas.every(m => m.isFlagged),
-    [selectedMetas]
+    () => selectedMetas.length > 0 && selectedMetas.every((m) => m.isFlagged),
+    [selectedMetas],
   )
 
   // Batch status change
-  const handleBatchSetStatus = useCallback((status: SessionStatusId) => {
-    selectedIds.forEach(sessionId => {
-      onSessionStatusChange(sessionId, status)
-    })
-  }, [selectedIds, onSessionStatusChange])
+  const handleBatchSetStatus = useCallback(
+    (status: SessionStatusId) => {
+      selectedIds.forEach((sessionId) => {
+        onSessionStatusChange(sessionId, status)
+      })
+    },
+    [selectedIds, onSessionStatusChange],
+  )
 
   // Batch label toggle (all-or-nothing semantics, same as MainContentPanel)
-  const handleBatchToggleLabel = useCallback((labelId: string) => {
-    if (!onSessionLabelsChange) return
-    const allHaveLabel = selectedMetas.every(meta =>
-      (meta.labels || []).some(entry => extractLabelId(entry) === labelId)
-    )
-    selectedMetas.forEach(meta => {
-      const currentLabels = meta.labels || []
-      const hasLabel = currentLabels.some(entry => extractLabelId(entry) === labelId)
-      const filtered = currentLabels.filter(entry => extractLabelId(entry) !== labelId)
-      const nextLabels = allHaveLabel
-        ? filtered
-        : (hasLabel ? currentLabels : [...currentLabels, labelId])
-      onSessionLabelsChange(meta.id, nextLabels)
-    })
-  }, [selectedMetas, onSessionLabelsChange])
+  const handleBatchToggleLabel = useCallback(
+    (labelId: string) => {
+      if (!onSessionLabelsChange) return
+      const allHaveLabel = selectedMetas.every((meta) =>
+        (meta.labels || []).some((entry) => extractLabelId(entry) === labelId),
+      )
+      selectedMetas.forEach((meta) => {
+        const currentLabels = meta.labels || []
+        const hasLabel = currentLabels.some(
+          (entry) => extractLabelId(entry) === labelId,
+        )
+        const filtered = currentLabels.filter(
+          (entry) => extractLabelId(entry) !== labelId,
+        )
+        const nextLabels = allHaveLabel
+          ? filtered
+          : hasLabel
+            ? currentLabels
+            : [...currentLabels, labelId]
+        onSessionLabelsChange(meta.id, nextLabels)
+      })
+    },
+    [selectedMetas, onSessionLabelsChange],
+  )
 
   // Batch flag/unflag
   const handleBatchFlag = useCallback(() => {
-    selectedIds.forEach(id => onFlagSession(id))
-    toast(`${selectedIds.size} ${selectedIds.size === 1 ? 'session' : 'sessions'} flagged`)
+    selectedIds.forEach((id) => onFlagSession(id))
+    toast(
+      `${selectedIds.size} ${selectedIds.size === 1 ? 'session' : 'sessions'} flagged`,
+    )
   }, [selectedIds, onFlagSession])
 
   const handleBatchUnflag = useCallback(() => {
-    selectedIds.forEach(id => onUnflagSession(id))
-    toast(`${selectedIds.size} ${selectedIds.size === 1 ? 'session' : 'sessions'} unflagged`)
+    selectedIds.forEach((id) => onUnflagSession(id))
+    toast(
+      `${selectedIds.size} ${selectedIds.size === 1 ? 'session' : 'sessions'} unflagged`,
+    )
   }, [selectedIds, onUnflagSession])
 
   // Batch archive
   const handleBatchArchive = useCallback(() => {
-    selectedIds.forEach(id => onArchiveSession(id))
+    selectedIds.forEach((id) => onArchiveSession(id))
     clearMultiSelect()
-    toast(`${selectedIds.size} ${selectedIds.size === 1 ? 'session' : 'sessions'} archived`)
+    toast(
+      `${selectedIds.size} ${selectedIds.size === 1 ? 'session' : 'sessions'} archived`,
+    )
   }, [selectedIds, onArchiveSession, clearMultiSelect])
 
   // Batch send to workspace
@@ -164,7 +197,9 @@ export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = fals
     ? (() => {
         const icon = getStateIcon(activeStatusId, sessionStatuses)
         return React.isValidElement(icon)
-          ? React.cloneElement(icon as React.ReactElement<{ bare?: boolean }>, { bare: true })
+          ? React.cloneElement(icon as React.ReactElement<{ bare?: boolean }>, {
+              bare: true,
+            })
           : icon
       })()
     : null
@@ -185,13 +220,19 @@ export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = fals
           <Sub>
             <SubTrigger className="pr-2">
               {statusIcon ? (
-                <span style={{ color: getStateColor(activeStatusId!, sessionStatuses) ?? 'var(--foreground)' }}>
+                <span
+                  style={{
+                    color:
+                      getStateColor(activeStatusId!, sessionStatuses) ??
+                      'var(--foreground)',
+                  }}
+                >
                   {statusIcon}
                 </span>
               ) : (
                 <span className="h-3.5 w-3.5" />
               )}
-              <span className="flex-1">{t("sessionMenu.status")}</span>
+              <span className="flex-1">{t('sessionMenu.status')}</span>
             </SubTrigger>
             <SubContent>
               <StatusMenuItems
@@ -204,11 +245,11 @@ export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = fals
           </Sub>
 
           {/* Labels submenu */}
-          {labels.length > 0 && (
+          {FEATURE_FLAGS.sessionLabelsUi && labels.length > 0 && (
             <Sub>
               <SubTrigger className="pr-2">
                 <Tag className="h-3.5 w-3.5" />
-                <span className="flex-1">{t("sidebar.labels")}</span>
+                <span className="flex-1">{t('sidebar.labels')}</span>
               </SubTrigger>
               <SubContent>
                 <LabelMenuItems
@@ -225,12 +266,12 @@ export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = fals
           {allFlagged ? (
             <MenuItem onClick={handleBatchUnflag}>
               <FlagOff className="h-3.5 w-3.5" />
-              <span className="flex-1">{t("sessionMenu.unflagAll")}</span>
+              <span className="flex-1">{t('sessionMenu.unflagAll')}</span>
             </MenuItem>
           ) : (
             <MenuItem onClick={handleBatchFlag}>
               <Flag className="h-3.5 w-3.5 text-info" />
-              <span className="flex-1">{t("sessionMenu.flagAll")}</span>
+              <span className="flex-1">{t('sessionMenu.flagAll')}</span>
             </MenuItem>
           )}
         </>
@@ -239,14 +280,14 @@ export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = fals
       {/* Archive */}
       <MenuItem onClick={handleBatchArchive}>
         <Archive className="h-3.5 w-3.5" />
-        <span className="flex-1">{t("sessionMenu.archive")}</span>
+        <span className="flex-1">{t('sessionMenu.archive')}</span>
       </MenuItem>
 
       {/* Send to Workspace */}
       {hasRemoteWorkspaces && (
         <MenuItem onClick={handleSendToWorkspace}>
           <Send className="h-3.5 w-3.5" />
-          <span className="flex-1">{t("sessionMenu.sendToWorkspace")}</span>
+          <span className="flex-1">{t('sessionMenu.sendToWorkspace')}</span>
         </MenuItem>
       )}
 
@@ -255,7 +296,7 @@ export function BatchSessionMenu({ onSendToWorkspace, hideMetadataActions = fals
       {/* Delete */}
       <MenuItem onClick={handleBatchDelete} variant="destructive">
         <Trash2 className="h-3.5 w-3.5" />
-        <span className="flex-1">{t("common.delete")}</span>
+        <span className="flex-1">{t('common.delete')}</span>
       </MenuItem>
     </>
   )

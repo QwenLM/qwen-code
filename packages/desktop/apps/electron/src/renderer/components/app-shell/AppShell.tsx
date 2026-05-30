@@ -33,6 +33,7 @@ import {
 import { TopBar } from './TopBar'
 import { AboutDialog } from '../AboutDialog'
 import { BRAND } from '@craft-agent/shared/branding'
+import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags'
 import { SquarePenRounded } from '../icons/SquarePenRounded'
 import { cn } from '@/lib/utils'
 import { isMac } from '@/lib/platform'
@@ -1133,6 +1134,7 @@ function AppShellContent({
 
   // Derive current view's label filter as a Map<string, FilterMode>
   const labelFilter = useMemo(() => {
+    if (!FEATURE_FLAGS.sessionLabelsUi) return new Map<string, FilterMode>()
     if (!sessionFilterKey) return new Map<string, FilterMode>()
     const entry = viewFiltersMap[sessionFilterKey]?.labels ?? {}
     return new Map<string, FilterMode>(
@@ -1149,6 +1151,7 @@ function AppShellContent({
             prev: Map<SessionStatusId, FilterMode>,
           ) => Map<SessionStatusId, FilterMode>),
     ) => {
+      if (!FEATURE_FLAGS.sessionLabelsUi) return
       setViewFiltersMap((prev) => {
         if (!sessionFilterKey) return prev
         const current = new Map<SessionStatusId, FilterMode>(
@@ -1558,7 +1561,8 @@ function AppShellContent({
   // Load labels from workspace config
   const { labels: labelConfigs } = useLabels(activeWorkspace?.id || null)
   const displayLabelConfigs = useMemo(
-    () => sortLabelsForDisplay(labelConfigs),
+    () =>
+      FEATURE_FLAGS.sessionLabelsUi ? sortLabelsForDisplay(labelConfigs) : [],
     [labelConfigs],
   )
 
@@ -2050,6 +2054,10 @@ function AppShellContent({
     workspaceSessionSnapshotLoadingIds,
     setWorkspaceSessionSnapshotLoadingIds,
   ] = useState<Set<string>>(new Set())
+  const [
+    sessionListRefreshWorkspaceIds,
+    setSessionListRefreshWorkspaceIds,
+  ] = useState<Set<string>>(new Set())
   const workspaceSessionSnapshotRetryAttemptsRef = useRef<Map<string, number>>(
     new Map(),
   )
@@ -2087,6 +2095,24 @@ function AppShellContent({
       }
       workspaceSessionSnapshotRetryTimersRef.current.clear()
     }
+  }, [])
+
+  useEffect(() => {
+    const cleanup = window.electronAPI.onSessionListRefreshStateChanged(
+      (workspaceId, isRefreshing) => {
+        setSessionListRefreshWorkspaceIds((prev) => {
+          const hasWorkspace = prev.has(workspaceId)
+          if (isRefreshing === hasWorkspace) return prev
+
+          const next = new Set(prev)
+          if (isRefreshing) next.add(workspaceId)
+          else next.delete(workspaceId)
+          return next
+        })
+      },
+    )
+
+    return cleanup
   }, [])
 
   useEffect(() => {
@@ -2225,6 +2251,9 @@ function AppShellContent({
 
   const projectTreeLoadingWorkspaceSessionIds = useMemo(() => {
     const next = new Set(workspaceSessionSnapshotLoadingIds)
+    for (const workspaceId of sessionListRefreshWorkspaceIds) {
+      next.add(workspaceId)
+    }
     if (
       activeWorkspaceId &&
       isSessionListLoading &&
@@ -2241,6 +2270,7 @@ function AppShellContent({
     isSessionListLoading,
     projectDraftTargetWorkspaceId,
     projectTreeWorkspaceSessions,
+    sessionListRefreshWorkspaceIds,
     workspaceSessionSnapshotLoadingIds,
   ])
   const [projectSessionRevealRequest, setProjectSessionRevealRequest] =
@@ -2749,12 +2779,9 @@ function AppShellContent({
   }, [])
 
   // Handler for settings view
-  const handleSettingsClick = useCallback(
-    (subpage?: SettingsSubpage) => {
-      navigate(routes.view.settings(subpage))
-    },
-    [],
-  )
+  const handleSettingsClick = useCallback((subpage?: SettingsSubpage) => {
+    navigate(routes.view.settings(subpage))
+  }, [])
 
   // ============================================================================
   // EDIT POPOVER STATE
@@ -3278,6 +3305,7 @@ function AppShellContent({
           : t('sidebar.allSessions')
       }
       case 'label':
+        if (!FEATURE_FLAGS.sessionLabelsUi) return t('sidebar.allSessions')
         return sessionFilter.labelId === '__all__'
           ? t('sidebar.labels')
           : getLabelDisplayName(labelConfigs, sessionFilter.labelId)
@@ -3764,7 +3792,9 @@ function AppShellContent({
                                     }
                                   }}
                                   placeholder={t(
-                                    'sidebar.searchStatusesLabels',
+                                    FEATURE_FLAGS.sessionLabelsUi
+                                      ? 'sidebar.searchStatusesLabels'
+                                      : 'sidebar.searchStatuses',
                                   )}
                                   className="w-full bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none"
                                   autoFocus
@@ -4109,34 +4139,35 @@ function AppShellContent({
                                   </StyledDropdownMenuSubContent>
                                 </DropdownMenuSub>
 
-                                {/* Labels submenu - hierarchical tree with recursive submenus */}
-                                <DropdownMenuSub>
-                                  <StyledDropdownMenuSubTrigger>
-                                    <Tag className="h-3.5 w-3.5" />
-                                    <span className="flex-1">
-                                      {t('sidebar.labels')}
-                                    </span>
-                                  </StyledDropdownMenuSubTrigger>
-                                  <StyledDropdownMenuSubContent minWidth="min-w-[180px]">
-                                    {labelConfigs.length === 0 ? (
-                                      <StyledDropdownMenuItem disabled>
-                                        <span className="text-muted-foreground">
-                                          {t('table.noLabelsConfigured')}
-                                        </span>
-                                      </StyledDropdownMenuItem>
-                                    ) : (
-                                      <FilterLabelItems
-                                        labels={displayLabelConfigs}
-                                        labelFilter={labelFilter}
-                                        setLabelFilter={setLabelFilter}
-                                        pinnedLabelId={
-                                          pinnedFilters.pinnedLabelId
-                                        }
-                                        altHeld={filterAltHeld}
-                                      />
-                                    )}
-                                  </StyledDropdownMenuSubContent>
-                                </DropdownMenuSub>
+                                {FEATURE_FLAGS.sessionLabelsUi && (
+                                  <DropdownMenuSub>
+                                    <StyledDropdownMenuSubTrigger>
+                                      <Tag className="h-3.5 w-3.5" />
+                                      <span className="flex-1">
+                                        {t('sidebar.labels')}
+                                      </span>
+                                    </StyledDropdownMenuSubTrigger>
+                                    <StyledDropdownMenuSubContent minWidth="min-w-[180px]">
+                                      {labelConfigs.length === 0 ? (
+                                        <StyledDropdownMenuItem disabled>
+                                          <span className="text-muted-foreground">
+                                            {t('table.noLabelsConfigured')}
+                                          </span>
+                                        </StyledDropdownMenuItem>
+                                      ) : (
+                                        <FilterLabelItems
+                                          labels={displayLabelConfigs}
+                                          labelFilter={labelFilter}
+                                          setLabelFilter={setLabelFilter}
+                                          pinnedLabelId={
+                                            pinnedFilters.pinnedLabelId
+                                          }
+                                          altHeld={filterAltHeld}
+                                        />
+                                      )}
+                                    </StyledDropdownMenuSubContent>
+                                  </DropdownMenuSub>
+                                )}
 
                                 {/* Group by submenu - hidden in state sub-views (always date there) */}
                                 {!isStateSubView && (
@@ -4218,7 +4249,9 @@ function AppShellContent({
                                 {filterDropdownResults.states.length === 0 &&
                                 filterDropdownResults.labels.length === 0 ? (
                                   <div className="px-3 py-4 text-center text-xs text-muted-foreground">
-                                    No matching statuses or labels
+                                    {FEATURE_FLAGS.sessionLabelsUi
+                                      ? 'No matching statuses or labels'
+                                      : 'No matching statuses'}
                                   </div>
                                 ) : (
                                   <div
@@ -4926,51 +4959,52 @@ function AppShellContent({
             }}
             {...getEditConfig('edit-statuses', activeWorkspace.rootPath)}
           />
-          {/* Configure Labels EditPopover - anchored near sidebar */}
-          <EditPopover
-            open={editPopoverOpen === 'labels'}
-            onOpenChange={(isOpen) =>
-              setEditPopoverOpen(isOpen ? 'labels' : null)
-            }
-            modal={true}
-            trigger={
-              <div
-                className="fixed w-0 h-0 pointer-events-none"
-                style={{
-                  left: sidebarWidth + 20,
-                  top: editPopoverAnchorY.current,
-                }}
-                aria-hidden="true"
-              />
-            }
-            side="bottom"
-            align="start"
-            secondaryAction={{
-              label: 'Edit File',
-              filePath: `${activeWorkspace.rootPath}/labels/config.json`,
-            }}
-            {...(() => {
-              // Spread base config, override context to include which label was right-clicked
-              const config = getEditConfig(
-                'edit-labels',
-                activeWorkspace.rootPath,
-              )
-              const targetLabel = editLabelTargetId.current
-                ? findLabelById(labelConfigs, editLabelTargetId.current)
-                : undefined
-              if (!targetLabel) return config
-              return {
-                ...config,
-                context: {
-                  ...config.context,
-                  context:
-                    (config.context.context || '') +
-                    ` The user right-clicked on the label "${targetLabel.name}" (id: "${targetLabel.id}"). ` +
-                    'If they refer to "this label" or "this", they mean this specific label.',
-                },
+          {FEATURE_FLAGS.sessionLabelsUi && (
+            <EditPopover
+              open={editPopoverOpen === 'labels'}
+              onOpenChange={(isOpen) =>
+                setEditPopoverOpen(isOpen ? 'labels' : null)
               }
-            })()}
-          />
+              modal={true}
+              trigger={
+                <div
+                  className="fixed w-0 h-0 pointer-events-none"
+                  style={{
+                    left: sidebarWidth + 20,
+                    top: editPopoverAnchorY.current,
+                  }}
+                  aria-hidden="true"
+                />
+              }
+              side="bottom"
+              align="start"
+              secondaryAction={{
+                label: 'Edit File',
+                filePath: `${activeWorkspace.rootPath}/labels/config.json`,
+              }}
+              {...(() => {
+                // Spread base config, override context to include which label was right-clicked
+                const config = getEditConfig(
+                  'edit-labels',
+                  activeWorkspace.rootPath,
+                )
+                const targetLabel = editLabelTargetId.current
+                  ? findLabelById(labelConfigs, editLabelTargetId.current)
+                  : undefined
+                if (!targetLabel) return config
+                return {
+                  ...config,
+                  context: {
+                    ...config.context,
+                    context:
+                      (config.context.context || '') +
+                      ` The user right-clicked on the label "${targetLabel.name}" (id: "${targetLabel.id}"). ` +
+                      'If they refer to "this label" or "this", they mean this specific label.',
+                  },
+                }
+              })()}
+            />
+          )}
           {/* Edit Views EditPopover - anchored near sidebar */}
           <EditPopover
             open={editPopoverOpen === 'views'}

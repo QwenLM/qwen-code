@@ -13,6 +13,8 @@
  * That's it - types, routes, and validation are derived automatically.
  */
 
+import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags';
+
 /**
  * Settings page definition
  */
@@ -135,6 +137,7 @@ const HIDDEN_SETTINGS_NAVIGATION_SUBPAGES = new Set<SettingsSubpage>([
   'workspace',
   'preferences',
   'messaging',
+  ...(FEATURE_FLAGS.sessionLabelsUi ? [] : (['labels'] as const)),
 ]);
 
 /**

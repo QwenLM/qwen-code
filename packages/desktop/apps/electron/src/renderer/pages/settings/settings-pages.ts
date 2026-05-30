@@ -13,6 +13,7 @@
 
 import type { ComponentType } from 'react';
 import type { SettingsSubpage } from '../../../shared/settings-registry';
+import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags';
 
 import AppSettingsPage from './AppSettingsPage';
 import AiSettingsPage from './AiSettingsPage';
@@ -61,5 +62,8 @@ export const SETTINGS_PAGE_COMPONENTS: Record<SettingsSubpage, ComponentType> =
 export function getSettingsPageComponent(
   subpage: SettingsSubpage,
 ): ComponentType {
+  if (subpage === 'labels' && !FEATURE_FLAGS.sessionLabelsUi) {
+    return GeneralSettingsPage;
+  }
   return SETTINGS_PAGE_COMPONENTS[subpage];
 }

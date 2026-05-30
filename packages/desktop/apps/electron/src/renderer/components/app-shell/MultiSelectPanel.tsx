@@ -22,9 +22,13 @@ import {
   StyledDropdownMenuSubTrigger,
   DropdownMenuSub,
 } from '@/components/ui/styled-dropdown'
-import type { SessionStatusId, SessionStatus } from '@/config/session-status-config'
+import type {
+  SessionStatusId,
+  SessionStatus,
+} from '@/config/session-status-config'
 import type { LabelConfig } from '@craft-agent/shared/labels'
 import { LabelMenuItems, StatusMenuItems } from './SessionMenuParts'
+import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags'
 
 type MultiSelectEntityType = 'automation' | 'session' | 'skill' | 'source'
 
@@ -90,7 +94,7 @@ export function MultiSelectPanel({
     <div
       className={cn(
         'flex flex-col items-center justify-center h-full gap-6 p-8',
-        className
+        className,
       )}
     >
       {/* Selection count */}
@@ -144,34 +148,39 @@ export function MultiSelectPanel({
             </StyledDropdownMenuContent>
           </DropdownMenu>
         )}
-        {onToggleLabel && labels.length > 0 && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="gap-2 bg-background shadow-minimal hover:bg-foreground/[0.03]"
+        {FEATURE_FLAGS.sessionLabelsUi &&
+          onToggleLabel &&
+          labels.length > 0 && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="gap-2 bg-background shadow-minimal hover:bg-foreground/[0.03]"
+                >
+                  <Tag className="w-4 h-4" />
+                  {t('multiSelect.setLabels')}
+                </Button>
+              </DropdownMenuTrigger>
+              <StyledDropdownMenuContent
+                align="center"
+                className="min-w-[220px]"
               >
-                <Tag className="w-4 h-4" />
-                {t('multiSelect.setLabels')}
-              </Button>
-            </DropdownMenuTrigger>
-            <StyledDropdownMenuContent align="center" className="min-w-[220px]">
-              <LabelMenuItems
-                labels={labels}
-                appliedLabelIds={appliedLabelIds}
-                onToggle={onToggleLabel}
-                menu={{
-                  MenuItem: StyledDropdownMenuItem,
-                  Separator: StyledDropdownMenuSeparator,
-                  Sub: DropdownMenuSub,
-                  SubTrigger: StyledDropdownMenuSubTrigger,
-                  SubContent: StyledDropdownMenuSubContent,
-                }}
-              />
-            </StyledDropdownMenuContent>
-          </DropdownMenu>
-        )}
+                <LabelMenuItems
+                  labels={labels}
+                  appliedLabelIds={appliedLabelIds}
+                  onToggle={onToggleLabel}
+                  menu={{
+                    MenuItem: StyledDropdownMenuItem,
+                    Separator: StyledDropdownMenuSeparator,
+                    Sub: DropdownMenuSub,
+                    SubTrigger: StyledDropdownMenuSubTrigger,
+                    SubContent: StyledDropdownMenuSubContent,
+                  }}
+                />
+              </StyledDropdownMenuContent>
+            </DropdownMenu>
+          )}
         {onSendToWorkspace && (
           <Button
             variant="ghost"
