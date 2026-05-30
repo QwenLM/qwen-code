@@ -6,6 +6,7 @@
 
 import { createDebugLogger, isGitRepository } from '@qwen-code/qwen-code-core';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 
@@ -215,7 +216,45 @@ export function getInstallationInfo(
       };
     }
 
-    // Assume global npm
+    // Assume global npm — check if prefix is writable before offering npm update
+    const npmPrefixDir = path.dirname(path.dirname(realPath));
+    let npmPrefixWritable = false;
+    try {
+      fs.accessSync(npmPrefixDir, fs.constants.W_OK);
+      npmPrefixWritable = true;
+    } catch {
+      // Not writable (e.g., /usr/local/lib/node_modules owned by root)
+    }
+
+    if (!npmPrefixWritable && isAutoUpdateEnabled) {
+      // npm prefix requires sudo — fall back to standalone update path
+      // which installs to ~/.local/lib/qwen-code/ (user-writable)
+      const installRoot = process.env['HOME'] || os.homedir();
+      if (!installRoot || installRoot === '/') {
+        // Cannot determine a safe user-writable location; skip migration
+        return {
+          packageManager: PackageManager.NPM,
+          isGlobal: true,
+          updateMessage:
+            'Update requires sudo. Run: sudo npm install -g @qwen-code/qwen-code@latest',
+        };
+      }
+      const fallbackStandaloneDir = path.join(
+        installRoot,
+        '.local',
+        'lib',
+        'qwen-code',
+      );
+      return {
+        packageManager: PackageManager.NPM,
+        isGlobal: true,
+        isStandalone: true,
+        standaloneDir: fallbackStandaloneDir,
+        updateMessage:
+          'npm install requires sudo. Migrating to standalone installer for automatic updates.',
+      };
+    }
+
     const updateCommand = 'npm install -g @qwen-code/qwen-code@latest';
     return {
       packageManager: PackageManager.NPM,
