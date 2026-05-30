@@ -407,7 +407,7 @@ function logTokenUsageWriteFailure(error: unknown): void {
       console.error(
         `[token-usage] Write failed (${code}):`,
         suppressedCount > 0
-          ? `${message} (${suppressedCount} similar suppressed in last window)`
+          ? `${message} (${suppressedCount} similar suppressed since last log)`
           : message,
       );
     } else {
