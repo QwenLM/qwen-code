@@ -999,7 +999,8 @@ export class Session implements SessionContext {
               );
             }
           },
-          (result) => (result.stopReason === 'cancelled' ? 'cancelled' : 'ok'),
+          (result: { stopReason: PromptResponse['stopReason'] }) =>
+            result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
         );
       },
     );
