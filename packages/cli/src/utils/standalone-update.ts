@@ -3,11 +3,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Readable } from 'node:stream';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { fetch } from 'undici';
 import * as tar from 'tar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { verifySignature } from './standalone-update-verify.js';
 
 const debugLogger = createDebugLogger('STANDALONE_UPDATE');
 
@@ -87,6 +88,28 @@ async function verifyChecksum(
   const response = await downloadWithFallback(versionPath, 'SHA256SUMS');
   const text = await response.text();
 
+  // Verify Ed25519 signature of SHA256SUMS if available (try OSS then GitHub)
+  const requireSig = process.env.QWEN_REQUIRE_SIGNATURE === '1';
+  let sigResponse = await tryFetch(`${OSS_BASE}/${versionPath}/SHA256SUMS.sig`);
+  if (!sigResponse) {
+    sigResponse = await tryFetch(
+      `${GITHUB_BASE}/${versionPath}/SHA256SUMS.sig`,
+    );
+  }
+  if (sigResponse) {
+    const sigContent = await sigResponse.text();
+    verifySignature(text, sigContent.trim());
+    debugLogger.info('SHA256SUMS signature verified.');
+  } else if (requireSig) {
+    throw new Error(
+      'SHA256SUMS.sig not found and QWEN_REQUIRE_SIGNATURE=1 is set',
+    );
+  } else {
+    debugLogger.debug(
+      'SHA256SUMS.sig not available — skipping signature verification.',
+    );
+  }
+
   const expectedLine = text.split('\n').find((line) => {
     const parts = line.trim().split(/\s+/);
     return parts.length >= 2 && parts[parts.length - 1] === filename;
@@ -156,6 +179,69 @@ async function extractArchive(
   }
 }
 
+/**
+ * Runs a command and captures stdout/exit code.
+ */
+function spawnAndCapture(
+  command: string,
+  args: string[],
+  timeoutMs: number,
+): Promise<{ exitCode: number; stdout: string }> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      command,
+      args,
+      { timeout: timeoutMs },
+      (err, out) => {
+        if (err && 'killed' in err && err.killed) {
+          reject(new Error('Smoke test timed out'));
+          return;
+        }
+        const exitCode =
+          err && 'code' in err && typeof err.code === 'number' ? err.code : 0;
+        resolve({ exitCode, stdout: out || '' });
+      },
+    );
+    child.on('error', reject);
+  });
+}
+
+/**
+ * Verifies the new installation can actually run by invoking --version.
+ * Prevents replacing a working install with a broken binary.
+ */
+async function smokeTest(newInstallDir: string, target: string): Promise<void> {
+  const nodeBin = target.startsWith('win')
+    ? path.join(newInstallDir, 'node', 'node.exe')
+    : path.join(newInstallDir, 'node', 'bin', 'node');
+  const cliBin = path.join(newInstallDir, 'lib', 'cli.js');
+
+  if (!fs.existsSync(nodeBin)) {
+    throw new Error(`Smoke test failed: node binary not found at ${nodeBin}`);
+  }
+  if (!fs.existsSync(cliBin)) {
+    throw new Error(`Smoke test failed: cli.js not found at ${cliBin}`);
+  }
+
+  const { exitCode, stdout } = await spawnAndCapture(
+    nodeBin,
+    [cliBin, '--version'],
+    10_000,
+  );
+  if (exitCode !== 0) {
+    throw new Error(
+      `Smoke test failed: new binary exited with code ${exitCode}`,
+    );
+  }
+  const version = stdout.trim();
+  if (!SEMVER_RE.test(version)) {
+    throw new Error(
+      `Smoke test failed: unexpected version output "${version}"`,
+    );
+  }
+  debugLogger.info(`Smoke test passed: ${version}`);
+}
+
 function acquireLock(lockPath: string): boolean {
   try {
     fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
@@ -223,7 +309,7 @@ function atomicReplace(
       `tasklist /FI "PID eq ${process.pid}" 2>nul | find "${process.pid}" >nul && (timeout /t 1 >nul & goto wait)`,
       `move /Y "${standaloneDir}" "${oldDir}"`,
       `move /Y "${pendingDir}" "${standaloneDir}"`,
-      `rmdir /s /q "${oldDir}" 2>nul`,
+      'rem Keep .old for rollback',
       `del "%~f0"`,
     ].join('\r\n');
     const scriptPath = path.join(
@@ -247,7 +333,7 @@ function atomicReplace(
       fs.renameSync(oldDir, standaloneDir);
       throw err;
     }
-    fs.rmSync(oldDir, { recursive: true, force: true });
+    // Keep .old for rollback instead of deleting immediately
     return 'done';
   }
 }
@@ -304,8 +390,40 @@ export async function performStandaloneUpdate(
       );
     }
 
+    debugLogger.info('Running smoke test...');
+    await smokeTest(newInstallDir, target);
+
     debugLogger.info('Replacing installation...');
     const result = atomicReplace(standaloneDir, newInstallDir);
+
+    // Write rollback metadata so /doctor rollback knows what version is preserved
+    const oldDir = `${standaloneDir}.old`;
+    if (fs.existsSync(oldDir)) {
+      try {
+        // Read the old manifest to capture its version
+        const oldManifestPath = path.join(oldDir, 'manifest.json');
+        let oldVersion = 'unknown';
+        if (fs.existsSync(oldManifestPath)) {
+          const oldManifest = JSON.parse(
+            fs.readFileSync(oldManifestPath, 'utf-8'),
+          ) as { version?: string };
+          oldVersion = oldManifest.version || 'unknown';
+        }
+        const rollbackInfo = {
+          preservedVersion: oldVersion,
+          updatedTo: versionPath,
+          timestamp: new Date().toISOString(),
+          reason: 'auto-update',
+        };
+        fs.writeFileSync(
+          path.join(oldDir, '.qwen-rollback-info.json'),
+          JSON.stringify(rollbackInfo, null, 2),
+        );
+      } catch {
+        // Non-critical — rollback still works without metadata
+      }
+    }
+
     debugLogger.info('Standalone update complete.');
     return result;
   } finally {
@@ -314,5 +432,46 @@ export async function performStandaloneUpdate(
     if (fs.existsSync(extractDir)) {
       fs.rmSync(extractDir, { recursive: true, force: true });
     }
+  }
+}
+
+/**
+ * Rolls back a standalone installation to the previous version (.old directory).
+ * Returns true if rollback succeeded, false if no rollback available.
+ */
+export function rollbackStandaloneUpdate(standaloneDir: string): boolean {
+  const oldDir = `${standaloneDir}.old`;
+
+  if (!fs.existsSync(oldDir)) {
+    return false;
+  }
+
+  const oldManifest = path.join(oldDir, 'manifest.json');
+  if (!fs.existsSync(oldManifest)) {
+    debugLogger.error('Rollback failed: .old directory has no manifest.json');
+    return false;
+  }
+
+  const failedDir = `${standaloneDir}.failed`;
+  try {
+    if (fs.existsSync(failedDir)) {
+      fs.rmSync(failedDir, { recursive: true, force: true });
+    }
+    fs.renameSync(standaloneDir, failedDir);
+    fs.renameSync(oldDir, standaloneDir);
+    fs.rmSync(failedDir, { recursive: true, force: true });
+    debugLogger.info('Rollback successful.');
+    return true;
+  } catch (err) {
+    debugLogger.error('Rollback failed:', err);
+    // Attempt to restore current if we moved it
+    if (!fs.existsSync(standaloneDir) && fs.existsSync(failedDir)) {
+      try {
+        fs.renameSync(failedDir, standaloneDir);
+      } catch {
+        // Critical failure — both dirs are in bad state
+      }
+    }
+    return false;
   }
 }
