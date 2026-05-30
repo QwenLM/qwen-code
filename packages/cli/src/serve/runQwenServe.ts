@@ -826,21 +826,6 @@ export async function runQwenServe(
           const fresh = loadSettings(workspace);
           fresh.setValue(SettingScope.Workspace, 'tools.approvalMode', mode);
         }),
-      // #4175 Wave 4 PR 17: `POST /workspace/tools/:name/enable` writes
-      // through this callback. Re-reads settings on each call (same
-      // freshness rationale as `persistApprovalMode`) and merges into
-      // the existing `tools.disabled` array — concurrent toggles from
-      // other writers stay safe across the read/modify/write window.
-      //
-      // #4282 wenshao H2 fold-in: read from the WORKSPACE scope only.
-      // Reading `fresh.merged.tools?.disabled` (the UNION across
-      // System / SystemDefaults / User / Workspace) and writing the
-      // result back into `SettingScope.Workspace` would copy entries
-      // from higher scopes into the workspace file on the first
-      // toggle. Subsequent removals at the originating scope (e.g.
-      // User) would no longer take effect because the names have been
-      // baked into the workspace file with no obvious source.
-      persistDisabledTools: persistDisabledToolsFn,
     });
 
   // Construct the DaemonWorkspaceService AFTER the bridge so it can
@@ -851,27 +836,18 @@ export async function runQwenServe(
   const workspaceService = createDaemonWorkspaceService({
     boundWorkspace,
     contextFilename: contextFilenameForInit ?? 'QWEN.md',
-    fsFactory,
-    // Device-flow registry is constructed inside createServeApp (it
-    // needs provider map + event sink wiring that lives there). The
-    // workspace service's auth sub-service uses it for the auth routes
-    // — those routes are wired in a follow-up PR, so the registry is
-    // not available at this point. Passing undefined is safe because the
-    // type is now optional; auth routes will throw at call-time if
-    // they're invoked before the registry is wired.
-    deviceFlowRegistry: undefined,
-    subagentManager: undefined,
     // Daemon-host status provider for env + preflight cells.
     statusProvider,
-    // Channel liveness check — proxied through bridge.sessionCount.
-    isChannelLive: () => bridge.sessionCount > 0,
+    // Channel liveness check — proxied through the bridge's live-channel
+    // probe (not session count: a channel can be live with zero attached
+    // sessions during the cold-spawn window).
+    isChannelLive: () => bridge.isChannelLive(),
     persistDisabledTools: persistDisabledToolsFn,
     queryWorkspaceStatus: (method, idle) =>
       bridge.queryWorkspaceStatus(method, idle),
     invokeWorkspaceCommand: (method, params, invokeOpts) =>
       bridge.invokeWorkspaceCommand(method, params, invokeOpts),
     publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
-    knownClientIds: () => bridge.knownClientIds(),
   });
 
   let actualPort = opts.port;

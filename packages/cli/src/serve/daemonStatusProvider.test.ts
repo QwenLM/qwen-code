@@ -49,9 +49,6 @@ function makeWorkspaceServiceWithProvider(
   return createDaemonWorkspaceService({
     boundWorkspace: WS_A,
     contextFilename: 'QWEN.md',
-    fsFactory: undefined as never, // Not exercised in status tests.
-    deviceFlowRegistry: undefined,
-    subagentManager: undefined,
     statusProvider,
     isChannelLive: opts.isChannelLive ?? (() => false),
     persistDisabledTools: async () => {},
@@ -60,7 +57,6 @@ function makeWorkspaceServiceWithProvider(
       throw new Error('not wired');
     },
     publishWorkspaceEvent: () => {},
-    knownClientIds: () => new Set(),
   });
 }
 

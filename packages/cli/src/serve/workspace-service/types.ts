@@ -7,9 +7,11 @@
 /**
  * Type definitions for the DaemonWorkspaceService layer.
  *
- * Each sub-service gets a `WorkspaceRequestContext` as its first
- * parameter so audit, client-identity, and route metadata flow
- * naturally without threading individual fields.
+ * The facade exposes workspace-scoped status queries plus the
+ * tool-toggle / init / MCP-restart mutations. Each method takes a
+ * `WorkspaceRequestContext` as its first parameter so audit,
+ * client-identity, and route metadata flow naturally without threading
+ * individual fields.
  */
 
 import type {
@@ -18,44 +20,19 @@ import type {
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceEnvStatus,
   ServeWorkspacePreflightStatus,
-  ServeWorkspaceMemoryStatus,
-  ServeWorkspaceAgentsStatus,
-  ServeWorkspaceAgentDetail,
-  ServeContextFileScope,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge';
-
-import type {
-  WorkspaceFileSystemFactory,
-  ResolvedPath,
-  FsStat,
-  FsEntry,
-  ReadMeta,
-  ReadTextOptions,
-  ReadBytesOptions,
-  ReadBytesOutcome,
-  ListOptions,
-  GlobOptions,
-  WriteTextAtomicOptions,
-  WriteTextAtomicOutcome,
-} from '../fs/index.js';
-
-import type {
-  DeviceFlowRegistry,
-  DeviceFlowPublicView,
-  DeviceFlowProviderId,
-} from '../auth/deviceFlow.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceRequestContext
 // ---------------------------------------------------------------------------
 
 /**
- * Per-request context threaded to all sub-service methods. Extends the
- * filesystem `RequestContext` with optional fields the workspace layer
- * needs for audit correlation and client-identity gating.
+ * Per-request context threaded to all facade methods. Carries optional
+ * fields the workspace layer needs for audit correlation and
+ * client-identity gating.
  *
- * `originatorClientId` is optional because file reads work without a
+ * `originatorClientId` is optional because status reads work without a
  * registered client (e.g. stateless GET routes that don't carry the
  * header). `sessionId` is optional for audit correlation on
  * workspace-scoped routes that have no session context.
@@ -65,242 +42,10 @@ export interface WorkspaceRequestContext {
   originatorClientId?: string;
   /** ACP session id for cross-correlating audit + session events. */
   sessionId?: string;
-  /** Route name like 'GET /workspace/memory' for audit. */
+  /** Route name like 'GET /workspace/mcp' for audit. */
   route: string;
   /** Absolute path to the workspace root — trust boundary. */
   workspaceCwd: string;
-}
-
-// ---------------------------------------------------------------------------
-// FileService
-// ---------------------------------------------------------------------------
-
-/**
- * Workspace filesystem operations. Thin delegation layer over
- * `WorkspaceFileSystem` that accepts `WorkspaceRequestContext`
- * instead of requiring callers to construct a `RequestContext`
- * themselves.
- */
-export interface FileService {
-  resolve(
-    ctx: WorkspaceRequestContext,
-    input: string,
-    intent: 'read' | 'write' | 'stat' | 'list' | 'glob',
-  ): Promise<ResolvedPath>;
-
-  stat(ctx: WorkspaceRequestContext, p: ResolvedPath): Promise<FsStat>;
-
-  readText(
-    ctx: WorkspaceRequestContext,
-    p: ResolvedPath,
-    opts?: ReadTextOptions,
-  ): Promise<{ content: string; meta: ReadMeta }>;
-
-  readBytes(
-    ctx: WorkspaceRequestContext,
-    p: ResolvedPath,
-    opts?: ReadBytesOptions,
-  ): Promise<Buffer>;
-
-  readBytesWindow(
-    ctx: WorkspaceRequestContext,
-    p: ResolvedPath,
-    opts?: ReadBytesOptions,
-  ): Promise<ReadBytesOutcome>;
-
-  list(
-    ctx: WorkspaceRequestContext,
-    p: ResolvedPath,
-    opts?: ListOptions,
-  ): Promise<FsEntry[]>;
-
-  glob(
-    ctx: WorkspaceRequestContext,
-    pattern: string,
-    opts?: GlobOptions,
-  ): Promise<ResolvedPath[]>;
-
-  writeTextAtomic(
-    ctx: WorkspaceRequestContext,
-    p: ResolvedPath,
-    content: string,
-    opts: WriteTextAtomicOptions,
-  ): Promise<WriteTextAtomicOutcome>;
-
-  writeTextOverwrite(
-    ctx: WorkspaceRequestContext,
-    p: ResolvedPath,
-    content: string,
-  ): Promise<WriteTextAtomicOutcome>;
-
-  edit(
-    ctx: WorkspaceRequestContext,
-    p: ResolvedPath,
-    content: string,
-    opts: WriteTextAtomicOptions,
-  ): Promise<WriteTextAtomicOutcome>;
-}
-
-// ---------------------------------------------------------------------------
-// AuthService
-// ---------------------------------------------------------------------------
-
-/** Parameters for starting a device flow. */
-export interface AuthStartDeviceFlowParams {
-  providerId: DeviceFlowProviderId;
-}
-
-/** Result of starting (or attaching to) a device flow. */
-export interface AuthStartDeviceFlowResult {
-  view: DeviceFlowPublicView;
-  attached: boolean;
-}
-
-/** Result of cancelling a device flow. */
-export interface AuthCancelDeviceFlowResult {
-  alreadyTerminal: boolean;
-}
-
-/**
- * Authentication operations scoped to the workspace daemon. Wraps
- * `DeviceFlowRegistry` and auth-status queries.
- */
-export interface AuthService {
-  /** Start a new device flow (or attach to an existing one for the same provider). */
-  startDeviceFlow(
-    ctx: WorkspaceRequestContext,
-    params: AuthStartDeviceFlowParams,
-  ): Promise<AuthStartDeviceFlowResult>;
-
-  /** Get the public view of a device flow by id. */
-  getDeviceFlow(
-    ctx: WorkspaceRequestContext,
-    deviceFlowId: string,
-  ): DeviceFlowPublicView | undefined;
-
-  /** Cancel a pending device flow. Returns undefined for unknown ids. */
-  cancelDeviceFlow(
-    ctx: WorkspaceRequestContext,
-    deviceFlowId: string,
-  ): AuthCancelDeviceFlowResult | undefined;
-
-  /** List currently pending device flows. */
-  listPendingDeviceFlows(ctx: WorkspaceRequestContext): DeviceFlowPublicView[];
-
-  /** Get overall auth status for the workspace. */
-  getAuthStatus(
-    ctx: WorkspaceRequestContext,
-  ): Promise<{ authenticated: boolean; pendingFlows: DeviceFlowPublicView[] }>;
-}
-
-// ---------------------------------------------------------------------------
-// AgentsService
-// ---------------------------------------------------------------------------
-
-/** Parameters for creating a new agent. */
-export interface CreateAgentParams {
-  name: string;
-  description: string;
-  systemPrompt: string;
-  level?: 'project' | 'user';
-  tools?: string[];
-  disallowedTools?: string[];
-  model?: string;
-  color?: string;
-  background?: boolean;
-  approvalMode?: string;
-  runConfig?: { max_time_minutes?: number; max_turns?: number };
-}
-
-/** Parameters for updating an existing agent. */
-export interface UpdateAgentParams {
-  description?: string;
-  systemPrompt?: string;
-  tools?: string[];
-  disallowedTools?: string[];
-  model?: string;
-  color?: string;
-  background?: boolean;
-  approvalMode?: string;
-  runConfig?: { max_time_minutes?: number; max_turns?: number };
-}
-
-/**
- * Workspace agent CRUD operations. Wraps `SubagentManager` for
- * daemon-scoped agent management.
- */
-export interface AgentsService {
-  /** List all agents (project + user + builtin). */
-  listAgents(ctx: WorkspaceRequestContext): Promise<ServeWorkspaceAgentsStatus>;
-
-  /** Get full detail for a specific agent by name. */
-  getAgent(
-    ctx: WorkspaceRequestContext,
-    agentName: string,
-  ): Promise<ServeWorkspaceAgentDetail | undefined>;
-
-  /** Create a new agent definition. */
-  createAgent(
-    ctx: WorkspaceRequestContext,
-    params: CreateAgentParams,
-  ): Promise<ServeWorkspaceAgentDetail>;
-
-  /** Update an existing agent definition. */
-  updateAgent(
-    ctx: WorkspaceRequestContext,
-    agentName: string,
-    params: UpdateAgentParams,
-  ): Promise<ServeWorkspaceAgentDetail>;
-
-  /** Delete an agent definition. Idempotent — no-throw for missing agents. */
-  deleteAgent(
-    ctx: WorkspaceRequestContext,
-    agentName: string,
-  ): Promise<{ deleted: boolean }>;
-}
-
-// ---------------------------------------------------------------------------
-// MemoryService
-// ---------------------------------------------------------------------------
-
-/** Parameters for writing workspace memory. */
-export interface WriteMemoryParams {
-  scope: ServeContextFileScope;
-  content: string;
-  mode: 'append' | 'replace';
-}
-
-/** Result of a memory write operation. */
-export interface WriteMemoryResult {
-  path: string;
-  scope: ServeContextFileScope;
-  bytes: number;
-}
-
-/**
- * Workspace memory (QWEN.md / AGENTS.md) read + write operations.
- */
-export interface MemoryService {
-  /** List memory entries (file list + totals). */
-  list(ctx: WorkspaceRequestContext): Promise<ServeWorkspaceMemoryStatus>;
-
-  /** Read a specific memory entry by key/path. */
-  read(
-    ctx: WorkspaceRequestContext,
-    key: string,
-  ): Promise<{ content: string; path: string }>;
-
-  /** Write content to a workspace or global memory file. */
-  write(
-    ctx: WorkspaceRequestContext,
-    params: WriteMemoryParams,
-  ): Promise<WriteMemoryResult>;
-
-  /** Delete a memory entry. */
-  delete(
-    ctx: WorkspaceRequestContext,
-    key: string,
-  ): Promise<{ deleted: boolean }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,11 +80,6 @@ export type InvokeWorkspaceCommandFn = <T>(
  * concerns.
  */
 export interface DaemonWorkspaceService {
-  readonly file: FileService;
-  readonly auth: AuthService;
-  readonly agents: AgentsService;
-  readonly memory: MemoryService;
-
   // -- Workspace status (delegated to ACP child via callbacks) --
 
   /** MCP server status for the bound workspace. */
@@ -429,15 +169,6 @@ export interface DaemonWorkspaceServiceDeps {
   /** Context filename (e.g. 'QWEN.md') from workspace settings. */
   contextFilename: string;
 
-  /** Factory for per-request filesystem instances. */
-  fsFactory: WorkspaceFileSystemFactory;
-
-  /** Device-flow auth registry. Optional — auth routes are a no-op when absent. */
-  deviceFlowRegistry?: DeviceFlowRegistry;
-
-  /** Subagent manager for agents CRUD. Optional — agents routes return empty when absent. */
-  subagentManager?: unknown;
-
   /**
    * Daemon-host status provider for env + preflight cells.
    * When present, `getWorkspaceEnvStatus` returns daemon-local process state
@@ -480,10 +211,4 @@ export interface DaemonWorkspaceServiceDeps {
     data: unknown;
     originatorClientId?: string;
   }) => void;
-
-  /**
-   * Set of all currently known client ids across live sessions.
-   * Used for client-id validation on mutation routes.
-   */
-  knownClientIds: () => ReadonlySet<string>;
 }

@@ -9,54 +9,6 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
-// ---------------------------------------------------------------------------
-// Mock sub-service factories — inline return values (no external refs).
-// ---------------------------------------------------------------------------
-
-vi.mock('../fileService.js', () => ({
-  createFileService: vi.fn(() => ({
-    resolve: vi.fn(),
-    stat: vi.fn(),
-    readText: vi.fn(),
-    readBytes: vi.fn(),
-    readBytesWindow: vi.fn(),
-    list: vi.fn(),
-    glob: vi.fn(),
-    writeTextAtomic: vi.fn(),
-    writeTextOverwrite: vi.fn(),
-    edit: vi.fn(),
-  })),
-}));
-
-vi.mock('../authService.js', () => ({
-  createAuthService: vi.fn(() => ({
-    startDeviceFlow: vi.fn(),
-    getDeviceFlow: vi.fn(),
-    cancelDeviceFlow: vi.fn(),
-    listPendingDeviceFlows: vi.fn().mockReturnValue([]),
-    getAuthStatus: vi.fn(),
-  })),
-}));
-
-vi.mock('../agentsService.js', () => ({
-  createAgentsService: vi.fn(() => ({
-    listAgents: vi.fn(),
-    getAgent: vi.fn(),
-    createAgent: vi.fn(),
-    updateAgent: vi.fn(),
-    deleteAgent: vi.fn(),
-  })),
-}));
-
-vi.mock('../memoryService.js', () => ({
-  createMemoryService: vi.fn(() => ({
-    list: vi.fn(),
-    read: vi.fn(),
-    write: vi.fn(),
-    delete: vi.fn(),
-  })),
-}));
-
 // Mock @qwen-code/qwen-code-core to avoid the undici dependency chain.
 // This is required so @qwen-code/acp-bridge/status can load (it imports
 // SkillError from core).
@@ -88,11 +40,6 @@ function makeDeps(
   return {
     boundWorkspace: '/workspace',
     contextFilename: 'QWEN.md',
-    fsFactory: {
-      forRequest: vi.fn(),
-    } as unknown as DaemonWorkspaceServiceDeps['fsFactory'],
-    deviceFlowRegistry: undefined,
-    subagentManager: undefined,
     persistDisabledTools: vi.fn().mockResolvedValue(undefined),
     queryWorkspaceStatus: vi
       .fn()
@@ -105,7 +52,6 @@ function makeDeps(
       durationMs: 42,
     }),
     publishWorkspaceEvent: vi.fn(),
-    knownClientIds: vi.fn().mockReturnValue(new Set(['client-1'])),
     ...overrides,
   };
 }
@@ -126,41 +72,6 @@ function makeCtx(
 // ---------------------------------------------------------------------------
 
 describe('createDaemonWorkspaceService', () => {
-  describe('sub-service exposure', () => {
-    it('exposes file, auth, agents, and memory sub-services', () => {
-      const svc = createDaemonWorkspaceService(makeDeps());
-      expect(svc.file).toBeDefined();
-      expect(svc.auth).toBeDefined();
-      expect(svc.agents).toBeDefined();
-      expect(svc.memory).toBeDefined();
-    });
-
-    it('file sub-service has expected methods', () => {
-      const svc = createDaemonWorkspaceService(makeDeps());
-      expect(typeof svc.file.resolve).toBe('function');
-      expect(typeof svc.file.readText).toBe('function');
-      expect(typeof svc.file.writeTextAtomic).toBe('function');
-    });
-
-    it('auth sub-service has expected methods', () => {
-      const svc = createDaemonWorkspaceService(makeDeps());
-      expect(typeof svc.auth.startDeviceFlow).toBe('function');
-      expect(typeof svc.auth.listPendingDeviceFlows).toBe('function');
-    });
-
-    it('agents sub-service has expected methods', () => {
-      const svc = createDaemonWorkspaceService(makeDeps());
-      expect(typeof svc.agents.listAgents).toBe('function');
-      expect(typeof svc.agents.createAgent).toBe('function');
-    });
-
-    it('memory sub-service has expected methods', () => {
-      const svc = createDaemonWorkspaceService(makeDeps());
-      expect(typeof svc.memory.list).toBe('function');
-      expect(typeof svc.memory.write).toBe('function');
-    });
-  });
-
   describe('status methods', () => {
     it('getWorkspaceMcpStatus delegates to queryWorkspaceStatus with correct method', async () => {
       const queryWorkspaceStatus = vi

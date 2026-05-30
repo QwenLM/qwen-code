@@ -238,23 +238,6 @@ export interface BridgeOptions {
     mode: ApprovalMode,
   ) => Promise<void>;
   /**
-   * -- optional callback for mutating
-   * `tools.disabled` in workspace settings. Invoked by
-   * `setWorkspaceToolEnabled` to add (`enabled: false`) or remove
-   * (`enabled: true`) `toolName` from the persisted disabled set.
-   * The default `runQwenServe` wires this to a fresh
-   * `loadSettings(boundWorkspace)` per call so concurrent edits from
-   * other writers (CLI, another daemon, an editor) are picked up.
-   * Bridge tests / embedded callers may omit it; without the hook
-   * `setWorkspaceToolEnabled` throws a clear error rather than
-   * silently dropping the write.
-   */
-  persistDisabledTools?: (
-    boundWorkspace: string,
-    toolName: string,
-    enabled: boolean,
-  ) => Promise<void>;
-  /**
    * #4175 Wave 5 PR 22b/2 — optional injection seam for daemon-host
    * status cells (env snapshot, daemon preflight). Production
    * `qwen serve` provides

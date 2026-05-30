@@ -122,29 +122,6 @@ function mockWorkspaceService(
   overrides: Partial<DaemonWorkspaceService> = {},
 ): DaemonWorkspaceService {
   return {
-    file: {} as DaemonWorkspaceService['file'],
-    auth: {
-      startDeviceFlow: vi.fn(),
-      getDeviceFlow: vi.fn(),
-      cancelDeviceFlow: vi.fn(),
-      listPendingDeviceFlows: vi.fn().mockReturnValue([]),
-      getAuthStatus: vi
-        .fn()
-        .mockResolvedValue({ authenticated: false, pendingFlows: [] }),
-    } as unknown as DaemonWorkspaceService['auth'],
-    agents: {
-      listAgents: vi.fn().mockResolvedValue({ agents: [] }),
-      getAgent: vi.fn(),
-      createAgent: vi.fn(),
-      updateAgent: vi.fn(),
-      deleteAgent: vi.fn(),
-    } as unknown as DaemonWorkspaceService['agents'],
-    memory: {
-      list: vi.fn().mockResolvedValue({ files: [] }),
-      read: vi.fn(),
-      write: vi.fn(),
-      delete: vi.fn(),
-    } as unknown as DaemonWorkspaceService['memory'],
     getWorkspaceMcpStatus: vi.fn().mockResolvedValue({
       v: 1,
       workspaceCwd: WS_BOUND,

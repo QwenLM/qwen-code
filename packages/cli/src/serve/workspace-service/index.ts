@@ -7,9 +7,10 @@
 /**
  * DaemonWorkspaceService facade factory.
  *
- * Public entry point that wires up all four sub-services (file, auth,
- * agents, memory) and exposes workspace-scoped methods: status queries,
- * tool toggle, init, and MCP server restart.
+ * Public entry point exposing workspace-scoped methods: status queries,
+ * tool toggle, init, and MCP server restart. Status/mutation work is
+ * delegated to the ACP child through injected callbacks so the facade
+ * takes no direct reference to the bridge.
  */
 
 import { promises as fs, constants as fsConstants } from 'node:fs';
@@ -40,13 +41,6 @@ import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge/status';
 
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
-import { createFileService } from './fileService.js';
-import { createAuthService } from './authService.js';
-import { createAgentsService } from './agentsService.js';
-import { createMemoryService } from './memoryService.js';
-
-import type { DeviceFlowRegistry } from '../auth/deviceFlow.js';
-
 import type {
   DaemonWorkspaceService,
   DaemonWorkspaceServiceDeps,
@@ -68,7 +62,9 @@ export type {
 
 /**
  * Walk up from `inputPath` until we find an ancestor that exists on disk,
- * then `realpath` it. Mirrors `canonicalizeExistingAncestor` in bridge.ts.
+ * then `realpath` it. Used by `initWorkspace` to canonicalize the parent
+ * chain before writing, so a symlinked intermediate directory can't
+ * redirect the write outside the workspace.
  */
 async function canonicalizeExistingAncestor(
   inputPath: string,
@@ -133,84 +129,16 @@ export function createDaemonWorkspaceService(
   const {
     boundWorkspace,
     contextFilename,
-    fsFactory,
-    deviceFlowRegistry,
-    subagentManager,
     statusProvider,
     isChannelLive,
     persistDisabledTools,
     queryWorkspaceStatus,
     invokeWorkspaceCommand,
     publishWorkspaceEvent,
-    knownClientIds,
   } = deps;
-
-  // -- Sub-services --
-  const file = createFileService({
-    fsFactory,
-    boundWorkspace,
-  });
-
-  // Device-flow registry may be absent during early boot (it's constructed
-  // inside createServeApp and injected later). When absent, create a stub
-  // that throws descriptive errors at call time rather than crashing on
-  // undefined property access.
-  const auth = deviceFlowRegistry
-    ? createAuthService({ registry: deviceFlowRegistry })
-    : createAuthService({
-        registry: new Proxy({} as DeviceFlowRegistry, {
-          get(_target, prop) {
-            return () => {
-              throw new Error(
-                `DeviceFlowRegistry not available: cannot call '${String(prop)}' ` +
-                  `— the registry has not been injected yet.`,
-              );
-            };
-          },
-        }),
-      });
-
-  // SubagentManager may also be absent during early boot.
-  const agents = subagentManager
-    ? createAgentsService({
-        subagentManager:
-          subagentManager as import('@qwen-code/qwen-code-core').SubagentManager,
-        boundWorkspace,
-        publishWorkspaceEvent,
-        knownClientIds,
-      })
-    : createAgentsService({
-        subagentManager: new Proxy(
-          {} as import('@qwen-code/qwen-code-core').SubagentManager,
-          {
-            get(_target, prop) {
-              return () => {
-                throw new Error(
-                  `SubagentManager not available: cannot call '${String(prop)}' ` +
-                    `— the manager has not been injected yet.`,
-                );
-              };
-            },
-          },
-        ),
-        boundWorkspace,
-        publishWorkspaceEvent,
-        knownClientIds,
-      });
-
-  const memory = createMemoryService({
-    boundWorkspace,
-    publishWorkspaceEvent,
-    knownClientIds,
-  });
 
   // -- Facade --
   return {
-    file,
-    auth,
-    agents,
-    memory,
-
     // -- Status queries (delegate to ACP child via queryWorkspaceStatus) --
 
     async getWorkspaceMcpStatus(_ctx: WorkspaceRequestContext) {

@@ -601,11 +601,14 @@ function hasControlCharacter(value: string): boolean {
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const PERSIST_TIMEOUT_MS = 5_000;
 /**
- * Bridge-race deadline for `workspace/mcp/:server/restart`. The MCP
- * manager's per-server discovery deadline can be up to 5 minutes, so
- * this must be at least as long as the slowest legitimate per-server
- * discovery. The bridge race is purely a safety net against a
- * completely wedged ACP channel.
+ * Backstop timeout for runtime MCP add/remove/restart round-trips. A
+ * per-server discovery inside the ACP child can take up to 5 minutes
+ * (`McpClientManager.MAX_DISCOVERY_TIMEOUT_MS`), so reusing
+ * `initTimeoutMs` (10s) here produced a guaranteed false-timeout for
+ * any stdio MCP server slower than 10s while the ACP child kept
+ * reconnecting in the background. The bridge race is purely a safety
+ * net against a completely wedged ACP channel; it should be at least
+ * as long as the slowest legitimate per-server discovery.
  */
 const MCP_RESTART_TIMEOUT_MS = 300_000;
 const MCP_OAUTH_TIMEOUT_MS = 600_000;
@@ -754,10 +757,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     );
   }
   const boundWorkspace = opts.boundWorkspace;
-  // #4282 fold-in 5 (Codex P2-1). Snapshot the configured context
-  // filename at construction time. The daemon parent never updates
   const persistApprovalMode = opts.persistApprovalMode;
-  const persistDisabledTools = opts.persistDisabledTools;
   const telemetry = opts.telemetry ?? NOOP_BRIDGE_TELEMETRY;
 
   // Single-workspace model: the bridge hosts AT MOST one
@@ -2040,6 +2040,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   return {
     get sessionCount() {
       return byId.size;
+    },
+
+    isChannelLive() {
+      return !!liveChannelInfo();
     },
 
     get pendingPermissionCount() {

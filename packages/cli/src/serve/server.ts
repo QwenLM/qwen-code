@@ -677,9 +677,6 @@ export function createServeApp(
     createDaemonWorkspaceService({
       boundWorkspace,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
-      fsFactory,
-      deviceFlowRegistry,
-      subagentManager: undefined,
       persistDisabledTools:
         deps.persistDisabledTools ??
         (async () => {
@@ -690,7 +687,6 @@ export function createServeApp(
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
       publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
-      knownClientIds: () => bridge.knownClientIds(),
     });
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
