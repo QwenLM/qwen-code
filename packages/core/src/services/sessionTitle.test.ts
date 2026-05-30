@@ -33,6 +33,7 @@ function makeConfig(opts: MockOptions): {
     getGeminiClient: vi.fn(() => ({
       getChat: () => ({
         getHistory: () => opts.history ?? [],
+        getHistoryShallow: () => opts.history ?? [],
       }),
     })),
     getBaseLlmClient: vi.fn(() => ({ generateJson })),
@@ -202,7 +203,10 @@ describe('tryGenerateSessionTitle', () => {
       getFastModel: vi.fn(() => 'qwen-turbo'),
       getModel: vi.fn(() => 'qwen-plus'),
       getGeminiClient: vi.fn(() => ({
-        getChat: () => ({ getHistory: () => history }),
+        getChat: () => ({
+          getHistory: () => history,
+          getHistoryShallow: () => history,
+        }),
       })),
       getBaseLlmClient: vi.fn(() => ({ generateJson })),
     } as unknown as Config;
@@ -240,7 +244,10 @@ describe('tryGenerateSessionTitle', () => {
       getFastModel: vi.fn(() => 'qwen-turbo'),
       getModel: vi.fn(() => 'qwen-plus'),
       getGeminiClient: vi.fn(() => ({
-        getChat: () => ({ getHistory: () => history }),
+        getChat: () => ({
+          getHistory: () => history,
+          getHistoryShallow: () => history,
+        }),
       })),
       getBaseLlmClient: vi.fn(() => ({ generateJson })),
     } as unknown as Config;
