@@ -96,4 +96,5 @@ tmp/
 
 # code graph skills
 .venv
-.codegraph.qwen/computer-use/installed.json
+.codegraph
+.qwen/computer-use/installed.json

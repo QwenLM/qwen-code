@@ -230,6 +230,7 @@ describe('useResumeCommand', () => {
     const resetMonitorRegistry = vi.fn();
 
     const config = {
+      getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
@@ -320,6 +321,7 @@ describe('useResumeCommand', () => {
     const resetMonitorRegistry = vi.fn();
 
     const config = {
+      getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
@@ -407,6 +409,7 @@ describe('useResumeCommand', () => {
       .mockReturnValue('Recovered 2 interrupted background agents.');
 
     const config = {
+      getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
@@ -581,6 +584,86 @@ describe('useResumeCommand', () => {
       expect.objectContaining({
         type: 'error',
         text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('rolls core back to the old session when something fails after core swap but before UI swap', async () => {
+    const startNewSession = vi.fn();
+    const geminiClient = {
+      initialize: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('init boom'))
+        .mockResolvedValueOnce(undefined),
+    };
+
+    const config = {
+      getSessionId: () => 'old-session-id',
+      getTargetDir: () => '/tmp',
+      getGeminiClient: () => geminiClient,
+      startNewSession: vi.fn(),
+      getBackgroundTaskRegistry: () => ({
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('new-session-id');
+    });
+
+    // Core was swapped to the new session, then rolled back to the old one.
+    expect(config.startNewSession).toHaveBeenNthCalledWith(
+      1,
+      'new-session-id',
+      expect.any(Object),
+    );
+    expect(config.startNewSession).toHaveBeenNthCalledWith(
+      2,
+      'old-session-id',
+      undefined,
+    );
+    // UI never swapped.
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(historyManager.clearItems).not.toHaveBeenCalled();
+    expect(historyManager.loadHistory).not.toHaveBeenCalled();
+    // User sees the failure.
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(/Failed to resume session.*init boom/),
       }),
       expect.any(Number),
     );
