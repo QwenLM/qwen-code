@@ -386,6 +386,36 @@ describe('Session', () => {
     });
   });
 
+  describe('sendCurrentModeUpdateNotification', () => {
+    // The exit_plan_mode / edit-ProceedAlways path publishes the legacy
+    // `session_update{current_mode_update}` frame itself (via sendUpdate),
+    // so its extNotification must carry `legacyFrameSent: true` to stop the
+    // bridge demux from emitting a second, duplicate legacy frame. Unlike
+    // `setMode` (which omits the flag), a regression dropping it here would
+    // double-publish to the IDE companion. (A2)
+    it('marks the extNotification legacyFrameSent so the demux skips its dual-emit', async () => {
+      await (
+        session as unknown as {
+          sendCurrentModeUpdateNotification: (
+            outcome: core.ToolConfirmationOutcome,
+          ) => Promise<void>;
+        }
+      ).sendCurrentModeUpdateNotification(
+        core.ToolConfirmationOutcome.ProceedAlways,
+      );
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.objectContaining({
+          v: 1,
+          sessionId: 'test-session-id',
+          currentModeId: 'auto-edit',
+          legacyFrameSent: true,
+        }),
+      );
+    });
+  });
+
   describe('rewindToTurn', () => {
     it('truncates model history before the requested user turn and records rewind', () => {
       const history: Content[] = [

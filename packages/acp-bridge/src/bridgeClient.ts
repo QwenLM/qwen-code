@@ -598,11 +598,14 @@ export class BridgeClient implements Client {
 
   /**
    * A2: promote an in-session `current_mode_update` extNotification to
-   * `approval_mode_changed`. Mirrors `handleInSessionModelUpdate` exactly:
-   * suppressed while the bridge is driving its own approval-mode roundtrip
-   * (`entry.approvalModeRoundtripInFlight`). Additionally emits a legacy
-   * `session_update{current_mode_update}` for IDE companion compat
-   * (dual-emit transition — see §6 of the design doc).
+   * `approval_mode_changed`. Uses the same suppression pattern as
+   * `handleInSessionModelUpdate` — suppressed while the bridge is driving
+   * its own approval-mode roundtrip (`entry.approvalModeRoundtripInFlight`)
+   * — but diverges with two additions the model handler lacks: enum
+   * validation against `KNOWN_APPROVAL_MODES`, and a legacy
+   * `session_update{current_mode_update}` dual-emit for IDE companion
+   * compat (transition — see §6 of the design doc), itself deduped via the
+   * `legacyFrameSent` flag.
    */
   private handleInSessionModeUpdate(params: Record<string, unknown>): void {
     const sessionId = params['sessionId'];
