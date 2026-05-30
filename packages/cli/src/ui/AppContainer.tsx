@@ -2464,7 +2464,7 @@ export const AppContainer = (props: AppContainerProps) => {
             apiTruncateIndex = computeApiTruncationIndex(
               historyManager.history,
               userItem.id,
-              geminiClient.getHistory(),
+              geminiClient.getHistoryShallow(),
             );
             if (apiTruncateIndex < 0) {
               historyManager.addItem(
