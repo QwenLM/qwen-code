@@ -20,8 +20,8 @@
  */
 
 import type React from 'react';
-import { useCallback } from 'react';
-import { Box, Text, useCursor } from 'ink';
+import { useCallback, useRef } from 'react';
+import { Box, Text, useCursor, useBoxMetrics } from 'ink';
 import chalk from 'chalk';
 import type { TextBuffer } from './shared/text-buffer.js';
 import type { Key } from '../hooks/useKeypress.js';
@@ -253,20 +253,36 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
   const scrollVisualRow = buffer.visualScrollRow;
 
   // ── Physical cursor positioning for IME ──
-  // Called in render phase so Ink's useCursor (which uses useInsertionEffect)
-  // propagates the position before onRender — no one-frame lag on first mount.
+  // Walk up the yoga tree to get absolute coordinates from the dynamic
+  // output origin (not just relative to parent). This keeps the cursor
+  // correct when sibling components appear/disappear above us.
+  const rootRef = useRef(null);
+  const { hasMeasured } = useBoxMetrics(rootRef);
   const { setCursorPosition } = useCursor();
-  if (showCursor) {
+  if (hasMeasured && rootRef.current) {
+    let absTop = 0;
+    let absLeft = 0;
+    let node: unknown = rootRef.current;
+    while (node) {
+      const n = node as {
+        yogaNode?: { getComputedLayout(): { top: number; left: number } };
+        parentNode?: unknown;
+      };
+      const layout = n.yogaNode?.getComputedLayout();
+      if (layout) {
+        absTop += layout.top;
+        absLeft += layout.left;
+      }
+      node = n.parentNode;
+    }
     const relativeRow = cursorVisualRow - scrollVisualRow;
     const lineText = linesToRender[relativeRow] || '';
     const textBeforeCursor = cpSlice(lineText, 0, cursorVisualCol);
     const physicalCol = stringWidth(textBeforeCursor);
     setCursorPosition({
-      x: prefixWidth + physicalCol,
-      y: relativeRow + 2,
+      x: absLeft + prefixWidth + physicalCol,
+      y: absTop + relativeRow + 1,
     });
-  } else {
-    setCursorPosition(undefined);
   }
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
@@ -284,7 +300,7 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
     : '─'.repeat(columns);
 
   return (
-    <Box flexDirection="column">
+    <Box ref={rootRef} flexDirection="column">
       <Text color={resolvedBorderColor} wrap="truncate-end">
         {topBorderLine}
       </Text>
