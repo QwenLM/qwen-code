@@ -100,7 +100,7 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
  * Falls back to in-place write when the existing file's uid differs
  * from the process's euid — POSIX rename would reset ownership.
  * Also falls back on EXDEV (cross-device). Both fallbacks lose crash
- * atomicity but preserve the existing inode's uid/gid.
+ * atomicity but preserve the existing inode's uid.
  *
  * The parent directory of `filePath` must already exist.
  */
@@ -154,9 +154,10 @@ export async function atomicWriteFile(
   // Detect when atomic rename would silently change ownership. POSIX
   // rename creates a new inode owned by the process's euid:egid; if the
   // existing file has a different uid, fall back to in-place write which
-  // preserves the inode and therefore uid/gid. Only uid is compared —
-  // gid is skipped because macOS inherits the parent directory's GID
-  // for new files, making egid !== file.gid a false positive.
+  // preserves the inode and therefore uid. Only uid is compared — gid
+  // is intentionally skipped because macOS inherits the parent
+  // directory's GID for new files, making egid !== file.gid a
+  // false positive on the most common dev platform.
   const ownershipWouldChange = (): boolean => {
     if (existingStat === undefined) return false;
     if (process.platform === 'win32') return false;
