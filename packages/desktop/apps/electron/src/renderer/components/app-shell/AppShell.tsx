@@ -1299,17 +1299,10 @@ function AppShellContent({
     string | null
   >(null)
   const sidebarItemRefs = React.useRef<Map<string, HTMLElement>>(new Map())
-  // Track which expandable sidebar items are collapsed
-  // Labels are collapsed by default; user preference is persisted once toggled
+  // Track expandable sidebar sections for this app run only.
+  // Automations defaults collapsed and is independent of workspace switches.
   const [collapsedItems, setCollapsedItems] = React.useState<Set<string>>(
-    () => {
-      const saved = storage.get<string[] | null>(
-        storage.KEYS.collapsedSidebarItems,
-        null,
-      )
-      if (saved !== null) return new Set(saved)
-      return new Set(['nav:labels'])
-    },
+    () => new Set(['nav:automations']),
   )
   const isExpanded = React.useCallback(
     (id: string) => !collapsedItems.has(id),
@@ -1436,17 +1429,6 @@ function AppShellContent({
         activeWorkspaceId,
       )
       setExpandedFolders(new Set(newExpandedFolders))
-
-      const newCollapsedItems = storage.get<string[] | null>(
-        storage.KEYS.collapsedSidebarItems,
-        null,
-        activeWorkspaceId,
-      )
-      setCollapsedItems(
-        newCollapsedItems !== null
-          ? new Set(newCollapsedItems)
-          : new Set(['nav:labels']),
-      )
     }
 
     previousWorkspaceRef.current = activeWorkspaceId
@@ -2688,16 +2670,6 @@ function AppShellContent({
     if (!activeWorkspaceId) return
     storage.set(storage.KEYS.viewFilters, viewFiltersMap, activeWorkspaceId)
   }, [viewFiltersMap, activeWorkspaceId])
-
-  // Persist sidebar section collapsed states (workspace-scoped)
-  React.useEffect(() => {
-    if (!activeWorkspaceId) return
-    storage.set(
-      storage.KEYS.collapsedSidebarItems,
-      [...collapsedItems],
-      activeWorkspaceId,
-    )
-  }, [collapsedItems, activeWorkspaceId])
 
   const handleAllSessionsClick = useCallback(() => {
     setCollapseSessionNavigatorForProjectDraft(false)
