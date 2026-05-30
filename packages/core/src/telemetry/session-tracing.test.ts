@@ -734,6 +734,103 @@ describe('session-tracing', () => {
     });
   });
 
+  describe('session.id derives from the owning session, not the process-global (#4602 review)', () => {
+    it('stamps a tool span with the interaction session.id even when the process-global belongs to another session', () => {
+      // Daemon scenario: telemetry init left the process-global pointing at
+      // session B, but the active interaction belongs to session A.
+      setSessionContext(undefined, 'session-B-global');
+      startInteractionSpan(createMockConfig({ sessionId: 'session-A' }), {
+        promptId: 'p-a',
+        model: 'm',
+        messageType: 'acp_prompt',
+      });
+
+      const span = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      endToolSpan(span, { success: true });
+
+      const toolSpan = mockSpans.find((s) => s.name === 'qwen-code.tool');
+      expect(toolSpan?.attributes['session.id']).toBe('session-A');
+    });
+
+    it('stamps an llm_request span with the interaction session.id, not the global', () => {
+      setSessionContext(undefined, 'session-B-global');
+      startInteractionSpan(createMockConfig({ sessionId: 'session-A' }), {
+        promptId: 'p-a',
+        model: 'm',
+        messageType: 'acp_prompt',
+      });
+
+      const span = startLLMRequestSpan('m', 'p-a');
+      endLLMRequestSpan(span, { success: true });
+
+      const llmSpan = mockSpans.find((s) => s.name === 'qwen-code.llm_request');
+      expect(llmSpan?.attributes['session.id']).toBe('session-A');
+    });
+
+    it('stamps a tool.execution span with the owning session id via the tool span context', () => {
+      setSessionContext(undefined, 'session-B-global');
+      startInteractionSpan(createMockConfig({ sessionId: 'session-A' }), {
+        promptId: 'p-a',
+        model: 'm',
+        messageType: 'acp_prompt',
+      });
+
+      const toolSpan = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      let execSpan!: ReturnType<typeof startToolExecutionSpan>;
+      runInToolSpanContext(toolSpan, () => {
+        execSpan = startToolExecutionSpan();
+      });
+      endToolExecutionSpan(execSpan, { success: true });
+      endToolSpan(toolSpan, { success: true });
+
+      const exec = mockSpans.find((s) => s.name === 'qwen-code.tool.execution');
+      expect(exec?.attributes['session.id']).toBe('session-A');
+    });
+
+    it('isolates concurrent sessions: each tool span carries its own session id', async () => {
+      // Two interactions for two different sessions while the global is stale.
+      setSessionContext(undefined, 'stale-global');
+
+      await withInteractionSpan(
+        createMockConfig({ sessionId: 'session-A' }),
+        { promptId: 'pa', model: 'm', messageType: 'acp_prompt' },
+        async () => {
+          endToolSpan(startToolSpan('Read', { 'tool.call_id': 'a1' }), {
+            success: true,
+          });
+        },
+      );
+      await withInteractionSpan(
+        createMockConfig({ sessionId: 'session-B' }),
+        { promptId: 'pb', model: 'm', messageType: 'acp_prompt' },
+        async () => {
+          endToolSpan(startToolSpan('Write', { 'tool.call_id': 'b1' }), {
+            success: true,
+          });
+        },
+      );
+
+      const readSpan = mockSpans.find(
+        (s) => s.attributes['tool.name'] === 'Read',
+      );
+      const writeSpan = mockSpans.find(
+        (s) => s.attributes['tool.name'] === 'Write',
+      );
+      expect(readSpan?.attributes['session.id']).toBe('session-A');
+      expect(writeSpan?.attributes['session.id']).toBe('session-B');
+    });
+
+    it('falls back to the process-global session id for standalone spans (single-session CLI path)', () => {
+      // No interaction context — single-session CLI: the global is correct.
+      setSessionContext(undefined, 'cli-session');
+      const span = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      endToolSpan(span, { success: true });
+
+      const toolSpan = mockSpans.find((s) => s.name === 'qwen-code.tool');
+      expect(toolSpan?.attributes['session.id']).toBe('cli-session');
+    });
+  });
+
   describe('tool execution sub-spans', () => {
     it('creates a tool execution span as child of tool span via runInToolSpanContext', () => {
       const toolSpan = startToolSpan('Bash');
