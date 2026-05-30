@@ -363,20 +363,66 @@ function atomicReplace(
   }
 }
 
+/**
+ * Ensures ~/.local/bin/qwen exists and points to the standalone install.
+ * Required for npm→standalone migration so the new binary is on PATH.
+ */
+function ensureBinWrapper(standaloneDir: string, target: string): void {
+  const binDir = path.join(path.dirname(standaloneDir), '..', 'bin');
+  try {
+    fs.mkdirSync(binDir, { recursive: true });
+    if (target.startsWith('win')) {
+      const wrapperPath = path.join(binDir, 'qwen.cmd');
+      if (!fs.existsSync(wrapperPath)) {
+        const content = `@echo off\r\ncall "${standaloneDir}\\bin\\qwen.cmd" %*\r\n`;
+        fs.writeFileSync(wrapperPath, content);
+      }
+    } else {
+      const wrapperPath = path.join(binDir, 'qwen');
+      if (!fs.existsSync(wrapperPath)) {
+        const content = `#!/bin/sh\nexec "${standaloneDir}/bin/qwen" "$@"\n`;
+        fs.writeFileSync(wrapperPath, content, { mode: 0o755 });
+      }
+    }
+  } catch (err) {
+    debugLogger.debug('Failed to create bin wrapper:', err);
+  }
+}
+
+/**
+ * Detect the current platform target string for standalone archives.
+ */
+function detectTarget(): string {
+  const platform = os.platform();
+  const arch = os.arch();
+  if (platform === 'darwin')
+    return arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64';
+  if (platform === 'win32') return 'win-x64';
+  return arch === 'arm64' ? 'linux-arm64' : 'linux-x64';
+}
+
 export async function performStandaloneUpdate(
   standaloneDir: string,
   newVersion: string,
 ): Promise<'done' | 'deferred'> {
   const versionPath = normalizeVersion(newVersion);
 
-  const manifestRaw = fs.readFileSync(
-    path.join(standaloneDir, 'manifest.json'),
-    'utf-8',
-  );
-  const manifest = JSON.parse(manifestRaw) as { target?: string };
-  const target = manifest.target;
-  if (!target) {
-    throw new Error('manifest.json missing target field');
+  let target: string;
+  const manifestPath = path.join(standaloneDir, 'manifest.json');
+  if (fs.existsSync(manifestPath)) {
+    const manifestRaw = fs.readFileSync(manifestPath, 'utf-8');
+    const manifest = JSON.parse(manifestRaw) as { target?: string };
+    target = manifest.target || detectTarget();
+  } else if (fs.existsSync(standaloneDir)) {
+    // Directory exists but has no manifest — not a managed Qwen install.
+    // Refuse to overwrite to avoid data loss.
+    throw new Error(
+      `${standaloneDir} exists but is not a Qwen Code standalone install. Remove it manually to proceed.`,
+    );
+  } else {
+    // First-time migration from npm — directory does not exist yet
+    target = detectTarget();
+    fs.mkdirSync(standaloneDir, { recursive: true });
   }
   validateTarget(target);
 
@@ -448,6 +494,9 @@ export async function performStandaloneUpdate(
         // Non-critical — rollback still works without metadata
       }
     }
+
+    // Ensure bin wrapper exists (critical for npm→standalone migration)
+    ensureBinWrapper(standaloneDir, target);
 
     debugLogger.info('Standalone update complete.');
     return result;
