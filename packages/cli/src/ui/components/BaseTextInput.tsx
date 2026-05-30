@@ -19,9 +19,12 @@
  * and AgentComposer (with minimal customization).
  */
 
-import type React from 'react';
-import { useCallback, useRef } from 'react';
-import { Box, Text, useCursor, useBoxMetrics } from 'ink';
+import type { Context, ReactNode } from 'react';
+import { createRequire } from 'node:module';
+import { dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { useCallback, useContext, useEffect, useRef } from 'react';
+import { Box, Text, useBoxMetrics } from 'ink';
 import chalk from 'chalk';
 import type { TextBuffer } from './shared/text-buffer.js';
 import type { Key } from '../hooks/useKeypress.js';
@@ -30,6 +33,26 @@ import { keyMatchers, Command } from '../keyMatchers.js';
 import stringWidth from 'string-width';
 import { cpSlice, cpLen } from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
+
+// ─── Ink internals (not in package exports map) ────────────
+// Ink only exports its main entry. We resolve that via require.resolve
+// (which IS allowed), derive the package root, then use file:// import()
+// to bypass the exports-map restriction for internal subpaths.
+const _req = createRequire(import.meta.url);
+const _inkRoot = dirname(dirname(_req.resolve('ink')));
+const inkDom = (await import(
+  pathToFileURL(resolve(_inkRoot, 'build', 'dom.js')).href
+)) as {
+  addLayoutListener: (rootNode: unknown, listener: () => void) => () => void;
+};
+const inkCursorCtx = (await import(
+  pathToFileURL(resolve(_inkRoot, 'build', 'components', 'CursorContext.js'))
+    .href
+)) as {
+  default: Context<{
+    setCursorPosition(pos: { x: number; y: number } | undefined): void;
+  }>;
+};
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -67,7 +90,7 @@ export interface BaseTextInputProps {
   /** Placeholder text shown when the buffer is empty. */
   placeholder?: string;
   /** Custom prefix node (defaults to `> `). */
-  prefix?: React.ReactNode;
+  prefix?: ReactNode;
   /** Width of the prefix in terminal columns. Defaults to 2 (for "> "). */
   prefixWidth?: number;
   /** Border color for the input box. */
@@ -80,7 +103,7 @@ export interface BaseTextInputProps {
    * Custom line renderer for advanced rendering (e.g. syntax highlighting).
    * When not provided, lines are rendered as plain text with cursor overlay.
    */
-  renderLine?: (opts: RenderLineOptions) => React.ReactNode;
+  renderLine?: (opts: RenderLineOptions) => ReactNode;
 }
 
 // ─── Default line renderer ──────────────────────────────────
@@ -94,7 +117,7 @@ export function defaultRenderLine({
   isOnCursorLine,
   cursorCol,
   showCursor,
-}: RenderLineOptions): React.ReactNode {
+}: RenderLineOptions): ReactNode {
   if (!isOnCursorLine || !showCursor) {
     return <Text>{lineText || ' '}</Text>;
   }
@@ -124,9 +147,22 @@ export function defaultRenderLine({
   );
 }
 
+// ─── Helpers ────────────────────────────────────────────────
+
+// Walk up Ink's internal DOM tree to find the root node (ink-root).
+// addLayoutListener requires the root node specifically.
+function findRootNode(
+  node: (Record<string, unknown> & { parentNode?: unknown }) | null,
+): Record<string, unknown> | undefined {
+  if (!node) return undefined;
+  if (!node.parentNode)
+    return node['nodeName'] === 'ink-root' ? node : undefined;
+  return findRootNode(node.parentNode as Record<string, unknown>);
+}
+
 // ─── Component ──────────────────────────────────────────────
 
-export const BaseTextInput: React.FC<BaseTextInputProps> = ({
+export const BaseTextInput = ({
   buffer,
   onSubmit,
   onKeypress,
@@ -138,7 +174,7 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
   topRightLabel,
   isActive = true,
   renderLine = defaultRenderLine,
-}) => {
+}: BaseTextInputProps): ReactNode => {
   // ── Keyboard handling ──
 
   const handleKey = useCallback(
@@ -253,37 +289,56 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
   const scrollVisualRow = buffer.visualScrollRow;
 
   // ── Physical cursor positioning for IME ──
-  // Walk up the yoga tree to get absolute coordinates from the dynamic
-  // output origin (not just relative to parent). This keeps the cursor
-  // correct when sibling components appear/disappear above us.
+  // addLayoutListener fires in resetAfterCommit AFTER calculateLayout()
+  // but BEFORE onRender() — yoga layout is fresh, terminal not yet written.
+  // addLayoutListener requires the root node (ink-root), not the component
+  // node. We find it by walking up the Ink DOM parent chain.
   const rootRef = useRef(null);
-  const { hasMeasured } = useBoxMetrics(rootRef);
-  const { setCursorPosition } = useCursor();
-  if (hasMeasured && rootRef.current) {
-    let absTop = 0;
-    let absLeft = 0;
-    let node: unknown = rootRef.current;
-    while (node) {
-      const n = node as {
-        yogaNode?: { getComputedLayout(): { top: number; left: number } };
-        parentNode?: unknown;
-      };
-      const layout = n.yogaNode?.getComputedLayout();
-      if (layout) {
-        absTop += layout.top;
-        absLeft += layout.left;
+  useBoxMetrics(rootRef);
+  const cursorCtx = useContext(inkCursorCtx.default);
+
+  useEffect(() => {
+    const rootNode = findRootNode(rootRef.current);
+    if (!rootNode) return;
+    const unsub = inkDom.addLayoutListener(rootNode, () => {
+      const node = rootRef.current;
+      if (!node) return;
+      let absTop = 0;
+      let absLeft = 0;
+      let n: unknown = node;
+      while (n) {
+        const nd = n as {
+          yogaNode?: { getComputedLayout(): { top: number; left: number } };
+          parentNode?: unknown;
+        };
+        const layout = nd.yogaNode?.getComputedLayout();
+        if (layout) {
+          absTop += layout.top;
+          absLeft += layout.left;
+        }
+        n = nd.parentNode;
       }
-      node = n.parentNode;
-    }
-    const relativeRow = cursorVisualRow - scrollVisualRow;
-    const lineText = linesToRender[relativeRow] || '';
-    const textBeforeCursor = cpSlice(lineText, 0, cursorVisualCol);
-    const physicalCol = stringWidth(textBeforeCursor);
-    setCursorPosition({
-      x: absLeft + prefixWidth + physicalCol,
-      y: absTop + relativeRow + 1,
+      const relativeRow = cursorVisualRow - scrollVisualRow;
+      const lineText = linesToRender[relativeRow] || '';
+      const textBeforeCursor = cpSlice(lineText, 0, cursorVisualCol);
+      const physicalCol = stringWidth(textBeforeCursor);
+      cursorCtx.setCursorPosition({
+        x: absLeft + prefixWidth + physicalCol,
+        y: absTop + relativeRow + 1,
+      });
     });
-  }
+    return () => {
+      unsub();
+      cursorCtx.setCursorPosition(undefined);
+    };
+  }, [
+    cursorCtx,
+    cursorVisualRow,
+    cursorVisualCol,
+    scrollVisualRow,
+    linesToRender,
+    prefixWidth,
+  ]);
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (
