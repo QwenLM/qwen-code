@@ -48,7 +48,7 @@ interface WorkspaceProjectTreeProps {
   onWorkspaceChanged?: () => void
   sessionStatuses?: SessionStatus[]
   labels?: LabelConfig[]
-  onDeleteSession: (sessionId: string, skipConfirmation?: boolean) => Promise<boolean>
+  onDeleteSession: (sessionId: string, skipConfirmation?: boolean, displayTitle?: string) => Promise<boolean>
   onFlagSession?: (sessionId: string) => void
   onUnflagSession?: (sessionId: string) => void
   onArchiveSession?: (sessionId: string) => void
@@ -69,7 +69,7 @@ interface ProjectSessionMenuConfig {
   sessionStatuses: SessionStatus[]
   labels: LabelConfig[]
   hasRemoteWorkspaces: boolean
-  onDelete: (sessionId: string) => Promise<boolean>
+  onDelete: (sessionId: string, displayTitle?: string) => Promise<boolean>
   onFlag?: (sessionId: string) => void
   onUnflag?: (sessionId: string) => void
   onArchive?: (sessionId: string) => void
@@ -345,7 +345,7 @@ function ProjectSessionRow({
             onOpenInNewWindow={() => window.electronAPI.openSessionInNewWindow(workspaceId, session.id)}
             onSendToWorkspace={() => menuConfig.onSendToWorkspace([session.id])}
             hasRemoteWorkspaces={menuConfig.hasRemoteWorkspaces}
-            onDelete={() => void menuConfig.onDelete(session.id)}
+            onDelete={() => void menuConfig.onDelete(session.id, title)}
           />
         </ContextMenuProvider>
       </StyledContextMenuContent>
@@ -661,7 +661,7 @@ export function WorkspaceProjectTree({
     sessionStatuses,
     labels,
     hasRemoteWorkspaces,
-    onDelete: handleDeleteWithToast,
+    onDelete: (sessionId, displayTitle) => handleDeleteWithToast(sessionId, false, displayTitle),
     onFlag: onFlagSession ? handleFlagWithToast : undefined,
     onUnflag: onUnflagSession ? handleUnflagWithToast : undefined,
     onArchive: onArchiveSession ? handleArchiveWithToast : undefined,

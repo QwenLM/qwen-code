@@ -401,6 +401,47 @@ describe('Qwen native history loading', () => {
     expect(managed.lastMessageAt).toBe(timestamp);
   });
 
+  it('does not clear Qwen provider titles from stripped local headers', () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'));
+    tempRoots.push(workspaceRoot, projectRoot);
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: Date.now(),
+    };
+    const manager = new SessionManager();
+    const managed = createManagedSession(
+      {
+        id: '260531-qwen-title',
+        sdkSessionId: '260531-qwen-title',
+        sdkCwd: projectRoot,
+        workingDirectory: projectRoot,
+        name: 'Qwen generated summary',
+        llmConnection: 'qwen-code',
+        lastMessageAt: Date.now(),
+      },
+      workspace,
+    );
+
+    const changed = (
+      manager as unknown as {
+        applyExternalSessionMetadata: (
+          session: typeof managed,
+          header: { name?: string },
+        ) => boolean;
+      }
+    ).applyExternalSessionMetadata(managed, {});
+
+    expect(changed).toBe(false);
+    expect(managed.name).toBe('Qwen generated summary');
+  });
+
   it('removes provider-native mirrors once a Craft session owns the same SDK session ID', async () => {
     const workspaceRoot = mkdtempSync(
       join(tmpdir(), 'craft-managed-workspace-'),

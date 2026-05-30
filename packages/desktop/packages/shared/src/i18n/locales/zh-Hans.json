@@ -333,6 +333,7 @@
   "datatable.rowCount_other": "{{count}} 行",
   "dialog.deleteAutomation.description": "确定要删除<strong>{{name}}</strong>吗？这将从您的 automations.json 配置中移除该自动化。",
   "dialog.deleteAutomation.title": "删除自动化",
+  "dialog.deleteSession.title": "删除会话",
   "dialog.deleteSessionConfirmation": "删除会话「{{name}}」？",
   "dialog.logoutConfirmation": "确定要退出登录吗？",
   "dialog.pairingCode.expired": "代码已过期 — 请生成新代码。",

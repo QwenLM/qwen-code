@@ -14,7 +14,7 @@ export interface SessionListContextValue {
   onArchive?: (sessionId: string) => void
   onUnarchive?: (sessionId: string) => void
   onMarkUnread: (sessionId: string) => void
-  onDelete: (sessionId: string, skipConfirmation?: boolean) => Promise<boolean>
+  onDelete: (sessionId: string, skipConfirmation?: boolean, displayTitle?: string) => Promise<boolean>
   onLabelsChange?: (sessionId: string, labels: string[]) => void
   onSelectSessionById: (sessionId: string) => void
   onOpenInNewWindow: (item: SessionMeta) => void

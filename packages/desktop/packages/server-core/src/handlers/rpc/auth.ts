@@ -3,6 +3,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
+import { i18n } from '@craft-agent/shared/i18n'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 import { requestClientConfirmDialog } from '@craft-agent/server-core/transport'
@@ -35,12 +36,12 @@ export function registerAuthHandlers(server: RpcServer, deps: HandlerDeps): void
   server.handle(RPC_CHANNELS.auth.SHOW_DELETE_SESSION_CONFIRMATION, async (ctx, name: string) => {
     const result = await requestClientConfirmDialog(server, ctx.clientId, {
       type: 'warning',
-      buttons: ['Cancel', 'Delete'],
+      buttons: [i18n.t('common.cancel'), i18n.t('common.delete')],
       defaultId: 0,
       cancelId: 0,
-      title: 'Delete Conversation',
-      message: `Are you sure you want to delete: "${name}"?`,
-      detail: 'This action cannot be undone.',
+      title: i18n.t('dialog.deleteSession.title'),
+      message: i18n.t('dialog.deleteSessionConfirmation', { name }),
+      detail: i18n.t('dialog.reset.cannotUndo'),
     })
     // result.response is the index of the clicked button
     // 0 = Cancel, 1 = Delete

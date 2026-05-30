@@ -333,6 +333,7 @@
   "datatable.rowCount_other": "{{count}}行",
   "dialog.deleteAutomation.description": "<strong>{{name}}</strong>を削除してもよろしいですか？automations.json設定からオートメーションが削除されます。",
   "dialog.deleteAutomation.title": "オートメーションを削除",
+  "dialog.deleteSession.title": "セッションを削除",
   "dialog.deleteSessionConfirmation": "セッション「{{name}}」を削除しますか？",
   "dialog.logoutConfirmation": "ログアウトしてもよろしいですか？",
   "dialog.pairingCode.expired": "コードの有効期限が切れました — 新しいコードを生成してください。",

@@ -41,7 +41,7 @@ export type ChatGroupingMode = 'none' | 'date' | 'status'
 
 interface SessionListProps {
   items: SessionMeta[]
-  onDelete: (sessionId: string, skipConfirmation?: boolean) => Promise<boolean>
+  onDelete: (sessionId: string, skipConfirmation?: boolean, displayTitle?: string) => Promise<boolean>
   onFlag?: (sessionId: string) => void
   onUnflag?: (sessionId: string) => void
   onArchive?: (sessionId: string) => void

@@ -2578,12 +2578,12 @@ function AppShellContent({
   // Wrap delete handler to clear selection when deleting the currently selected session
   // This prevents stale state during re-renders that could cause crashes
   const handleDeleteSession = useCallback(
-    async (sessionId: string, skipConfirmation?: boolean): Promise<boolean> => {
+    async (sessionId: string, skipConfirmation?: boolean, displayTitle?: string): Promise<boolean> => {
       // Clear selection first if this is the selected session
       if (session.selected === sessionId) {
         setSession({ selected: null })
       }
-      return onDeleteSession(sessionId, skipConfirmation)
+      return onDeleteSession(sessionId, skipConfirmation, displayTitle)
     },
     [session.selected, setSession, onDeleteSession],
   )

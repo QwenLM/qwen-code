@@ -32,6 +32,7 @@ import {
 import { extractLabelId } from '@craft-agent/shared/labels'
 import { LabelMenuItems, StatusMenuItems } from './SessionMenuParts'
 import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags'
+import { getSessionTitle } from '@/utils/session'
 
 export interface BatchSessionMenuProps {
   /** Callback to open Send to Workspace dialog for the selected sessions */
@@ -182,15 +183,16 @@ export function BatchSessionMenu({
   const handleBatchDelete = useCallback(async () => {
     const count = selectedIds.size
     const ids = [...selectedIds]
+    const firstTitle = selectedMetas[0] ? getSessionTitle(selectedMetas[0]) : undefined
     // Delete one-by-one (first shows confirmation, rest skip if first is confirmed)
-    const firstDeleted = await onDeleteSession(ids[0])
+    const firstDeleted = await onDeleteSession(ids[0], false, firstTitle)
     if (!firstDeleted) return // User cancelled
     for (let i = 1; i < ids.length; i++) {
       await onDeleteSession(ids[i], true) // skip confirmation for remaining
     }
     clearMultiSelect()
     toast(`${count} ${count === 1 ? 'session' : 'sessions'} deleted`)
-  }, [selectedIds, onDeleteSession, clearMultiSelect])
+  }, [selectedIds, selectedMetas, onDeleteSession, clearMultiSelect])
 
   // Resolve current status icon for the submenu trigger
   const statusIcon = activeStatusId

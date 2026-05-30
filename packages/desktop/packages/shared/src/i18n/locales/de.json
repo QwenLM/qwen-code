@@ -333,6 +333,7 @@
   "datatable.rowCount_other": "{{count}} Zeilen",
   "dialog.deleteAutomation.description": "Bist du sicher, dass du <strong>{{name}}</strong> löschen möchtest? Dies entfernt die Automatisierung aus deiner automations.json-Konfiguration.",
   "dialog.deleteAutomation.title": "Automatisierung löschen",
+  "dialog.deleteSession.title": "Sitzung löschen",
   "dialog.deleteSessionConfirmation": "Sitzung \"{{name}}\" löschen?",
   "dialog.logoutConfirmation": "Bist du sicher, dass du dich abmelden möchtest?",
   "dialog.pairingCode.expired": "Code abgelaufen — bitte einen neuen erzeugen.",

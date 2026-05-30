@@ -265,6 +265,42 @@ describe('session message loading atoms', () => {
     expect(result?.messages.map((message) => message.id)).toEqual(['m1', 'm2'])
     expect(store.get(loadedSessionsAtom).has(sessionId)).toBe(true)
   })
+
+  it('preserves an existing metadata title when loaded messages omit the name', async () => {
+    const store = createStore()
+    const sessionId = 'session-1'
+
+    globalThis.window = {
+      electronAPI: {
+        getSessionMessages: async (id: string) => makeSession({
+          id,
+          messages: [msg('m1'), msg('m2', 'assistant')],
+          messageCount: 2,
+        }),
+      },
+    } as unknown as typeof window
+
+    store.set(sessionAtomFamily(sessionId), makeSession({
+      id: sessionId,
+      messages: [],
+      messageCount: 2,
+    }))
+    store.set(sessionMetaMapAtom, new Map([[
+      sessionId,
+      extractSessionMeta(makeSession({
+        id: sessionId,
+        name: 'Qwen generated title',
+        messages: [],
+        messageCount: 2,
+      })),
+    ]]))
+
+    const result = await store.set(ensureSessionMessagesLoadedAtom, sessionId)
+
+    expect(result?.name).toBe('Qwen generated title')
+    expect(store.get(sessionAtomFamily(sessionId))?.name).toBe('Qwen generated title')
+    expect(store.get(sessionMetaMapAtom).get(sessionId)?.name).toBe('Qwen generated title')
+  })
 })
 
 describe('initializeSessionsAtom', () => {

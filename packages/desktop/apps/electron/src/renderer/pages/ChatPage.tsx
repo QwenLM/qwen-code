@@ -490,9 +490,14 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     }
   }, [sessionId, session])
 
-  // Get display title for header - use getSessionTitle for consistent fallback logic with SessionList
-  // Priority: name > first user message > preview > "New chat"
-  const displayTitle = session ? getSessionTitle(session) : (sessionMeta ? getSessionTitle(sessionMeta) : t('chat.session'))
+  // Prefer the explicit list title if the full session is still missing it.
+  const displayTitle = session?.name
+    ? getSessionTitle(session)
+    : sessionMeta?.name
+      ? getSessionTitle(sessionMeta)
+      : session
+        ? getSessionTitle(session)
+        : (sessionMeta ? getSessionTitle(sessionMeta) : t('chat.session'))
   const renameInitialTitle = session?.name || sessionMeta?.name || displayTitle
   const isFlagged = session?.isFlagged || sessionMeta?.isFlagged || false
   const isArchived = session?.isArchived || sessionMeta?.isArchived || false
@@ -566,8 +571,8 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   }, [sessionId, onSessionLabelsChange])
 
   const handleDelete = React.useCallback(async () => {
-    await onDeleteSession(sessionId)
-  }, [sessionId, onDeleteSession])
+    await onDeleteSession(sessionId, false, displayTitle)
+  }, [sessionId, onDeleteSession, displayTitle])
 
   const handleOpenInNewWindow = React.useCallback(async () => {
     const route = routes.view.allSessions(sessionId)

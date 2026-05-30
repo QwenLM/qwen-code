@@ -167,7 +167,7 @@ export function SessionItem({
               : undefined
           }
           hasRemoteWorkspaces={hasRemoteWorkspaces}
-          onDelete={() => ctx.onDelete(item.id)}
+          onDelete={() => ctx.onDelete(item.id, false, title)}
         />
       }
       contextMenuContent={
@@ -198,7 +198,7 @@ export function SessionItem({
                 : undefined
             }
             hasRemoteWorkspaces={hasRemoteWorkspaces}
-            onDelete={() => ctx.onDelete(item.id)}
+            onDelete={() => ctx.onDelete(item.id, false, title)}
           />
         )
       }

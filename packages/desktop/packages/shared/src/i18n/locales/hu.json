@@ -333,6 +333,7 @@
   "datatable.rowCount_other": "{{count}} sor",
   "dialog.deleteAutomation.description": "Biztosan törölni szeretnéd a(z) <strong>{{name}}</strong> automatizálást? Ez eltávolítja az automatizálást az automations.json konfigurációból.",
   "dialog.deleteAutomation.title": "Automatizálás törlése",
+  "dialog.deleteSession.title": "Munkamenet törlése",
   "dialog.deleteSessionConfirmation": "Munkamenet törlése: \"{{name}}\"?",
   "dialog.logoutConfirmation": "Biztosan ki szeretnél jelentkezni?",
   "dialog.pairingCode.expired": "A kód lejárt — kérj egy újat.",

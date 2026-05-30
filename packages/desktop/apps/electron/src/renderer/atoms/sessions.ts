@@ -203,12 +203,16 @@ function shouldPreserveExistingMessages(currentSession: Session | null | undefin
 }
 
 function mergeSessionWithoutDroppingMessages(currentSession: Session | null | undefined, nextSession: Session): Session {
-  if (!shouldPreserveExistingMessages(currentSession, nextSession)) {
-    return nextSession
+  const nextSessionWithTitle = currentSession?.name && !nextSession.name
+    ? { ...nextSession, name: currentSession.name }
+    : nextSession
+
+  if (!shouldPreserveExistingMessages(currentSession, nextSessionWithTitle)) {
+    return nextSessionWithTitle
   }
 
   return {
-    ...nextSession,
+    ...nextSessionWithTitle,
     messages: currentSession.messages,
   }
 }
@@ -538,13 +542,18 @@ export const updateSessionAtom = atom(
     const sessionAtom = sessionAtomFamily(sessionId)
     const currentSession = get(sessionAtom)
     const newSession = updater(currentSession)
-    set(sessionAtom, newSession)
+    const existingMeta = get(sessionMetaMapAtom).get(sessionId)
+    const existingTitle = currentSession?.name ?? existingMeta?.name
+    const nextSession = newSession && !newSession.name && existingTitle
+      ? { ...newSession, name: existingTitle }
+      : newSession
+    set(sessionAtom, nextSession)
 
     // Also update metadata if session exists
-    if (newSession) {
+    if (nextSession) {
       const metaMap = get(sessionMetaMapAtom)
       const newMetaMap = new Map(metaMap)
-      const meta = extractSessionMeta(newSession)
+      const meta = extractSessionMeta(nextSession)
       newMetaMap.set(sessionId, meta)
       set(sessionMetaMapAtom, newMetaMap)
       upsertMetaInWorkspaceState(get, set, meta)
@@ -1102,6 +1111,7 @@ async function loadSessionMessages(
     // tokenUsage and sessionFolderPath are only returned by getSession() (not getSessions()),
     // so they must be explicitly merged here to be available after app restart.
     const existingSession = get(sessionAtomFamily(sessionId))
+    const existingTitle = existingSession?.name ?? existingMeta?.name
     const preservedStaleMessages = !!existingSession
       && existingSession.messages.length > 0
       && (!loadedSession.messages || loadedSession.messages.length === 0)
@@ -1128,8 +1138,11 @@ async function loadSessionMessages(
           availableSkillDetails: loadedSession.availableSkillDetails ?? existingSession.availableSkillDetails,
           tokenUsage: loadedSession.tokenUsage ?? existingSession.tokenUsage,
           sessionFolderPath: loadedSession.sessionFolderPath ?? existingSession.sessionFolderPath,
+          name: loadedSession.name ?? existingTitle,
         }
-      : loadedSession
+      : loadedSession.name || !existingTitle
+        ? loadedSession
+        : { ...loadedSession, name: existingTitle }
     set(sessionAtomFamily(sessionId), mergedSession)
 
     // Update only lastFinalMessageId in metadata (now computable from loaded messages).

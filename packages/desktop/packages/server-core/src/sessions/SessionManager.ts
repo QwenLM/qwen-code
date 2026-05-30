@@ -1525,8 +1525,12 @@ export class SessionManager implements ISessionManager {
       changed = true
     }
 
-    // Name
-    if (managed.name !== header.name) {
+    // Qwen canonical mirrors intentionally omit provider titles from local
+    // headers. Treat an absent local name as "unknown", not as a delete.
+    if (
+      !(header.name === undefined && this.isQwenCanonicalMessageSession(managed)) &&
+      managed.name !== header.name
+    ) {
       managed.name = header.name
       this.sendEvent(
         { type: 'name_changed', sessionId, name: header.name },
@@ -3699,8 +3703,6 @@ export class SessionManager implements ISessionManager {
       managed.enabledSourceSlugs = storedSession.enabledSourceSlugs
       managed.sharedUrl = storedSession.sharedUrl
       managed.sharedId = storedSession.sharedId
-      // Sync name from disk - ensures title persistence across lazy loading
-      managed.name = storedSession.name
       // Restore LLM connection state - ensures correct provider on resume
       if (storedSession.llmConnection) {
         managed.llmConnection = storedSession.llmConnection
@@ -3722,6 +3724,15 @@ export class SessionManager implements ISessionManager {
       }
       if (storedSession.thinkingLevel) {
         managed.thinkingLevel = storedSession.thinkingLevel
+      }
+      // Sync name from disk - ensures title persistence across lazy loading.
+      // Qwen canonical mirrors omit provider titles locally, so missing disk
+      // names must not clear the in-memory provider title.
+      if (
+        storedSession.name !== undefined ||
+        !this.isQwenCanonicalMessageSession(managed)
+      ) {
+        managed.name = storedSession.name
       }
       // Sync transferred session summary state from disk
       managed.transferredSessionSummary =

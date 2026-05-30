@@ -1387,12 +1387,12 @@ export default function App() {
 
   // Deep link navigation is initialized later after handleInputChange is defined
 
-  const handleDeleteSession = useCallback(async (sessionId: string, skipConfirmation = false): Promise<boolean> => {
+  const handleDeleteSession = useCallback(async (sessionId: string, skipConfirmation = false, displayTitle?: string): Promise<boolean> => {
     if (!skipConfirmation) {
       const metaMap = store.get(sessionMetaMapAtom)
       const meta = metaMap.get(sessionId)
       const confirmed = await window.electronAPI.showDeleteSessionConfirmation(
-        meta ? getSessionTitle(meta) : 'Untitled',
+        displayTitle || (meta ? getSessionTitle(meta) : 'Untitled'),
       )
       if (!confirmed) return false
     }

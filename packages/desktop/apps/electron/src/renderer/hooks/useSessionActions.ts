@@ -7,7 +7,7 @@ interface UseSessionActionsOptions {
   onUnflag?: (sessionId: string) => void
   onArchive?: (sessionId: string) => void
   onUnarchive?: (sessionId: string) => void
-  onDelete: (sessionId: string, skipConfirmation?: boolean) => Promise<boolean>
+  onDelete: (sessionId: string, skipConfirmation?: boolean, displayTitle?: string) => Promise<boolean>
 }
 
 export function useSessionActions({
@@ -67,10 +67,10 @@ export function useSessionActions({
     })
   }, [onArchive, onUnarchive, t])
 
-  const handleDeleteWithToast = useCallback(async (sessionId: string): Promise<boolean> => {
+  const handleDeleteWithToast = useCallback(async (sessionId: string, skipConfirmation = false, displayTitle?: string): Promise<boolean> => {
     // Confirmation dialog is shown by handleDeleteSession in App.tsx
     // We await so toast only shows after successful deletion (if user confirmed)
-    const deleted = await onDelete(sessionId)
+    const deleted = await onDelete(sessionId, skipConfirmation, displayTitle)
     if (deleted) {
       toast(t('toast.sessionDeleted'))
     }
