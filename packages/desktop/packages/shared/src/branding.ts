@@ -68,7 +68,7 @@ const BRANDS: Record<string, BrandConfig> = {
     coAuthorLine: 'Co-Authored-By: ModelStudio Desktop <noreply@alibaba.com>',
     selfReferName: 'ModelStudio Desktop',
     viewerUrl: 'https://agents.craft.do',
-    credits: 'Architecture: craft-agents-oss v0.8.12 | Agent: Qwen Code',
+    credits: 'Architecture: craft-agents-oss | Agent: Qwen Code',
     creditsShort: 'Based on craft-agents-oss & Qwen Code',
     creditsEntries: [
       {
@@ -78,7 +78,7 @@ const BRANDS: Record<string, BrandConfig> = {
       },
       {
         name: 'Craft Agents OSS',
-        role: 'Desktop Architecture (v0.8.12)',
+        role: 'Desktop Architecture',
         url: 'https://github.com/craft-ai-agents/craft-agents-oss',
       },
     ],

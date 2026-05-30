@@ -1,6 +1,6 @@
 {
   "name": "@craft-agent/ui",
-  "version": "0.8.12",
+  "version": "0.0.1",
   "license": "Apache-2.0",
   "description": "Shared React UI components for Qwen Code - session viewer, chat display, markdown rendering",
   "type": "module",

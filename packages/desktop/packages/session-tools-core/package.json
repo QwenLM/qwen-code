@@ -1,6 +1,6 @@
 {
   "name": "@craft-agent/session-tools-core",
-  "version": "0.8.12",
+  "version": "0.0.1",
   "license": "Apache-2.0",
   "description": "Shared utilities for session-scoped tools",
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "craft-agent",
-  "version": "0.8.12",
+  "version": "0.0.1",
   "license": "Apache-2.0",
   "description": "Qwen-backed agent for Craft documents",
   "type": "module",
