@@ -41,7 +41,6 @@ vi.mock('child_process', async (importOriginal) => {
 const mockedIsGitRepository = vi.mocked(isGitRepository);
 const mockedRealPathSync = vi.mocked(fs.realpathSync);
 const mockedExistsSync = vi.mocked(fs.existsSync);
-const _mockedAccessSync = vi.mocked(fs.accessSync);
 const mockedExecSync = vi.mocked(childProcess.execSync);
 
 describe('getInstallationInfo', () => {
