@@ -460,19 +460,6 @@ export interface AcpSessionBridge {
   /**
    * Restart a configured MCP server through the ACP child's
    * `McpClientManager` (pre-F2) or transport pool (F2 #4175 commit 5).
-   * Pre-checks the live budget snapshot and returns a structured
-   * "skipped" response (200 OK) for soft refusals.
-   *
-   * F2 commit 5: under pool mode, a single `serverName` may map to
-   * multiple `PoolEntry` instances (different fingerprints from
-   * per-session OAuth/env divergence). When `opts.entryIndex` is
-   * undefined, the pool restarts ALL matching entries in parallel via
-   * `Promise.allSettled` and returns the new `{entries: RestartResult[]}`
-   * shape. When `opts.entryIndex` is set, only that entry restarts
-   * (404 / not-found surfaces as `entries: []`). Pre-F2 daemons and
-   * single-entry pool-mode responses keep the legacy
-   * `{restarted, durationMs}` shape so SDK clients that pre-date the
-   * `mcp_pool_restart` capability tag observe no diff.
    */
   restartMcpServer(
     serverName: string,
@@ -540,6 +527,17 @@ export interface AcpSessionBridge {
 
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
+
+  /**
+   * Whether an ACP channel is currently live (spawned and not dying).
+   * Distinct from `sessionCount > 0`: a channel can be live with zero
+   * attached sessions during the cold-spawn window, and conversely a
+   * killed channel may briefly retain sessions before reaping. Consumers
+   * that need true channel liveness (e.g. the workspace service's
+   * `acpChannelLive` envelope field) must use this rather than the
+   * session count.
+   */
+  isChannelLive(): boolean;
 
   /** Test/inspection hook: number of permission requests awaiting a vote. */
   readonly pendingPermissionCount: number;
