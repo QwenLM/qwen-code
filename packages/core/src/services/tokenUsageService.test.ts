@@ -13,6 +13,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { Storage } from '../config/storage.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
+import { setDebugLogSession } from '../utils/debugLogger.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import {
   __overrideNowForTesting,
@@ -29,22 +30,30 @@ import {
 describe('tokenUsageService', () => {
   let tempDir: string;
   let originalRuntimeDir: string | undefined;
+  let originalDebugLogFileEnv: string | undefined;
 
   beforeEach(async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-05-25T10:00:00.000Z'));
     originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    originalDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
     tempDir = await mkdtemp(path.join(tmpdir(), 'qwen-token-usage-'));
     process.env['QWEN_RUNTIME_DIR'] = tempDir;
   });
 
   afterEach(async () => {
     vi.useRealTimers();
+    setDebugLogSession(null);
     resetTokenUsageFailureLogging();
     if (originalRuntimeDir === undefined) {
       delete process.env['QWEN_RUNTIME_DIR'];
     } else {
       process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
+    }
+    if (originalDebugLogFileEnv === undefined) {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+    } else {
+      process.env['QWEN_DEBUG_LOG_FILE'] = originalDebugLogFileEnv;
     }
     Storage.setRuntimeBaseDir(null);
     await rm(tempDir, { recursive: true, force: true });
@@ -314,14 +323,35 @@ describe('tokenUsageService', () => {
       writeSpy.mockRestore();
     }
 
-    // --- Advance time past cooldown: should log again ---
-    fakeNow += 61_000;
-    writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    const eaccesError = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(eaccesError);
     try {
       recordTokenUsageFromApiResponseBestEffort(config, event);
       await vi.waitFor(() => {
         expect(stderrSpy).toHaveBeenCalledTimes(2);
       });
+      expect(stderrSpy).toHaveBeenCalledWith(
+        '[token-usage] Write failed (EACCES):',
+        'permission denied',
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    // --- Advance time past cooldown: should log again with suppression count ---
+    fakeNow += 61_000;
+    writeSpy = vi.spyOn(jsonl, 'writeLine').mockRejectedValueOnce(error);
+    try {
+      recordTokenUsageFromApiResponseBestEffort(config, event);
+      await vi.waitFor(() => {
+        expect(stderrSpy).toHaveBeenCalledTimes(3);
+      });
+      expect(stderrSpy).toHaveBeenLastCalledWith(
+        '[token-usage] Write failed (ENOSPC):',
+        'disk full (1 similar suppressed in last window)',
+      );
     } finally {
       writeSpy.mockRestore();
     }
@@ -539,12 +569,17 @@ describe('tokenUsageService', () => {
   });
 
   it('tolerates malformed JSONL lines while querying', async () => {
+    vi.useRealTimers();
+    process.env['QWEN_DEBUG_LOG_FILE'] = '1';
     const filePath = getTokenUsageFilePath('2026-05');
+    const sessionId = 'token-usage-read-test';
+    setDebugLogSession({ getSessionId: () => sessionId });
     await mkdir(path.dirname(filePath), { recursive: true });
     await writeFile(
       filePath,
       [
         '{"schemaVersion":1,"id":"ok","timestamp":"2026-05-25T00:00:00.000Z","localDate":"2026-05-25","localMonth":"2026-05","sessionId":"s","model":"model-a","authType":"gemini","source":"main","inputTokens":1,"outputTokens":2,"cachedTokens":0,"thoughtsTokens":0,"totalTokens":3,"apiDurationMs":4}',
+        '{"schemaVersion":1,"id":"invalid"}',
         'not-json',
       ].join('\n'),
       'utf-8',
@@ -557,6 +592,10 @@ describe('tokenUsageService', () => {
 
     expect(summary.totals.totalTokens).toBe(3);
     expect(summary.totals.requests).toBe(1);
+    await vi.waitFor(async () => {
+      const log = await readFile(Storage.getDebugLogPath(sessionId), 'utf-8');
+      expect(log).toContain(`Dropped 1/2 invalid record(s) from ${filePath}`);
+    });
   });
 
   it('reads older compatible schema versions', async () => {

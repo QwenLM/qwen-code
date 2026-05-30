@@ -294,7 +294,9 @@ async function readRecordsForMonth(month: string): Promise<TokenUsageRecord[]> {
     }
   }
   if (dropped > 0) {
-    debugLogger.warn(`Dropped ${dropped} invalid record(s) from ${filePath}`);
+    debugLogger.warn(
+      `Dropped ${dropped}/${records.length} invalid record(s) from ${filePath}`,
+    );
   }
   return valid;
 }
@@ -381,6 +383,7 @@ export async function recordTokenUsageFromApiResponse(
 }
 
 const lastLoggedTimeByCode = new Map<string, number>();
+const suppressedCountByCode = new Map<string, number>();
 const TOKEN_USAGE_FAILURE_LOG_COOLDOWN_MS = 60_000;
 let _now: () => number = () => Date.now();
 
@@ -397,10 +400,20 @@ function logTokenUsageWriteFailure(error: unknown): void {
     const lastTime = lastLoggedTimeByCode.get(code) ?? 0;
     if (now - lastTime > TOKEN_USAGE_FAILURE_LOG_COOLDOWN_MS) {
       lastLoggedTimeByCode.set(code, now);
+      const suppressedCount = suppressedCountByCode.get(code) ?? 0;
+      suppressedCountByCode.delete(code);
+      const message = error instanceof Error ? error.message : String(error);
       // eslint-disable-next-line no-console -- surface persistent local write failures outside debug mode
       console.error(
         `[token-usage] Write failed (${code}):`,
-        error instanceof Error ? error.message : String(error),
+        suppressedCount > 0
+          ? `${message} (${suppressedCount} similar suppressed in last window)`
+          : message,
+      );
+    } else {
+      suppressedCountByCode.set(
+        code,
+        (suppressedCountByCode.get(code) ?? 0) + 1,
       );
     }
   }
@@ -409,6 +422,7 @@ function logTokenUsageWriteFailure(error: unknown): void {
 /** @internal Reset token usage failure rate-limiting state. For testing only. */
 export function resetTokenUsageFailureLogging(): void {
   lastLoggedTimeByCode.clear();
+  suppressedCountByCode.clear();
   _now = () => Date.now();
 }
 
