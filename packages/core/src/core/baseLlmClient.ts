@@ -233,7 +233,7 @@ export class BaseLlmClient {
       // Some OpenAI-compatible models follow the JSON prompt in the text
       // channel instead of invoking the function declaration.
       const responseText = getResponseText(result);
-      const parsed = parseJsonObjectFromText(responseText);
+      const parsed = parseJsonObjectFromText(responseText, model, promptId);
       if (parsed) {
         debugLogger.warn(
           `generateJson used text-channel fallback. ` +
@@ -538,6 +538,8 @@ export class BaseLlmClient {
 
 function parseJsonObjectFromText(
   text: string | null | undefined,
+  model: string,
+  promptId: string | undefined,
 ): Record<string, unknown> | undefined {
   if (!text) return undefined;
 
@@ -571,7 +573,11 @@ function parseJsonObjectFromText(
       if (isAmbiguityProbe) {
         debugLogger.warn(
           `generateJson: text-channel fallback rejected ambiguous JSON candidates. ` +
-            `A loose JSON-like candidate could not be repaired alongside a strict candidate.`,
+            `A loose JSON-like candidate could not be repaired alongside a strict candidate. ` +
+            `${formatGenerateJsonTextFallbackContext(model, promptId)}, ` +
+            `Candidate length: ${jsonSlice.length}, ` +
+            `first char: ${JSON.stringify(jsonSlice.trim()[0])}, ` +
+            `last char: ${JSON.stringify(jsonSlice.trim().at(-1))}.`,
         );
         return undefined;
       }
@@ -582,6 +588,7 @@ function parseJsonObjectFromText(
     if (validObjectCount > 1) {
       debugLogger.warn(
         `generateJson: text-channel fallback rejected ambiguous JSON candidates. ` +
+          `${formatGenerateJsonTextFallbackContext(model, promptId)}, ` +
           `Candidate count: ${validObjectCount}.`,
       );
       return undefined;
@@ -648,13 +655,11 @@ function hasMissingJsonValue(jsonSlice: string): boolean {
   return /:\s*(?=[,}])/.test(jsonSlice);
 }
 
+const UNQUOTED_KEY_STRING_VALUE_RE =
+  /[{,]\s*[A-Za-z_$][\w$-]*\s*:\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)\s*(?:[,}])/;
+
 function canRepairUnquotedKeyStringValues(jsonSlice: string): boolean {
-  const quotedStringValue =
-    String.raw`(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|` +
-    String.raw`\`(?:[^\`\\]|\\.)*\`)`;
-  return new RegExp(
-    String.raw`[{,]\s*[A-Za-z_$][\w$-]*\s*:\s*${quotedStringValue}\s*(?:[,}])`,
-  ).test(jsonSlice);
+  return UNQUOTED_KEY_STRING_VALUE_RE.test(jsonSlice);
 }
 
 function isLikelyJsonArrayPrefix(
@@ -777,7 +782,7 @@ function logGenerateJsonTextFallbackFailure(
   model: string,
   promptId: string | undefined,
 ): void {
-  const context = `Model: ${model}, promptId: ${promptId ?? 'unknown'}`;
+  const context = formatGenerateJsonTextFallbackContext(model, promptId);
   if (responseText === null) {
     debugLogger.warn(
       `generateJson: text-channel fallback found no response text. ${context}.`,
@@ -800,4 +805,11 @@ function logGenerateJsonTextFallbackFailure(
       `first char: ${JSON.stringify(trimmed[0])}, ` +
       `last char: ${JSON.stringify(trimmed.at(-1))}.`,
   );
+}
+
+function formatGenerateJsonTextFallbackContext(
+  model: string,
+  promptId: string | undefined,
+): string {
+  return `Model: ${model}, promptId: ${promptId ?? 'unknown'}`;
 }

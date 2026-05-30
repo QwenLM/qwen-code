@@ -570,6 +570,12 @@ describe('BaseLlmClient', () => {
       expect(mockDebugWarn).toHaveBeenCalledWith(
         expect.stringContaining('rejected ambiguous JSON candidates'),
       );
+      const warnMessages = mockDebugWarn.mock.calls
+        .map(([message]) => String(message))
+        .join('\n');
+      expect(warnMessages).toContain('Model: test-model');
+      expect(warnMessages).toContain('promptId: test-prompt-id');
+      expect(warnMessages).not.toContain('session-config');
     });
 
     it('should reject ambiguous text with backtick-quoted loose JSON values', async () => {
