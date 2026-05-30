@@ -59,7 +59,12 @@ export async function relaunchAppInChildProcess(
 
     // Allow the parent to clean up process.env after spawn copies it
     // but before the next relaunch iteration.
-    options?.afterSpawn?.();
+    try {
+      options?.afterSpawn?.();
+    } catch (err) {
+      child.kill();
+      throw err;
+    }
 
     return new Promise<number>((resolve, reject) => {
       child.on('error', reject);
