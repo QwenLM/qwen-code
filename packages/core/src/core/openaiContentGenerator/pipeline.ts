@@ -18,6 +18,7 @@ import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
+import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 
@@ -370,16 +371,24 @@ export class ContentGenerationPipeline {
       // `thinking: { type: 'disabled' }`; sending `enable_thinking` to them
       // is at best a no-op, at worst forwarded upstream and rejected).
       //
-      // `coder-model` is the QWEN_OAUTH default (DEFAULT_QWEN_MODEL in
-      // config/models.ts, aliased to Qwen 3.6 Plus hybrid) — it doesn't
-      // start with `qwen` but is the most common hybrid-thinking model
-      // for first-time users, so it must be covered.
-      const model = (this.contentGeneratorConfig.model ?? '').toLowerCase();
+      // Gate on the *wire* model (`context.model`, i.e.
+      // `request.model || contentGeneratorConfig.model` — the same value
+      // baseRequest.model is built from above), not on the config model. A
+      // request-level model override would otherwise desync the gate from
+      // what actually ships: a qwen config with a non-qwen request model
+      // would leak the field, and a non-qwen config with a qwen request
+      // model would miss the disable signal (the #4501 regression).
+      //
+      // DEFAULT_QWEN_MODEL (currently `coder-model`) is the QWEN_OAUTH
+      // default — it doesn't start with `qwen` but is the most common
+      // hybrid-thinking model for first-time users, so it must be covered.
+      // Importing the constant keeps this gate in sync if the alias moves.
+      const model = (context.model ?? '').toLowerCase();
       if (
         DashScopeOpenAICompatibleProvider.isDashScopeProvider(
           this.contentGeneratorConfig,
         ) &&
-        (model.startsWith('qwen') || model === 'coder-model')
+        (model.startsWith('qwen') || model === DEFAULT_QWEN_MODEL)
       ) {
         typed['enable_thinking'] = false;
       }

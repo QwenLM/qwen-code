@@ -487,7 +487,7 @@ describe('ContentGenerationPipeline', () => {
       }));
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'qwen3.5-flash',
         contents: [{ parts: [{ text: 'Suggest next' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
@@ -785,7 +785,7 @@ describe('ContentGenerationPipeline', () => {
       // `extra_body.enable_thinking` (so the field never appears on the
       // wire body unless we add it here).
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'qwen3.5-flash',
         contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
@@ -824,7 +824,7 @@ describe('ContentGenerationPipeline', () => {
       pipeline = new ContentGenerationPipeline(mockConfig);
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'qwen3.5-flash',
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
 
@@ -866,7 +866,7 @@ describe('ContentGenerationPipeline', () => {
       pipeline = new ContentGenerationPipeline(mockConfig);
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'coder-model',
         contents: [{ parts: [{ text: 'Hi' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
@@ -907,7 +907,7 @@ describe('ContentGenerationPipeline', () => {
       pipeline = new ContentGenerationPipeline(mockConfig);
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'qwen3.5-flash',
         contents: [{ parts: [{ text: 'Hi' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
@@ -988,7 +988,7 @@ describe('ContentGenerationPipeline', () => {
       pipeline = new ContentGenerationPipeline(mockConfig);
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'glm-5',
         contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
@@ -1011,6 +1011,85 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.enable_thinking).toBeUndefined();
     });
 
+    it('gates on the wire model, not config: qwen config + non-qwen request.model does NOT emit', async () => {
+      // buildRequest ships `context.model` (= request.model || config.model).
+      // A qwen *config* with a non-qwen *request* model must gate on the
+      // request model — otherwise the qwen-only field leaks to the non-qwen
+      // routing that is actually on the wire (e.g. GLM rejecting it upstream).
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'glm-5', // request-level override to a non-qwen wire model
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('gates on the wire model, not config: non-qwen config + qwen request.model emits false', async () => {
+      // The mirror direction: a non-qwen *config* with a qwen *request* model
+      // must still emit the disable signal, since the wire model is qwen and
+      // would otherwise keep thinking-on (the #4501 regression).
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.5-flash', // request-level override to a qwen wire model
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
     it('emits enable_thinking:false when baseUrl is unset (DashScope default)', async () => {
       // `isDashScopeProvider` treats a missing baseUrl as DashScope
       // (`dashscope.ts:49` returns true for `!baseUrl`). A fresh install
@@ -1030,7 +1109,7 @@ describe('ContentGenerationPipeline', () => {
       pipeline = new ContentGenerationPipeline(mockConfig);
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'qwen3.5-flash',
         contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
