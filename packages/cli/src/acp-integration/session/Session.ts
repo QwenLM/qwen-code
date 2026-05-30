@@ -1702,7 +1702,7 @@ export class Session implements SessionContext {
             }
           },
           () =>
-            ac.signal.aborted ? 'cancelled' : cronHadError ? 'cancelled' : 'ok',
+            ac.signal.aborted ? 'cancelled' : cronHadError ? 'error' : 'ok',
         );
       },
     );
@@ -2007,7 +2007,8 @@ export class Session implements SessionContext {
         function_name: fc.name ?? '',
         function_args: args,
         duration_ms: durationMs,
-        status: 'error',
+        // An aborted signal means the call was cancelled, not a genuine error.
+        status: abortSignal.aborted ? 'cancelled' : 'error',
         success: false,
         error: error.message,
         tool_type:
@@ -2580,6 +2581,21 @@ export class Session implements SessionContext {
             }
           }
 
+          // A tool can fail "softly" by returning toolResult.error without
+          // throwing, and can be cancelled mid-flight. Compute the real outcome
+          // once and reflect it on the client-facing emitResult as well as
+          // logToolCall / recordToolResult / the tool span, instead of
+          // hardcoding success — otherwise failed/cancelled daemon/ACP tools
+          // are mislabeled as successful in telemetry, session replay, and the
+          // client UI.
+          const aborted = abortSignal.aborted;
+          const status: 'success' | 'error' | 'cancelled' = aborted
+            ? 'cancelled'
+            : toolResult.error
+              ? 'error'
+              : 'success';
+          const succeeded = status === 'success';
+
           // Handle TodoWriteTool: extract todos and send plan update
           if (isTodoWriteTool) {
             const todos = this.planEmitter.extractTodos(
@@ -2596,10 +2612,11 @@ export class Session implements SessionContext {
             // Still log and return function response for LLM
           } else {
             // Normal tool handling: emit result using ToolCallEmitter
-            // Convert toolResult.error to Error type if present
             const error = toolResult.error
               ? new Error(toolResult.error.message)
-              : undefined;
+              : aborted
+                ? new Error('Tool execution was cancelled')
+                : undefined;
 
             await this.toolCallEmitter.emitResult({
               callId,
@@ -2608,23 +2625,11 @@ export class Session implements SessionContext {
               message: responseParts,
               resultDisplay: toolResult.returnDisplay,
               error,
-              success: !toolResult.error,
+              success: succeeded,
             });
           }
 
           const durationMs = Date.now() - startTime;
-          // A tool can fail "softly" by returning toolResult.error without
-          // throwing (and can be cancelled mid-flight). Reflect that real
-          // outcome on logToolCall / recordToolResult / the tool span instead
-          // of hardcoding success — otherwise failed daemon/ACP tools are
-          // mislabeled as successful in telemetry and session replay.
-          const aborted = abortSignal.aborted;
-          const status: 'success' | 'error' | 'cancelled' = aborted
-            ? 'cancelled'
-            : toolResult.error
-              ? 'error'
-              : 'success';
-          const succeeded = status === 'success';
           logToolCall(this.config, {
             'event.name': 'tool_call',
             'event.timestamp': new Date().toISOString(),
@@ -2658,6 +2663,8 @@ export class Session implements SessionContext {
           spanSuccess = succeeded;
           if (toolResult.error) {
             spanError = toolResult.error.message;
+          } else if (aborted) {
+            spanError = 'Tool execution was cancelled';
           }
           return responseParts;
         } catch (e) {
@@ -2707,7 +2714,9 @@ export class Session implements SessionContext {
           ];
           this.config.getChatRecordingService()?.recordToolResult(errorParts, {
             callId,
-            status: 'error',
+            // A throw caused by abort (e.g. AbortError) is a cancellation, not
+            // a genuine tool error — keep it consistent with the success path.
+            status: abortSignal.aborted ? 'cancelled' : 'error',
             resultDisplay: undefined,
             error,
             errorType: undefined,

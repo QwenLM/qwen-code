@@ -47,7 +47,7 @@ export interface EndInteractionOptions {
   errorMessage?: string;
 }
 
-export type InteractionSpanResultStatus = 'ok' | 'cancelled';
+export type InteractionSpanResultStatus = 'ok' | 'error' | 'cancelled';
 
 export interface LLMRequestMetadata {
   inputTokens?: number;
@@ -418,6 +418,7 @@ export async function withInteractionSpan<T>(
   return await otelContext.with(activeContext, async () =>
     interactionContext.run(spanContextObj, async () => {
       let terminalStatus: InteractionStatus = 'ok';
+      let errorStatusSet = false;
       try {
         const result = await fn();
         terminalStatus = getResultStatus?.(result) ?? 'ok';
@@ -430,6 +431,7 @@ export async function withInteractionSpan<T>(
             error instanceof Error ? error.message : String(error),
           ),
         });
+        errorStatusSet = true;
         throw error;
       } finally {
         if (!spanContextObj.ended) {
@@ -441,6 +443,15 @@ export async function withInteractionSpan<T>(
           });
           if (terminalStatus === 'ok') {
             span.setStatus({ code: SpanStatusCode.OK });
+          } else if (terminalStatus === 'error' && !errorStatusSet) {
+            // getResultStatus reported 'error' on a non-throwing path (e.g. the
+            // cron path swallows API errors and surfaces them via status), so
+            // the catch above didn't run. Mark the span ERROR here, guarded so
+            // a thrown error's specific message is never overwritten.
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: 'interaction error',
+            });
           }
           span.end();
           activeSpans.delete(spanId);

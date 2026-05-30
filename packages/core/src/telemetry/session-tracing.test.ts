@@ -217,6 +217,37 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.statuses.at(-1)?.code).toBe(SpanStatusCode.OK);
     });
 
+    it('marks the interaction span ERROR when getResultStatus returns "error"', async () => {
+      const config = createMockConfig();
+      await withInteractionSpan(
+        config,
+        { promptId: 'p-cron-err', model: 'm', messageType: 'cron' },
+        async () => 'done',
+        () => 'error',
+      );
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.attributes['qwen-code.turn_status']).toBe('error');
+      expect(span?.statuses.at(-1)?.code).toBe(SpanStatusCode.ERROR);
+    });
+
+    it('keeps a thrown error message instead of the generic error-status message', async () => {
+      const config = createMockConfig();
+      await expect(
+        withInteractionSpan(
+          config,
+          { promptId: 'p-throw', model: 'm', messageType: 'cron' },
+          async () => {
+            throw new Error('boom from fn');
+          },
+        ),
+      ).rejects.toThrow('boom from fn');
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.statuses.at(-1)?.code).toBe(SpanStatusCode.ERROR);
+      expect(span?.statuses.at(-1)?.message).toBe('boom from fn');
+    });
+
     it('ends interaction span with error status', () => {
       const config = createMockConfig();
       startInteractionSpan(config, {
