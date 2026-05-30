@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as path from 'node:path';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { TrustedHooksManager } from './trustedHooks.js';
 import { HookType, type HookConfig } from './types.js';
@@ -65,7 +66,9 @@ describe('TrustedHooksManager', () => {
     });
 
     const [configPath] = vi.mocked(atomicWriteFileSync).mock.calls[0];
-    expect(configPath).toBe('/mock/home/.qwen/trusted_hooks.json');
+    expect(configPath).toBe(
+      path.join('/mock/home/.qwen', 'trusted_hooks.json'),
+    );
   });
 
   it('trustHooks persists the hook key derived from the hook config', () => {
