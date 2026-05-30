@@ -8,6 +8,9 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
+  buildBtwCacheSafeParams,
+  buildBtwPrompt,
+  getCacheSafeParams,
   clearCachedCredentialFile,
   createDebugLogger,
   generateSessionRecap,
@@ -15,6 +18,7 @@ import {
   qwenOAuth2Events,
   MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
+  runForkedAgent,
   SessionService,
   SESSION_TITLE_MAX_LENGTH,
   tokenLimit,
@@ -137,6 +141,9 @@ import {
 } from '../ui/commands/contextCommand.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
+// Must be less than SESSION_BTW_TIMEOUT_MS (60s) in bridge.ts so the child
+// aborts before the bridge's backstop timer fires.
+const BTW_CHILD_TIMEOUT_MS = 55_000;
 
 /**
  * Env-var candidates per auth method, used by `buildAuthPreflightCell` for
@@ -2544,6 +2551,50 @@ class QwenAgent implements Agent {
           `recap ext-method completed for session=${sessionId} result=${recap ? `len=${recap.length}` : 'null'}`,
         );
         return { sessionId, recap };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionBtw: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const question = params['question'];
+        if (
+          typeof question !== 'string' ||
+          !question.trim() ||
+          question.length > 4096
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing question (max 4096 chars)',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        const cacheSafeParams =
+          buildBtwCacheSafeParams(config) ?? getCacheSafeParams();
+        if (!cacheSafeParams) {
+          return { sessionId, answer: null };
+        }
+        let result;
+        try {
+          result = await runForkedAgent({
+            config,
+            userMessage: buildBtwPrompt(question.trim()),
+            cacheSafeParams,
+            abortSignal: AbortSignal.timeout(BTW_CHILD_TIMEOUT_MS),
+          });
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'TimeoutError') {
+            throw RequestError.internalError(
+              'Side question timed out after 55s',
+            );
+          }
+          throw err;
+        }
+        return { sessionId, answer: result.text || null };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionShellHistory: {
         const sessionId = params['sessionId'];

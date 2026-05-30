@@ -370,6 +370,7 @@ export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/tool-utils.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
+export * from './utils/btwUtils.js';
 export * from './utils/forkedAgent.js';
 export * from './utils/sideQuery.js';
 

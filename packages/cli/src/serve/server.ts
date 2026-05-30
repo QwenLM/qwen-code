@@ -2048,6 +2048,62 @@ export function createServeApp(
     }
   });
 
+  app.post('/session/:id/btw', mutate(), async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    const body = safeBody(req);
+    const question = body['question'];
+    if (
+      typeof question !== 'string' ||
+      question.trim().length === 0 ||
+      question.length > 4096
+    ) {
+      res.status(400).json({
+        error:
+          '`question` is required, must be a non-empty string, and at most 4096 characters',
+      });
+      return;
+    }
+    const abort = new AbortController();
+    const onResClose = () => {
+      if (!res.writableEnded) abort.abort();
+    };
+    res.once('close', onResClose);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) {
+      res.off('close', onResClose);
+      return;
+    }
+    try {
+      const result = await bridge.generateSessionBtw(
+        sessionId,
+        question.trim(),
+        abort.signal,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      if (
+        err instanceof DOMException &&
+        err.name === 'AbortError' &&
+        abort.signal.aborted
+      ) {
+        return;
+      }
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/btw',
+        sessionId,
+      });
+    } finally {
+      res.off('close', onResClose);
+    }
+  });
+
   app.post('/session/:id/shell', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
