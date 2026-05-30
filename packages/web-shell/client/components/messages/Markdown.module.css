@@ -186,6 +186,8 @@
   border: 1px solid var(--border-color);
   overflow-x: auto;
   text-align: center;
+  line-height: normal;
+  overflow-wrap: normal;
 }
 
 .mermaidBlock.mermaidInline {
@@ -197,6 +199,14 @@
 .mermaidBlock :global(svg) {
   max-width: 100%;
   height: auto;
+}
+
+.mermaidBlock :global(foreignObject p) {
+  margin: 0;
+}
+
+.mermaidBlock :global(foreignObject div) {
+  line-height: normal;
 }
 
 .mermaidLoading {

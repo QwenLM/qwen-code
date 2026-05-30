@@ -7,21 +7,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
-
-function formatRelativeTime(iso: string, language: string): string {
-  if (language !== 'zh-CN') {
-    return new Date(iso).toLocaleString();
-  }
-  const diff = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return '刚刚';
-  if (mins < 60) return `${mins} 分钟前`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days} 天前`;
-  return new Date(iso).toLocaleDateString();
-}
+import { formatRelativeTime } from '../../utils/formatRelativeTime';
 
 interface ReleaseSessionDialogProps {
   onReleased: (sessionId: string) => void;
@@ -34,7 +20,7 @@ export function ReleaseSessionDialog({
   onError,
   onClose,
 }: ReleaseSessionDialogProps) {
-  const { language, t } = useI18n();
+  const { t } = useI18n();
   const connection = useConnection();
   const {
     sessions,
@@ -302,10 +288,7 @@ export function ReleaseSessionDialog({
                 <div className={dp('resume-picker-item-meta')}>
                   <span>
                     {(s.updatedAt || s.createdAt) &&
-                      formatRelativeTime(
-                        s.updatedAt || s.createdAt || '',
-                        language,
-                      )}
+                      formatRelativeTime(s.updatedAt || s.createdAt || '', t)}
                   </span>
                   <span className={dp('resume-picker-item-detail')}>
                     {t('common.clients', { count: s.clientCount ?? 0 })}

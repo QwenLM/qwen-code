@@ -37,6 +37,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   ApprovalMode,
+  SessionService,
   Storage,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
@@ -3887,6 +3888,307 @@ describe('createServeApp', () => {
         .set('X-Qwen-Client-Id', 'bad-client');
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_client_id');
+    });
+  });
+
+  describe('POST /sessions/delete', () => {
+    let previousRuntimeDir: string | undefined;
+    let runtimeDir: string;
+    let wsDir: string;
+
+    beforeEach(async () => {
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-batch-delete-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      wsDir = realpathSync(runtimeDir);
+    });
+
+    afterEach(async () => {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      await fsp.rm(runtimeDir, { recursive: true, force: true });
+    });
+
+    async function writeSession(sessionId: string): Promise<void> {
+      const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
+      await fsp.mkdir(chatsDir, { recursive: true });
+      const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+      const record = {
+        uuid: `${sessionId}-user-1`,
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-05-28T12:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hello' }] },
+        cwd: wsDir,
+      };
+      await fsp.writeFile(filePath, `${JSON.stringify(record)}\n`, 'utf8');
+    }
+
+    it('400 on missing sessionIds', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_request');
+    });
+
+    it('400 on empty sessionIds array', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [] });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_request');
+    });
+
+    it('deletes active session and its transcript when bridge succeeds', async () => {
+      const sid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid);
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(res.status).toBe(200);
+      expect(res.body.removed).toEqual([sid]);
+      expect(res.body.notFound).toEqual([]);
+      expect(res.body.errors).toEqual([]);
+      const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
+      const filePath = path.join(chatsDir, `${sid}.jsonl`);
+      await expect(fsp.access(filePath)).rejects.toThrow();
+    });
+
+    it('deletes inactive session transcript when bridge throws SessionNotFoundError', async () => {
+      const sid = 'deadbeef-dead-beef-dead-beefdeaddead';
+      await writeSession(sid);
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(res.status).toBe(200);
+      expect(res.body.removed).toEqual([sid]);
+      expect(res.body.errors).toEqual([]);
+      const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
+      const filePath = path.join(chatsDir, `${sid}.jsonl`);
+      await expect(fsp.access(filePath)).rejects.toThrow();
+    });
+
+    it('does not delete when bridge.closeSession throws InvalidClientIdError', async () => {
+      const sid = 'aaaabbbb-cccc-dddd-eeee-ffffaaaabbbb';
+      await writeSession(sid);
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          throw new InvalidClientIdError(sessionId, 'bad-client');
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'bad-client')
+        .send({ sessionIds: [sid] });
+      expect(res.status).toBe(200);
+      expect(res.body.removed).toEqual([]);
+      expect(res.body.errors).toHaveLength(1);
+      expect(res.body.errors[0].sessionId).toBe(sid);
+    });
+
+    it('returns notFound for sessions without persisted data', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: ['nonexistent'] });
+      expect(res.status).toBe(200);
+      expect(res.body.removed).toEqual([]);
+      expect(res.body.notFound).toEqual(['nonexistent']);
+    });
+
+    it('errors array contains string messages, not Error objects', async () => {
+      const bridge = fakeBridge({
+        closeImpl: async () => {
+          throw new Error('bridge exploded');
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: ['s-1'] });
+      expect(res.status).toBe(200);
+      expect(res.body.errors[0].error).toBe('bridge exploded');
+      expect(typeof res.body.errors[0].error).toBe('string');
+    });
+
+    it('handles multi-session batch with mixed outcomes', async () => {
+      const sidOk = 'aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const sidNotFound = 'aaaa2222-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const sidFail = 'aaaa3333-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sidOk);
+      await writeSession(sidNotFound);
+      await writeSession(sidFail);
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          if (sessionId === sidNotFound) {
+            throw new SessionNotFoundError(sessionId);
+          }
+          if (sessionId === sidFail) {
+            throw new Error('agent busy');
+          }
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sidOk, sidNotFound, sidFail] });
+      expect(res.status).toBe(200);
+      expect(res.body.removed.sort()).toEqual([sidNotFound, sidOk].sort());
+      expect(res.body.errors).toHaveLength(1);
+      expect(res.body.errors[0].sessionId).toBe(sidFail);
+      expect(res.body.errors[0].error).toBe('agent busy');
+      const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
+      await expect(
+        fsp.access(path.join(chatsDir, `${sidOk}.jsonl`)),
+      ).rejects.toThrow();
+      await expect(
+        fsp.access(path.join(chatsDir, `${sidNotFound}.jsonl`)),
+      ).rejects.toThrow();
+      await expect(
+        fsp.access(path.join(chatsDir, `${sidFail}.jsonl`)),
+      ).resolves.toBeUndefined();
+    });
+
+    it('400 when sessionIds exceeds max 100', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const ids = Array.from({ length: 101 }, (_, i) => `s-${i}`);
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: ids });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_request');
+    });
+
+    it('400 when sessionIds contains non-string elements', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [123, true] });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_request');
+    });
+
+    it('deduplicates sessionIds and calls closeSession once per unique id', async () => {
+      const sid = 'ddddd111-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid);
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid, sid] });
+      expect(res.status).toBe(200);
+      expect(res.body.removed).toEqual([sid]);
+      expect(bridge.closeCalls).toHaveLength(1);
+    });
+
+    it('preserves transcript file when bridge.closeSession throws non-SessionNotFoundError', async () => {
+      const sid = 'eeee1111-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sid);
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          throw new InvalidClientIdError(sessionId, 'bad-client');
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+      expect(res.status).toBe(200);
+      expect(res.body.removed).toEqual([]);
+      expect(res.body.errors).toHaveLength(1);
+      const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
+      await expect(
+        fsp.access(path.join(chatsDir, `${sid}.jsonl`)),
+      ).resolves.toBeUndefined();
+    });
+
+    it('returns 500 when removeSessions throws unexpectedly', async () => {
+      const spy = vi
+        .spyOn(SessionService.prototype, 'removeSessions')
+        .mockRejectedValueOnce(new Error('disk on fire'));
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: ['aaaa0000-bbbb-cccc-dddd-eeeeeeeeeeee'] });
+      expect(res.status).toBe(500);
+      expect(res.body.code).toBe('sessions_delete_failed');
+      spy.mockRestore();
     });
   });
 

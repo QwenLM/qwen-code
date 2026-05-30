@@ -120,6 +120,12 @@ export interface DaemonGlobResult {
 export interface DaemonWorkspaceActions {
   // Sessions
   listSessions(): Promise<DaemonSessionSummary[]>;
+  deleteSession(sessionId: string): Promise<boolean>;
+  deleteSessions(sessionIds: string[]): Promise<{
+    removed: string[];
+    notFound: string[];
+    errors: Array<{ sessionId: string; error: string }>;
+  }>;
 
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;

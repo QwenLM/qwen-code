@@ -1,43 +1,73 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
 import { useConnection, useSessions } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 
-interface ResumeDialogProps {
-  onSelect: (sessionId: string) => void;
+interface DeleteSessionDialogProps {
+  onDeleted: (sessionIds: string[]) => void;
+  onError: (error: unknown) => void;
   onClose: () => void;
 }
 
-export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
+export function DeleteSessionDialog({
+  onDeleted,
+  onError,
+  onClose,
+}: DeleteSessionDialogProps) {
   const { t } = useI18n();
   const connection = useConnection();
-  const { sessions, loading, error } = useSessions({ autoLoad: true });
+  const {
+    sessions,
+    loading,
+    error: sessionsError,
+    deleteSession,
+    deleteSessions,
+  } = useSessions({ autoLoad: true });
   const currentSessionId = connection.sessionId;
+  const [deleting, setDeleting] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState(0);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [message, setMessage] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const filtered = searchQuery
-    ? sessions.filter((s) => {
-        const q = searchQuery.toLowerCase();
-        return (
-          (s.displayName || s.title || '').toLowerCase().includes(q) ||
-          s.sessionId.toLowerCase().includes(q)
-        );
-      })
-    : sessions;
+  useEffect(() => {
+    if (sessionsError) setMessage(sessionsError.message);
+  }, [sessionsError]);
 
-  // Keep selection in bounds
+  const filtered = useMemo(
+    () =>
+      searchQuery
+        ? sessions.filter((s) => {
+            const q = searchQuery.toLowerCase();
+            return (
+              (s.displayName || s.title || '').toLowerCase().includes(q) ||
+              s.sessionId.toLowerCase().includes(q)
+            );
+          })
+        : sessions,
+    [sessions, searchQuery],
+  );
+
+  useEffect(() => {
+    if (searchQuery && selectedIds.size > 0) {
+      const filteredSet = new Set(filtered.map((s) => s.sessionId));
+      setSelectedIds((prev) => {
+        const pruned = new Set([...prev].filter((id) => filteredSet.has(id)));
+        return pruned.size === prev.size ? prev : pruned;
+      });
+    }
+  }, [searchQuery, filtered, selectedIds.size]);
+
   useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {
       setSelectedIdx(filtered.length - 1);
     }
   }, [filtered.length, selectedIdx]);
 
-  // Scroll selected item into view
   useEffect(() => {
     const el = listRef.current?.children[selectedIdx] as
       | HTMLElement
@@ -45,16 +75,118 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
-  const handleSelect = useCallback(() => {
-    const session = filtered[selectedIdx];
-    if (session) {
-      onSelect(session.sessionId);
-      onClose();
+  const toggleSelection = useCallback(
+    (sessionId: string) => {
+      if (sessionId === currentSessionId) return;
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(sessionId)) {
+          next.delete(sessionId);
+        } else {
+          next.add(sessionId);
+        }
+        return next;
+      });
+    },
+    [currentSessionId],
+  );
+
+  const handleDelete = useCallback(() => {
+    if (deleting) return;
+
+    if (selectedIds.size > 0) {
+      const filteredSet = new Set(filtered.map((s) => s.sessionId));
+      const idsToDelete = Array.from(selectedIds).filter((id) =>
+        filteredSet.has(id),
+      );
+      if (idsToDelete.length === 0) return;
+      setDeleting(true);
+      deleteSessions(idsToDelete)
+        .then((res) => {
+          const succeeded = res.removed.length + res.notFound.length;
+          const failed = res.errors.length;
+
+          if (failed > 0 && succeeded > 0) {
+            onError(
+              new Error(
+                t('delete.partialFail', {
+                  removed: succeeded,
+                  failed,
+                  detail: res.errors[0].error,
+                }),
+              ),
+            );
+            onClose();
+            return;
+          }
+
+          if (failed > 0) {
+            setMessage(
+              t('delete.allFailed', {
+                count: failed,
+                reason: res.errors[0].error,
+              }),
+            );
+            setDeleting(false);
+            setSelectedIds(new Set());
+            return;
+          }
+
+          if (succeeded === 0) {
+            setMessage(t('delete.nonRemoved'));
+            setDeleting(false);
+            setSelectedIds(new Set());
+            return;
+          }
+
+          onDeleted([...res.removed, ...res.notFound]);
+          onClose();
+        })
+        .catch((error: unknown) => {
+          onError(error);
+          setDeleting(false);
+        });
+      return;
     }
-  }, [filtered, selectedIdx, onSelect, onClose]);
+
+    const session = filtered[selectedIdx];
+    if (!session) return;
+    if (session.sessionId === currentSessionId) {
+      setMessage(t('delete.cannotCurrent'));
+      return;
+    }
+    setDeleting(true);
+    deleteSession(session.sessionId)
+      .then((removed) => {
+        if (!removed) {
+          setMessage(t('delete.notFound'));
+          setDeleting(false);
+          return;
+        }
+        onDeleted([session.sessionId]);
+        onClose();
+      })
+      .catch((error: unknown) => {
+        onError(error);
+        setDeleting(false);
+      });
+  }, [
+    currentSessionId,
+    deleteSession,
+    deleteSessions,
+    deleting,
+    filtered,
+    onClose,
+    onDeleted,
+    onError,
+    selectedIdx,
+    selectedIds,
+    t,
+  ]);
 
   useDelayedGlobalKeyDown(
     (e: KeyboardEvent) => {
+      if (deleting) return;
       if (searchMode) {
         if (e.key === 'Escape') {
           e.preventDefault();
@@ -69,6 +201,7 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
           e.preventDefault();
           if (filtered.length > 0) {
             setSearchMode(false);
+            setSelectedIdx(0);
           }
           return;
         }
@@ -78,13 +211,10 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
           if (e.key === 'ArrowDown') {
             setSelectedIdx((i) => Math.min(i + 1, filtered.length - 1));
           }
-          return;
         }
-        // Let the input handle other keys
         return;
       }
 
-      // List mode
       if (e.key === 'Escape') {
         e.preventDefault();
         if (searchQuery) {
@@ -109,28 +239,48 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
         }
         return;
       }
+      if (e.key === ' ') {
+        e.preventDefault();
+        const session = filtered[selectedIdx];
+        if (session) toggleSelection(session.sessionId);
+        return;
+      }
       if (e.key === 'Enter') {
         e.preventDefault();
-        handleSelect();
+        handleDelete();
         return;
       }
       if (e.key === '/') {
         e.preventDefault();
         setSearchMode(true);
-        return;
       }
     },
-    [searchMode, searchQuery, filtered, selectedIdx, onClose, handleSelect],
+    [
+      deleting,
+      filtered,
+      handleDelete,
+      onClose,
+      searchMode,
+      searchQuery,
+      selectedIdx,
+      toggleSelection,
+    ],
   );
+
+  const hasSelection = selectedIds.size > 0;
 
   return (
     <div className={dp('resume-picker')}>
-      {/* Header */}
       <div className={dp('resume-picker-header')}>
-        <span className={dp('resume-picker-title')}>{t('resume.title')}</span>
-        {searchQuery && (
+        <span className={dp('resume-picker-title')}>{t('delete.title')}</span>
+        {hasSelection && (
           <span className={dp('resume-picker-count')}>
-            ({filtered.length} matches)
+            ({t('delete.selected', { count: selectedIds.size })})
+          </span>
+        )}
+        {!hasSelection && searchQuery && (
+          <span className={dp('resume-picker-count')}>
+            ({t('delete.matches', { count: filtered.length })})
           </span>
         )}
         <button
@@ -142,7 +292,6 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
         </button>
       </div>
 
-      {/* Search row */}
       <div className={dp('resume-picker-search')}>
         {searchMode ? (
           <>
@@ -171,34 +320,39 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
           </>
         ) : (
           <span className={dp('resume-picker-search-hint')}>
-            {t('resume.pressSearch')}
+            {message ||
+              (deleting
+                ? t('delete.deleting')
+                : loading
+                  ? t('common.loading')
+                  : t('delete.pressSearch'))}
           </span>
         )}
       </div>
 
-      {/* Separator */}
       <div className={dp('resume-picker-sep')} />
 
-      {/* Session list */}
       <div className={dp('resume-picker-list')} ref={listRef}>
         {loading && (
           <div className={dp('resume-picker-empty')}>{t('common.loading')}</div>
         )}
-        {!loading && error && (
+        {!loading && sessionsError && (
           <div className={dp('resume-picker-empty')}>
-            {error.message || 'Failed to load sessions'}
+            {sessionsError.message}
           </div>
         )}
-        {!loading && !error && filtered.length === 0 && (
+        {!loading && !sessionsError && filtered.length === 0 && (
           <div className={dp('resume-picker-empty')}>
             {searchQuery
-              ? t('resume.noMatch', { query: searchQuery })
-              : t('resume.none')}
+              ? t('delete.noMatch', { query: searchQuery })
+              : t('delete.none')}
           </div>
         )}
         {!loading &&
           filtered.map((s, i) => {
             const isCurrent = s.sessionId === currentSessionId;
+            const isChecked = selectedIds.has(s.sessionId);
+            const checkbox = isCurrent ? '[-]' : isChecked ? '[✓]' : '[ ]';
             return (
               <div
                 key={s.sessionId}
@@ -206,16 +360,17 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
                   'resume-picker-item',
                   i === selectedIdx && !searchMode ? 'selected' : undefined,
                   isCurrent ? 'resume-picker-item-current' : undefined,
+                  isCurrent ? 'disabled' : undefined,
                 )}
                 onClick={() => {
-                  onSelect(s.sessionId);
-                  onClose();
+                  setSelectedIdx(i);
+                  if (!isCurrent) toggleSelection(s.sessionId);
                 }}
                 onMouseEnter={() => setSelectedIdx(i)}
               >
                 <div className={dp('resume-picker-item-row')}>
                   <span className={dp('resume-picker-item-prefix')}>
-                    {i === selectedIdx && !searchMode ? '›' : ' '}
+                    {checkbox}
                   </span>
                   <span className={dp('resume-picker-item-title')}>
                     {s.displayName || s.title || s.sessionId.slice(0, 8)}
@@ -245,14 +400,10 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
           })}
       </div>
 
-      {/* Separator */}
       <div className={dp('resume-picker-sep')} />
 
-      {/* Footer */}
       <div className={dp('resume-picker-footer')}>
-        {searchMode
-          ? t('dialog.footer.search')
-          : t('dialog.footer.navSelectCancel')}
+        {searchMode ? t('dialog.footer.search') : t('delete.footer')}
       </div>
     </div>
   );

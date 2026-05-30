@@ -33,6 +33,8 @@ const sdkMocks = vi.hoisted(() => {
   const createWorkspaceAgent = vi.fn();
   const deleteWorkspaceAgent = vi.fn();
   const workspaceProviders = vi.fn();
+  const listWorkspaceSessions = vi.fn();
+  const deleteSessionsData = vi.fn();
 
   class MockDaemonClient {
     constructor(_opts: unknown) {}
@@ -52,6 +54,8 @@ const sdkMocks = vi.hoisted(() => {
     createWorkspaceAgent = createWorkspaceAgent;
     deleteWorkspaceAgent = deleteWorkspaceAgent;
     workspaceProviders = workspaceProviders;
+    listWorkspaceSessions = listWorkspaceSessions;
+    deleteSessionsData = deleteSessionsData;
   }
 
   return {
@@ -71,6 +75,8 @@ const sdkMocks = vi.hoisted(() => {
     createWorkspaceAgent,
     deleteWorkspaceAgent,
     workspaceProviders,
+    listWorkspaceSessions,
+    deleteSessionsData,
     reset() {
       capabilities.mockReset();
       capabilities.mockResolvedValue({
@@ -138,6 +144,14 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         initialized: true,
         providers: [],
+      });
+      listWorkspaceSessions.mockReset();
+      listWorkspaceSessions.mockResolvedValue({ sessions: [] });
+      deleteSessionsData.mockReset();
+      deleteSessionsData.mockResolvedValue({
+        removed: [],
+        notFound: [],
+        errors: [],
       });
     },
   };
@@ -356,5 +370,98 @@ describe('DaemonWorkspaceProvider', () => {
     });
 
     expect(result).toEqual({ matches: ['src/App.tsx', 'src/index.ts'] });
+  });
+
+  it('actions.deleteSession calls client.deleteSessionsData with single-element array', async () => {
+    sdkMocks.deleteSessionsData.mockResolvedValueOnce({
+      removed: ['session-123'],
+      notFound: [],
+      errors: [],
+    });
+    let actions: DaemonWorkspaceActions | undefined;
+
+    function Harness() {
+      const workspace = useOptionalDaemonWorkspace();
+      actions = workspace?.actions;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    if (!actions) throw new Error('actions not defined');
+
+    let result: boolean | undefined;
+    await act(async () => {
+      result = await actions!.deleteSession('session-123');
+    });
+
+    expect(result).toBe(true);
+    expect(sdkMocks.deleteSessionsData).toHaveBeenCalledWith(['session-123']);
+  });
+
+  it('actions.deleteSession throws when result has errors', async () => {
+    sdkMocks.deleteSessionsData.mockResolvedValueOnce({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 'session-456', error: 'invalid client id' }],
+    });
+    let actions: DaemonWorkspaceActions | undefined;
+
+    function Harness() {
+      const workspace = useOptionalDaemonWorkspace();
+      actions = workspace?.actions;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    if (!actions) throw new Error('actions not defined');
+
+    await act(async () => {
+      await expect(actions!.deleteSession('session-456')).rejects.toThrow(
+        'invalid client id',
+      );
+    });
+  });
+
+  it('actions.deleteSessions calls client.deleteSessionsData', async () => {
+    const batchResult = {
+      removed: ['s-1', 's-2'],
+      notFound: ['s-3'],
+      errors: [] as Array<{ sessionId: string; error: string }>,
+    };
+    sdkMocks.deleteSessionsData.mockResolvedValueOnce(batchResult);
+    let actions: DaemonWorkspaceActions | undefined;
+
+    function Harness() {
+      const workspace = useOptionalDaemonWorkspace();
+      actions = workspace?.actions;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    if (!actions) throw new Error('actions not defined');
+
+    let result: typeof batchResult | undefined;
+    await act(async () => {
+      result = await actions!.deleteSessions(['s-1', 's-2', 's-3']);
+    });
+
+    expect(result).toEqual(batchResult);
+    expect(sdkMocks.deleteSessionsData).toHaveBeenCalledWith([
+      's-1',
+      's-2',
+      's-3',
+    ]);
   });
 });

@@ -1800,6 +1800,87 @@ export function createServeApp(
     }
   });
 
+  app.post('/sessions/delete', mutate(), async (req, res) => {
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    const body = safeBody(req);
+    const sessionIds: unknown = body['sessionIds'];
+    if (
+      !Array.isArray(sessionIds) ||
+      sessionIds.length === 0 ||
+      sessionIds.length > 100 ||
+      !sessionIds.every((id) => typeof id === 'string')
+    ) {
+      res.status(400).json({
+        error: '`sessionIds` must be a non-empty string array (max 100)',
+        code: 'invalid_request',
+      });
+      return;
+    }
+    try {
+      const uniqueIds = [...new Set(sessionIds as string[])];
+      const closeResults = await Promise.allSettled(
+        uniqueIds.map(async (id) => {
+          // Intentional: no clientId — batch delete bypasses per-tab ownership.
+          await bridge.closeSession(id);
+          return id;
+        }),
+      );
+      const closeErrors: Array<{ sessionId: string; error: string }> = [];
+      const closedIds: string[] = [];
+      for (let i = 0; i < closeResults.length; i++) {
+        const r = closeResults[i];
+        const id = uniqueIds[i];
+        if (r.status === 'fulfilled') {
+          closedIds.push(id);
+        } else {
+          const closeErr = r.reason;
+          if (closeErr instanceof SessionNotFoundError) {
+            // Session not active in bridge — still attempt to remove its transcript file
+            closedIds.push(id);
+          } else {
+            const msg =
+              closeErr instanceof Error ? closeErr.message : String(closeErr);
+            writeStderrLine(
+              `qwen serve: closeSession failed for ${safeLogValue(id)}: ${safeLogValue(msg)}`,
+            );
+            closeErrors.push({ sessionId: id, error: msg });
+          }
+        }
+      }
+      const result = await new SessionService(boundWorkspace).removeSessions(
+        closedIds,
+      );
+      for (const e of result.errors) {
+        const msg =
+          e.error instanceof Error ? e.error.message : String(e.error);
+        writeStderrLine(
+          `qwen serve: removeSession failed for ${safeLogValue(e.sessionId)}: ${safeLogValue(msg)}`,
+        );
+      }
+      res.status(200).json({
+        removed: result.removed,
+        notFound: result.notFound,
+        errors: [
+          ...closeErrors,
+          ...result.errors.map((e) => ({
+            sessionId: e.sessionId,
+            error: e.error instanceof Error ? e.error.message : String(e.error),
+          })),
+        ],
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      writeStderrLine(
+        `qwen serve: failed to batch delete sessions: ${safeLogValue(message)}`,
+      );
+      res.status(500).json({
+        error: 'Failed to delete sessions',
+        code: 'sessions_delete_failed',
+      });
+    }
+  });
+
   app.patch('/session/:id/metadata', async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
