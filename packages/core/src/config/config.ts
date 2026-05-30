@@ -2675,6 +2675,10 @@ export class Config {
     return this.userMemory;
   }
 
+  getOutputLanguageFilePath(): string | undefined {
+    return this.outputLanguageFilePath;
+  }
+
   setUserMemory(newUserMemory: string): void {
     this.userMemory = newUserMemory;
   }
