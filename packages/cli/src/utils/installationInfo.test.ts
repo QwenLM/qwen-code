@@ -45,7 +45,6 @@ const mockedRealPathSync = vi.mocked(fs.realpathSync);
 const mockedExistsSync = vi.mocked(fs.existsSync);
 const mockedLstatSync = vi.mocked(fs.lstatSync);
 const mockedReadFileSync = vi.mocked(fs.readFileSync);
-const _mockedAccessSync = vi.mocked(fs.accessSync);
 const mockedExecSync = vi.mocked(childProcess.execSync);
 
 describe('getInstallationInfo', () => {
