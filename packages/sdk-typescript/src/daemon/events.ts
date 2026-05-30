@@ -1149,6 +1149,11 @@ const RESYNC_PASSTHROUGH_TYPES = new Set<KnownDaemonEvent['type']>([
   'session_closed',
   'client_evicted',
   'stream_error',
+  // A5 (#4511): the snapshot is a full-state authoritative frame, not a
+  // delta, so it is safe to apply during resync — and it is exactly what
+  // lets a client that reconnected past the ring recover currentModelId /
+  // approvalMode without waiting for the next loadSession.
+  'session_snapshot',
 ]);
 
 export function createDaemonSessionViewState(

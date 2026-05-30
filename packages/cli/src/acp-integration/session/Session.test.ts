@@ -352,6 +352,38 @@ describe('Session', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(expected);
     });
+
+    it('emits a current_mode_update extNotification after switching (A2)', async () => {
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'auto-edit',
+      });
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.objectContaining({
+          v: 1,
+          sessionId: 'test-session-id',
+          currentModeId: 'auto-edit',
+        }),
+      );
+    });
+
+    it('rejects an unknown modeId and does NOT touch approval mode (A2)', async () => {
+      await expect(
+        session.setMode({
+          sessionId: 'test-session-id',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          modeId: 'totally-bogus' as any,
+        }),
+      ).rejects.toThrow(/Unknown approval mode/);
+
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.anything(),
+      );
+    });
   });
 
   describe('rewindToTurn', () => {

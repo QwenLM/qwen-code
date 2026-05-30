@@ -1440,6 +1440,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `Session.setModel`, which emits it) is suppressed by the demux —
       // the authoritative `model_switched` is published below.
       entry.modelRoundtripInFlight = true;
+      // Mirror setSessionModel: only reconcile after a change that landed. A
+      // rejected roundtrip leaves the cache unchanged (often still unset on
+      // the create/attach path), so reconciling would emit a corrective
+      // model_switched right beside the model_switch_failed below.
+      let succeeded = false;
       try {
         await Promise.race([
           withTimeout(
@@ -1453,6 +1458,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           transportClosed,
         ]);
         publishModelSwitched(entry, modelId, originatorClientId);
+        succeeded = true;
       } catch (err) {
         // Surface the failure to ALL attached clients, not just the
         // caller — a shared session swallowing a denied model change
@@ -1473,7 +1479,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw err;
       } finally {
         entry.modelRoundtripInFlight = false;
-        void reconcileAfterRoundtrip(entry, 'model');
+        if (succeeded) {
+          void reconcileAfterRoundtrip(entry, 'model');
+        } else {
+          writeStderrLine(
+            `[reconcile] session=${entry.sessionId} target=model action=skipped reason=roundtrip_failed`,
+          );
+        }
       }
     });
     // Tail swallows failures so subsequent model changes still run; the
@@ -3443,7 +3455,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           return result;
         } finally {
           entry.modelRoundtripInFlight = false;
-          if (succeeded) void reconcileAfterRoundtrip(entry, 'model');
+          if (succeeded) {
+            void reconcileAfterRoundtrip(entry, 'model');
+          } else {
+            writeStderrLine(
+              `[reconcile] session=${entry.sessionId} target=model action=skipped reason=roundtrip_failed`,
+            );
+          }
         }
       });
       // Tail-swallow on the queue so a model-change failure doesn't poison
@@ -3592,7 +3610,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           };
         } finally {
           entry.approvalModeRoundtripInFlight = false;
-          if (succeeded) void reconcileAfterRoundtrip(entry, 'approvalMode');
+          if (succeeded) {
+            void reconcileAfterRoundtrip(entry, 'approvalMode');
+          } else {
+            writeStderrLine(
+              `[reconcile] session=${entry.sessionId} target=approvalMode action=skipped reason=roundtrip_failed`,
+            );
+          }
         }
       });
       // Tail-swallow so a failed change doesn't poison subsequent ones.

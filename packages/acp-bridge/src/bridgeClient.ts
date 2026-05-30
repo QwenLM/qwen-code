@@ -119,6 +119,18 @@ const MAX_EARLY_EVENTS_PER_SESSION = 32;
 const MAX_SUGGESTION_LENGTH = 500;
 const EARLY_EVENT_TTL_MS = 60_000;
 
+// Known approval-mode ids accepted on the in-session `current_mode_update`
+// demux path. Mirrors the `modeMap` keys in `Session.setMode` (CLI); an id
+// outside this set is dropped before it fans out to SSE clients / the SDK
+// reducer. Keep the two in lockstep.
+const KNOWN_APPROVAL_MODES: ReadonlySet<string> = new Set([
+  'plan',
+  'default',
+  'auto-edit',
+  'auto',
+  'yolo',
+]);
+
 /**
  * Human-readable label for a `fs.Stats` object's kind, used in the
  * `readTextFile` "not a regular file" rejection message (BX8YO).
@@ -598,6 +610,20 @@ export class BridgeClient implements Client {
     if (typeof sessionId !== 'string' || typeof currentModeId !== 'string') {
       return;
     }
+    // Validate against the known approval-mode enum before it fans out.
+    // `Session.setMode` guards the symmetric send path with the same set
+    // ("an unknown id would call setApprovalMode(undefined), leaving the
+    // permission system undefined"); this is the receive path the agent
+    // can reach without that validation, so an unknown id here would
+    // propagate through `approval_mode_changed` to every SSE client and
+    // land in the SDK reducer's `state.approvalMode`. Keep in lockstep
+    // with `Session.setMode`'s `modeMap` keys (includes `auto`).
+    if (!KNOWN_APPROVAL_MODES.has(currentModeId)) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_mode_update action=dropped reason=unknown_mode mode=${currentModeId}`,
+      );
+      return;
+    }
     const entry = this.resolveEntry(sessionId);
     if (!entry) {
       writeStderrLine(
@@ -650,6 +676,14 @@ export class BridgeClient implements Client {
     // handler keeps working. Remove this block (and its tracking issue)
     // once the companion ships an `approval_mode_changed` handler.
     //
+    // Skip it when the producer already sent the legacy frame itself: the
+    // `exit_plan_mode` path (`Session.sendCurrentModeUpdateNotification`)
+    // calls `sendUpdate` before this extNotification, which
+    // `BridgeClient.sessionUpdate` already fanned onto the bus as the same
+    // `session_update{current_mode_update}` frame. Dual-emitting here would
+    // deliver it twice. The `setMode` path omits the flag (it has no
+    // `sendUpdate`), so its dual-emit still fires.
+    //
     // Use the canonical ACP-nested shape (`data.update.sessionUpdate`),
     // matching what `BridgeClient.sessionUpdate` publishes for a real
     // `current_mode_update` notification. A flat
@@ -658,6 +692,12 @@ export class BridgeClient implements Client {
     // switch, and (b) collide structurally with the real `session_update`
     // the agent already emits on the `exit_plan_mode` path — leaving two
     // incompatible shapes on the bus for one change.
+    if (params['legacyFrameSent'] === true) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=current_mode_update action=promoted mode=${currentModeId} legacy_frame=skipped`,
+      );
+      return;
+    }
     try {
       entry.events.publish({
         type: 'session_update',

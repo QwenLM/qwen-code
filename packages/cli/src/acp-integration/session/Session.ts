@@ -1956,11 +1956,19 @@ export class Session implements SessionContext {
     // A2 (#4511): promote the mode change to the bridge side-channel so
     // it reaches `approval_mode_changed` on the SSE bus, matching the
     // extNotification in `setMode`.
+    //
+    // Unlike `setMode`, this path already published the legacy
+    // `session_update{current_mode_update}` frame via `sendUpdate` above
+    // (BridgeClient.sessionUpdate fans it onto the bus). Tell the demux to
+    // skip its compat dual-emit so the IDE companion sees exactly one
+    // legacy frame for this change, not two. `setMode` omits the flag, so
+    // its dual-emit still fires (it has no `sendUpdate`).
     void this.client
       .extNotification('qwen/notify/session/mode-update', {
         v: 1,
         sessionId: this.sessionId,
         currentModeId: newModeId,
+        legacyFrameSent: true,
       })
       .catch(() => {
         // Advisory only; a failed notification must not fail the mode
