@@ -89,7 +89,7 @@ async function verifyChecksum(
   const text = await response.text();
 
   // Verify Ed25519 signature of SHA256SUMS if available (try OSS then GitHub)
-  const requireSig = process.env.QWEN_REQUIRE_SIGNATURE === '1';
+  const requireSig = process.env['QWEN_REQUIRE_SIGNATURE'] === '1';
   let sigResponse = await tryFetch(`${OSS_BASE}/${versionPath}/SHA256SUMS.sig`);
   if (!sigResponse) {
     sigResponse = await tryFetch(
@@ -286,6 +286,7 @@ function isProcessAlive(pid: number): boolean {
 function atomicReplace(
   standaloneDir: string,
   newDir: string,
+  lockPath: string,
 ): 'done' | 'deferred' {
   const oldDir = `${standaloneDir}.old`;
   const pendingDir = `${standaloneDir}.new`;
@@ -303,13 +304,27 @@ function atomicReplace(
     }
     fs.renameSync(newDir, pendingDir);
 
+    // Validate paths don't contain cmd.exe metacharacters that could break the script
+    const unsafeCmdChars = /[&|<>^%!]/;
+    if (
+      unsafeCmdChars.test(standaloneDir) ||
+      unsafeCmdChars.test(oldDir) ||
+      unsafeCmdChars.test(pendingDir)
+    ) {
+      throw new Error(
+        'Installation path contains characters unsafe for deferred update script',
+      );
+    }
+
+    const lockFile = lockPath;
     const script = [
       '@echo off',
       ':wait',
       `tasklist /FI "PID eq ${process.pid}" 2>nul | find "${process.pid}" >nul && (timeout /t 1 >nul & goto wait)`,
       `move /Y "${standaloneDir}" "${oldDir}"`,
       `move /Y "${pendingDir}" "${standaloneDir}"`,
-      'rem Keep .old for rollback',
+      'rem Keep .old for rollback; release update lock',
+      `del /F /Q "${lockFile}" 2>nul`,
       `del "%~f0"`,
     ].join('\r\n');
     const scriptPath = path.join(
@@ -394,7 +409,7 @@ export async function performStandaloneUpdate(
     await smokeTest(newInstallDir, target);
 
     debugLogger.info('Replacing installation...');
-    const result = atomicReplace(standaloneDir, newInstallDir);
+    const result = atomicReplace(standaloneDir, newInstallDir, lockPath);
 
     // Write rollback metadata so /doctor rollback knows what version is preserved
     const oldDir = `${standaloneDir}.old`;
@@ -427,7 +442,12 @@ export async function performStandaloneUpdate(
     debugLogger.info('Standalone update complete.');
     return result;
   } finally {
-    releaseLock(lockPath);
+    // On Windows deferred updates, keep the lock alive until the bat script
+    // finishes the swap — it will be cleaned up by the next successful update.
+    // On Unix (immediate), release the lock now.
+    if (os.platform() !== 'win32') {
+      releaseLock(lockPath);
+    }
     fs.rmSync(tempDir, { recursive: true, force: true });
     if (fs.existsSync(extractDir)) {
       fs.rmSync(extractDir, { recursive: true, force: true });
