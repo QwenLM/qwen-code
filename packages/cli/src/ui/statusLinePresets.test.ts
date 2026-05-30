@@ -11,6 +11,7 @@ import {
   buildStatusLinePresetData,
   buildStatusLinePresetLines,
   DEFAULT_STATUS_LINE_PRESET_CONFIG,
+  formatModelWithReasoning,
   formatTokenCount,
   getRunStateLabel,
   inferPullRequestNumber,
@@ -61,6 +62,36 @@ describe('statusLinePresets', () => {
       orderStatusLinePresetItems(
         [...DEFAULT_STATUS_LINE_PRESET_CONFIG.items].reverse(),
       ),
+    );
+  });
+
+  it('orders preset items directly', () => {
+    expect(orderStatusLinePresetItems([])).toEqual([]);
+    expect(orderStatusLinePresetItems(['bogus'])).toEqual([]);
+    expect(orderStatusLinePresetItems([42, null])).toEqual([]);
+    expect(
+      orderStatusLinePresetItems([
+        'run-state',
+        'model',
+        'git-branch',
+        'model',
+        'context-remaining',
+      ]),
+    ).toEqual(['model', 'git-branch', 'context-remaining', 'run-state']);
+  });
+
+  it('formats model reasoning directly', () => {
+    expect(formatModelWithReasoning('qwen3-code-plus', false)).toBe(
+      'qwen3-code-plus reasoning off',
+    );
+    expect(
+      formatModelWithReasoning('qwen3-code-plus', { effort: 'high' }),
+    ).toBe('qwen3-code-plus high');
+    expect(
+      formatModelWithReasoning('qwen3-code-plus', { effort: undefined }),
+    ).toBe('qwen3-code-plus');
+    expect(formatModelWithReasoning('qwen3-code-plus', undefined)).toBe(
+      'qwen3-code-plus',
     );
   });
 
