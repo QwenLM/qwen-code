@@ -25,7 +25,7 @@ const VALID_THINKING_LEVELS_LIST = THINKING_LEVEL_IDS.map(
   (id) => `'${id}'`,
 ).join(', ');
 
-const SESSION_LIST_EXTERNAL_REFRESH_WAIT_MS = 30_000;
+const SESSION_LIST_EXTERNAL_REFRESH_WAIT_MS = 90_000;
 const EXTERNAL_REFRESH_TIMED_OUT = Symbol('external-refresh-timed-out');
 
 type SessionListRefreshLogger = Pick<HandlerDeps['platform']['logger'], 'warn'>;

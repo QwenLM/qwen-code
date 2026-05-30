@@ -352,6 +352,7 @@ export default function App() {
   // Splash screen state - tracks when app is fully ready (all data loaded)
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
   const [sessionListLoading, setSessionListLoading] = useState(false)
+  const [sessionListRefreshWorkspaceIds, setSessionListRefreshWorkspaceIds] = useState<Set<string>>(new Set())
   const [projectSessionSnapshotsReady, setProjectSessionSnapshotsReady] = useState(false)
   const [sessionLoadError, setSessionLoadError] = useState<string | null>(null)
   const [splashExiting, setSplashExiting] = useState(false)
@@ -716,6 +717,58 @@ export default function App() {
       return null
     }
   }, [cacheWorkspaceSessionMetas, store, syncSessionOptionsFromSession, reconcilePermissionModeState, windowRemoteWorkspaceId])
+
+  const refreshChangedWorkspaceSessions = useCallback(async (workspaceId: string) => {
+    try {
+      const sessions = await window.electronAPI.getSessionsForWorkspace(workspaceId, { refreshExternal: false })
+      cacheWorkspaceSessionMetas(workspaceId, sessions)
+      setSessionListRefreshWorkspaceIds(prev => {
+        if (!prev.has(workspaceId)) return prev
+        const next = new Set(prev)
+        next.delete(workspaceId)
+        return next
+      })
+
+      if (workspaceId !== windowWorkspaceIdRef.current) return
+
+      applyLoadedSessions(sessions, workspaceId, windowRemoteWorkspaceId)
+      setSessionsLoaded(true)
+      setSessionLoadError(null)
+      setSessionListLoading(false)
+      void reconcileLoadedSessionPermissionModes(sessions)
+    } catch (err) {
+      console.error(`[App] Failed to refresh changed session list for workspace ${workspaceId}:`, err)
+    }
+  }, [
+    applyLoadedSessions,
+    cacheWorkspaceSessionMetas,
+    reconcileLoadedSessionPermissionModes,
+    windowRemoteWorkspaceId,
+  ])
+
+  useEffect(() => {
+    const cleanup = window.electronAPI.onSessionsChanged((workspaceId) => {
+      void refreshChangedWorkspaceSessions(workspaceId)
+    })
+
+    return cleanup
+  }, [refreshChangedWorkspaceSessions])
+
+  useEffect(() => {
+    const cleanup = window.electronAPI.onSessionListRefreshStateChanged((workspaceId, isRefreshing) => {
+      setSessionListRefreshWorkspaceIds(prev => {
+        const hasWorkspace = prev.has(workspaceId)
+        if (isRefreshing === hasWorkspace) return prev
+
+        const next = new Set(prev)
+        if (isRefreshing) next.add(workspaceId)
+        else next.delete(workspaceId)
+        return next
+      })
+    })
+
+    return cleanup
+  }, [])
 
   // Stale session watchdog — catches stuck sessions that the reconnect protocol misses
   const { trackSessionActivity } = useStaleSessionRecovery({
@@ -2346,6 +2399,9 @@ export default function App() {
 
   // Show splash until exit animation completes
   const showSplash = !splashHidden
+  const isActiveSessionListLoading =
+    sessionListLoading ||
+    (!!windowWorkspaceId && sessionListRefreshWorkspaceIds.has(windowWorkspaceId))
 
   // Ready state - main app with splash overlay during data loading
   return (
@@ -2400,7 +2456,7 @@ export default function App() {
                   defaultLayout={[20, 32, 48]}
                   menuNewChatTrigger={menuNewChatTrigger}
                   isFocusedMode={isFocusedMode}
-                  isSessionListLoading={sessionListLoading}
+                  isSessionListLoading={isActiveSessionListLoading}
                   onProjectSessionSnapshotsReadyChange={setProjectSessionSnapshotsReady}
                 />
               )}

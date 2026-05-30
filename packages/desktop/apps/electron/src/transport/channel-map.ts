@@ -52,6 +52,10 @@ export const CHANNEL_MAP = {
   onUnreadSummaryChanged: listener(
     RPC_CHANNELS.sessions.UNREAD_SUMMARY_CHANGED,
   ),
+  onSessionsChanged: listener(RPC_CHANNELS.sessions.LIST_CHANGED),
+  onSessionListRefreshStateChanged: listener(
+    RPC_CHANNELS.sessions.LIST_REFRESH_STATE_CHANGED,
+  ),
 
   // Transport reliability
   onReconnected: listener('__transport:reconnected'),

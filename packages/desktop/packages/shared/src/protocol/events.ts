@@ -19,6 +19,11 @@ export interface BroadcastEventMap {
   // Session events (workspace-scoped via broadcastToWorkspace)
   [RPC_CHANNELS.sessions.EVENT]: [event: SessionEvent]
   [RPC_CHANNELS.sessions.UNREAD_SUMMARY_CHANGED]: [summary: UnreadSummary]
+  [RPC_CHANNELS.sessions.LIST_CHANGED]: [workspaceId: string]
+  [RPC_CHANNELS.sessions.LIST_REFRESH_STATE_CHANGED]: [
+    workspaceId: string,
+    isRefreshing: boolean,
+  ]
   [RPC_CHANNELS.sessions.FILES_CHANGED]: [sessionId: string]
 
   // Domain change broadcasts (global via broadcastToAll)

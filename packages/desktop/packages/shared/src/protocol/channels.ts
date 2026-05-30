@@ -23,6 +23,8 @@ export const RPC_CHANNELS = {
     GET_UNREAD_SUMMARY: 'sessions:getUnreadSummary',
     MARK_ALL_READ: 'sessions:markAllRead',
     UNREAD_SUMMARY_CHANGED: 'sessions:unreadSummaryChanged',
+    LIST_CHANGED: 'sessions:listChanged',
+    LIST_REFRESH_STATE_CHANGED: 'sessions:listRefreshStateChanged',
     CREATE: 'sessions:create',
     DELETE: 'sessions:delete',
     GET_MESSAGES: 'sessions:getMessages',

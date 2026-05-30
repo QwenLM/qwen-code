@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentBackend } from '@craft-agent/shared/agent/backend';
 import type { Workspace } from '@craft-agent/shared/config';
+import { RPC_CHANNELS } from '@craft-agent/shared/protocol';
 import {
   loadSession,
   saveSession,
@@ -220,6 +221,15 @@ describe('Qwen native history loading', () => {
         }) as unknown as AgentBackend,
     });
 
+    const pushedEvents: Array<{
+      channel: string;
+      target: unknown;
+      args: unknown[];
+    }> = [];
+    manager.setEventSink((channel, target, ...args) => {
+      pushedEvents.push({ channel, target, args });
+    });
+
     const workspace: Workspace = {
       id: 'workspace-qwen',
       name: 'qwen-code',
@@ -292,6 +302,11 @@ describe('Qwen native history loading', () => {
     expect(listed?.createdAt).toBe(createdTimestamp);
     expect(listed?.lastUsedAt).toBe(timestamp);
     expect(listed?.lastMessageAt).toBe(timestamp);
+    expect(pushedEvents).toContainEqual({
+      channel: RPC_CHANNELS.sessions.LIST_CHANGED,
+      target: { to: 'all' },
+      args: [workspace.id],
+    });
   });
 
   it('does not persist existing Qwen provider metadata during list refresh', async () => {

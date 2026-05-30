@@ -467,6 +467,10 @@ export interface ElectronAPI {
   onUnreadSummaryChanged(
     callback: (summary: UnreadSummary) => void,
   ): () => void;
+  onSessionsChanged(callback: (workspaceId: string) => void): () => void;
+  onSessionListRefreshStateChanged(
+    callback: (workspaceId: string, isRefreshing: boolean) => void,
+  ): () => void;
 
   // File operations
   readFile(path: string): Promise<string>;

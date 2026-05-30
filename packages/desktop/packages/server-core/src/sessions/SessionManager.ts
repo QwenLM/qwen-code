@@ -2213,11 +2213,13 @@ export class SessionManager implements ISessionManager {
         )
       })
       .finally(() => {
+        this.emitSessionListRefreshStateChanged(workspace.id, false)
         this.externalSessionListSyncAt.set(workspace.id, Date.now())
         this.externalSessionListSyncPromises.delete(workspace.id)
       })
 
     this.externalSessionListSyncPromises.set(workspace.id, syncPromise)
+    this.emitSessionListRefreshStateChanged(workspace.id, true)
     await syncPromise
   }
 
@@ -2281,18 +2283,22 @@ export class SessionManager implements ISessionManager {
       if (didUpsert) seenSdkSessionIds.add(info.sessionId)
     }
 
-    if (reachedEnd) {
-      await this.removeMissingExternalListedSessions(
+    const removedMissingSessions = reachedEnd
+      ? await this.removeMissingExternalListedSessions(
         workspace,
         backendContext.connection.slug,
         seenSdkSessionIds,
       )
-    }
+      : false
 
     if (listedSessions.length > 0) {
       sessionLog.info(
         `Synced ${seenSdkSessionIds.size} provider session(s) for workspace ${workspace.id}`,
       )
+    }
+
+    if (seenSdkSessionIds.size > 0 || removedMissingSessions) {
+      this.emitSessionListChanged(workspace.id)
     }
   }
 
@@ -3064,7 +3070,9 @@ export class SessionManager implements ISessionManager {
     workspace: Workspace,
     connectionSlug: string,
     seenSdkSessionIds: Set<string>,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let removed = false
+
     for (const managed of Array.from(this.sessions.values())) {
       if (managed.workspace.id !== workspace.id) continue
       if (this.resolveExternalSessionConnectionSlug(managed) !== connectionSlug)
@@ -3074,12 +3082,15 @@ export class SessionManager implements ISessionManager {
       if (managed.isProcessing) continue
 
       this.sessions.delete(managed.id)
+      removed = true
       unregisterSessionScopedToolCallbacks(managed.id)
       deleteStoredSession(workspace.rootPath, managed.id)
 
       const automationSystem = this.automationSystems.get(workspace.rootPath)
       automationSystem?.removeSessionMetadata(managed.id)
     }
+
+    return removed
   }
 
   // Persist a session to disk (async with debouncing)
@@ -3598,6 +3609,30 @@ export class SessionManager implements ISessionManager {
       RPC_CHANNELS.sessions.UNREAD_SUMMARY_CHANGED,
       { to: 'all' },
       summary,
+    )
+  }
+
+  private emitSessionListChanged(workspaceId: string): void {
+    if (!this.eventSink) return
+
+    this.eventSink(
+      RPC_CHANNELS.sessions.LIST_CHANGED,
+      { to: 'all' },
+      workspaceId,
+    )
+  }
+
+  private emitSessionListRefreshStateChanged(
+    workspaceId: string,
+    isRefreshing: boolean,
+  ): void {
+    if (!this.eventSink) return
+
+    this.eventSink(
+      RPC_CHANNELS.sessions.LIST_REFRESH_STATE_CHANGED,
+      { to: 'all' },
+      workspaceId,
+      isRefreshing,
     )
   }
 

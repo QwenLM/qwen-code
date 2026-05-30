@@ -189,6 +189,24 @@ export const mockElectronAPI = {
     }
   },
 
+  onSessionsChanged: (callback: (workspaceId: string) => void) => {
+    console.log('[Playground] onSessionsChanged subscribed')
+    void callback
+    return () => {
+      console.log('[Playground] onSessionsChanged unsubscribed')
+    }
+  },
+
+  onSessionListRefreshStateChanged: (
+    callback: (workspaceId: string, isRefreshing: boolean) => void,
+  ) => {
+    console.log('[Playground] onSessionListRefreshStateChanged subscribed')
+    void callback
+    return () => {
+      console.log('[Playground] onSessionListRefreshStateChanged unsubscribed')
+    }
+  },
+
   browserPane: {
     focus: async (instanceId: string) => {
       console.log('[Playground] browserPane.focus called:', instanceId)
