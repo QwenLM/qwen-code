@@ -350,7 +350,7 @@ describe('tokenUsageService', () => {
       });
       expect(stderrSpy).toHaveBeenLastCalledWith(
         '[token-usage] Write failed (ENOSPC):',
-        'disk full (1 similar suppressed in last window)',
+        'disk full (1 similar suppressed since last log)',
       );
     } finally {
       writeSpy.mockRestore();
