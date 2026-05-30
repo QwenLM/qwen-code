@@ -135,20 +135,24 @@ export function setUpdateHandler(
     }, 60000);
   };
 
-  const handleUpdateFailed = () => {
+  const handleUpdateFailed = (data: { message?: string }) => {
     setUpdateInfo(null);
     addItemOrDefer({
       type: MessageType.ERROR,
-      text: `Automatic update failed. Please try updating manually`,
+      text:
+        data?.message ||
+        'Automatic update failed. Please try updating manually',
     });
   };
 
-  const handleUpdateSuccess = () => {
+  const handleUpdateSuccess = (data: { message?: string }) => {
     successfullyInstalled = true;
     setUpdateInfo(null);
     addItemOrDefer({
       type: MessageType.INFO,
-      text: `Update successful! The new version will be used on your next run.`,
+      text:
+        data?.message ||
+        'Update successful! The new version will be used on your next run.',
     });
   };
 
