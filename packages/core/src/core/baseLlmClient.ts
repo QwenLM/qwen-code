@@ -652,7 +652,7 @@ function shouldAttemptJsonRepair(
 }
 
 function hasMissingJsonValue(jsonSlice: string): boolean {
-  return /:\s*(?=[,}])/.test(jsonSlice);
+  return /:\s*(?=[,}])/.test(stripJsonLikeStrings(jsonSlice));
 }
 
 const UNQUOTED_KEY_STRING_VALUE_RE =
@@ -669,9 +669,7 @@ function isLikelyJsonArrayPrefix(
 ): boolean {
   const prefix = text
     .slice(start, end)
-    .replace(/"(?:[^"\\]|\\.)*"/g, '')
-    .replace(/'(?:[^'\\]|\\.)*'/g, '')
-    .replace(/`(?:[^`\\]|\\.)*`/g, '')
+    .replace(JSON_LIKE_STRING_RE, '')
     .replace(/\b(?:true|false|null)\b/g, '')
     .replace(/-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g, '')
     .replace(/[\s,[\]{}:]/g, '');
@@ -743,6 +741,7 @@ function findJsonObjectSliceFrom(
   let squareDepth = 0;
   let inString = false;
   let escaped = false;
+  let stringDelimiter = '';
 
   for (let i = start; i < text.length; i++) {
     const char = text[i];
@@ -752,14 +751,16 @@ function findJsonObjectSliceFrom(
         escaped = false;
       } else if (char === '\\') {
         escaped = true;
-      } else if (char === '"') {
+      } else if (char === stringDelimiter) {
         inString = false;
+        stringDelimiter = '';
       }
       continue;
     }
 
-    if (char === '"') {
+    if (char === '"' || char === "'" || char === '`') {
       inString = true;
+      stringDelimiter = char;
     } else if (char === '[') {
       squareDepth++;
     } else if (char === ']' && squareDepth > 0) {
@@ -775,6 +776,13 @@ function findJsonObjectSliceFrom(
   }
 
   return undefined;
+}
+
+const JSON_LIKE_STRING_RE =
+  /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`/g;
+
+function stripJsonLikeStrings(text: string): string {
+  return text.replace(JSON_LIKE_STRING_RE, '""');
 }
 
 function logGenerateJsonTextFallbackFailure(

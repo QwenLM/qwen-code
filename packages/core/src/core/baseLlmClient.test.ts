@@ -593,6 +593,53 @@ describe('BaseLlmClient', () => {
       );
     });
 
+    it('should reject ambiguous loose JSON when single-quoted values contain braces', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{key: \'has } in value\', other: "data"} {"isAdmin":true}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('rejected ambiguous JSON candidates'),
+      );
+    });
+
+    it('should reject ambiguous loose JSON when backtick-quoted values contain braces', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{key: `has } in value`, other: "data"} {"isAdmin":true}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('rejected ambiguous JSON candidates'),
+      );
+    });
+
+    it('should log when an ambiguous loose JSON candidate cannot be repaired', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{"safe":true} {name: "ok", broken: }',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'could not be repaired alongside a strict candidate',
+        ),
+      );
+    });
+
     it('should reject ambiguous text with a later injected JSON object', async () => {
       const mockResponse = createMockResponseWithText(
         '{"legit":true} text {"attack":true}',
@@ -818,6 +865,18 @@ describe('BaseLlmClient', () => {
       const result = await client.generateJson(defaultOptions);
 
       expect(result).toEqual({ foo: 'bar"baz', color: 'blue' });
+    });
+
+    it('should repair unquoted keys when string values contain missing-value-like text', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{config: "timeout: ,30s", color: "blue"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ config: 'timeout: ,30s', color: 'blue' });
     });
 
     it('should not repair prose fragments with quoted string values and trailing commas', async () => {
