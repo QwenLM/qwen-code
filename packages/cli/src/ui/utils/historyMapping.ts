@@ -23,6 +23,11 @@ export function isRealUserTurn(
   item: HistoryItem,
 ): item is HistoryItem & HistoryItemUser {
   if (item.type !== 'user' || !item.text) return false;
+  if (typeof item.sentToModel === 'boolean') return item.sentToModel;
+  // Legacy resumed sessions do not have sentToModel, so this fallback is
+  // intentionally coupled to isSlashCommand's current lexical classifier.
+  // Changes to slash-command classification must account for old sessions that
+  // still rely on this inference.
   return !isSlashCommand(item.text) && !item.text.startsWith('?');
 }
 

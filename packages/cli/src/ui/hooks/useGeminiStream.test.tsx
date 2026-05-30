@@ -626,7 +626,8 @@ describe('useGeminiStream', () => {
       queuedPrompt,
     );
     const queuedPromptAddItemIndex = mockAddItem.mock.calls.findIndex(
-      ([item]) => item.type === MessageType.USER && item.text === queuedPrompt,
+      ([item]) =>
+        item.type === MessageType.NOTIFICATION && item.text === queuedPrompt,
     );
     expect(queuedPromptAddItemIndex).toBeGreaterThanOrEqual(0);
     expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
@@ -636,7 +637,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mock.invocationCallOrder[0],
     );
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.USER, text: queuedPrompt },
+      { type: MessageType.NOTIFICATION, text: queuedPrompt },
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
@@ -731,7 +732,7 @@ describe('useGeminiStream', () => {
     });
 
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.USER, text: queuedPrompt },
+      { type: MessageType.NOTIFICATION, text: queuedPrompt },
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(

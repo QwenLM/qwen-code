@@ -1655,6 +1655,37 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('OutboundCorrelation Configuration', () => {
+    // Default-to-false is security-relevant — controls whether
+    // `traceparent` is written onto outbound LLM/fetch request streams.
+    it.each<{
+      label: string;
+      outboundCorrelation: ConfigParameters['outboundCorrelation'];
+      expected: boolean;
+    }>([
+      { label: 'omitted', outboundCorrelation: undefined, expected: false },
+      { label: 'empty object', outboundCorrelation: {}, expected: false },
+      {
+        label: 'explicit true',
+        outboundCorrelation: { propagateTraceContext: true },
+        expected: true,
+      },
+      {
+        label: 'explicit false',
+        outboundCorrelation: { propagateTraceContext: false },
+        expected: false,
+      },
+    ])(
+      'propagateTraceContext resolves to $expected when $label',
+      ({ outboundCorrelation, expected }) => {
+        const config = new Config({ ...baseParams, outboundCorrelation });
+        expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(
+          expected,
+        );
+      },
+    );
+  });
+
   describe('UseRipgrep Configuration', () => {
     it('should default useRipgrep to true when not provided', () => {
       const config = new Config(baseParams);

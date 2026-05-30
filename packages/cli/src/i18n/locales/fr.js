@@ -1859,6 +1859,7 @@ export default {
   'Auto-memory: {{status}}': 'Mémoire automatique : {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Rêve automatique : {{status}} · {{lastDream}} · /dream pour lancer',
+  'Auto-skill: {{status}}': 'Compétence automatique : {{status}}',
   never: 'jamais',
   on: 'activé',
   off: 'désactivé',
