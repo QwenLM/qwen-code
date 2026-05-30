@@ -1394,27 +1394,35 @@ function cleanOrphanedToolCalls(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const cleaned: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-  const toolCallIds = new Set<string>();
-  const toolResponseIds = new Set<string>();
+  const adjacentToolResponseIds = new Set<string>();
 
-  // First pass: collect all tool call IDs and tool response IDs
-  for (const message of messages) {
+  // First pass: collect tool responses that directly answer the previous assistant turn.
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
     if (
       message.role === 'assistant' &&
       'tool_calls' in message &&
       message.tool_calls
     ) {
-      for (const toolCall of message.tool_calls) {
-        if (toolCall.id) {
-          toolCallIds.add(toolCall.id);
+      const expectedToolCallIds = new Set(
+        message.tool_calls
+          .map((toolCall) => toolCall.id)
+          .filter((id): id is string => Boolean(id)),
+      );
+
+      for (let j = i + 1; j < messages.length; j++) {
+        const maybeToolResponse = messages[j];
+        if (maybeToolResponse.role !== 'tool') {
+          break;
+        }
+        if (
+          'tool_call_id' in maybeToolResponse &&
+          maybeToolResponse.tool_call_id &&
+          expectedToolCallIds.has(maybeToolResponse.tool_call_id)
+        ) {
+          adjacentToolResponseIds.add(maybeToolResponse.tool_call_id);
         }
       }
-    } else if (
-      message.role === 'tool' &&
-      'tool_call_id' in message &&
-      message.tool_call_id
-    ) {
-      toolResponseIds.add(message.tool_call_id);
     }
   }
 
@@ -1427,7 +1435,8 @@ function cleanOrphanedToolCalls(
     ) {
       // Filter out tool calls that don't have corresponding responses
       const validToolCalls = message.tool_calls.filter(
-        (toolCall) => toolCall.id && toolResponseIds.has(toolCall.id),
+        (toolCall) =>
+          toolCall.id && adjacentToolResponseIds.has(toolCall.id),
       );
 
       if (validToolCalls.length > 0) {
@@ -1459,7 +1468,7 @@ function cleanOrphanedToolCalls(
       message.tool_call_id
     ) {
       // Only keep tool responses that have corresponding tool calls
-      if (toolCallIds.has(message.tool_call_id)) {
+      if (adjacentToolResponseIds.has(message.tool_call_id)) {
         cleaned.push(message);
       }
     } else {

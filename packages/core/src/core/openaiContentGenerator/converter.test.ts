@@ -3448,6 +3448,104 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('mergeConsecutiveAssistantMessages', () => {
+    it('drops tool results that are not adjacent to their assistant tool call', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_a',
+                  name: 'tool_a',
+                  args: {},
+                },
+              },
+              {
+                functionCall: {
+                  id: 'call_b',
+                  name: 'tool_b',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_a',
+                  name: 'tool_a',
+                  response: { output: 'result_a' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [{ text: 'intervening user message' }],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_c',
+                  name: 'tool_c',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_c',
+                  name: 'tool_c',
+                  response: { output: 'result_c' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_b',
+                  name: 'tool_b',
+                  response: { output: 'late_result_b' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const toolMessages = messages.filter((m) => m.role === 'tool');
+      expect(
+        toolMessages.map((m) => (m as { tool_call_id: string }).tool_call_id),
+      ).toEqual(['call_a', 'call_c']);
+
+      const assistantMessages = messages.filter((m) => m.role === 'assistant');
+      expect(
+        (
+          assistantMessages[0] as {
+            tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
+          }
+        ).tool_calls?.map((toolCall) => toolCall.id),
+      ).toEqual(['call_a']);
+    });
+
     it('should merge two consecutive assistant messages with string content', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
