@@ -1,9 +1,9 @@
 /**
  * Auto-update module using electron-updater
  *
- * Handles checking for updates, downloading, and installing via the standard
- * electron-updater library. Updates are served from https://agents.craft.do/electron/latest
- * using the generic provider (YAML manifests + binaries on R2/S3).
+ * Auto-update is disabled for this fork until we have an update server we own.
+ * Keep the public API in place so renderer/main callers fail closed instead of
+ * accidentally reaching the upstream Craft update feed.
  *
  * Platform behavior:
  * - macOS: Downloads zip, extracts and swaps app bundle atomically
@@ -33,6 +33,7 @@ import type { EventSink } from '@craft-agent/server-core/transport'
 const PLATFORM = platform()
 const IS_MAC = PLATFORM === 'darwin'
 const IS_WINDOWS = PLATFORM === 'win32'
+const AUTO_UPDATE_ENABLED = false
 
 // Get the update cache directory path (for file watcher fallback on macOS)
 // electron-updater uses these paths:
@@ -111,11 +112,11 @@ function broadcastDownloadProgress(progress: number): void {
 
 // ─── Configure electron-updater ───────────────────────────────────────────────
 
-// Auto-download updates in the background after detection
-autoUpdater.autoDownload = true
+// Do not download or install updates until an owned update server is configured.
+autoUpdater.autoDownload = AUTO_UPDATE_ENABLED
 
-// Install on app quit (if update is downloaded but user hasn't clicked "Restart")
-autoUpdater.autoInstallOnAppQuit = true
+// Prevent cached upstream downloads from being applied on quit.
+autoUpdater.autoInstallOnAppQuit = AUTO_UPDATE_ENABLED
 
 // Use the logger for electron-updater internal logging
 autoUpdater.logger = {
@@ -314,6 +315,17 @@ function checkForExistingDownload(): { exists: boolean; version?: string } {
  * @param options.autoDownload - If false, only checks without downloading (for manual "Check Now")
  */
 export async function checkForUpdates(options: CheckOptions = {}): Promise<UpdateInfo> {
+  if (!AUTO_UPDATE_ENABLED) {
+    updateInfo = {
+      available: false,
+      currentVersion: getAppVersion(),
+      latestVersion: null,
+      downloadState: 'idle',
+      downloadProgress: 0,
+    }
+    return getUpdateInfo()
+  }
+
   const { autoDownload = true } = options
 
   // Temporarily override autoDownload for this check if needed
@@ -369,6 +381,10 @@ export async function checkForUpdates(options: CheckOptions = {}): Promise<Updat
  * Then relaunches the app automatically.
  */
 export async function installUpdate(): Promise<void> {
+  if (!AUTO_UPDATE_ENABLED) {
+    throw new Error('Auto-update is disabled')
+  }
+
   if (updateInfo.downloadState !== 'ready') {
     throw new Error('No update ready to install')
   }
@@ -413,6 +429,11 @@ export interface UpdateOnLaunchResult {
  * - Auto-downloads if update available
  */
 export async function checkForUpdatesOnLaunch(): Promise<UpdateOnLaunchResult> {
+  if (!AUTO_UPDATE_ENABLED) {
+    mainLog.info('[auto-update] Skipping auto-update; disabled until an owned update server is configured')
+    return { action: 'skipped', reason: 'disabled' }
+  }
+
   mainLog.info('[auto-update] Checking for updates on launch...')
 
   const info = await checkForUpdates({ autoDownload: true })

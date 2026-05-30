@@ -1,8 +1,13 @@
 import { debug } from "../utils/debug";
 
-const VERSIONS_URL = 'https://agents.craft.do/electron';
+const VERSIONS_URL: string | null = null;
 
 export async function getLatestVersion(): Promise<string | null> {
+    if (VERSIONS_URL == null) {
+      debug('[manifest] Update manifest fetch is disabled');
+      return null;
+    }
+
     try {
       const response = await fetch(`${VERSIONS_URL}/latest`);
       const data = await response.json();
@@ -19,6 +24,11 @@ export async function getLatestVersion(): Promise<string | null> {
 }
 
 export async function getManifest(version: string): Promise<VersionManifest | null> {
+    if (VERSIONS_URL == null) {
+        debug(`[manifest] Update manifest fetch is disabled for version: ${version}`);
+        return null;
+    }
+
     try {
         const url = `${VERSIONS_URL}/${version}/manifest.json`;
         debug(`[manifest] Getting manifest for version: ${url}`);

@@ -365,19 +365,6 @@ export function TopBar({
                       </StyledDropdownMenuSubTrigger>
                       <StyledDropdownMenuSubContent>
                         <StyledDropdownMenuItem
-                          onClick={() => window.electronAPI.checkForUpdates()}
-                        >
-                          <Icons.Download className="h-3.5 w-3.5" />
-                          Check for Updates
-                        </StyledDropdownMenuItem>
-                        <StyledDropdownMenuItem
-                          onClick={() => window.electronAPI.installUpdate()}
-                        >
-                          <Icons.Download className="h-3.5 w-3.5" />
-                          Install Update
-                        </StyledDropdownMenuItem>
-                        <StyledDropdownMenuSeparator />
-                        <StyledDropdownMenuItem
                           onClick={() =>
                             window.electronAPI.menuToggleDevTools()
                           }

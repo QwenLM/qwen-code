@@ -6,7 +6,7 @@
  * Settings:
  * - Notifications
  * - Network (proxy)
- * - About (version, updates)
+ * - About (version)
  *
  * Note: AI settings (connections, model, thinking) have been moved to AiSettingsPage.
  * Note: Appearance settings (theme, font) have been moved to AppearanceSettingsPage.
@@ -20,6 +20,7 @@ import { Button } from '@/components/ui/button'
 import { HeaderMenu } from '@/components/ui/HeaderMenu'
 import { routes } from '@/lib/navigate'
 import { Spinner } from '@craft-agent/ui'
+import { APP_VERSION } from '@craft-agent/shared/branding'
 import type { DetailsPageMeta } from '@/lib/navigation-registry'
 import type { NetworkProxySettings } from '../../../shared/types'
 
@@ -31,7 +32,6 @@ import {
   SettingsToggle,
   SettingsInput,
 } from '@/components/settings'
-import { useUpdateChecker } from '@/hooks/useUpdateChecker'
 
 export const meta: DetailsPageMeta = {
   navigator: 'settings',
@@ -109,20 +109,6 @@ export default function AppSettingsPage() {
   const [savedProxyForm, setSavedProxyForm] = useState<ProxyFormState>(EMPTY_PROXY_FORM)
   const [proxyError, setProxyError] = useState<string | undefined>()
   const [isSavingProxy, setIsSavingProxy] = useState(false)
-
-  // Auto-update state (Check Now / Update Ready only shown in Electron, not WebUI)
-  const isElectron = window.electronAPI.getRuntimeEnvironment() === 'electron'
-  const updateChecker = useUpdateChecker()
-  const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false)
-
-  const handleCheckForUpdates = useCallback(async () => {
-    setIsCheckingForUpdates(true)
-    try {
-      await updateChecker.checkForUpdates()
-    } finally {
-      setIsCheckingForUpdates(false)
-    }
-  }, [updateChecker])
 
   // Load settings on mount
   const loadSettings = useCallback(async () => {
@@ -314,45 +300,10 @@ export default function AppSettingsPage() {
                   <SettingsRow label={t("settings.about.version")}>
                     <div className="flex items-center gap-2">
                       <span className="text-muted-foreground">
-                        {updateChecker.updateInfo?.currentVersion ?? t("common.loading")}
+                        {APP_VERSION}
                       </span>
-                      {isElectron && updateChecker.isDownloading && updateChecker.updateInfo?.latestVersion && (
-                        <div className="flex items-center gap-2 text-muted-foreground text-sm">
-                          <Spinner className="w-3 h-3" />
-                          <span>{t("settings.about.downloading", { version: updateChecker.updateInfo.latestVersion, percent: updateChecker.downloadProgress })}</span>
-                        </div>
-                      )}
                     </div>
                   </SettingsRow>
-                  {isElectron && (
-                    <SettingsRow label={t("settings.about.checkForUpdates")}>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleCheckForUpdates}
-                        disabled={isCheckingForUpdates}
-                      >
-                        {isCheckingForUpdates ? (
-                          <>
-                            <Spinner className="mr-1.5" />
-                            {t("common.checking")}
-                          </>
-                        ) : (
-                          t("settings.about.checkNow")
-                        )}
-                      </Button>
-                    </SettingsRow>
-                  )}
-                  {isElectron && updateChecker.isReadyToInstall && updateChecker.updateInfo?.latestVersion && (
-                    <SettingsRow label={t("settings.about.updateReady")}>
-                      <Button
-                        size="sm"
-                        onClick={updateChecker.installUpdate}
-                      >
-                        {t("settings.about.restartToUpdate", { version: updateChecker.updateInfo.latestVersion })}
-                      </Button>
-                    </SettingsRow>
-                  )}
                 </SettingsCard>
               </SettingsSection>
             </div>
