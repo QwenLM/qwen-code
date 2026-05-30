@@ -10,7 +10,7 @@ $RootDir = Split-Path -Parent (Split-Path -Parent $ElectronDir)
 # Configuration
 $BunVersion = "bun-v1.3.9"  # Pinned version for reproducible builds
 
-Write-Host "=== Building Qwen Code Windows Installer using electron-builder ===" -ForegroundColor Cyan
+Write-Host "=== Building Qwen Code Desktop Windows Installer using electron-builder ===" -ForegroundColor Cyan
 
 # Debug: System information
 Write-Host ""

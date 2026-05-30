@@ -399,7 +399,7 @@ function getElectronEnv(): Record<string, string> {
     CRAFT_CONFIG_DIR: process.env.CRAFT_CONFIG_DIR || '',
     CRAFT_USER_DATA_DIR: process.env.CRAFT_USER_DATA_DIR || '',
     CRAFT_SERVER_LOCK_FILE: process.env.CRAFT_SERVER_LOCK_FILE || '',
-    CRAFT_APP_NAME: process.env.CRAFT_APP_NAME || 'Qwen Code',
+    CRAFT_APP_NAME: process.env.CRAFT_APP_NAME || 'Qwen Code Desktop',
     CRAFT_DEEPLINK_SCHEME: process.env.CRAFT_DEEPLINK_SCHEME || 'craftagents',
     CRAFT_INSTANCE_NUMBER: process.env.CRAFT_INSTANCE_NUMBER || '',
   };

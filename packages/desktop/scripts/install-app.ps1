@@ -1,18 +1,20 @@
-# Qwen Code Windows Installer
-# Usage: irm https://agents.craft.do/install-app.ps1 | iex
+# Qwen Code Desktop Windows Installer
+# Usage: disabled until an owned update server is configured
 
 & {
 $ErrorActionPreference = "Stop"
 
-$VERSIONS_URL = "https://agents.craft.do/electron"
+$VERSIONS_URL = ""
 $DOWNLOAD_DIR = "$env:TEMP\qwen-code-install"
-$APP_NAME = "Qwen Code"
+$APP_NAME = "Qwen Code Desktop"
 
 # Colors for output
 function Write-Info { Write-Host "> $args" -ForegroundColor Blue }
 function Write-Success { Write-Host "> $args" -ForegroundColor Green }
 function Write-Warn { Write-Host "! $args" -ForegroundColor Yellow }
 function Write-Err { Write-Host "x $args" -ForegroundColor Red; exit 1 }
+
+Write-Err "Desktop installer is disabled until an owned update server is configured."
 
 # Check for Windows
 if ($env:OS -ne "Windows_NT") {
@@ -58,7 +60,7 @@ Write-Info "Latest version: $version"
 # Parse YAML to extract sha512, url (filename), and size for our architecture
 # YAML format:
 #   files:
-#     - url: Qwen-Code-x64.exe
+#     - url: Qwen-Code-Desktop-x64.exe
 #       sha512: <base64>
 #       size: 123456789
 #       arch: x64
@@ -108,7 +110,7 @@ if (-not $checksum -or $checksum.Length -lt 80) {
 
 # Use default filename if not found
 if (-not $filename) {
-    $filename = "Qwen-Code-$arch.exe"
+    $filename = "Qwen-Code-Desktop-$arch.exe"
 }
 
 $installerUrl = "$VERSIONS_URL/latest/$filename"
@@ -192,9 +194,9 @@ if ($actualHash -ne $checksum) {
 Write-Success "Checksum verified!"
 
 # Close the app if it's running
-$process = Get-Process -Name "Qwen Code" -ErrorAction SilentlyContinue
+$process = Get-Process -Name "Qwen Code Desktop", "Qwen Code" -ErrorAction SilentlyContinue
 if ($process) {
-    Write-Info "Closing Qwen Code..."
+    Write-Info "Closing Qwen Code Desktop..."
     $process | Stop-Process -Force
     Start-Sleep -Seconds 2
 }
@@ -231,7 +233,7 @@ Write-Info "Adding 'qwen-code' command to PATH..."
 
 $binDir = "$env:LOCALAPPDATA\Qwen Code\bin"
 $cmdFile = "$binDir\qwen-code.cmd"
-$exePath = "$env:LOCALAPPDATA\Programs\Qwen Code\Qwen Code.exe"
+$exePath = "$env:LOCALAPPDATA\Programs\Qwen Code Desktop\Qwen Code Desktop.exe"
 
 # Create bin directory
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null
@@ -255,7 +257,7 @@ Write-Host "--------------------------------------------------------------------
 Write-Host ""
 Write-Success "Installation complete!"
 Write-Host ""
-Write-Host "  Qwen Code has been installed."
+Write-Host "  Qwen Code Desktop has been installed."
 Write-Host ""
 Write-Host "  Launch from:"
 Write-Host "    - Start Menu or desktop shortcut"

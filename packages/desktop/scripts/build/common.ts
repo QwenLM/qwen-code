@@ -500,10 +500,10 @@ export async function loadEnvFile(config: BuildConfig): Promise<void> {
 export function getArtifactName(platform: Platform, arch: Arch): string {
   switch (platform) {
     case 'darwin':
-      return `Qwen-Code-${arch}.dmg`;
+      return `Qwen-Code-Desktop-${arch}.dmg`;
     case 'win32':
-      return `Qwen-Code-${arch}.exe`;
+      return `Qwen-Code-Desktop-${arch}.exe`;
     case 'linux':
-      return `Qwen-Code-${arch}.AppImage`;
+      return `Qwen-Code-Desktop-${arch}.AppImage`;
   }
 }

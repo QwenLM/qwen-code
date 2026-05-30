@@ -2,7 +2,7 @@
 
 set -e
 
-VERSIONS_URL="https://agents.craft.do/electron"
+VERSIONS_URL=""
 DOWNLOAD_DIR="$HOME/.craft-agent/downloads"
 
 # Colors for output
@@ -17,6 +17,8 @@ info() { printf "%b\n" "${BLUE}>${NC} $1"; }
 success() { printf "%b\n" "${GREEN}>${NC} $1"; }
 warn() { printf "%b\n" "${YELLOW}!${NC} $1"; }
 error() { printf "%b\n" "${RED}x${NC} $1"; exit 1; }
+
+error "Desktop installer is disabled until an owned update server is configured."
 
 # Detect OS
 OS="$(uname -s)"
@@ -142,7 +144,7 @@ esac
 # Set platform-specific variables
 if [ "$OS_TYPE" = "darwin" ]; then
     platform="darwin-${arch}"
-    APP_NAME="Qwen Code.app"
+    APP_NAME="Qwen Code Desktop.app"
     INSTALL_DIR="/Applications"
     ext="zip"
     yml_file="latest-mac.yml"
@@ -152,7 +154,7 @@ else
         error "Linux currently only supports x64 architecture. Your architecture: $arch"
     fi
     platform="linux-${arch}"
-    APP_NAME="Qwen-Code-x64.AppImage"
+    APP_NAME="Qwen-Code-Desktop-x64.AppImage"
     INSTALL_DIR="$HOME/.local/bin"
     ext="AppImage"
     yml_file="latest-linux.yml"
@@ -201,7 +203,7 @@ fi
 
 # Use default filename if not found
 if [ -z "$filename" ]; then
-    filename="Qwen-Code-${arch}.${ext}"
+    filename="Qwen-Code-Desktop-${arch}.${ext}"
 fi
 
 info "Expected sha512: ${checksum:0:20}..."
@@ -242,22 +244,27 @@ if [ "$OS_TYPE" = "darwin" ]; then
 
     # Quit the app if it's running (use bundle ID for reliability)
     APP_BUNDLE_ID="com.alibaba.qwen-code"
-    if pgrep -x "Qwen Code" >/dev/null 2>&1; then
-        info "Quitting Qwen Code..."
+    is_app_running() {
+        [ "$(osascript -e "application id \"$APP_BUNDLE_ID\" is running" 2>/dev/null || echo false)" = "true" ]
+    }
+
+    if is_app_running; then
+        info "Quitting Qwen Code Desktop..."
         osascript -e "tell application id \"$APP_BUNDLE_ID\" to quit" 2>/dev/null || true
         # Wait for app to quit (max 5 seconds) - POSIX compatible loop
         i=0
         while [ $i -lt 10 ]; do
-            if ! pgrep -x "Qwen Code" >/dev/null 2>&1; then
+            if ! is_app_running; then
                 break
             fi
             sleep 0.5
             i=$((i + 1))
         done
         # Force kill if still running
-        if pgrep -x "Qwen Code" >/dev/null 2>&1; then
+        if is_app_running; then
             warn "App didn't quit gracefully. Force quitting (unsaved data may be lost)..."
-            pkill -9 -x "Qwen Code" 2>/dev/null || true
+            pkill -9 -f "Qwen Code Desktop.app" 2>/dev/null || true
+            pkill -9 -f "Qwen Code.app" 2>/dev/null || true
             # Wait longer for macOS to release file handles
             sleep 3
         fi
@@ -267,6 +274,10 @@ if [ "$OS_TYPE" = "darwin" ]; then
     if [ -d "$INSTALL_DIR/$APP_NAME" ]; then
         info "Removing previous installation..."
         rm -rf "$INSTALL_DIR/$APP_NAME"
+    fi
+    if [ -d "$INSTALL_DIR/Qwen Code.app" ]; then
+        info "Removing previous Qwen Code installation..."
+        rm -rf "$INSTALL_DIR/Qwen Code.app"
     fi
 
     # Extract ZIP to temp directory
@@ -304,10 +315,10 @@ if [ "$OS_TYPE" = "darwin" ]; then
     echo ""
     success "Installation complete!"
     echo ""
-    printf "%b\n" "  Qwen Code has been installed to ${BOLD}$INSTALL_DIR/$APP_NAME${NC}"
+    printf "%b\n" "  Qwen Code Desktop has been installed to ${BOLD}$INSTALL_DIR/$APP_NAME${NC}"
     echo ""
     printf "%b\n" "  You can launch it from ${BOLD}Applications${NC} or by running:"
-    printf "%b\n" "    ${BOLD}open -a 'Qwen Code'${NC}"
+    printf "%b\n" "    ${BOLD}open -a 'Qwen Code Desktop'${NC}"
     echo ""
 
 else
@@ -317,11 +328,11 @@ else
     # New paths
     APP_DIR="$HOME/.craft-agent/app"
     WRAPPER_PATH="$INSTALL_DIR/qwen-code"
-    APPIMAGE_INSTALL_PATH="$APP_DIR/Qwen-Code-x64.AppImage"
+    APPIMAGE_INSTALL_PATH="$APP_DIR/Qwen-Code-Desktop-x64.AppImage"
 
     # Kill the app if it's running
     if pgrep -f "Qwen-Code.*AppImage" >/dev/null 2>&1; then
-        info "Stopping Qwen Code..."
+        info "Stopping Qwen Code Desktop..."
         pkill -f "Qwen-Code.*AppImage" 2>/dev/null || true
         sleep 2
     fi
@@ -332,6 +343,7 @@ else
 
     # Remove existing AppImage
     [ -f "$APPIMAGE_INSTALL_PATH" ] && rm -f "$APPIMAGE_INSTALL_PATH"
+    [ -f "$APP_DIR/Qwen-Code-x64.AppImage" ] && rm -f "$APP_DIR/Qwen-Code-x64.AppImage"
 
     # Install AppImage
     info "Installing AppImage to $APP_DIR..."
@@ -342,16 +354,16 @@ else
     info "Creating launcher at $WRAPPER_PATH..."
     cat > "$WRAPPER_PATH" << 'WRAPPER_EOF'
 #!/bin/bash
-# Qwen Code launcher - handles Linux-specific AppImage issues
+# Qwen Code Desktop launcher - handles Linux-specific AppImage issues
 
-APPIMAGE_PATH="$HOME/.craft-agent/app/Qwen-Code-x64.AppImage"
+APPIMAGE_PATH="$HOME/.craft-agent/app/Qwen-Code-Desktop-x64.AppImage"
 ELECTRON_CACHE="$HOME/.config/@qwen-code"
 ELECTRON_CACHE_ALT="$HOME/.cache/@qwen-code"
 
 # Verify AppImage exists
 if [ ! -f "$APPIMAGE_PATH" ]; then
-    echo "Error: Qwen Code not found at $APPIMAGE_PATH"
-    echo "Reinstall: curl -fsSL https://agents.craft.do/install-app.sh | bash"
+    echo "Error: Qwen Code Desktop not found at $APPIMAGE_PATH"
+    echo "Reinstall: disabled until an owned update server is configured"
     exit 1
 fi
 

@@ -12,29 +12,29 @@
 
 export interface BrandConfig {
   /** Internal identifier */
-  id: string
+  id: string;
   /** User-visible application name */
-  appName: string
+  appName: string;
   /** macOS/Windows/Linux bundle identifier */
-  appId: string
+  appId: string;
   /** electron-builder productName */
-  productName: string
+  productName: string;
   /** Artifact file-name prefix (no spaces) */
-  artifactPrefix: string
+  artifactPrefix: string;
   /** Copyright line */
-  copyright: string
+  copyright: string;
   /** Git co-author line inserted into commits */
-  coAuthorLine: string
+  coAuthorLine: string;
   /** Name the assistant uses to refer to itself in prompts */
-  selfReferName: string
+  selfReferName: string;
   /** Session viewer base URL */
-  viewerUrl: string
+  viewerUrl: string;
   /** Multi-line credits text shown in the About panel */
-  credits: string
+  credits: string;
   /** One-line credits summary */
-  creditsShort: string
+  creditsShort: string;
   /** Structured credits for custom About dialog */
-  creditsEntries: Array<{ name: string; role: string; url: string }>
+  creditsEntries: Array<{ name: string; role: string; url: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -43,10 +43,10 @@ export interface BrandConfig {
 
 const QWEN_CODE_BRAND: BrandConfig = {
   id: 'qwen-code',
-  appName: 'Qwen Code',
+  appName: 'Qwen Code Desktop',
   appId: 'com.alibaba.qwen-code',
-  productName: 'Qwen Code',
-  artifactPrefix: 'Qwen-Code',
+  productName: 'Qwen Code Desktop',
+  artifactPrefix: 'Qwen-Code-Desktop',
   copyright: 'Copyright © 2026 Alibaba Group.',
   coAuthorLine: 'Co-Authored-By: Qwen Code <agents-noreply@craft.do>',
   selfReferName: 'Qwen Code',
@@ -54,7 +54,7 @@ const QWEN_CODE_BRAND: BrandConfig = {
   credits: '',
   creditsShort: '',
   creditsEntries: [],
-}
+};
 
 const BRANDS: Record<string, BrandConfig> = {
   'qwen-code': QWEN_CODE_BRAND,
@@ -83,20 +83,20 @@ const BRANDS: Record<string, BrandConfig> = {
       },
     ],
   },
-}
+};
 
 /** Active brand, selected by CRAFT_BRAND env var (default: "qwen-code"). */
 export const BRAND: BrandConfig =
-  BRANDS[process.env.CRAFT_BRAND || 'qwen-code'] ?? QWEN_CODE_BRAND
+  BRANDS[process.env.CRAFT_BRAND || 'qwen-code'] ?? QWEN_CODE_BRAND;
 
 // ---------------------------------------------------------------------------
 // App version (renderer-safe — avoids the version barrel which pulls in Node deps)
 // ---------------------------------------------------------------------------
 
-import pkg from '../package.json'
+import pkg from '../package.json';
 
 /** Application version from package.json (safe for renderer/browser use). */
-export const APP_VERSION: string = pkg.version
+export const APP_VERSION: string = pkg.version;
 
 // ---------------------------------------------------------------------------
 // Legacy exports (unchanged, still used by OAuth callback pages etc.)
@@ -108,12 +108,12 @@ export const CRAFT_LOGO = [
   '██████     ██████████ ██████████ ████████   ██████████',
   '██████████ ████████   ██████████ ███████      ██████  ',
   '  ████████ ████  ████ ████  ████ █████        ██████  ',
-] as const
+] as const;
 
 /** Logo as a single string for HTML templates */
 export const CRAFT_LOGO_HTML = CRAFT_LOGO.map((line) => line.trimEnd()).join(
   '\n',
-)
+);
 
 /** Session viewer base URL */
-export const VIEWER_URL = BRAND.viewerUrl
+export const VIEWER_URL = BRAND.viewerUrl;

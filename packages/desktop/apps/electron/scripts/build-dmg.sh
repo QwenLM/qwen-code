@@ -82,7 +82,7 @@ done
 # Configuration
 BUN_VERSION="bun-v1.3.9"  # Pinned version for reproducible builds
 
-echo "=== Building Qwen Code DMG (${ARCH}) using electron-builder ==="
+echo "=== Building Qwen Code Desktop DMG (${ARCH}) using electron-builder ==="
 if [ "$UPLOAD" = true ]; then
     echo "Will upload to S3 after build"
 fi
@@ -167,8 +167,8 @@ fi
 npx electron-builder $BUILDER_ARGS
 
 # 9. Verify the DMG was built
-# electron-builder.yml uses artifactName to output: Qwen-Code-${arch}.dmg
-DMG_NAME="Qwen-Code-${ARCH}.dmg"
+# electron-builder.yml uses artifactName to output: Qwen-Code-Desktop-${arch}.dmg
+DMG_NAME="Qwen-Code-Desktop-${ARCH}.dmg"
 DMG_PATH="$ELECTRON_DIR/release/$DMG_NAME"
 
 if [ ! -f "$DMG_PATH" ]; then

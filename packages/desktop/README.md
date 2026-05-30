@@ -134,11 +134,11 @@ Release builds require signing credentials via environment variables:
 
 All artifacts are written to `apps/electron/release/`:
 
-| Platform | Artifact                                                 |
-| -------- | -------------------------------------------------------- |
-| macOS    | `Qwen-Code-{arm64,x64}.dmg`, `Qwen-Code-{arm64,x64}.zip` |
-| Windows  | `Qwen-Code-x64.exe`                                      |
-| Linux    | `Qwen-Code-x64.AppImage`                                 |
+| Platform | Artifact                                                                 |
+| -------- | ------------------------------------------------------------------------ |
+| macOS    | `Qwen-Code-Desktop-{arm64,x64}.dmg`, `Qwen-Code-Desktop-{arm64,x64}.zip` |
+| Windows  | `Qwen-Code-Desktop-x64.exe`                                              |
+| Linux    | `Qwen-Code-Desktop-x64.AppImage`                                         |
 
 ### What the Build Does
 

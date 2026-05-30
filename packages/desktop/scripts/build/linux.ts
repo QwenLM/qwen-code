@@ -20,7 +20,7 @@ export async function packageLinux(config: BuildConfig): Promise<string> {
 
   // electron-builder uses different arch names: x86_64 for x64, aarch64 for arm64
   const linuxArch = arch === 'x64' ? 'x86_64' : 'aarch64';
-  const builtName = `Qwen-Code-${linuxArch}.AppImage`;
+  const builtName = `Qwen-Code-Desktop-${linuxArch}.AppImage`;
   const builtPath = join(electronDir, 'release', builtName);
 
   if (!existsSync(builtPath)) {
@@ -30,7 +30,7 @@ export async function packageLinux(config: BuildConfig): Promise<string> {
   }
 
   // Rename to our standard naming convention
-  const finalName = `Qwen-Code-${arch}.AppImage`;
+  const finalName = `Qwen-Code-Desktop-${arch}.AppImage`;
   const finalPath = join(electronDir, 'release', finalName);
 
   if (builtPath !== finalPath) {
