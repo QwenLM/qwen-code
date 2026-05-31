@@ -5,7 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
-import { createWriteStream } from 'node:fs';
+import { createWriteStream, statSync } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
@@ -16,6 +16,13 @@ const PROCESS_TIMEOUT_MS = 5000;
 
 // Track which tool works on Linux to avoid redundant checks/failures
 let linuxClipboardTool: 'wl-paste' | 'xclip' | null | undefined;
+
+/**
+ * Reset the cached Linux clipboard tool. Used for testing.
+ */
+export function resetLinuxClipboardTool(): void {
+  linuxClipboardTool = undefined;
+}
 
 /**
  * Detect the Linux clipboard tool.
@@ -66,7 +73,6 @@ async function saveFromCommand(
     const safeResolve = (value: boolean) => {
       if (!resolved) {
         resolved = true;
-        // Cleanup: kill child if still running, destroy file stream
         try {
           if (!child.killed) child.kill();
         } catch {
@@ -81,7 +87,6 @@ async function saveFromCommand(
       }
     };
 
-    // Timeout: kill process if it hangs
     const timer = setTimeout(() => {
       debugLogger.debug(`${command} timed out after ${PROCESS_TIMEOUT_MS}ms`);
       safeResolve(false);
@@ -115,8 +120,7 @@ async function saveFromCommand(
 
       const checkFile = async () => {
         try {
-          const { stat } = await import('node:fs/promises');
-          const stats = await stat(destination);
+          const stats = statSync(destination);
           safeResolve(stats.size > 0);
         } catch {
           safeResolve(false);
@@ -124,11 +128,11 @@ async function saveFromCommand(
       };
 
       if (fileStream.writableFinished) {
-        await checkFile();
+        checkFile();
       } else {
         fileStream.on('finish', checkFile);
-        fileStream.on('close', async () => {
-          if (!resolved) await checkFile();
+        fileStream.on('close', () => {
+          if (!resolved) checkFile();
         });
       }
     });
@@ -144,26 +148,35 @@ async function checkClipboardForImage(
   args: string[],
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'] });
-    let stdout = '';
+    try {
+      const child = spawn(command, args, {
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      let stdout = '';
 
-    // Timeout
-    const timer = setTimeout(() => {
-      child.kill();
-      resolve(false);
-    }, PROCESS_TIMEOUT_MS);
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {
+          /* ignore */
+        }
+        resolve(false);
+      }, PROCESS_TIMEOUT_MS);
 
-    child.stdout.on('data', (data: Buffer) => {
-      stdout += data.toString();
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve(code === 0 && stdout.includes('image/'));
-    });
-    child.on('error', () => {
-      clearTimeout(timer);
+      child.stdout.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        resolve(code === 0 && stdout.includes('image/'));
+      });
+      child.on('error', () => {
+        clearTimeout(timer);
+        resolve(false);
+      });
+    } catch {
       resolve(false);
-    });
+    }
   });
 }
 
@@ -173,7 +186,6 @@ async function checkClipboardForImage(
  * @returns true if clipboard contains an image
  */
 export async function clipboardHasImage(): Promise<boolean> {
-  // Linux: use platform-native tools
   if (process.platform === 'linux') {
     const tool = getLinuxClipboardTool();
     if (tool === 'wl-paste') {
@@ -191,7 +203,6 @@ export async function clipboardHasImage(): Promise<boolean> {
     return false;
   }
 
-  // Fallback: use @teddyzhu/clipboard native module (macOS, Windows)
   try {
     const modName = '@teddyzhu/clipboard';
     const mod = await import(modName);
@@ -208,12 +219,25 @@ export async function clipboardHasImage(): Promise<boolean> {
  */
 async function getWlPasteImageTypes(): Promise<string[]> {
   return new Promise<string[]>((resolve) => {
-    const child = spawn('wl-paste', ['--list-types']);
+    const child = spawn('wl-paste', ['--list-types'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
     let stdout = '';
+
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        /* ignore */
+      }
+      resolve([]);
+    }, PROCESS_TIMEOUT_MS);
+
     child.stdout.on('data', (data: Buffer) => {
       stdout += data.toString();
     });
     child.on('close', () => {
+      clearTimeout(timer);
       resolve(
         stdout
           .trim()
@@ -221,25 +245,30 @@ async function getWlPasteImageTypes(): Promise<string[]> {
           .filter((t) => t.startsWith('image/')),
       );
     });
-    child.on('error', () => resolve([]));
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve([]);
+    });
   });
 }
 
 /**
  * Saves clipboard content to a file using wl-paste (Wayland).
  * Handles both PNG and BMP formats (WSL2 exposes BMP from Windows clipboard).
+ * Returns the saved file path on success, false on failure.
  */
-async function saveFileWithWlPaste(tempFilePath: string): Promise<boolean> {
+async function saveFileWithWlPaste(
+  tempFilePath: string,
+): Promise<string | false> {
   const imageTypes = await getWlPasteImageTypes();
 
-  // Try PNG first
   if (imageTypes.includes('image/png')) {
     const success = await saveFromCommand(
       'wl-paste',
       ['--no-newline', '--type', 'image/png'],
       tempFilePath,
     );
-    if (success) return true;
+    if (success) return tempFilePath;
     try {
       await fs.unlink(tempFilePath);
     } catch {
@@ -247,7 +276,6 @@ async function saveFileWithWlPaste(tempFilePath: string): Promise<boolean> {
     }
   }
 
-  // Try BMP (common in WSL2) and convert to PNG
   if (imageTypes.includes('image/bmp')) {
     const bmpPath = tempFilePath.replace('.png', '.bmp');
     const bmpSuccess = await saveFromCommand(
@@ -256,30 +284,43 @@ async function saveFileWithWlPaste(tempFilePath: string): Promise<boolean> {
       bmpPath,
     );
     if (bmpSuccess) {
-      // Try converting BMP to PNG using Python PIL
       try {
         await new Promise<void>((resolve, reject) => {
-          const child = spawn('python3', [
-            '-c',
-            'import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])',
-            bmpPath,
-            tempFilePath,
-          ]);
+          const child = spawn(
+            'python3',
+            [
+              '-c',
+              'import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])',
+              bmpPath,
+              tempFilePath,
+            ],
+            { stdio: ['ignore', 'ignore', 'ignore'] },
+          );
+          const timer = setTimeout(() => {
+            try {
+              child.kill();
+            } catch {
+              /* ignore */
+            }
+            reject(new Error('python3 timed out'));
+          }, PROCESS_TIMEOUT_MS);
           child.on('close', (code) => {
+            clearTimeout(timer);
             if (code === 0) resolve();
             else reject(new Error(`python3 exited with code ${code}`));
           });
-          child.on('error', reject);
+          child.on('error', (err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
         });
-        // Clean up BMP file
         try {
           await fs.unlink(bmpPath);
         } catch {
           /* ignore */
         }
-        return true;
+        return tempFilePath;
       } catch (err) {
-        // Python PIL not available, return BMP file path
         debugLogger.debug(
           'Python PIL not available; BMP-to-PNG conversion failed:',
           err,
@@ -293,7 +334,6 @@ async function saveFileWithWlPaste(tempFilePath: string): Promise<boolean> {
       /* ignore */
     }
   }
-
   return false;
 }
 
@@ -307,7 +347,6 @@ async function saveFileWithXclip(tempFilePath: string): Promise<boolean> {
     tempFilePath,
   );
   if (success) return true;
-
   try {
     await fs.unlink(tempFilePath);
   } catch {
@@ -331,7 +370,6 @@ export async function saveClipboardImage(
     await fs.mkdir(tempDir, { recursive: true });
     const timestamp = new Date().getTime();
 
-    // Linux: use platform-native tools
     if (process.platform === 'linux') {
       const pngPath = path.join(tempDir, `clipboard-${timestamp}.png`);
       const tool = getLinuxClipboardTool();
@@ -339,7 +377,6 @@ export async function saveClipboardImage(
       if (tool === 'wl-paste') {
         const savedPath = await saveFileWithWlPaste(pngPath);
         if (savedPath) {
-          // Verify the file exists and has content
           try {
             const stats = await fs.stat(savedPath);
             if (stats.size > 0) return savedPath;
@@ -356,7 +393,6 @@ export async function saveClipboardImage(
       return null;
     }
 
-    // Fallback: use @teddyzhu/clipboard native module (macOS, Windows)
     const modName = '@teddyzhu/clipboard';
     const mod = await import(modName);
     const clipboard = new mod.ClipboardManager();
