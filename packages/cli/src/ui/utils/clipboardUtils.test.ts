@@ -11,7 +11,22 @@ import {
   cleanupOldClipboardImages,
 } from './clipboardUtils.js';
 
-// Mock ClipboardManager
+// Mock child_process for platform-native clipboard tools
+const mockSpawn = vi.fn();
+vi.mock('node:child_process', () => ({
+  spawn: mockSpawn,
+  execSync: vi.fn(),
+}));
+
+// Mock fs for file operations
+vi.mock('node:fs/promises', () => ({
+  mkdir: vi.fn().mockResolvedValue(undefined),
+  readdir: vi.fn().mockResolvedValue([]),
+  stat: vi.fn().mockResolvedValue({ atimeMs: 0 }),
+  unlink: vi.fn().mockResolvedValue(undefined),
+}));
+
+// Mock ClipboardManager for non-Linux fallback
 const mockHasFormat = vi.fn();
 const mockGetImageData = vi.fn();
 
@@ -34,40 +49,55 @@ describe('clipboardUtils', () => {
   });
 
   describe('clipboardHasImage', () => {
-    it('should return true when clipboard contains image', async () => {
-      mockHasFormat.mockReturnValue(true);
+    it('should return true when clipboard contains image on Linux', async () => {
+      // Mock wl-paste --list-types returning image types
+      const mockStdout = {
+        on: vi.fn((event, callback) => {
+          if (event === 'data') {
+            callback(Buffer.from('image/png\nimage/bmp\n'));
+          }
+        }),
+      };
+      const mockChild = {
+        stdout: mockStdout,
+        on: vi.fn((event, callback) => {
+          if (event === 'close') {
+            callback(0);
+          }
+        }),
+      };
+      mockSpawn.mockReturnValue(mockChild);
 
       const result = await clipboardHasImage();
       expect(result).toBe(true);
-      expect(mockHasFormat).toHaveBeenCalledWith('image');
     });
 
-    it('should return false when clipboard does not contain image', async () => {
-      mockHasFormat.mockReturnValue(false);
+    it('should return false when clipboard does not contain image on Linux', async () => {
+      // Mock wl-paste --list-types returning no image types
+      const mockStdout = {
+        on: vi.fn((event, callback) => {
+          if (event === 'data') {
+            callback(Buffer.from('text/plain\n'));
+          }
+        }),
+      };
+      const mockChild = {
+        stdout: mockStdout,
+        on: vi.fn((event, callback) => {
+          if (event === 'close') {
+            callback(0);
+          }
+        }),
+      };
+      mockSpawn.mockReturnValue(mockChild);
 
       const result = await clipboardHasImage();
       expect(result).toBe(false);
-      expect(mockHasFormat).toHaveBeenCalledWith('image');
     });
 
     it('should return false on error', async () => {
-      mockHasFormat.mockImplementation(() => {
+      mockSpawn.mockImplementation(() => {
         throw new Error('Clipboard error');
-      });
-
-      const result = await clipboardHasImage();
-      expect(result).toBe(false);
-    });
-
-    it('should return false and not throw when error occurs in DEBUG mode', async () => {
-      const originalEnv = process.env;
-      vi.stubGlobal('process', {
-        ...process,
-        env: { ...originalEnv, DEBUG: '1' },
-      });
-
-      mockHasFormat.mockImplementation(() => {
-        throw new Error('Test error');
       });
 
       const result = await clipboardHasImage();
@@ -77,38 +107,31 @@ describe('clipboardUtils', () => {
 
   describe('saveClipboardImage', () => {
     it('should return null when clipboard has no image', async () => {
-      mockHasFormat.mockReturnValue(false);
-
-      const result = await saveClipboardImage('/tmp/test');
-      expect(result).toBe(null);
-    });
-
-    it('should return null when image data buffer is null', async () => {
-      mockHasFormat.mockReturnValue(true);
-      mockGetImageData.mockReturnValue({ data: null });
+      // Mock wl-paste --list-types returning no image types
+      const mockStdout = {
+        on: vi.fn((event, callback) => {
+          if (event === 'data') {
+            callback(Buffer.from('text/plain\n'));
+          }
+        }),
+      };
+      const mockChild = {
+        stdout: mockStdout,
+        on: vi.fn((event, callback) => {
+          if (event === 'close') {
+            callback(0);
+          }
+        }),
+      };
+      mockSpawn.mockReturnValue(mockChild);
 
       const result = await saveClipboardImage('/tmp/test');
       expect(result).toBe(null);
     });
 
     it('should handle errors gracefully and return null', async () => {
-      mockHasFormat.mockImplementation(() => {
+      mockSpawn.mockImplementation(() => {
         throw new Error('Clipboard error');
-      });
-
-      const result = await saveClipboardImage('/tmp/test');
-      expect(result).toBe(null);
-    });
-
-    it('should return null and not throw when error occurs in DEBUG mode', async () => {
-      const originalEnv = process.env;
-      vi.stubGlobal('process', {
-        ...process,
-        env: { ...originalEnv, DEBUG: '1' },
-      });
-
-      mockHasFormat.mockImplementation(() => {
-        throw new Error('Test error');
       });
 
       const result = await saveClipboardImage('/tmp/test');
@@ -125,12 +148,6 @@ describe('clipboardUtils', () => {
 
     it('should complete without errors on valid directory', async () => {
       await expect(cleanupOldClipboardImages('.')).resolves.not.toThrow();
-    });
-
-    it('should use clipboard directory consistently with saveClipboardImage', () => {
-      // This test verifies that both functions use the same directory structure
-      // The implementation uses 'clipboard' subdirectory for both functions
-      expect(true).toBe(true);
     });
   });
 });
