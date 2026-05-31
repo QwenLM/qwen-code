@@ -472,7 +472,13 @@ export function endLLMRequestSpan(
 ): void {
   const spanId = getSpanId(span);
   const spanCtx = activeSpans.get(spanId)?.deref();
-  if (!spanCtx || spanCtx.ended) return;
+  if (!spanCtx) return;
+  if (spanCtx.ended) {
+    debugLogger.debug(
+      `endLLMRequestSpan: span ${spanId} already ended (possible TTL sweep race)`,
+    );
+    return;
+  }
 
   spanCtx.ended = true;
 
@@ -637,7 +643,13 @@ export function runInToolSpanContext<T>(span: Span, fn: () => T): T {
 export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
   const spanId = getSpanId(span);
   const spanCtx = activeSpans.get(spanId)?.deref();
-  if (!spanCtx || spanCtx.ended) return;
+  if (!spanCtx) return;
+  if (spanCtx.ended) {
+    debugLogger.debug(
+      `endToolSpan: span ${spanId} already ended (possible TTL sweep race)`,
+    );
+    return;
+  }
 
   spanCtx.ended = true;
 
@@ -982,7 +994,13 @@ export function startHookSpan(opts: StartHookSpanOptions): Span {
 export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
   const spanId = getSpanId(span);
   const spanCtx = activeSpans.get(spanId)?.deref();
-  if (!spanCtx || spanCtx.ended) return;
+  if (!spanCtx) return;
+  if (spanCtx.ended) {
+    debugLogger.debug(
+      `endHookSpan: span ${spanId} already ended (possible TTL sweep race)`,
+    );
+    return;
+  }
 
   spanCtx.ended = true;
 
