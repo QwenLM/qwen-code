@@ -2936,7 +2936,7 @@ export class Session implements SessionContext {
         if (typeof part === 'string') {
           processedQueryParts.push({ text: part });
         } else {
-          processedQueryParts.push(part);
+          processedQueryParts.push(clampInlineMediaPart(part));
         }
       }
     } else if (embeddedContext.length > 0) {
