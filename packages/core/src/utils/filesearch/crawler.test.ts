@@ -942,6 +942,62 @@ describe('crawler', () => {
       expect(results).not.toContain('skip.txt');
     });
 
+    it('should list tracked files inside submodules', async () => {
+      tmpDir = await createTmpDir({
+        packages: {
+          nested: {
+            'submodule-file.ts': '',
+          },
+        },
+      });
+      const gitCalls: string[][] = [];
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command !== 'git') {
+          return { success: false, lines: [] };
+        }
+        gitCalls.push(args);
+        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+          return { success: true, lines: [tmpDir] };
+        }
+        if (args.includes('ls-files') && args.includes('--others')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--deleted')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--cached')) {
+          return {
+            success: true,
+            lines: ['S packages/nested', 'H packages/nested/submodule-file.ts'],
+          };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      const cachedGitCall = gitCalls.find(
+        (args) => args.includes('ls-files') && args.includes('--cached'),
+      );
+      expect(cachedGitCall).toContain('--recurse-submodules');
+      expect(results).toContain('packages/nested/submodule-file.ts');
+      expect(results).not.toContain('packages/nested');
+    });
+
     it('should preserve leading and trailing spaces in tracked filenames', async () => {
       tmpDir = await createTmpDir({
         ' leading.txt': '',
