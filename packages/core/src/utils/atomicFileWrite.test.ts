@@ -711,7 +711,7 @@ describe('EXDEV fallback (async + sync)', () => {
 
     await expect(
       atomicWriteFile(filePath, 'data', undefined, { rename: eioRename }),
-    ).rejects.toThrow(/EIO/);
+    ).rejects.toThrow(/atomicWriteFile\(.*eio\.txt.*\):.*EIO/);
     // Tmp cleaned up even though rename failed
     expect(await fs.readdir(tmpDir)).toEqual([]);
   });
@@ -730,8 +730,32 @@ describe('EXDEV fallback (async + sync)', () => {
 
     expect(() =>
       atomicWriteFileSync(filePath, 'data', undefined, { rename: eioRename }),
-    ).toThrow(/EIO/);
+    ).toThrow(/atomicWriteFileSync\(.*eio-sync\.txt.*\):.*EIO/);
     expect(fsSync.readdirSync(tmpDir)).toEqual([]);
+  });
+
+  it('atomicWriteFile: annotates errors whose message contains the target path (startsWith guard, not includes)', async () => {
+    // Guards the documented idempotency-guard bug: it once used
+    // `message.includes(targetPath)`, but real syscall errors embed the
+    // *tmp* path (which contains the target as a substring), so annotation
+    // was silently skipped on every real failure. Here the rename error
+    // message embeds a tmp-style path containing the target; with the
+    // correct `startsWith` guard the message is still annotated. Reverting
+    // to the `includes` guard would skip annotation and fail this test.
+    const filePath = path.join(tmpDir, 'pathinmsg.txt');
+    const renameWithPathInMsg = async () => {
+      const e: NodeJS.ErrnoException = new Error(
+        `EIO: i/o error, rename '${filePath}.abc123.tmp'`,
+      );
+      e.code = 'EIO';
+      throw e;
+    };
+
+    await expect(
+      atomicWriteFile(filePath, 'data', undefined, {
+        rename: renameWithPathInMsg,
+      }),
+    ).rejects.toThrow(/^atomicWriteFile\(/);
   });
 
   // PR #4333 review fold-in: the EXDEV-then-fallback-write-fails path is

@@ -1308,6 +1308,15 @@ export class NativeLspService {
       throw new Error(`Refusing to apply edits outside workspace: ${filePath}`);
     }
 
+    // Concurrency: this is an async read-modify-write (readFile → splice →
+    // access(W_OK) → atomicWriteFile) with await points between read and
+    // write. atomicWriteFile keeps the file from being torn, but does NOT
+    // serialize writers — two overlapping applyTextEdits calls for the SAME
+    // path can both read the same base content and the second rename clobbers
+    // the first (lost update). Latent today: applyWorkspaceEdit has no
+    // production caller and no workspace/applyEdit handler is wired. Before
+    // wiring one, serialize per resolved filePath (see jsonl-utils getFileLock).
+
     // Read the current file content. Only treat ENOENT as "new file"; any
     // other read failure (EACCES on a read-protected file, EISDIR, etc.)
     // must propagate — otherwise the atomic rename below would silently

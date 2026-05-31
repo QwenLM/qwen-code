@@ -117,6 +117,7 @@ export class TipHistory {
       atomicWriteFileSync(this.filePath, JSON.stringify(this.data, null, 2), {
         mode: 0o600,
         forceMode: true,
+        noFollow: true,
       });
     } catch {
       // Silently ignore write errors — tips are non-critical
