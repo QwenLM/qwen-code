@@ -110,6 +110,14 @@
   background: var(--bg-tertiary);
 }
 
+.resume-picker-keyboard-only .resume-picker-item:hover {
+  background: transparent;
+}
+
+.resume-picker-keyboard-only .resume-picker-item.selected:hover {
+  background: var(--bg-tertiary);
+}
+
 .resume-picker-item.disabled {
   cursor: default;
   opacity: 0.55;

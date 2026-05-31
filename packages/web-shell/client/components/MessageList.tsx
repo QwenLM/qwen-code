@@ -6,6 +6,7 @@ import {
   useCallback,
   useMemo,
   type ReactNode,
+  type MutableRefObject,
 } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Message, ACPToolCall } from '../adapters/types';
@@ -26,7 +27,7 @@ interface MessageListProps {
     selectedOption: string,
     answers?: Record<string, string>,
   ) => void;
-  followBottomSignal?: number;
+  catchingUp?: boolean;
   welcomeHeader?: ReactNode;
   workspaceCwd?: string;
 }
@@ -202,7 +203,7 @@ export function MessageList({
   messages,
   pendingApproval,
   onConfirm,
-  followBottomSignal,
+  catchingUp,
   welcomeHeader,
   workspaceCwd,
 }: MessageListProps) {
@@ -219,14 +220,57 @@ export function MessageList({
     [mergedMessages],
   );
   const containerRef = useRef<HTMLDivElement>(null);
-  const shouldAutoScroll = useRef(true);
-  const programmaticScroll = useRef(false);
+
+  // ── Scroll-follow state ──────────────────────────────────────────────
+  //
+  // The scroll behavior follows 6 rules:
+  //
+  //   1. Default follow-bottom — while the user is looking at the bottom,
+  //      new content (streaming tokens, tool cards expanding, approval
+  //      cards appearing, any height change) keeps the viewport pinned
+  //      to the latest output.
+  //
+  //   2. Scroll-up pauses follow — if the user scrolls up, the page
+  //      assumes they want to read history and stops auto-scrolling.
+  //      Even if the model is still streaming, the viewport stays put.
+  //
+  //   3. Scroll-back-to-bottom resumes — when the user scrolls back
+  //      near the bottom (< 30px from edge), follow mode re-engages
+  //      and new content resumes sticking.
+  //
+  //   4. New message resets follow — after the user sends a message,
+  //      follow mode is forced on so the model's reply scrolls in
+  //      naturally.
+  //
+  //   5. Session restore / reconnect — during history replay
+  //      (`catchingUp === true`), all auto-scrolling is suppressed to
+  //      avoid fighting the rapidly replaying transcript. Once replay
+  //      finishes (`catchingUp` flips to falsy), a single scroll-to-
+  //      bottom fires so the user lands at the latest content.
+  //
+  //   6. Short content — if the content doesn't overflow the container
+  //      (no scrollbar), scrollToBottom is a no-op. This avoids a
+  //      visual flash when the model just started replying with a
+  //      short first chunk.
+  //
+  // Implementation: three refs, three effects, one scroll handler.
+  //
+  //   - `shouldFollow`      — whether auto-scroll is active
+  //   - `lastScrollTop`     — previous scrollTop for direction detection
+  //   - `prevLastUserMsgId` — tracks when a new user message appears
+  //   - `prevCatchingUp`    — tracks the catchingUp → ready transition
+  //
+  // The single auto-scroll driver is a `useLayoutEffect` on
+  // `totalVirtualSize` (the virtualizer's computed content height).
+  // Every height change — streaming text, card expand, approval
+  // appearance — flows through this one effect.
+  // ─────────────────────────────────────────────────────────────────────
+
+  const shouldFollow = useRef(true);
   const lastScrollTop = useRef(0);
-  const scrollFrame = useRef<number | null>(null);
-  const prevMsgCount = useRef(messages.length);
-  const prevLastUserMessageId = useRef<string | null>(
-    getLastUserMessageId(messages),
-  );
+  const prevLastUserMsgId = useRef<string | null>(null);
+  const prevCatchingUp: MutableRefObject<boolean | undefined> =
+    useRef(catchingUp);
 
   const hasTailApproval = useMemo(() => {
     if (!pendingApproval) return false;
@@ -239,15 +283,13 @@ export function MessageList({
   const totalCount =
     headerOffset + displayItems.length + (hasTailApproval ? 1 : 0);
 
+  // Rule 6: skip if content doesn't overflow (no scrollbar).
   const scrollToBottom = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
-    programmaticScroll.current = true;
+    if (el.scrollHeight <= el.clientHeight) return;
     el.scrollTop = el.scrollHeight;
     lastScrollTop.current = el.scrollTop;
-    window.requestAnimationFrame(() => {
-      programmaticScroll.current = false;
-    });
   }, []);
 
   const virtualizer = useVirtualizer({
@@ -270,74 +312,56 @@ export function MessageList({
     useAnimationFrameWithResizeObserver: true,
   });
 
+  // Rules 2 & 3: detect scroll direction to toggle follow mode.
+  // Runs synchronously in the scroll handler — no rAF needed since
+  // the browser already coalesces scroll events.
   const handleScroll = useCallback(() => {
-    if (scrollFrame.current !== null) return;
-    scrollFrame.current = window.requestAnimationFrame(() => {
-      scrollFrame.current = null;
-      const el = containerRef.current;
-      if (!el) return;
-      const distanceFromBottom =
-        el.scrollHeight - el.scrollTop - el.clientHeight;
-      const scrollingUp = el.scrollTop < lastScrollTop.current - 1;
-      lastScrollTop.current = el.scrollTop;
+    const el = containerRef.current;
+    if (!el) return;
+    const prev = lastScrollTop.current;
+    const curr = el.scrollTop;
+    lastScrollTop.current = curr;
+    const distanceFromBottom = el.scrollHeight - curr - el.clientHeight;
 
-      if (programmaticScroll.current) {
-        shouldAutoScroll.current = true;
-        return;
-      }
-      if (scrollingUp) {
-        shouldAutoScroll.current = false;
-        return;
-      }
-      if (distanceFromBottom <= 4) {
-        shouldAutoScroll.current = true;
-      }
-    });
+    // Rule 2: scrolling up → pause follow
+    if (curr < prev - 1) {
+      shouldFollow.current = false;
+      return;
+    }
+    // Rule 3: near bottom → resume follow
+    if (distanceFromBottom < 30) {
+      shouldFollow.current = true;
+    }
   }, []);
 
-  useEffect(
-    () => () => {
-      if (scrollFrame.current !== null) {
-        window.cancelAnimationFrame(scrollFrame.current);
-      }
-    },
-    [],
-  );
-
-  // Reset auto-scroll on clear screen
+  // Clear screen (e.g. /clear) → reset to follow mode.
   useEffect(() => {
-    if (prevMsgCount.current > 0 && messages.length === 0) {
-      shouldAutoScroll.current = true;
+    if (messages.length === 0) {
+      shouldFollow.current = true;
     }
-    prevMsgCount.current = messages.length;
   }, [messages.length]);
 
-  // Auto-scroll to bottom when content changes
+  // Rule 4: new user message → force follow on so the model's reply
+  // scrolls into view as it streams in.
   useEffect(() => {
-    if (shouldAutoScroll.current) {
+    const lastId = getLastUserMessageId(messages);
+    if (lastId && lastId !== prevLastUserMsgId.current) {
+      shouldFollow.current = true;
       requestAnimationFrame(scrollToBottom);
     }
-  }, [messages, pendingApproval, scrollToBottom]);
-
-  // A user send explicitly starts a new tail-following interaction.
-  useEffect(() => {
-    const lastUserMessageId = getLastUserMessageId(messages);
-    if (
-      lastUserMessageId &&
-      lastUserMessageId !== prevLastUserMessageId.current
-    ) {
-      shouldAutoScroll.current = true;
-      requestAnimationFrame(scrollToBottom);
-    }
-    prevLastUserMessageId.current = lastUserMessageId;
+    prevLastUserMsgId.current = lastId;
   }, [messages, scrollToBottom]);
 
-  useLayoutEffect(() => {
-    if (followBottomSignal !== undefined) {
-      shouldAutoScroll.current = true;
-      scrollToBottom();
+  // Rule 5: session restore — when catchingUp flips from true → falsy,
+  // replay just finished. Scroll to bottom once so the user sees the
+  // latest content without the viewport fighting the replay.
+  useEffect(() => {
+    if (prevCatchingUp.current && !catchingUp) {
+      shouldFollow.current = true;
+      requestAnimationFrame(scrollToBottom);
     }
-  }, [followBottomSignal, scrollToBottom]);
+    prevCatchingUp.current = catchingUp;
+  }, [catchingUp, scrollToBottom]);
 
   const renderVirtualItem = useCallback(
     (index: number) => {
@@ -398,11 +422,23 @@ export function MessageList({
   const virtualItems = virtualizer.getVirtualItems();
   const totalVirtualSize = virtualizer.getTotalSize();
 
+  // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
+  // Fires whenever the virtualizer's total content height changes —
+  // this captures every scenario: streaming tokens appending, tool
+  // cards expanding/collapsing, approval cards appearing, etc.
+  //
+  // Rule 5: during replay (catchingUp) → skip, avoid fighting rapid
+  //         transcript replay. The catchingUp→ready transition effect
+  //         above handles the final scroll.
+  // Rule 1: when shouldFollow is true → scroll to bottom.
+  // Rule 6: scrollToBottom itself checks scrollHeight <= clientHeight
+  //         and is a no-op when there's no overflow.
   useLayoutEffect(() => {
-    if (shouldAutoScroll.current) {
+    if (catchingUp) return;
+    if (shouldFollow.current) {
       scrollToBottom();
     }
-  }, [totalVirtualSize, scrollToBottom]);
+  }, [totalVirtualSize, catchingUp, scrollToBottom]);
 
   return (
     <div ref={containerRef} className={styles.list} onScroll={handleScroll}>

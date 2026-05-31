@@ -398,7 +398,6 @@ export function App({
   const [currentModel, setCurrentModel] = useState('');
   const [currentMode, setCurrentMode] = useState('default');
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
-  const [followBottomSignal, setFollowBottomSignal] = useState(0);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
   const nextQueuedPromptIdRef = useRef(1);
   const drainingQueueRef = useRef(false);
@@ -1120,17 +1119,6 @@ export function App({
     ],
   );
 
-  const handleEditorSubmit = useCallback(
-    (text: string, images?: PromptImage[]) => {
-      const accepted = handleSubmit(text, images);
-      if (accepted) {
-        setFollowBottomSignal((signal) => signal + 1);
-      }
-      return accepted;
-    },
-    [handleSubmit],
-  );
-
   useEffect(() => {
     if (drainingQueueRef.current) return;
     if (!connected) return;
@@ -1449,7 +1437,7 @@ export function App({
                 messages={displayMessages}
                 pendingApproval={pendingApproval}
                 onConfirm={handleConfirm}
-                followBottomSignal={followBottomSignal}
+                catchingUp={connection.catchingUp}
                 workspaceCwd={connection.workspaceCwd || ''}
                 welcomeHeader={
                   <WelcomeHeader
@@ -1479,7 +1467,7 @@ export function App({
                 <QueuedPromptDisplay prompts={queuedPrompts} t={t} />
                 <Editor
                   ref={editorRef}
-                  onSubmit={handleEditorSubmit}
+                  onSubmit={handleSubmit}
                   onCycleMode={handleCycleMode}
                   onToggleShortcuts={handleToggleShortcuts}
                   disabled={isDisabled}
