@@ -1292,7 +1292,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // registry calls), so this wrapper's `catch` is unreachable for the
     // happy-flow lifecycle. To still surface real terminal state on the
     // span, body opts in by calling `recordOutcome(metadata)` before it
-    // resolves. If the body forgets, the wrapper defaults to `completed`.
+    // resolves. If the body forgets, the wrapper does NOT default to
+    // `completed`: the `finally` below defaults to `failed` plus a
+    // `wiring_bug_record_outcome_not_called` terminateReason sentinel, so
+    // the wiring bug surfaces proactively in dashboards instead of being
+    // silently masked as a success.
     // The throw-derived fallbacks below only fire if the body somehow
     // rejects (synchronous setup throw or a bug). Review wenshao @ #4410.
     let recordedMetadata: SubagentSpanMetadata | undefined;

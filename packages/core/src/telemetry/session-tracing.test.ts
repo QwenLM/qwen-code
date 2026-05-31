@@ -1212,6 +1212,32 @@ describe('session-tracing', () => {
       mockState.throwOnSetAttributes = false;
       endToolSpan(toolSpan, { success: true });
     });
+
+    it('endSubagentSpan: end() runs and activeSpans is cleared when setAttributes throws', () => {
+      const span = startSubagentSpan({
+        agentId: 'Explore-err',
+        subagentName: 'Explore',
+        invocationKind: 'foreground',
+        isBuiltIn: true,
+        depth: 0,
+        sessionId: 'session-uuid',
+      });
+      const record = mockSpans.find((s) => s.name === 'qwen-code.subagent')!;
+
+      mockState.throwOnSetAttributes = true;
+      endSubagentSpan(span, { status: 'completed' });
+
+      // The attribute write threw, but the span must still be ended so the
+      // WeakRef registry doesn't leak it. Mirrors the endLLMRequestSpan /
+      // endToolSpan resilience tests. #4410 review.
+      expect(record.ended).toBe(true);
+
+      // No leak: spanCtx was removed from activeSpans, so a second call
+      // short-circuits and records no recovery status.
+      mockState.throwOnSetAttributes = false;
+      endSubagentSpan(span, { status: 'completed' });
+      expect(record.statuses).toHaveLength(0);
+    });
   });
 
   describe('TTL safety net (#4321 review)', () => {
