@@ -1074,6 +1074,12 @@ export class Config {
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
+    // Only set the global env marker if no session has claimed it yet,
+    // so throwaway Config instances (e.g. telemetry-only) don't clobber
+    // the real interactive session's ID.
+    if (!process.env['QWEN_CODE_SESSION_ID']) {
+      process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
+    }
     this.sessionData = params.sessionData;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
@@ -1986,6 +1992,7 @@ export class Config {
 
     const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
+    process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
     this.sessionData = sessionData;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
