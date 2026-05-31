@@ -19,8 +19,9 @@ interface Shortcut {
 const getNewlineKey = () => {
   if (process.platform === 'win32') return 'ctrl+enter';
   // Show shift+enter as the primary newline key since it's the most intuitive.
-  // It works natively in CSI-u terminals (VSCode, iTerm2, Ghostty, Kitty, WezTerm, etc.)
-  // ctrl+j and ctrl+enter also work as alternatives.
+  // It works natively in CSI-u terminals (iTerm2, Ghostty, Kitty, WezTerm, etc.).
+  // Terminals without native CSI-u support (e.g. VSCode/Cursor, Apple Terminal)
+  // need /terminal-setup first; ctrl+j and ctrl+enter also work as alternatives.
   return 'shift+enter';
 };
 const getPasteKey = () => {

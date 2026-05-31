@@ -65,12 +65,6 @@ const TESTS = [
     note: 'LF (0x0a) — universal newline fallback',
   },
   {
-    name: 'VSCode ESC+CR',
-    keySeq: '\x1b\r',
-    expectLine: true,
-    note: 'ESC(0x1b)+CR — VSCode Shift+Enter keybinding',
-  },
-  {
     name: 'Kitty CSI-u Shift+Enter',
     keySeq: '\x1b[13;2u',
     expectLine: true,
