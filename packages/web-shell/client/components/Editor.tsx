@@ -248,7 +248,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
       {
         key: 'Shift-Enter',
-        run: () => false,
+        run: (view) => {
+          view.dispatch(view.state.replaceSelection('\n'));
+          return true;
+        },
       },
       {
         key: 'Ctrl-j',
@@ -793,8 +796,6 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     const accepted = onSubmitRef.current(last);
     if (accepted === false) return;
     setPastedImages([]);
-    historyActionsRef.current.push(last);
-    historyActionsRef.current.reset();
   }, []);
 
   useImperativeHandle(

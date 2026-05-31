@@ -355,12 +355,11 @@ function closeCompletedSubAgentsBefore(
   stack: ActiveSubAgent[],
   timestamp: number,
 ): void {
-  while (stack.length > 0) {
-    const active = stack[stack.length - 1];
-    if (!active?.closeAt || timestamp < active.closeAt) {
-      return;
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const active = stack[i];
+    if (active?.closeAt && timestamp >= active.closeAt) {
+      stack.splice(i, 1);
     }
-    stack.pop();
   }
 }
 

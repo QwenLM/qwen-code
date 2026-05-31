@@ -26,7 +26,7 @@ const SHORTCUTS: Shortcut[] = [
   { key: '@', descriptionKey: 'help.shortcut.addContext' },
   { key: 'shift+tab', descriptionKey: 'help.shortcut.approvals' },
   { key: 'esc', descriptionKey: 'help.shortcut.cancel' },
-  { key: 'ctrl+j', descriptionKey: 'help.shortcut.newline' },
+  { key: 'shift+enter / ctrl+j', descriptionKey: 'help.shortcut.newline' },
   { key: 'ctrl+l', descriptionKey: 'help.shortcut.clear' },
   { key: 'ctrl+y', descriptionKey: 'help.shortcut.retry' },
   { key: 'ctrl+o', descriptionKey: 'help.shortcut.compact' },
