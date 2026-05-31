@@ -1874,7 +1874,7 @@ function walkCompoundCommand(
 
     const subOps = extractShellOperations(sub, effectiveCwd);
     if (cwdUnknown) {
-      ops.push(...markCwdUnknownOps(subOps));
+      ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
     } else {
       ops.push(...subOps);
     }
@@ -1883,9 +1883,40 @@ function walkCompoundCommand(
   return ops;
 }
 
-function markCwdUnknownOps(ops: ShellOperation[]): ShellOperation[] {
+function hasAbsolutePathTokenForOperation(
+  command: string,
+  cwd: string,
+  filePath: string,
+): boolean {
+  for (const token of tokenize(command)) {
+    const redirectTarget = token.match(/^(?:>>|>|2>>|2>|&>>|&>|<)(.+)$/)?.[1];
+    const candidate = redirectTarget ?? token;
+    if (
+      looksLikePath(candidate) &&
+      isShellAbsolutePath(candidate) &&
+      resolvePath(candidate, cwd) === filePath
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function markCwdUnknownOps(
+  ops: ShellOperation[],
+  command: string,
+  cwd: string,
+): ShellOperation[] {
   return ops.map((op) => {
     if (!op.filePath) return op;
-    return { ...op, cwdUnknown: true, pathMayDependOnCwd: true };
+    return {
+      ...op,
+      cwdUnknown: true,
+      pathMayDependOnCwd: !hasAbsolutePathTokenForOperation(
+        command,
+        cwd,
+        op.filePath,
+      ),
+    };
   });
 }

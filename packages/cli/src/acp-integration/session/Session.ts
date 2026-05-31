@@ -1945,6 +1945,11 @@ export class Session implements SessionContext {
         finalPermission,
         forceAutoReviewForAllow,
       );
+      if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+        debugLogger.info(
+          `Auto mode: L4 allow overridden by protected-write guard for ${fc.name}`,
+        );
+      }
       let autoModeAllowed =
         finalPermission === 'allow' && !forceAutoReviewForAllow;
       if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {

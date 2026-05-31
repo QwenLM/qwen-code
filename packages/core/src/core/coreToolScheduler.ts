@@ -1639,6 +1639,12 @@ export class CoreToolScheduler {
             forceAutoReviewForAllow,
           );
 
+          if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+            debugLogger.info(
+              `Auto mode: L4 allow overridden by protected-write guard for ${canonicalName}`,
+            );
+          }
+
           if (finalPermission === 'allow' && !forceAutoReviewForAllow) {
             // Auto-approve: tool is inherently safe (read-only) or PM allows.
             // In AUTO mode, also reset denialTracking so an L4 allow-rule

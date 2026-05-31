@@ -514,6 +514,22 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  it('does not mark absolute writes after dynamic `cd` as cwd-dependent', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd "$QWEN_HOME" && echo hi > /tmp/out.txt',
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/tmp/out.txt',
+        cwdUnknown: true,
+        pathMayDependOnCwd: false,
+      },
+    ]);
+  });
+
   it('clears cwd-unknown after an absolute static `cd`', () => {
     expect(
       extractShellOperationsAcrossCommand(
