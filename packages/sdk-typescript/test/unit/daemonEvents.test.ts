@@ -2485,6 +2485,42 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.unrecognizedKnownEventCount).toBe(1);
       expect(state.awaitingResync).toBe(false);
     });
+
+    it('still applies session_snapshot while awaitingResync (RESYNC_PASSTHROUGH_TYPES)', () => {
+      // session_snapshot is in RESYNC_PASSTHROUGH_TYPES — a reconnecting
+      // client that missed ring events still needs to seed its side-channel
+      // model/mode state. Without passthrough, the auto-skip gate would
+      // drop the snapshot and the client would remain on stale null/null.
+      const afterResync = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 5,
+            earliestAvailableId: 12,
+          },
+        },
+      );
+      expect(afterResync.awaitingResync).toBe(true);
+
+      const afterSnapshot = reduceDaemonSessionEvent(afterResync, {
+        id: 13,
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: 'qwen-max',
+          currentApprovalMode: 'auto-edit',
+        },
+      });
+      // The snapshot must have applied — model/mode state is populated.
+      expect(afterSnapshot.currentModelId).toBe('qwen-max');
+      expect(afterSnapshot.approvalMode).toBe('auto-edit');
+      // awaitingResync stays true (consumer hasn't explicitly recovered).
+      expect(afterSnapshot.awaitingResync).toBe(true);
+    });
   });
 
   describe('followup_suggestion (daemon assist push)', () => {

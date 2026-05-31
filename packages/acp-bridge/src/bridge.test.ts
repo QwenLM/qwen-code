@@ -8801,14 +8801,24 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
     });
 
     it('drops unknown agent-returned approval mode without publishing a corrective event', async () => {
-      // F7qEL: when the agent returns a mode not in KNOWN_APPROVAL_MODES,
-      // reconcile should drop it (action=dropped reason=unknown_mode)
-      // instead of broadcasting an invalid approval_mode_changed.
+      // F7qEL / F8E2h: when the agent returns a mode not in
+      // KNOWN_APPROVAL_MODES, the approvalMode reconcile branch should
+      // drop it (action=dropped reason=unknown_mode) instead of
+      // broadcasting an invalid approval_mode_changed. We trigger the
+      // approvalMode reconcile via setSessionApprovalMode (not via
+      // modelServiceId, which only reconciles the model branch).
       const factory: ChannelFactory = async () => {
         const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent({
-          extMethodImpl: (method) => {
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/session/approval_mode') {
+              return Promise.resolve({
+                previous: 'default',
+                current: (params as { mode: string }).mode,
+              });
+            }
             if (method === 'qwen/status/session/context') {
+              // Agent claims a mode that's NOT in KNOWN_APPROVAL_MODES.
               return Promise.resolve({
                 state: { modes: { currentModeId: 'super-yolo' } },
               });
@@ -8816,16 +8826,7 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
             return Promise.resolve({});
           },
         });
-        const augmented = new Proxy(fakeAgent, {
-          get(target, prop) {
-            if (prop === 'unstable_setSessionModel') {
-              return async () => ({});
-            }
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            return (target as any)[prop];
-          },
-        });
-        new AgentSideConnection(() => augmented as Agent, agentStream);
+        new AgentSideConnection(() => fakeAgent as Agent, agentStream);
         return {
           stream: clientStream,
           exited: new Promise<
@@ -8837,25 +8838,35 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
         };
       };
       const bridge = makeBridge({ channelFactory: factory });
-      const session = await bridge.spawnOrAttach({
-        workspaceCwd: WS_A,
-        modelServiceId: 'qwen-turbo',
-      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       const abort = new AbortController();
       const iter = bridge.subscribeEvents(session.sessionId, {
         signal: abort.signal,
       });
-      const events: string[] = [];
+      const modeEvents: string[] = [];
       const collecting = (async () => {
         for await (const e of iter) {
-          events.push(e.type);
+          if (e.type === 'approval_mode_changed') {
+            modeEvents.push((e.data as { next: string }).next);
+          }
         }
       })();
 
-      // The model switch triggers reconcile. Agent reports 'super-yolo'
-      // which is not a known mode — the corrective should be dropped.
+      // setSessionApprovalMode triggers reconcileAfterRoundtrip(entry,
+      // 'approvalMode'). The status read returns 'super-yolo' which
+      // isn't in KNOWN_APPROVAL_MODES — reconcile must DROP it.
+      await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.YOLO,
+        { persist: false },
+        undefined,
+      );
+
+      // Wait for reconcile to fire (async microtask chain).
       await new Promise((r) => setTimeout(r, 50));
-      expect(events.filter((e) => e === 'approval_mode_changed')).toEqual([]);
+      // Only the original mode change should appear — no corrective
+      // for the unknown 'super-yolo' value from the agent.
+      expect(modeEvents).toEqual(['yolo']);
       abort.abort();
       await collecting;
       await bridge.shutdown();
@@ -8876,13 +8887,11 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
               });
             }
             if (method === 'qwen/status/session/context') {
+              // Status RPC returns agent's authoritative mode. After the
+              // persist, the agent is on 'yolo' — return it so reconcile
+              // sees no drift and does not emit a corrective.
               return Promise.resolve({
-                state: {
-                  modes: {
-                    currentModeId:
-                      (params as { mode?: string }).mode ?? 'default',
-                  },
-                },
+                state: { modes: { currentModeId: 'yolo' } },
               });
             }
             return Promise.resolve({});
