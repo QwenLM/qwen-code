@@ -11,6 +11,7 @@ import { getHeapStatistics } from 'node:v8';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
+import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
 
 // Types
 
@@ -104,6 +105,7 @@ export class MemoryPressureMonitor extends EventEmitter {
   private consecutiveIneffectiveAggressiveCleanups = 0;
   private cleanupGeneration = 0;
   private readonly effectiveMemoryLimit: number;
+  private readonly diagnosticsDumper: MemoryDiagnosticsDumper;
 
   constructor(coreConfig: Config, pressureConfig?: MemoryPressureConfig) {
     super();
@@ -111,6 +113,7 @@ export class MemoryPressureMonitor extends EventEmitter {
     this.config = { ...(pressureConfig ?? DEFAULT_PRESSURE_CONFIG) };
     validateMemoryPressureConfig(this.config);
     this.effectiveMemoryLimit = this.computeEffectiveMemoryLimit();
+    this.diagnosticsDumper = new MemoryDiagnosticsDumper(coreConfig);
     const heapSizeLimit = getHeapStatistics().heap_size_limit;
     debugLogger.info(
       `Effective memory limit: ${formatMiB(this.effectiveMemoryLimit)} MiB; ` +
@@ -142,6 +145,7 @@ export class MemoryPressureMonitor extends EventEmitter {
   resetForNewSession(): void {
     this.cleanupGeneration++;
     this.resetConsecutiveFailures();
+    this.diagnosticsDumper.resetForNewSession();
     this.cleanupInProgress = false;
     this.activeCleanupAction = 'none';
     this.queuedCleanupRecommendation = undefined;
@@ -194,6 +198,12 @@ export class MemoryPressureMonitor extends EventEmitter {
     const cleanupCooldownMs = this.getCleanupCooldownMs(recommendation.action);
     if (!isEscalation && now - this.lastCleanupTime < cleanupCooldownMs) {
       return;
+    }
+
+    // Write diagnostics to disk before cleanup — the JSON is cheap and survives
+    // even if a subsequent heap snapshot or cleanup triggers OOM.
+    if (pressure === 'hard' || pressure === 'critical') {
+      void this.diagnosticsDumper.dump(pressure);
     }
 
     this.executeCleanup(recommendation);
