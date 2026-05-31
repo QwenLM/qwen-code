@@ -130,6 +130,7 @@ import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 } from './constants.js';
+import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
@@ -578,6 +579,7 @@ export interface ConfigParameters {
   fileFiltering?: {
     respectGitIgnore?: boolean;
     respectQwenIgnore?: boolean;
+    customIgnoreFiles?: string[];
     enableRecursiveFileSearch?: boolean;
     enableFuzzySearch?: boolean;
   };
@@ -863,6 +865,7 @@ export class Config {
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
     respectQwenIgnore: boolean;
+    customIgnoreFiles: string[];
     enableRecursiveFileSearch: boolean;
     enableFuzzySearch: boolean;
   };
@@ -1034,6 +1037,9 @@ export class Config {
     this.fileFiltering = {
       respectGitIgnore: params.fileFiltering?.respectGitIgnore ?? true,
       respectQwenIgnore: params.fileFiltering?.respectQwenIgnore ?? true,
+      customIgnoreFiles: params.fileFiltering?.customIgnoreFiles ?? [
+        ...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+      ],
       enableRecursiveFileSearch:
         params.fileFiltering?.enableRecursiveFileSearch ?? true,
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
@@ -2913,6 +2919,7 @@ export class Config {
     return {
       respectGitIgnore: this.fileFiltering.respectGitIgnore,
       respectQwenIgnore: this.fileFiltering.respectQwenIgnore,
+      customIgnoreFiles: [...this.fileFiltering.customIgnoreFiles],
     };
   }
 
@@ -2964,7 +2971,10 @@ export class Config {
 
   getFileService(): FileDiscoveryService {
     if (!this.fileDiscoveryService) {
-      this.fileDiscoveryService = new FileDiscoveryService(this.targetDir);
+      this.fileDiscoveryService = new FileDiscoveryService(
+        this.targetDir,
+        this.fileFiltering.customIgnoreFiles,
+      );
     }
     return this.fileDiscoveryService;
   }

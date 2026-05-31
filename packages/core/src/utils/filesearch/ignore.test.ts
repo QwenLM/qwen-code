@@ -107,6 +107,41 @@ describe('loadIgnoreRules', () => {
     expect(fileFilter('test.txt')).toBe(false);
   });
 
+  it('should load rules from .agentignore and .aiignore with qwenignore enabled', async () => {
+    tmpDir = await createTmpDir({
+      '.agentignore': 'agent-secret.txt',
+      '.aiignore': 'ai-secret.txt',
+    });
+    const ignore = loadIgnoreRules({
+      projectRoot: tmpDir,
+      useGitignore: false,
+      useQwenignore: true,
+      ignoreDirs: [],
+    });
+    const fileFilter = ignore.getFileFilter();
+    expect(fileFilter('agent-secret.txt')).toBe(true);
+    expect(fileFilter('ai-secret.txt')).toBe(true);
+    expect(fileFilter('visible.txt')).toBe(false);
+  });
+
+  it('should load rules from configured custom ignore files with qwenignore enabled', async () => {
+    tmpDir = await createTmpDir({
+      '.cursorignore': 'cursor-secret.txt',
+      '.agentignore': 'agent-secret.txt',
+    });
+    const ignore = loadIgnoreRules({
+      projectRoot: tmpDir,
+      useGitignore: false,
+      useQwenignore: true,
+      customIgnoreFiles: ['.cursorignore'],
+      ignoreDirs: [],
+    });
+    const fileFilter = ignore.getFileFilter();
+    expect(fileFilter('cursor-secret.txt')).toBe(true);
+    expect(fileFilter('agent-secret.txt')).toBe(false);
+    expect(fileFilter('visible.txt')).toBe(false);
+  });
+
   it('should combine rules from .gitignore and .qwenignore', async () => {
     tmpDir = await createTmpDir({
       '.gitignore': '*.log',

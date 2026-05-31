@@ -555,6 +555,37 @@ describe('handleAtCommand', () => {
         `Ignored 1 files:\nQwen-ignored: ${qwenIgnoredFile}`,
       );
     });
+
+    it('should skip files ignored by .agentignore in @ commands', async () => {
+      await createTestFile(
+        path.join(testRootDir, '.agentignore'),
+        'agent/output.js',
+      );
+      const agentIgnoredFile = await createTestFile(
+        path.join(testRootDir, 'agent', 'output.js'),
+        'console.log("Hello");',
+      );
+      const query = `@${agentIgnoredFile}`;
+
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 204,
+        signal: abortController.signal,
+      });
+
+      expect(result).toMatchObject({
+        processedQuery: [{ text: query }],
+        shouldProceed: true,
+      });
+      expect(mockOnDebugMessage).toHaveBeenCalledWith(
+        `Path ${agentIgnoredFile} is qwen-ignored and will be skipped.`,
+      );
+      expect(mockOnDebugMessage).toHaveBeenCalledWith(
+        `Ignored 1 files:\nQwen-ignored: ${agentIgnoredFile}`,
+      );
+    });
   });
   it('should process non-ignored files when .qwenignore is present', async () => {
     await createTestFile(

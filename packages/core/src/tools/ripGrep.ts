@@ -18,6 +18,7 @@ import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { getQwenIgnoreFileNames } from '../utils/qwenIgnoreParser.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
 const RIPGREP_FIELD_SEPARATOR = '';
@@ -60,21 +61,21 @@ function getRipgrepJsonPath(match: RipgrepJsonMatch): string | undefined {
 }
 
 /**
- * Per-process cache for `.qwenignore` discovery. The same directories show
+ * Per-process cache for AI ignore-file discovery. The same directories show
  * up across many Grep invocations in a typical session — without caching,
  * each invocation pays 2-3 sync syscalls per searchPath. Bounded so a
  * pathologically long session can't grow without limit.
  *
  * `dirIsDir`: searchPath → boolean (is the path itself a directory?)
- * `qwenIgnore`: dir → string | null (cached `.qwenignore` path or null)
+ * `qwenIgnore`: dir → string[] (cached supported ignore-file paths)
  *
- * **Known staleness window:** a `.qwenignore` created mid-session, or a
+ * **Known staleness window:** an ignore file created mid-session, or a
  * searchPath whose type flips (dir→file or vice versa), will not be
  * picked up until the entry rotates out of the FIFO (256 entries). Users
  * rarely add ignore files mid-session; a process restart resets the cache.
  */
 const dirIsDirCache = new Map<string, boolean>();
-const qwenIgnoreCache = new Map<string, string | null>();
+const qwenIgnoreCache = new Map<string, readonly string[]>();
 const RIPGREP_CACHE_MAX = 256;
 function trimCache<K, V>(m: Map<K, V>): void {
   if (m.size <= RIPGREP_CACHE_MAX) return;
@@ -400,14 +401,14 @@ class GrepToolInvocation extends BaseToolInvocation<
       pattern,
     ];
 
-    // Add file exclusions from .gitignore and .qwenignore
+    // Add file exclusions from .gitignore and AI-specific ignore files
     const filteringOptions = this.getFileFilteringOptions();
     if (!filteringOptions.respectGitIgnore) {
       rgArgs.push('--no-ignore-vcs');
     }
 
     if (filteringOptions.respectQwenIgnore) {
-      // Load .qwenignore from each workspace directory, not just the primary one
+      // Load ignore files from each workspace directory, not just the primary one.
       const seenIgnoreFiles = new Set<string>();
       for (const searchPath of paths) {
         let isDir = dirIsDirCache.get(searchPath);
@@ -421,16 +422,21 @@ class GrepToolInvocation extends BaseToolInvocation<
           trimCache(dirIsDirCache);
         }
         const dir = isDir ? searchPath : path.dirname(searchPath);
-        let qwenIgnorePath = qwenIgnoreCache.get(dir);
-        if (qwenIgnorePath === undefined) {
-          const candidate = path.join(dir, '.qwenignore');
-          qwenIgnorePath = fs.existsSync(candidate) ? candidate : null;
-          qwenIgnoreCache.set(dir, qwenIgnorePath);
+        let qwenIgnorePaths = qwenIgnoreCache.get(dir);
+        if (qwenIgnorePaths === undefined) {
+          qwenIgnorePaths = getQwenIgnoreFileNames(
+            filteringOptions.customIgnoreFiles,
+          )
+            .map((ignoreFileName) => path.join(dir, ignoreFileName))
+            .filter((candidate) => fs.existsSync(candidate));
+          qwenIgnoreCache.set(dir, qwenIgnorePaths);
           trimCache(qwenIgnoreCache);
         }
-        if (qwenIgnorePath && !seenIgnoreFiles.has(qwenIgnorePath)) {
-          rgArgs.push('--ignore-file', qwenIgnorePath);
-          seenIgnoreFiles.add(qwenIgnorePath);
+        for (const qwenIgnorePath of qwenIgnorePaths) {
+          if (!seenIgnoreFiles.has(qwenIgnorePath)) {
+            rgArgs.push('--ignore-file', qwenIgnorePath);
+            seenIgnoreFiles.add(qwenIgnorePath);
+          }
         }
       }
     }
@@ -461,6 +467,9 @@ class GrepToolInvocation extends BaseToolInvocation<
       respectQwenIgnore:
         options?.respectQwenIgnore ??
         DEFAULT_FILE_FILTERING_OPTIONS.respectQwenIgnore,
+      customIgnoreFiles:
+        options?.customIgnoreFiles ??
+        DEFAULT_FILE_FILTERING_OPTIONS.customIgnoreFiles,
     };
   }
 

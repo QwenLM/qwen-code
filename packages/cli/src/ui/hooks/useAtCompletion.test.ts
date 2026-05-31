@@ -127,7 +127,9 @@ describe('useAtCompletion', () => {
     it('should append a trailing slash to directory paths in suggestions', async () => {
       const structure: FileSystemStructure = {
         'file.txt': '',
-        dir: {},
+        dir: {
+          'nested.txt': '',
+        },
       };
       testRootDir = await createTmpDir(structure);
 
@@ -141,6 +143,7 @@ describe('useAtCompletion', () => {
 
       expect(result.current.suggestions.map((s) => s.value)).toEqual([
         'dir/',
+        'dir/nested.txt',
         'file.txt',
       ]);
       // Verify isDirectory flag
@@ -393,7 +396,9 @@ describe('useAtCompletion', () => {
         '.gitignore': gitignoreContent,
         dist: {},
         'test.log': '',
-        src: {},
+        src: {
+          'index.ts': '',
+        },
       };
       testRootDir = await createTmpDir(structure);
 
@@ -408,6 +413,48 @@ describe('useAtCompletion', () => {
       expect(result.current.suggestions.map((s) => s.value)).toEqual([
         'src/',
         '.gitignore',
+        'src/index.ts',
+      ]);
+    });
+
+    it('should respect configured custom qwen ignore files', async () => {
+      const structure: FileSystemStructure = {
+        '.cursorignore': 'cursor-secret.txt',
+        '.agentignore': 'agent-secret.txt',
+        'cursor-secret.txt': '',
+        'agent-secret.txt': '',
+        'visible.txt': '',
+      };
+      testRootDir = await createTmpDir(structure);
+
+      const customIgnoreConfig = {
+        getEnableRecursiveFileSearch: () => true,
+        getFileFilteringOptions: vi.fn(() => ({
+          respectGitIgnore: true,
+          respectQwenIgnore: true,
+          customIgnoreFiles: ['.cursorignore'],
+        })),
+        getFileFilteringEnableFuzzySearch: () => true,
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          '',
+          customIgnoreConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        '.agentignore',
+        '.cursorignore',
+        'agent-secret.txt',
+        'visible.txt',
       ]);
     });
 

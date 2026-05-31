@@ -1344,8 +1344,20 @@ const SETTINGS_SCHEMA = {
             category: 'Context',
             requiresRestart: true,
             default: true,
-            description: 'Respect .qwenignore files when searching',
+            description:
+              'Respect .qwenignore and configured custom ignore files when searching',
             showInDialog: true,
+          },
+          customIgnoreFiles: {
+            type: 'array',
+            label: 'Custom Ignore Files',
+            category: 'Context',
+            requiresRestart: true,
+            default: ['.agentignore', '.aiignore'],
+            description:
+              'Additional project-root-relative ignore files to respect when respectQwenIgnore is enabled. .qwenignore is always included when respectQwenIgnore is enabled.',
+            showInDialog: true,
+            items: { type: 'string' },
           },
           enableRecursiveFileSearch: {
             type: 'boolean',

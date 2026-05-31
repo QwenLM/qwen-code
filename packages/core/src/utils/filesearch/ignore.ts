@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import ignore from 'ignore';
 import picomatch from 'picomatch';
+import { getQwenIgnoreFileNames } from '../qwenIgnoreParser.js';
 
 const hasFileExtension = picomatch('**/*[*.]*');
 
@@ -15,6 +16,7 @@ export interface LoadIgnoreRulesOptions {
   projectRoot: string;
   useGitignore: boolean;
   useQwenignore: boolean;
+  customIgnoreFiles?: string[];
   ignoreDirs: string[];
 }
 
@@ -28,9 +30,13 @@ export function loadIgnoreRules(options: LoadIgnoreRulesOptions): Ignore {
   }
 
   if (options.useQwenignore) {
-    const qwenignorePath = path.join(options.projectRoot, '.qwenignore');
-    if (fs.existsSync(qwenignorePath)) {
-      ignorer.add(fs.readFileSync(qwenignorePath, 'utf8'));
+    for (const ignoreFileName of getQwenIgnoreFileNames(
+      options.customIgnoreFiles,
+    )) {
+      const qwenignorePath = path.join(options.projectRoot, ignoreFileName);
+      if (fs.existsSync(qwenignorePath)) {
+        ignorer.add(fs.readFileSync(qwenignorePath, 'utf8'));
+      }
     }
   }
 

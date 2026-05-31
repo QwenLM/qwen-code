@@ -2987,6 +2987,23 @@ describe('loadCliConfig fileFiltering', () => {
       expect(getter(config)).toBe(value);
     },
   );
+
+  it('should pass customIgnoreFiles from settings to config', async () => {
+    const settings: Settings = {
+      context: {
+        fileFiltering: { customIgnoreFiles: ['.cursorignore'] },
+      },
+    };
+    const argv = await parseArguments();
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.cursorignore',
+    ]);
+    expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+      '.qwenignore/.cursorignore',
+    );
+  });
 });
 
 describe('Output format', () => {

@@ -738,6 +738,71 @@ describe('RipGrepTool', () => {
       await fs.rm(secondDir, { recursive: true, force: true });
     });
 
+    it('should pass .agentignore and .aiignore to ripgrep when respected', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.agentignore'),
+        'agent-secret.txt\n',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, '.aiignore'),
+        'ai-secret.txt\n',
+      );
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'secret' };
+      const invocation = grepTool.build(params);
+      await invocation.execute(abortSignal);
+
+      const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+      const ignoreFileArgs = rgArgs.filter(
+        (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+      );
+      expect(ignoreFileArgs).toContain(path.join(tempRootDir, '.agentignore'));
+      expect(ignoreFileArgs).toContain(path.join(tempRootDir, '.aiignore'));
+    });
+
+    it('should pass configured custom ignore files to ripgrep', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.cursorignore'),
+        'cursor-secret.txt\n',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, '.agentignore'),
+        'agent-secret.txt\n',
+      );
+      Object.assign(mockConfig, {
+        getFileFilteringOptions: () => ({
+          respectGitIgnore: true,
+          respectQwenIgnore: true,
+          customIgnoreFiles: ['.cursorignore'],
+        }),
+      });
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'secret' };
+      const invocation = grepTool.build(params);
+      await invocation.execute(abortSignal);
+
+      const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+      const ignoreFileArgs = rgArgs.filter(
+        (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+      );
+      expect(ignoreFileArgs).toContain(path.join(tempRootDir, '.cursorignore'));
+      expect(ignoreFileArgs).not.toContain(
+        path.join(tempRootDir, '.agentignore'),
+      );
+    });
+
     it('should deduplicate matches from overlapping workspace directories', async () => {
       // This tests the fix: when ripgrep receives overlapping search paths
       // (e.g. /parent and /parent/sub), it may report the same file twice.

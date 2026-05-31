@@ -28,6 +28,7 @@ export interface FileSearchOptions {
   ignoreDirs: string[];
   useGitignore: boolean;
   useQwenignore: boolean;
+  customIgnoreFiles?: string[];
   cache: boolean;
   cacheTtl: number;
   enableRecursiveFileSearch: boolean;

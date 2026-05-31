@@ -7,7 +7,10 @@
 import type { GitIgnoreFilter } from '../utils/gitIgnoreParser.js';
 import type { QwenIgnoreFilter } from '../utils/qwenIgnoreParser.js';
 import { GitIgnoreParser } from '../utils/gitIgnoreParser.js';
-import { QwenIgnoreParser } from '../utils/qwenIgnoreParser.js';
+import {
+  formatQwenIgnoreFileNames,
+  QwenIgnoreParser,
+} from '../utils/qwenIgnoreParser.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import * as path from 'node:path';
 
@@ -27,16 +30,22 @@ export class FileDiscoveryService {
   private qwenIgnoreFilter: QwenIgnoreFilter | null = null;
   private projectRoot: string;
 
-  constructor(projectRoot: string) {
+  constructor(
+    projectRoot: string,
+    private readonly customIgnoreFiles?: string[],
+  ) {
     this.projectRoot = path.resolve(projectRoot);
     if (isGitRepository(this.projectRoot)) {
       this.gitIgnoreFilter = new GitIgnoreParser(this.projectRoot);
     }
-    this.qwenIgnoreFilter = new QwenIgnoreParser(this.projectRoot);
+    this.qwenIgnoreFilter = new QwenIgnoreParser(
+      this.projectRoot,
+      customIgnoreFiles,
+    );
   }
 
   /**
-   * Filters a list of file paths based on git ignore rules
+   * Filters a list of file paths based on git and AI ignore rules.
    */
   filterFiles(
     filePaths: string[],
@@ -103,7 +112,7 @@ export class FileDiscoveryService {
   }
 
   /**
-   * Checks if a single file should be qwen-ignored
+   * Checks if a single file should be ignored by Qwen/agent ignore files.
    */
   shouldQwenIgnoreFile(filePath: string): boolean {
     if (this.qwenIgnoreFilter) {
@@ -134,9 +143,13 @@ export class FileDiscoveryService {
   }
 
   /**
-   * Returns loaded patterns from .qwenignore
+   * Returns loaded patterns from Qwen/agent ignore files.
    */
   getQwenIgnorePatterns(): string[] {
     return this.qwenIgnoreFilter?.getPatterns() ?? [];
+  }
+
+  getQwenIgnoreFileNamesDisplay(): string {
+    return formatQwenIgnoreFileNames(this.customIgnoreFiles);
   }
 }

@@ -1090,8 +1090,65 @@ describe('ReadFileTool', () => {
         const params: ReadFileToolParams = {
           file_path: ignoredFilePath,
         };
-        const expectedError = `File path '${ignoredFilePath}' is ignored by .qwenignore pattern(s).`;
+        const expectedError = `File path '${ignoredFilePath}' is ignored by .qwenignore/.agentignore/.aiignore pattern(s).`;
         expect(() => tool.build(params)).toThrow(expectedError);
+      });
+
+      it('should throw error if path is ignored by .agentignore or .aiignore', async () => {
+        await fsp.writeFile(
+          path.join(tempRootDir, '.agentignore'),
+          'agent-secret.txt\n',
+        );
+        await fsp.writeFile(
+          path.join(tempRootDir, '.aiignore'),
+          'ai-secret.txt\n',
+        );
+        const agentIgnoredFilePath = path.join(tempRootDir, 'agent-secret.txt');
+        const aiIgnoredFilePath = path.join(tempRootDir, 'ai-secret.txt');
+        await fsp.writeFile(agentIgnoredFilePath, 'content', 'utf-8');
+        await fsp.writeFile(aiIgnoredFilePath, 'content', 'utf-8');
+
+        expect(() => tool.build({ file_path: agentIgnoredFilePath })).toThrow(
+          /\.qwenignore\/\.agentignore\/\.aiignore/,
+        );
+        expect(() => tool.build({ file_path: aiIgnoredFilePath })).toThrow(
+          /\.qwenignore\/\.agentignore\/\.aiignore/,
+        );
+      });
+
+      it('should throw error using configured custom ignore file display', async () => {
+        await fsp.writeFile(
+          path.join(tempRootDir, '.cursorignore'),
+          'cursor-secret.txt\n',
+        );
+        const customConfig = {
+          getFileService: () =>
+            new FileDiscoveryService(tempRootDir, ['.cursorignore']),
+          getFileSystemService: () => new StandardFileSystemService(),
+          getTargetDir: () => tempRootDir,
+          getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+          storage: {
+            getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+            getProjectDir: () => path.join(tempRootDir, '.project'),
+            getUserSkillsDirs: () => [
+              path.join(os.homedir(), '.qwen', 'skills'),
+            ],
+          },
+          getTruncateToolOutputThreshold: () => 2500,
+          getTruncateToolOutputLines: () => 500,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true, pdf: true, audio: true, video: true },
+          }),
+          getFileReadCache: () => fileReadCache,
+          getFileReadCacheDisabled: () => false,
+        } as unknown as Config;
+        const customTool = new ReadFileTool(customConfig);
+        const ignoredFilePath = path.join(tempRootDir, 'cursor-secret.txt');
+        await fsp.writeFile(ignoredFilePath, 'content', 'utf-8');
+
+        expect(() => customTool.build({ file_path: ignoredFilePath })).toThrow(
+          /\.qwenignore\/\.cursorignore/,
+        );
       });
 
       it('should throw error if file is in an ignored directory', async () => {
@@ -1102,7 +1159,7 @@ describe('ReadFileTool', () => {
         const params: ReadFileToolParams = {
           file_path: ignoredFilePath,
         };
-        const expectedError = `File path '${ignoredFilePath}' is ignored by .qwenignore pattern(s).`;
+        const expectedError = `File path '${ignoredFilePath}' is ignored by .qwenignore/.agentignore/.aiignore pattern(s).`;
         expect(() => tool.build(params)).toThrow(expectedError);
       });
 

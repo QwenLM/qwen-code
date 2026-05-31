@@ -184,6 +184,24 @@ describe('LSTool', () => {
       expect(result.returnDisplay).toBe('Listed 2 item(s) (1 qwen-ignored)');
     });
 
+    it('should respect agent and ai ignore patterns', async () => {
+      await fs.writeFile(path.join(tempRootDir, 'file1.txt'), 'content1');
+      await fs.writeFile(path.join(tempRootDir, 'agent-secret.log'), 'content');
+      await fs.writeFile(path.join(tempRootDir, 'ai-secret.log'), 'content');
+      await fs.writeFile(
+        path.join(tempRootDir, '.agentignore'),
+        'agent-secret.log',
+      );
+      await fs.writeFile(path.join(tempRootDir, '.aiignore'), 'ai-secret.log');
+      const invocation = lsTool.build({ path: tempRootDir });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('file1.txt');
+      expect(result.llmContent).not.toContain('agent-secret.log');
+      expect(result.llmContent).not.toContain('ai-secret.log');
+      expect(result.returnDisplay).toBe('Listed 3 item(s) (2 qwen-ignored)');
+    });
+
     it('should handle non-directory paths', async () => {
       const testPath = path.join(tempRootDir, 'file1.txt');
       await fs.writeFile(testPath, 'content1');

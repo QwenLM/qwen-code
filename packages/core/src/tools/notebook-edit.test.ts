@@ -707,6 +707,22 @@ describe('NotebookEditTool', () => {
     ).toThrow(/ignored by \.qwenignore/);
   });
 
+  it('rejects notebooks ignored by .agentignore during validation', () => {
+    fs.writeFileSync(path.join(tempDir, '.agentignore'), '*.ipynb\n', 'utf-8');
+    const filePath = writeNotebook('agent-ignored.ipynb', {
+      cells: [],
+      metadata: {},
+    });
+
+    expect(() =>
+      tool.build({
+        notebook_path: filePath,
+        edit_mode: 'insert',
+        new_source: 'x = 1',
+      }),
+    ).toThrow(/\.qwenignore\/\.agentignore\/\.aiignore/);
+  });
+
   it('returns a notebook diff for confirmation', async () => {
     const filePath = writeNotebook('confirm.ipynb', {
       cells: [{ cell_type: 'code', id: 'a', source: ['x = 1'], metadata: {} }],

@@ -1292,6 +1292,10 @@ describe('Server Config (config.ts)', () => {
   it('should set default file filtering settings when not provided', () => {
     const config = new Config(baseParams);
     expect(config.getFileFilteringRespectGitIgnore()).toBe(true);
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.agentignore',
+      '.aiignore',
+    ]);
   });
 
   it('should set custom file filtering settings when provided', () => {
@@ -1299,10 +1303,17 @@ describe('Server Config (config.ts)', () => {
       ...baseParams,
       fileFiltering: {
         respectGitIgnore: false,
+        customIgnoreFiles: ['.cursorignore'],
       },
     };
     const config = new Config(paramsWithFileFiltering);
     expect(config.getFileFilteringRespectGitIgnore()).toBe(false);
+    expect(config.getFileFilteringOptions().customIgnoreFiles).toEqual([
+      '.cursorignore',
+    ]);
+    expect(config.getFileService().getQwenIgnoreFileNamesDisplay()).toBe(
+      '.qwenignore/.cursorignore',
+    );
   });
 
   it('should initialize WorkspaceContext with includeDirectories', () => {
