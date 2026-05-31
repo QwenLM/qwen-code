@@ -161,7 +161,7 @@ const toolContext = new AsyncLocalStorage<SpanContext | undefined>();
  * picks `interactionContext.getStore()` whenever it is non-null — which is
  * always true during foreground execution — and re-parents every child
  * span back to the interaction, bypassing the subagent span entirely.
- * Review wenshao @ #4410 (DeepSeek bot 3290820352).
+ * Review wenshao @ #4410.
  */
 const subagentContext = new AsyncLocalStorage<SpanContext | undefined>();
 
@@ -176,10 +176,9 @@ const SPAN_TTL_MS_LONG = 4 * 60 * 60 * 1000; //   4 h  — long fire-and-forget 
 
 /**
  * Invocation kinds that legitimately run for hours and need the long TTL.
- * Typed against `SubagentInvocationKind` so adding a new kind to the union
- * (e.g. `'scheduled'`) without revisiting this Set causes a TS error in
- * the ttlFor() comparison instead of silently falling through to the
- * 30-min default. Review wenshao @ #4410.
+ * New kinds added to `SubagentInvocationKind` silently fall through to
+ * the 30-min default (Set.has() returns false) — widen this Set only
+ * after confirming the new kind legitimately needs 4h+ TTL.
  */
 const LONG_TTL_SUBAGENT_KINDS = new Set<SubagentInvocationKind>([
   'fork',
@@ -259,7 +258,7 @@ function sweepStaleSpans(now: number): void {
                 // endSubagentSpan stamps so dashboards querying that
                 // namespace see TTL-swept spans too (they currently
                 // only get the generic qwen-code.span.duration_ms
-                // above). wenshao @ #4410 DeepSeek 3292521245.
+                // above). wenshao @ #4410.
                 'qwen-code.subagent.duration_ms': ageMs,
               }
             : {}),
@@ -430,7 +429,7 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
 
   // Prefer subagentContext over interactionContext so LLM spans inside a
   // foreground subagent nest under the subagent span instead of escaping
-  // back to the outer interaction. wenshao @ #4410 (DeepSeek 3290820352).
+  // back to the outer interaction. wenshao @ #4410.
   const parentCtx = subagentContext.getStore() ?? interactionContext.getStore();
   // resolveParentContext() also re-parents to the active OTel span when
   // present, so a side-query LLM call nested inside a tool span still
@@ -438,7 +437,7 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
   const ctx = resolveParentContext(parentCtx);
 
   // Tri-state so subagent-parented LLM calls don't get mis-classified as
-  // "interaction" in dashboards. wenshao @ #4410 DeepSeek 3291876044.
+  // "interaction" in dashboards. wenshao @ #4410.
   const attributes: Attributes = {
     'qwen-code.model': model,
     'qwen-code.prompt_id': promptId,
@@ -593,7 +592,7 @@ export function startToolSpan(
   }
 
   // Prefer subagentContext over interactionContext (see startLLMRequestSpan
-  // for rationale; wenshao @ #4410 DeepSeek 3290820352).
+  // for rationale; wenshao @ #4410).
   const parentCtx = subagentContext.getStore() ?? interactionContext.getStore();
   // Same fallback as startLLMRequestSpan: prefer active OTel span for
   // tools-inside-tools cases before falling back to the session root.
@@ -968,7 +967,7 @@ export function startHookSpan(opts: StartHookSpanOptions): Span {
   // hook span is started outside any tool (defensive — keeps the trace tree
   // correlated with the session). subagentContext sits between tool and
   // interaction so hooks fired inside a subagent but outside any tool
-  // still nest under the subagent. wenshao @ #4410 DeepSeek 3290820352.
+  // still nest under the subagent. wenshao @ #4410.
   const parentCtx =
     toolContext.getStore() ??
     subagentContext.getStore() ??
@@ -1220,7 +1219,7 @@ export function startSubagentSpan(opts: StartSubagentSpanOptions): Span {
  *    inner-tool parenting remains correct. This is required so hooks
  *    fired inside a subagent body (e.g. SubagentStart) don't
  *    incorrectly parent under the outer AGENT tool span (#4410
- *    DeepSeek 3291876051).
+ *).
  *
  * Mirrors opencode's `withRunSpan` pattern.
  */
@@ -1239,7 +1238,7 @@ export function runInSubagentSpanContext<T>(
   // Enter subagentContext so child startLLMRequestSpan/startToolSpan/
   // startHookSpan calls inside the body parent under this subagent
   // instead of escaping back to the outer interactionContext.
-  // wenshao @ #4410 (DeepSeek 3290820352).
+  // wenshao @ #4410.
   //
   // Also clear `toolContext` for the body's duration. `startHookSpan`'s
   // parent priority is `tool > subagent > interaction`, and the AGENT
@@ -1248,7 +1247,7 @@ export function runInSubagentSpanContext<T>(
   // inner tool call) would parent to the outer AGENT tool span instead
   // of the subagent. The subagent's own inner tools will re-set
   // toolContext via runInToolSpanContext, so inner-tool parenting stays
-  // correct. wenshao @ #4410 DeepSeek 3291876051.
+  // correct. wenshao @ #4410.
   const otelCtxWithSpan = trace.setSpan(otelContext.active(), span);
   return subagentContext.run(spanCtx, () =>
     toolContext.run(undefined, () => otelContext.with(otelCtxWithSpan, fn)),
@@ -1279,7 +1278,7 @@ export function endSubagentSpan(
   // every subagent invocation when telemetry is OFF: in that case
   // `startSubagentSpan` returns NOOP_SPAN which was never registered in
   // `activeSpans`, so `!spanCtx` is the normal teardown — not a race.
-  // Review wenshao @ #4410 (DeepSeek bot 3290820392) + own silent-failure
+  // Review wenshao @ #4410 + own silent-failure
   // hunter follow-up.
   if (!spanCtx) {
     if (isTelemetrySdkInitialized()) {
@@ -1368,7 +1367,7 @@ export function clearSessionTracingForTesting(): void {
   toolContext.enterWith(undefined);
   // subagentContext is checked BEFORE interactionContext in startXSpan, so
   // a leaked subagent ALS frame would silently re-parent every subsequent
-  // test's spans. wenshao @ #4410 DeepSeek 3291876036.
+  // test's spans. wenshao @ #4410.
   subagentContext.enterWith(undefined);
   interactionSequence = 0;
   lastInteractionCtx = undefined;

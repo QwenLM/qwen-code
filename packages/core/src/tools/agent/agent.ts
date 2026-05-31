@@ -732,8 +732,7 @@ function deriveSubagentOutcomeMetadata(opts: {
   // `error`/`errorType` so endSubagentSpan sets standard OTel exception
   // attributes instead of a generic `'subagent failed'` placeholder.
   // Otherwise dashboards relying on `exception.message`/`error.type` see
-  // no signal for these (reachable) outcomes. wenshao @ #4410 DeepSeek
-  // 3291876053.
+  // no signal for these (reachable) outcomes. wenshao @ #4410.
   return {
     status: 'failed',
     terminateReason: String(terminateMode).toLowerCase(),
@@ -1249,8 +1248,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    * assumption that this wrapper covers it: a rejection escaping the
    * `void` boundary becomes an unhandled-promise event (terminates the
    * process on Node ≥ 15 in default mode). If a new void'd call site is
-   * added, wrap it in `.catch(...)` defensively. wenshao @ #4410 DeepSeek
-   * 3292370970.
+   * added, wrap it in `.catch(...)` defensively. wenshao @ #4410.
    *
    * #3731 Phase 3.
    */
@@ -1298,14 +1296,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // the wiring bug surfaces proactively in dashboards instead of being
     // silently masked as a success.
     // The throw-derived fallbacks below only fire if the body somehow
-    // rejects (synchronous setup throw or a bug). Review wenshao @ #4410.
+    // rejects (synchronous setup throw or a bug).
     let recordedMetadata: SubagentSpanMetadata | undefined;
     // First-write-wins. The previous review noticed runSubagentWithHooks
     // and bgBody can call this twice (success path + inner catch chains),
     // and last-write would silently turn a real `completed` into the
     // catch's `failed` when an UpdateDisplay throws mid-success. Pinning
     // the first call protects the publish-first ordering. Review wenshao
-    // @ #4410 (DeepSeek bot 3290820357).
+    // @ #4410.
     const recordOutcome: SubagentOutcomeSink = (m) => {
       recordedMetadata ??= m;
     };
@@ -1328,8 +1326,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // future wiring bug surfaces proactively in dashboards instead
       // of silently masking every failure as a success. Production
       // logs alone don't catch this (debug-level), but a real
-      // `status=failed` will. Review wenshao @ #4410 DeepSeek
-      // 3292370968.
+      // `status=failed` will. Review wenshao @ #4410.
       if (!recordedMetadata) {
         debugLogger.warn(
           `runWithSubagentSpan: body did not call recordOutcome for ${spec.subagentName}/${spec.agentId} — defaulting span status to failed (wiring bug)`,
@@ -1341,8 +1338,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: 'failed',
           error: 'recordOutcome was never called (wiring bug)',
           // Distinct sentinel so dashboards can separate genuine
-          // failures from wiring defects. wenshao @ #4410 DeepSeek
-          // 3292521240.
+          // failures from wiring defects. wenshao @ #4410.
           terminateReason: 'wiring_bug_record_outcome_not_called',
         },
       );
@@ -1353,7 +1349,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    * Build the spec object passed to `runWithSubagentSpan`. The 3 call
    * sites differ only in `invocationKind`; this helper de-duplicates the
    * other fields so renaming `subagentName` (or adding a new spec field)
-   * is a one-place change. wenshao @ #4410 DeepSeek 3292521238.
+   * is a one-place change. wenshao @ #4410.
    */
   private buildSubagentSpanSpec(
     hookOpts: { agentId: string; agentType: string },
@@ -1453,7 +1449,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // `resultSummaryPresent` checks the RAW subagent text (not finalText
       // with stop-hook warning) so a subagent that produced no result but
       // hit a stop-hook block doesn't false-positive as having a summary.
-      // Matches the bgBody pattern. wenshao @ #4410 DeepSeek 3291876047.
+      // Matches the bgBody pattern. wenshao @ #4410.
       opts.recordSpanOutcome?.(
         deriveSubagentOutcomeMetadata({
           terminateMode,
@@ -2319,7 +2315,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               // (deriveSubagentOutcomeMetadata); align the registry side
               // so dashboards don't see span=cancelled / registry=failed
               // mismatch on graceful arena/team-session shutdown.
-              // wenshao @ #4410 DeepSeek 3291876034.
+              // wenshao @ #4410.
               registry.finalizeCancelled(
                 hookOpts.agentId,
                 finalText,
@@ -2446,7 +2442,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // call could theoretically throw if OTel internals break.
         // Without this, such a throw becomes an unhandled rejection
         // (Node ≥15 default = process termination). Review wenshao @
-        // #4410 DeepSeek 3292370970 + silent-failure-hunter.
+        // #4410 + silent-failure-hunter.
         const bgPromise = isFork
           ? runInForkContext(framedBgBody)
           : framedBgBody();
