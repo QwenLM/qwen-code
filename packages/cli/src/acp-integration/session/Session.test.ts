@@ -906,6 +906,106 @@ describe('Session', () => {
       }
     });
 
+    describe('conversation_finished telemetry (#4602 review)', () => {
+      it('emits conversation_finished once when a turn completes normally', async () => {
+        const finishedSpy = vi
+          .spyOn(core, 'logConversationFinishedEvent')
+          .mockImplementation(() => {});
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(finishedSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('still emits conversation_finished when the turn throws (telemetry not lost on the error path)', async () => {
+        const finishedSpy = vi
+          .spyOn(core, 'logConversationFinishedEvent')
+          .mockImplementation(() => {});
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockRejectedValue(new Error('stream boom'));
+
+        await session
+          .prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          })
+          .catch(() => undefined);
+
+        expect(finishedSpy).toHaveBeenCalled();
+      });
+    });
+
+    describe('tool outcome telemetry (#4602 review)', () => {
+      it('records a soft tool failure (toolResult.error) as error, not success', async () => {
+        const logToolCallSpy = vi
+          .spyOn(core, 'logToolCall')
+          .mockImplementation(() => {});
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            execute: vi.fn().mockResolvedValue({
+              llmContent: 'nope',
+              returnDisplay: 'failed',
+              error: { message: 'tool blew up' },
+            }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read the file' }],
+        });
+
+        const toolEvent = logToolCallSpy.mock.calls
+          .map(
+            ([, ev]) =>
+              ev as {
+                function_name?: string;
+                status?: string;
+                success?: boolean;
+              },
+          )
+          .find((ev) => ev.function_name === 'read_file');
+        expect(toolEvent?.status).toBe('error');
+        expect(toolEvent?.success).toBe(false);
+      });
+    });
+
     describe('auto-compress', () => {
       it('runs automatic compression before sending an ACP prompt', async () => {
         mockChat.sendMessageStream = vi

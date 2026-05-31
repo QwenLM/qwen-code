@@ -26,7 +26,11 @@ import {
 } from './constants.js';
 import { clearDetailedSpanState } from './detailed-span-attributes.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
-import { getSessionContext, setSessionContext } from './session-context.js';
+import {
+  getCurrentSessionId,
+  getSessionContext,
+  setSessionContext,
+} from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
@@ -43,7 +47,7 @@ export interface EndInteractionOptions {
   errorMessage?: string;
 }
 
-export type InteractionSpanResultStatus = 'ok' | 'cancelled';
+export type InteractionSpanResultStatus = 'ok' | 'error' | 'cancelled';
 
 export interface LLMRequestMetadata {
   inputTokens?: number;
@@ -153,6 +157,29 @@ const NOOP_SPAN = trace.wrapSpanContext({
 
 const interactionContext = new AsyncLocalStorage<SpanContext | undefined>();
 const toolContext = new AsyncLocalStorage<SpanContext | undefined>();
+
+/**
+ * Resolve the session.id for a child span (llm_request / tool / tool.execution)
+ * from the per-session value carried on the parent span context, falling back
+ * to the process-global getCurrentSessionId() only when no parent is present.
+ *
+ * A daemon hosts many sessions in one process, but getCurrentSessionId() is a
+ * single module-global set at telemetry init — so reading it directly would
+ * stamp a child span with whichever session last touched the global rather than
+ * the session that owns the parenting interaction span. The interaction span
+ * sets 'session.id' from the per-session config.getSessionId(), so deriving it
+ * from the parent context keeps multi-session traces correctly attributed. The
+ * global fallback preserves the single-session CLI path, where no interaction
+ * span context exists around standalone spans.
+ */
+function resolveSessionId(
+  parentCtx: SpanContext | undefined,
+): string | undefined {
+  const fromParent = parentCtx?.attributes?.['session.id'];
+  return typeof fromParent === 'string' && fromParent
+    ? fromParent
+    : getCurrentSessionId();
+}
 
 const activeSpans = new Map<string, WeakRef<SpanContext>>();
 const strongSpans = new Map<string, SpanContext>();
@@ -391,6 +418,7 @@ export async function withInteractionSpan<T>(
   return await otelContext.with(activeContext, async () =>
     interactionContext.run(spanContextObj, async () => {
       let terminalStatus: InteractionStatus = 'ok';
+      let errorStatusSet = false;
       try {
         const result = await fn();
         terminalStatus = getResultStatus?.(result) ?? 'ok';
@@ -403,6 +431,7 @@ export async function withInteractionSpan<T>(
             error instanceof Error ? error.message : String(error),
           ),
         });
+        errorStatusSet = true;
         throw error;
       } finally {
         if (!spanContextObj.ended) {
@@ -414,6 +443,15 @@ export async function withInteractionSpan<T>(
           });
           if (terminalStatus === 'ok') {
             span.setStatus({ code: SpanStatusCode.OK });
+          } else if (terminalStatus === 'error' && !errorStatusSet) {
+            // getResultStatus reported 'error' on a non-throwing path (e.g. the
+            // cron path swallows API errors and surfaces them via status), so
+            // the catch above didn't run. Mark the span ERROR here, guarded so
+            // a thrown error's specific message is never overwritten.
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: 'interaction error',
+            });
           }
           span.end();
           activeSpans.delete(spanId);
@@ -437,7 +475,9 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
   // attaches to the tool span instead of skipping back to the session root.
   const ctx = resolveParentContext(parentCtx);
 
+  const sessionId = resolveSessionId(parentCtx);
   const attributes: Attributes = {
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'qwen-code.model': model,
     'qwen-code.prompt_id': promptId,
     'llm_request.context': parentCtx ? 'interaction' : 'standalone',
@@ -585,7 +625,9 @@ export function startToolSpan(
   // tools-inside-tools cases before falling back to the session root.
   const ctx = resolveParentContext(parentCtx);
 
+  const sessionId = resolveSessionId(parentCtx);
   const attributes: Attributes = {
+    ...(sessionId ? { 'session.id': sessionId } : {}),
     'tool.name': toolName,
     ...attrs,
   };
@@ -699,9 +741,15 @@ export function startToolExecutionSpan(): Span {
   // subsystem) before falling back to the session root.
   const ctx = resolveParentContext(parentCtx);
 
+  const sessionId = resolveSessionId(
+    parentCtx ?? interactionContext.getStore(),
+  );
   const span = getTracer().startSpan(
     SPAN_TOOL_EXECUTION,
-    { kind: SpanKind.INTERNAL },
+    {
+      kind: SpanKind.INTERNAL,
+      attributes: sessionId ? { 'session.id': sessionId } : {},
+    },
     ctx,
   );
 
@@ -709,7 +757,7 @@ export function startToolExecutionSpan(): Span {
   const spanContextObj: SpanContext = {
     span,
     startTime: Date.now(),
-    attributes: {},
+    attributes: sessionId ? { 'session.id': sessionId } : {},
     type: 'tool.execution',
   };
   activeSpans.set(spanId, new WeakRef(spanContextObj));
