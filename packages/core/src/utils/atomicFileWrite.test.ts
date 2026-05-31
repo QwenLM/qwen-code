@@ -372,6 +372,7 @@ describe('atomicWriteFile', () => {
 
       const realGeteuid = process.geteuid!;
       const realStat = await fs.stat(realFile);
+      const inoBefore = realStat.ino;
       process.geteuid = () => realStat.uid + 1;
 
       try {
@@ -382,6 +383,7 @@ describe('atomicWriteFile', () => {
 
       // The real file is updated; the symlink itself is preserved.
       expect(await fs.readFile(realFile, 'utf-8')).toBe('updated');
+      expect((await fs.stat(realFile)).ino).toBe(inoBefore);
       expect((await fs.lstat(symlinkAt)).isSymbolicLink()).toBe(true);
     },
   );
