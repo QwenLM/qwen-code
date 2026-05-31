@@ -100,7 +100,7 @@ The package exposes both a barrel root (`@qwen-code/acp-bridge`) and
 per-module subpaths (`/eventBus`, `/inMemoryChannel`, `/channel`,
 `/permission`, `/status`, `/workspacePaths`, `/bridgeErrors`,
 `/bridgeTypes`, `/bridgeOptions`, `/spawnChannel`, `/bridgeClient`,
-`/bridge`, `/bridgeFileSystem`). They re-export the same symbols, so
+`/bridge`, `/bridgeFileSystem`, `/mcpTimeouts`). They re-export the same symbols, so
 either form resolves to the same module at runtime. Pick by intent:
 
 - **Root** for application/test code that uses several primitives at

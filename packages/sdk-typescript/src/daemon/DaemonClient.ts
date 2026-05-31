@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  MCP_RESTART_SERVER_DEADLINE_MS,
+  MCP_RESTART_CLIENT_HEADROOM_MS,
+} from '@qwen-code/acp-bridge/mcpTimeouts';
 import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { parseSseStream } from './sse.js';
 import type {
@@ -100,26 +104,9 @@ export interface DaemonClientOptions {
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
-/**
- * #4282 fold-in 5 (Codex P2-3) + post-merge Codex review P2 (folded
- * into F1 #4319). The daemon's `MCP_RESTART_TIMEOUT_MS` (5 minutes —
- * see `bridge.ts`) is the upper bound on a single MCP rediscovery.
- * The SDK previously matched that ceiling EXACTLY (300_000ms), which
- * raced the daemon's own deadline: for restarts that finish or fail
- * near 300s, the client `AbortSignal` could fire before the daemon
- * serialized + transmitted the structured success/error response,
- * yielding a client `TimeoutError` even though the daemon was still
- * within its own budget.
- *
- * Adding 30s headroom over the server ceiling lets the daemon's
- * response (typed McpServerRestartFailedError JSON envelope or
- * success summary) reach the client even when the daemon's work
- * runs right up to its budget. 330_000ms is a defensive ceiling on
- * end-to-end "daemon finished + response in-flight + client
- * decoded"; callers needing tighter caps pass their own `timeoutMs`
- * to `restartMcpServer`.
- */
-const MCP_RESTART_DEFAULT_TIMEOUT_MS = 330_000;
+// Server deadline + headroom so the client never races the daemon's own budget (#4330).
+const MCP_RESTART_DEFAULT_TIMEOUT_MS =
+  MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
 
 /**
@@ -1231,9 +1218,9 @@ export class DaemonClient {
    * surface as non-2xx.
    *
    * #4282 fold-in 5 (Codex P2-3): the daemon-side restart waits up to
-   * 5 minutes for stdio MCP discovery; the SDK matches that budget by
-   * default so a slow but valid restart isn't aborted client-side
-   * while the daemon continues working. Callers can pass a custom
+   * 5 minutes for stdio MCP discovery; the SDK default allows that
+   * budget plus 30s headroom (#4330) so a slow but valid restart isn't
+   * aborted client-side while the daemon continues working. Callers can pass a custom
    * `timeoutMs` when their threat model needs a tighter cap, or `0`
    * to disable the timeout entirely.
    *

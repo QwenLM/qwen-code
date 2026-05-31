@@ -67,6 +67,10 @@
       "types": "./dist/bridgeFileSystem.d.ts",
       "import": "./dist/bridgeFileSystem.js"
     },
+    "./mcpTimeouts": {
+      "types": "./dist/mcpTimeouts.d.ts",
+      "import": "./dist/mcpTimeouts.js"
+    },
     "./internal/testUtils": {
       "types": "./dist/internal/testUtils.d.ts",
       "import": "./dist/internal/testUtils.js"
