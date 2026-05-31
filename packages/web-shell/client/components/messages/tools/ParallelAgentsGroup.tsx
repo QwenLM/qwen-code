@@ -6,6 +6,7 @@ import {
   getTaskExecutionRecord,
   getAgentType,
   getAgentDescription,
+  getAgentCurrentToolHint,
   formatTokenCount,
   getAgentCancellationReason,
   getAgentDisplayStatus,
@@ -64,24 +65,6 @@ function getAgentStats(agent: ACPToolCall, now: number): string {
   return parts.join(' · ');
 }
 
-function getCurrentToolHint(agent: ACPToolCall): string {
-  if (agent.status !== 'in_progress') return '';
-  const subs = agent.subTools;
-  if (!subs || subs.length === 0) return '';
-  const last = subs[subs.length - 1];
-  if (last.status !== 'in_progress' && last.status !== 'pending') return '';
-  let hint = last.toolName;
-  if (last.title) {
-    const colonIdx = last.title.indexOf(': ');
-    hint += ' ' + (colonIdx > 0 ? last.title.slice(colonIdx + 2) : last.title);
-  } else if (last.args?.command) {
-    hint += ' ' + (last.args.command as string);
-  } else if (last.args?.file_path) {
-    hint += ' ' + (last.args.file_path as string);
-  }
-  return truncateText(hint, 50);
-}
-
 function toolMatchesApprovalId(tool: ACPToolCall, toolCallId: string): boolean {
   if (tool.callId === toolCallId) return true;
   if (tool.subTools) {
@@ -130,7 +113,7 @@ export function ParallelAgentsGroup({
         {agents.map((agent) => {
           const agentType = getAgentType(agent);
           const desc = getAgentDescription(agent);
-          const toolHint = getCurrentToolHint(agent);
+          const toolHint = getAgentCurrentToolHint(agent);
           const stats = getAgentStats(agent, now);
           const status = getAgentDisplayStatus(agent);
           const isExpanded = expandedId === agent.callId;

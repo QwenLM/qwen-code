@@ -188,6 +188,7 @@ function cachedCodeToHtml(
 // mermaid.initialize() is idempotent but runs per-block; with N diagrams in a
 // transcript this saves N-1 redundant calls per render cycle.
 let lastMermaidTheme: string | undefined;
+let mermaidRenderId = 0;
 
 function MermaidBlock({ code }: { code: string }) {
   const { t } = useI18n();
@@ -216,7 +217,7 @@ function MermaidBlock({ code }: { code: string }) {
           lastMermaidTheme = mermaidTheme;
         }
         try {
-          const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const id = `mermaid-${++mermaidRenderId}`;
           const { svg: rendered } = await mermaid.render(id, code.trim());
           const safeSvg = sanitizeSvg(rendered);
           if (!cancelled) {

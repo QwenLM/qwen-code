@@ -140,13 +140,13 @@ describe('toolFormatting', () => {
     ).toBe('cat ~/.qwen/settings.json (查看 ~/.qwen/settings.json 文件内容)');
   });
 
-  it('displays read_file rawOutput on the result line', () => {
+  it('summarizes read_file rawOutput by line count', () => {
     expect(
       getToolResultSummary(
         tool({
           rawOutput: '# Title\n\nBody',
         }),
       ),
-    ).toBe('# Title\n\nBody');
+    ).toBe('3 line(s)');
   });
 });

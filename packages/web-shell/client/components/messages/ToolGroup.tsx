@@ -1,4 +1,4 @@
-import { memo, useContext, useEffect, useState } from 'react';
+import { memo, useContext, useEffect, useMemo, useState } from 'react';
 import type {
   ACPToolCall,
   PermissionRequest,
@@ -21,6 +21,7 @@ import {
   extractText,
   formatTokenCount,
   getAgentCancellationReason,
+  getAgentCurrentToolHint,
   getAgentDescription,
   getAgentDisplayStatus,
   getAgentType,
@@ -141,24 +142,31 @@ const MAX_READ_LINES = 25;
 function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
   const { t } = useI18n();
   const [showAll, setShowAll] = useState(false);
-  const output = extractText(tool) || '';
-  const lines = output.split('\n');
+  const output = useMemo(() => extractText(tool) || '', [tool]);
+  const lines = useMemo(() => output.split('\n'), [output]);
   const isUserShell = tool.toolName === 'shell';
   const isLong = lines.length > MAX_BASH_LINES;
   const hiddenLinesCount = Math.max(0, lines.length - MAX_BASH_LINES);
-  const displayText =
-    isLong && !showAll
-      ? [
-          `... first ${hiddenLinesCount} lines hidden ...`,
-          ...lines.slice(-MAX_BASH_LINES),
-        ].join('\n')
-      : output;
+  const displayText = useMemo(
+    () =>
+      isLong && !showAll
+        ? [
+            `... first ${hiddenLinesCount} lines hidden ...`,
+            ...lines.slice(-MAX_BASH_LINES),
+          ].join('\n')
+        : output,
+    [hiddenLinesCount, isLong, lines, output, showAll],
+  );
+  const ansiSegments = useMemo(
+    () => (hasAnsi(displayText) ? parseAnsi(displayText) : null),
+    [displayText],
+  );
 
   return (
     <div className={styles.expandedBash}>
       <pre className={styles.expandedOutput}>
-        {hasAnsi(displayText)
-          ? parseAnsi(displayText).map((seg, i) => (
+        {ansiSegments
+          ? ansiSegments.map((seg, i) => (
               <span
                 key={i}
                 style={{
@@ -189,11 +197,14 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
 function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
   const { t } = useI18n();
   const [showAll, setShowAll] = useState(false);
-  const content = extractText(tool) || '';
-  const lines = content.split('\n');
+  const content = useMemo(() => extractText(tool) || '', [tool]);
+  const lines = useMemo(() => content.split('\n'), [content]);
   const isLong = lines.length > MAX_READ_LINES;
-  const displayText =
-    isLong && !showAll ? lines.slice(0, MAX_READ_LINES).join('\n') : content;
+  const displayText = useMemo(
+    () =>
+      isLong && !showAll ? lines.slice(0, MAX_READ_LINES).join('\n') : content,
+    [content, isLong, lines, showAll],
+  );
 
   return (
     <div className={styles.expandedRead}>
@@ -213,7 +224,7 @@ function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
 }
 
 function ExpandedEditDiff({ tool }: { tool: ACPToolCall }) {
-  const diff = extractDiff(tool);
+  const diff = useMemo(() => extractDiff(tool), [tool]);
   if (!diff) return null;
   return (
     <div className={styles.expandedEdit}>
@@ -240,13 +251,20 @@ function getWriteContent(tool: ACPToolCall): string {
 function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
   const { t } = useI18n();
   const [showAll, setShowAll] = useState(false);
-  const content = getWriteContent(tool);
-  if (!content) return null;
-  const lines = content.split('\n');
-  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const content = useMemo(() => getWriteContent(tool), [tool]);
+  const lines = useMemo(() => {
+    const nextLines = content.split('\n');
+    if (nextLines.length > 0 && nextLines[nextLines.length - 1] === '') {
+      nextLines.pop();
+    }
+    return nextLines;
+  }, [content]);
   const isLong = lines.length > MAX_WRITE_LINES;
-  const displayLines =
-    isLong && !showAll ? lines.slice(0, MAX_WRITE_LINES) : lines;
+  const displayLines = useMemo(
+    () => (isLong && !showAll ? lines.slice(0, MAX_WRITE_LINES) : lines),
+    [isLong, lines, showAll],
+  );
+  if (!content) return null;
 
   return (
     <div className={styles.expandedWrite}>
@@ -339,7 +357,10 @@ interface ToolLineProps {
   workspaceCwd?: string;
 }
 
-function getAgentDisplayInfo(tool: ACPToolCall): {
+function getAgentDisplayInfo(
+  tool: ACPToolCall,
+  now?: number,
+): {
   agentType: string;
   description: string;
   subToolCount: number;
@@ -365,7 +386,11 @@ function getAgentDisplayInfo(tool: ACPToolCall): {
   const elapsed =
     stats && typeof stats['totalDurationMs'] === 'number'
       ? formatDurationMs(stats['totalDurationMs'])
-      : formatElapsed(tool.startTime, tool.endTime);
+      : formatElapsed(
+          tool.startTime,
+          tool.endTime ??
+            (tool.status === 'in_progress' && now ? now : undefined),
+        );
 
   const totalTokens =
     taskExec &&
@@ -488,9 +513,11 @@ function areSubToolsEqual(
     const b = next[i];
     if (
       a.callId !== b.callId ||
+      a.toolName !== b.toolName ||
       a.status !== b.status ||
       a.endTime !== b.endTime ||
       a.rawOutput !== b.rawOutput ||
+      a.args !== b.args ||
       a.subContent !== b.subContent ||
       a.title !== b.title
     ) {
@@ -510,6 +537,7 @@ const ToolLine = memo(function ToolLine({
   const [expanded, setExpanded] = useState(
     () => !compactMode && shouldAutoExpand(tool),
   );
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(
     () => {
@@ -524,10 +552,24 @@ const ToolLine = memo(function ToolLine({
     approval?.toolCallId &&
     isSubAgentToolCall(tool) &&
     toolHasApprovalInSubTools(tool, approval.toolCallId);
+  const isAgent = isSubAgentToolCall(tool);
+  const isRunningAgent = isAgent && tool.status === 'in_progress';
 
-  if (isSubAgentToolCall(tool)) {
-    const info = getAgentDisplayInfo(tool);
+  useEffect(() => {
+    if (!isRunningAgent) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [isRunningAgent]);
+
+  if (isAgent) {
+    const info = getAgentDisplayInfo(tool, now);
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
+    const toolHint = getAgentCurrentToolHint(tool);
+    const progressLabel = tool.status === 'pending' ? 'pending' : 'running';
+    const runningMeta = [toolHint, progressLabel, info.elapsed]
+      .filter(Boolean)
+      .join(' · ');
     const showExpanded = expanded || !!hasSubToolApproval;
     return (
       <div className={styles.line}>
@@ -540,6 +582,21 @@ const ToolLine = memo(function ToolLine({
             </span>
           )}
         </div>
+        {!isComplete && (
+          <div
+            className={`${styles.agentSummary} ${styles.lineExpandable}`}
+            onClick={() => setExpanded(!expanded)}
+          >
+            <StatusIcon status={tool.status} />
+            <span className={styles.lineName}>{info.agentType}:</span>
+            <span className={styles.lineArg}>
+              {truncateText(info.description || info.agentType, 50)}
+            </span>
+            {runningMeta && (
+              <span className={styles.lineElapsed}>· {runningMeta}</span>
+            )}
+          </div>
+        )}
         {isComplete && (
           <div
             className={`${styles.agentSummary} ${styles.lineExpandable}`}

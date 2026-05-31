@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { memo, useState, useMemo } from 'react';
 import type { ACPToolCall } from '../../../adapters/types';
 import { Markdown } from '../Markdown';
 import {
@@ -106,7 +106,7 @@ function getToolOutput(tool: ACPToolCall): string {
   return '';
 }
 
-function SubToolLine({ tool }: { tool: ACPToolCall }) {
+const SubToolLine = memo(function SubToolLine({ tool }: { tool: ACPToolCall }) {
   if (tool.subTools || tool.subContent) return <SubAgentPanel tool={tool} />;
 
   const summary = getToolSummary(tool);
@@ -126,7 +126,7 @@ function SubToolLine({ tool }: { tool: ACPToolCall }) {
       {output && <div className={chromeStyles.lineOutput}>{output}</div>}
     </div>
   );
-}
+});
 
 function TaskToolCallLine({ tc }: { tc: TaskToolCall }) {
   const desc = tc.description || '';

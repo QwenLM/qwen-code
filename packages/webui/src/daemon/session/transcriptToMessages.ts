@@ -36,6 +36,9 @@ export function transcriptBlocksToDaemonMessages(
   const messages: DaemonMessage[] = [];
   const subAgentStack: ActiveSubAgent[] = [];
   let currentAssistantIdx: number | null = null;
+  // Tool cards are standalone transcript turns. Once a tool is emitted,
+  // the next top-level assistant/thought block must start a fresh assistant
+  // message instead of being appended to text that appeared before the tool.
   let needsNewContentMessage = false;
 
   for (let i = 0; i < blocks.length; i++) {
@@ -311,6 +314,12 @@ export function transcriptBlocksToDaemonMessages(
 function getFallbackActiveSubAgent(
   stack: ActiveSubAgent[],
 ): DaemonMessageToolCall | undefined {
+  // Only use positional fallback when there is exactly one active top-level
+  // agent. Multiple top-level agents usually mean parallel/background work;
+  // without an explicit parentToolCallId, assigning text or shell output to
+  // the newest agent would steal main-thread content and scramble grouping.
+  // Nested agents keep the fallback because their parent link makes ownership
+  // unambiguous even while the daemon streams child output out-of-band.
   if (stack.length === 1) return stack[0]?.tool;
   const top = stack[stack.length - 1]?.tool;
   return top?.parentToolCallId ? top : undefined;

@@ -2078,7 +2078,14 @@ describe('DaemonSessionProvider', () => {
       await firstStreamDone.promise;
       await flushPromises();
     });
-    expect(awaitingResync).toBe(true);
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'error',
+          text: expect.stringContaining('State resync required'),
+        }),
+      ]),
+    );
 
     await act(async () => {
       await reattachDelivered.promise;
@@ -2088,10 +2095,6 @@ describe('DaemonSessionProvider', () => {
     expect(awaitingResync).toBe(false);
     expect(blocks).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          kind: 'error',
-          text: expect.stringContaining('State resync required'),
-        }),
         expect.objectContaining({
           kind: 'assistant',
           text: 'after reattach',

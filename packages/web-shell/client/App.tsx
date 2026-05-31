@@ -162,24 +162,6 @@ function parseRenameArgument(
   return { type: 'manual', displayName: trimmed };
 }
 
-function getFloatingTodos(messages: readonly Message[]): TodoItem[] {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (message.role === 'plan') {
-      return hasActiveTodos(message.todos) ? message.todos : [];
-    }
-    if (message.role === 'tool_group') {
-      for (let j = message.tools.length - 1; j >= 0; j--) {
-        const todos = extractTodosFromToolCall(message.tools[j]);
-        if (todos) {
-          return hasActiveTodos(todos) ? todos : [];
-        }
-      }
-    }
-  }
-  return [];
-}
-
 function isAgentTool(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   return (
@@ -191,13 +173,38 @@ function isActiveTool(tool: ACPToolCall): boolean {
   return tool.status === 'pending' || tool.status === 'in_progress';
 }
 
-function getFloatingAgents(messages: readonly Message[]): ACPToolCall[] {
-  return messages.flatMap((message) => {
-    if (message.role !== 'tool_group') return [];
-    return message.tools.filter(
-      (tool) => isAgentTool(tool) && isActiveTool(tool),
-    );
-  });
+interface FloatingPanels {
+  todos: TodoItem[];
+  agents: ACPToolCall[];
+}
+
+function getFloatingPanels(messages: readonly Message[]): FloatingPanels {
+  let todos: TodoItem[] | undefined;
+  const agents: ACPToolCall[] = [];
+
+  for (const message of messages) {
+    if (message.role === 'plan') {
+      if (hasActiveTodos(message.todos)) {
+        todos = message.todos;
+      } else {
+        todos = [];
+      }
+      continue;
+    }
+    if (message.role !== 'tool_group') continue;
+
+    for (const tool of message.tools) {
+      const nextTodos = extractTodosFromToolCall(tool);
+      if (nextTodos) {
+        todos = hasActiveTodos(nextTodos) ? nextTodos : [];
+      }
+      if (isAgentTool(tool) && isActiveTool(tool)) {
+        agents.push(tool);
+      }
+    }
+  }
+
+  return { todos: todos ?? [], agents };
 }
 
 function translateCopyMessage(
@@ -319,20 +326,16 @@ export function App({
   const pendingApprovalRef = useRef(pendingApproval);
   pendingApprovalRef.current = pendingApproval;
   const shouldHideComposer = pendingApproval !== null;
-  const rawFloatingTodos = useMemo(
-    () => getFloatingTodos(messages),
+  const rawFloatingPanels = useMemo(
+    () => getFloatingPanels(messages),
     [messages],
   );
   const floatingTodos = useStableArray(
-    rawFloatingTodos,
+    rawFloatingPanels.todos,
     (t) => `${t.id}:${t.status}:${t.content}`,
   );
-  const rawFloatingAgents = useMemo(
-    () => getFloatingAgents(messages),
-    [messages],
-  );
   const floatingAgents = useStableArray(
-    rawFloatingAgents,
+    rawFloatingPanels.agents,
     (a) => `${a.callId}:${a.status}`,
   );
   const activeAgentsPanelRef = useRef<HTMLDivElement>(null);
@@ -1302,6 +1305,18 @@ export function App({
     );
   }, [connection.commands, connection.skills, t]);
 
+  const welcomeHeader = useMemo(
+    () => (
+      <WelcomeHeader
+        version={WEB_SHELL_VERSION}
+        cwd={connection.workspaceCwd || ''}
+        currentModel={currentModel}
+        currentMode={currentMode}
+      />
+    ),
+    [connection.workspaceCwd, currentModel, currentMode],
+  );
+
   const appClassName = [
     styles.app,
     selectedTheme === 'light' ? styles.themeLight : styles.themeDark,
@@ -1452,14 +1467,7 @@ export function App({
                 onConfirm={handleConfirm}
                 catchingUp={connection.catchingUp}
                 workspaceCwd={connection.workspaceCwd || ''}
-                welcomeHeader={
-                  <WelcomeHeader
-                    version={WEB_SHELL_VERSION}
-                    cwd={connection.workspaceCwd || ''}
-                    currentModel={currentModel}
-                    currentMode={currentMode}
-                  />
-                }
+                welcomeHeader={welcomeHeader}
               />
 
               <StreamingStatus />
