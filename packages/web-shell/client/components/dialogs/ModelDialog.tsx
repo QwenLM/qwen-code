@@ -16,12 +16,6 @@ interface ModelDialogModel {
   label?: string;
   authType?: string;
   contextWindow?: number;
-  modalities?: {
-    image?: boolean;
-    pdf?: boolean;
-    audio?: boolean;
-    video?: boolean;
-  };
   isRuntime?: boolean;
 }
 
@@ -31,19 +25,6 @@ function formatContextWindow(size: number | undefined, t: T): string {
   return size
     ? `${size.toLocaleString()} ${t('contextUsage.tokens')}`
     : t('model.contextWindow.unknown');
-}
-
-function formatModalities(model: ModelDialogModel | undefined, t: T): string {
-  const modalities = model?.modalities;
-  if (!modalities) return t('model.modality.textOnly');
-  const parts: string[] = [];
-  if (modalities.image) parts.push('image');
-  if (modalities.pdf) parts.push('pdf');
-  if (modalities.audio) parts.push('audio');
-  if (modalities.video) parts.push('video');
-  return parts.length > 0
-    ? `text · ${parts.join(' · ')}`
-    : t('model.modality.textOnly');
 }
 
 function getAuthType(model: ModelDialogModel): string | undefined {
@@ -302,10 +283,6 @@ export function ModelDialog({
       {selectedModel && (
         <>
           <div className={dp('resume-picker-detail-panel')}>
-            <DetailRow
-              label={t('model.modality')}
-              value={formatModalities(selectedModel, t)}
-            />
             <DetailRow
               label={t('model.contextWindow')}
               value={formatContextWindow(selectedModel.contextWindow, t)}

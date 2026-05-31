@@ -224,6 +224,16 @@ export function isShellToolName(name: string): boolean {
   );
 }
 
+export function toolContainsCallId(
+  tool: ACPToolCall,
+  toolCallId: string,
+): boolean {
+  if (tool.callId === toolCallId) return true;
+  return (
+    tool.subTools?.some((sub) => toolContainsCallId(sub, toolCallId)) ?? false
+  );
+}
+
 function formatDescriptionPaths(
   description: string,
   workspaceCwd?: string,

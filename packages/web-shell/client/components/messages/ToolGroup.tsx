@@ -29,6 +29,7 @@ import {
   getToolDescription,
   getToolResultSummary,
   isShellToolName,
+  toolContainsCallId,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
 import { CompactModeContext } from '../../App';
@@ -233,8 +234,6 @@ function ExpandedEditDiff({ tool }: { tool: ACPToolCall }) {
   );
 }
 
-const MAX_WRITE_LINES = 30;
-
 function getWriteContent(tool: ACPToolCall): string {
   if (tool.args?.content) return tool.args.content as string;
   if (tool.args?.new_string) return tool.args.new_string as string;
@@ -249,8 +248,6 @@ function getWriteContent(tool: ACPToolCall): string {
 }
 
 function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
-  const { t } = useI18n();
-  const [showAll, setShowAll] = useState(false);
   const content = useMemo(() => getWriteContent(tool), [tool]);
   const lines = useMemo(() => {
     const nextLines = content.split('\n');
@@ -259,30 +256,15 @@ function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
     }
     return nextLines;
   }, [content]);
-  const isLong = lines.length > MAX_WRITE_LINES;
-  const displayLines = useMemo(
-    () => (isLong && !showAll ? lines.slice(0, MAX_WRITE_LINES) : lines),
-    [isLong, lines, showAll],
-  );
   if (!content) return null;
 
   return (
     <div className={styles.expandedWrite}>
       <pre className={styles.expandedOutput}>
-        {displayLines.map((line, i) => (
+        {lines.map((line, i) => (
           <span key={i} className={styles.writeAdd}>{`+ ${line}\n`}</span>
         ))}
       </pre>
-      {isLong && (
-        <button
-          className={styles.expandBtn}
-          onClick={() => setShowAll(!showAll)}
-        >
-          {showAll
-            ? t('tool.showLess')
-            : t('tool.linesTotal', { count: lines.length })}
-        </button>
-      )}
     </div>
   );
 }
@@ -415,17 +397,6 @@ function getAgentDisplayInfo(
   };
 }
 
-function toolHasApprovalInSubTools(
-  tool: ACPToolCall,
-  toolCallId: string,
-): boolean {
-  if (!tool.subTools) return false;
-  return tool.subTools.some(
-    (sub) =>
-      sub.callId === toolCallId || toolHasApprovalInSubTools(sub, toolCallId),
-  );
-}
-
 function shouldAutoExpand(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (name === 'write_file' || name === 'writefile') return true;
@@ -438,6 +409,11 @@ function getActiveTool(tools: ACPToolCall[]): ACPToolCall {
   return (
     tools.find((t) => t.status === 'in_progress') ?? tools[tools.length - 1]
   );
+}
+
+function isWebFetchToolName(toolName: string): boolean {
+  const name = toolName.toLowerCase();
+  return name === 'web_fetch' || name === 'webfetch' || name === 'fetch';
 }
 
 const getCompactDisplayStatus = getAgentDisplayStatus;
@@ -453,9 +429,11 @@ function CompactToolGroup({
   const activeTool = getActiveTool(tools);
   const overallStatus = getCompactDisplayStatus(activeTool);
   const description = getToolDescription(activeTool, workspaceCwd);
-  const elapsed = isShellToolName(activeTool.toolName)
-    ? ''
-    : formatElapsed(activeTool.startTime, activeTool.endTime);
+  const elapsed =
+    isShellToolName(activeTool.toolName) ||
+    isWebFetchToolName(activeTool.toolName)
+      ? ''
+      : formatElapsed(activeTool.startTime, activeTool.endTime);
 
   return (
     <div className={styles.compactGroup}>
@@ -551,7 +529,7 @@ const ToolLine = memo(function ToolLine({
     !hasApproval &&
     approval?.toolCallId &&
     isSubAgentToolCall(tool) &&
-    toolHasApprovalInSubTools(tool, approval.toolCallId);
+    toolContainsCallId(tool, approval.toolCallId);
   const isAgent = isSubAgentToolCall(tool);
   const isRunningAgent = isAgent && tool.status === 'in_progress';
 
@@ -642,9 +620,10 @@ const ToolLine = memo(function ToolLine({
 
   const description = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
-  const elapsed = isShellToolName(tool.toolName)
-    ? ''
-    : formatElapsed(tool.startTime, tool.endTime);
+  const elapsed =
+    isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
+      ? ''
+      : formatElapsed(tool.startTime, tool.endTime);
   const expandable = hasExpandableContent(tool);
 
   const name = tool.toolName.toLowerCase();
@@ -697,11 +676,7 @@ export const ToolGroup = memo(function ToolGroup({
   const compactMode = useContext(CompactModeContext);
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
-    tools.some(
-      (t) =>
-        t.callId === pendingApproval.toolCallId ||
-        toolHasApprovalInSubTools(t, pendingApproval.toolCallId!),
-    );
+    tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
   const showCompact = compactMode && !hasApprovalTool;
 
   if (showCompact) {

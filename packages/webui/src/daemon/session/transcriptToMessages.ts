@@ -139,6 +139,10 @@ export function transcriptBlocksToDaemonMessages(
         const parentSubAgent = toolCall.parentToolCallId
           ? findSubAgent(subAgentStack, toolCall.parentToolCallId)
           : undefined;
+        const existingTopLevelTool = findTopLevelTool(
+          messages,
+          toolCall.callId,
+        );
 
         if (isSubAgentToolCall(toolCall)) {
           const matchingSubAgentIndex = findSubAgentIndex(
@@ -155,6 +159,11 @@ export function transcriptBlocksToDaemonMessages(
             }
             break;
           }
+        }
+
+        if (existingTopLevelTool) {
+          mergeToolCall(existingTopLevelTool, toolCall);
+          break;
         }
 
         if (parentSubAgent) {
@@ -240,26 +249,50 @@ export function transcriptBlocksToDaemonMessages(
       }
 
       case 'permission': {
-        const permissionToolCall = permissionBlockToSubAgentToolCall(
-          block as DaemonPermissionTranscriptBlock,
-        );
-        if (permissionToolCall) {
-          const matchingSubAgentIndex = findSubAgentIndex(
-            subAgentStack,
-            permissionToolCall.callId,
-          );
-          if (matchingSubAgentIndex >= 0) {
-            // A preceding synthetic tool block carries the canonical display
-            // metadata. Keep it intact and avoid rendering a duplicate card.
-            break;
-          }
+        const permBlock = block as DaemonPermissionTranscriptBlock;
+        const permissionToolCall = permissionBlockToToolCall(permBlock);
+        if (!permissionToolCall) break;
+        const isSubAgentPermission = isSubAgentToolCall(permissionToolCall);
 
-          // Agent calls that need confirmation skip the daemon's usual start
-          // event, so the permission block is the only place that carries the
-          // parent toolCallId until execution resumes. Render a pending Agent
-          // here so later sub-tools can still be grouped under that parent.
-          appendToolCallMessage(messages, block.id, permissionToolCall);
-          needsNewContentMessage = true;
+        const matchingSubAgentIndex = findSubAgentIndex(
+          subAgentStack,
+          permissionToolCall.callId,
+        );
+        if (matchingSubAgentIndex >= 0) {
+          break;
+        }
+
+        if (permBlock.resolved) {
+          // Resolved permission with no matching real tool block:
+          // - Approved: the daemon may still skip the initial agent tool_call
+          //   or a regular tool_call. Keep a pending placeholder visible; for
+          //   agents, also keep it on the stack so child thought/tool events
+          //   stay grouped until the final update merges by callId.
+          // - Rejected: no child events belong to the agent. Render a finished
+          //   card without pushing to subAgentStack so later assistant content
+          //   stays in the main conversation.
+          if (isApprovedPermissionResolution(permBlock.resolved)) {
+            if (!isSubAgentPermission) {
+              permissionToolCall.status = 'in_progress';
+            }
+            appendToolCallMessage(messages, block.id, permissionToolCall);
+            needsNewContentMessage = true;
+            if (isSubAgentPermission) {
+              subAgentStack.push({ tool: permissionToolCall });
+            }
+          } else {
+            permissionToolCall.status = 'failed';
+            permissionToolCall.endTime = permBlock.updatedAt;
+            appendToolCallMessage(messages, block.id, permissionToolCall);
+            needsNewContentMessage = true;
+          }
+          break;
+        }
+
+        // Unresolved: render as pending agent awaiting approval.
+        appendToolCallMessage(messages, block.id, permissionToolCall);
+        needsNewContentMessage = true;
+        if (isSubAgentPermission) {
           subAgentStack.push({ tool: permissionToolCall });
         }
         break;
@@ -351,6 +384,18 @@ function appendSubTool(
   parent.subTools.push(toolCall);
 }
 
+function findTopLevelTool(
+  messages: DaemonMessage[],
+  callId: string,
+): DaemonMessageToolCall | undefined {
+  for (const message of messages) {
+    if (message.role !== 'tool_group') continue;
+    const match = message.tools.find((tool) => tool.callId === callId);
+    if (match) return match;
+  }
+  return undefined;
+}
+
 function closeCompletedSubAgentsBefore(
   stack: ActiveSubAgent[],
   timestamp: number,
@@ -387,6 +432,7 @@ function mergeToolCall(
   target.title = source.title ?? target.title;
   target.toolName = source.toolName ?? target.toolName;
   target.kind = source.kind ?? target.kind;
+  target.content = source.content ?? target.content;
   target.endTime = source.endTime ?? target.endTime;
   target.rawOutput = source.rawOutput ?? target.rawOutput;
   target.args = source.args ?? target.args;
@@ -503,7 +549,7 @@ function daemonToolBlockToToolCall(
   };
 }
 
-function permissionBlockToSubAgentToolCall(
+function permissionBlockToToolCall(
   block: DaemonPermissionTranscriptBlock,
 ): DaemonMessageToolCall | undefined {
   const toolCall = getRecord(block.toolCall);
@@ -511,11 +557,13 @@ function permissionBlockToSubAgentToolCall(
 
   const rawInput = getToolCallRawInput(toolCall);
   const meta = getRecord(toolCall['_meta']);
+  const kind = getString(toolCall, 'kind');
   const toolName =
     getString(meta, 'toolName') ??
     getString(toolCall, 'toolName') ??
     getString(toolCall, 'name') ??
-    (rawInput?.['subagent_type'] ? 'agent' : undefined);
+    (rawInput?.['subagent_type'] ? 'agent' : undefined) ??
+    (kind === 'fetch' ? 'web_fetch' : kind);
   const toolCallId =
     getString(toolCall, 'toolCallId') ?? getString(toolCall, 'id');
   if (!toolCallId || !toolName) return undefined;
@@ -525,12 +573,38 @@ function permissionBlockToSubAgentToolCall(
     toolName,
     title: getString(toolCall, 'title') ?? block.title,
     status: 'pending',
-    kind: inferToolKind(toolName, getString(toolCall, 'kind')),
+    kind: inferToolKind(toolName, kind),
     args: rawInput,
     startTime: block.createdAt,
   };
 
-  return isSubAgentToolCall(syntheticTool) ? syntheticTool : undefined;
+  return syntheticTool;
+}
+
+function isApprovedPermissionResolution(resolved: string): boolean {
+  const [primary = '', detail = ''] = resolved.toLowerCase().split(':', 2);
+  if (isApprovalToken(primary)) return true;
+  if (primary !== 'selected') return false;
+  return detail
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .some(isApprovalToken);
+}
+
+function isApprovalToken(token: string): boolean {
+  return (
+    token === 'allow' ||
+    token === 'allowed' ||
+    token === 'approve' ||
+    token === 'approved' ||
+    token === 'accept' ||
+    token === 'accepted' ||
+    token === 'confirm' ||
+    token === 'confirmed' ||
+    token === 'proceed' ||
+    token === 'success' ||
+    token === 'succeeded'
+  );
 }
 
 function getToolCallRawInput(

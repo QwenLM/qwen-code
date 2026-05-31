@@ -933,6 +933,184 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(agent?.subTools?.[0]).toMatchObject({ callId: 'sub-a1' });
   });
 
+  it('uses resolved approved permission as agent placeholder until final update', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Agent A',
+        options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-1',
+          rawInput: { subagent_type: 'Explore', prompt: 'a' },
+        },
+        preview: { kind: 'generic' as const },
+        resolved: 'selected:allow',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      textBlock('thought-1', 'thought', 'inside agent', 3),
+      toolBlock('child-1', 'child-tool-1', 'completed', 4, {
+        toolName: 'web_fetch',
+        parentToolCallId: 'agent-1',
+        rawOutput: 'child output',
+      }),
+      toolBlock('t1', 'agent-1', 'completed', 5, {
+        toolName: 'agent',
+        title: 'Agent A',
+        rawInput: { subagent_type: 'Explore', prompt: 'a' },
+        rawOutput: { type: 'task_execution', result: 'done' },
+        updatedAt: 6,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const agent =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agent?.callId).toBe('agent-1');
+    expect(agent?.status).toBe('completed');
+    expect(agent?.subContent).toBe('inside agent');
+    expect(agent?.subTools?.[0]).toMatchObject({
+      callId: 'child-tool-1',
+      toolName: 'web_fetch',
+    });
+  });
+
+  it('keeps approved regular tool permission visible until tool update arrives', () => {
+    const pendingMessages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title:
+          'Fetching content from https://www.aliyun.com/activity (format: markdown)',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'webfetch-1',
+          kind: 'fetch',
+          rawInput: {
+            url: 'https://www.aliyun.com/activity',
+            prompt: 'list activities',
+            format: 'markdown',
+          },
+        },
+        preview: { kind: 'generic' as const },
+        resolved: 'selected:proceed_once',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    ]);
+
+    expect(pendingMessages).toHaveLength(1);
+    const pendingTool =
+      pendingMessages[0].role === 'tool_group'
+        ? pendingMessages[0].tools[0]
+        : undefined;
+    expect(pendingTool).toMatchObject({
+      callId: 'webfetch-1',
+      toolName: 'web_fetch',
+      status: 'in_progress',
+      kind: 'fetch',
+    });
+
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title:
+          'Fetching content from https://www.aliyun.com/activity (format: markdown)',
+        options: [{ optionId: 'proceed_once', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'webfetch-1',
+          kind: 'fetch',
+          rawInput: {
+            url: 'https://www.aliyun.com/activity',
+            prompt: 'list activities',
+            format: 'markdown',
+          },
+        },
+        preview: { kind: 'generic' as const },
+        resolved: 'selected:proceed_once',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      toolBlock('t1', 'webfetch-1', 'completed', 3, {
+        toolName: 'web_fetch',
+        toolKind: 'fetch',
+        title: 'WebFetch result',
+        rawOutput: 'Content processed successfully.',
+        updatedAt: 4,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).toMatchObject({
+      callId: 'webfetch-1',
+      toolName: 'web_fetch',
+      status: 'completed',
+      rawOutput: 'Content processed successfully.',
+    });
+  });
+
+  it('renders rejected permission as completed agent card', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('t1', 'thought', 'first thinking', 1),
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: '查询阿里云官网活动',
+        options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-1',
+          rawInput: { subagent_type: 'general-purpose', prompt: 'query' },
+        },
+        preview: { kind: 'generic' as const },
+        resolved: 'selected:cancel',
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 3,
+      },
+      textBlock('t2', 'thought', 'second thinking', 4),
+      textBlock('a1', 'assistant', 'response text', 5),
+    ]);
+
+    expect(messages).toHaveLength(3);
+    // First: thinking-only assistant
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      thinking: 'first thinking',
+      content: '',
+    });
+    // Second: completed agent card (not pending)
+    const agentGroup = messages[1];
+    expect(agentGroup.role).toBe('tool_group');
+    if (agentGroup.role === 'tool_group') {
+      expect(agentGroup.tools[0]).toMatchObject({
+        callId: 'agent-1',
+        status: 'failed',
+        endTime: 3,
+      });
+    }
+    // Third: second thinking + response (not absorbed into agent subContent)
+    expect(messages[2]).toMatchObject({
+      role: 'assistant',
+      thinking: 'second thinking',
+      content: 'response text',
+    });
+  });
+
   it('splits thought across permission boundary when content already exists', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('t1', 'thought', 'first thinking', 1),

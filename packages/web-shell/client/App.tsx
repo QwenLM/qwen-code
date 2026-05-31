@@ -207,6 +207,31 @@ function getFloatingPanels(messages: readonly Message[]): FloatingPanels {
   return { todos: todos ?? [], agents };
 }
 
+function getAgentPanelVersion(agent: ACPToolCall): string {
+  const raw = agent.rawOutput;
+  const taskExec =
+    raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : undefined;
+  const summary = taskExec?.executionSummary;
+  const summaryRecord =
+    summary && typeof summary === 'object' && !Array.isArray(summary)
+      ? (summary as Record<string, unknown>)
+      : undefined;
+  return [
+    agent.subTools?.length ?? 0,
+    agent.subContent?.length ?? 0,
+    agent.title ?? '',
+    agent.args?.description ?? '',
+    agent.args?.prompt ?? '',
+    taskExec?.tokenCount ?? '',
+    summaryRecord?.totalTokens ?? '',
+    summaryRecord?.totalToolCalls ?? '',
+    summaryRecord?.failedToolCalls ?? '',
+    taskExec?.terminateReason ?? '',
+  ].join(':');
+}
+
 function translateCopyMessage(
   message: string,
   t: ReturnType<typeof getTranslator>,
@@ -336,7 +361,8 @@ export function App({
   );
   const floatingAgents = useStableArray(
     rawFloatingPanels.agents,
-    (a) => `${a.callId}:${a.status}`,
+    (a) =>
+      `${a.callId}:${a.status}:${a.subTools?.length ?? 0}:${getAgentPanelVersion(a)}`,
   );
   const activeAgentsPanelRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorHandle>(null);

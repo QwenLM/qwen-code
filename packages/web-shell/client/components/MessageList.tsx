@@ -17,6 +17,7 @@ import { MessageItem } from './MessageItem';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
+import { toolContainsCallId } from './messages/toolFormatting';
 import styles from './MessageList.module.css';
 
 interface MessageListProps {
@@ -38,14 +39,6 @@ function isAskUserQuestion(request: PermissionRequest): boolean {
   );
 }
 
-function toolMatchesApproval(tool: ACPToolCall, toolCallId: string): boolean {
-  if (tool.callId === toolCallId) return true;
-  if (tool.subTools) {
-    return tool.subTools.some((sub) => toolMatchesApproval(sub, toolCallId));
-  }
-  return false;
-}
-
 function approvalMatchesToolGroup(
   messages: Message[],
   approval: PermissionRequest | null,
@@ -53,7 +46,7 @@ function approvalMatchesToolGroup(
   if (!approval?.toolCallId) return false;
   for (const msg of messages) {
     if (msg.role === 'tool_group') {
-      if (msg.tools.some((t) => toolMatchesApproval(t, approval.toolCallId!)))
+      if (msg.tools.some((t) => toolContainsCallId(t, approval.toolCallId!)))
         return true;
     }
   }
@@ -87,7 +80,7 @@ function isForceExpandGroup(
   if (msg.role !== 'tool_group') return false;
   if (
     pendingApproval?.toolCallId &&
-    msg.tools.some((t) => toolMatchesApproval(t, pendingApproval.toolCallId!))
+    msg.tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!))
   )
     return true;
   return false;

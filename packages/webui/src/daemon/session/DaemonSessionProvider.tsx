@@ -107,10 +107,11 @@ const DaemonWorkspaceEventSignalsContext = createContext<
   DaemonWorkspaceEventSignals | undefined
 >(undefined);
 const TERMINAL_SESSION_HTTP_STATUSES = new Set([401, 403, 404, 410]);
-// Keep enough transcript history for large daemon replay streams. The web-shell
-// message list is virtualized, so the practical bottleneck is preserving event
-// ordering and subagent grouping rather than DOM node count. Callers can still
-// pass a smaller maxBlocks when embedding the provider in constrained contexts.
+// Keep enough transcript history for large daemon replay streams so event order
+// and subagent grouping survive replay. Rendering is virtualized, but message
+// normalization still rebuilds from retained blocks today, so this high default
+// is a history-preservation tradeoff rather than a claim that large transcripts
+// are CPU-free. Callers can pass a smaller maxBlocks in constrained contexts.
 const DEFAULT_MAX_BLOCKS = 200_000;
 
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {

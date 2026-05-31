@@ -10,6 +10,7 @@ import {
   formatTokenCount,
   getAgentCancellationReason,
   getAgentDisplayStatus,
+  toolContainsCallId,
 } from '../toolFormatting';
 import { SubAgentPanel } from './SubAgentPanel';
 import { ToolApproval } from '../ToolApproval';
@@ -65,14 +66,6 @@ function getAgentStats(agent: ACPToolCall, now: number): string {
   return parts.join(' · ');
 }
 
-function toolMatchesApprovalId(tool: ACPToolCall, toolCallId: string): boolean {
-  if (tool.callId === toolCallId) return true;
-  if (tool.subTools) {
-    return tool.subTools.some((sub) => toolMatchesApprovalId(sub, toolCallId));
-  }
-  return false;
-}
-
 export function ParallelAgentsGroup({
   agents,
   pendingApproval,
@@ -95,7 +88,7 @@ export function ParallelAgentsGroup({
   const total = agents.length;
 
   const approvalAgent = pendingApproval?.toolCallId
-    ? agents.find((a) => toolMatchesApprovalId(a, pendingApproval.toolCallId!))
+    ? agents.find((a) => toolContainsCallId(a, pendingApproval.toolCallId!))
     : undefined;
 
   return (
