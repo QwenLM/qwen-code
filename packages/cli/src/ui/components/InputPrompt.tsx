@@ -1583,10 +1583,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // Calculate prefix width for physical cursor positioning
   const prefixWidth = shellModeActive
     ? reverseSearchActive
-      ? 5 // "(r:) " = 5 chars
+      ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
       : 2 // "! " = 2 chars
     : commandSearchActive
-      ? 5 // "(r:) " = 5 chars
+      ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
       : showYoloStyling
         ? 2 // "* " = 2 chars
         : 2; // "> " = 2 chars

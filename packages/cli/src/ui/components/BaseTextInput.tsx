@@ -21,7 +21,7 @@
 
 import type { ReactNode } from 'react';
 import { useCallback, useContext, useEffect, useRef } from 'react';
-import { Box, Text, useBoxMetrics } from 'ink';
+import { Box, Text } from 'ink';
 import { addLayoutListener, type DOMElement } from 'ink/dom';
 import CursorContext from 'ink/components/CursorContext';
 import chalk from 'chalk';
@@ -273,7 +273,6 @@ export const BaseTextInput = ({
   // addLayoutListener requires the root node (ink-root), not the component
   // node. We find it by walking up the Ink DOM parent chain.
   const rootRef = useRef(null);
-  useBoxMetrics(rootRef);
   const cursorCtx = useContext(CursorContext);
 
   // Use a ref to hold mutable state so the layout listener callback
