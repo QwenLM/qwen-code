@@ -17,11 +17,15 @@ const PROCESS_TIMEOUT_MS = 5000;
 // Track which tool works on Linux to avoid redundant checks/failures
 let linuxClipboardTool: 'wl-paste' | 'xclip' | null | undefined;
 
+// Cache for wl-paste image types (reset after each paste operation)
+let cachedWlPasteImageTypes: string[] | null = null;
+
 /**
  * Reset the cached Linux clipboard tool. Used for testing.
  */
 export function resetLinuxClipboardTool(): void {
   linuxClipboardTool = undefined;
+  cachedWlPasteImageTypes = null;
 }
 
 /**
@@ -142,11 +146,22 @@ async function saveFromCommand(
 /**
  * Check if the clipboard contains an image using the specified tool.
  * Merged function replacing checkWlPasteForImage and checkXclipForImage.
+ * For wl-paste, caches the result for reuse by saveClipboardImage.
  */
 async function checkClipboardForImage(
   command: string,
   args: string[],
 ): Promise<boolean> {
+  // For wl-paste --list-types, cache the result
+  if (
+    command === 'wl-paste' &&
+    args.length === 1 &&
+    args[0] === '--list-types'
+  ) {
+    const types = await getWlPasteImageTypes();
+    return types.length > 0;
+  }
+
   return new Promise<boolean>((resolve) => {
     try {
       const child = spawn(command, args, {
@@ -216,8 +231,14 @@ export async function clipboardHasImage(): Promise<boolean> {
 
 /**
  * Get the available image MIME types from wl-paste.
+ * Uses cached result if available to avoid redundant calls.
  */
 async function getWlPasteImageTypes(): Promise<string[]> {
+  // Return cached result if available
+  if (cachedWlPasteImageTypes !== null) {
+    return cachedWlPasteImageTypes;
+  }
+
   return new Promise<string[]>((resolve) => {
     const child = spawn('wl-paste', ['--list-types'], {
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -230,6 +251,7 @@ async function getWlPasteImageTypes(): Promise<string[]> {
       } catch {
         /* ignore */
       }
+      cachedWlPasteImageTypes = [];
       resolve([]);
     }, PROCESS_TIMEOUT_MS);
 
@@ -238,15 +260,16 @@ async function getWlPasteImageTypes(): Promise<string[]> {
     });
     child.on('close', () => {
       clearTimeout(timer);
-      resolve(
-        stdout
-          .trim()
-          .split('\n')
-          .filter((t) => t.startsWith('image/')),
-      );
+      const types = stdout
+        .trim()
+        .split('\n')
+        .filter((t) => t.startsWith('image/'));
+      cachedWlPasteImageTypes = types;
+      resolve(types);
     });
     child.on('error', () => {
       clearTimeout(timer);
+      cachedWlPasteImageTypes = [];
       resolve([]);
     });
   });
