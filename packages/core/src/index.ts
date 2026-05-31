@@ -82,6 +82,7 @@ export * from './tools/tools.js';
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
 export * from './tools/mcp-tool.js';
+export * from './tools/elicitation.js';
 export * from './tools/read-file.js';
 export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';

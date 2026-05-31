@@ -274,6 +274,21 @@ const SETTINGS_SCHEMA = {
     description: 'Configuration for MCP servers.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+    jsonSchemaOverride: {
+      type: 'object',
+      additionalProperties: {
+        type: 'object',
+        properties: {
+          enableUrlElicitationCapability: {
+            type: 'boolean',
+            description:
+              'When true, advertise direct URL-mode MCP elicitation support for this server. Defaults to false so Qwen Code sends the Java/Spring-AI-friendly `elicitation: {}` capability shape, which still declares form-mode elicitation support.',
+            default: false,
+          },
+        },
+        additionalProperties: true,
+      },
+    },
   },
 
   // Channels configuration (Telegram, Discord, etc.)

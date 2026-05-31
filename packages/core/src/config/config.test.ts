@@ -12,6 +12,7 @@ import {
   ApprovalMode,
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
+  ELICITATION_COMPLETION_CACHE_TTL_MS,
   MCPServerConfig,
 } from './config.js';
 import { Storage } from './storage.js';
@@ -419,6 +420,131 @@ describe('Server Config (config.ts)', () => {
       // call — recorded entries would vanish between operations.
       const config = new Config(baseParams);
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('elicitation completion waiting', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('resolves when completion is notified', async () => {
+      const config = new Config(baseParams);
+      const waitPromise = config.waitForElicitationCompletion(
+        'test-server',
+        'elicitation-1',
+      );
+
+      config.notifyElicitationCompletion({
+        serverName: 'test-server',
+        elicitationId: 'elicitation-1',
+      });
+
+      await expect(waitPromise).resolves.toBeUndefined();
+    });
+
+    it('does not reuse a completion that already resolved a waiter', async () => {
+      vi.useFakeTimers();
+      const config = new Config(baseParams);
+      const waitPromise = config.waitForElicitationCompletion(
+        'test-server',
+        'elicitation-one-shot',
+        undefined,
+        100,
+      );
+
+      config.notifyElicitationCompletion({
+        serverName: 'test-server',
+        elicitationId: 'elicitation-one-shot',
+      });
+
+      await expect(waitPromise).resolves.toBeUndefined();
+
+      const secondWaitPromise = config
+        .waitForElicitationCompletion(
+          'test-server',
+          'elicitation-one-shot',
+          undefined,
+          100,
+        )
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(secondWaitPromise).resolves.toMatchObject({
+        name: 'TimeoutError',
+      });
+    });
+
+    it('resolves immediately when completion arrived before waiting', async () => {
+      const config = new Config(baseParams);
+      config.notifyElicitationCompletion({
+        serverName: 'test-server',
+        elicitationId: 'elicitation-2',
+      });
+
+      await expect(
+        config.waitForElicitationCompletion('test-server', 'elicitation-2'),
+      ).resolves.toBeUndefined();
+    });
+
+    it('expires cached completions after the TTL', async () => {
+      vi.useFakeTimers();
+      const config = new Config(baseParams);
+      config.notifyElicitationCompletion({
+        serverName: 'test-server',
+        elicitationId: 'elicitation-3',
+      });
+
+      await vi.advanceTimersByTimeAsync(ELICITATION_COMPLETION_CACHE_TTL_MS);
+
+      const waitPromise = config
+        .waitForElicitationCompletion(
+          'test-server',
+          'elicitation-3',
+          undefined,
+          100,
+        )
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(waitPromise).resolves.toMatchObject({
+        message: expect.stringContaining('Timed out'),
+      });
+    });
+
+    it('rejects when aborted while waiting', async () => {
+      const config = new Config(baseParams);
+      const abortController = new AbortController();
+      const waitPromise = config.waitForElicitationCompletion(
+        'test-server',
+        'elicitation-4',
+        abortController.signal,
+      );
+
+      abortController.abort();
+
+      await expect(waitPromise).rejects.toMatchObject({
+        name: 'AbortError',
+      });
+    });
+
+    it('rejects when completion does not arrive before timeout', async () => {
+      vi.useFakeTimers();
+      const config = new Config(baseParams);
+      const waitPromise = config
+        .waitForElicitationCompletion(
+          'test-server',
+          'elicitation-5',
+          undefined,
+          100,
+        )
+        .catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(waitPromise).resolves.toMatchObject({
+        name: 'TimeoutError',
+      });
     });
   });
 

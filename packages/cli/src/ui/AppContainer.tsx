@@ -59,12 +59,14 @@ import {
   MCPDiscoveryState,
   ToolConfirmationOutcome,
   type WaitingToolCall,
+  type ElicitationRequestEvent,
   ToolNames,
   clearWorktreeSession,
   restoreWorktreeContext,
   GitWorktreeService,
   readWorktreeSessionMarker,
 } from '@qwen-code/qwen-code-core';
+import type { ElicitResult } from '@modelcontextprotocol/sdk/types.js';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import { restoreGoalFromHistory } from './utils/restoreGoal.js';
@@ -207,6 +209,7 @@ import {
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
 } from './utils/historyUtils.js';
+import type { QueuedElicitationRequest } from './components/mcp/ElicitationDialog.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -324,6 +327,98 @@ export const AppContainer = (props: AppContainerProps) => {
   const [isTrustedFolder, setIsTrustedFolder] = useState<boolean | undefined>(
     config.isTrustedFolder(),
   );
+  const [elicitationRequests, setElicitationRequests] = useState<
+    QueuedElicitationRequest[]
+  >([]);
+
+  useEffect(() => {
+    config.setElicitationHandler(
+      (event: ElicitationRequestEvent): Promise<ElicitResult> =>
+        new Promise<ElicitResult>((resolve) => {
+          let settled = false;
+          const dismiss = () => {
+            setElicitationRequests((previous) =>
+              previous.filter(
+                (queued) =>
+                  !(
+                    queued.serverName === event.serverName &&
+                    queued.requestId === event.requestId
+                  ),
+              ),
+            );
+          };
+          const finish = (
+            result: ElicitResult,
+            options: { dismissAfterResponse?: boolean } = {},
+          ) => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            event.signal.removeEventListener('abort', handleAbort);
+            resolve(result);
+            if (options.dismissAfterResponse) {
+              dismiss();
+            }
+          };
+          const handleAbort = () => {
+            finish(
+              { action: 'cancel' },
+              {
+                dismissAfterResponse: true,
+              },
+            );
+          };
+
+          if (event.signal.aborted) {
+            handleAbort();
+            return;
+          }
+
+          const queued: QueuedElicitationRequest = {
+            ...event,
+            respond: finish,
+            dismiss,
+          };
+
+          event.signal.addEventListener('abort', handleAbort, { once: true });
+          setElicitationRequests((previous) => [...previous, queued]);
+        }),
+    );
+    config.setElicitationCompletionHandler(({ serverName, elicitationId }) => {
+      setElicitationRequests((previous) => {
+        let matched = false;
+        const next = previous.map((queued) => {
+          if (
+            queued.serverName === serverName &&
+            queued.params.mode === 'url' &&
+            'elicitationId' in queued.params &&
+            queued.params.elicitationId === elicitationId
+          ) {
+            matched = true;
+            return { ...queued, completed: true };
+          }
+          return queued;
+        });
+        if (!matched) {
+          debugLogger.debug(
+            `Ignoring unknown MCP elicitation completion '${elicitationId}' from server '${serverName}'`,
+          );
+        }
+        return next;
+      });
+    });
+    return () => {
+      setElicitationRequests((previous) => {
+        for (const request of previous) {
+          request.respond({ action: 'cancel' });
+        }
+        return [];
+      });
+      config.setElicitationHandler(undefined);
+      config.setElicitationCompletionHandler(undefined);
+    };
+  }, [config]);
 
   const extensionManager = config.getExtensionManager();
 
@@ -2279,6 +2374,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!providerUpdateRequest ||
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
+    elicitationRequests.length > 0 ||
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
@@ -3231,6 +3327,7 @@ export const AppContainer = (props: AppContainerProps) => {
       providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
+      elicitationRequests,
       loopDetectionConfirmationRequest,
       geminiMdFileCount,
       streamingState,
@@ -3355,6 +3452,7 @@ export const AppContainer = (props: AppContainerProps) => {
       providerUpdateRequest,
       settingInputRequests,
       pluginChoiceRequests,
+      elicitationRequests,
       loopDetectionConfirmationRequest,
       geminiMdFileCount,
       streamingState,

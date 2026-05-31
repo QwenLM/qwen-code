@@ -9,6 +9,7 @@ import * as ClientLib from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthProviderType, type Config } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
@@ -16,6 +17,7 @@ import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   addMCPStatusChangeListener,
+  connectToMcpServer,
   createTransport,
   getAllMCPServerStatuses,
   getMCPServerStatus,
@@ -697,6 +699,92 @@ describe('mcp-client', () => {
 
       // Cleanup the registry entry so this test doesn't leak.
       removeMCPServerStatus('healthy-server');
+    });
+  });
+
+  describe('connectToMcpServer', () => {
+    function mockConnectToMcpServerClient() {
+      const mockedClient = {
+        connect: vi.fn(),
+        notification: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setNotificationHandler: vi.fn(),
+        setRequestHandler: vi.fn(),
+        onclose: undefined as (() => void) | undefined,
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn(),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+      return mockedClient;
+    }
+
+    it('registers form-compatible elicitation capabilities by default', async () => {
+      const mockedClient = mockConnectToMcpServerClient();
+      await connectToMcpServer(
+        'interactive-server',
+        { command: 'test-command' },
+        false,
+        {
+          getDirectories: () => [],
+          onDirectoriesChanged: () => vi.fn(),
+        } as unknown as WorkspaceContext,
+        {} as Config,
+      );
+
+      expect(ClientLib.Client).toHaveBeenLastCalledWith(
+        {
+          name: 'qwen-code-mcp-client',
+          version: '0.0.1',
+        },
+        {
+          capabilities: {
+            roots: {},
+            elicitation: {},
+          },
+        },
+      );
+      expect(mockedClient.setRequestHandler).toHaveBeenCalledWith(
+        ElicitRequestSchema,
+        expect.any(Function),
+      );
+      expect(mockedClient.setNotificationHandler).toHaveBeenCalledOnce();
+    });
+
+    it('registers URL elicitation capabilities when enabled per server', async () => {
+      mockConnectToMcpServerClient();
+
+      await connectToMcpServer(
+        'interactive-server',
+        {
+          command: 'test-command',
+          enableUrlElicitationCapability: true,
+        },
+        false,
+        {
+          getDirectories: () => [],
+          onDirectoriesChanged: () => vi.fn(),
+        } as unknown as WorkspaceContext,
+        {} as Config,
+      );
+
+      expect(ClientLib.Client).toHaveBeenLastCalledWith(
+        {
+          name: 'qwen-code-mcp-client',
+          version: '0.0.1',
+        },
+        {
+          capabilities: {
+            roots: {},
+            elicitation: {
+              form: {},
+              url: {},
+            },
+          },
+        },
+      );
     });
   });
 

@@ -55,6 +55,12 @@ import {
   getMCPServerStatus,
   type SendSdkMcpMessage,
 } from '../tools/mcp-client.js';
+import type {
+  ElicitationCompletionEvent,
+  ElicitationCompletionHandler,
+  ElicitationHandler,
+  ElicitationHookHandler,
+} from '../tools/elicitation.js';
 import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
@@ -156,6 +162,9 @@ import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
+
+export const DEFAULT_ELICITATION_COMPLETION_TIMEOUT_MS = 5 * 60 * 1000;
+export const ELICITATION_COMPLETION_CACHE_TTL_MS = 60 * 1000;
 
 import {
   ModelsConfig,
@@ -531,6 +540,16 @@ export class MCPServerConfig {
      * call sites.
      */
     readonly discoveryTimeoutMs?: number,
+    /**
+     * Advertise support for direct URL-mode MCP elicitation
+     * (`elicitation: { form: {}, url: {} }`) for this server.
+     *
+     * Defaults to false so Qwen Code advertises `elicitation: {}` instead.
+     * The empty object is spec-compatible form-mode support and avoids
+     * breaking strict Java/Kotlin MCP servers that reject unknown
+     * `form`/`url` capability properties during handshake.
+     */
+    readonly enableUrlElicitationCapability?: boolean,
   ) {}
 }
 
@@ -1069,6 +1088,18 @@ export class Config {
   private readonly hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
+  private elicitationHandler?: ElicitationHandler;
+  private elicitationHookHandler?: ElicitationHookHandler;
+  private elicitationCompletionHandler?: ElicitationCompletionHandler;
+  private readonly elicitationCompletionListeners = new Map<
+    string,
+    Set<() => void>
+  >();
+  private readonly completedElicitations = new Set<string>();
+  private readonly completedElicitationTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
   private readonly memoryManager: MemoryManager;
   private readonly modelChangeListeners = new Set<(model: string) => void>();
 
@@ -3258,6 +3289,137 @@ export class Config {
    */
   setMessageBus(messageBus: MessageBus): void {
     this.messageBus = messageBus;
+  }
+
+  getElicitationHandler(): ElicitationHandler | undefined {
+    return this.elicitationHandler;
+  }
+
+  setElicitationHandler(handler: ElicitationHandler | undefined): void {
+    this.elicitationHandler = handler;
+  }
+
+  getElicitationHookHandler(): ElicitationHookHandler | undefined {
+    return this.elicitationHookHandler;
+  }
+
+  setElicitationHookHandler(handler: ElicitationHookHandler | undefined): void {
+    this.elicitationHookHandler = handler;
+  }
+
+  getElicitationCompletionHandler(): ElicitationCompletionHandler | undefined {
+    return this.elicitationCompletionHandler;
+  }
+
+  setElicitationCompletionHandler(
+    handler: ElicitationCompletionHandler | undefined,
+  ): void {
+    this.elicitationCompletionHandler = handler;
+  }
+
+  notifyElicitationCompletion(event: ElicitationCompletionEvent): void {
+    this.elicitationCompletionHandler?.(event);
+    const key = this.getElicitationCompletionKey(
+      event.serverName,
+      event.elicitationId,
+    );
+    const listeners = this.elicitationCompletionListeners.get(key);
+    if (!listeners || listeners.size === 0) {
+      if (!this.completedElicitations.has(key)) {
+        this.rememberCompletedElicitation(key);
+      }
+      return;
+    }
+
+    this.elicitationCompletionListeners.delete(key);
+    this.completedElicitations.delete(key);
+    this.clearCompletedElicitationTimer(key);
+    for (const listener of listeners) {
+      listener();
+    }
+  }
+
+  waitForElicitationCompletion(
+    serverName: string,
+    elicitationId: string,
+    signal?: AbortSignal,
+    timeoutMs = DEFAULT_ELICITATION_COMPLETION_TIMEOUT_MS,
+  ): Promise<void> {
+    if (signal?.aborted) {
+      return Promise.reject(new DOMException('Aborted', 'AbortError'));
+    }
+
+    const key = this.getElicitationCompletionKey(serverName, elicitationId);
+    if (this.completedElicitations.delete(key)) {
+      this.clearCompletedElicitationTimer(key);
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        const listeners = this.elicitationCompletionListeners.get(key);
+        listeners?.delete(resolveListener);
+        if (listeners?.size === 0) {
+          this.elicitationCompletionListeners.delete(key);
+        }
+        signal?.removeEventListener('abort', abortListener);
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+      };
+      const resolveListener = () => {
+        cleanup();
+        resolve();
+      };
+      const abortListener = () => {
+        cleanup();
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
+      const timeoutListener = () => {
+        cleanup();
+        reject(
+          new DOMException(
+            `Timed out waiting for MCP elicitation completion: ${serverName}/${elicitationId}`,
+            'TimeoutError',
+          ),
+        );
+      };
+
+      const listeners =
+        this.elicitationCompletionListeners.get(key) ?? new Set<() => void>();
+      listeners.add(resolveListener);
+      this.elicitationCompletionListeners.set(key, listeners);
+      signal?.addEventListener('abort', abortListener, { once: true });
+      if (timeoutMs > 0) {
+        timeout = setTimeout(timeoutListener, timeoutMs);
+      }
+    });
+  }
+
+  private rememberCompletedElicitation(key: string): void {
+    this.completedElicitations.add(key);
+    this.clearCompletedElicitationTimer(key);
+    const timeout = setTimeout(() => {
+      this.completedElicitations.delete(key);
+      this.completedElicitationTimers.delete(key);
+    }, ELICITATION_COMPLETION_CACHE_TTL_MS);
+    this.completedElicitationTimers.set(key, timeout);
+  }
+
+  private clearCompletedElicitationTimer(key: string): void {
+    const timeout = this.completedElicitationTimers.get(key);
+    if (timeout) {
+      clearTimeout(timeout);
+      this.completedElicitationTimers.delete(key);
+    }
+  }
+
+  private getElicitationCompletionKey(
+    serverName: string,
+    elicitationId: string,
+  ): string {
+    return `${serverName}\0${elicitationId}`;
   }
 
   /**

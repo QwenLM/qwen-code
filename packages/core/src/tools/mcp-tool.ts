@@ -18,6 +18,7 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { CallableTool, FunctionCall, Part } from '@google/genai';
+import { UrlElicitationRequiredError } from '@modelcontextprotocol/sdk/types.js';
 import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
 import { truncateToolOutput } from '../utils/truncation.js';
@@ -26,11 +27,18 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('MCP_TOOL');
 
 type ToolParams = Record<string, unknown>;
+const MAX_URL_ELICITATION_RETRIES = 3;
+
+interface UrlElicitationRetryRequest {
+  message: string;
+  url: string;
+  elicitationId: string;
+}
 
 /**
  * Minimal interface for the raw MCP Client's callTool method.
- * This avoids a direct import of @modelcontextprotocol/sdk in this file,
- * keeping the dependency contained in mcp-client.ts.
+ * This avoids importing the full MCP Client type here; mcp-client.ts owns the
+ * concrete client lifecycle.
  */
 export interface McpDirectClient {
   callTool(
@@ -265,6 +273,114 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     throw error;
   }
 
+  private createMcpToolErrorResult(message: string): ToolResult {
+    return {
+      llmContent: message,
+      returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
+      error: {
+        message,
+        type: ToolErrorType.MCP_TOOL_ERROR,
+      },
+    };
+  }
+
+  private async handleUrlElicitationRequired(
+    error: unknown,
+    signal: AbortSignal,
+    retryCount: number,
+  ): Promise<'retry' | ToolResult | undefined> {
+    const elicitations = extractUrlElicitationsFromError(error);
+    if (elicitations.length === 0) {
+      return undefined;
+    }
+
+    if (retryCount >= MAX_URL_ELICITATION_RETRIES) {
+      return this.createMcpToolErrorResult(
+        `MCP tool '${this.serverToolName}' requested URL elicitation more than ${MAX_URL_ELICITATION_RETRIES} times.`,
+      );
+    }
+
+    const handler = this.cliConfig?.getElicitationHandler();
+    if (!handler || !this.cliConfig) {
+      return this.createMcpToolErrorResult(
+        `MCP tool '${this.serverToolName}' requested URL elicitation, but no elicitation handler is registered.`,
+      );
+    }
+
+    for (const elicitation of elicitations) {
+      const waitAbortController = new AbortController();
+      let waitCanceledByUser = false;
+      const handleOuterAbort = () => {
+        waitAbortController.abort();
+      };
+      if (signal.aborted) {
+        waitAbortController.abort();
+      } else {
+        signal.addEventListener('abort', handleOuterAbort, { once: true });
+      }
+
+      let result: { action: 'accept' | 'decline' | 'cancel' };
+      try {
+        result = await handler({
+          serverName: this.serverName,
+          requestId: `${this.serverName}:${this.serverToolName}:url-retry:${retryCount}:${elicitation.elicitationId}`,
+          params: {
+            mode: 'url',
+            message: elicitation.message,
+            url: elicitation.url,
+            elicitationId: elicitation.elicitationId,
+          },
+          signal: waitAbortController.signal,
+          cancel: () => {
+            waitCanceledByUser = true;
+            waitAbortController.abort();
+          },
+        });
+      } catch (error) {
+        signal.removeEventListener('abort', handleOuterAbort);
+        throw error;
+      }
+
+      if (result.action !== 'accept') {
+        signal.removeEventListener('abort', handleOuterAbort);
+        return this.createMcpToolErrorResult(
+          `URL elicitation for MCP tool '${this.serverToolName}' was ${result.action}.`,
+        );
+      }
+
+      try {
+        await this.cliConfig.waitForElicitationCompletion(
+          this.serverName,
+          elicitation.elicitationId,
+          waitAbortController.signal,
+        );
+      } catch (waitError) {
+        if (
+          waitError instanceof DOMException &&
+          waitError.name === 'TimeoutError'
+        ) {
+          return this.createMcpToolErrorResult(
+            `Timed out waiting for URL elicitation completion for MCP tool '${this.serverToolName}'.`,
+          );
+        }
+        if (
+          waitCanceledByUser &&
+          waitError instanceof DOMException &&
+          waitError.name === 'AbortError'
+        ) {
+          return this.createMcpToolErrorResult(
+            `URL elicitation wait for MCP tool '${this.serverToolName}' was canceled.`,
+          );
+        }
+        throw waitError;
+      } finally {
+        signal.removeEventListener('abort', handleOuterAbort);
+      }
+    }
+
+    return 'retry';
+  }
+
   async execute(
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
@@ -287,65 +403,88 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
-    try {
-      const callToolResult = await this.mcpClient!.callTool(
-        {
-          name: this.serverToolName,
-          arguments: this.params as Record<string, unknown>,
-        },
-        undefined,
-        {
-          onprogress: (progress) => {
-            if (updateOutput) {
-              const progressData: McpToolProgressData = {
-                type: 'mcp_tool_progress',
-                progress: progress.progress,
-                ...(progress.total != null && { total: progress.total }),
-                ...(progress.message != null && { message: progress.message }),
-              };
-              updateOutput(progressData);
-            }
+    for (
+      let urlRetryCount = 0;
+      urlRetryCount <= MAX_URL_ELICITATION_RETRIES;
+      urlRetryCount++
+    ) {
+      try {
+        const callToolResult = await this.mcpClient!.callTool(
+          {
+            name: this.serverToolName,
+            arguments: this.params as Record<string, unknown>,
           },
-          timeout: this.mcpTimeout,
-          signal,
-        },
-      );
+          undefined,
+          {
+            onprogress: (progress) => {
+              if (updateOutput) {
+                const progressData: McpToolProgressData = {
+                  type: 'mcp_tool_progress',
+                  progress: progress.progress,
+                  ...(progress.total != null && { total: progress.total }),
+                  ...(progress.message != null && {
+                    message: progress.message,
+                  }),
+                };
+                updateOutput(progressData);
+              }
+            },
+            timeout: this.mcpTimeout,
+            signal,
+          },
+        );
 
-      // Wrap the raw CallToolResult into the Part[] format that the
-      // existing transform/display functions expect.
-      const rawResponseParts = wrapMcpCallToolResultAsParts(
-        this.serverToolName,
-        callToolResult,
-      );
+        // Wrap the raw CallToolResult into the Part[] format that the
+        // existing transform/display functions expect.
+        const rawResponseParts = wrapMcpCallToolResultAsParts(
+          this.serverToolName,
+          callToolResult,
+        );
 
-      // Ensure the response is not an error
-      if (this.isMCPToolError(rawResponseParts)) {
-        const errorMessage = `MCP tool '${
-          this.serverToolName
-        }' reported tool error for function call: ${safeJsonStringify({
-          name: this.serverToolName,
-          args: this.params,
-        })} with response: ${safeJsonStringify(rawResponseParts)}`;
+        // Ensure the response is not an error
+        if (this.isMCPToolError(rawResponseParts)) {
+          const errorMessage = `MCP tool '${
+            this.serverToolName
+          }' reported tool error for function call: ${safeJsonStringify({
+            name: this.serverToolName,
+            args: this.params,
+          })} with response: ${safeJsonStringify(rawResponseParts)}`;
+          return {
+            llmContent: errorMessage,
+            returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
+            error: {
+              message: errorMessage,
+              type: ToolErrorType.MCP_TOOL_ERROR,
+            },
+          };
+        }
+
+        const transformedParts = transformMcpContentToParts(rawResponseParts);
+        const truncatedParts = await this.truncateTextParts(transformedParts);
+
         return {
-          llmContent: errorMessage,
-          returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
-          error: {
-            message: errorMessage,
-            type: ToolErrorType.MCP_TOOL_ERROR,
-          },
+          llmContent: truncatedParts,
+          returnDisplay: getDisplayFromParts(truncatedParts),
         };
+      } catch (error) {
+        const urlElicitationResult = await this.handleUrlElicitationRequired(
+          error,
+          signal,
+          urlRetryCount,
+        );
+        if (urlElicitationResult === 'retry') {
+          continue;
+        }
+        if (urlElicitationResult) {
+          return urlElicitationResult;
+        }
+        return this.handleReconnectOnError(error, signal, updateOutput);
       }
-
-      const transformedParts = transformMcpContentToParts(rawResponseParts);
-      const truncatedParts = await this.truncateTextParts(transformedParts);
-
-      return {
-        llmContent: truncatedParts,
-        returnDisplay: getDisplayFromParts(truncatedParts),
-      };
-    } catch (error) {
-      return this.handleReconnectOnError(error, signal, updateOutput);
     }
+
+    return this.createMcpToolErrorResult(
+      `MCP tool '${this.serverToolName}' did not complete after URL elicitation retries.`,
+    );
   }
 
   /**
@@ -656,6 +795,22 @@ function getDisplayFromParts(parts: Part[]): string {
   }
 
   return displayParts.join('\n');
+}
+
+function extractUrlElicitationsFromError(
+  error: unknown,
+): UrlElicitationRetryRequest[] {
+  if (!(error instanceof UrlElicitationRequiredError)) {
+    return [];
+  }
+
+  return error.elicitations.map((elicitation) => ({
+    url: elicitation.url,
+    elicitationId: elicitation.elicitationId,
+    message:
+      elicitation.message ??
+      'Complete the requested URL interaction to continue.',
+  }));
 }
 
 /** Visible for testing */
