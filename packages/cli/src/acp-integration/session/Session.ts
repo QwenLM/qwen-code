@@ -42,6 +42,7 @@ import {
   getErrorStatus,
   UserPromptEvent,
   readManyFiles,
+  clampInlineMediaPart,
   Storage,
   ToolNames,
   fireNotificationHook,
@@ -2853,12 +2854,12 @@ export class Session implements SessionContext {
           return { text: part.text };
         case 'image':
         case 'audio':
-          return {
+          return clampInlineMediaPart({
             inlineData: {
               mimeType: part.mimeType,
               data: part.data,
             },
-          };
+          });
         case 'resource_link': {
           if (part.uri.startsWith(FILE_URI_SCHEME)) {
             return {
@@ -2892,7 +2893,7 @@ export class Session implements SessionContext {
     // Extract paths from @ commands - pass directly to readManyFiles without filtering
     // since this is user-triggered behavior, not LLM-triggered
     const pathSpecsToRead: string[] = atPathCommandParts.map(
-      (part) => part.fileData!.fileUri,
+      (part) => part.fileData!.fileUri!,
     );
 
     // Construct the initial part of the query for the LLM
@@ -2935,7 +2936,7 @@ export class Session implements SessionContext {
         if (typeof part === 'string') {
           processedQueryParts.push({ text: part });
         } else {
-          processedQueryParts.push(part);
+          processedQueryParts.push(clampInlineMediaPart(part));
         }
       }
     } else if (embeddedContext.length > 0) {
@@ -2956,12 +2957,14 @@ export class Session implements SessionContext {
       }
       // Type guard for blob resources
       if ('blob' in contextPart && contextPart.blob) {
-        processedQueryParts.push({
-          inlineData: {
-            mimeType: contextPart.mimeType ?? 'application/octet-stream',
-            data: contextPart.blob,
-          },
-        });
+        processedQueryParts.push(
+          clampInlineMediaPart({
+            inlineData: {
+              mimeType: contextPart.mimeType ?? 'application/octet-stream',
+              data: contextPart.blob,
+            },
+          }),
+        );
       }
     }
 

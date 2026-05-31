@@ -863,6 +863,49 @@ describe('Session', () => {
       );
     });
 
+    it('degrades an oversized inline image to a text placeholder before sending to the model', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = '8';
+      try {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'QUJDREVGR0hJSktMTU5PUFFSU1Q=', // ~20 decoded bytes, over the 8-byte cap
+            },
+          ],
+        });
+
+        const sendMessageStream = mockChat.sendMessageStream as ReturnType<
+          typeof vi.fn
+        >;
+        const request = sendMessageStream.mock.calls[0]?.[1] as {
+          message: Array<Record<string, unknown>>;
+        };
+        const parts = request.message;
+        expect(parts.some((p) => 'inlineData' in p)).toBe(false);
+        expect(
+          parts.some(
+            (p) =>
+              typeof p['text'] === 'string' &&
+              (p['text'] as string).includes('image/png') &&
+              (p['text'] as string).toLowerCase().includes('omitted'),
+          ),
+        ).toBe(true);
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+    });
+
     describe('conversation_finished telemetry (#4602 review)', () => {
       it('emits conversation_finished once when a turn completes normally', async () => {
         const finishedSpy = vi
@@ -890,10 +933,6 @@ describe('Session', () => {
           .fn()
           .mockRejectedValue(new Error('stream boom'));
 
-        // The turn surfaces the failure (rejection or error stopReason); either
-        // way the finally wrapping the whole turn must have fired the event
-        // before unwinding — the regression wenshao flagged was that only the
-        // clean stop-hook path emitted it.
         await session
           .prompt({
             sessionId: 'test-session-id',
@@ -918,7 +957,6 @@ describe('Session', () => {
           build: vi.fn().mockReturnValue({
             params: { path: '/tmp/test.txt' },
             getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-            // Soft failure: resolves (does not throw) but carries an error.
             execute: vi.fn().mockResolvedValue({
               llmContent: 'nope',
               returnDisplay: 'failed',

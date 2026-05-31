@@ -262,9 +262,11 @@ export class AcpDispatcher {
       protocolVersion: negotiated,
       agentCapabilities: {
         loadSession: true,
+        // Mirror acpAgent.ts promptCapabilities: #resolvePrompt handles audio
+        // blocks identically to image (both become inlineData Parts).
         promptCapabilities: {
           image: true,
-          audio: false,
+          audio: true,
           embeddedContext: true,
         },
         // Model + mode are exposed via the STANDARD `session/set_config_option`
