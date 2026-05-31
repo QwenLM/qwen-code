@@ -2497,6 +2497,24 @@ describe('PermissionManager — compound shell write attribution', () => {
     ).toBe(true);
   });
 
+  it('hasRelevantRules sees protected writes after `cd` before compound recursion', () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+  });
+
   it('hasMatchingAskRule sees writes after `cd` into a subdir', () => {
     const pm = new PermissionManager(
       makeConfig({
