@@ -60,6 +60,7 @@ import {
 } from './permission-helpers.js';
 import {
   evaluatePermissionFlow,
+  getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
   isAutoEditApproved,
@@ -1633,6 +1634,10 @@ export class CoreToolScheduler {
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
             shouldForceAutoModeReviewForAllow(pmCtx);
+          const confirmationPermission = getEffectivePermissionForConfirmation(
+            finalPermission,
+            forceAutoReviewForAllow,
+          );
 
           if (finalPermission === 'allow' && !forceAutoReviewForAllow) {
             // Auto-approve: tool is inherently safe (read-only) or PM allows.
@@ -1756,7 +1761,11 @@ export class CoreToolScheduler {
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
           if (
-            !needsConfirmation(finalPermission, approvalMode, canonicalName)
+            !needsConfirmation(
+              confirmationPermission,
+              approvalMode,
+              canonicalName,
+            )
           ) {
             this.setToolCallOutcome(
               reqInfo.callId,

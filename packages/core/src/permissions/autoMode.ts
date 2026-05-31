@@ -171,9 +171,18 @@ function matchesConfiguredContextFile(normalizedPath: string): boolean {
   );
 }
 
+let qwenHomePrefixesCacheKey: string | undefined;
+let qwenHomePrefixesCache: string[] | undefined;
+
 function getNormalizedQwenHomePrefixes(): string[] {
   const qwenHome = process.env['QWEN_HOME'];
   if (!qwenHome) return [];
+  if (
+    qwenHomePrefixesCacheKey === qwenHome &&
+    qwenHomePrefixesCache !== undefined
+  ) {
+    return qwenHomePrefixesCache;
+  }
 
   const candidates = new Set<string>([path.resolve(qwenHome)]);
   if (qwenHome.startsWith('/') || /^[A-Za-z]:[\\/]/.test(qwenHome)) {
@@ -185,9 +194,12 @@ function getNormalizedQwenHomePrefixes(): string[] {
     // QWEN_HOME may not exist yet; the configured path still matters.
   }
 
-  return [...candidates].map((candidate) =>
+  const prefixes = [...candidates].map((candidate) =>
     normalizePathForAutoModePattern(candidate).replace(/\/+$/, ''),
   );
+  qwenHomePrefixesCacheKey = qwenHome;
+  qwenHomePrefixesCache = prefixes;
+  return prefixes;
 }
 
 function matchesQwenHomeSurface(normalizedPath: string): boolean {

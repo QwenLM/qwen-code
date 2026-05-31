@@ -163,15 +163,6 @@ function isShellAbsolutePath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:\//.test(p.replace(/\\/g, '/'));
 }
 
-function normalizeShellPath(p: string): string {
-  const normalized = p.replace(/\\/g, '/');
-  let end = normalized.length;
-  while (end > 0 && normalized[end - 1] === '/') {
-    end--;
-  }
-  return normalized.slice(0, end);
-}
-
 /**
  * Return true if a token looks like a file/directory path argument, as
  * opposed to a flag, shell variable, number, or script expression.
@@ -1774,8 +1765,12 @@ function resolveCdTargetCwd(
   while (
     targetIndex < words.length &&
     words[targetIndex]!.startsWith('-') &&
-    words[targetIndex] !== '-'
+    words[targetIndex] !== '-' &&
+    words[targetIndex] !== '--'
   ) {
+    targetIndex++;
+  }
+  if (words[targetIndex] === '--') {
     targetIndex++;
   }
 
@@ -1894,12 +1889,6 @@ function markCwdUnknownOps(
 ): ShellOperation[] {
   return ops.map((op) => {
     if (!op.filePath) return op;
-    const normalizedCwd = normalizeShellPath(effectiveCwd);
-    const normalizedPath = normalizeShellPath(op.filePath);
-    const pathMayDependOnCwd =
-      normalizedPath === normalizedCwd ||
-      normalizedPath.startsWith(`${normalizedCwd}/`);
-    if (!pathMayDependOnCwd) return op;
     return { ...op, cwdUnknown: true, pathMayDependOnCwd: true };
   });
 }

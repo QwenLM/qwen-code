@@ -467,6 +467,20 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  it('treats the word after `cd --` as the target even when it starts with dash', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "cd -- -some-dir && printf '{}' > settings.local.json",
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/-some-dir/settings.local.json',
+      },
+    ]);
+  });
+
   it('marks relative writes after dynamic `cd` targets as cwd-unknown', () => {
     // Keep the guessed path, but mark it unsafe to trust as final.
     expect(
@@ -478,6 +492,22 @@ describe('extractShellOperationsAcrossCommand', () => {
       {
         virtualTool: 'write_file',
         filePath: '/repo/out.txt',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
+  it('marks all file ops after dynamic `cd` as cwd-unknown', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd "$QWEN_HOME" && echo hi > ../settings.json',
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/settings.json',
         cwdUnknown: true,
         pathMayDependOnCwd: true,
       },

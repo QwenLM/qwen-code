@@ -268,6 +268,32 @@ describe('isAutoModeProtectedWritePath', () => {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
   });
+
+  it('caches normalized QWEN_HOME prefixes per configured home', () => {
+    const originalQwenHome = process.env['QWEN_HOME'];
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-home-cache-'));
+    const realpathSpy = vi.spyOn(fs.realpathSync, 'native');
+
+    try {
+      const settingsPath = path.join(tmpRoot, 'settings.json');
+      fs.writeFileSync(settingsPath, '{}');
+      process.env['QWEN_HOME'] = tmpRoot;
+
+      expect(isAutoModeProtectedWritePath(settingsPath)).toBe(true);
+      expect(isAutoModeProtectedWritePath(settingsPath)).toBe(true);
+      expect(
+        realpathSpy.mock.calls.filter(([arg]) => arg === tmpRoot),
+      ).toHaveLength(1);
+    } finally {
+      realpathSpy.mockRestore();
+      if (originalQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = originalQwenHome;
+      }
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('passesAcceptEditsFastPath', () => {

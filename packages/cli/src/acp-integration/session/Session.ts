@@ -56,6 +56,7 @@ import {
   getArenaSystemReminder,
   STARTUP_CONTEXT_MODEL_ACK,
   evaluatePermissionFlow,
+  getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
   abortGoalForStopHookCap,
@@ -1940,6 +1941,10 @@ export class Session implements SessionContext {
       const forceAutoReviewForAllow =
         approvalMode === ApprovalMode.AUTO &&
         shouldForceAutoModeReviewForAllow(pmCtx);
+      const confirmationPermission = getEffectivePermissionForConfirmation(
+        finalPermission,
+        forceAutoReviewForAllow,
+      );
       let autoModeAllowed =
         finalPermission === 'allow' && !forceAutoReviewForAllow;
       if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
@@ -2005,7 +2010,7 @@ export class Session implements SessionContext {
 
       if (
         !autoModeAllowed &&
-        needsConfirmation(finalPermission, approvalMode, fc.name)
+        needsConfirmation(confirmationPermission, approvalMode, fc.name)
       ) {
         confirmationDetails =
           await invocation.getConfirmationDetails(abortSignal);
