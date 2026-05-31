@@ -598,6 +598,50 @@ export function resetHomeEnvBootstrapForTesting(): void {
 }
 
 /**
+ * Collects environment variables from user-level `.env` files and returns
+ * them as a plain dictionary **without** mutating `process.env`.
+ *
+ * Candidates are iterated most-specific-first (`~/.qwen/.env` before
+ * `~/.env`).  `??=` ensures the first file to define a key wins, matching
+ * dotenv's first-occurrence-wins semantics used elsewhere.
+ *
+ * Note: this dict intentionally does NOT filter PROJECT_ENV_HARDCODED_EXCLUSIONS
+ * or advanced.excludedEnvVars — substitution scope is narrower than process.env
+ * population handled by preResolveHomeEnvOverrides / readHomeEnvInto.
+ */
+function getHomeEnvFallbackVars(): Record<string, string> {
+  const globalQwenDir = Storage.getGlobalQwenDir();
+  const candidates = [path.join(globalQwenDir, '.env')];
+  // When QWEN_HOME is set, skip ~/.env to avoid surprise cross-contamination
+  // from a shared home .env. getUserLevelEnvPaths() always includes ~/.env
+  // because loadEnvironment() populates process.env independently — the two
+  // scopes are intentionally different.
+  if (!process.env['QWEN_HOME']) {
+    candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
+  }
+
+  const result: Record<string, string> = {};
+  for (const candidate of candidates) {
+    if (!fs.existsSync(candidate)) {
+      continue;
+    }
+    try {
+      const parsed = dotenv.parse(fs.readFileSync(candidate, 'utf-8'));
+      for (const key in parsed) {
+        if (Object.hasOwn(parsed, key) && !Object.hasOwn(process.env, key)) {
+          result[key] ??= parsed[key]!;
+        }
+      }
+    } catch (e) {
+      debugLogger.warn(
+        `Failed to read home .env candidate ${candidate}: ${getErrorMessage(e)}`,
+      );
+    }
+  }
+  return result;
+}
+
+/**
  * Surfaces a one-shot warning when QWEN_HOME has been redirected but the
  * user hasn't migrated their existing global state. Auto-copying OAuth
  * tokens / settings / memory is intentionally skipped, but silently starting
@@ -1033,11 +1077,25 @@ export function loadSettings(
   const userOriginalSettings = structuredClone(userResult.settings);
   const workspaceOriginalSettings = structuredClone(workspaceResult.settings);
 
-  // Environment variables for runtime use
-  systemSettings = resolveEnvVarsInObject(systemResult.settings);
-  systemDefaultSettings = resolveEnvVarsInObject(systemDefaultsResult.settings);
-  userSettings = resolveEnvVarsInObject(userResult.settings);
-  workspaceSettings = resolveEnvVarsInObject(workspaceResult.settings);
+  // Resolve ${VAR} placeholders in settings using home .env as fallback.
+  // getHomeEnvFallbackVars() excludes keys already in process.env, so
+  // effective precedence is: process.env > home .env > unresolved placeholder.
+  // The resolver checks customEnv before process.env, but since customEnv
+  // never contains a process.env key, process.env always wins.
+  const homeEnvFallback = getHomeEnvFallbackVars();
+  systemSettings = resolveEnvVarsInObject(
+    systemResult.settings,
+    homeEnvFallback,
+  );
+  systemDefaultSettings = resolveEnvVarsInObject(
+    systemDefaultsResult.settings,
+    homeEnvFallback,
+  );
+  userSettings = resolveEnvVarsInObject(userResult.settings, homeEnvFallback);
+  workspaceSettings = resolveEnvVarsInObject(
+    workspaceResult.settings,
+    homeEnvFallback,
+  );
 
   // Support legacy theme names
   if (userSettings.ui?.theme === 'VS') {
