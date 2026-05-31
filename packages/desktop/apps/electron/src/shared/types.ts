@@ -461,6 +461,9 @@ export interface ElectronAPI {
   onCloseRequested(callback: (request: WindowCloseRequest) => void): () => void;
   /** Show/hide macOS traffic light buttons (for fullscreen overlays) */
   setTrafficLightsVisible(visible: boolean): Promise<void>;
+  beginWindowDrag(screenX: number, screenY: number): Promise<void>;
+  moveWindowDrag(screenX: number, screenY: number): Promise<void>;
+  endWindowDrag(): Promise<void>;
 
   // Event listeners
   onSessionEvent(callback: (event: SessionEvent) => void): () => void;

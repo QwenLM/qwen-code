@@ -1,9 +1,9 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test'
-import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
-import type { RpcServer } from '@craft-agent/server-core/transport'
-import type { HandlerDeps } from '../handler-deps'
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { RPC_CHANNELS } from '@craft-agent/shared/protocol';
+import type { RpcServer } from '@craft-agent/server-core/transport';
+import type { HandlerDeps } from '../handler-deps';
 
-const registeredChannels: string[] = []
+const registeredChannels: string[] = [];
 
 mock.module('electron', () => ({
   ipcMain: {
@@ -41,16 +41,16 @@ mock.module('electron', () => ({
     buildFromTemplate: () => ({ popup: () => {} }),
   },
   session: {},
-}))
+}));
 
 function createMockServer(): RpcServer {
   return {
     handle(channel: string, _handler: unknown) {
-      registeredChannels.push(channel)
+      registeredChannels.push(channel);
     },
     push() {},
     async invokeClient() {},
-  }
+  };
 }
 
 function createMockDeps(): HandlerDeps {
@@ -82,7 +82,7 @@ function createMockDeps(): HandlerDeps {
       dispose: () => {},
       size: 0,
     } as unknown as HandlerDeps['oauthFlowStore'],
-  }
+  };
 }
 
 async function getExpectedChannels(): Promise<Set<string>> {
@@ -119,15 +119,17 @@ async function getExpectedChannels(): Promise<Set<string>> {
     import('@craft-agent/server-core/handlers/rpc/workspace'),
     import('@craft-agent/server-core/handlers/rpc/onboarding'),
     import('@craft-agent/server-core/handlers/rpc/resources'),
-  ])
+  ]);
 
   // GUI handler channels (remain in electron)
-  const [browser, guiSystem, guiWorkspace, guiSettings] = await Promise.all([
-    import('../browser'),
-    import('../system'),
-    import('../workspace'),
-    import('../settings'),
-  ])
+  const [browser, guiSystem, guiWorkspace, guiSettings, guiWindowDrag] =
+    await Promise.all([
+      import('../browser'),
+      import('../system'),
+      import('../workspace'),
+      import('../settings'),
+      import('../window-drag'),
+    ]);
 
   return new Set([
     ...auth.HANDLED_CHANNELS,
@@ -153,53 +155,54 @@ async function getExpectedChannels(): Promise<Set<string>> {
     ...guiSystem.GUI_HANDLED_CHANNELS,
     ...guiWorkspace.GUI_HANDLED_CHANNELS,
     ...guiSettings.GUI_HANDLED_CHANNELS,
-  ])
+    ...guiWindowDrag.GUI_HANDLED_CHANNELS,
+  ]);
 }
 
 describe('RPC handler registration', () => {
   beforeEach(() => {
-    registeredChannels.length = 0
-  })
+    registeredChannels.length = 0;
+  });
 
   it('registers all declared handled channels exactly once', async () => {
-    const expected = await getExpectedChannels()
-    const { registerAllRpcHandlers } = await import('../index')
+    const expected = await getExpectedChannels();
+    const { registerAllRpcHandlers } = await import('../index');
 
-    registerAllRpcHandlers(createMockServer(), createMockDeps())
+    registerAllRpcHandlers(createMockServer(), createMockDeps());
 
-    const appChannels = registeredChannels.filter((ch) => ch.includes(':'))
-    const actual = new Set(appChannels)
+    const appChannels = registeredChannels.filter((ch) => ch.includes(':'));
+    const actual = new Set(appChannels);
 
-    const missing = [...expected].filter((ch) => !actual.has(ch)).sort()
-    const unexpected = [...actual].filter((ch) => !expected.has(ch)).sort()
+    const missing = [...expected].filter((ch) => !actual.has(ch)).sort();
+    const unexpected = [...actual].filter((ch) => !expected.has(ch)).sort();
 
-    expect(missing).toEqual([])
-    expect(unexpected).toEqual([])
+    expect(missing).toEqual([]);
+    expect(unexpected).toEqual([]);
 
     // Check for duplicates
-    const counts = new Map<string, number>()
+    const counts = new Map<string, number>();
     for (const ch of appChannels) {
-      counts.set(ch, (counts.get(ch) ?? 0) + 1)
+      counts.set(ch, (counts.get(ch) ?? 0) + 1);
     }
     const duplicates = [...counts.entries()]
       .filter(([, count]) => count > 1)
       .map(([channel, count]) => `${channel} (${count}x)`)
-      .sort()
+      .sort();
 
-    expect(duplicates).toEqual([])
-  })
+    expect(duplicates).toEqual([]);
+  });
 
   it('keeps onboarding channels in registration coverage', async () => {
     const { HANDLED_CHANNELS } = await import(
       '@craft-agent/server-core/handlers/rpc/onboarding'
-    )
-    const { registerAllRpcHandlers } = await import('../index')
+    );
+    const { registerAllRpcHandlers } = await import('../index');
 
-    registerAllRpcHandlers(createMockServer(), createMockDeps())
+    registerAllRpcHandlers(createMockServer(), createMockDeps());
 
-    const actual = new Set(registeredChannels)
-    const missingOnboarding = HANDLED_CHANNELS.filter((ch) => !actual.has(ch))
+    const actual = new Set(registeredChannels);
+    const missingOnboarding = HANDLED_CHANNELS.filter((ch) => !actual.has(ch));
 
-    expect(missingOnboarding).toEqual([])
-  })
-})
+    expect(missingOnboarding).toEqual([]);
+  });
+});

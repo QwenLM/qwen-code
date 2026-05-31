@@ -1,8 +1,8 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test'
-import type { RpcServer } from '@craft-agent/server-core/transport'
-import type { HandlerDeps } from '../handler-deps'
+import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import type { RpcServer } from '@craft-agent/server-core/transport';
+import type { HandlerDeps } from '../handler-deps';
 
-const registeredChannels: string[] = []
+const registeredChannels: string[] = [];
 
 mock.module('electron', () => ({
   ipcMain: {
@@ -39,16 +39,16 @@ mock.module('electron', () => ({
     buildFromTemplate: () => ({ popup: () => {} }),
   },
   session: {},
-}))
+}));
 
 function createMockServer(): RpcServer {
   return {
     handle(channel: string, _handler: unknown) {
-      registeredChannels.push(channel)
+      registeredChannels.push(channel);
     },
     push() {},
     async invokeClient() {},
-  }
+  };
 }
 
 function createMockDeps(): HandlerDeps {
@@ -80,7 +80,7 @@ function createMockDeps(): HandlerDeps {
       dispose: () => {},
       size: 0,
     } as unknown as HandlerDeps['oauthFlowStore'],
-  }
+  };
 }
 
 async function getExpectedCoreChannels(): Promise<Set<string>> {
@@ -115,7 +115,7 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     import('@craft-agent/server-core/handlers/rpc/system'),
     import('@craft-agent/server-core/handlers/rpc/workspace'),
     import('@craft-agent/server-core/handlers/rpc/onboarding'),
-  ])
+  ]);
 
   return new Set([
     ...auth.HANDLED_CHANNELS,
@@ -132,49 +132,51 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     ...system.CORE_HANDLED_CHANNELS,
     ...workspace.CORE_HANDLED_CHANNELS,
     ...onboarding.HANDLED_CHANNELS,
-  ])
+  ]);
 }
 
 async function getExpectedGuiChannels(): Promise<Set<string>> {
-  const [browser, system, workspace, settings] = await Promise.all([
+  const [browser, system, workspace, settings, windowDrag] = await Promise.all([
     import('../browser'),
     import('../system'),
     import('../workspace'),
     import('../settings'),
-  ])
+    import('../window-drag'),
+  ]);
 
   return new Set([
     ...browser.HANDLED_CHANNELS,
     ...system.GUI_HANDLED_CHANNELS,
     ...workspace.GUI_HANDLED_CHANNELS,
     ...settings.GUI_HANDLED_CHANNELS,
-  ])
+    ...windowDrag.GUI_HANDLED_CHANNELS,
+  ]);
 }
 
 describe('RPC handler profile registration', () => {
   beforeEach(() => {
-    registeredChannels.length = 0
-  })
+    registeredChannels.length = 0;
+  });
 
   it('registerCoreRpcHandlers registers only core channels', async () => {
-    const expected = await getExpectedCoreChannels()
-    const { registerCoreRpcHandlers } = await import('../index')
+    const expected = await getExpectedCoreChannels();
+    const { registerCoreRpcHandlers } = await import('../index');
 
-    registerCoreRpcHandlers(createMockServer(), createMockDeps())
+    registerCoreRpcHandlers(createMockServer(), createMockDeps());
 
-    const actual = new Set(registeredChannels.filter(ch => ch.includes(':')))
-    expect([...expected].filter(ch => !actual.has(ch))).toEqual([])
-    expect([...actual].filter(ch => !expected.has(ch))).toEqual([])
-  })
+    const actual = new Set(registeredChannels.filter((ch) => ch.includes(':')));
+    expect([...expected].filter((ch) => !actual.has(ch))).toEqual([]);
+    expect([...actual].filter((ch) => !expected.has(ch))).toEqual([]);
+  });
 
   it('registerGuiRpcHandlers registers only gui channels', async () => {
-    const expected = await getExpectedGuiChannels()
-    const { registerGuiRpcHandlers } = await import('../index')
+    const expected = await getExpectedGuiChannels();
+    const { registerGuiRpcHandlers } = await import('../index');
 
-    registerGuiRpcHandlers(createMockServer(), createMockDeps())
+    registerGuiRpcHandlers(createMockServer(), createMockDeps());
 
-    const actual = new Set(registeredChannels.filter(ch => ch.includes(':')))
-    expect([...expected].filter(ch => !actual.has(ch))).toEqual([])
-    expect([...actual].filter(ch => !expected.has(ch))).toEqual([])
-  })
-})
+    const actual = new Set(registeredChannels.filter((ch) => ch.includes(':')));
+    expect([...expected].filter((ch) => !actual.has(ch))).toEqual([]);
+    expect([...actual].filter((ch) => !expected.has(ch))).toEqual([]);
+  });
+});
