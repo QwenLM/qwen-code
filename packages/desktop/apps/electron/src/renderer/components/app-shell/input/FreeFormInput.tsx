@@ -2667,7 +2667,7 @@ export function FreeFormInput({
                               });
                             })()
                       }
-                      isExpanded={isEmptySession}
+                      isExpanded={false}
                       hasSelection={optimisticSourceSlugs.length > 0}
                       showChevron={true}
                       isOpen={sourceDropdownOpen}
