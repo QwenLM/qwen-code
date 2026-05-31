@@ -19,12 +19,11 @@
  * and AgentComposer (with minimal customization).
  */
 
-import type { Context, ReactNode } from 'react';
-import { createRequire } from 'node:module';
-import { dirname, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import type { ReactNode } from 'react';
 import { useCallback, useContext, useEffect, useRef } from 'react';
 import { Box, Text, useBoxMetrics } from 'ink';
+import { addLayoutListener, type DOMElement } from 'ink/dom';
+import CursorContext from 'ink/components/CursorContext';
 import chalk from 'chalk';
 import type { TextBuffer } from './shared/text-buffer.js';
 import type { Key } from '../hooks/useKeypress.js';
@@ -33,26 +32,6 @@ import { keyMatchers, Command } from '../keyMatchers.js';
 import stringWidth from 'string-width';
 import { cpSlice, cpLen } from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
-
-// ─── Ink internals (not in package exports map) ────────────
-// Ink only exports its main entry. We resolve that via require.resolve
-// (which IS allowed), derive the package root, then use file:// import()
-// to bypass the exports-map restriction for internal subpaths.
-const _req = createRequire(import.meta.url);
-const _inkRoot = dirname(dirname(_req.resolve('ink')));
-const inkDom = (await import(
-  pathToFileURL(resolve(_inkRoot, 'build', 'dom.js')).href
-)) as {
-  addLayoutListener: (rootNode: unknown, listener: () => void) => () => void;
-};
-const inkCursorCtx = (await import(
-  pathToFileURL(resolve(_inkRoot, 'build', 'components', 'CursorContext.js'))
-    .href
-)) as {
-  default: Context<{
-    setCursorPosition(pos: { x: number; y: number } | undefined): void;
-  }>;
-};
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -153,10 +132,10 @@ export function defaultRenderLine({
 // addLayoutListener requires the root node specifically.
 function findRootNode(
   node: (Record<string, unknown> & { parentNode?: unknown }) | null,
-): Record<string, unknown> | undefined {
+): DOMElement | undefined {
   if (!node) return undefined;
   if (!node.parentNode)
-    return node['nodeName'] === 'ink-root' ? node : undefined;
+    return node['nodeName'] === 'ink-root' ? (node as DOMElement) : undefined;
   return findRootNode(node.parentNode as Record<string, unknown>);
 }
 
@@ -295,7 +274,7 @@ export const BaseTextInput = ({
   // node. We find it by walking up the Ink DOM parent chain.
   const rootRef = useRef(null);
   useBoxMetrics(rootRef);
-  const cursorCtx = useContext(inkCursorCtx.default);
+  const cursorCtx = useContext(CursorContext);
 
   // Use a ref to hold mutable state so the layout listener callback
   // always reads the latest values without needing to resubscribe.
@@ -319,7 +298,7 @@ export const BaseTextInput = ({
   useEffect(() => {
     const rootNode = findRootNode(rootRef.current);
     if (!rootNode) return;
-    const unsub = inkDom.addLayoutListener(rootNode, () => {
+    const unsub = addLayoutListener(rootNode, () => {
       const {
         showCursor: sc,
         cursorVisualRow: vr,
