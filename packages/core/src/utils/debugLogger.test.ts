@@ -15,7 +15,7 @@ import {
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Storage } from '../config/storage.js';
-import { trace, type Context, type Span } from '@opentelemetry/api';
+import { trace, type Span } from '@opentelemetry/api';
 import { setSessionContext } from '../telemetry/session-context.js';
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -205,30 +205,22 @@ describe('debugLogger', () => {
       expect(calls[1]?.[1]).not.toContain('span_id=');
     });
 
-    it('uses the session root span context for fallback trace context', async () => {
-      const sessionRootContext = { root: true } as unknown as Context;
-      setSessionContext(sessionRootContext, 'test-session');
-      vi.mocked(trace.getSpan).mockImplementation((ctx) =>
-        ctx === sessionRootContext
-          ? ({
-              spanContext: () => ({
-                traceId: 'cccccccccccccccccccccccccccccccc',
-                spanId: 'dddddddddddddddd',
-                traceFlags: 1,
-              }),
-            } as unknown as Span)
-          : undefined,
-      );
+    it('uses deriveTraceId(sessionId) as fallback trace context', async () => {
+      setSessionContext(undefined, 'test-session');
 
       const logger = createDebugLogger();
       logger.debug('session root fallback');
 
       await vi.runAllTimersAsync();
 
+      const { deriveTraceId } = await import(
+        '../telemetry/trace-id-utils.js'
+      );
+      const expectedTraceId = deriveTraceId('test-session');
       expect(fs.appendFile).toHaveBeenCalledWith(
         expect.any(String),
         expect.stringContaining(
-          '[trace_id=cccccccccccccccccccccccccccccccc span_id=dddddddddddddddd]',
+          `[trace_id=${expectedTraceId} span_id=${'0'.repeat(16)}]`,
         ),
         'utf8',
       );

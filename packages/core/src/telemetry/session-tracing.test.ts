@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpanStatusCode, type Context } from '@opentelemetry/api';
+import { ROOT_CONTEXT, SpanStatusCode } from '@opentelemetry/api';
 
 const mockState = vi.hoisted(() => ({
   sdkInitialized: true,
@@ -192,6 +192,17 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.statuses[0]!.code).toBe(SpanStatusCode.OK);
     });
 
+    it('defaults to ROOT_CONTEXT when no parentContext is provided', async () => {
+      await withInteractionSpan(
+        createMockConfig({ sessionId: 's' }),
+        { promptId: 'p', model: 'm', messageType: 'cron' },
+        async () => {},
+      );
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toBe(ROOT_CONTEXT);
+    });
+
     it('runs scoped interaction spans without mutating the global interaction context', async () => {
       const config = createMockConfig({ sessionId: 'scoped-session' });
       const result = await withInteractionSpan(
@@ -338,10 +349,9 @@ describe('session-tracing', () => {
     });
   });
 
-  describe('interaction span — trace context (#4486)', () => {
-    it('attaches to the session root context returned by getSessionContext', () => {
-      const fakeRoot = { __sessionRoot: true } as unknown as Context;
-      setSessionContext(fakeRoot, 'test-session');
+  describe('interaction span — per-prompt traceId', () => {
+    it('uses ROOT_CONTEXT as parent (each interaction is a trace root)', () => {
+      setSessionContext(undefined, 'test-session');
 
       startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
         promptId: 'p',
@@ -350,12 +360,10 @@ describe('session-tracing', () => {
       });
 
       const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
-      expect(span?.parentContext).toBe(fakeRoot);
+      expect(span?.parentContext).toBe(ROOT_CONTEXT);
     });
 
-    it('anchors at session root even when an unrelated OTel span is active', () => {
-      const fakeRoot = { __sessionRoot: true } as unknown as Context;
-      setSessionContext(fakeRoot, 'test-session');
+    it('ignores active OTel span — interaction always starts a new trace', () => {
       mockState.activeOtelSpan = { name: 'unrelated-wrapper-span' };
 
       startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
@@ -365,22 +373,18 @@ describe('session-tracing', () => {
       });
 
       const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
-      expect(span?.parentContext).toBe(fakeRoot);
+      expect(span?.parentContext).toBe(ROOT_CONTEXT);
     });
 
-    it('falls back to otelContext.active() when no session context is set', () => {
-      // Intentionally NOT calling setSessionContext — exercises the fallback.
-      const fakeActive = { kind: 'fake-active-span' };
-      mockState.activeOtelSpan = fakeActive;
-
-      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+    it('still stamps session.id attribute for cross-prompt correlation', () => {
+      startInteractionSpan(createMockConfig({ sessionId: 'my-session' }), {
         promptId: 'p',
         model: 'm',
         messageType: 'userQuery',
       });
 
       const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
-      expect(span?.parentContext).toMatchObject({ __activeSpan: fakeActive });
+      expect(span?.attributes['session.id']).toBe('my-session');
     });
   });
 

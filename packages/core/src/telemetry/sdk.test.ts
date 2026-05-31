@@ -55,13 +55,8 @@ vi.mock('@opentelemetry/sdk-node');
 vi.mock('./gcp-exporters.js');
 vi.mock('./log-to-span-processor.js');
 vi.mock('./session-context.js');
-vi.mock('./tracer.js', () => ({
-  createSessionRootContext: vi.fn((id: string) => ({ __sessionId: id })),
-}));
-
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import { setSessionContext } from './session-context.js';
-import { createSessionRootContext } from './tracer.js';
 
 describe('resolveHttpOtlpUrl', () => {
   it('appends signal path to base collector URL', () => {
@@ -666,34 +661,19 @@ describe('refreshSessionContext', () => {
 
   it('should update session context when telemetry is initialized', () => {
     initializeTelemetry(mockConfig);
+    vi.clearAllMocks();
 
     refreshSessionContext('new-session-id');
 
-    expect(createSessionRootContext).toHaveBeenCalledWith('new-session-id');
     expect(setSessionContext).toHaveBeenCalledWith(
-      { __sessionId: 'new-session-id' },
+      undefined,
       'new-session-id',
     );
   });
 
   it('should be a no-op when telemetry is not initialized', () => {
-    // Do NOT call initializeTelemetry — telemetryInitialized remains false
     refreshSessionContext('some-session');
 
-    expect(createSessionRootContext).not.toHaveBeenCalled();
-    expect(setSessionContext).not.toHaveBeenCalled();
-  });
-
-  it('should not throw when refreshing session context fails', () => {
-    initializeTelemetry(mockConfig);
-    vi.clearAllMocks();
-    vi.mocked(createSessionRootContext).mockImplementationOnce(() => {
-      throw new Error('session context failed');
-    });
-
-    expect(() => refreshSessionContext('bad-session')).not.toThrow();
-
-    expect(createSessionRootContext).toHaveBeenCalledWith('bad-session');
     expect(setSessionContext).not.toHaveBeenCalled();
   });
 });
