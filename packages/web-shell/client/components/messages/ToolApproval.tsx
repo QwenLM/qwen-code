@@ -9,12 +9,22 @@ interface ToolApprovalProps {
   onConfirm: (id: string, selectedOption: string) => void;
 }
 
-function parseTitle(title?: string): { toolName: string; description: string } {
+export function parseTitle(title?: string): {
+  toolName: string;
+  description: string;
+} {
   if (!title) return { toolName: '', description: '' };
   const colonIdx = title.indexOf(': ');
   if (colonIdx > 0) {
+    const prefix = title.slice(0, colonIdx);
+    // Only split CLI-style titles such as "Bash: npm test". Descriptive
+    // permission titles may contain ordinary prose like "(format: auto)";
+    // treating those colons as separators corrupts the header into name/desc.
+    if (!/^[A-Za-z][\w.-]{0,40}$/.test(prefix)) {
+      return { toolName: title, description: '' };
+    }
     return {
-      toolName: title.slice(0, colonIdx),
+      toolName: prefix,
       description: title.slice(colonIdx + 2),
     };
   }

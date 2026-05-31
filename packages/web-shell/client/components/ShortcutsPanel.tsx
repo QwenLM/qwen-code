@@ -6,6 +6,21 @@ interface Shortcut {
   descriptionKey: string;
 }
 
+function isMacPlatform(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const userAgentData = (
+    navigator as Navigator & {
+      userAgentData?: { platform?: string };
+    }
+  ).userAgentData;
+  const platform = userAgentData?.platform || navigator.platform || '';
+  return /mac|iphone|ipad|ipod/i.test(platform);
+}
+
+function getPasteImagesShortcut(): string {
+  return isMacPlatform() ? 'cmd+v' : 'ctrl+v';
+}
+
 const SHORTCUTS: Shortcut[] = [
   { key: '/', descriptionKey: 'help.shortcut.commandMenu' },
   { key: '@', descriptionKey: 'help.shortcut.addContext' },
@@ -17,15 +32,22 @@ const SHORTCUTS: Shortcut[] = [
   { key: 'ctrl+o', descriptionKey: 'help.shortcut.compact' },
   { key: 'ctrl+r', descriptionKey: 'help.shortcut.history' },
   { key: '↑ / ↓', descriptionKey: 'help.shortcut.history' },
-  { key: 'cmd+v', descriptionKey: 'help.shortcut.pasteImages' },
   { key: '?', descriptionKey: 'help.shortcut.togglePanel' },
 ];
 
 export function ShortcutsPanel() {
   const { t } = useI18n();
-  const mid = Math.ceil(SHORTCUTS.length / 2);
-  const col1 = SHORTCUTS.slice(0, mid);
-  const col2 = SHORTCUTS.slice(mid);
+  const shortcuts = [
+    ...SHORTCUTS.slice(0, -1),
+    {
+      key: getPasteImagesShortcut(),
+      descriptionKey: 'help.shortcut.pasteImages',
+    },
+    SHORTCUTS[SHORTCUTS.length - 1],
+  ];
+  const mid = Math.ceil(shortcuts.length / 2);
+  const col1 = shortcuts.slice(0, mid);
+  const col2 = shortcuts.slice(mid);
 
   return (
     <div className={styles.panel}>

@@ -748,7 +748,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(assistantMsgs[1]).toMatchObject({ content: 'second reply' });
   });
 
-  it('skips permission blocks entirely', () => {
+  it('skips non-agent permission blocks', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('a1', 'assistant', 'let me run that', 1),
       {
@@ -771,6 +771,198 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages[0]).toMatchObject({
       role: 'assistant',
       content: 'let me run that done',
+    });
+  });
+
+  it('renders pending subagent permission blocks as agent tools', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-agent-1',
+        kind: 'permission',
+        requestId: 'req-agent-1',
+        sessionId: 'sess-1',
+        title: '查询阿里云官网活动',
+        options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call-1',
+          kind: 'other',
+          status: 'pending',
+          title: '查询阿里云官网活动',
+          rawInput: {
+            description: '查询阿里云官网活动',
+            prompt: '请查询阿里云官网当前的活动信息。',
+            subagent_type: 'general-purpose',
+          },
+        },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+      {
+        id: 'perm-agent-2',
+        kind: 'permission',
+        requestId: 'req-agent-2',
+        sessionId: 'sess-1',
+        title: '查询百度云官网活动',
+        options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-call-2',
+          kind: 'other',
+          status: 'pending',
+          title: '查询百度云官网活动',
+          rawInput: {
+            description: '查询百度云官网活动',
+            prompt: '请查询百度云官网当前的活动信息。',
+            subagent_type: 'general-purpose',
+          },
+        },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+    ]);
+
+    expect(messages).toHaveLength(2);
+    const agentA =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    const agentB =
+      messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
+    expect(agentA).toMatchObject({
+      callId: 'agent-call-1',
+      toolName: 'agent',
+      status: 'pending',
+      title: '查询阿里云官网活动',
+      args: {
+        description: '查询阿里云官网活动',
+        subagent_type: 'general-purpose',
+      },
+    });
+    expect(agentB).toMatchObject({
+      callId: 'agent-call-2',
+      toolName: 'agent',
+      status: 'pending',
+      title: '查询百度云官网活动',
+    });
+  });
+
+  it('merges the real subagent tool update after a permission block', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-agent-1',
+        kind: 'permission',
+        requestId: 'req-agent-1',
+        sessionId: 'sess-1',
+        title: 'Agent A',
+        options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-1',
+          rawInput: { subagent_type: 'Explore', prompt: 'a' },
+        },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      toolBlock('t1', 'agent-1', 'in_progress', 2, {
+        toolName: 'Agent',
+        title: 'Agent A running',
+        rawInput: { subagent_type: 'Explore', prompt: 'a' },
+      }),
+      toolBlock('t2', 'sub-a1', 'completed', 3, {
+        toolName: 'web_fetch',
+        parentToolCallId: 'agent-1',
+        rawOutput: 'data-a',
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const agent =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agent).toMatchObject({
+      callId: 'agent-1',
+      toolName: 'Agent',
+      title: 'Agent A running',
+      status: 'in_progress',
+    });
+    expect(agent?.subTools).toHaveLength(1);
+    expect(agent?.subTools?.[0]).toMatchObject({ callId: 'sub-a1' });
+  });
+
+  it('does not duplicate a permission block when the synthetic agent tool already exists', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'agent-1', 'confirming', 1, {
+        toolName: 'Agent',
+        title: 'Agent A',
+        rawInput: { subagent_type: 'Explore', prompt: 'a' },
+      }),
+      {
+        id: 'perm-agent-1',
+        kind: 'permission',
+        requestId: 'req-agent-1',
+        sessionId: 'sess-1',
+        title: 'Agent A',
+        options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-1',
+          rawInput: { subagent_type: 'Explore', prompt: 'a' },
+        },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+      toolBlock('t2', 'sub-a1', 'completed', 3, {
+        toolName: 'web_fetch',
+        parentToolCallId: 'agent-1',
+        rawOutput: 'data-a',
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const agent =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agent).toMatchObject({
+      callId: 'agent-1',
+      toolName: 'Agent',
+      title: 'Agent A',
+      status: 'pending',
+    });
+    expect(agent?.subTools).toHaveLength(1);
+    expect(agent?.subTools?.[0]).toMatchObject({ callId: 'sub-a1' });
+  });
+
+  it('splits thought across permission boundary when content already exists', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('t1', 'thought', 'first thinking', 1),
+      textBlock('a1', 'assistant', 'let me try this', 2),
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Allow Skill?',
+        options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
+        toolCall: { toolCallId: 'tc-1', rawInput: { skill: 'codegraph' } },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 3,
+        createdAt: 3,
+        updatedAt: 3,
+      },
+      textBlock('t2', 'thought', 'second thinking', 4),
+      textBlock('a2', 'assistant', 'different approach', 5),
+    ]);
+
+    const assistantMsgs = messages.filter((m) => m.role === 'assistant');
+    expect(assistantMsgs).toHaveLength(2);
+    expect(assistantMsgs[0]).toMatchObject({
+      thinking: 'first thinking',
+      content: 'let me try this',
+    });
+    expect(assistantMsgs[1]).toMatchObject({
+      thinking: 'second thinking',
+      content: 'different approach',
     });
   });
 
@@ -979,7 +1171,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(agentTool?.subTools).toBeUndefined();
   });
 
-  it('status blocks inside subagent append to subContent', () => {
+  it('keeps status blocks in the main transcript while subagent is active', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
         title: 'Agent: analyze',
@@ -994,10 +1186,16 @@ describe('transcriptBlocksToDaemonMessages', () => {
       }),
     ]);
 
-    expect(messages).toHaveLength(1);
+    expect(messages).toHaveLength(2);
     const agentTool =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
-    expect(agentTool?.subContent).toBe('Working on it...\n');
+    expect(agentTool?.subContent).toBeUndefined();
+    expect(messages[1]).toMatchObject({
+      id: 'st1',
+      role: 'system',
+      content: 'Working on it...',
+      variant: 'info',
+    });
   });
 
   it('closeAt auto-pops already-completed agent before next block', () => {

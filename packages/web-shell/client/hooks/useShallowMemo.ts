@@ -14,7 +14,15 @@ function shallowEqual<T>(a: T, b: T): boolean {
   const objB = b as Record<string, unknown>;
   const objA = a as Record<string, unknown>;
   if (keysA.length !== Object.keys(objB).length) return false;
-  return keysA.every((k) => objA[k] === objB[k]);
+  return keysA.every((k) => {
+    const va = objA[k];
+    const vb = objB[k];
+    if (va === vb) return true;
+    if (Array.isArray(va) && Array.isArray(vb)) {
+      return va.length === vb.length && va.every((v, i) => v === vb[i]);
+    }
+    return false;
+  });
 }
 
 export function useShallowMemo<T>(value: T): T {

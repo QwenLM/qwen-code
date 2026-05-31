@@ -7,6 +7,12 @@ import {
   StatusIcon,
   truncateText,
 } from './toolDisplay';
+import {
+  getAgentDisplayStatus,
+  formatTokenCount,
+  getAgentType,
+  getAgentDescription,
+} from '../toolFormatting';
 import chromeStyles from './ToolChrome.module.css';
 import styles from './SubAgentPanel.module.css';
 
@@ -165,41 +171,6 @@ function getAgentResultText(tool: ACPToolCall): string {
   return '';
 }
 
-function getAgentStatus(tool: ACPToolCall): ACPToolCall['status'] {
-  if (tool.status === 'failed') return 'failed';
-  if (!tool.rawOutput || typeof tool.rawOutput !== 'object') {
-    return tool.status;
-  }
-  const raw = tool.rawOutput as Record<string, unknown>;
-  const status = typeof raw.status === 'string' ? raw.status.toLowerCase() : '';
-  const terminateReason =
-    typeof raw.terminateReason === 'string' ? raw.terminateReason : '';
-  const reason =
-    (typeof raw.reason === 'string' && raw.reason) ||
-    (terminateReason && terminateReason !== 'GOAL' && terminateReason) ||
-    (typeof raw.error === 'string' && raw.error) ||
-    '';
-  if (
-    status === 'cancelled' ||
-    status === 'canceled' ||
-    reason.toLowerCase().includes('cancel')
-  ) {
-    return 'failed';
-  }
-  return tool.status;
-}
-
-function formatTokens(taskExec?: TaskExecution | null): string {
-  const t =
-    taskExec?.tokenCount && taskExec.tokenCount > 0
-      ? taskExec.tokenCount
-      : taskExec?.executionSummary?.totalTokens;
-  if (!t) return '';
-  if (t >= 1000000) return `${(t / 1000000).toFixed(1)}M tokens`;
-  if (t >= 1000) return `${Math.round(t / 1000)}k tokens`;
-  return `${t} tokens`;
-}
-
 type SubAgentTab = 'result' | 'tools';
 
 export function SubAgentPanel({
@@ -209,7 +180,7 @@ export function SubAgentPanel({
   inline,
 }: SubAgentPanelProps) {
   const isComplete = tool.status === 'completed' || tool.status === 'failed';
-  const displayStatus = getAgentStatus(tool);
+  const displayStatus = getAgentDisplayStatus(tool);
   const [expanded, setExpanded] = useState(defaultExpanded ?? false);
   const [activeTab, setActiveTab] = useState<SubAgentTab>('result');
 
@@ -217,19 +188,16 @@ export function SubAgentPanel({
 
   const subToolCount =
     tool.subTools?.length || taskExec?.toolCalls?.length || 0;
-  const description =
-    taskExec?.taskDescription ||
-    (tool.args?.description as string) ||
-    (tool.args?.prompt as string) ||
-    '';
-  const agentType =
-    taskExec?.subagentName ||
-    (tool.args?.subagent_type as string) ||
-    (tool.toolName === 'task' ? 'task' : 'general-purpose');
+  const description = getAgentDescription(tool);
+  const agentType = getAgentType(tool);
   const elapsed =
     formatElapsed(tool.startTime, tool.endTime) ||
     formatDurationMs(taskExec?.executionSummary?.totalDurationMs);
-  const tokens = formatTokens(taskExec);
+  const tokenCount =
+    taskExec?.tokenCount && taskExec.tokenCount > 0
+      ? taskExec.tokenCount
+      : taskExec?.executionSummary?.totalTokens;
+  const tokens = tokenCount ? formatTokenCount(tokenCount) : '';
   const resultText = isComplete ? getAgentResultText(tool) : '';
 
   const taskToolCalls = useMemo(() => {

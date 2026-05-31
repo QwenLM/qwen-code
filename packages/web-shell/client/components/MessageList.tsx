@@ -345,12 +345,16 @@ export function MessageList({
   // scrolls into view as it streams in.
   useEffect(() => {
     const lastId = getLastUserMessageId(messages);
+    if (catchingUp) {
+      prevLastUserMsgId.current = lastId;
+      return;
+    }
     if (lastId && lastId !== prevLastUserMsgId.current) {
       shouldFollow.current = true;
       requestAnimationFrame(scrollToBottom);
     }
     prevLastUserMsgId.current = lastId;
-  }, [messages, scrollToBottom]);
+  }, [messages, catchingUp, scrollToBottom]);
 
   // Rule 5: session restore — when catchingUp flips from true → falsy,
   // replay just finished. Scroll to bottom once so the user sees the

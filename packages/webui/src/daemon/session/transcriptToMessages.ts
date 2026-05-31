@@ -25,6 +25,11 @@ interface ActiveSubAgent {
   closeAt?: number;
 }
 
+type DaemonPermissionTranscriptBlock = Extract<
+  DaemonTranscriptBlock,
+  { kind: 'permission' }
+>;
+
 export function transcriptBlocksToDaemonMessages(
   blocks: readonly DaemonTranscriptBlock[],
 ): DaemonMessage[] {
@@ -99,7 +104,12 @@ export function transcriptBlocksToDaemonMessages(
           currentAssistantIdx !== null
             ? messages[currentAssistantIdx]
             : undefined;
-        if (target && target.role === 'assistant' && !needsNewContentMessage) {
+        if (
+          target &&
+          target.role === 'assistant' &&
+          !needsNewContentMessage &&
+          !target.content
+        ) {
           messages[currentAssistantIdx!] = {
             ...target,
             thinking: (target.thinking || '') + textBlock.text,
@@ -127,14 +137,19 @@ export function transcriptBlocksToDaemonMessages(
           ? findSubAgent(subAgentStack, toolCall.parentToolCallId)
           : undefined;
 
-        if (isAgentCompletion(toolCall) || isBackgroundAgentLaunch(toolCall)) {
+        if (isSubAgentToolCall(toolCall)) {
           const matchingSubAgentIndex = findSubAgentIndex(
             subAgentStack,
             toolCall.callId,
           );
           if (matchingSubAgentIndex >= 0) {
             mergeToolCall(subAgentStack[matchingSubAgentIndex].tool, toolCall);
-            subAgentStack.splice(matchingSubAgentIndex, 1);
+            if (
+              isAgentCompletion(toolCall) ||
+              isBackgroundAgentLaunch(toolCall)
+            ) {
+              subAgentStack.splice(matchingSubAgentIndex, 1);
+            }
             break;
           }
         }
@@ -221,18 +236,35 @@ export function transcriptBlocksToDaemonMessages(
         break;
       }
 
-      case 'permission':
+      case 'permission': {
+        const permissionToolCall = permissionBlockToSubAgentToolCall(
+          block as DaemonPermissionTranscriptBlock,
+        );
+        if (permissionToolCall) {
+          const matchingSubAgentIndex = findSubAgentIndex(
+            subAgentStack,
+            permissionToolCall.callId,
+          );
+          if (matchingSubAgentIndex >= 0) {
+            // A preceding synthetic tool block carries the canonical display
+            // metadata. Keep it intact and avoid rendering a duplicate card.
+            break;
+          }
+
+          // Agent calls that need confirmation skip the daemon's usual start
+          // event, so the permission block is the only place that carries the
+          // parent toolCallId until execution resumes. Render a pending Agent
+          // here so later sub-tools can still be grouped under that parent.
+          appendToolCallMessage(messages, block.id, permissionToolCall);
+          needsNewContentMessage = true;
+          subAgentStack.push({ tool: permissionToolCall });
+        }
         break;
+      }
 
       case 'status':
       case 'debug': {
         const text = (block as DaemonStatusTranscriptBlock).text;
-        const activeSubAgent = getFallbackActiveSubAgent(subAgentStack);
-        if (activeSubAgent) {
-          activeSubAgent.subContent =
-            (activeSubAgent.subContent || '') + text + '\n';
-          break;
-        }
         const todos = parsePlanTodos(text);
         if (todos) {
           messages.push({
@@ -243,6 +275,10 @@ export function transcriptBlocksToDaemonMessages(
           needsNewContentMessage = true;
           break;
         }
+        // Status/debug blocks are daemon-level diagnostics, not tool output.
+        // Keeping them in the main transcript avoids hiding global messages
+        // such as SSE lag warnings, malformed-event debug lines, or shell
+        // result notices inside whichever subAgent happened to be active.
         messages.push({
           id: block.id,
           role: 'system',
@@ -339,14 +375,14 @@ function mergeToolCall(
   target: DaemonMessageToolCall,
   source: DaemonMessageToolCall,
 ): void {
-  target.status = source.status || target.status;
-  target.title = source.title || target.title;
-  target.toolName = source.toolName || target.toolName;
-  target.kind = source.kind || target.kind;
-  target.endTime = source.endTime || target.endTime;
+  target.status = source.status ?? target.status;
+  target.title = source.title ?? target.title;
+  target.toolName = source.toolName ?? target.toolName;
+  target.kind = source.kind ?? target.kind;
+  target.endTime = source.endTime ?? target.endTime;
   target.rawOutput = source.rawOutput ?? target.rawOutput;
-  target.args = source.args || target.args;
-  target.locations = source.locations || target.locations;
+  target.args = source.args ?? target.args;
+  target.locations = source.locations ?? target.locations;
 }
 
 function isSubAgentToolCall(tool: DaemonMessageToolCall): boolean {
@@ -412,6 +448,14 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
   return value as Record<string, unknown>;
 }
 
+function getString(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): string | undefined {
+  const value = record?.[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
 function daemonToolBlockToToolCall(
   block: DaemonToolTranscriptBlock,
 ): DaemonMessageToolCall {
@@ -449,6 +493,46 @@ function daemonToolBlockToToolCall(
     startTime: block.createdAt,
     endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
   };
+}
+
+function permissionBlockToSubAgentToolCall(
+  block: DaemonPermissionTranscriptBlock,
+): DaemonMessageToolCall | undefined {
+  const toolCall = getRecord(block.toolCall);
+  if (!toolCall) return undefined;
+
+  const rawInput = getToolCallRawInput(toolCall);
+  const meta = getRecord(toolCall['_meta']);
+  const toolName =
+    getString(meta, 'toolName') ??
+    getString(toolCall, 'toolName') ??
+    getString(toolCall, 'name') ??
+    (rawInput?.['subagent_type'] ? 'agent' : undefined);
+  const toolCallId =
+    getString(toolCall, 'toolCallId') ?? getString(toolCall, 'id');
+  if (!toolCallId || !toolName) return undefined;
+
+  const syntheticTool: DaemonMessageToolCall = {
+    callId: toolCallId,
+    toolName,
+    title: getString(toolCall, 'title') ?? block.title,
+    status: 'pending',
+    kind: inferToolKind(toolName, getString(toolCall, 'kind')),
+    args: rawInput,
+    startTime: block.createdAt,
+  };
+
+  return isSubAgentToolCall(syntheticTool) ? syntheticTool : undefined;
+}
+
+function getToolCallRawInput(
+  toolCall: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  return (
+    getRecord(toolCall['rawInput']) ??
+    getRecord(toolCall['input']) ??
+    getRecord(toolCall['args'])
+  );
 }
 
 function isBackgroundAgentBlock(

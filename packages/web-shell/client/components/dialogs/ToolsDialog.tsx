@@ -21,6 +21,7 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
     autoLoad: true,
   });
   const [selectedIdx, setSelectedIdx] = useState(0);
+  const [busyTool, setBusyTool] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(
     () => new Set(),
@@ -39,11 +40,13 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
   const handleToggle = useCallback(
     (tool: DaemonWorkspaceToolStatus) => {
       setMessage(null);
+      setBusyTool(tool.name);
       setEnabled(tool.name, !tool.enabled)
         .then(() => reload())
         .catch((err: unknown) => {
           setMessage(err instanceof Error ? err.message : String(err));
-        });
+        })
+        .finally(() => setBusyTool(null));
     },
     [reload, setEnabled],
   );
@@ -122,7 +125,7 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
         <button
           className={dp('resume-picker-close')}
           onClick={onClose}
-          title="Close"
+          title={t('common.close')}
         >
           ESC
         </button>
@@ -130,7 +133,7 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
 
       <div className={dp('resume-picker-search')}>
         <span className={dp('resume-picker-search-hint')}>
-          {message || (loading ? t('tools.loading') : `${tools.length} tools`)}
+          {message || (loading ? t('tools.loading') : summary)}
         </span>
       </div>
 
@@ -157,9 +160,11 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
                 {toolLabel(tool)}
               </span>
               <span className={dp('resume-picker-item-badge')}>
-                {tool.enabled
-                  ? t('tools.status.enabled')
-                  : t('tools.status.disabled')}
+                {busyTool === tool.name
+                  ? '...'
+                  : tool.enabled
+                    ? t('tools.status.enabled')
+                    : t('tools.status.disabled')}
               </span>
             </div>
             {tool.displayName && tool.displayName !== tool.name && (

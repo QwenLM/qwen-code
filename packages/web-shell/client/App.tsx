@@ -286,6 +286,8 @@ export function App({
   const workspaceActions = useWorkspaceActions();
 
   const messages = useMessages();
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const [recapMessage, setRecapMessage] = useState<LocalRecapMessage | null>(
     null,
   );
@@ -542,8 +544,12 @@ export function App({
   compactModeRef.current = compactMode;
 
   const handleClearScreen = useCallback(() => {
+    if (streamingStateRef.current !== 'idle') {
+      store.dispatch([{ type: 'status', text: t('clear.blocked') }]);
+      return;
+    }
     store.reset();
-  }, [store]);
+  }, [store, t]);
 
   const handleToggleCompact = useCallback(() => {
     const next = !compactModeRef.current;
@@ -588,6 +594,13 @@ export function App({
               (o) => o.kind === 'allow_once',
             );
             if (allowOnce) {
+              const toolDesc = approval.title || '';
+              store.dispatch([
+                {
+                  type: 'status',
+                  text: t('mode.autoApproved', { tool: toolDesc }),
+                },
+              ]);
               sessionActions
                 .submitPermission(approval.id, allowOnce.id)
                 .catch((error: unknown) => {
@@ -795,7 +808,7 @@ export function App({
           }
           if (cmd === 'copy') {
             const copyArg = text.slice(match[0].length).trim();
-            copyFromLastAssistantMessage(messages, copyArg)
+            copyFromLastAssistantMessage(messagesRef.current, copyArg)
               .then((result) => {
                 store.dispatch([
                   {
@@ -1109,7 +1122,6 @@ export function App({
       enqueuePrompt,
       handleThemeChange,
       handleSetMode,
-      messages,
       onLanguageChange,
       reportError,
       runVisibleRecap,
@@ -1193,6 +1205,7 @@ export function App({
 
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {
+      if (dialogOpen) return;
       if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         if (e.key === 'l') {
           e.preventDefault();
@@ -1213,7 +1226,7 @@ export function App({
     };
     window.addEventListener('keydown', onGlobalShortcut, true);
     return () => window.removeEventListener('keydown', onGlobalShortcut, true);
-  }, [handleClearScreen, handleToggleCompact]);
+  }, [dialogOpen, handleClearScreen, handleToggleCompact]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {

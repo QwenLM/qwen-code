@@ -792,6 +792,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     if (!last) return;
     const accepted = onSubmitRef.current(last);
     if (accepted === false) return;
+    setPastedImages([]);
     historyActionsRef.current.push(last);
     historyActionsRef.current.reset();
   }, []);

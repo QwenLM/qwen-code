@@ -19,6 +19,12 @@ import {
 } from './tools/toolDisplay';
 import {
   extractText,
+  formatTokenCount,
+  getAgentCancellationReason,
+  getAgentDescription,
+  getAgentDisplayStatus,
+  getAgentType,
+  getTaskExecutionRecord,
   getToolDescription,
   getToolResultSummary,
   isShellToolName,
@@ -235,13 +241,12 @@ function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
   const { t } = useI18n();
   const [showAll, setShowAll] = useState(false);
   const content = getWriteContent(tool);
+  if (!content) return null;
   const lines = content.split('\n');
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   const isLong = lines.length > MAX_WRITE_LINES;
   const displayLines =
     isLong && !showAll ? lines.slice(0, MAX_WRITE_LINES) : lines;
-
-  if (!content) return null;
 
   return (
     <div className={styles.expandedWrite}>
@@ -334,50 +339,6 @@ interface ToolLineProps {
   workspaceCwd?: string;
 }
 
-function isTaskExecutionRaw(raw: unknown): Record<string, unknown> | undefined {
-  if (!raw || typeof raw !== 'object') return undefined;
-  const record = raw as Record<string, unknown>;
-  return record['type'] === 'task_execution' ? record : undefined;
-}
-
-function getStringField(
-  record: Record<string, unknown> | undefined,
-  field: string,
-): string {
-  const value = record?.[field];
-  return typeof value === 'string' ? value : '';
-}
-
-function getAgentCancellationReason(tool: ACPToolCall): string {
-  const raw = tool.rawOutput;
-  if (typeof raw === 'string') return '';
-  const record =
-    raw && typeof raw === 'object'
-      ? (raw as Record<string, unknown>)
-      : undefined;
-  const terminateReason = getStringField(record, 'terminateReason');
-  return (
-    getStringField(record, 'reason') ||
-    (terminateReason !== 'GOAL' ? terminateReason : '') ||
-    getStringField(record, 'error')
-  );
-}
-
-function isCancelledAgent(tool: ACPToolCall, reason: string): boolean {
-  const raw = tool.rawOutput;
-  const record =
-    raw && typeof raw === 'object'
-      ? (raw as Record<string, unknown>)
-      : undefined;
-  const rawStatus = getStringField(record, 'status').toLowerCase();
-  return (
-    tool.status === 'failed' ||
-    rawStatus === 'cancelled' ||
-    rawStatus === 'canceled' ||
-    reason.toLowerCase().includes('cancel')
-  );
-}
-
 function getAgentDisplayInfo(tool: ACPToolCall): {
   agentType: string;
   description: string;
@@ -387,30 +348,11 @@ function getAgentDisplayInfo(tool: ACPToolCall): {
   status: ACPToolCall['status'];
   reason: string;
 } {
-  const taskExec = isTaskExecutionRaw(tool.rawOutput);
+  const taskExec = getTaskExecutionRecord(tool.rawOutput);
   const reason = getAgentCancellationReason(tool);
-  const status = isCancelledAgent(tool, reason) ? 'failed' : tool.status;
-
-  const agentType =
-    (taskExec &&
-      typeof taskExec['subagentName'] === 'string' &&
-      taskExec['subagentName']) ||
-    (typeof tool.args?.subagent_type === 'string' && tool.args.subagent_type) ||
-    (tool.toolName === 'task' ? 'task' : 'general-purpose');
-
-  let description = '';
-  if (tool.title) {
-    const colonIdx = tool.title.indexOf(': ');
-    if (colonIdx > 0) description = tool.title.slice(colonIdx + 2);
-  }
-  if (!description) {
-    const desc = tool.args?.description;
-    if (typeof desc === 'string' && desc.trim()) description = desc.trim();
-  }
-  if (!description && taskExec) {
-    const td = taskExec['taskDescription'];
-    if (typeof td === 'string' && td.trim()) description = td.trim();
-  }
+  const status = getAgentDisplayStatus(tool);
+  const agentType = getAgentType(tool);
+  const description = getAgentDescription(tool);
 
   const subToolCount =
     tool.subTools?.length ||
@@ -435,12 +377,7 @@ function getAgentDisplayInfo(tool: ACPToolCall): {
           stats['totalTokens'] > 0
         ? (stats['totalTokens'] as number)
         : 0;
-  let tokens = '';
-  if (totalTokens > 0) {
-    if (totalTokens >= 1000)
-      tokens = (totalTokens / 1000).toFixed(1).replace(/\.0$/, '') + 'k tokens';
-    else tokens = `${totalTokens} tokens`;
-  }
+  const tokens = totalTokens > 0 ? formatTokenCount(totalTokens) : '';
 
   return {
     agentType,
@@ -478,16 +415,7 @@ function getActiveTool(tools: ACPToolCall[]): ACPToolCall {
   );
 }
 
-function getCompactDisplayStatus(tool: ACPToolCall): ACPToolCall['status'] {
-  if (tool.status !== 'completed') return tool.status;
-  const raw = tool.rawOutput;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return tool.status;
-  const record = raw as Record<string, unknown>;
-  const rawStatus =
-    typeof record.status === 'string' ? record.status.toLowerCase() : '';
-  if (rawStatus === 'cancelled' || rawStatus === 'canceled') return 'failed';
-  return tool.status;
-}
+const getCompactDisplayStatus = getAgentDisplayStatus;
 
 function CompactToolGroup({
   tools,
@@ -542,6 +470,7 @@ function areToolLinePropsEqual(
     a.endTime === b.endTime &&
     a.subContent === b.subContent &&
     a.rawOutput === b.rawOutput &&
+    a.content === b.content &&
     a.title === b.title &&
     areSubToolsEqual(a.subTools, b.subTools)
   );
@@ -561,7 +490,9 @@ function areSubToolsEqual(
       a.callId !== b.callId ||
       a.status !== b.status ||
       a.endTime !== b.endTime ||
-      a.rawOutput !== b.rawOutput
+      a.rawOutput !== b.rawOutput ||
+      a.subContent !== b.subContent ||
+      a.title !== b.title
     ) {
       return false;
     }

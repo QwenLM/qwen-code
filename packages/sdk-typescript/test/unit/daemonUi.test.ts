@@ -5431,8 +5431,8 @@ describe('daemon assist push: followup_suggestion', () => {
   });
 });
 
-describe('permission_request synthesizes tool.update for Agent tools', () => {
-  it('emits tool.update before permission.request when toolCall has subagent_type', () => {
+describe('permission_request normalization for Agent tools', () => {
+  it('keeps Agent toolCall metadata on permission.request without synthesizing tool.update', () => {
     const events = normalizeDaemonEvent({
       id: 100,
       v: 1,
@@ -5460,23 +5460,20 @@ describe('permission_request synthesizes tool.update for Agent tools', () => {
       },
     } as never);
 
-    expect(events).toHaveLength(2);
-    expect(events[0].type).toBe('tool.update');
-    const toolUpdate = events[0] as Extract<
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('permission.request');
+    const permissionEvent = events[0] as Extract<
       DaemonUiEvent,
-      { type: 'tool.update' }
+      { type: 'permission.request' }
     >;
-    expect(toolUpdate.toolCallId).toBe('call_agent_1');
-    expect(toolUpdate.toolName).toBe('Agent');
-    expect(toolUpdate.title).toBe('Query website');
-    expect(toolUpdate.status).toBe('pending');
-    expect(toolUpdate.subagentType).toBe('Explore');
-    expect(toolUpdate.rawInput).toMatchObject({ subagent_type: 'Explore' });
-
-    expect(events[1].type).toBe('permission.request');
+    expect(permissionEvent.toolCall).toMatchObject({
+      toolCallId: 'call_agent_1',
+      title: 'Query website',
+      rawInput: { subagent_type: 'Explore' },
+    });
   });
 
-  it('does NOT emit synthetic tool.update when toolCall has no subagent_type', () => {
+  it('emits only permission.request when toolCall has no subagent_type', () => {
     const events = normalizeDaemonEvent({
       id: 101,
       v: 1,
@@ -5497,10 +5494,9 @@ describe('permission_request synthesizes tool.update for Agent tools', () => {
     expect(events[0].type).toBe('permission.request');
   });
 
-  it('creates tool block from Agent permission_request so sub-tools find parent', () => {
+  it('does not create SDK tool blocks from Agent permission_request', () => {
     let state = createDaemonTranscriptState({ now: 1000 });
 
-    // Agent permission_request arrives — should create tool block
     const permEvents = normalizeDaemonEvent({
       id: 200,
       v: 1,
@@ -5524,16 +5520,9 @@ describe('permission_request synthesizes tool.update for Agent tools', () => {
 
     state = reduceDaemonTranscriptEvents(state, permEvents, { now: 1001 });
 
-    // Verify tool block was created
     const toolBlocks = state.blocks.filter((b) => b.kind === 'tool');
-    expect(toolBlocks).toHaveLength(1);
-    expect(toolBlocks[0]).toMatchObject({
-      kind: 'tool',
-      toolCallId: 'call_agent_x',
-      toolName: 'Agent',
-    });
+    expect(toolBlocks).toHaveLength(0);
 
-    // Sub-tool arrives with parentToolCallId
     const subToolEvents = normalizeDaemonEvent({
       id: 201,
       v: 1,
@@ -5554,7 +5543,6 @@ describe('permission_request synthesizes tool.update for Agent tools', () => {
 
     state = reduceDaemonTranscriptEvents(state, subToolEvents, { now: 1002 });
 
-    // Verify sub-tool has parentBlockId pointing to agent
     const subToolBlocks = state.blocks.filter(
       (b) => b.kind === 'tool' && b.toolCallId === 'call_subtool_1',
     );
@@ -5562,9 +5550,8 @@ describe('permission_request synthesizes tool.update for Agent tools', () => {
     expect(subToolBlocks[0]).toMatchObject({
       parentToolCallId: 'call_agent_x',
     });
-    // parentBlockId should be resolved since agent block exists
     expect((subToolBlocks[0] as { parentBlockId?: string }).parentBlockId).toBe(
-      toolBlocks[0].id,
+      undefined,
     );
   });
 });

@@ -111,8 +111,6 @@
 }
 
 .lineDetail {
-  /* margin-top: 4px; */
-  /* margin-left: 22px; */
 }
 
 .expandedBash,
@@ -124,7 +122,6 @@
   padding: 0px 0px 0 16px;
   font-size: 12px;
   line-height: 1.5;
-  /* background: var(--editor-bg); */
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
@@ -156,7 +153,6 @@
   font-family: var(--font-mono);
   background: var(--subtle-bg);
   border: none;
-  /* border-top: 1px solid var(--border-color); */
   color: var(--text-dimmed);
   cursor: pointer;
   text-align: left;
@@ -186,7 +182,6 @@
 }
 
 .todoActive {
-  /* color: var(--success-color); */
   font-weight: 600;
 }
 

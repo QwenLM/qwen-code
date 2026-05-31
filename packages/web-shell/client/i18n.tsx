@@ -217,6 +217,7 @@ const EN: Messages = {
   'help.shortcut.compact': 'Toggle compact mode',
   'help.shortcut.approvals': 'Cycle approval modes',
   'help.shortcut.cancel': 'Close dialogs or cancel operation',
+  'clear.blocked': 'Cannot clear while streaming — cancel first (Esc).',
   'compact.enabled': 'Compact mode enabled',
   'compact.disabled': 'Compact mode disabled',
   'compact.hint': 'Press Ctrl+O to show full tool output',
@@ -333,6 +334,10 @@ const EN: Messages = {
   'mode.auto.desc': 'Automatically decide when approval is needed',
   'mode.auto.notice':
     'Auto mode enabled. An LLM classifier evaluates each tool call and auto-approves safe actions, blocks risky ones. To exit: Shift+Tab or /approval-mode default.',
+  'mode.autoApproved': ((v) =>
+    v?.tool
+      ? `Auto-approved: ${v.tool}`
+      : 'Pending tool call auto-approved by mode switch.') as MessageValue,
   'mode.auto-edit': 'Auto-accept edits',
   'mode.auto-edit.desc': 'Automatically approve file read/write operations',
   'mode.default': 'Default mode',
@@ -343,7 +348,11 @@ const EN: Messages = {
   'mode.yolo': 'YOLO mode',
   'mode.yolo.desc': 'Automatically approve all operations',
   'plan.title': 'Plan',
+  'model.contextWindow': 'Context Window',
+  'model.contextWindow.unknown': '(unknown)',
   'model.current': (v) => `current: ${v?.model ?? 'unknown'}`,
+  'model.modality': 'Modality',
+  'model.modality.textOnly': 'text-only',
   'model.searchHint': 'Press / to search',
   'model.fastHint': 'for suggestions and side tasks',
   'model.noMatch': (v) => `No model matching "${v?.query ?? ''}"`,
@@ -607,6 +616,7 @@ const ZH: Messages = {
   'help.shortcut.compact': '切换紧凑模式',
   'help.shortcut.approvals': '切换审批模式',
   'help.shortcut.cancel': '关闭弹窗或取消操作',
+  'clear.blocked': '流式输出中无法清屏 — 先按 Esc 取消。',
   'compact.enabled': '紧凑模式已开启',
   'compact.disabled': '紧凑模式已关闭',
   'compact.hint': '按 Ctrl+O 显示完整工具输出',
@@ -718,6 +728,10 @@ const ZH: Messages = {
   'mode.auto.desc': '自动判断是否需要请求批准',
   'mode.auto.notice':
     'Auto 模式已启用。LLM 分类器会评估每个工具调用，自动批准安全操作，拦截危险操作。退出方式：Shift+Tab 或 /approval-mode default。',
+  'mode.autoApproved': ((v) =>
+    v?.tool
+      ? `已自动批准：${v.tool}`
+      : '切换模式后自动批准了待处理的工具调用。') as MessageValue,
   'mode.auto-edit': '自动编辑',
   'mode.auto-edit.desc': '自动批准文件读写操作',
   'mode.default': '默认模式',
@@ -728,7 +742,11 @@ const ZH: Messages = {
   'mode.yolo': 'YOLO 模式',
   'mode.yolo.desc': '自动批准所有操作',
   'plan.title': '计划',
+  'model.contextWindow': '上下文窗口',
+  'model.contextWindow.unknown': '（未知）',
   'model.current': (v) => `当前：${v?.model ?? '未知'}`,
+  'model.modality': '模态',
+  'model.modality.textOnly': '仅文本',
   'model.searchHint': '按 / 搜索',
   'model.fastHint': '用于建议和旁路任务',
   'model.noMatch': (v) => `没有匹配 "${v?.query ?? ''}" 的模型`,

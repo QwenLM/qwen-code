@@ -25,19 +25,25 @@ interface ModelDialogModel {
   isRuntime?: boolean;
 }
 
-function formatContextWindow(size?: number): string {
-  return size ? `${size.toLocaleString('en-US')} tokens` : '(unknown)';
+type T = (key: string, vars?: Record<string, string | number>) => string;
+
+function formatContextWindow(size: number | undefined, t: T): string {
+  return size
+    ? `${size.toLocaleString()} ${t('contextUsage.tokens')}`
+    : t('model.contextWindow.unknown');
 }
 
-function formatModalities(model?: ModelDialogModel): string {
+function formatModalities(model: ModelDialogModel | undefined, t: T): string {
   const modalities = model?.modalities;
-  if (!modalities) return 'text-only';
+  if (!modalities) return t('model.modality.textOnly');
   const parts: string[] = [];
   if (modalities.image) parts.push('image');
   if (modalities.pdf) parts.push('pdf');
   if (modalities.audio) parts.push('audio');
   if (modalities.video) parts.push('video');
-  return parts.length > 0 ? `text · ${parts.join(' · ')}` : 'text-only';
+  return parts.length > 0
+    ? `text · ${parts.join(' · ')}`
+    : t('model.modality.textOnly');
 }
 
 function getAuthType(model: ModelDialogModel): string | undefined {
@@ -201,7 +207,7 @@ export function ModelDialog({
         <button
           className={dp('resume-picker-close')}
           onClick={onClose}
-          title="Close"
+          title={t('common.close')}
         >
           ESC
         </button>
@@ -297,12 +303,12 @@ export function ModelDialog({
         <>
           <div className={dp('resume-picker-detail-panel')}>
             <DetailRow
-              label="Modality"
-              value={formatModalities(selectedModel)}
+              label={t('model.modality')}
+              value={formatModalities(selectedModel, t)}
             />
             <DetailRow
-              label="Context Window"
-              value={formatContextWindow(selectedModel.contextWindow)}
+              label={t('model.contextWindow')}
+              value={formatContextWindow(selectedModel.contextWindow, t)}
             />
           </div>
           <div className={dp('resume-picker-sep')} />

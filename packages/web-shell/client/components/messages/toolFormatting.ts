@@ -76,7 +76,7 @@ export function getToolResultSummary(tool: ACPToolCall): string {
   const lineCount = lines.length;
 
   if (name === 'read' || name === 'read_file' || name === 'readfile') {
-    return text;
+    return `${lineCount} line(s)`;
   }
 
   if (name === 'glob') {
@@ -271,6 +271,86 @@ function isAbsoluteLikePath(filePath: string): boolean {
 function basename(filePath: string): string {
   const trimmed = filePath.replace(/\/+$/, '');
   return trimmed.split('/').pop() || filePath;
+}
+
+// ── Shared agent helpers (used by ParallelAgentsGroup & SubAgentPanel) ──
+
+export function getTaskExecutionRecord(
+  rawOutput: unknown,
+): Record<string, unknown> | undefined {
+  if (!rawOutput || typeof rawOutput !== 'object') return undefined;
+  const record = rawOutput as Record<string, unknown>;
+  return record['type'] === 'task_execution' ? record : undefined;
+}
+
+export function getAgentCancellationReason(agent: ACPToolCall): string {
+  if (!agent.rawOutput || typeof agent.rawOutput !== 'object') return '';
+  const raw = agent.rawOutput as Record<string, unknown>;
+  const terminateReason =
+    typeof raw.terminateReason === 'string' ? raw.terminateReason : '';
+  return (
+    (typeof raw.reason === 'string' && raw.reason) ||
+    (terminateReason && terminateReason !== 'GOAL' && terminateReason) ||
+    (typeof raw.error === 'string' && raw.error) ||
+    ''
+  );
+}
+
+export function getAgentDisplayStatus(
+  agent: ACPToolCall,
+): ACPToolCall['status'] {
+  if (agent.status === 'failed') return 'failed';
+  if (!agent.rawOutput || typeof agent.rawOutput !== 'object') {
+    return agent.status;
+  }
+  const raw = agent.rawOutput as Record<string, unknown>;
+  const status = typeof raw.status === 'string' ? raw.status.toLowerCase() : '';
+  const reason = getAgentCancellationReason(agent);
+  if (
+    status === 'cancelled' ||
+    status === 'canceled' ||
+    reason.toLowerCase().includes('cancel')
+  ) {
+    return 'failed';
+  }
+  return agent.status;
+}
+
+export function formatTokenCount(tokens: number): string {
+  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M tokens`;
+  if (tokens >= 1000)
+    return (tokens / 1000).toFixed(1).replace(/\.0$/, '') + 'k tokens';
+  return `${tokens} tokens`;
+}
+
+const DEFAULT_SUBAGENT_TYPE = 'general-purpose';
+
+export function getAgentType(agent: ACPToolCall): string {
+  const taskExec = getTaskExecutionRecord(agent.rawOutput);
+  if (taskExec) {
+    const name = taskExec['subagentName'];
+    if (typeof name === 'string' && name) return name;
+  }
+  const subagentType = agent.args?.subagent_type;
+  if (typeof subagentType === 'string' && subagentType) return subagentType;
+  return agent.toolName === 'task' ? 'task' : DEFAULT_SUBAGENT_TYPE;
+}
+
+export function getAgentDescription(agent: ACPToolCall): string {
+  if (agent.title) {
+    const colonIdx = agent.title.indexOf(': ');
+    if (colonIdx > 0) return agent.title.slice(colonIdx + 2);
+  }
+  const desc = agent.args?.description;
+  if (typeof desc === 'string' && desc.trim()) return desc.trim();
+  const taskExec = getTaskExecutionRecord(agent.rawOutput);
+  const taskDesc = taskExec?.['taskDescription'];
+  if (typeof taskDesc === 'string' && taskDesc.trim()) return taskDesc.trim();
+  const prompt = agent.args?.prompt;
+  if (typeof prompt === 'string' && prompt.trim()) {
+    return prompt.trim().split('\n')[0] ?? '';
+  }
+  return '';
 }
 
 function extractRawOutputText(rawOutput: unknown): string | null {
