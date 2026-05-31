@@ -122,7 +122,7 @@ export function shouldRunAutoModeForCall(
  * classifier or an explicit `permissions.allow` rule.
  */
 const PERSISTENCE_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
-  /(^|\/)\.git\//, // git config, hooks, alias — covers .git/hooks/* and .git/config
+  /(^|\/)\.git(?:\/|$)/, // git config, hooks, alias, and worktree .git files
   /(^|\/)\.husky\//, // git hooks via husky
   /(^|\/)package\.json$/, // npm scripts (root + nested workspaces)
   /(^|\/)\.npmrc$/, // registry override → malicious package fetch on next install

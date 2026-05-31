@@ -147,6 +147,7 @@ describe('isAutoModeProtectedWritePath', () => {
       '/repo/.qwen/QWEN.local.md',
       '/repo/.qwen/rules/backend.md',
       '/repo/.mcp.json',
+      '/repo/.git',
     ];
 
     for (const filePath of protectedPaths) {

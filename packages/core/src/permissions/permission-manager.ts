@@ -11,6 +11,7 @@ import {
   resolveToolName,
   splitCompoundCommand,
   SHELL_TOOL_NAMES,
+  toolMatchesRuleToolName,
 } from './rule-parser.js';
 import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
@@ -366,6 +367,15 @@ export class PermissionManager {
     let worst: PermissionDecision = 'default';
 
     for (const op of ops) {
+      if (
+        op.cwdUnknown &&
+        op.pathMayDependOnCwd &&
+        this.hasDenyOrAskRuleForTool(op.virtualTool)
+      ) {
+        worst = 'ask';
+        continue;
+      }
+
       // Evaluate the virtual operation using the standard rule-matching path.
       // Since op.virtualTool ≠ 'run_shell_command', this will not recurse back
       // into the shell-semantics branch.
@@ -383,6 +393,18 @@ export class PermissionManager {
     }
 
     return worst;
+  }
+
+  private hasDenyOrAskRuleForTool(toolName: string): boolean {
+    return [
+      ...this.sessionRules.ask,
+      ...this.persistentRules.ask,
+      ...this.sessionRules.deny,
+      ...this.persistentRules.deny,
+    ].some(
+      (rule) =>
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
+    );
   }
 
   /**
@@ -686,6 +708,14 @@ export class PermissionManager {
       const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
       if (
         ops.some((op) => {
+          if (
+            op.cwdUnknown &&
+            op.pathMayDependOnCwd &&
+            this.hasDenyOrAskRuleForTool(op.virtualTool)
+          ) {
+            return true;
+          }
+
           const opMatchArgs = [
             op.virtualTool,
             undefined,
@@ -753,6 +783,14 @@ export class PermissionManager {
       const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
       if (
         ops.some((op) => {
+          if (
+            op.cwdUnknown &&
+            op.pathMayDependOnCwd &&
+            this.hasAskRuleForTool(op.virtualTool)
+          ) {
+            return true;
+          }
+
           const opMatchArgs = [
             op.virtualTool,
             undefined,
@@ -787,6 +825,13 @@ export class PermissionManager {
     ] as const;
 
     return askRules.some((rule) => matchesRule(rule, ...matchArgs));
+  }
+
+  private hasAskRuleForTool(toolName: string): boolean {
+    return [...this.sessionRules.ask, ...this.persistentRules.ask].some(
+      (rule) =>
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
+    );
   }
 
   // ---------------------------------------------------------------------------

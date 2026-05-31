@@ -2532,4 +2532,30 @@ describe('PermissionManager — compound shell write attribution', () => {
       }),
     ).toBe(true);
   });
+
+  it('escalates dynamic-cd writes when path-specific deny rules may apply', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+    expect(
+      pm.hasRelevantRules({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > ../settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe(true);
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > ../settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe('ask');
+  });
 });

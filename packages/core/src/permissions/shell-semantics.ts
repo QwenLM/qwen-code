@@ -1874,7 +1874,7 @@ function walkCompoundCommand(
 
     const subOps = extractShellOperations(sub, effectiveCwd);
     if (cwdUnknown) {
-      ops.push(...markCwdUnknownOps(subOps, effectiveCwd));
+      ops.push(...markCwdUnknownOps(subOps));
     } else {
       ops.push(...subOps);
     }
@@ -1883,10 +1883,7 @@ function walkCompoundCommand(
   return ops;
 }
 
-function markCwdUnknownOps(
-  ops: ShellOperation[],
-  effectiveCwd: string,
-): ShellOperation[] {
+function markCwdUnknownOps(ops: ShellOperation[]): ShellOperation[] {
   return ops.map((op) => {
     if (!op.filePath) return op;
     return { ...op, cwdUnknown: true, pathMayDependOnCwd: true };
