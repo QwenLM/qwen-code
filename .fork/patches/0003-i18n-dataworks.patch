@@ -57,9 +57,9 @@ index fd430b8c5..8f1a4c784 100644
    'Use /compress when the conversation gets long to summarize history and free up context.':
      '对话变长时用 /compress，总结历史并释放上下文。',
    'Start a fresh idea with /clear or /new; the previous session stays available in history.':
-@@ -1291,6 +1295,18 @@ export default {
-   'Long conversation? /compress summarizes history to free context.':
-     '对话太长？用 /compress 总结历史，释放上下文。',
+@@ -1345,6 +1349,18 @@ export default {
+   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+     '显示上下文窗口使用情况明细。使用 "/context detail" 查看逐项明细。',
  
 +  // DataWorks usage examples
 +  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':

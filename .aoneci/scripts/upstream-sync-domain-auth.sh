@@ -271,6 +271,12 @@ ensure_repo() {
 
   git config user.name "$GIT_USER_NAME"
   git config user.email "$GIT_USER_EMAIL"
+
+  local git_dir
+  if git_dir="$(git rev-parse --git-dir 2>/dev/null)" && [ -e "$git_dir/hooks/pre-push" ]; then
+    log "removing stale .git/hooks/pre-push (CI image installs a git-lfs hook without git-lfs binary)"
+    rm -f "$git_dir/hooks/pre-push"
+  fi
 }
 
 configure_authenticated_origin() {

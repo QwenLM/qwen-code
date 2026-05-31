@@ -182,7 +182,7 @@ jobs:
             git log --oneline upstream/main --no-merges | head -3
           fi
 
-      - name: '准备 sync 分支'
+      - name: '基于 upstream/main 构建 sync 分支（patch-apply 模式）'
         run: |
           SOURCE_DIR="${AONE_CI_SOURCE:-.}"
           cd "$SOURCE_DIR"
@@ -200,313 +200,111 @@ jobs:
 
           NEW_COMMITS=$(cat "$NEW_COMMITS_FILE" 2>/dev/null || echo "0")
           if [ "$NEW_COMMITS" = "0" ]; then
-            echo "✅ 无新 upstream 提交，跳过 sync 分支准备"
+            echo "✅ 无新 upstream 提交，跳过 sync"
             exit 0
           fi
 
           SYNC_BRANCH="sync/upstream-$(date +%Y%m%d)"
-          REMOTE_SYNC_REF="origin/$SYNC_BRANCH"
-
-          git fetch origin "$SYNC_BRANCH" 2>/dev/null || true
           echo "0" > "$SKIP_PUSH_FILE"
 
+          # 检查远端是否已有同日 sync 分支且是最新的
+          git fetch origin "$SYNC_BRANCH" 2>/dev/null || true
           if git show-ref --verify --quiet "refs/remotes/origin/$SYNC_BRANCH"; then
-            if git merge-base --is-ancestor upstream/main "$REMOTE_SYNC_REF"; then
-              # ── 情况 A：sync 分支已包含最新 upstream/main → 直接复用 ──
-              echo "♻️ 检测到远端已有当天 sync 分支且已包含最新 upstream/main，直接复用"
-              git checkout -B "$SYNC_BRANCH" "$REMOTE_SYNC_REF"
+            if git merge-base --is-ancestor upstream/main "origin/$SYNC_BRANCH"; then
+              echo "♻️ 远端已有最新 sync 分支，直接复用"
+              git checkout -B "$SYNC_BRANCH" "origin/$SYNC_BRANCH"
               echo "$SYNC_BRANCH" > "$BRANCH_NAME_FILE"
               echo "1" > "$SKIP_PUSH_FILE"
+              echo "clean" > "$CONFLICT_STATUS_FILE"
               echo "" > "$CONFLICT_FILES_FILE"
-              if [ "$(git rev-parse "$REMOTE_SYNC_REF")" = "$(git rev-parse upstream/main)" ]; then
-                echo "has_conflicts" > "$CONFLICT_STATUS_FILE"
-              else
-                echo "clean" > "$CONFLICT_STATUS_FILE"
-              fi
-              echo "📋 reusing sync branch | status=$(cat "$CONFLICT_STATUS_FILE") | HEAD=$(git log --oneline -1 HEAD)"
               echo "$(git rev-parse HEAD)" > "$SYNC_CHECKPOINT_FILE"
-              git merge-base HEAD upstream/main 2>/dev/null > "$MERGE_BASE_FILE" || echo "" > "$MERGE_BASE_FILE"
+              echo "$(git rev-parse upstream/main)" > "$MERGE_BASE_FILE"
+              echo "📋 reusing sync branch | HEAD=$(git log --oneline -1 HEAD)"
               exit 0
-            else
-              # ── 情况 B：sync 分支已存在但 upstream/main 有新提交 → 增量合并 ──
-              STALE_NEW_COUNT=$(git log --oneline "$REMOTE_SYNC_REF..upstream/main" --no-merges | wc -l | tr -d ' ')
-              echo "🔄 远端已有当天 sync 分支，但 upstream/main 有 $STALE_NEW_COUNT 个新提交"
-              echo "   将在现有 sync 分支上增量合并，保留已有评审上下文..."
-              echo "   现有 sync HEAD: $(git log --oneline -1 "$REMOTE_SYNC_REF")"
-              git checkout -B "$SYNC_BRANCH" "$REMOTE_SYNC_REF"
             fi
-          else
-            # ── 情况 C：sync 分支不存在 → 从 target 分支新建 ──
-            echo "📦 创建新的 sync 分支（基于 $TARGET_BRANCH）"
-            if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
-              git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
-            else
-              git checkout -B "$TARGET_BRANCH"
-            fi
-            git checkout -B "$SYNC_BRANCH"
           fi
 
-          SYNC_CHECKPOINT=$(git rev-parse HEAD)
-          git tag "sync-checkpoint-$(date +%Y%m%d-%H%M%S)-$(git rev-parse --short=7 HEAD)" HEAD 2>/dev/null || true
+          # ── 核心逻辑：基于 upstream/main 创建 sync 分支，apply patches ──
+          echo "📦 基于 upstream/main 创建 sync 分支，执行 patch-apply"
+          git checkout -B "$SYNC_BRANCH" upstream/main
+
+          # 从 fork main 获取 .fork/ 目录（patch 文件本身不在 upstream 里）
+          git checkout "origin/$TARGET_BRANCH" -- .fork/ .aoneci/ .qwen/ 2>/dev/null || true
+
+          SYNC_CHECKPOINT=$(git rev-parse upstream/main)
           echo "$SYNC_CHECKPOINT" > "$SYNC_CHECKPOINT_FILE"
-
-          # 计算 merge-base，用于合并后的 fork 定制校验。
-          # 必须锚到 fork 的稳定分叉点（target 分支与 upstream 的共同祖先），
-          # 而不是 sync 分支 HEAD —— 在情况 B（增量合并）下，HEAD 已经包含
-          # 上次合过的 upstream，再用 HEAD 算 merge-base 会得到上次同步点，
-          # 让 PRE_MERGE_FILES 把上次合并带入的上游改动也当成 fork 改动。
-          MERGE_BASE_ANCHOR=""
-          if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
-            MERGE_BASE_ANCHOR="origin/$TARGET_BRANCH"
-          elif git show-ref --verify --quiet "refs/heads/$TARGET_BRANCH"; then
-            MERGE_BASE_ANCHOR="$TARGET_BRANCH"
-          else
-            MERGE_BASE_ANCHOR="HEAD"
-          fi
-          MERGE_BASE_REF=$(git merge-base "$MERGE_BASE_ANCHOR" upstream/main 2>/dev/null || echo "")
-          if [ -n "$MERGE_BASE_REF" ]; then
-            echo "📌 merge-base: $(git rev-parse --short $MERGE_BASE_REF) (anchor: $MERGE_BASE_ANCHOR)"
-          else
-            echo "⚠️ 无法计算 merge-base（anchor: $MERGE_BASE_ANCHOR），合并后校验将跳过"
-          fi
-          echo "$MERGE_BASE_REF" > "$MERGE_BASE_FILE"
-          echo "pending" > "$CONFLICT_STATUS_FILE"
+          echo "$SYNC_CHECKPOINT" > "$MERGE_BASE_FILE"
           echo "$SYNC_BRANCH" > "$BRANCH_NAME_FILE"
+          echo "pending" > "$CONFLICT_STATUS_FILE"
 
-      - name: '合并 upstream 并检测冲突'
-        run: |
-          SOURCE_DIR="${AONE_CI_SOURCE:-.}"
-          cd "$SOURCE_DIR"
-          STATE_DIR="$(cd "$SOURCE_DIR/.." && pwd)/.aoneci-upstream-sync"
-          CONFLICT_STATUS_FILE="$STATE_DIR/conflict-status"
-          CONFLICT_FILES_FILE="$STATE_DIR/conflict-files"
-          BRANCH_NAME_FILE="$STATE_DIR/branch-name"
-          SKIP_PUSH_FILE="$STATE_DIR/skip-push"
-          DINGTALK_SCRIPT_FILE="$STATE_DIR/send-dingtalk-alert.js"
-          SYNC_CHECKPOINT_FILE="$STATE_DIR/sync-checkpoint"
-          MERGE_BASE_FILE="$STATE_DIR/merge-base"
+          # Step 1: Apply fork patches
+          APPLY_RC=0
+          echo "🩹 执行 bash .fork/apply.sh ..."
+          bash .fork/apply.sh 2>&1 || APPLY_RC=$?
 
-          SYNC_STATUS=$(cat "$CONFLICT_STATUS_FILE" 2>/dev/null || echo "skip")
-          SYNC_BRANCH=$(cat "$BRANCH_NAME_FILE" 2>/dev/null || echo "")
-          SKIP_PUSH=$(cat "$SKIP_PUSH_FILE" 2>/dev/null || echo "0")
-          if [ "$SYNC_STATUS" = "skip" ] || [ -z "$SYNC_BRANCH" ]; then
-            echo "✅ 无需同步，跳过 merge"
-            exit 0
+          if [ "$APPLY_RC" -ne 0 ]; then
+            echo "⚠️ patch apply 失败（exit $APPLY_RC），尝试 LLM 辅助修复..."
+            FAILED_PATCHES=$(bash .fork/apply.sh --check 2>&1 | grep "^FAIL:" | awk '{print $2}' || true)
+            echo "   失败的 patches: $FAILED_PATCHES"
+
+            # 尝试 LLM 修复：让它读 .rej 文件并手动应用
+            QWEN_API_KEY="${{secrets['CI_QWEN_API_KEY']}}"
+            if [ -n "$QWEN_API_KEY" ]; then
+              QWEN_BASE_URL="${{secrets['CI_QWEN_BASE_URL']}}"
+              QWEN_BASE_URL="${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+              LLM_PROMPT='Some fork patches failed to apply cleanly. For each .rej file in the working tree:
+1. Read the .rej file to understand the intended change
+2. Read the target source file
+3. Apply the intended change manually (the context lines shifted but the intent is clear)
+4. Delete the .rej file after successful application
+5. Run: git add <modified-file>
+
+After all .rej files are resolved, verify none remain: find . -name "*.rej"'
+              npm_config_registry="https://registry.anpm.alibaba-inc.com/" \
+                OPENAI_API_KEY="$QWEN_API_KEY" \
+                OPENAI_BASE_URL="$QWEN_BASE_URL" \
+                npm exec --yes --package=@alife/dataworks-qwen-code@latest -- qwen \
+                --auth-type openai \
+                --prompt "$LLM_PROMPT" \
+                --yolo || true
+
+              # 检查是否还有 .rej 文件
+              REJ_REMAINING=$(find . -name "*.rej" | wc -l | tr -d ' ')
+              if [ "$REJ_REMAINING" -eq 0 ]; then
+                echo "✅ LLM 成功修复所有 patch apply 失败"
+                APPLY_RC=0
+              else
+                echo "⚠️ LLM 修复后仍有 $REJ_REMAINING 个 .rej 文件"
+              fi
+            fi
+
+            if [ "$APPLY_RC" -ne 0 ]; then
+              echo "has_conflicts" > "$CONFLICT_STATUS_FILE"
+              echo "$FAILED_PATCHES" > "$CONFLICT_FILES_FILE"
+              CI_DINGTALK_WEBHOOK_URL="${{secrets['CI_DINGTALK_WEBHOOK_URL']}}" \
+                CI_DINGTALK_WEBHOOK_SECRET="${{secrets['CI_DINGTALK_WEBHOOK_SECRET']}}" \
+                node "$DINGTALK_SCRIPT_FILE" \
+                --title "Upstream Sync Patch Apply 失败" \
+                --content "fork patches 无法干净 apply 到 upstream/main。需要人工 refresh patches。失败: $FAILED_PATCHES" \
+                || true
+              echo "📋 patch-apply failed | branch=$SYNC_BRANCH | HEAD=$(git log --oneline -1 HEAD)"
+              exit 0
+            fi
           fi
-          if [ "$SKIP_PUSH" = "1" ]; then
-            echo "✅ 复用远端 sync 分支，跳过 merge"
-            exit 0
+
+          # Step 2: Rewrite package identity (name → @alife/..., add registry)
+          echo "📦 执行 rewrite-package-identity.js ..."
+          if [ -f ".fork/rewrite-package-identity.js" ]; then
+            node .fork/rewrite-package-identity.js
           fi
 
-          SYNC_CHECKPOINT=$(cat "$SYNC_CHECKPOINT_FILE" 2>/dev/null || git rev-parse HEAD)
-          MERGE_BASE_REF=$(cat "$MERGE_BASE_FILE" 2>/dev/null || echo "")
-
-          # 状态文件：记录冲突信息供后续步骤使用
+          # Step 3: Stage all changes
+          git add -A
           echo "clean" > "$CONFLICT_STATUS_FILE"
           echo "" > "$CONFLICT_FILES_FILE"
 
-          # 辅助函数：安全中止 merge
-          abort_merge_if_active() {
-            if [ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
-              git merge --abort
-            fi
-          }
+          echo "📋 patch-apply done | status=clean | branch=$SYNC_BRANCH | HEAD=$(git log --oneline -1 HEAD)"
 
-          # 尝试合并
-          MERGE_OUTPUT=""
-          MERGE_EXIT=0
-          MERGE_OUTPUT=$(git merge upstream/main --no-edit 2>&1) || MERGE_EXIT=$?
-
-          if [ "$MERGE_EXIT" -eq 0 ]; then
-            echo "✅ git merge 完成，无冲突标记"
-
-            # 合并后校验：检查 fork 定制是否被静默回退。
-            #
-            # 两层检测：
-            #   1. fork 改过的文件在合并后不再相对 merge-base 变化。
-            #   2. fork 改过的文件在合并后完全等于 upstream/main 版本。
-            #
-            # 第二层能覆盖这类情况：upstream 同文件也有改动，所以文件仍在
-            # post-merge diff 里，但合并结果实际整体采用了 upstream blob。
-            REVERTED_FILES=""
-            REVERTED_COUNT=0
-            if [ -n "$MERGE_BASE_REF" ]; then
-              PRE_MERGE_FILES=$(mktemp)
-              POST_MERGE_FILES=$(mktemp)
-              UPSTREAM_OVERWRITE_FILES=$(mktemp)
-              BLOB_QUERIES=$(mktemp)
-              BLOB_RESULTS=$(mktemp)
-
-              git diff --name-only "$MERGE_BASE_REF" "$SYNC_CHECKPOINT" 2>/dev/null | sort > "$PRE_MERGE_FILES"
-              git diff --name-only "$MERGE_BASE_REF" HEAD 2>/dev/null | sort > "$POST_MERGE_FILES"
-
-              # 第一层：fork 改过的文件在 post-merge diff 里完全消失（被 upstream 覆盖到 merge-base）
-              comm -23 "$PRE_MERGE_FILES" "$POST_MERGE_FILES" > "$UPSTREAM_OVERWRITE_FILES"
-
-              # 第二层：fork 改过的文件 HEAD blob 等于 upstream blob（整体采用上游版本）。
-              # 用一次 git cat-file --batch-check 取齐三个 blob，避免每文件 fork 3 次 git。
-              while IFS= read -r fork_file; do
-                [ -z "$fork_file" ] && continue
-                printf '%s:%s\n%s:%s\n%s:%s\n' \
-                  "$SYNC_CHECKPOINT" "$fork_file" \
-                  "HEAD" "$fork_file" \
-                  "upstream/main" "$fork_file"
-              done < "$PRE_MERGE_FILES" > "$BLOB_QUERIES"
-
-              if [ -s "$BLOB_QUERIES" ]; then
-                git cat-file --batch-check='%(objectname) %(objecttype)' < "$BLOB_QUERIES" > "$BLOB_RESULTS" 2>/dev/null || true
-                # PRE_MERGE_FILES 行 N 对应 BLOB_RESULTS 行 (3N-2, 3N-1, 3N)，
-                # 在同一个 awk 里读两份输入并按组判定，避免按文件再 fork 子进程。
-                # 用 $2=="blob" 判断对象存在，避免路径里含 "missing" 时误判。
-                awk '
-                  function read_blob(line,    parts) {
-                    split(line, parts, " ")
-                    return (parts[2] == "blob") ? parts[1] : ""
-                  }
-                  NR == FNR { files[FNR] = $0; next }
-                  (FNR % 3) == 1 { sync_blob = read_blob($0) }
-                  (FNR % 3) == 2 { head_blob = read_blob($0) }
-                  (FNR % 3) == 0 {
-                    up_blob = read_blob($0)
-                    idx = FNR / 3
-                    # 仅当三处 blob 都存在、fork 改动相对 upstream 不同、合并后 HEAD 等于上游 blob 时算 silent revert
-                    if (sync_blob != "" && head_blob != "" && up_blob != "" \
-                        && sync_blob != up_blob && head_blob == up_blob) {
-                      print files[idx]
-                    }
-                  }
-                ' "$PRE_MERGE_FILES" "$BLOB_RESULTS" >> "$UPSTREAM_OVERWRITE_FILES"
-              fi
-
-              REVERTED_FILES=$(sort -u "$UPSTREAM_OVERWRITE_FILES")
-              REVERTED_COUNT=$(printf '%s\n' "$REVERTED_FILES" | grep -c . || true)
-
-              rm -f "$PRE_MERGE_FILES" "$POST_MERGE_FILES" "$UPSTREAM_OVERWRITE_FILES" "$BLOB_QUERIES" "$BLOB_RESULTS"
-            fi
-
-            if [ "$REVERTED_COUNT" -gt 0 ]; then
-              echo "❌ fork customization reverted in $REVERTED_COUNT file(s) — likely shallow clone issue"
-              echo "$REVERTED_FILES" | head -20
-              echo ""
-              echo "Hint: confirm git fetch --unshallow succeeded"
-              abort_merge_if_active
-              echo "has_conflicts" > "$CONFLICT_STATUS_FILE"
-              echo "$REVERTED_FILES" > "$CONFLICT_FILES_FILE"
-              # 中止合并，切到 upstream/main 让 MR 展示 upstream 变更（与常规冲突处理一致）
-              git reset --hard "$SYNC_CHECKPOINT"
-              git checkout -B "$SYNC_BRANCH" upstream/main
-            else
-              echo "✅ 合并后校验通过：fork 定制完整保留"
-            fi
-          elif echo "$MERGE_OUTPUT" | grep -q "unrelated histories"; then
-            echo "⚠️ 检测到 unrelated histories，使用 --allow-unrelated-histories 重试"
-            MERGE_EXIT=0
-            MERGE_OUTPUT=$(git merge upstream/main --no-edit --allow-unrelated-histories 2>&1) || MERGE_EXIT=$?
-            if [ "$MERGE_EXIT" -eq 0 ]; then
-              echo "✅ 合并成功（allow-unrelated-histories）"
-              MERGE_EXIT=0
-            fi
-          fi
-
-          # 合并失败时，检查是否有文件冲突
-          if [ "$MERGE_EXIT" -ne 0 ]; then
-            CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
-            CONFLICT_COUNT=$(echo "$CONFLICT_FILES" | grep -c . || true)
-
-            if [ "$CONFLICT_COUNT" -eq 0 ]; then
-              echo "❌ 合并失败但无文件冲突，可能是 git 错误:"
-              echo "$MERGE_OUTPUT"
-              CI_DINGTALK_WEBHOOK_URL="${{secrets['CI_DINGTALK_WEBHOOK_URL']}}" \
-                CI_DINGTALK_WEBHOOK_SECRET="${{secrets['CI_DINGTALK_WEBHOOK_SECRET']}}" \
-                node "$DINGTALK_SCRIPT_FILE" \
-                --title "Upstream Sync 执行失败" \
-                --content "git merge upstream/main 失败，但没有检测到可展示的冲突文件。请查看 CI 日志。错误输出: $MERGE_OUTPUT" \
-                || true
-              abort_merge_if_active
-              exit 1
-            fi
-
-            echo "⚠️ 检测到 $CONFLICT_COUNT 个文件冲突"
-            echo "$CONFLICT_FILES"
-
-            # ── 快速路径：确定性解决 package.json 冲突 ──
-            # 策略：版本号以 upstream 为准，名称覆写为 @alife/xxx
-            PKG_CONFLICTS=$(echo "$CONFLICT_FILES" | grep 'package\.json$' || true)
-            if [ -n "$PKG_CONFLICTS" ]; then
-              echo "📦 确定性解决 package.json 冲突（版本号=upstream，名称=@alife）..."
-              echo "$PKG_CONFLICTS" | while read -r pkg_file; do
-                git checkout --theirs "$pkg_file" && git add "$pkg_file"
-                echo "  ✅ $pkg_file → 采用 upstream 版本"
-              done
-              # 覆写 fork 名称 + registry
-              if [ -f ".fork/rewrite-package-identity.js" ]; then
-                node .fork/rewrite-package-identity.js
-                echo "$PKG_CONFLICTS" | xargs git add
-                echo "  ✅ 已覆写 fork 包名 + registry"
-              fi
-              # 重新计算剩余冲突
-              CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
-              CONFLICT_COUNT=$(echo "$CONFLICT_FILES" | grep -c . || true)
-              if [ "$CONFLICT_COUNT" -eq 0 ]; then
-                echo "✅ 所有冲突已通过确定性规则解决（仅 package.json 冲突）"
-              else
-                echo "⚠️ 剩余 $CONFLICT_COUNT 个非 package.json 冲突，继续 LLM 解决"
-              fi
-            fi
-
-            # 尝试 LLM 辅助解决冲突（仅处理剩余非 package.json 冲突）
-            LLM_RESOLVED=false
-            if [ "$CONFLICT_COUNT" -eq 0 ]; then
-              LLM_RESOLVED=true
-            fi
-            QWEN_API_KEY="${{secrets['CI_QWEN_API_KEY']}}"
-            if [ "$LLM_RESOLVED" = "false" ] && [ -n "$QWEN_API_KEY" ]; then
-              echo "🤖 尝试 LLM 辅助冲突解决..."
-              # 使用内部 npm registry 上已发布的 CLI（冲突状态下无法 npm ci 构建本地 dist）
-              # 显式指定内部 registry，避免 npx 回退到 npmjs.org
-              INTERNAL_REGISTRY="https://registry.anpm.alibaba-inc.com/"
-              QWEN_BASE_URL="${{secrets['CI_QWEN_BASE_URL']}}"
-              QWEN_BASE_URL="${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
-              if OPENAI_API_KEY="$QWEN_API_KEY" OPENAI_BASE_URL="$QWEN_BASE_URL" \
-                npx --registry "$INTERNAL_REGISTRY" @alife/dataworks-qwen-code \
-                --auth-type openai \
-                --prompt "Read .qwen/upstream-sync-rules.yml for resolution rules. Resolve all git merge conflicts in the working tree following those rules. For each conflicted file, read both versions, apply the appropriate rule, write the resolved content, then run: git add -A" \
-                --yolo; then
-                REMAINING=$(git diff --name-only --diff-filter=U | grep -c . || true)
-                if [ "$REMAINING" -eq 0 ]; then
-                  echo "✅ LLM 成功解决所有冲突"
-                  LLM_RESOLVED=true
-                else
-                  echo "⚠️ LLM 解决了部分冲突，仍有 $REMAINING 个文件未解决"
-                fi
-              else
-                echo "⚠️ LLM 冲突解决执行失败"
-              fi
-            else
-              echo "⚠️ CI_QWEN_API_KEY 未配置，跳过 LLM 冲突解决"
-            fi
-
-            if [ "$LLM_RESOLVED" = "false" ]; then
-              # 方案 B：abort merge，基于 upstream/main 创建分支，让 GitLab MR 原生展示冲突
-              REMAINING_FILES=$(git diff --name-only --diff-filter=U)
-              echo "has_conflicts" > "$CONFLICT_STATUS_FILE"
-              echo "$REMAINING_FILES" > "$CONFLICT_FILES_FILE"
-              echo "📝 中止合并，改为基于 upstream/main 创建分支，由 GitLab MR 展示冲突"
-              abort_merge_if_active
-              # 切到 upstream/main 创建 sync 分支，MR target 仍为默认分支
-              git checkout -B "$SYNC_BRANCH" upstream/main
-              CI_DINGTALK_WEBHOOK_URL="${{secrets['CI_DINGTALK_WEBHOOK_URL']}}" \
-                CI_DINGTALK_WEBHOOK_SECRET="${{secrets['CI_DINGTALK_WEBHOOK_SECRET']}}" \
-                node "$DINGTALK_SCRIPT_FILE" \
-                --title "Upstream Sync 需要人工处理" \
-                --content "检测到 $CONFLICT_COUNT 个 upstream merge 冲突，CI 已停止自动处理并准备创建 sync MR。冲突文件: $(echo "$REMAINING_FILES" | tr '\n' ' ')" \
-                || true
-            fi
-          fi
-
-          echo "$SYNC_BRANCH" > "$BRANCH_NAME_FILE"
-
-          echo "📋 merge done | status=$(cat "$CONFLICT_STATUS_FILE") | branch=$SYNC_BRANCH | HEAD=$(git log --oneline -1 HEAD)"
 
       - name: '提交 clean sync 结果'
         run: |

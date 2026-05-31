@@ -62,7 +62,9 @@
           "packages/cli/src/ui/utils/osc8.test.ts",
           "packages/cli/src/ui/utils/osc8.ts"
         ],
-        "tests": ["cd packages/cli && npx vitest run src/ui/utils/osc8.test.ts"]
+        "tests": [
+          "cd packages/cli && npx vitest run src/ui/utils/osc8.test.ts"
+        ]
       },
       {
         "file": "0006-dingtalk-channel-enhancements.patch",
@@ -77,11 +79,9 @@
       {
         "file": "0007-feishu-channel.patch",
         "title": "Feishu channel integration",
-        "reason": "Keep the fork-only Feishu channel package and CLI registry integration.",
+        "reason": "Rewrite feishu channel import to fork package name in CLI registry.",
         "paths": [
-          "packages/channels/feishu",
-          "packages/cli/src/commands/channel/channel-registry.ts",
-          "packages/cli/tsconfig.json"
+          "packages/cli/src/commands/channel/channel-registry.ts"
         ]
       },
       {
@@ -96,21 +96,23 @@
       {
         "file": "0010-build-single-bundle.patch",
         "title": "Single-file bundle output",
-        "reason": "Fork uses single outfile (dist/cli.js) without code-splitting, and includes feishu in build order.",
-        "paths": ["esbuild.config.js", "scripts/build.js"]
+        "reason": "Fork uses single outfile (dist/cli.js) without code-splitting and removes acp-bridge from build.",
+        "paths": [
+          "esbuild.config.js",
+          "scripts/build.js"
+        ]
       },
       {
         "file": "0011-test-fork-adaptations.patch",
         "title": "Test adaptations for fork UI and CI",
-        "reason": "Adapt tests for fork's OAuth menu structure, Aone CI runner detection, and static imports.",
+        "reason": "Adapt tests for fork OAuth menu structure, Aone CI runner detection, and static imports.",
         "paths": [
           "packages/cli/src/ui/auth/AuthDialog.test.tsx",
-          "packages/cli/src/ui/themes/detect-terminal-theme.test.ts",
           "packages/cli/src/utils/doctorChecks.test.ts",
           "packages/core/src/skills/skill-activation.test.ts"
         ],
         "tests": [
-          "cd packages/cli && npx vitest run src/ui/auth/AuthDialog.test.tsx src/ui/themes/detect-terminal-theme.test.ts src/utils/doctorChecks.test.ts",
+          "cd packages/cli && npx vitest run src/ui/auth/AuthDialog.test.tsx src/utils/doctorChecks.test.ts",
           "cd packages/core && npx vitest run src/skills/skill-activation.test.ts"
         ]
       }

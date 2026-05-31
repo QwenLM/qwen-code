@@ -1,11 +1,11 @@
 From: fork-maintainer <fork@qwen-code.local>
-Subject: [PATCH] build: use single-file bundle output and add feishu to build order
+Subject: [PATCH] build: use single-file bundle output and remove acp-bridge
 
 Fork divergence from upstream esbuild config:
 - Remove code-splitting (no chunks/ directory)
 - Single outfile: dist/cli.js instead of outdir + entryNames
 - Remove __dirname/__filename → chunk shim rewrite (not needed without splitting)
-- Add feishu channel to build order, remove acp-bridge (not in fork)
+- Remove acp-bridge (not in fork)
 
 diff --git a/esbuild.config.js b/esbuild.config.js
 index bc50dc265..2b87c6ce9 100644
@@ -67,7 +67,7 @@ index bc50dc265..2b87c6ce9 100644
      loader: { '.node': 'file' },
      plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],
 diff --git a/scripts/build.js b/scripts/build.js
-index 8bc39f2c1..03dc856e0 100644
+index a39534b1f..03dc856e0 100644
 --- a/scripts/build.js
 +++ b/scripts/build.js
 @@ -38,11 +38,10 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
@@ -86,11 +86,9 @@ index 8bc39f2c1..03dc856e0 100644
  const buildOrder = [
    'packages/core',
    'packages/web-templates',
-@@ -50,8 +49,8 @@ const buildOrder = [
-   'packages/channels/telegram',
-   'packages/channels/weixin',
+@@ -52,7 +51,6 @@ const buildOrder = [
    'packages/channels/dingtalk',
-+  'packages/channels/feishu',
+   'packages/channels/feishu',
    'packages/channels/plugin-example',
 -  'packages/acp-bridge',
    'packages/cli',
