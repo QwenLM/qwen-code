@@ -1859,9 +1859,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // corrected. Keep the signal in the operator log rather than
       // emitting a bus event no client can decode: `reconciliation_failed`
       // is not a known SDK event type, so `asKnownDaemonEvent` drops it
-      // and the reducer never sees it. The client-facing "your state may
-      // be stale" path is already covered by `state_resync_required` on
-      // reconnect.
+      // and the reducer never sees it. Long-lived SSE connections that
+      // never disconnect will hold their last-seen state until the next
+      // successful roundtrip triggers another reconcile; reconnecting
+      // clients get a fresh `session_snapshot` on attach.
       writeStderrLine(
         `[reconcile] session=${entry.sessionId} target=${target} action=failed error=${
           err instanceof Error ? err.message : String(err)
@@ -3488,6 +3489,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ),
             transportClosed,
           ]);
+          // Cache the model id as received from the caller. The bridge
+          // layer does not have access to the CLI's `formatAcpModelId`
+          // (which requires `authType`), so it cannot canonicalize here.
+          // In practice callers always send canonical ids (from
+          // `buildAvailableModels`); any residual raw→canonical drift is
+          // corrected by the `reconcileAfterRoundtrip` below, which reads
+          // the agent's authoritative canonical id and re-publishes if it
+          // differs.
           publishModelSwitched(entry, req.modelId, originatorClientId);
           succeeded = true;
           return result;
