@@ -1086,7 +1086,7 @@ export class Config {
     // rather than checking env existence — otherwise a nested qwen-code
     // launched from within a session would inherit the parent's ID and
     // never claim its own.
-    if (!sessionEnvClaimed) {
+    if (!sessionEnvClaimed && process.env) {
       process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
       sessionEnvClaimed = true;
     }
@@ -2002,7 +2002,9 @@ export class Config {
 
     const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
-    process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
+    if (process.env) {
+      process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
+    }
     this.sessionData = sessionData;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
