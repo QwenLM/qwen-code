@@ -24,7 +24,7 @@ import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { useCallback, useContext, useEffect, useRef } from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useBoxMetrics } from 'ink';
 import chalk from 'chalk';
 import type { TextBuffer } from './shared/text-buffer.js';
 import type { Key } from '../hooks/useKeypress.js';
@@ -294,6 +294,7 @@ export const BaseTextInput = ({
   // addLayoutListener requires the root node (ink-root), not the component
   // node. We find it by walking up the Ink DOM parent chain.
   const rootRef = useRef(null);
+  useBoxMetrics(rootRef);
   const cursorCtx = useContext(inkCursorCtx.default);
 
   // Use a ref to hold mutable state so the layout listener callback
@@ -318,7 +319,6 @@ export const BaseTextInput = ({
   useEffect(() => {
     const rootNode = findRootNode(rootRef.current);
     if (!rootNode) return;
-    let lastPos = '';
     const unsub = inkDom.addLayoutListener(rootNode, () => {
       const {
         showCursor: sc,
@@ -330,7 +330,6 @@ export const BaseTextInput = ({
       } = stateRef.current;
       if (!sc) {
         cursorCtx.setCursorPosition(undefined);
-        lastPos = '';
         return;
       }
       const node = rootRef.current;
@@ -354,13 +353,10 @@ export const BaseTextInput = ({
       const lineText = lt[relativeRow] || '';
       const textBeforeCursor = cpSlice(lineText, 0, vc);
       const physicalCol = stringWidth(textBeforeCursor);
-      const x = absLeft + pw + physicalCol;
-      const y = absTop + relativeRow + 1;
-      const pos = `${x},${y}`;
-      if (pos !== lastPos) {
-        lastPos = pos;
-        cursorCtx.setCursorPosition({ x, y });
-      }
+      cursorCtx.setCursorPosition({
+        x: absLeft + pw + physicalCol,
+        y: absTop + relativeRow + 1,
+      });
     });
     return () => {
       unsub();
