@@ -12,6 +12,8 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 
+const PROCESS_TIMEOUT_MS = 5000;
+
 // Track which tool works on Linux to avoid redundant checks/failures
 let linuxClipboardTool: 'wl-paste' | 'xclip' | null | undefined;
 
@@ -49,7 +51,7 @@ function getLinuxClipboardTool(): 'wl-paste' | 'xclip' | null {
 }
 
 /**
- * Helper to save command stdout to a file.
+ * Helper to save command stdout to a file with timeout and proper cleanup.
  */
 async function saveFromCommand(
   command: string,
@@ -57,30 +59,50 @@ async function saveFromCommand(
   destination: string,
 ): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn(command, args);
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'] });
     const fileStream = createWriteStream(destination);
     let resolved = false;
 
     const safeResolve = (value: boolean) => {
       if (!resolved) {
         resolved = true;
+        // Cleanup: kill child if still running, destroy file stream
+        try {
+          if (!child.killed) child.kill();
+        } catch {
+          /* ignore */
+        }
+        try {
+          fileStream.destroy();
+        } catch {
+          /* ignore */
+        }
         resolve(value);
       }
     };
+
+    // Timeout: kill process if it hangs
+    const timer = setTimeout(() => {
+      debugLogger.debug(`${command} timed out after ${PROCESS_TIMEOUT_MS}ms`);
+      safeResolve(false);
+    }, PROCESS_TIMEOUT_MS);
 
     child.stdout.pipe(fileStream);
 
     child.on('error', (err) => {
       debugLogger.debug(`Failed to spawn ${command}:`, err);
+      clearTimeout(timer);
       safeResolve(false);
     });
 
     fileStream.on('error', (err) => {
       debugLogger.debug(`File stream error for ${destination}:`, err);
+      clearTimeout(timer);
       safeResolve(false);
     });
 
     child.on('close', async (code) => {
+      clearTimeout(timer);
       if (resolved) return;
 
       if (code !== 0) {
@@ -114,53 +136,35 @@ async function saveFromCommand(
 }
 
 /**
- * Check if the clipboard contains an image using wl-paste (Wayland).
+ * Check if the clipboard contains an image using the specified tool.
+ * Merged function replacing checkWlPasteForImage and checkXclipForImage.
  */
-async function checkWlPasteForImage(): Promise<boolean> {
-  try {
-    return new Promise<boolean>((resolve) => {
-      const child = spawn('wl-paste', ['--list-types']);
-      let stdout = '';
-      child.stdout.on('data', (data: Buffer) => {
-        stdout += data.toString();
-      });
-      child.on('close', () => {
-        resolve(stdout.includes('image/'));
-      });
-      child.on('error', () => resolve(false));
-    });
-  } catch (e) {
-    debugLogger.warn('Error checking wl-clipboard for image:', e);
-  }
-  return false;
-}
+async function checkClipboardForImage(
+  command: string,
+  args: string[],
+): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    let stdout = '';
 
-/**
- * Check if the clipboard contains an image using xclip (X11).
- */
-async function checkXclipForImage(): Promise<boolean> {
-  try {
-    return new Promise<boolean>((resolve) => {
-      const child = spawn('xclip', [
-        '-selection',
-        'clipboard',
-        '-t',
-        'TARGETS',
-        '-o',
-      ]);
-      let stdout = '';
-      child.stdout.on('data', (data: Buffer) => {
-        stdout += data.toString();
-      });
-      child.on('close', () => {
-        resolve(stdout.includes('image/'));
-      });
-      child.on('error', () => resolve(false));
+    // Timeout
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve(false);
+    }, PROCESS_TIMEOUT_MS);
+
+    child.stdout.on('data', (data: Buffer) => {
+      stdout += data.toString();
     });
-  } catch (e) {
-    debugLogger.warn('Error checking xclip for image:', e);
-  }
-  return false;
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve(code === 0 && stdout.includes('image/'));
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
 }
 
 /**
@@ -173,10 +177,16 @@ export async function clipboardHasImage(): Promise<boolean> {
   if (process.platform === 'linux') {
     const tool = getLinuxClipboardTool();
     if (tool === 'wl-paste') {
-      return checkWlPasteForImage();
+      return checkClipboardForImage('wl-paste', ['--list-types']);
     }
     if (tool === 'xclip') {
-      return checkXclipForImage();
+      return checkClipboardForImage('xclip', [
+        '-selection',
+        'clipboard',
+        '-t',
+        'TARGETS',
+        '-o',
+      ]);
     }
     return false;
   }
@@ -315,38 +325,38 @@ async function saveFileWithXclip(tempFilePath: string): Promise<boolean> {
 export async function saveClipboardImage(
   targetDir?: string,
 ): Promise<string | null> {
-  const baseDir = targetDir || process.cwd();
-  const tempDir = path.join(baseDir, 'clipboard');
-  await fs.mkdir(tempDir, { recursive: true });
-  const timestamp = new Date().getTime();
+  try {
+    const baseDir = targetDir || process.cwd();
+    const tempDir = path.join(baseDir, 'clipboard');
+    await fs.mkdir(tempDir, { recursive: true });
+    const timestamp = new Date().getTime();
 
-  // Linux: use platform-native tools
-  if (process.platform === 'linux') {
-    const pngPath = path.join(tempDir, `clipboard-${timestamp}.png`);
-    const tool = getLinuxClipboardTool();
+    // Linux: use platform-native tools
+    if (process.platform === 'linux') {
+      const pngPath = path.join(tempDir, `clipboard-${timestamp}.png`);
+      const tool = getLinuxClipboardTool();
 
-    if (tool === 'wl-paste') {
-      const savedPath = await saveFileWithWlPaste(pngPath);
-      if (savedPath) {
-        // Verify the file exists and has content
-        try {
-          const stats = await fs.stat(savedPath);
-          if (stats.size > 0) return savedPath;
-        } catch {
-          /* ignore */
+      if (tool === 'wl-paste') {
+        const savedPath = await saveFileWithWlPaste(pngPath);
+        if (savedPath) {
+          // Verify the file exists and has content
+          try {
+            const stats = await fs.stat(savedPath);
+            if (stats.size > 0) return savedPath;
+          } catch {
+            /* ignore */
+          }
         }
+        return null;
+      }
+      if (tool === 'xclip') {
+        if (await saveFileWithXclip(pngPath)) return pngPath;
+        return null;
       }
       return null;
     }
-    if (tool === 'xclip') {
-      if (await saveFileWithXclip(pngPath)) return pngPath;
-      return null;
-    }
-    return null;
-  }
 
-  // Fallback: use @teddyzhu/clipboard native module (macOS, Windows)
-  try {
+    // Fallback: use @teddyzhu/clipboard native module (macOS, Windows)
     const modName = '@teddyzhu/clipboard';
     const mod = await import(modName);
     const clipboard = new mod.ClipboardManager();
