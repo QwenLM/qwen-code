@@ -481,6 +481,36 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  it('tracks static pushd targets like cd targets', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "pushd .qwen && printf '{}' > settings.local.json",
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/.qwen/settings.local.json',
+      },
+    ]);
+  });
+
+  it('marks writes after popd as cwd-unknown', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "popd && printf '{}' > settings.local.json",
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/settings.local.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
   it('marks relative writes after dynamic `cd` targets as cwd-unknown', () => {
     // Keep the guessed path, but mark it unsafe to trust as final.
     expect(

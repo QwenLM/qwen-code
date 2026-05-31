@@ -372,6 +372,9 @@ export class PermissionManager {
         op.pathMayDependOnCwd &&
         this.hasDenyOrAskRuleForTool(op.virtualTool)
       ) {
+        debugLogger.info(
+          `PermissionManager: cwdUnknown escalation to 'ask' for virtualTool=${op.virtualTool} filePath=${op.filePath}`,
+        );
         worst = 'ask';
         continue;
       }

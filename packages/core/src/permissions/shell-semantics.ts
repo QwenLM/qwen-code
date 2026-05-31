@@ -1749,7 +1749,9 @@ function resolveCdTargetCwd(
       // operators/substitutions/expansions — bail on anything we can't
       // statically resolve.
       if (typeof part !== 'string') {
-        return words[0] === 'cd' ? { kind: 'dynamic' } : { kind: 'not-cd' };
+        return words[0] === 'cd' || words[0] === 'pushd'
+          ? { kind: 'dynamic' }
+          : { kind: 'not-cd' };
       }
       words.push(part);
     }
@@ -1757,7 +1759,8 @@ function resolveCdTargetCwd(
     return { kind: 'not-cd' };
   }
 
-  if (words[0] !== 'cd') return { kind: 'not-cd' };
+  if (words[0] === 'popd') return { kind: 'dynamic' };
+  if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
 
   // Skip POSIX `cd` flags (-L, -P, --, -e, -@) without consuming the special
   // `cd -` (previous directory) which is non-static and should bail out.
