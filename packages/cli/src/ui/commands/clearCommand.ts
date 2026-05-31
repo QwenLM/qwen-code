@@ -10,9 +10,7 @@ import { t } from '../../i18n/index.js';
 import {
   uiTelemetryService,
   SessionEndReason,
-  SessionStartSource,
   ToolNames,
-  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import {
   hasBlockingBackgroundWork,
@@ -92,18 +90,6 @@ export const clearCommand: SlashCommand = {
       } else {
         context.ui.setDebugMessage(t('Starting a new session and clearing.'));
       }
-
-      // Fire SessionStart event (non-blocking to avoid UI lag)
-      config
-        .getHookSystem()
-        ?.fireSessionStartEvent(
-          SessionStartSource.Clear,
-          config.getModel() ?? '',
-          String(config.getApprovalMode()) as PermissionMode,
-        )
-        .catch((err) => {
-          config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
-        });
     } else {
       context.ui.setDebugMessage(t('Starting a new session and clearing.'));
       context.ui.clear();

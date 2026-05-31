@@ -22,8 +22,8 @@ function splitByTables(text: string): string[] {
   let inCode = false;
 
   for (const line of lines) {
-    // Track code fences
-    if (line.trim().startsWith('```')) {
+    // Track code fences (parity-based to handle inline code on same line)
+    if ((line.match(/```/g) || []).length % 2 === 1) {
       inCode = !inCode;
       current.push(line);
       continue;
@@ -91,10 +91,27 @@ export function buildCardContent(
     !options?.isStreaming &&
     markdown.length > threshold
   ) {
+    // Find a split point near position 200 that doesn't break code fences
     const previewEnd = markdown.indexOf('\n', 200);
     const rawSplit = previewEnd > 0 ? previewEnd : 200;
     const safeSplit = markdown.lastIndexOf(' ', rawSplit);
-    const splitAt = safeSplit > 100 ? safeSplit : rawSplit;
+    let splitAt = safeSplit > 100 ? safeSplit : rawSplit;
+    // Verify fence parity at split point — if preview has odd fences,
+    // move split to the nearest newline before/after where fences balance
+    const previewCandidate = markdown.slice(0, splitAt);
+    let fenceCount = 0;
+    for (const line of previewCandidate.split('\n')) {
+      if ((line.match(/```/g) || []).length % 2 === 1) fenceCount++;
+    }
+    if (fenceCount % 2 === 1) {
+      // Inside a code block — find the closing fence and split after it
+      const fenceStart = markdown.indexOf('\n```', splitAt);
+      if (fenceStart > 0 && fenceStart < rawSplit + 500) {
+        const fenceLineEnd = markdown.indexOf('\n', fenceStart + 1);
+        splitAt = fenceLineEnd > 0 ? fenceLineEnd : fenceStart + 4;
+      }
+      // else: no nearby closing fence, accept the split as-is
+    }
     const preview = markdown.slice(0, splitAt);
     const rest = markdown.slice(splitAt);
 
@@ -206,15 +223,21 @@ export function splitChunks(text: string): string[] {
         buf += '\n```';
       }
       chunks.push(buf);
-      buf = inCode ? fenceLine + '\n' : '';
+      buf = inCode ? fenceLine : '';
     }
 
     buf += (buf ? '\n' : '') + line;
 
     // Hard-split oversized lines that exceed the limit on their own
     while (buf.length > CHUNK_LIMIT) {
-      chunks.push(buf.slice(0, CHUNK_LIMIT));
-      buf = buf.slice(CHUNK_LIMIT);
+      const maxSlice = inCode ? CHUNK_LIMIT - '\n```'.length - 1 : CHUNK_LIMIT;
+      let piece = buf.slice(0, maxSlice);
+      buf = buf.slice(maxSlice);
+      if (inCode) {
+        piece += '\n```';
+        buf = fenceLine + '\n' + buf;
+      }
+      chunks.push(piece);
     }
 
     if (fenceCount % 2 === 1) {

@@ -14,6 +14,7 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
+import { useContext, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
@@ -43,7 +44,6 @@ import {
   type HistoryItemWithoutId,
   ToolCallStatus,
 } from './types.js';
-import { useContext } from 'react';
 import { Box, measureElement } from 'ink';
 
 // Mock useStdout to capture terminal title writes
@@ -94,6 +94,8 @@ vi.mock('./hooks/useIdeTrustListener.js');
 vi.mock('./hooks/useMessageQueue.js');
 vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
+vi.mock('./hooks/usePreferredEditor.js');
+vi.mock('./hooks/useWorktreeSession.js');
 vi.mock('./hooks/useProviderUpdates.js', () => ({
   useProviderUpdates: vi.fn(() => ({
     providerUpdateRequest: undefined,
@@ -236,21 +238,15 @@ describe('AppContainer State Management', () => {
           authMessage: null,
         },
       },
-      handleAuthSelect: vi.fn(),
-      handleSubscriptionPlanSubmit: vi.fn(),
-      handleCodingPlanSubmit: vi.fn(),
-      handleTokenPlanSubmit: vi.fn(),
-      handleApiKeyProviderSubmit: vi.fn(),
-      handleOpenRouterSubmit: vi.fn(),
-      handleCustomApiKeySubmit: vi.fn(),
+      closeAuthDialog: vi.fn(),
+      handleProviderSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
       actions: {
         setAuthState: vi.fn(),
         onAuthError: vi.fn(),
-        handleAuthSelect: vi.fn(),
+        closeAuthDialog: vi.fn(),
         handleProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
       },
@@ -2341,7 +2337,13 @@ describe('AppContainer State Management', () => {
       expect(lastCall[2]).toBe(1);
     });
 
-    it('does not remeasure footer height for sticky todo status-only updates', () => {
+    it('does not remeasure footer height for sticky todo status-only updates', async () => {
+      // Scoped stub: makeFakeConfig().initialize() rejects on React's
+      // double-mount, which leaks async renders and destabilizes the
+      // footer-measurement timing this test depends on. Kept per-test so
+      // unrelated tests in this block still exercise the real init gate.
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+
       const historyManager = {
         history: makeTodoHistory('pending'),
         addItem: vi.fn(),
@@ -2354,29 +2356,55 @@ describe('AppContainer State Management', () => {
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
       mockedMeasureElement.mockReturnValue({ width: 80, height: 4 });
 
-      const view = render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
-      const callsAfterInitialRender = mockedMeasureElement.mock.calls.length;
+      let view: ReturnType<typeof render>;
+      await act(async () => {
+        view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+
+      // Let any pending state updates from useLayoutEffect settle.
+      await act(async () => {
+        view!.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+
+      const heightAfterSettle = capturedUIState.availableTerminalHeight;
+
+      // Switch the mock to a different height so any re-measurement triggered
+      // by the status-only rerender below would change controlsHeight (and
+      // therefore availableTerminalHeight). Without this, the production
+      // same-value short-circuit on setControlsHeight makes the equality
+      // assertion pass even when the optimization regresses.
+      mockedMeasureElement.mockReturnValue({ width: 80, height: 10 });
 
       historyManager.history = makeTodoHistory('in_progress');
-      view.rerender(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+      await act(async () => {
+        view!.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
 
-      expect(mockedMeasureElement).toHaveBeenCalledTimes(
-        callsAfterInitialRender,
-      );
+      // The sticky todo status change (pending → in_progress) must not alter
+      // the computed terminal height. Combined with the mock-height swap
+      // above, this fails iff the footer was re-measured.
+      expect(capturedUIState.availableTerminalHeight).toBe(heightAfterSettle);
     });
   });
 
@@ -2408,21 +2436,15 @@ describe('AppContainer State Management', () => {
             authMessage: null,
           },
         },
-        handleAuthSelect: vi.fn(),
-        handleSubscriptionPlanSubmit: vi.fn(),
-        handleCodingPlanSubmit: vi.fn(),
-        handleTokenPlanSubmit: vi.fn(),
-        handleApiKeyProviderSubmit: vi.fn(),
-        handleOpenRouterSubmit: vi.fn(),
-        handleCustomApiKeySubmit: vi.fn(),
+        closeAuthDialog: vi.fn(),
+        handleProviderSubmit: vi.fn(),
         openAuthDialog: vi.fn(),
         cancelAuthentication: vi.fn(),
         actions: {
           setAuthState: vi.fn(),
           onAuthError: vi.fn(),
-          handleAuthSelect: vi.fn(),
+          closeAuthDialog: vi.fn(),
           handleProviderSubmit: vi.fn(),
-          handleOpenRouterSubmit: vi.fn(),
           openAuthDialog: vi.fn(),
           cancelAuthentication: vi.fn(),
         },
@@ -2893,6 +2915,267 @@ describe('AppContainer State Management', () => {
       // Verify that the actions are correctly passed through context
       capturedUIActions.closeModelDialog();
       expect(mockCloseModelDialog).toHaveBeenCalled();
+    });
+  });
+
+  // Coverage for the AppContainer onModelChange wiring. The Static header
+  // (key = `${historyRemountKey}-${currentModel}`) and MainContent's
+  // progressive-replay reset (keyed on historyRemountKey) both depend on
+  // these two state updates landing in the same commit on a real model
+  // change — see the comment in AppContainer.tsx around the
+  // config.onModelChange subscription and PR #4119 review discussion.
+  describe('Model change refreshStatic wiring', () => {
+    function captureModelChangeListener(config: Config) {
+      // Track every subscribe/unsubscribe pair. The CLI test harness
+      // tears down ink's renderer after the initial render flush, which
+      // runs the effect's cleanup synchronously — but the captured
+      // callback closure is still callable (and AppContainer's setState
+      // still updates state because React's update queue is independent
+      // of the listener registration). We therefore fire on the LAST
+      // captured callback, regardless of whether ink considers the
+      // effect mounted, and assert on the number of subscribe/cleanup
+      // calls separately for unsubscribe coverage.
+      const subs: Array<{
+        cb: (model: string) => void;
+        active: boolean;
+      }> = [];
+      const fakeOnModelChange = vi.fn((cb: (model: string) => void) => {
+        const entry = { cb, active: true };
+        subs.push(entry);
+        return () => {
+          entry.active = false;
+        };
+      });
+      (
+        config as unknown as { onModelChange: typeof fakeOnModelChange }
+      ).onModelChange = fakeOnModelChange;
+      return {
+        spy: fakeOnModelChange,
+        notify: (model: string) => {
+          if (subs.length === 0) {
+            throw new Error('AppContainer never subscribed to onModelChange');
+          }
+          // Always fire on the most-recent captured callback.
+          subs[subs.length - 1].cb(model);
+        },
+        subscribeCount: () => subs.length,
+        activeCount: () => subs.filter((s) => s.active).length,
+      };
+    }
+
+    // Effects run after the synchronous render returns. Flushing two
+    // microtasks lines up the same pattern used by other async tests in
+    // this file (search "Let the userMessages-fetching effect resolve").
+    const flushEffects = async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    };
+
+    it('fires refreshStatic in the same handler that updates currentModel', async () => {
+      // Wenshao's PR #4119 [Critical]: if refreshStatic (which bumps
+      // historyRemountKey) and setCurrentModel were split into two
+      // separate effects, the first commit would show the new
+      // currentModel against the OLD historyRemountKey — MainContent's
+      // <Static key={`${historyRemountKey}-${currentModel}`}> would
+      // remount BEFORE the progressive-replay reset, dumping the full
+      // history in one frame.
+      //
+      // The fix moves refreshStatic into the event handler itself so
+      // both side effects (clearTerminal + setHistoryRemountKey via
+      // refreshStatic, plus setCurrentModel) run inside the same
+      // synchronous JS task — React 18+ batches all setState calls in
+      // an event-handler-style task into one commit. We verify this
+      // synchronously by inspecting mockStdout.write the moment the
+      // listener returns: clearTerminal must already be written, proving
+      // refreshStatic runs in-handler rather than queued for a later
+      // useEffect tick. (We cannot observe the post-commit React state
+      // through capturedUIState here because ink-testing-library tears
+      // down the renderer once render() returns, so setState calls
+      // queued from the listener never produce a follow-up commit. The
+      // synchronous side-effect ordering is the part that matters for
+      // the bug wenshao flagged.)
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');
+      const trigger = captureModelChangeListener(mockConfig);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushEffects();
+      mockStdout.write.mockClear();
+
+      // Synchronous notification → refreshStatic must run BEFORE the
+      // notify() call returns (i.e., before any React batch tick).
+      trigger.notify('model-b');
+
+      expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
+    });
+
+    it('skips refreshStatic when the notified model matches the current one', async () => {
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');
+      const trigger = captureModelChangeListener(mockConfig);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushEffects();
+
+      const baselineRemountKey = capturedUIState.historyRemountKey;
+      mockStdout.write.mockClear();
+
+      trigger.notify('model-a');
+      await flushEffects();
+
+      expect(mockStdout.write).not.toHaveBeenCalledWith(
+        ansiEscapes.clearTerminal,
+      );
+      expect(capturedUIState.historyRemountKey).toBe(baselineRemountKey);
+      expect(capturedUIState.currentModel).toBe('model-a');
+    });
+
+    it('fires refreshStatic only once per real model change (StrictMode-safe)', async () => {
+      // StrictMode double-invokes state updater functions in dev. The
+      // refreshStatic side-effect therefore must NOT live inside a
+      // setState updater — it lives in the event handler, with a ref
+      // guard to de-dupe redundant notifications. We simulate the
+      // StrictMode-style re-fire by calling the listener twice with the
+      // same value (e.g. if a deduplicator upstream missed it).
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');
+      const trigger = captureModelChangeListener(mockConfig);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushEffects();
+      mockStdout.write.mockClear();
+
+      trigger.notify('model-b');
+      trigger.notify('model-b');
+      await flushEffects();
+
+      const clearWrites = mockStdout.write.mock.calls.filter(
+        ([arg]) => arg === ansiEscapes.clearTerminal,
+      );
+      expect(clearWrites).toHaveLength(1);
+    });
+
+    it('returns an unsubscribe function that AppContainer wires up', async () => {
+      // AppContainer's effect returns the unsubscribe so React can call it
+      // on unmount or when deps change. We verify both halves of the
+      // subscribe/cleanup contract were exercised — every subscribe must
+      // have paired with a cleanup invocation by the time the renderer
+      // tears down.
+      vi.spyOn(mockConfig, 'getModel').mockReturnValue('model-a');
+      const trigger = captureModelChangeListener(mockConfig);
+
+      const { unmount } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushEffects();
+      expect(trigger.subscribeCount()).toBeGreaterThanOrEqual(1);
+
+      unmount();
+      await flushEffects();
+
+      expect(trigger.activeCount()).toBe(0);
+    });
+  });
+
+  describe('IDE mode rewind guard', () => {
+    it('shows info message instead of opening rewind selector when IDE mode is enabled', () => {
+      const mockAddItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'hello' }],
+        addItem: mockAddItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(true);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.openRewindSelector();
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringMatching(/rewind.*disabled.*IDE/i),
+        }),
+        expect.any(Number),
+      );
+      expect(capturedUIState.isRewindSelectorOpen).toBeFalsy();
+    });
+
+    it('opens rewind selector normally when IDE mode is disabled', () => {
+      const mockAddItemDisabled = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'hello' }],
+        addItem: mockAddItemDisabled,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(false);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.openRewindSelector();
+
+      expect(mockAddItemDisabled).not.toHaveBeenCalled();
     });
   });
 });

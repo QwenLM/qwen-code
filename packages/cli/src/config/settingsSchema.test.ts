@@ -22,13 +22,13 @@ describe('SettingsSchema', () => {
         'ide',
         'privacy',
         'telemetry',
-        'proxy',
         'model',
         'context',
         'tools',
         'mcp',
         'security',
         'advanced',
+        'plansDirectory',
       ];
 
       expectedSettings.forEach((setting) => {
@@ -127,6 +127,15 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().proxy.requiresRestart).toBe(true);
       expect(getSettingsSchema().proxy.default).toBe(undefined);
       expect(getSettingsSchema().proxy.showInDialog).toBe(false);
+    });
+
+    it('should have plansDirectory setting in schema', () => {
+      expect(getSettingsSchema().plansDirectory).toBeDefined();
+      expect(getSettingsSchema().plansDirectory.type).toBe('string');
+      expect(getSettingsSchema().plansDirectory.category).toBe('Advanced');
+      expect(getSettingsSchema().plansDirectory.default).toBe(undefined);
+      expect(getSettingsSchema().plansDirectory.requiresRestart).toBe(true);
+      expect(getSettingsSchema().plansDirectory.showInDialog).toBe(false);
     });
 
     it('should have unique categories', () => {
@@ -251,7 +260,6 @@ describe('SettingsSchema', () => {
           includeDirectories: ['/path/to/dir'],
           loadFromIncludeDirectories: true,
         },
-        proxy: 'http://localhost:7890',
       };
 
       // TypeScript should not complain about these properties
@@ -259,7 +267,6 @@ describe('SettingsSchema', () => {
       expect(settings.ui?.renderMode).toBe('raw');
       expect(settings.context?.includeDirectories).toEqual(['/path/to/dir']);
       expect(settings.context?.loadFromIncludeDirectories).toBe(true);
-      expect(settings.proxy).toBe('http://localhost:7890');
     });
 
     it('should have includeDirectories setting in schema', () => {

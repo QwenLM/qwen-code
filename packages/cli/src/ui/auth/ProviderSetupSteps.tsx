@@ -13,10 +13,7 @@ import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import type {
-  ProviderConfig,
-  BaseUrlOption,
-} from '../../auth/providerConfig.js';
+import type { ProviderConfig, BaseUrlOption } from '@qwen-code/qwen-code-core';
 import type { ProviderSetupFlow } from './useProviderSetupFlow.js';
 
 // ---------------------------------------------------------------------------
@@ -109,7 +106,9 @@ function BaseUrlInputStep({
           value={flow.state.baseUrl}
           onChange={flow.changeBaseUrl}
           onSubmit={flow.submitBaseUrl}
-          placeholder="https://api.openai.com/v1"
+          placeholder={
+            flow.state.baseUrlPlaceholder || 'https://api.openai.com/v1'
+          }
         />
       </Box>
       {flow.state.baseUrlError && (
@@ -396,11 +395,18 @@ export function ProviderSetupSteps({
   useKeypress(
     (key) => {
       if (step === 'advancedConfig') {
-        if (key.name === 'up') {
+        // The context-window row has an embedded TextInput that's conditionally
+        // active. Restrict the focus-row navigation to unambiguous shortcuts —
+        // arrow keys and the readline-style Ctrl+P/Ctrl+N — so typing a letter
+        // into the context-window field never simultaneously moves the focus.
+        const isFocusUp = key.name === 'up' || (key.ctrl && key.name === 'p');
+        const isFocusDown =
+          key.name === 'down' || (key.ctrl && key.name === 'n');
+        if (isFocusUp) {
           flow.moveAdvancedFocusUp();
           return;
         }
-        if (key.name === 'down') {
+        if (isFocusDown) {
           flow.moveAdvancedFocusDown();
           return;
         }

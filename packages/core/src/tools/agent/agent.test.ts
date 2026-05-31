@@ -98,6 +98,7 @@ describe('AgentTool', () => {
     // to surface the run in the pill+dialog. A no-op stub registry is
     // enough for these tests — they don't assert on registry behavior.
     const stubRegistry = {
+      assertCanStartBackgroundAgent: vi.fn(),
       register: vi.fn(),
       unregisterForeground: vi.fn(),
       complete: vi.fn(),
@@ -138,6 +139,7 @@ describe('AgentTool', () => {
       getSubagentManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
+      getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
@@ -145,6 +147,9 @@ describe('AgentTool', () => {
       getMonitorRegistry: vi.fn().mockReturnValue(stubMonitorRegistry),
       getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
       createToolRegistry: vi.fn().mockResolvedValue(stubToolRegistry),
+      storage: {
+        getProjectDir: vi.fn().mockReturnValue('/test/project/.qwen'),
+      },
     } as unknown as Config;
 
     changeListeners = [];
@@ -692,7 +697,13 @@ describe('AgentTool', () => {
       expect(result.returnDisplay).toHaveProperty('status', 'completed');
     });
 
-    it('should not require confirmation', async () => {
+    it("L3 default is 'ask' so AUTO mode routes through the classifier", async () => {
+      // Previously this returned 'allow', but launching a sub-agent
+      // hands control to a new instance with its own tool access — a
+      // privileged sink. The AUTO scheduler short-circuits at L4 when
+      // finalPermission === 'allow', so without this override the
+      // classifier projection added in PR #4151 would never be reached
+      // and arbitrary sub-agent spawns would bypass classifier review.
       const params: AgentParams = {
         description: 'Search files',
         prompt: 'Find all TypeScript files',
@@ -704,7 +715,7 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       const permission = await invocation.getDefaultPermission();
 
-      expect(permission).toBe('allow');
+      expect(permission).toBe('ask');
     });
 
     it('should provide correct description', async () => {
@@ -1295,6 +1306,40 @@ describe('AgentTool', () => {
       expect(mockAgent.execute).toHaveBeenCalledTimes(2);
     });
 
+    it('uses the configured SubagentStop blocking cap', async () => {
+      (
+        config as unknown as {
+          getStopHookBlockingCap: ReturnType<typeof vi.fn>;
+        }
+      ).getStopHookBlockingCap.mockReturnValue(2);
+      const mockBlockOutput = {
+        isBlockingDecision: vi.fn().mockReturnValue(true),
+        shouldStopExecution: vi.fn().mockReturnValue(false),
+        getEffectiveReason: vi.fn().mockReturnValue('Keep working'),
+      };
+
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue(
+        mockBlockOutput as never,
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(2);
+      expect(mockAgent.execute).toHaveBeenCalledTimes(2);
+      expect(partToString(result.llmContent)).toContain(
+        'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
+    });
+
     it('should allow stop when SubagentStop hook fails', async () => {
       vi.mocked(mockHookSystem.fireSubagentStopEvent).mockRejectedValue(
         new Error('Stop hook failed'),
@@ -1719,6 +1764,7 @@ describe('AgentTool', () => {
     let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
     let mockRegistry: {
+      assertCanStartBackgroundAgent: ReturnType<typeof vi.fn>;
       register: ReturnType<typeof vi.fn>;
       unregisterForeground: ReturnType<typeof vi.fn>;
       complete: ReturnType<typeof vi.fn>;
@@ -1759,6 +1805,7 @@ describe('AgentTool', () => {
       MockedContextState.mockImplementation(() => mockContextState);
 
       mockRegistry = {
+        assertCanStartBackgroundAgent: vi.fn(),
         register: vi.fn(),
         unregisterForeground: vi.fn(),
         complete: vi.fn(),
@@ -1946,6 +1993,114 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalled();
     });
 
+    it('returns registry registration errors to the model without launching the background body', async () => {
+      const errorMessage =
+        'Cannot start background agent: maximum concurrent background agents ' +
+        '(1) reached. Stop an existing agent first.';
+      mockRegistry.register.mockImplementation(() => {
+        throw new Error(errorMessage);
+      });
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
+
+      try {
+        const params: AgentParams = {
+          description: 'Start monitor',
+          prompt: 'Watch for changes',
+          subagent_type: 'monitor',
+        };
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        const result = await invocation.execute();
+
+        expect(partToString(result.llmContent)).toBe(errorMessage);
+        expect((result.returnDisplay as AgentResultDisplay).status).toBe(
+          'failed',
+        );
+        expect(attachSpy).not.toHaveBeenCalled();
+        expect(mockAgent.execute).not.toHaveBeenCalled();
+        expect(mockRegistry.complete).not.toHaveBeenCalled();
+        expect(mockRegistry.fail).not.toHaveBeenCalled();
+      } finally {
+        attachSpy.mockRestore();
+      }
+    });
+
+    it('fires SubagentStop when the final background register check fails after SubagentStart', async () => {
+      const errorMessage =
+        'Cannot start background agent: maximum concurrent background agents ' +
+        '(1) reached. Stop an existing agent first.';
+      mockRegistry.register.mockImplementation(() => {
+        throw new Error(errorMessage);
+      });
+      const mockHookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HookSystem;
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(mockHookSystem);
+
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(errorMessage);
+      expect(mockHookSystem.fireSubagentStartEvent).toHaveBeenCalledOnce();
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledWith(
+        expect.stringContaining('monitor-'),
+        'monitor',
+        expect.stringMatching(
+          /subagents[\\/]test-session-id[\\/]agent-monitor-.*\.jsonl$/,
+        ),
+        'Monitor done',
+        false,
+        PermissionMode.AutoEdit,
+        undefined,
+      );
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+    });
+
+    it('preflights the background cap before hooks and subagent setup', async () => {
+      const errorMessage =
+        'Cannot start background agent: maximum concurrent background agents ' +
+        '(1) reached. Stop an existing agent first.';
+      mockRegistry.assertCanStartBackgroundAgent.mockImplementation(() => {
+        throw new Error(errorMessage);
+      });
+      const mockHookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+      } as unknown as HookSystem;
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(mockHookSystem);
+
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(errorMessage);
+      expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      expect(mockRegistry.register).not.toHaveBeenCalled();
+    });
+
     it('passes the sidechain transcript path to SubagentStop hooks for fresh background agents', async () => {
       const mockHookSystem = {
         fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
@@ -2008,13 +2163,13 @@ describe('AgentTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).not.toContain('Background agent launched');
       // Foreground subagents register in the same registry with
-      // flavor: 'foreground' so the pill+dialog can surface them while
+      // isBackgrounded: false so the pill+dialog can surface them while
       // the parent's tool-call awaits, then unregister in the finally
       // path once the call returns. (The tool-result is the durable
       // record — the entry does not persist.)
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({
-          flavor: 'foreground',
+          isBackgrounded: false,
           description: 'Search files',
           subagentType: 'file-search',
           status: 'running',
@@ -2122,6 +2277,117 @@ describe('AgentTool', () => {
         { notify: false },
       );
     });
+
+    it('foreground subagent reserves a JSONL+meta path on the registry entry', async () => {
+      // Foreground subagents persist a JSONL transcript + meta sidecar
+      // symmetrically with the background path. Without this, a cancelled
+      // or crashed foreground run leaves no on-disk evidence beyond
+      // whatever made it into the parent's tool result.
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isBackgrounded: false,
+          outputFile: expect.stringMatching(
+            /subagents[\\/]test-session-id[\\/]agent-file-search-.*\.jsonl$/,
+          ),
+          metaPath: expect.stringMatching(
+            /subagents[\\/]test-session-id[\\/]agent-file-search-.*\.meta\.json$/,
+          ),
+        }),
+      );
+      // Writer attached to the AgentTool's emitter so foreground tool
+      // calls / round text get recorded into the JSONL.
+      expect(attachSpy).toHaveBeenCalled();
+      // Meta sidecar is seeded eagerly at register time so resume
+      // discovery can surface paused foreground runs.
+      expect(writeMetaSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
+        expect.objectContaining({
+          status: 'running',
+          agentType: 'file-search',
+          description: 'Search files',
+        }),
+      );
+      // Finally block patches the sidecar to the terminal status —
+      // without this a completed foreground run leaves the on-disk meta
+      // frozen at `running`.
+      expect(patchMetaSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
+        expect.objectContaining({ status: 'completed' }),
+      );
+
+      attachSpy.mockRestore();
+      writeMetaSpy.mockRestore();
+      patchMetaSpy.mockRestore();
+    });
+
+    it.each([
+      [AgentTerminateMode.CANCELLED, 'cancelled'],
+      [AgentTerminateMode.ERROR, 'failed'],
+      [AgentTerminateMode.MAX_TURNS, 'failed'],
+      [AgentTerminateMode.TIMEOUT, 'failed'],
+    ] as const)(
+      'foreground %s terminate mode patches meta as %s',
+      async (mode, expectedStatus) => {
+        // The fgTerminalStatus ternary maps GOAL → completed, CANCELLED →
+        // cancelled, and *everything else* → failed. GOAL is covered by
+        // the "foreground subagent reserves a JSONL+meta path" test above;
+        // CANCELLED and the fallback branch are covered here. A regression
+        // that flipped CANCELLED → 'failed' or the fallback back to
+        // 'completed' (an earlier fallback bug shipped and was fixed in
+        // d67db4c50) would now fail at least one of these cases.
+        const fgSubagent: SubagentConfig = {
+          ...bgSubagent,
+          name: 'file-search',
+          background: undefined,
+        };
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+          fgSubagent,
+        );
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+
+        const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+
+        const params: AgentParams = {
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+        };
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        await invocation.execute();
+
+        expect(patchMetaSpy).toHaveBeenCalledWith(
+          expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
+          expect.objectContaining({ status: expectedStatus }),
+        );
+
+        patchMetaSpy.mockRestore();
+      },
+    );
 
     it('foreground CANCELLED prefixes the partial result so the parent sees the cancel', async () => {
       // Without this prefix, a user-cancelled foreground subagent returns

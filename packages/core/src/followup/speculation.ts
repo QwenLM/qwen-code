@@ -25,6 +25,7 @@ import {
   getCacheSafeParams,
   createForkedChat,
   runForkedAgent,
+  runWithForkedChatModel,
 } from '../utils/forkedAgent.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
 
@@ -200,199 +201,204 @@ async function runSpeculativeLoop(
   cacheSafe: import('../utils/forkedAgent.js').CacheSafeParams,
   modelOverride?: string,
 ): Promise<LoopResult> {
-  const chat = createForkedChat(config, cacheSafe);
-  const model = modelOverride || cacheSafe.model;
-  const approvalMode = config.getApprovalMode();
-  const messages: Content[] = [];
+  const modelSelector =
+    modelOverride ?? config.getFastModel() ?? cacheSafe.model;
+  return runWithForkedChatModel(config, modelSelector, async (model) => {
+    const chat = createForkedChat(config, cacheSafe);
+    const approvalMode = config.getApprovalMode();
+    const messages: Content[] = [];
 
-  // Add the suggestion as the initial user message
-  const userMsg: Content = {
-    role: 'user',
-    parts: [{ text: state.suggestion }],
-  };
-  messages.push(userMsg);
+    // Add the suggestion as the initial user message
+    const userMsg: Content = {
+      role: 'user',
+      parts: [{ text: state.suggestion }],
+    };
+    messages.push(userMsg);
 
-  for (let turn = 0; turn < MAX_SPECULATION_TURNS; turn++) {
-    if (state.abortController?.signal.aborted) break;
-    if (messages.length >= MAX_SPECULATION_MESSAGES) break;
-
-    // Send user message for this turn
-    const lastUserMsg = messages[messages.length - 1];
-    const stream = await chat.sendMessageStream(
-      model,
-      { message: lastUserMsg.parts ?? [] },
-      'speculation',
-    );
-
-    const modelParts: Part[] = [];
-    for await (const event of stream) {
+    for (let turn = 0; turn < MAX_SPECULATION_TURNS; turn++) {
       if (state.abortController?.signal.aborted) break;
-      if (event.type !== StreamEventType.CHUNK) continue;
-      const response = event.value;
-      const parts = response.candidates?.[0]?.content?.parts ?? [];
-      for (const part of parts) {
-        // Skip thought/reasoning parts — only capture visible text + function calls
-        if (part.text && !(part as Record<string, unknown>)['thought']) {
-          modelParts.push({ text: part.text });
-        }
-        if (part.functionCall && part.functionCall.name) {
-          modelParts.push({
-            functionCall: {
-              name: part.functionCall.name,
-              args: part.functionCall.args,
-            },
-          });
-        }
-      }
-    }
+      if (messages.length >= MAX_SPECULATION_MESSAGES) break;
 
-    if (state.abortController?.signal.aborted) break;
-    if (modelParts.length === 0) break;
-
-    const modelMsg: Content = { role: 'model', parts: modelParts };
-    messages.push(modelMsg);
-
-    // Extract function calls from model response
-    const functionCalls = modelParts.filter(
-      (p): p is Part & { functionCall: NonNullable<Part['functionCall']> } =>
-        p.functionCall !== undefined,
-    );
-
-    if (functionCalls.length === 0) {
-      // No tool calls — speculation complete (text-only response)
-      break;
-    }
-
-    // Process each function call through the tool gate
-    const functionResponses: Part[] = [];
-    let hitBoundary = false;
-
-    for (const part of functionCalls) {
-      const fc = part.functionCall;
-      const name = fc.name ?? '';
-      const args = (fc.args ?? {}) as Record<string, unknown>;
-      const gate = await evaluateToolCall(
-        name,
-        args,
-        state.overlayFs!,
-        approvalMode,
+      // Send user message for this turn
+      const lastUserMsg = messages[messages.length - 1];
+      const stream = await chat.sendMessageStream(
+        model,
+        { message: lastUserMsg.parts ?? [] },
+        'speculation',
       );
 
-      if (gate.action === 'boundary') {
-        hitBoundary = true;
+      const modelParts: Part[] = [];
+      for await (const event of stream) {
+        if (state.abortController?.signal.aborted) break;
+        if (event.type !== StreamEventType.CHUNK) continue;
+        const response = event.value;
+        const parts = response.candidates?.[0]?.content?.parts ?? [];
+        for (const part of parts) {
+          // Skip thought/reasoning parts — only capture visible text + function calls
+          if (part.text && !(part as Record<string, unknown>)['thought']) {
+            modelParts.push({ text: part.text });
+          }
+          if (part.functionCall && part.functionCall.name) {
+            modelParts.push({
+              functionCall: {
+                name: part.functionCall.name,
+                args: part.functionCall.args,
+              },
+            });
+          }
+        }
+      }
+
+      if (state.abortController?.signal.aborted) break;
+      if (modelParts.length === 0) break;
+
+      const modelMsg: Content = { role: 'model', parts: modelParts };
+      messages.push(modelMsg);
+
+      // Extract function calls from model response
+      const functionCalls = modelParts.filter(
+        (p): p is Part & { functionCall: NonNullable<Part['functionCall']> } =>
+          p.functionCall !== undefined,
+      );
+
+      if (functionCalls.length === 0) {
+        // No tool calls — speculation complete (text-only response)
         break;
       }
 
-      if (gate.action === 'redirect') {
-        try {
-          await rewritePathArgs(args, state.overlayFs!);
-        } catch {
-          // Path rewrite failed (e.g., absolute path outside cwd) — treat as boundary
+      // Process each function call through the tool gate
+      const functionResponses: Part[] = [];
+      let hitBoundary = false;
+
+      for (const part of functionCalls) {
+        const fc = part.functionCall;
+        const name = fc.name ?? '';
+        const args = (fc.args ?? {}) as Record<string, unknown>;
+        const gate = await evaluateToolCall(
+          name,
+          args,
+          state.overlayFs!,
+          approvalMode,
+        );
+
+        if (gate.action === 'boundary') {
           hitBoundary = true;
           break;
         }
-      }
 
-      // Execute the tool directly (bypassing CoreToolScheduler)
-      // SECURITY: Only reaches here for read-only tools or writes gated by approvalMode
-      try {
-        const toolRegistry = config.getToolRegistry();
-        const tool = await toolRegistry.ensureTool(name);
-        if (!tool) {
+        if (gate.action === 'redirect') {
+          try {
+            await rewritePathArgs(args, state.overlayFs!);
+          } catch {
+            // Path rewrite failed (e.g., absolute path outside cwd) — treat as boundary
+            hitBoundary = true;
+            break;
+          }
+        }
+
+        // Execute the tool directly (bypassing CoreToolScheduler)
+        // SECURITY: Only reaches here for read-only tools or writes gated by approvalMode
+        try {
+          const toolRegistry = config.getToolRegistry();
+          const tool = await toolRegistry.ensureTool(name);
+          if (!tool) {
+            functionResponses.push({
+              functionResponse: {
+                name,
+                response: { error: `Tool '${name}' not found` },
+              },
+            });
+            continue;
+          }
+
+          const invocation = tool.build(args);
+          const result = await invocation.execute(
+            state.abortController!.signal,
+          );
+          state.toolUseCount++;
+
+          const responseContent =
+            typeof result.llmContent === 'string'
+              ? { output: result.llmContent }
+              : { output: JSON.stringify(result.llmContent) };
+          functionResponses.push({
+            functionResponse: { name, response: responseContent },
+          });
+        } catch (error: unknown) {
           functionResponses.push({
             functionResponse: {
               name,
-              response: { error: `Tool '${name}' not found` },
+              response: {
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : 'Tool execution failed',
+              },
             },
           });
-          continue;
         }
-
-        const invocation = tool.build(args);
-        const result = await invocation.execute(state.abortController!.signal);
-        state.toolUseCount++;
-
-        const responseContent =
-          typeof result.llmContent === 'string'
-            ? { output: result.llmContent }
-            : { output: JSON.stringify(result.llmContent) };
-        functionResponses.push({
-          functionResponse: { name, response: responseContent },
-        });
-      } catch (error: unknown) {
-        functionResponses.push({
-          functionResponse: {
-            name,
-            response: {
-              error:
-                error instanceof Error
-                  ? error.message
-                  : 'Tool execution failed',
-            },
-          },
-        });
       }
-    }
 
-    if (hitBoundary) {
-      // Keep already-executed tool responses, strip unexecuted function calls
-      // from model message, and add the partial responses we do have (#18)
-      if (functionResponses.length > 0) {
-        // Some tools were executed before boundary — keep only the first N
-        // functionCall parts (matching functionResponses.length) by order,
-        // not by name, to handle duplicate tool names correctly.
-        let keptFunctionCalls = 0;
-        const keptModelParts = modelParts.filter((p) => {
-          if (!p.functionCall) return true;
-          if (keptFunctionCalls < functionResponses.length) {
-            keptFunctionCalls++;
-            return true;
+      if (hitBoundary) {
+        // Keep already-executed tool responses, strip unexecuted function calls
+        // from model message, and add the partial responses we do have (#18)
+        if (functionResponses.length > 0) {
+          // Some tools were executed before boundary — keep only the first N
+          // functionCall parts (matching functionResponses.length) by order,
+          // not by name, to handle duplicate tool names correctly.
+          let keptFunctionCalls = 0;
+          const keptModelParts = modelParts.filter((p) => {
+            if (!p.functionCall) return true;
+            if (keptFunctionCalls < functionResponses.length) {
+              keptFunctionCalls++;
+              return true;
+            }
+            return false;
+          });
+          if (keptModelParts.length > 0) {
+            messages[messages.length - 1] = {
+              role: 'model',
+              parts: keptModelParts,
+            };
+            // Add the tool results we have
+            messages.push({ role: 'user', parts: functionResponses });
+          } else {
+            messages.pop();
           }
-          return false;
-        });
-        if (keptModelParts.length > 0) {
-          messages[messages.length - 1] = {
-            role: 'model',
-            parts: keptModelParts,
-          };
-          // Add the tool results we have
-          messages.push({ role: 'user', parts: functionResponses });
         } else {
-          messages.pop();
+          // No tools were executed — remove the model message entirely
+          const textOnlyParts = modelParts.filter(
+            (p) => p.functionCall === undefined,
+          );
+          if (textOnlyParts.length > 0) {
+            messages[messages.length - 1] = {
+              role: 'model',
+              parts: textOnlyParts,
+            };
+          } else {
+            messages.pop();
+          }
         }
-      } else {
-        // No tools were executed — remove the model message entirely
-        const textOnlyParts = modelParts.filter(
-          (p) => p.functionCall === undefined,
-        );
-        if (textOnlyParts.length > 0) {
-          messages[messages.length - 1] = {
-            role: 'model',
-            parts: textOnlyParts,
-          };
-        } else {
-          messages.pop();
-        }
+
+        return {
+          messages,
+          boundary: {
+            type: 'boundary',
+            detail: 'speculation_boundary',
+            completedAt: Date.now(),
+          },
+        };
       }
 
-      return {
-        messages,
-        boundary: {
-          type: 'boundary',
-          detail: 'speculation_boundary',
-          completedAt: Date.now(),
-        },
-      };
+      // Add tool results to history for next turn
+      if (functionResponses.length > 0) {
+        const resultMsg: Content = { role: 'user', parts: functionResponses };
+        messages.push(resultMsg);
+      }
     }
 
-    // Add tool results to history for next turn
-    if (functionResponses.length > 0) {
-      const resultMsg: Content = { role: 'user', parts: functionResponses };
-      messages.push(resultMsg);
-    }
-  }
-
-  return { messages };
+    return { messages };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -539,12 +545,13 @@ ${SUGGESTION_PROMPT}`;
 
     const cacheSafeParams = getCacheSafeParams();
     if (!cacheSafeParams) return null;
+    const model = modelOverride ?? config.getFastModel();
     const result = await runForkedAgent({
       config,
       userMessage: augmentedPrompt,
       cacheSafeParams,
       jsonSchema: PIPELINED_SCHEMA,
-      model: modelOverride,
+      ...(model !== undefined ? { model } : {}),
       abortSignal,
     });
 

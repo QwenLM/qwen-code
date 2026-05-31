@@ -40,6 +40,8 @@ describe('EditTool', () => {
   let geminiClient: any;
   let baseLlmClient: any;
   let fileReadCache: FileReadCache;
+  let mockFileHistoryService: { trackEdit: ReturnType<typeof vi.fn> };
+  let fsService: StandardFileSystemService;
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -47,6 +49,8 @@ describe('EditTool', () => {
     rootDir = path.join(tempDir, 'root');
     fs.mkdirSync(rootDir);
     fileReadCache = new FileReadCache();
+    mockFileHistoryService = { trackEdit: vi.fn() };
+    fsService = new StandardFileSystemService();
 
     geminiClient = {
       generateJson: mockGenerateJson, // mockGenerateJson is already defined and hoisted
@@ -63,7 +67,7 @@ describe('EditTool', () => {
       getApprovalMode: vi.fn(),
       setApprovalMode: vi.fn(),
       getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
-      getFileSystemService: () => new StandardFileSystemService(),
+      getFileSystemService: () => fsService,
       getIdeMode: () => false,
       getApiKey: () => 'test-api-key',
       getModel: () => 'test-model',
@@ -84,6 +88,7 @@ describe('EditTool', () => {
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
+      getFileHistoryService: () => mockFileHistoryService,
     } as unknown as Config;
 
     // Reset mocks before each test
@@ -495,10 +500,96 @@ describe('EditTool', () => {
         /Showing lines \d+-\d+ of \d+ from the edited file:/,
       );
       expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileDiff).toMatch(initialContent);
       expect(display.fileDiff).toMatch(newContent);
       expect(display.fileName).toBe(testFile);
+    });
+
+    // trackEdit is best-effort: a FileHistoryService failure (disk full,
+    // permissions, corrupted state) must never break the edit tool.
+    it('completes the edit even when trackEdit throws', async () => {
+      const initialContent = 'This is some old text.';
+      const newContent = 'This is some new text.';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
+      mockFileHistoryService.trackEdit.mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+      expect(result.llmContent).toMatch(
+        /Showing lines \d+-\d+ of \d+ from the edited file:/,
+      );
+    });
+
+    // Pin the upstream-aligned ordering: trackEdit MUST run before the
+    // pre-write checkPriorRead. The upstream `claude-code/src/tools/
+    // FileEditTool` comment on the equivalent block says:
+    //
+    //   "These awaits must stay OUTSIDE the critical section below — a
+    //    yield between the staleness check and writeTextContent lets
+    //    concurrent edits interleave."
+    //
+    // Without this ordering the multi-hundred-ms `trackEdit` sat
+    // between checkPriorRead and writeTextFile, widening the
+    // already-acknowledged stat-then-write race window from microseconds
+    // to seconds.
+    //
+    // Test strategy: install a `trackEdit` mock that mutates the file
+    // on disk (bumps mtime) before returning. The mutation has to be
+    // detected by the pre-write `checkPriorRead`. That only happens if
+    // `trackEdit` runs BEFORE the pre-write check — the broken
+    // ordering would run the pre-write check first (passing on the
+    // pre-mutation stats), then trackEdit (which mutates), then write
+    // (which clobbers the external mutation silently).
+    //
+    // Asserting on `result.error` directly tests the behavioral
+    // invariant rather than the call-ordering proxy, so it survives
+    // future refactors that preserve the invariant even if they shift
+    // the number of `cache.check` calls.
+    it('backs up before the pre-write freshness check (TOCTOU ordering)', async () => {
+      const initialContent = 'This is some old text.';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
+
+      mockFileHistoryService.trackEdit.mockImplementation(async () => {
+        // Simulate an external write that lands while trackEdit is
+        // copying the file to the backup directory. Bumping mtime by
+        // 5 s makes the change reliably "newer" under the cache's
+        // ~1 s comparison granularity on macOS.
+        const newTime = new Date(Date.now() + 5000);
+        fs.utimesSync(filePath, newTime, newTime);
+      });
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+
+      const result = await tool
+        .build(params)
+        .execute(new AbortController().signal);
+
+      // trackEdit must have actually fired.
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      // The pre-write check must have caught the in-trackEdit mutation
+      // and rejected, proving trackEdit ran BEFORE the pre-write check.
+      expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      // The file on disk is unchanged (rejected, not overwritten).
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
     });
 
     // The Edit tool feeds the commit-attribution singleton on success so
@@ -918,24 +1009,23 @@ describe('EditTool', () => {
       expect(() => tool.build(params)).toThrow();
     });
 
-    it.skipIf(process.getuid && process.getuid() === 0)(
-      'should return FILE_WRITE_FAILURE on write error',
-      async () => {
-        fs.writeFileSync(filePath, 'content', 'utf8');
-        seedPriorRead(filePath);
-        // Make file readonly to trigger a write error
-        fs.chmodSync(filePath, '444');
+    it('should return FILE_WRITE_FAILURE on write error', async () => {
+      fs.writeFileSync(filePath, 'content', 'utf8');
+      seedPriorRead(filePath);
 
-        const params: EditToolParams = {
-          file_path: filePath,
-          old_string: 'content',
-          new_string: 'new content',
-        };
-        const invocation = tool.build(params);
-        const result = await invocation.execute(new AbortController().signal);
-        expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
-      },
-    );
+      vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce(
+        new Error('Simulated write error'),
+      );
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'content',
+        new_string: 'new content',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+    });
   });
 
   describe('getDescription', () => {
@@ -1126,6 +1216,7 @@ describe('EditTool', () => {
       expect(result.error?.message).toMatch(
         /binary \/ image \/ audio \/ video \/ PDF \/ notebook payload/,
       );
+      expect(result.error?.message).toContain('notebook_edit');
       expect(result.error?.message).not.toMatch(/Use the read_file tool first/);
       // EditTool's verb is "edit", not "overwrite" — using the
       // wrong one here would be confusing for in-place edits.

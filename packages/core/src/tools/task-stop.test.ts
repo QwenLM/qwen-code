@@ -50,6 +50,8 @@ describe('TaskStopTool', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: ac,
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     const result = await tool.validateBuildAndExecute(
@@ -81,6 +83,8 @@ describe('TaskStopTool', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     registry.complete('agent-1', 'done');
 
@@ -100,6 +104,8 @@ describe('TaskStopTool', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     const result = await tool.validateBuildAndExecute(
@@ -118,6 +124,8 @@ describe('TaskStopTool', () => {
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     abandonBackgroundAgent.mockReturnValue(true);
 
@@ -197,6 +205,8 @@ describe('TaskStopTool', () => {
         status: 'running',
         startTime: Date.now(),
         abortController: agentAc,
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
       });
       shellRegistry.register({
         shellId: 'shared-id',
@@ -235,6 +245,7 @@ describe('TaskStopTool', () => {
         maxEvents: 100,
         idleTimeoutMs: 300_000,
         droppedLines: 0,
+        outputFile: '/tmp/test.jsonl',
       });
 
       const result = await tool.validateBuildAndExecute(
@@ -263,6 +274,7 @@ describe('TaskStopTool', () => {
         maxEvents: 100,
         idleTimeoutMs: 300_000,
         droppedLines: 0,
+        outputFile: '/tmp/test.jsonl',
       });
       monitorRegistry.complete('mon_done', 0);
 

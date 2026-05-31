@@ -19,6 +19,7 @@ import {
   useBackgroundTaskViewActions,
 } from '../../contexts/BackgroundTaskViewContext.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../keyMatchers.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { theme } from '../../semantic-colors.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
@@ -26,8 +27,8 @@ import {
   buildBackgroundEntryLabel,
   ToolDisplayNames,
   ToolNames,
-  type BackgroundTaskEntry,
-  type MonitorEntry,
+  type AgentTask,
+  type MonitorTask,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
@@ -167,9 +168,7 @@ function rowLabel(entry: DialogEntry): string {
   switch (entry.kind) {
     case 'agent': {
       const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
-      return entry.flavor === 'foreground'
-        ? `${FOREGROUND_ROW_PREFIX} ${label}`
-        : label;
+      return entry.isBackgrounded ? label : `${FOREGROUND_ROW_PREFIX} ${label}`;
     }
     case 'shell':
       // Shell / monitor prefixes mirror the dialog's "section" visual hint
@@ -698,7 +697,7 @@ const AgentDetailBody: React.FC<{
 };
 
 const ShellDetailBody: React.FC<{
-  entry: import('@qwen-code/qwen-code-core').BackgroundShellEntry;
+  entry: import('@qwen-code/qwen-code-core').ShellTask;
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
@@ -756,7 +755,7 @@ const ShellDetailBody: React.FC<{
         </Text>
       </Box>
       <Box>
-        <Text wrap="truncate-end">{entry.outputPath}</Text>
+        <Text wrap="truncate-end">{entry.outputFile}</Text>
       </Box>
 
       {hasError && (
@@ -779,7 +778,7 @@ const ShellDetailBody: React.FC<{
 };
 
 const MonitorDetailBody: React.FC<{
-  entry: MonitorEntry;
+  entry: MonitorTask;
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
@@ -871,6 +870,8 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 }) => {
   const { entries, selectedIndex, dialogOpen, dialogMode } =
     useBackgroundTaskViewState();
+  const isDetailMode =
+    dialogMode === 'detail' || dialogMode === 'detail-from-panel';
   const {
     moveSelectionUp,
     moveSelectionDown,
@@ -950,16 +951,16 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const selectedAgentIdForActivity =
     selectedEntry?.kind === 'agent' ? selectedEntry.agentId : undefined;
   useEffect(() => {
-    if (!dialogOpen || dialogMode !== 'detail' || !selectedAgentIdForActivity)
+    if (!dialogOpen || !isDetailMode || !selectedAgentIdForActivity)
       return;
     const registry = config.getBackgroundTaskRegistry();
-    const onActivity = (entry: BackgroundTaskEntry) => {
+    const onActivity = (entry: AgentTask) => {
       if (entry.agentId !== selectedAgentIdForActivity) return;
       setActivityTick((n) => n + 1);
     };
     registry.setActivityChangeCallback(onActivity);
     return () => registry.setActivityChangeCallback(undefined);
-  }, [dialogOpen, dialogMode, config, selectedAgentIdForActivity]);
+  }, [dialogOpen, dialogMode, isDetailMode, config, selectedAgentIdForActivity]);
 
   // Wall-clock tick for the running agent's duration. Activity callbacks
   // fire when tools run, but duration needs to advance even when the agent
@@ -968,14 +969,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   useEffect(() => {
     if (
       !dialogOpen ||
-      dialogMode !== 'detail' ||
+      !isDetailMode ||
       !selectedEntryId ||
       selectedStatus !== 'running'
     )
       return;
     const id = setInterval(() => setActivityTick((n) => n + 1), 1000);
     return () => clearInterval(id);
-  }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus]);
+  }, [dialogOpen, dialogMode, isDetailMode, selectedEntryId, selectedStatus]);
 
   // Auto-fallback to the list view when the selected agent reaches a
   // terminal state while the user is watching it live. We only exit on
@@ -988,7 +989,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     status: EntryStatus;
   } | null>(null);
   useEffect(() => {
-    if (!dialogOpen || dialogMode !== 'detail') {
+    if (!dialogOpen || !isDetailMode) {
       initialDetailStatusRef.current = null;
       return;
     }
@@ -1020,7 +1021,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     ) {
       exitDetail();
     }
-  }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus, exitDetail]);
+  }, [dialogOpen, dialogMode, isDetailMode, selectedEntryId, selectedStatus, exitDetail]);
 
   // Encapsulates the cancel flow with the foreground confirm-step.
   // Foreground entries: first `x` arms; second `x` confirms. Background
@@ -1039,7 +1040,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     if (!isCancelable && !isAbandonable) return;
     const entryKey = entryId(selectedEntry);
     const isForegroundAgent =
-      selectedEntry.kind === 'agent' && selectedEntry.flavor === 'foreground';
+      selectedEntry.kind === 'agent' && !selectedEntry.isBackgrounded;
     if (isForegroundAgent && pendingCancelEntryId !== entryKey) {
       setPendingCancelEntryId(entryKey);
       return;
@@ -1053,12 +1054,12 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       if (!dialogOpen) return;
 
       if (dialogMode === 'list') {
-        if (key.name === 'up') {
+        if (keyMatchers[Command.SELECTION_UP](key)) {
           moveSelectionUp();
           setPendingCancelEntryId(null);
           return;
         }
-        if (key.name === 'down') {
+        if (keyMatchers[Command.SELECTION_DOWN](key)) {
           moveSelectionDown();
           setPendingCancelEntryId(null);
           return;
@@ -1155,7 +1156,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     }
     hints.push('\u2190/Esc close');
   } else {
-    hints.push('\u2190 go back', 'Esc/Enter/Space close');
+    hints.push('\u2190 back', 'Esc close');
     if (selectedEntry?.status === 'running') hints.push('x stop');
     if (selectedEntryAllowsResume) hints.push('r resume');
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {

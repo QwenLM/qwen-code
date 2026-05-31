@@ -12,6 +12,7 @@ import {
   GitWorktreeService,
   writeWorktreeSessionMarker,
 } from '../services/gitWorktreeService.js';
+import { writeWorktreeSession } from '../services/worktreeSessionService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('ENTER_WORKTREE');
@@ -146,7 +147,23 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
         `enter_worktree: getCurrentBranch failed at ${projectRoot}: ${error}`,
       );
     }
-    const result = await service.createUserWorktree(slug, baseBranch);
+
+    // Capture HEAD before creating the branch so WorktreeExitDialog can
+    // count new commits created inside the worktree. Empty string when
+    // rev-parse fails (e.g. unborn HEAD) — the dialog treats empty as
+    // "unknown" and skips the commit-count display.
+    let originalHeadCommit = '';
+    try {
+      originalHeadCommit = await service.getCurrentCommitHash();
+    } catch (error) {
+      debugLogger.warn(
+        `enter_worktree: getCurrentCommitHash failed at ${projectRoot}: ${error}`,
+      );
+    }
+
+    const result = await service.createUserWorktree(slug, baseBranch, {
+      symlinkDirectories: this.config.getWorktreeSymlinkDirectories(),
+    });
     if (!result.success || !result.worktree) {
       const reason = result.error ?? 'Failed to create worktree.';
       debugLogger.warn(`enter_worktree: createUserWorktree failed: ${reason}`);
@@ -166,6 +183,31 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
     } catch (error) {
       debugLogger.warn(
         `enter_worktree: failed to write session marker at ${result.worktree.path}: ${error}`,
+      );
+    }
+
+    // Persist worktree session state so --resume can restore context,
+    // the Footer can display the active worktree, and WorktreeExitDialog
+    // knows what to operate on. Best-effort: a write failure does not
+    // abort the creation (the worktree is still usable; the CLI just
+    // loses visibility into it across resume).
+    try {
+      await writeWorktreeSession(
+        this.config
+          .getSessionService()
+          .getWorktreeSessionPath(this.config.getSessionId()),
+        {
+          slug,
+          worktreePath: result.worktree.path,
+          worktreeBranch: result.worktree.branch,
+          originalCwd: projectRoot,
+          originalBranch: baseBranch ?? 'HEAD',
+          originalHeadCommit,
+        },
+      );
+    } catch (error) {
+      debugLogger.warn(
+        `enter_worktree: failed to write WorktreeSession sidecar: ${error}`,
       );
     }
 

@@ -6,6 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import type { HookPlanner, HookEventContext } from './hookPlanner.js';
+import { getHookMatcherTarget } from './hookPlanner.js';
 import type { HookRunner } from './hookRunner.js';
 import type { HookAggregator, AggregatedHookResult } from './hookAggregator.js';
 import type { SessionHooksManager } from './sessionHooksManager.js';
@@ -30,6 +31,8 @@ import type {
   PostCompactTrigger,
   NotificationInput,
   NotificationType,
+  PermissionDeniedInput,
+  PermissionDeniedReason,
   PermissionRequestInput,
   PermissionSuggestion,
   SubagentStartInput,
@@ -38,8 +41,12 @@ import type {
   FunctionHookContext,
   StopFailureInput,
   StopFailureErrorType,
+  TodoCreatedInput,
+  TodoCompletedInput,
+  TodoItem,
+  TodoStatus,
 } from './types.js';
-import { PermissionMode } from './types.js';
+import { HookPhase, PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';
 import { HookCallEvent } from '../telemetry/types.js';
@@ -361,6 +368,37 @@ export class HookEventHandler {
   }
 
   /**
+   * Fire a PermissionDenied event for tool calls rejected before manual
+   * permission handling starts. Unlike PermissionRequest, this event does not
+   * ask hooks to approve or modify the call; it reports AUTO-mode denials that
+   * happen before any permission dialog would be shown.
+   */
+  async firePermissionDeniedEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolUseId: string,
+    reason: PermissionDeniedReason,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: PermissionDeniedInput = {
+      ...this.createBaseInput(HookEventName.PermissionDenied),
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_use_id: toolUseId,
+      reason,
+    };
+
+    return this.executeHooks(
+      HookEventName.PermissionDenied,
+      input,
+      {
+        toolName,
+      },
+      signal,
+    );
+  }
+
+  /**
    * Fire a SubagentStart event
    * Called when a subagent is spawned via the Agent tool
    */
@@ -474,6 +512,66 @@ export class HookEventHandler {
   }
 
   /**
+   * Fire a TodoCreated event
+   * Called when a new todo item is added to the list
+   */
+  async fireTodoCreatedEvent(
+    todoId: string,
+    todoContent: string,
+    todoStatus: TodoStatus,
+    allTodos: TodoItem[],
+    phase: HookPhase,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: TodoCreatedInput = {
+      ...this.createBaseInput(HookEventName.TodoCreated),
+      hook_event_name: 'TodoCreated',
+      todo_id: todoId,
+      todo_content: todoContent,
+      todo_status: todoStatus,
+      all_todos: allTodos,
+      phase,
+    };
+
+    return this.executeHooks(
+      HookEventName.TodoCreated,
+      input,
+      undefined,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a TodoCompleted event
+   * Called when a todo item's status changes to 'completed'
+   */
+  async fireTodoCompletedEvent(
+    todoId: string,
+    todoContent: string,
+    previousStatus: 'pending' | 'in_progress',
+    allTodos: TodoItem[],
+    phase: HookPhase,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: TodoCompletedInput = {
+      ...this.createBaseInput(HookEventName.TodoCompleted),
+      hook_event_name: 'TodoCompleted',
+      todo_id: todoId,
+      todo_content: todoContent,
+      previous_status: previousStatus,
+      all_todos: allTodos,
+      phase,
+    };
+
+    return this.executeHooks(
+      HookEventName.TodoCompleted,
+      input,
+      undefined,
+      signal,
+    );
+  }
+
+  /**
    * Execute hooks for a specific event (direct execution without MessageBus)
    * Used as fallback when MessageBus is not available
    */
@@ -483,20 +581,38 @@ export class HookEventHandler {
     context?: HookEventContext,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
+    const failClosedResult: AggregatedHookResult = {
+      success: false,
+      allOutputs: [],
+      errors: [],
+      totalDuration: 0,
+      finalOutput:
+        eventName === HookEventName.TodoCreated ||
+        eventName === HookEventName.TodoCompleted
+          ? {
+              decision: 'block',
+              reason: `Hook system failed while processing ${eventName}`,
+            }
+          : undefined,
+    };
+
     try {
       // Create execution plan from registry hooks
       const plan = this.hookPlanner.createExecutionPlan(eventName, context);
 
       // Get session hooks and merge with registry hooks
       const sessionId = input.session_id;
-      const targetName = context?.toolName || '';
-      const sessionHooks = sessionId
-        ? this.sessionHooksManager.getMatchingHooks(
-            sessionId,
-            eventName,
-            targetName,
-          )
-        : [];
+      const matcherTarget = getHookMatcherTarget(eventName, context)?.target;
+      const sessionHooks =
+        sessionId !== undefined
+          ? matcherTarget === undefined
+            ? this.sessionHooksManager.getHooksForEvent(sessionId, eventName)
+            : this.sessionHooksManager.getMatchingHooks(
+                sessionId,
+                eventName,
+                matcherTarget,
+              )
+          : [];
 
       // Merge hook configs from registry plan and session hooks
       const registryHookConfigs = plan?.hookConfigs || [];
@@ -578,12 +694,13 @@ export class HookEventHandler {
     } catch (error) {
       debugLogger.error(`Hook event bus error for ${eventName}: ${error}`);
 
-      return {
-        success: false,
-        allOutputs: [],
-        errors: [error instanceof Error ? error : new Error(String(error))],
-        totalDuration: 0,
-      };
+      const normalizedError =
+        error instanceof Error ? error : new Error(String(error));
+      failClosedResult.errors = [normalizedError];
+      if (failClosedResult.finalOutput) {
+        failClosedResult.finalOutput.reason = `${failClosedResult.finalOutput.reason}: ${normalizedError.message}`;
+      }
+      return failClosedResult;
     }
   }
 
@@ -629,6 +746,37 @@ export class HookEventHandler {
     }
   }
 
+  private sanitizeHookInputForTelemetry(
+    eventName: HookEventName,
+    input: HookInput,
+  ): Record<string, unknown> {
+    const telemetryInput: Record<string, unknown> = { ...input };
+
+    if (eventName === HookEventName.TodoCreated) {
+      delete telemetryInput['todo_content'];
+      delete telemetryInput['all_todos'];
+      if ('phase' in telemetryInput) {
+        telemetryInput['phase'] =
+          telemetryInput['phase'] === HookPhase.PostWrite
+            ? HookPhase.PostWrite
+            : HookPhase.Validation;
+      }
+    }
+
+    if (eventName === HookEventName.TodoCompleted) {
+      delete telemetryInput['todo_content'];
+      delete telemetryInput['all_todos'];
+      if ('phase' in telemetryInput) {
+        telemetryInput['phase'] =
+          telemetryInput['phase'] === HookPhase.PostWrite
+            ? HookPhase.PostWrite
+            : HookPhase.Validation;
+      }
+    }
+
+    return telemetryInput;
+  }
+
   /**
    * Log hook execution for observability
    */
@@ -657,6 +805,8 @@ export class HookEventHandler {
       );
     }
 
+    const telemetryInput = this.sanitizeHookInputForTelemetry(eventName, input);
+
     for (const result of results) {
       const hookName = this.getHookNameFromResult(result);
       const hookType = this.getHookTypeFromResult(result);
@@ -665,7 +815,7 @@ export class HookEventHandler {
         eventName,
         hookType,
         hookName,
-        { ...input },
+        telemetryInput,
         result.duration,
         result.success,
         result.output ? { ...result.output } : undefined,
@@ -705,7 +855,7 @@ export class HookEventHandler {
    */
   private getHookTypeFromResult(
     result: HookExecutionResult,
-  ): 'command' | 'http' | 'function' {
+  ): 'command' | 'http' | 'function' | 'prompt' {
     return result.hookConfig.type;
   }
 }

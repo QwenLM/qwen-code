@@ -4,15 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   BackgroundShellRegistry,
-  type BackgroundShellEntry,
+  MAX_RETAINED_TERMINAL_SHELLS,
+  type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
 
 function makeEntry(
-  overrides: Partial<BackgroundShellEntry> = {},
-): BackgroundShellEntry {
+  overrides: Partial<ShellTaskRegistration> = {},
+): ShellTaskRegistration {
   return {
     shellId: 's1',
     command: 'sleep 60',
@@ -243,6 +244,49 @@ describe('BackgroundShellRegistry', () => {
       const reg = new BackgroundShellRegistry();
       expect(() => reg.abortAll()).not.toThrow();
     });
+
+    it('fires statusChange exactly once regardless of how many entries cancel', () => {
+      // The single subscriber (`useBackgroundTaskView`) re-pulls
+      // `getAll()` from inside the callback, so per-entry statusChange
+      // fires here just produce a flurry of redundant React re-renders
+      // on shutdown / `/clear`. Pin the batch behavior so a future
+      // refactor that loops `cancel()` again doesn't silently
+      // re-introduce the wakeup churn.
+      const reg = new BackgroundShellRegistry();
+      const transitions: Array<{ id: string; status: string }> = [];
+      for (let i = 0; i < 5; i++) {
+        reg.register(makeEntry({ shellId: `s-${i}` }));
+      }
+      reg.setStatusChangeCallback((entry) => {
+        if (entry) {
+          transitions.push({ id: entry.shellId, status: entry.status });
+        }
+      });
+
+      reg.abortAll();
+
+      // All five entries must end up cancelled, but the callback
+      // fires only once.
+      for (let i = 0; i < 5; i++) {
+        expect(reg.get(`s-${i}`)!.status).toBe('cancelled');
+      }
+      expect(transitions).toHaveLength(1);
+      expect(transitions[0].status).toBe('cancelled');
+    });
+
+    it('does not fire statusChange when no entry was cancelled', () => {
+      // Empty / all-already-terminal registries shouldn't wake the
+      // subscriber for a no-op transition.
+      const reg = new BackgroundShellRegistry();
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.complete('a', 0, 1500);
+      const cb = vi.fn();
+      reg.setStatusChangeCallback(cb);
+
+      reg.abortAll();
+
+      expect(cb).not.toHaveBeenCalled();
+    });
   });
 
   describe('session switch helpers', () => {
@@ -262,6 +306,75 @@ describe('BackgroundShellRegistry', () => {
       reg.reset();
 
       expect(reg.getAll()).toEqual([]);
+    });
+  });
+
+  describe('terminal-entry retention cap', () => {
+    it('retains only a bounded number of terminal entries (oldest by endTime evicted)', () => {
+      const reg = new BackgroundShellRegistry();
+      // Register and complete one more entry than the cap allows. Use
+      // strictly increasing endTimes so eviction order is deterministic.
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 2; i++) {
+        reg.register(makeEntry({ shellId: `s-${i}`, startTime: i * 10 }));
+        reg.complete(`s-${i}`, 0, i * 10 + 5);
+      }
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
+      // The two oldest (`s-0`, `s-1`) get pruned; the newest survives.
+      expect(reg.get('s-0')).toBeUndefined();
+      expect(reg.get('s-1')).toBeUndefined();
+      expect(reg.get(`s-${MAX_RETAINED_TERMINAL_SHELLS + 1}`)).toBeDefined();
+    });
+
+    it('never evicts running entries even when the cap is exceeded', () => {
+      const reg = new BackgroundShellRegistry();
+      // Register one extra terminal entry beyond the cap, then a single
+      // running entry. The running entry must be retained regardless of
+      // its launch order — pruning a still-running shell would lose the
+      // user's only handle on a live process.
+      reg.register(makeEntry({ shellId: 'live', startTime: 1 }));
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS + 1; i++) {
+        reg.register(
+          makeEntry({ shellId: `done-${i}`, startTime: 100 + i * 10 }),
+        );
+        reg.complete(`done-${i}`, 0, 100 + i * 10 + 5);
+      }
+      // Cap-of-32 terminals + 1 running survivor = 33 entries kept.
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS + 1);
+      expect(reg.get('live')?.status).toBe('running');
+      // The oldest terminal entry (lowest endTime) is the one evicted.
+      expect(reg.get('done-0')).toBeUndefined();
+    });
+
+    it('prunes after fail() too, not just complete()', () => {
+      const reg = new BackgroundShellRegistry();
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
+        reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
+        reg.complete(`done-${i}`, 0, i * 10 + 5);
+      }
+      const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
+      reg.register(
+        makeEntry({ shellId: 'overflow', startTime: overflowStart }),
+      );
+      reg.fail('overflow', 'boom', overflowStart + 5);
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
+      expect(reg.get('done-0')).toBeUndefined();
+      expect(reg.get('overflow')?.status).toBe('failed');
+    });
+
+    it('prunes after cancel() too, not just complete()', () => {
+      const reg = new BackgroundShellRegistry();
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_SHELLS; i++) {
+        reg.register(makeEntry({ shellId: `done-${i}`, startTime: i * 10 }));
+        reg.complete(`done-${i}`, 0, i * 10 + 5);
+      }
+      const overflowStart = MAX_RETAINED_TERMINAL_SHELLS * 10 + 100;
+      reg.register(
+        makeEntry({ shellId: 'overflow', startTime: overflowStart }),
+      );
+      reg.cancel('overflow', overflowStart + 5);
+      expect(reg.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_SHELLS);
+      expect(reg.get('done-0')).toBeUndefined();
+      expect(reg.get('overflow')?.status).toBe('cancelled');
     });
   });
 

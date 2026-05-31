@@ -29,7 +29,7 @@ const debugLogger = createDebugLogger('BG_TASK_VIEW');
 
 // ─── Types ──────────────────────────────────────────────────
 
-export type BackgroundDialogMode = 'closed' | 'list' | 'detail';
+export type BackgroundDialogMode = 'closed' | 'list' | 'detail' | 'detail-from-panel';
 
 export interface BackgroundTaskViewState {
   /**
@@ -49,6 +49,11 @@ export interface BackgroundTaskViewState {
    * Enter to open the dialog). Mirrors the Arena tab-bar focus pattern.
    */
   pillFocused: boolean;
+  /**
+   * True when LiveAgentPanel owns keyboard focus for row navigation.
+   */
+  livePanelFocused: boolean;
+  livePanelSelectedIndex: number;
 }
 
 export interface BackgroundTaskViewActions {
@@ -62,7 +67,12 @@ export interface BackgroundTaskViewActions {
   cancelSelected(): void;
   /** Resume the currently selected paused entry. */
   resumeSelected(): Promise<void>;
+  enterDetailFromPanel(): void;
   setPillFocused(focused: boolean): void;
+  setLivePanelFocused(focused: boolean): void;
+  setLivePanelSelectedIndex(index: number): void;
+  /** Pre-select a specific entry index before opening the dialog. */
+  setSelectedIndex(index: number): void;
 }
 
 // ─── Context ────────────────────────────────────────────────
@@ -80,6 +90,8 @@ const DEFAULT_STATE: BackgroundTaskViewState = {
   dialogMode: 'closed',
   dialogOpen: false,
   pillFocused: false,
+  livePanelFocused: false,
+  livePanelSelectedIndex: 0,
 };
 
 const noop = () => {};
@@ -92,9 +104,13 @@ const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   closeDialog: noop,
   enterDetail: noop,
   exitDetail: noop,
+  enterDetailFromPanel: noop,
   cancelSelected: noop,
   resumeSelected: async () => {},
   setPillFocused: noop,
+  setLivePanelFocused: noop,
+  setLivePanelSelectedIndex: noop,
+  setSelectedIndex: noop,
 };
 
 // ─── Hooks ──────────────────────────────────────────────────
@@ -123,6 +139,12 @@ export function BackgroundTaskViewProvider({
   const [rawSelectedIndex, setRawSelectedIndex] = useState(0);
   const [dialogMode, setDialogMode] = useState<BackgroundDialogMode>('closed');
   const [pillFocused, setPillFocused] = useState(false);
+  const [livePanelFocused, setLivePanelFocusedRaw] = useState(false);
+  const [livePanelSelectedIndex, setLivePanelSelectedIndex] = useState(0);
+  const setLivePanelFocused = useCallback((focused: boolean) => {
+    setLivePanelFocusedRaw(focused);
+    if (focused) setLivePanelSelectedIndex(0);
+  }, []);
   const dialogOpen = dialogMode !== 'closed';
   const hasEntries = entries.length > 0;
 
@@ -133,6 +155,11 @@ export function BackgroundTaskViewProvider({
   useEffect(() => {
     if (pillFocused && !hasEntries) setPillFocused(false);
   }, [pillFocused, hasEntries]);
+
+  const hasAgentEntries = entries.some((e) => e.kind === 'agent');
+  useEffect(() => {
+    if (livePanelFocused && !hasAgentEntries) setLivePanelFocusedRaw(false);
+  }, [livePanelFocused, hasAgentEntries]);
 
   // rawSelectedIndex can fall out of range when entries shrink; clamp on read.
   const selectedIndex =
@@ -167,9 +194,19 @@ export function BackgroundTaskViewProvider({
     setDialogMode('detail');
   }, [entries.length]);
 
+  const enterDetailFromPanel = useCallback(() => {
+    if (entries.length === 0) return;
+    setDialogMode('detail-from-panel');
+  }, [entries.length]);
+
   const exitDetail = useCallback(() => {
-    setDialogMode('list');
-  }, []);
+    if (dialogMode === 'detail-from-panel') {
+      setDialogMode('closed');
+      setLivePanelFocusedRaw(true);
+    } else {
+      setDialogMode('list');
+    }
+  }, [dialogMode]);
 
   const cancelSelected = useCallback(() => {
     if (!config) return;
@@ -248,8 +285,10 @@ export function BackgroundTaskViewProvider({
       dialogMode,
       dialogOpen,
       pillFocused,
+      livePanelFocused,
+      livePanelSelectedIndex,
     }),
-    [entries, selectedIndex, dialogMode, dialogOpen, pillFocused],
+    [entries, selectedIndex, dialogMode, dialogOpen, pillFocused, livePanelFocused, livePanelSelectedIndex],
   );
 
   const actions: BackgroundTaskViewActions = useMemo(
@@ -259,10 +298,14 @@ export function BackgroundTaskViewProvider({
       openDialog,
       closeDialog,
       enterDetail,
+      enterDetailFromPanel,
       exitDetail,
       cancelSelected,
       resumeSelected,
       setPillFocused,
+      setLivePanelFocused,
+      setLivePanelSelectedIndex,
+      setSelectedIndex: setRawSelectedIndex,
     }),
     [
       moveSelectionUp,
@@ -270,10 +313,14 @@ export function BackgroundTaskViewProvider({
       openDialog,
       closeDialog,
       enterDetail,
+      enterDetailFromPanel,
       exitDetail,
       cancelSelected,
       resumeSelected,
       setPillFocused,
+      setLivePanelFocused,
+      setLivePanelSelectedIndex,
+      setRawSelectedIndex,
     ],
   );
 

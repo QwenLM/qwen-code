@@ -242,6 +242,23 @@ export class SessionHooksManager {
   }
 
   /**
+   * Returns true when any session (or just `sessionId`, when provided) has at
+   * least one hook registered for `event`. Used as the fast-path skip check by
+   * the turn engine so it knows to actually fire the event for session-scoped
+   * hooks like `/goal`.
+   */
+  hasHooksForEvent(event: HookEventName, sessionId?: string): boolean {
+    if (sessionId !== undefined) {
+      const storage = this.sessions.get(sessionId);
+      return (storage?.hooks.get(event)?.length ?? 0) > 0;
+    }
+    for (const storage of this.sessions.values()) {
+      if ((storage.hooks.get(event)?.length ?? 0) > 0) return true;
+    }
+    return false;
+  }
+
+  /**
    * Get hooks that match a specific tool/target
    * @param sessionId Session ID
    * @param event Hook event name

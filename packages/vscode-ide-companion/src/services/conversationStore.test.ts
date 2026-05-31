@@ -72,6 +72,105 @@ describe('ConversationStore', () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  it('renameConversationId updates a conversation id and current id', async () => {
+    const { store, update, conversations } = createStore([
+      {
+        id: 'conversation-1',
+        title: 'Conversation',
+        messages: [{ role: 'user' as const, content: 'first', timestamp: 1 }],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+    store.setCurrentConversationId('conversation-1');
+
+    await expect(
+      store.renameConversationId('conversation-1', 'session-1'),
+    ).resolves.toBe(true);
+
+    expect(conversations[0]?.id).toBe('session-1');
+    expect(store.getCurrentConversationId()).toBe('session-1');
+    expect(update).toHaveBeenCalledWith('conversations', conversations);
+  });
+
+  it('renameConversationId returns false when the target id already exists', async () => {
+    const { store, update, conversations } = createStore([
+      {
+        id: 'conversation-1',
+        title: 'Conversation',
+        messages: [],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      {
+        id: 'session-1',
+        title: 'Existing Session',
+        messages: [],
+        createdAt: 2,
+        updatedAt: 2,
+      },
+    ]);
+
+    await expect(
+      store.renameConversationId('conversation-1', 'session-1'),
+    ).resolves.toBe(false);
+
+    expect(conversations.map((conversation) => conversation.id)).toEqual([
+      'conversation-1',
+      'session-1',
+    ]);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('upsertConversation inserts a missing conversation with cloned messages', async () => {
+    const messages = [
+      { role: 'user' as const, content: 'first', timestamp: 1 },
+    ];
+    const { store, update, conversations } = createStore([]);
+
+    await store.upsertConversation({
+      id: 'session-1',
+      title: 'Session',
+      messages,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]?.id).toBe('session-1');
+    expect(conversations[0]?.messages).toEqual(messages);
+    expect(conversations[0]?.messages[0]).not.toBe(messages[0]);
+    expect(store.getCurrentConversationId()).toBe('session-1');
+    expect(update).toHaveBeenCalledWith('conversations', conversations);
+  });
+
+  it('upsertConversation replaces an existing conversation', async () => {
+    const { store, update, conversations } = createStore([
+      {
+        id: 'session-1',
+        title: 'Old',
+        messages: [{ role: 'user' as const, content: 'old', timestamp: 1 }],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    await store.upsertConversation({
+      id: 'session-1',
+      title: 'New',
+      messages: [{ role: 'assistant' as const, content: 'new', timestamp: 2 }],
+      createdAt: 1,
+      updatedAt: 2,
+    });
+
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]?.title).toBe('New');
+    expect(conversations[0]?.messages).toEqual([
+      { role: 'assistant', content: 'new', timestamp: 2 },
+    ]);
+    expect(update).toHaveBeenCalledWith('conversations', conversations);
+  });
+
   it('truncateFromUserTurn truncates from the matching user turn', async () => {
     const { store, update, conversations } = createStore([
       {

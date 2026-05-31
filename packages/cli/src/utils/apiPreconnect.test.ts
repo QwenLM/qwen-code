@@ -17,8 +17,19 @@ const { mockGetOrCreateSharedDispatcher, mockDebugLogger } = vi.hoisted(() => {
   };
 });
 
-// Mock fetch
-const mockFetch = vi.fn().mockResolvedValue(undefined);
+// Mock fetch. apiPreconnect.ts now uses `import { fetch } from 'undici'`
+// rather than the global fetch, so we have to intercept the module export —
+// vi.stubGlobal('fetch', …) would not catch the named import.
+const { mockFetch } = vi.hoisted(() => ({
+  mockFetch: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('undici')>();
+  return {
+    ...actual,
+    fetch: mockFetch,
+  };
+});
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -50,11 +61,9 @@ describe('apiPreconnect', () => {
     delete process.env['QWEN_CODE_DISABLE_PRECONNECT'];
     delete process.env['NODE_EXTRA_CA_CERTS'];
     delete process.env['SANDBOX'];
-    vi.stubGlobal('fetch', mockFetch);
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 

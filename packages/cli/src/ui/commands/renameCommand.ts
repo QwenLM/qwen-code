@@ -4,13 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
 import {
-  runSideQuery,
   SESSION_TITLE_MAX_LENGTH,
-  stripTerminalControlSequences,
   tryGenerateSessionTitle,
-  type Config,
   type SessionTitleFailureReason,
 } from '@qwen-code/qwen-code-core';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
@@ -20,92 +16,15 @@ import { t } from '../../i18n/index.js';
 const MAX_TITLE_LENGTH = SESSION_TITLE_MAX_LENGTH;
 
 /**
- * Extracts a short text summary from conversation history for title generation.
- * Takes the last few user/assistant messages, truncated to ~1000 chars.
- */
-function extractConversationText(history: Content[]): string {
-  const texts: string[] = [];
-  // Walk backwards to get the most recent context
-  for (let i = history.length - 1; i >= 0 && texts.length < 6; i--) {
-    const content = history[i];
-    const role = content.role === 'user' ? 'User' : 'Assistant';
-    for (const part of content.parts ?? []) {
-      if ('text' in part && part.text) {
-        texts.unshift(`${role}: ${part.text}`);
-        break;
-      }
-    }
-  }
-  const joined = texts.join('\n');
-  return joined.length > 1000 ? joined.slice(-1000) : joined;
-}
-
-/**
- * Calls the LLM to generate a short kebab-case session title from conversation
- * history. Used when `/rename` is invoked with no arguments — produces a
- * filesystem-style name for sessions the user wants to keep long-term.
- */
-async function generateKebabTitle(
-  config: Config,
-  signal?: AbortSignal,
-): Promise<string | null> {
-  try {
-    const history = config.getGeminiClient().getHistory(true);
-    const conversationText = extractConversationText(history);
-    if (!conversationText) {
-      return null;
-    }
-
-    const result = await runSideQuery(config, {
-      purpose: 'chat-rename',
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: conversationText }],
-        },
-      ],
-      systemInstruction: {
-        role: 'user',
-        parts: [
-          {
-            text: 'Generate a short kebab-case name (2-4 words) that captures the main topic of this conversation. Use lowercase words separated by hyphens. Examples: "fix-login-bug", "add-auth-feature", "refactor-api-client". Reply with ONLY the kebab-case name, nothing else.',
-          },
-        ],
-      },
-      abortSignal: signal ?? new AbortController().signal,
-      // Title generation is a one-shot interactive gesture; if the model
-      // is unavailable, surface "could not generate" instead of retrying.
-      maxAttempts: 1,
-    });
-
-    if (!result.text) {
-      return null;
-    }
-    // Clean up: strip ANSI / control sequences via the shared helper
-    // (same security concern as the sentence-case path — the title renders
-    // directly in the picker), then take the first line and drop quotes.
-    const cleaned = stripTerminalControlSequences(result.text)
-      .split('\n')[0]
-      .replace(/["`']/g, '')
-      .trim();
-    return cleaned.length > 0 && cleaned.length <= MAX_TITLE_LENGTH
-      ? cleaned
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Translate a title-generation failure reason into a human-actionable
- * message. Exists so `/rename --auto` doesn't collapse to a generic "could
- * not generate" that leaves the user guessing about the cause.
+ * message. Used by both `/rename` (no args) and `/rename --auto` since they
+ * share the same fast-model `tryGenerateSessionTitle` pipeline.
  */
-function autoFailureMessage(reason: SessionTitleFailureReason): string {
+function titleFailureMessage(reason: SessionTitleFailureReason): string {
   switch (reason) {
     case 'no_fast_model':
       return t(
-        '/rename --auto requires a fast model. Configure one with `/model --fast <model>`.',
+        'Auto-generating a title requires a fast model. Configure one with `/model --fast <model>`, or pass a name: `/rename <name>`.',
       );
     case 'empty_history':
       return t(
@@ -119,7 +38,7 @@ function autoFailureMessage(reason: SessionTitleFailureReason): string {
       return t('Title generation was cancelled.');
     case 'model_error':
       return t(
-        'The fast model could not generate a title (rate limit, auth, or network error). Check debug log or try again.',
+        'The fast model could not generate a title (rate limit, auth, network error, or unexpected response format). Check debug log or try again.',
       );
     case 'no_client':
       return t('Session is still initializing — try again in a moment.');
@@ -179,6 +98,26 @@ export const renameCommand: SlashCommand = {
       'Rename the current conversation. --auto lets the fast model pick a title.',
     );
   },
+  argumentHint: '[--auto] [<name>]',
+  completion: async (_context, partialArg) => {
+    // Only `--auto` is a structured option — the rest is a free-text
+    // title and shouldn't be auto-completed (we don't want the picker to
+    // try to "guess" what name the user wants). Match /model's empty-arg
+    // contract too: return null so the completion menu stays closed
+    // until the user starts typing a flag.
+    const trimmed = partialArg.trim();
+    if (trimmed && '--auto'.startsWith(trimmed)) {
+      return [
+        {
+          value: '--auto',
+          description: t(
+            'Let the fast model generate a sentence-case title from the conversation so far.',
+          ),
+        },
+      ];
+    }
+    return null;
+  },
   action: async (context, args): Promise<SlashCommandActionReturn> => {
     const { config } = context.services;
 
@@ -203,39 +142,28 @@ export const renameCommand: SlashCommand = {
     }
     let name = positional;
     // Track where the title came from so the session picker can dim
-    // auto-generated titles; explicit user text stays 'manual'.
-    let titleSource: 'auto' | 'manual' = 'manual';
+    // auto-generated titles; only explicit user text stays 'manual'.
+    const titleSource: 'auto' | 'manual' = name ? 'manual' : 'auto';
 
-    if (auto) {
-      // Explicit user-triggered auto-title. This overwrites whatever title
-      // is currently set (manual or auto) because the user asked for it.
-      // Requires a configured fast model — we don't silently fall back to
-      // the main model here because `--auto` is a deliberate opt-in to the
-      // sentence-case fast-model flow, and surprising a user with a main-
-      // model call would defeat the purpose.
-      const fastModel =
-        config.getFastModelForSideQuery?.() ?? config.getFastModel();
-      if (!fastModel) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t(
-            '/rename --auto requires a fast model. Configure one with `/model --fast <model>`.',
-          ),
-        };
-      }
-      if (positional) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t(
-            '/rename --auto does not take a name. Use `/rename <name>` to set a name yourself.',
-          ),
-        };
-      }
+    if (auto && positional) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          '/rename --auto does not take a name. Use `/rename <name>` to set a name yourself.',
+        ),
+      };
+    }
+
+    if (!name) {
+      // Both `/rename` (no args) and `/rename --auto` go through the same
+      // schema-enforced sentence-case pipeline backed by the fast model.
+      // The flag is now just an explicitness marker (no semantic divergence
+      // beyond the spinner copy), so users who type `/rename` get the same
+      // quality of title without remembering the flag.
       const dots = ['.', '..', '...'];
       let dotIndex = 0;
-      const baseText = t('Regenerating session title');
+      const baseText = t('Generating session title');
       context.ui.setPendingItem({
         type: 'info',
         text: baseText + dots[dotIndex],
@@ -264,44 +192,10 @@ export const renameCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'error',
-          content: autoFailureMessage(outcome.reason),
+          content: titleFailureMessage(outcome.reason),
         };
       }
       name = outcome.title;
-      titleSource = 'auto';
-    } else if (!name) {
-      // Legacy no-arg behavior: kebab-case, generated via the main content
-      // generator with fallback to fastModel. Preserved as-is for users who
-      // prefer filesystem-style names.
-      const dots = ['.', '..', '...'];
-      let dotIndex = 0;
-      const baseText = t('Generating session name');
-      context.ui.setPendingItem({
-        type: 'info',
-        text: baseText + dots[dotIndex],
-      });
-      const timer = setInterval(() => {
-        dotIndex = (dotIndex + 1) % dots.length;
-        context.ui.setPendingItem({
-          type: 'info',
-          text: baseText + dots[dotIndex],
-        });
-      }, 500);
-      let generated: string | null;
-      try {
-        generated = await generateKebabTitle(config, context.abortSignal);
-      } finally {
-        clearInterval(timer);
-        context.ui.setPendingItem(null);
-      }
-      if (!generated) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t('Could not generate a title. Usage: /rename <name>'),
-        };
-      }
-      name = generated;
     }
 
     if (name.length > MAX_TITLE_LENGTH) {

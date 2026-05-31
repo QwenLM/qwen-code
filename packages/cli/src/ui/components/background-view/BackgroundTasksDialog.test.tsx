@@ -58,12 +58,17 @@ const mockedUseKeypress = vi.mocked(useKeypress);
 
 function entry(overrides: Partial<AgentDialogEntry> = {}): AgentDialogEntry {
   return {
+    id: 'a',
     kind: 'agent',
     agentId: 'a',
     description: 'desc',
+    isBackgrounded: true,
     status: 'running',
     startTime: 0,
     abortController: new AbortController(),
+    outputFile: '/tmp/agent.jsonl',
+    outputOffset: 0,
+    notified: false,
     ...overrides,
   } as AgentDialogEntry;
 }
@@ -113,7 +118,7 @@ interface Harness {
   monitorCancel: ReturnType<typeof vi.fn>;
   dreamCancelTask: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
-  pressKey: (key: { name?: string; sequence?: string }) => void;
+  pressKey: (key: { name?: string; sequence?: string; ctrl?: boolean }) => void;
   call: (fn: () => void) => void;
   lastFrame: () => string | undefined;
   probe: { current: ProbeHandle | null };
@@ -310,7 +315,7 @@ describe('BackgroundTasksDialog', () => {
     const fg = entry({
       agentId: 'fg-1',
       status: 'running',
-      flavor: 'foreground',
+      isBackgrounded: false,
     });
     const h = setup([fg]);
 
@@ -330,7 +335,7 @@ describe('BackgroundTasksDialog', () => {
     const bg = entry({
       agentId: 'bg-1',
       status: 'running',
-      flavor: 'background',
+      isBackgrounded: true,
     });
     const h = setup([bg]);
 
@@ -350,7 +355,7 @@ describe('BackgroundTasksDialog', () => {
     const completed = entry({
       agentId: 'fg-done',
       status: 'completed',
-      flavor: 'foreground',
+      isBackgrounded: false,
     });
     const h = setup([completed]);
 
@@ -372,7 +377,7 @@ describe('BackgroundTasksDialog', () => {
     const fg = entry({
       agentId: 'fg-1',
       status: 'running',
-      flavor: 'foreground',
+      isBackgrounded: false,
     });
     const h = setup([fg]);
 
@@ -393,7 +398,7 @@ describe('BackgroundTasksDialog', () => {
     const fg = entry({
       agentId: 'fg-1',
       status: 'running',
-      flavor: 'foreground',
+      isBackgrounded: false,
     });
     const h = setup([fg]);
 
@@ -425,6 +430,23 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.selectedIndex).toBe(0);
 
     h.setEntries([]);
+    expect(h.probe.current!.state.selectedIndex).toBe(0);
+  });
+
+  it('moves list selection with Ctrl+N/P readline aliases', () => {
+    const h = setup([
+      entry({ agentId: 'a' }),
+      entry({ agentId: 'b' }),
+      entry({ agentId: 'c' }),
+    ]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    expect(h.probe.current!.state.selectedIndex).toBe(0);
+
+    h.pressKey({ name: 'n', sequence: '\u000E', ctrl: true });
+    expect(h.probe.current!.state.selectedIndex).toBe(1);
+
+    h.pressKey({ name: 'p', sequence: '\u0010', ctrl: true });
     expect(h.probe.current!.state.selectedIndex).toBe(0);
   });
 

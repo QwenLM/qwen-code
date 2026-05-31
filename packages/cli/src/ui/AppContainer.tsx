@@ -25,9 +25,11 @@ import {
 import { ConfigContext } from './contexts/ConfigContext.js';
 import {
   type HistoryItem,
+  type HistoryItemUser,
   ToolCallStatus,
   type HistoryItemWithoutId,
 } from './types.js';
+import type { RestoreOption } from './components/RewindSelector.js';
 import { MessageType, StreamingState } from './types.js';
 import {
   type EditorType,
@@ -42,7 +44,6 @@ import {
   ShellExecutionService,
   Storage,
   SessionEndReason,
-  SessionStartSource,
   generatePromptSuggestion,
   logPromptSuggestion,
   PromptSuggestionEvent,
@@ -56,12 +57,17 @@ import {
   ApprovalMode,
   ConditionalRulesRegistry,
   MCPDiscoveryState,
-  type PermissionMode,
   ToolConfirmationOutcome,
   type WaitingToolCall,
   ToolNames,
+  clearWorktreeSession,
+  restoreWorktreeContext,
+  GitWorktreeService,
+  readWorktreeSessionMarker,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import { loadLowlight } from './utils/lowlightLoader.js';
+import { restoreGoalFromHistory } from './utils/restoreGoal.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -100,9 +106,9 @@ import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
+import { usePreferredEditor } from './hooks/usePreferredEditor.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
-import { useManageModelsCommand } from './hooks/useManageModelsCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useBranchCommand } from './hooks/useBranchCommand.js';
@@ -155,6 +161,8 @@ import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
+import { useWorktreeSession } from './hooks/useWorktreeSession.js';
+import type { StatusLinePresetConfig } from './statusLinePresets.js';
 import {
   useExtensionUpdates,
   useConfirmUpdateRequests,
@@ -429,6 +437,34 @@ export const AppContainer = (props: AppContainerProps) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
+  const worktreeSession = useWorktreeSession(config);
+  const [showWorktreeExitDialog, setShowWorktreeExitDialog] = useState(false);
+  /**
+   * One-shot worktree restore reminder for the TUI path. Set during
+   * `--resume` when the persisted sidecar names a live worktree, then
+   * consumed and cleared by `handleFinalSubmit` on the user's first
+   * prompt — same shape as ACP `Session.pendingWorktreeNotice` and
+   * headless's `<system-reminder>` prefix. Without this, the resumed
+   * model would see an INFO history item in the TUI but never receive
+   * the reminder in the next API request, leaving it free to edit the
+   * parent checkout. (PR #4174 review #3259975249.)
+   */
+  const pendingWorktreeNoticeRef = useRef<string | null>(null);
+  const activeWorktree = useMemo(
+    () =>
+      worktreeSession
+        ? {
+            slug: worktreeSession.slug,
+            branch: worktreeSession.worktreeBranch,
+            path: worktreeSession.worktreePath,
+            originalCwd: worktreeSession.originalCwd,
+            originalBranch: worktreeSession.originalBranch,
+            originalHeadCommit: worktreeSession.originalHeadCommit,
+          }
+        : null,
+    [worktreeSession],
+  );
+
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
   const originalTitleRef = useRef(
@@ -436,6 +472,33 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   const lastTitleRef = useRef<string | null>(null);
   const staticExtraHeight = 3;
+
+  // Prefetch the lowlight chunk on mount so the dynamic import is already
+  // in flight before the first code block needs colorizing. Without this
+  // kick-off, code blocks committed to ink's append-only <Static> region
+  // before the import resolves stay plain text for the rest of the session
+  // — Static can only be re-rendered via `refreshStatic`, which is not
+  // wired to lowlight load completion. Common reachable paths: short
+  // `--prompt -p` runs that finalize quickly, Ctrl+C-cancelled first turns,
+  // and the first-paint history replay on `--resume`. Firing the load
+  // from mount keeps the startup parse-cost win (V8 still parses off the
+  // critical path) while restoring the "first paint sees a loaded
+  // instance" guarantee. Errors are silently swallowed; CodeColorizer
+  // already falls back to plain text on miss.
+  useEffect(() => {
+    void loadLowlight().catch((err) => {
+      // The loader caches rejection with a cooldown (see
+      // `LOWLIGHT_RETRY_COOLDOWN_MS` / `lowlightLastFailureAt` in
+      // `lowlightLoader.ts`). This useEffect runs once on mount, so this
+      // catch fires at most once per session regardless. Log to the debug
+      // channel so a degraded syntax-highlight state (corrupted install,
+      // missing chunk) leaves a breadcrumb without spamming the user's
+      // TTY — `CodeColorizer` already falls back to plain text.
+      debugLogger.warn(
+        `Failed to load lowlight chunk; code blocks will render as plain text: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }, []);
 
   // Initialize config (runs once on mount)
   useEffect(() => {
@@ -456,6 +519,21 @@ export const AppContainer = (props: AppContainerProps) => {
       // the profile captures the full MCP timeline without holding back
       // the user-facing TTI.
 
+      // Phase D-1: when launched with --worktree, gemini.tsx stashes a
+      // one-shot notice on Config. Consume it here so it surfaces in the
+      // transcript AND gets injected into the next user prompt. This
+      // wins over the Phase C resume-restore path below — startup beats
+      // resume on the same prompt.
+      const startupWorktreeNotice =
+        config.consumePendingStartupWorktreeNotice();
+      if (startupWorktreeNotice) {
+        historyManager.addItem(
+          { type: MessageType.INFO, text: startupWorktreeNotice },
+          Date.now(),
+        );
+        pendingWorktreeNoticeRef.current = startupWorktreeNotice;
+      }
+
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
         const historyItems = buildResumedHistoryItems(
@@ -463,6 +541,13 @@ export const AppContainer = (props: AppContainerProps) => {
           config,
         );
         historyManager.loadHistory(historyItems);
+
+        // Re-arm any `/goal` that was active when the prior session ended.
+        try {
+          restoreGoalFromHistory(historyItems, config, historyManager.addItem);
+        } catch {
+          // Restore is best-effort — never block resume on it.
+        }
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
@@ -486,32 +571,44 @@ export const AppContainer = (props: AppContainerProps) => {
         if (title) {
           setSessionName(title);
         }
-      }
 
-      // Fire SessionStart event after config is initialized
-      const sessionStartSource = resumedSessionData
-        ? SessionStartSource.Resume
-        : SessionStartSource.Startup;
-
-      const hookSystem = config.getHookSystem();
-
-      if (hookSystem) {
-        hookSystem
-          .fireSessionStartEvent(
-            sessionStartSource,
-            config.getModel() ?? '',
-            String(config.getApprovalMode()) as PermissionMode,
-          )
-          .then(() => {
-            debugLogger.debug('SessionStart event completed successfully');
-          })
-          .catch((err) => {
-            debugLogger.warn(`SessionStart hook failed: ${err}`);
-          });
-      } else {
-        debugLogger.debug(
-          'SessionStart: HookSystem not available, skipping event',
-        );
+        // Restore worktree context (shared logic — headless and ACP use
+        // the same helper). Stale sidecars get cleaned up; live ones
+        // produce an INFO message the model sees on the next turn.
+        // Skipped when Phase D-1 already injected a --worktree startup
+        // notice above (startup wins over resume on the same prompt).
+        if (!startupWorktreeNotice) {
+          try {
+            const sessionPath = config
+              .getSessionService()
+              .getWorktreeSessionPath(config.getSessionId());
+            const restored = await restoreWorktreeContext(
+              sessionPath,
+              (err) => {
+                // eslint-disable-next-line no-console
+                console.debug('worktree session restore warning:', err);
+              },
+            );
+            if (restored.contextMessage) {
+              // UI: show the notice in the transcript so the user knows.
+              historyManager.addItem(
+                { type: MessageType.INFO, text: restored.contextMessage },
+                Date.now(),
+              );
+              // Model: queue the notice for one-shot injection into the
+              // next user prompt (consumed by handleFinalSubmit). The INFO
+              // history item alone is UI-only — the model never sees it,
+              // so without this it could resume editing the parent
+              // checkout despite the user seeing the worktree path.
+              pendingWorktreeNoticeRef.current = restored.contextMessage;
+            }
+          } catch (error) {
+            // Best-effort: failures here only affect UI hint visibility,
+            // not the resumed conversation itself.
+            // eslint-disable-next-line no-console
+            console.debug('worktree session restore failed:', error);
+          }
+        }
       }
     })();
 
@@ -704,6 +801,8 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, []);
 
+  const preferredEditor = usePreferredEditor();
+
   const buffer = useTextBuffer({
     initialText: '',
     viewport: { height: 10, width: inputWidth },
@@ -711,6 +810,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setRawMode,
     isValidPath,
     shellModeActive,
+    preferredEditor,
   });
 
   useEffect(() => {
@@ -766,17 +866,36 @@ export const AppContainer = (props: AppContainerProps) => {
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
   // clear and remount the static region to redraw the banner at the top.
+  //
+  // Two requirements pull in opposite directions:
+  //   (a) refreshStatic() must NOT be called from inside a setState updater,
+  //       because React.StrictMode double-invokes updaters in dev and we'd
+  //       fire two clearTerminal writes per model swap.
+  //   (b) setHistoryRemountKey (inside refreshStatic) and setCurrentModel
+  //       MUST land in the SAME commit. MainContent's <Static> key is
+  //       `${historyRemountKey}-${currentModel}` and its render-phase
+  //       progressive-replay reset (lastRemountKey !== historyRemountKey)
+  //       only fires when historyRemountKey changes. If currentModel
+  //       changes first in its own render, Static remounts with the OLD
+  //       remount key and the unreset (full-length) replayCount — i.e.
+  //       a full-history Static render that bypasses progressive replay
+  //       (the issue #3899 freeze regression). See PR #4119 review.
+  //
+  // Fix: side-effect lives in the event handler (NOT the updater); a ref
+  // guard de-dupes same-model notifications. React batches the
+  // setHistoryRemountKey (via refreshStatic) and setCurrentModel calls in
+  // this event handler into a single commit, so the render-phase reset
+  // and the Static remount happen together — no full-history flash.
+  const lastNotifiedModelRef = useRef(currentModel);
   useEffect(() => {
     const unsubscribe = config.onModelChange((model) => {
-      setCurrentModel((prev) => {
-        if (prev === model) {
-          return prev;
-        }
-        refreshStatic();
-        return model;
-      });
+      if (lastNotifiedModelRef.current === model) {
+        return;
+      }
+      lastNotifiedModelRef.current = model;
+      refreshStatic();
+      setCurrentModel(model);
     });
-
     return unsubscribe;
   }, [config, refreshStatic]);
 
@@ -805,7 +924,7 @@ export const AppContainer = (props: AppContainerProps) => {
     refreshStatic,
   );
   const { state: authState, actions: authActions } = auth;
-  const { onAuthError, openAuthDialog, handleAuthSelect } = authActions;
+  const { onAuthError, openAuthDialog, closeAuthDialog } = authActions;
   const { isAuthDialogOpen, isAuthenticating, pendingAuthType } = authState;
 
   useInitializationAuthError(initializationResult.authError, onAuthError);
@@ -850,6 +969,26 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
+  const [isStatusLineDialogOpen, setStatusLineDialogOpen] = useState(false);
+  const openStatusLineDialog = useCallback(
+    () => setStatusLineDialogOpen(true),
+    [],
+  );
+  const closeStatusLineDialog = useCallback(
+    () => setStatusLineDialogOpen(false),
+    [],
+  );
+  const [statusLineSettingsVersion, setStatusLineSettingsVersion] = useState(0);
+  const [statusLineConfigOverride, setStatusLineConfigOverride] = useState<
+    StatusLinePresetConfig | undefined
+  >(undefined);
+  const notifyStatusLineSettingsChanged = useCallback(
+    (newConfig: StatusLinePresetConfig) => {
+      setStatusLineConfigOverride(newConfig);
+      setStatusLineSettingsVersion((version) => version + 1);
+    },
+    [],
+  );
   const { isMemoryDialogOpen, openMemoryDialog, closeMemoryDialog } =
     useMemoryDialog();
 
@@ -859,11 +998,6 @@ export const AppContainer = (props: AppContainerProps) => {
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
-  const {
-    isManageModelsDialogOpen,
-    openManageModelsDialog,
-    closeManageModelsDialog,
-  } = useManageModelsCommand();
   const { activeArenaDialog, openArenaDialog, closeArenaDialog } =
     useArenaCommand();
 
@@ -937,6 +1071,17 @@ export const AppContainer = (props: AppContainerProps) => {
   // is swapped in once the real callback exists.
   const openRewindSelectorRef = useRef<() => void>(() => {});
 
+  // /diff opens a per-turn diff dialog. Unlike rewind, no double-press or
+  // history-bound guard is needed, so the open/close handlers can live here
+  // (no ref bridge required).
+  const [isDiffDialogOpen, setIsDiffDialogOpen] = useState(false);
+  const openDiffDialog = useCallback(() => {
+    setIsDiffDialogOpen(true);
+  }, []);
+  const closeDiffDialog = useCallback(() => {
+    setIsDiffDialogOpen(false);
+  }, []);
+
   const slashCommandActions = useMemo(
     () => ({
       openAuthDialog,
@@ -944,8 +1089,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openMemoryDialog,
       openSettingsDialog,
+      openStatusLineDialog,
       openModelDialog,
-      openManageModelsDialog,
       openTrustDialog,
       openArenaDialog,
       openPermissionsDialog,
@@ -967,6 +1112,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       openResumeDialog,
       openRewindSelector: () => openRewindSelectorRef.current(),
+      openDiffDialog,
       handleResume,
       handleBranch,
       openDeleteDialog,
@@ -978,8 +1124,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openMemoryDialog,
       openSettingsDialog,
+      openStatusLineDialog,
       openModelDialog,
-      openManageModelsDialog,
       openArenaDialog,
       setDebugMessage,
       dispatchExtensionStateUpdate,
@@ -997,6 +1143,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleBranch,
       openDeleteDialog,
       openHelpDialog,
+      openDiffDialog,
     ],
   );
 
@@ -1027,6 +1174,7 @@ export const AppContainer = (props: AppContainerProps) => {
     extensionsUpdateStateInternal,
     isConfigInitialized,
     logger,
+    historyManager.updateItem,
     setSessionName,
   );
 
@@ -1036,6 +1184,107 @@ export const AppContainer = (props: AppContainerProps) => {
       config.getDebugLogger().debug(message);
     },
     [config],
+  );
+
+  const handleWorktreeExit = useCallback(
+    async (choice: 'keep' | 'remove' | 'cancel') => {
+      if (choice === 'cancel') {
+        setShowWorktreeExitDialog(false);
+        return;
+      }
+      setShowWorktreeExitDialog(false);
+      if (choice === 'remove' && activeWorktree) {
+        try {
+          // Anchor at the repo top-level (captured at enter time) rather
+          // than the current targetDir — when the CLI was launched from
+          // a monorepo subdirectory, `config.getTargetDir()` is that
+          // subdir but the worktree lives at `<repoRoot>/.qwen/worktrees/`,
+          // so a service rooted at the subdir would never find it. (PR
+          // #4174 review finding 3252368637.)
+          const svc = new GitWorktreeService(activeWorktree.originalCwd);
+          // Ownership guard — read the in-worktree session marker and
+          // refuse to remove a worktree owned by a different session
+          // (stale sidecar, copied state from another machine, etc.).
+          // Mirrors the guard ExitWorktreeTool applies on the model
+          // path; without it the dialog could destroy a worktree it
+          // doesn't own. (PR #4174 review #3259975247.)
+          const owner = await readWorktreeSessionMarker(activeWorktree.path);
+          const currentSessionId = config.getSessionId();
+          if (owner !== null && owner !== currentSessionId) {
+            historyManager.addItem(
+              {
+                type: MessageType.ERROR,
+                text:
+                  `Refusing to remove worktree "${activeWorktree.slug}" — ` +
+                  `it was created by a different session (owner=${owner}). ` +
+                  `Resume the owning session to drop it, or remove it ` +
+                  `manually with \`git worktree remove ${activeWorktree.path}\`.`,
+              },
+              Date.now(),
+            );
+            return;
+          }
+          // The user just clicked Remove on a dialog that already showed
+          // the dirty-state and unmerged-commit counts ("discards N
+          // commits, M files"). Force-delete the branch to honour that
+          // intent — without it, `git branch -d` refuses unmerged
+          // commits and the branch is silently preserved, contradicting
+          // the dialog text. (Finding 3252368640 part 2.)
+          const result = await svc.removeUserWorktree(activeWorktree.slug, {
+            deleteBranch: true,
+            forceDeleteBranch: true,
+          });
+          // removeUserWorktree returns {success, error} on failure — it
+          // does NOT throw — so the previous try/catch never tripped on
+          // a soft failure. If removal failed, leave the sidecar intact
+          // so the next --resume can still see the worktree. Surface
+          // the error in history and stay in the session so the user
+          // can decide what to do (retry via exit_worktree, fix the
+          // underlying problem, or force-quit). Previously the dialog
+          // silently /quit on failure, contradicting the "discards N
+          // commits, M files" intent the user clicked Remove on.
+          // (Findings 3252368640 part 1 + 3256237933.)
+          if (!result.success) {
+            historyManager.addItem(
+              {
+                type: MessageType.ERROR,
+                text:
+                  `Failed to remove worktree "${activeWorktree.slug}": ` +
+                  `${result.error ?? 'unknown error'}. The worktree is ` +
+                  `still on disk; use \`exit_worktree\` to retry or ` +
+                  `remove it manually with \`git worktree remove\`.`,
+              },
+              Date.now(),
+            );
+            return;
+          }
+          await clearWorktreeSession(
+            config
+              .getSessionService()
+              .getWorktreeSessionPath(config.getSessionId()),
+          );
+        } catch (error) {
+          // Hard failure (e.g. git binary missing, GitWorktreeService
+          // constructor threw). Same treatment as the soft failure
+          // path: surface to the user and stay alive — silent /quit
+          // here would leave the user wondering whether the worktree
+          // was actually removed.
+          historyManager.addItem(
+            {
+              type: MessageType.ERROR,
+              text:
+                `Worktree removal failed for "${activeWorktree.slug}": ` +
+                `${error instanceof Error ? error.message : String(error)}. ` +
+                `Use \`exit_worktree\` or remove it manually.`,
+            },
+            Date.now(),
+          );
+          return;
+        }
+      }
+      handleSlashCommand('/quit');
+    },
+    [activeWorktree, config, handleSlashCommand, historyManager],
   );
 
   const performMemoryRefresh = useCallback(async () => {
@@ -1167,8 +1416,11 @@ export const AppContainer = (props: AppContainerProps) => {
     hideTips: tipsDisabled,
   });
 
-  // Track whether suggestions are visible for Tab key handling
-  const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
+  // Track whether the input area has any Tab consumer (autocomplete dropdown,
+  // followup suggestion, mid-input ghost text, reverse/command search). When
+  // true, we suppress the Windows-only "bare Tab cycles approval mode"
+  // fallback so a single Tab keystroke triggers only one action. See #4171.
+  const [hasTabConsumer, setHasTabConsumer] = useState(false);
 
   const agentViewState = useAgentViewState();
   const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
@@ -1192,9 +1444,10 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const showAutoAcceptIndicator = useAutoAcceptIndicator({
     config,
+    settings,
     addItem: historyManager.addItem,
     onApprovalModeChange: handleApprovalModeChange,
-    shouldBlockTab: () => hasSuggestionsVisible,
+    shouldBlockTab: () => hasTabConsumer,
     disabled: agentViewState.activeView !== 'main',
   });
 
@@ -1347,6 +1600,18 @@ export const AppContainer = (props: AppContainerProps) => {
           agent.interactiveAgent.enqueueMessage(submittedValue.trim());
           return;
         }
+      }
+      // Phase C: one-shot worktree restore reminder. Set during --resume
+      // when the persisted sidecar names a live worktree. We only inject
+      // on top-level user prompts (not btw-during-response, not slash
+      // commands — those go through different paths). Once consumed,
+      // clear the ref so subsequent prompts aren't repeatedly prefixed.
+      const worktreeNotice = pendingWorktreeNoticeRef.current;
+      if (worktreeNotice && !isSlashCommand(submittedValue)) {
+        pendingWorktreeNoticeRef.current = null;
+        submittedValue =
+          `<system-reminder>\n${worktreeNotice}\n</system-reminder>\n\n` +
+          submittedValue;
       }
       if (
         streamingState === StreamingState.Responding &&
@@ -1847,10 +2112,8 @@ export const AppContainer = (props: AppContainerProps) => {
       const fullHistory = geminiClient.getChat().getHistory(true);
       const conversationHistory =
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
-      const fastModel = config.getFastModel();
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
-        model: fastModel,
       })
         .then((result) => {
           if (ac.signal.aborted) return;
@@ -1858,9 +2121,7 @@ export const AppContainer = (props: AppContainerProps) => {
             setPromptSuggestion(result.suggestion);
             // Start speculation if enabled (runs in background)
             if (settings.merged.ui?.enableSpeculation) {
-              startSpeculation(config, result.suggestion, ac.signal, {
-                model: fastModel,
-              })
+              startSpeculation(config, result.suggestion, ac.signal)
                 .then((state) => {
                   speculationRef.current = state;
                 })
@@ -2021,9 +2282,9 @@ export const AppContainer = (props: AppContainerProps) => {
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
+    isStatusLineDialogOpen ||
     isMemoryDialogOpen ||
     isModelDialogOpen ||
-    isManageModelsDialogOpen ||
     isTrustDialogOpen ||
     activeArenaDialog !== null ||
     isPermissionsDialogOpen ||
@@ -2041,7 +2302,10 @@ export const AppContainer = (props: AppContainerProps) => {
     isHelpDialogOpen ||
     isExtensionsManagerDialogOpen ||
     isRewindSelectorOpen ||
-    bgTasksDialogOpen;
+    isDiffDialogOpen ||
+    bgTasksDialogOpen ||
+    showWorktreeExitDialog ||
+    !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
   dialogsVisibleRef.current = dialogsVisible;
   const shouldShowStickyTodos =
     stickyTodos !== null &&
@@ -2141,14 +2405,25 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   // --- Rewind selector callbacks ---
+  // IDE guard here is NOT redundant with the keyboard handler guard (line ~2375):
+  // /rewind calls openRewindSelector directly, bypassing the keyboard handler.
   const openRewindSelector = useCallback(() => {
     if (streamingState !== StreamingState.Idle) return;
-    if (config.getIdeMode()) return;
     if (dialogsVisibleRef.current) return;
+    if (config.getIdeMode()) {
+      historyManager.addItem(
+        {
+          type: 'info',
+          text: 'Rewind is disabled in IDE mode.',
+        },
+        Date.now(),
+      );
+      return;
+    }
     const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
     if (!hasUserTurns) return;
     setIsRewindSelectorOpen(true);
-  }, [streamingState, config, historyManager.history]);
+  }, [streamingState, config, historyManager]);
   openRewindSelectorRef.current = openRewindSelector;
 
   const closeRewindSelector = useCallback(() => {
@@ -2156,75 +2431,189 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   const handleRewindConfirm = useCallback(
-    (userItem: HistoryItem) => {
-      const geminiClient = config.getGeminiClient();
-      if (!geminiClient) return;
+    async (userItem: HistoryItem, option: RestoreOption) => {
+      try {
+        // For 'both', validate that conversation can be truncated BEFORE
+        // touching files — otherwise we'd roll back the workspace while
+        // the conversation stays at the newer state.
+        const needsConversation =
+          option === 'conversation' || option === 'both';
+        const geminiClient = needsConversation
+          ? config.getGeminiClient()
+          : null;
+        let apiTruncateIndex = -1;
+        let conversationSkippedNoClient = false;
+        if (needsConversation) {
+          if (!geminiClient) {
+            if (option === 'conversation') {
+              historyManager.addItem(
+                {
+                  type: 'error',
+                  text: t(
+                    'Cannot rewind conversation: no active model client.',
+                  ),
+                },
+                Date.now(),
+              );
+              return;
+            }
+            // 'both' with no client: skip conversation, still try files,
+            // and surface a warning after the restore output.
+            conversationSkippedNoClient = true;
+          } else {
+            apiTruncateIndex = computeApiTruncationIndex(
+              historyManager.history,
+              userItem.id,
+              geminiClient.getHistory(),
+            );
+            if (apiTruncateIndex < 0) {
+              historyManager.addItem(
+                {
+                  type: 'error',
+                  text: t(
+                    'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+                  ),
+                },
+                Date.now(),
+              );
+              if (option === 'both') {
+                // Abort file restore too — don't create inconsistent state
+                return;
+              }
+              return;
+            }
+          }
+        }
 
-      // 1. Compute values from current history BEFORE truncation
-      const originalHistory = historyManager.history;
-      const originalLength = originalHistory.length;
+        // Restore code (files on disk). For 'code'-only, don't truncate
+        // the snapshot timeline — the conversation turns remain visible
+        // and their snapshots must stay available for future rewinds.
+        let fileRestoreMessage: string | undefined;
+        let fileRestoreError: string | undefined;
+        let hasRestoreFailure = false;
+        if (option === 'code' || option === 'both') {
+          const promptId = (userItem as HistoryItemUser).promptId;
+          if (promptId) {
+            try {
+              const truncateHistory =
+                option === 'both' && !!geminiClient && apiTruncateIndex >= 0;
+              const result = await config
+                .getFileHistoryService()
+                .rewind(promptId, truncateHistory);
+              if (result.filesChanged.length > 0) {
+                fileRestoreMessage = t('Restored {{count}} file(s).', {
+                  count: String(result.filesChanged.length),
+                });
+              } else if (result.filesFailed.length === 0) {
+                fileRestoreMessage = t('No files needed to be restored.');
+              }
+              if (result.filesFailed.length > 0) {
+                hasRestoreFailure = true;
+                fileRestoreError = t(
+                  'Failed to restore {{count}} file(s): {{files}}',
+                  {
+                    count: String(result.filesFailed.length),
+                    files: result.filesFailed
+                      .map((f) => f.split('/').pop())
+                      .join(', '),
+                  },
+                );
+              }
+            } catch (error) {
+              hasRestoreFailure = true;
+              fileRestoreError = t('Failed to restore files: {{error}}', {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          } else {
+            hasRestoreFailure = true;
+            fileRestoreError = t(
+              'Cannot restore files: this turn was created before file checkpointing was enabled.',
+            );
+          }
+        }
 
-      let targetTurnIndex = 0;
-      for (const h of originalHistory) {
-        if (h.id === userItem.id) break;
-        if (isRealUserTurn(h)) targetTurnIndex++;
-      }
+        // Truncate conversation (already validated above).
+        // Skip if file restore had failures in "both" mode to avoid inconsistent state.
+        if (
+          needsConversation &&
+          geminiClient &&
+          apiTruncateIndex >= 0 &&
+          !(option === 'both' && hasRestoreFailure)
+        ) {
+          const originalHistory = historyManager.history;
+          const originalLength = originalHistory.length;
 
-      // 2. Compute API truncation point
-      const apiHistory = geminiClient.getHistory();
-      const apiTruncateIndex = computeApiTruncationIndex(
-        originalHistory,
-        userItem.id,
-        apiHistory,
-      );
+          let targetTurnIndex = 0;
+          for (const h of originalHistory) {
+            if (h.id === userItem.id) break;
+            if (isRealUserTurn(h)) targetTurnIndex++;
+          }
 
-      // Abort if the target turn is unreachable (e.g., absorbed by compression)
-      if (apiTruncateIndex < 0) {
+          geminiClient.truncateHistory(apiTruncateIndex);
+
+          const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
+          historyManager.loadHistory(truncatedUi);
+
+          refreshStatic();
+
+          if (userItem.type === 'user' && userItem.text) {
+            buffer.setText(userItem.text);
+          }
+
+          historyManager.addItem(
+            {
+              type: 'info',
+              text: t(
+                'Conversation rewound. Edit your prompt and press Enter to continue.',
+              ),
+            },
+            Date.now(),
+          );
+
+          config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
+            truncatedCount: originalLength - truncatedUi.length,
+          });
+        }
+
+        // Show file restore result after conversation truncation so the
+        // message isn't immediately removed by loadHistory.
+        if (fileRestoreMessage) {
+          historyManager.addItem(
+            { type: 'info', text: fileRestoreMessage },
+            Date.now(),
+          );
+        }
+        if (fileRestoreError) {
+          historyManager.addItem(
+            { type: 'error', text: fileRestoreError },
+            Date.now(),
+          );
+        }
+        if (conversationSkippedNoClient) {
+          historyManager.addItem(
+            {
+              type: 'info',
+              text: t(
+                'Code restored, but conversation could not be rewound (no active client).',
+              ),
+            },
+            Date.now(),
+          );
+        }
+      } catch (error) {
         historyManager.addItem(
           {
             type: 'error',
-            text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+            text: t('Rewind failed: {{error}}', {
+              error: error instanceof Error ? error.message : String(error),
+            }),
           },
           Date.now(),
         );
+      } finally {
         setIsRewindSelectorOpen(false);
-        return;
       }
-
-      // 3. Truncate API history to the target point.
-      // Do NOT strip thought parts — reasoning models (e.g. DeepSeek) require
-      // reasoning_content continuity across all turns in the conversation.
-      geminiClient.truncateHistory(apiTruncateIndex);
-
-      // 4. Truncate UI history (keep everything before the target item)
-      const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
-      historyManager.loadHistory(truncatedUi);
-
-      // 5. Re-render the terminal
-      refreshStatic();
-
-      // 6. Pre-populate input with the original user text
-      if (userItem.type === 'user' && userItem.text) {
-        buffer.setText(userItem.text);
-      }
-
-      // 7. Add info message
-      historyManager.addItem(
-        {
-          type: 'info',
-          text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
-        },
-        Date.now(),
-      );
-
-      // 8. Record the rewind event — re-roots the parentUuid chain so
-      //    rewound messages end up on a dead branch during resume.
-      config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-        truncatedCount: originalLength - truncatedUi.length,
-      });
-
-      // 9. Close the selector
-      setIsRewindSelectorOpen(false);
     },
     [config, historyManager, refreshStatic, buffer],
   );
@@ -2365,12 +2754,14 @@ export const AppContainer = (props: AppContainerProps) => {
     isApprovalModeDialogOpen,
     handleApprovalModeSelect,
     isAuthDialogOpen,
-    handleAuthSelect,
+    closeAuthDialog,
     pendingAuthType,
     isEditorDialogOpen,
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    isStatusLineDialogOpen,
+    closeStatusLineDialog,
     isMemoryDialogOpen,
     closeMemoryDialog,
     activeArenaDialog,
@@ -2382,6 +2773,10 @@ export const AppContainer = (props: AppContainerProps) => {
     closeHelpDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
+    isDiffDialogOpen,
+    closeDiffDialog,
+    showWorktreeExitDialog,
+    closeWorktreeExitDialog: () => setShowWorktreeExitDialog(false),
   });
 
   const handleExit = useCallback(
@@ -2390,10 +2785,18 @@ export const AppContainer = (props: AppContainerProps) => {
       setPressedOnce: (value: boolean) => void,
       timerRef: React.MutableRefObject<NodeJS.Timeout | null>,
     ) => {
-      // Fast double-press: Direct quit (preserve user habit)
+      // Fast double-press: Direct quit (preserve user habit) — unless the
+      // session is inside an active worktree, in which case intercept and
+      // show WorktreeExitDialog so the user explicitly decides keep vs
+      // remove before the process exits.
       if (pressedOnce) {
         if (timerRef.current) {
           clearTimeout(timerRef.current);
+        }
+        if (activeWorktree) {
+          setShowWorktreeExitDialog(true);
+          setPressedOnce(false);
+          return;
         }
         // Exit directly
         handleSlashCommand('/quit');
@@ -2454,6 +2857,7 @@ export const AppContainer = (props: AppContainerProps) => {
       streamingState,
       cancelOngoingRequest,
       buffer,
+      activeWorktree,
     ],
   );
 
@@ -2540,7 +2944,8 @@ export const AppContainer = (props: AppContainerProps) => {
         // Input is empty and idle — double-ESC opens rewind selector
         if (
           streamingState === StreamingState.Idle &&
-          !dialogsVisibleRef.current
+          !dialogsVisibleRef.current &&
+          !config.getIdeMode()
         ) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
@@ -2802,10 +3207,12 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isStatusLineDialogOpen,
+      statusLineSettingsVersion,
+      statusLineConfigOverride,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
-      isManageModelsDialogOpen,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -2868,6 +3275,8 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelBtw,
       nightly,
       branchName,
+      activeWorktree,
+      showWorktreeExitDialog,
       sessionStats,
       terminalWidth,
       terminalHeight,
@@ -2909,6 +3318,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,
+      // Diff dialog
+      isDiffDialogOpen,
     }),
     [
       isThemeDialogOpen,
@@ -2920,10 +3331,12 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isStatusLineDialogOpen,
+      statusLineSettingsVersion,
+      statusLineConfigOverride,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
-      isManageModelsDialogOpen,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -2985,6 +3398,8 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelBtw,
       nightly,
       branchName,
+      activeWorktree,
+      showWorktreeExitDialog,
       sessionStats,
       terminalWidth,
       terminalHeight,
@@ -3028,6 +3443,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Rewind selector
       isRewindSelectorOpen,
       rewindEscPending,
+      // Diff dialog
+      isDiffDialogOpen,
     ],
   );
 
@@ -3043,11 +3460,11 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeStatusLineDialog,
+      notifyStatusLineSettingsChanged,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
-      openManageModelsDialog,
-      closeManageModelsDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -3061,7 +3478,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFolderTrustSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
-      onSuggestionsVisibilityChange: setHasSuggestionsVisible,
+      onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,
       handleRetryLastPrompt: retryLastPrompt,
@@ -3070,6 +3487,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
+      // Worktree exit dialog
+      handleWorktreeExit,
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
@@ -3105,6 +3524,9 @@ export const AppContainer = (props: AppContainerProps) => {
       openRewindSelector,
       closeRewindSelector,
       handleRewindConfirm,
+      // Diff dialog
+      openDiffDialog,
+      closeDiffDialog,
     }),
     [
       openThemeDialog,
@@ -3117,11 +3539,11 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeStatusLineDialog,
+      notifyStatusLineSettingsChanged,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
-      openManageModelsDialog,
-      closeManageModelsDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -3142,6 +3564,7 @@ export const AppContainer = (props: AppContainerProps) => {
       popAllMessages,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
+      handleWorktreeExit,
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
@@ -3177,6 +3600,9 @@ export const AppContainer = (props: AppContainerProps) => {
       openRewindSelector,
       closeRewindSelector,
       handleRewindConfirm,
+      // Diff dialog
+      openDiffDialog,
+      closeDiffDialog,
     ],
   );
 

@@ -7,6 +7,7 @@
 import { useReducer, useRef, useEffect } from 'react';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { useKeypress } from './useKeypress.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
 
 export interface SelectionListItem<T> {
   key: string;
@@ -324,12 +325,12 @@ export function useSelectionList<T>({
         numberInputRef.current = '';
       }
 
-      if (name === 'k' || name === 'up') {
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         dispatch({ type: 'MOVE_UP', payload: { items } });
         return;
       }
 
-      if (name === 'j' || name === 'down') {
+      if (keyMatchers[Command.SELECTION_DOWN](key)) {
         dispatch({ type: 'MOVE_DOWN', payload: { items } });
         return;
       }

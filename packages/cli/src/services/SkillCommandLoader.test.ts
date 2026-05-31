@@ -7,17 +7,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SkillCommandLoader } from './SkillCommandLoader.js';
 import { CommandKind } from '../ui/commands/types.js';
-import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
+import {
+  buildSkillLlmContent,
+  type Config,
+  type SkillConfig,
+} from '@qwen-code/qwen-code-core';
 
 function makeSkill(overrides: Partial<SkillConfig> = {}): SkillConfig {
   return {
     name: 'my-skill',
     description: 'My skill description',
     level: 'user',
-    filePath: '/home/user/.qwen/skills/my-skill/SKILL.md',
+    filePath: '/tmp/qwen-test/skills/my-skill/SKILL.md',
     body: 'Skill body content.',
     ...overrides,
   };
+}
+
+function makeSkillPrompt(body: string): string {
+  return buildSkillLlmContent('/tmp/qwen-test/skills/my-skill', body);
 }
 
 describe('SkillCommandLoader', () => {
@@ -104,6 +112,21 @@ describe('SkillCommandLoader', () => {
     expect(cmd.modelInvocable).toBe(true);
   });
 
+  it('does not propagate skill.priority to completionPriority', async () => {
+    // Priority is scoped to the `/skills` listing only; slash-completion /
+    // `/help` ordering should be independent of any skill's priority value.
+    const skill = makeSkill({ level: 'user', priority: 42 });
+    mockSkillManager.listSkills.mockImplementation(
+      ({ level }: { level: string }) =>
+        Promise.resolve(level === 'user' ? [skill] : []),
+    );
+
+    const loader = new SkillCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0].completionPriority).toBeUndefined();
+  });
+
   it('should load project skill with sourceLabel "Project"', async () => {
     const skill = makeSkill({ level: 'project' });
     mockSkillManager.listSkills.mockImplementation(
@@ -136,7 +159,7 @@ describe('SkillCommandLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'Skill body content.' }],
+      content: [{ text: makeSkillPrompt('Skill body content.') }],
     });
   });
 
@@ -156,7 +179,11 @@ describe('SkillCommandLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'Skill body content.\n\n/my-skill foo' }],
+      content: [
+        {
+          text: `${makeSkillPrompt('Skill body content.')}\n\n/my-skill foo`,
+        },
+      ],
     });
   });
 

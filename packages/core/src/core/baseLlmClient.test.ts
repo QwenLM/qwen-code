@@ -117,6 +117,19 @@ const createMockResponseWithoutFunctionCall = (): GenerateContentResponse =>
     ],
   }) as GenerateContentResponse;
 
+const createMockTextResponse = (text: string): GenerateContentResponse =>
+  ({
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: [{ text }],
+        },
+        index: 0,
+      },
+    ],
+  }) as GenerateContentResponse;
+
 describe('BaseLlmClient', () => {
   let client: BaseLlmClient;
   let abortController: AbortController;
@@ -322,6 +335,50 @@ describe('BaseLlmClient', () => {
 
       expect(result).toEqual({});
     });
+
+    it('should parse a loose JSON object from text when no function call is returned', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('Result:\n{"color":"purple","count":2}\nDone.'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'purple', count: 2 });
+    });
+
+    it('should parse fenced JSON text when no function call is returned', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('```json\n{"color":"orange"}\n```'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'orange' });
+    });
+
+    it('should ignore malformed loose JSON text', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('```json\n{"color":\n```'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+    });
+
+    it('should reject loose JSON arrays', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('[{"color":"blue"}]'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+    });
   });
 
   describe('generateJson - Error Handling', () => {
@@ -502,7 +559,16 @@ describe('BaseLlmClient', () => {
         getEmbeddingModel: vi.fn().mockReturnValue('test-embedding-model'),
         getModel: vi.fn().mockReturnValue('main-model'),
         getFastModel: vi.fn().mockReturnValue(undefined),
-        getFastModelForSideQuery: vi.fn().mockReturnValue(undefined),
+        getAllConfiguredModels: vi.fn((authTypes?: AuthType[]) =>
+          authTypes?.includes(AuthType.QWEN_OAUTH)
+            ? []
+            : [
+                {
+                  id: fastModel,
+                  authType: AuthType.USE_ANTHROPIC,
+                },
+              ],
+        ),
         getModelsConfig: vi.fn().mockReturnValue({ getResolvedModel }),
       } as unknown as Mocked<Config>;
     });
@@ -514,6 +580,29 @@ describe('BaseLlmClient', () => {
 
       expect(resolved.contentGenerator).toBe(mockContentGenerator);
       expect(resolved.retryAuthType).toBe(AuthType.QWEN_OAUTH);
+      expect(getResolvedModel).not.toHaveBeenCalled();
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('returns the active runtime generator when model matches the runtime view', async () => {
+      const runtimeContentGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      crossProviderConfig.getContentGenerator = vi
+        .fn()
+        .mockReturnValue(runtimeContentGenerator);
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'runtime-model',
+      });
+      vi.mocked(crossProviderConfig.getModel).mockReturnValue('runtime-model');
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const resolved = await c.resolveForModel('runtime-model');
+
+      expect(resolved.contentGenerator).toBe(runtimeContentGenerator);
+      expect(resolved.retryAuthType).toBe(AuthType.USE_OPENAI);
       expect(getResolvedModel).not.toHaveBeenCalled();
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
@@ -586,6 +675,38 @@ describe('BaseLlmClient', () => {
       expect(resolved.contentGenerator).toBe(mockContentGenerator);
       // Falls back to main authType for retry classification.
       expect(resolved.retryAuthType).toBe(AuthType.QWEN_OAUTH);
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('does not cache the unregistered-model fallback across runtime-view changes', async () => {
+      // Unregistered selector: createContentGeneratorForModel falls back to
+      // getCurrentContentGenerator(). The runtime view changes between calls
+      // — caching would pin the first call's generator under the selector
+      // key and return it on the second call after the view has unwound.
+      getResolvedModel.mockReturnValue(undefined);
+
+      const firstRuntimeGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      const secondRuntimeGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      const getContentGenerator = vi
+        .fn()
+        .mockReturnValueOnce(firstRuntimeGenerator)
+        .mockReturnValueOnce(secondRuntimeGenerator);
+      crossProviderConfig.getContentGenerator = getContentGenerator;
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const first = await c.resolveForModel('unknown-model');
+      const second = await c.resolveForModel('unknown-model');
+
+      expect(first.contentGenerator).toBe(firstRuntimeGenerator);
+      expect(second.contentGenerator).toBe(secondRuntimeGenerator);
+      expect(getContentGenerator).toHaveBeenCalledTimes(2);
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
@@ -681,9 +802,7 @@ describe('BaseLlmClient', () => {
     });
 
     it('generateJson resolves fast selectors through the configured fast model', async () => {
-      crossProviderConfig.getFastModelForSideQuery.mockReturnValue(
-        'openai:shared-model',
-      );
+      crossProviderConfig.getFastModel.mockReturnValue('openai:shared-model');
       getResolvedModel.mockImplementation((authType: string, model: string) => {
         if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
           return {

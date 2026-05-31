@@ -34,11 +34,10 @@
  * as forward-compatible additions.
  */
 
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { isNodeError } from './errors.js';
+import { atomicWriteJSON } from './atomicFileWrite.js';
 
 export const RUNTIME_STATUS_SCHEMA_VERSION = 1;
 
@@ -106,19 +105,7 @@ export async function writeRuntimeStatus(
   };
 
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-
-  const tmpPath = `${filePath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-  try {
-    await fs.writeFile(tmpPath, JSON.stringify(payload, null, 2), 'utf-8');
-    await renameWithRetry(tmpPath, filePath, 3, 50);
-  } catch (err) {
-    try {
-      await fs.unlink(tmpPath);
-    } catch {
-      // ignore cleanup errors
-    }
-    throw err;
-  }
+  await atomicWriteJSON(filePath, payload);
   return filePath;
 }
 
@@ -215,25 +202,4 @@ export async function clearRuntimeStatus(filePath: string): Promise<void> {
 
 function isFiniteInteger(v: unknown): v is number {
   return typeof v === 'number' && Number.isInteger(v);
-}
-
-async function renameWithRetry(
-  src: string,
-  dest: string,
-  retries: number,
-  delayMs: number,
-): Promise<void> {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      await fs.rename(src, dest);
-      return;
-    } catch (err) {
-      const retryable =
-        isNodeError(err) && (err.code === 'EPERM' || err.code === 'EACCES');
-      if (!retryable || attempt === retries) {
-        throw err;
-      }
-      await new Promise((r) => setTimeout(r, delayMs * 2 ** attempt));
-    }
-  }
 }

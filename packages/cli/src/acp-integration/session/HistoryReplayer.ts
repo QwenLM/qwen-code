@@ -69,6 +69,20 @@ export class HistoryReplayer {
           }
           break;
         }
+        if (record.subtype === 'mid_turn_user_message') {
+          const displayText = (
+            record.systemPayload as NotificationRecordPayload | undefined
+          )?.displayText;
+          if (displayText) {
+            await this.messageEmitter.emitUserMessage(
+              displayText,
+              record.timestamp,
+            );
+          } else if (record.message) {
+            await this.replayContent(record.message, 'user', record.timestamp);
+          }
+          break;
+        }
         if (record.message) {
           await this.replayContent(record.message, 'user', record.timestamp);
         }

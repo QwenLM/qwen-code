@@ -1,6 +1,6 @@
 {
   "name": "@alife/dataworks-qwen-code-channel-weixin",
-  "version": "0.15.11",
+  "version": "0.17.0",
   "description": "WeChat (Weixin) channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",

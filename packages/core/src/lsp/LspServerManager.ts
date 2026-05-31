@@ -265,6 +265,7 @@ export class LspServerManager {
       const connection = await this.createLspConnection(handle.config);
       handle.connection = connection.connection;
       handle.process = connection.process;
+      handle.processDiagnostics = connection.processDiagnostics;
 
       // Initialize LSP server
       await this.initializeLspServer(connection, handle.config);
@@ -275,6 +276,12 @@ export class LspServerManager {
     } catch (error) {
       handle.status = 'FAILED';
       handle.error = error as Error;
+      if (handle.processDiagnostics) {
+        debugLogger.error(
+          `LSP server ${name} process diagnostics:`,
+          handle.processDiagnostics,
+        );
+      }
       debugLogger.error(`LSP server ${name} failed to start:`, error);
     }
   }
@@ -299,6 +306,7 @@ export class LspServerManager {
     }
     handle.connection = undefined;
     handle.process = undefined;
+    handle.processDiagnostics = undefined;
     handle.status = 'NOT_STARTED';
     handle.warmedUp = false;
     handle.restartAttempts = 0;
@@ -368,6 +376,7 @@ export class LspServerManager {
     }
     handle.connection = undefined;
     handle.process = undefined;
+    handle.processDiagnostics = undefined;
     handle.status = 'NOT_STARTED';
     handle.error = undefined;
     handle.warmedUp = false;
@@ -442,6 +451,7 @@ export class LspServerManager {
       return {
         connection: lspConnection.connection,
         process: lspConnection.process as ChildProcess,
+        processDiagnostics: lspConnection.processDiagnostics,
         shutdown: async () => {
           await lspConnection.connection.shutdown();
         },
