@@ -221,7 +221,12 @@ function matchesQwenHomeSurface(normalizedPath: string): boolean {
   return false;
 }
 
+const writePathCandidateCache = new Map<string, string[]>();
+
 function getAutoModeWritePathCandidates(filePath: string): string[] {
+  const cached = writePathCandidateCache.get(filePath);
+  if (cached) return cached;
+
   const candidates = new Set<string>([filePath]);
 
   try {
@@ -238,7 +243,9 @@ function getAutoModeWritePathCandidates(filePath: string): string[] {
     }
   }
 
-  return [...candidates];
+  const result = [...candidates];
+  writePathCandidateCache.set(filePath, result);
+  return result;
 }
 
 export function isAutoModeProtectedWritePath(filePath: string): boolean {
