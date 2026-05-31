@@ -7,6 +7,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   context as otelContext,
+  ROOT_CONTEXT,
   SpanKind,
   SpanStatusCode,
   trace,
@@ -26,7 +27,7 @@ import {
 } from './constants.js';
 import { clearDetailedSpanState } from './detailed-span-attributes.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
-import { getSessionContext, setSessionContext } from './session-context.js';
+import { setSessionContext } from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
@@ -116,31 +117,19 @@ interface SpanContext {
  * Priority:
  *  1. Explicit parent (from `interactionContext` / `toolContext` ALS) — keeps
  *     the LLM/tool/exec span attached to its logical owner.
- *  2. Currently-active OTel span — preserves the trace tree when an
- *     LLM or tool call is nested inside another span (e.g. subagent inside a
- *     tool, or any nested-tool path) but the ALS parent has already exited.
- *     Without this, the new span re-parents to the synthetic session root and
- *     the trace flattens.
- *  3. Synthetic session-root context — keeps side-query spans (auto-title,
- *     recap, etc.) correlated with the session even when they run outside
- *     any interaction.
- *  4. Active context as a no-op fallback.
- *
- * Mirrors `tracer.ts:getParentContext()` (#4126 review follow-up, #4212).
+ *  2. Currently-active OTel context — preserves the trace tree when a span
+ *     is nested inside another (e.g. subagent inside a tool). Spans created
+ *     outside any interaction become trace roots with fresh traceIds;
+ *     cross-prompt correlation uses the `session.id` attribute instead.
  *
  * SYNC: keep parent-resolution logic in step with getParentContext() in
- * telemetry/tracer.ts — drift here re-introduces the trace-tree flattening
- * issue #4212 set out to fix (#4302 review).
+ * telemetry/tracer.ts (#4302 review).
  */
 function resolveParentContext(parent: SpanContext | undefined): Context {
   if (parent) {
     return trace.setSpan(otelContext.active(), parent.span);
   }
-  const active = otelContext.active();
-  if (trace.getSpan(active)) {
-    return active;
-  }
-  return getSessionContext() ?? active;
+  return otelContext.active();
 }
 
 const NOOP_SPAN = trace.wrapSpanContext({
@@ -291,13 +280,13 @@ export function startInteractionSpan(
     'interaction.sequence': interactionSequence,
   };
 
-  // Pin to session root directly — resolveParentContext() would prefer
-  // any active OTel span, but interaction is a turn boundary (#4486).
-  const sessionCtx = getSessionContext() ?? otelContext.active();
+  // Each interaction is a trace root with its own traceId so that traces
+  // stay bounded and renderable in trace viewers (ARMS / Jaeger).
+  // Cross-prompt correlation uses the session.id span attribute instead.
   const span = getTracer().startSpan(
     SPAN_INTERACTION,
     { kind: SpanKind.INTERNAL, attributes },
-    sessionCtx,
+    ROOT_CONTEXT,
   );
 
   const spanId = getSpanId(span);
@@ -353,9 +342,9 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
   }
 
   const parentCtx = interactionContext.getStore();
-  // resolveParentContext() also re-parents to the active OTel span when
+  // resolveParentContext() re-parents to the active OTel span when
   // present, so a side-query LLM call nested inside a tool span still
-  // attaches to the tool span instead of skipping back to the session root.
+  // attaches to the tool span instead of becoming a separate trace root.
   const ctx = resolveParentContext(parentCtx);
 
   const attributes: Attributes = {
@@ -503,7 +492,7 @@ export function startToolSpan(
 
   const parentCtx = interactionContext.getStore();
   // Same fallback as startLLMRequestSpan: prefer active OTel span for
-  // tools-inside-tools cases before falling back to the session root.
+  // tools-inside-tools cases before becoming a trace root.
   const ctx = resolveParentContext(parentCtx);
 
   const attributes: Attributes = {
@@ -617,7 +606,7 @@ export function startToolExecutionSpan(): Span {
   }
   // Without an explicit toolContext parent we still try the active OTel span
   // (some tool execution paths run inside a withSpan() block from another
-  // subsystem) before falling back to the session root.
+  // subsystem) before becoming a trace root.
   const ctx = resolveParentContext(parentCtx);
 
   const span = getTracer().startSpan(

@@ -20,7 +20,12 @@ import { CompressionAlgorithm } from '@opentelemetry/otlp-exporter-base';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
 import { resourceFromAttributes } from '@opentelemetry/resources';
-import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
+import {
+  BatchSpanProcessor,
+  type ReadableSpan,
+  type Span as SdkSpan,
+  type SpanProcessor,
+} from '@opentelemetry/sdk-trace-node';
 import { BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
 import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
@@ -35,8 +40,10 @@ import {
 } from './file-exporters.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
-import { createSessionRootContext } from './tracer.js';
-import { setSessionContext } from './session-context.js';
+import {
+  getCurrentSessionId,
+  setSessionContext,
+} from './session-context.js';
 import { endInteractionSpan } from './session-tracing.js';
 
 function createTelemetryDiagLogger(): DiagLogger {
@@ -173,6 +180,18 @@ function validateUrl(url: string | undefined): string | undefined {
     diag.error('Invalid OTLP signal endpoint URL, skipping:', url);
     return undefined;
   }
+}
+
+class SessionIdSpanProcessor implements SpanProcessor {
+  onStart(span: SdkSpan): void {
+    const sessionId = getCurrentSessionId();
+    if (sessionId) {
+      span.setAttribute('session.id', sessionId);
+    }
+  }
+  onEnd(_span: ReadableSpan): void {}
+  async shutdown(): Promise<void> {}
+  async forceFlush(): Promise<void> {}
 }
 
 export function initializeTelemetry(config: Config): void {
@@ -458,7 +477,9 @@ export function initializeTelemetry(config: Config): void {
     // before the detectors settle (e.g. during HttpInstrumentation span creation).
     autoDetectResources: false,
     ...(textMapPropagator && { textMapPropagator }),
-    spanProcessors: spanExporter ? [new BatchSpanProcessor(spanExporter)] : [],
+    spanProcessors: spanExporter
+      ? [new SessionIdSpanProcessor(), new BatchSpanProcessor(spanExporter)]
+      : [],
     logRecordProcessors: logExporter
       ? [new BatchLogRecordProcessor(logExporter)]
       : logToSpanProcessor
@@ -546,7 +567,7 @@ export function initializeTelemetry(config: Config): void {
     debugLogger.debug('OpenTelemetry SDK started successfully.');
     telemetryInitialized = true;
     const sessionId = config.getSessionId();
-    setSessionContext(createSessionRootContext(sessionId), sessionId);
+    setSessionContext(undefined, sessionId);
     initializeMetrics(config);
   } catch (error) {
     debugLogger.error('Error starting OpenTelemetry SDK:', error);
@@ -554,14 +575,14 @@ export function initializeTelemetry(config: Config): void {
 }
 
 /**
- * Refresh the session root context with a new session ID.
+ * Refresh the session context with a new session ID.
  * Must be called whenever the session changes (e.g. /clear, /resume)
- * so that new spans inherit the correct traceId.
+ * so that SessionIdSpanProcessor stamps spans with the correct session.id.
  */
 export function refreshSessionContext(sessionId: string): void {
   if (!telemetryInitialized) return;
   try {
-    setSessionContext(createSessionRootContext(sessionId), sessionId);
+    setSessionContext(undefined, sessionId);
   } catch (error) {
     createDebugLogger('OTEL').warn('Failed to refresh session context:', error);
   }
