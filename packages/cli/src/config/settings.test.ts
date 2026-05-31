@@ -56,6 +56,8 @@ import {
   SETTINGS_VERSION,
   SETTINGS_VERSION_KEY,
   resetHomeEnvBootstrapForTesting,
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
 } from './settings.js';
 import { needsMigration } from './migration/index.js';
 import { QWEN_DIR } from '@qwen-code/qwen-code-core';
@@ -108,6 +110,7 @@ vi.mock('node:fs', async (importOriginal) => {
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
+    copyFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
     realpathSync: (p: string) => p,
@@ -126,6 +129,7 @@ vi.mock('fs', async (importOriginal) => {
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
+    copyFileSync: vi.fn(),
     mkdirSync: vi.fn(),
     statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
     realpathSync: (p: string) => p,
@@ -1874,19 +1878,18 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
-      // Verify the corrupted file was renamed with timestamp suffix
-      const renameCalls = (fs.renameSync as Mock).mock.calls;
-      const corruptedRename = renameCalls.find(
+      // Verify the corrupted file was copied to .corrupted
+      const copyCalls = (fs.copyFileSync as Mock).mock.calls;
+      const corruptedCopy = copyCalls.find(
         (call: unknown[]) =>
           call[0] === USER_SETTINGS_PATH &&
-          String(call[1]).includes('.corrupted.'),
+          String(call[1]).includes('.corrupted'),
       );
-      expect(corruptedRename).toBeDefined();
+      expect(corruptedCopy).toBeDefined();
 
-      // Verify migrationWarnings contains recovery message
-      const warnings = getSettingsWarnings(result);
-      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(true);
-      expect(warnings.some((w) => w.includes('renamed'))).toBe(true);
+      // Corrupted dialog is driven by corruptedPath, not by migrationWarnings
+      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+      expect(result.wasRecovered).toBe(false);
 
       vi.restoreAllMocks();
     });
@@ -1919,11 +1922,8 @@ describe('Settings Loading and Merging', () => {
       );
       expect(restoreWrite).toBeDefined();
 
-      // Verify migrationWarnings informs user about recovery
-      const warnings = getSettingsWarnings(result);
-      expect(warnings.some((w) => w.includes('recovered from backup'))).toBe(
-        true,
-      );
+      // Recovery is communicated via wasRecovered flag, not migrationWarnings
+      expect(result.wasRecovered).toBe(true);
 
       vi.restoreAllMocks();
     });
@@ -1954,20 +1954,27 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
-      // Verify the corrupted file was renamed
-      const renameCalls = (fs.renameSync as Mock).mock.calls;
+      expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+      expect(result.wasRecovered).toBe(false);
+      const resetWrites = (fs.writeFileSync as Mock).mock.calls.filter(
+        (call: unknown[]) => call[0] === USER_SETTINGS_PATH && call[1] === '{}',
+      );
+      expect(resetWrites.length).toBeGreaterThan(0);
+
+      // Verify the corrupted file was copied to .corrupted
+      const copyCalls = (fs.copyFileSync as Mock).mock.calls;
       expect(
-        renameCalls.some(
+        copyCalls.some(
           (call: unknown[]) =>
             call[0] === USER_SETTINGS_PATH &&
-            String(call[1]).includes('.corrupted.'),
+            String(call[1]).includes('.corrupted'),
         ),
       ).toBe(true);
 
       vi.restoreAllMocks();
     });
 
-    it('should start with empty settings when rename of corrupted file fails', () => {
+    it('should start with empty settings when copy of corrupted file fails', () => {
       const invalidJsonContent = 'invalid json';
 
       (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
@@ -1983,8 +1990,8 @@ describe('Settings Loading and Merging', () => {
         },
       );
 
-      // Simulate rename failure (e.g., permission denied)
-      (fs.renameSync as Mock).mockImplementation(() => {
+      // Simulate copy failure (e.g., permission denied)
+      (fs.copyFileSync as Mock).mockImplementation(() => {
         throw new Error('EACCES: permission denied');
       });
 
@@ -1992,11 +1999,11 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
-      // Verify the warning message does NOT say "renamed" since rename failed,
-      // but instead tells user to fix the file manually.
+      // Corruption warning no longer goes through migrationWarnings —
+      // copy failed so corruptedPath is undefined too
       const warnings = getSettingsWarnings(result);
-      expect(warnings.some((w) => w.includes('fix the JSON'))).toBe(true);
-      expect(warnings.some((w) => w.includes('renamed to'))).toBe(false);
+      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
+      expect(result.corruptedPath).toBeUndefined();
 
       vi.restoreAllMocks();
     });
@@ -2017,17 +2024,109 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       const warnings = getSettingsWarnings(result);
 
-      // Warnings must be non-empty so the early stderr loop in gemini.tsx
-      // (before relaunchAppInChildProcess) actually emits something.
-      expect(warnings.length).toBeGreaterThan(0);
-      // Each warning should be a human-readable string suitable for stderr
-      for (const w of warnings) {
-        expect(typeof w).toBe('string');
-        expect(w.length).toBeGreaterThan(0);
-      }
-      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(true);
+      // Corruption warning no longer goes through migrationWarnings —
+      // it is emitted via settings.corruptedPath check in gemini.tsx
+      // early stderr path instead. Verify corruptedPath is set.
+      expect(result.corruptedPath).toBeDefined();
+      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(false);
 
       vi.restoreAllMocks();
+    });
+
+    describe('corruption env var propagation', () => {
+      afterEach(() => {
+        delete process.env[ENV_CORRUPTED_PATH];
+        delete process.env[ENV_WAS_RECOVERED];
+      });
+
+      it('should propagate corruptedPath/wasRecovered from env vars', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_WAS_RECOVERED] = '1';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(result.corruptedPath).toBe(`${USER_SETTINGS_PATH}.corrupted`);
+        expect(result.wasRecovered).toBe(true);
+      });
+
+      it('should delete env vars after reading so subsequent calls do not re-trigger', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_WAS_RECOVERED] = '0';
+
+        loadSettings(MOCK_WORKSPACE_DIR);
+        expect(process.env[ENV_CORRUPTED_PATH]).toBeUndefined();
+        expect(process.env[ENV_WAS_RECOVERED]).toBeUndefined();
+      });
+
+      it('should only consume env vars for SettingScope.User', () => {
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+          const s = p.toString();
+          return s === USER_SETTINGS_PATH || s === MOCK_WORKSPACE_SETTINGS_PATH;
+        });
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_WAS_RECOVERED] = '1';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+
+        // env vars consumed in User scope — scope guard exercised
+        expect(process.env[ENV_CORRUPTED_PATH]).toBeUndefined();
+        expect(process.env[ENV_WAS_RECOVERED]).toBeUndefined();
+        expect(result.corruptedPath).toBeDefined();
+      });
+
+      it('should map wasRecovered="0" to false', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_WAS_RECOVERED] = '0';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(result.wasRecovered).toBe(false);
+      });
+
+      it('should not consume env vars when consumeCorruptionEnvVars=false', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = `${USER_SETTINGS_PATH}.corrupted`;
+        process.env[ENV_WAS_RECOVERED] = '1';
+
+        loadSettings(MOCK_WORKSPACE_DIR, false);
+        // env vars should remain untouched so child processes can still read them
+        expect(process.env[ENV_CORRUPTED_PATH]).toBe(
+          `${USER_SETTINGS_PATH}.corrupted`,
+        );
+        expect(process.env[ENV_WAS_RECOVERED]).toBe('1');
+      });
+
+      it('should reject mismatched ENV_CORRUPTED_PATH', () => {
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+        );
+        (fs.readFileSync as Mock).mockImplementation(() => '{}');
+        process.env[ENV_CORRUPTED_PATH] = '/some/other/path.corrupted';
+        process.env[ENV_WAS_RECOVERED] = '1';
+
+        const result = loadSettings(MOCK_WORKSPACE_DIR);
+
+        // Guard rejected — corruptedPath not propagated
+        expect(result.corruptedPath).toBeUndefined();
+        // Env vars not consumed because guard failed
+        expect(process.env[ENV_CORRUPTED_PATH]).toBe(
+          '/some/other/path.corrupted',
+        );
+      });
     });
 
     it('should resolve environment variables in user settings', () => {
