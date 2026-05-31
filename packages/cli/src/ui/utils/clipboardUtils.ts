@@ -251,7 +251,9 @@ async function saveFileWithWlPaste(tempFilePath: string): Promise<boolean> {
         await new Promise<void>((resolve, reject) => {
           const child = spawn('python3', [
             '-c',
-            `from PIL import Image; Image.open('${bmpPath}').save('${tempFilePath}')`,
+            'import sys; from PIL import Image; Image.open(sys.argv[1]).save(sys.argv[2])',
+            bmpPath,
+            tempFilePath,
           ]);
           child.on('close', (code) => {
             if (code === 0) resolve();
@@ -266,19 +268,13 @@ async function saveFileWithWlPaste(tempFilePath: string): Promise<boolean> {
           /* ignore */
         }
         return true;
-      } catch {
-        // Python PIL not available, return BMP as-is
-        try {
-          await fs.rename(bmpPath, tempFilePath.replace('.png', '.bmp'));
-        } catch {
-          /* ignore */
-        }
-        try {
-          await fs.unlink(bmpPath);
-        } catch {
-          /* ignore */
-        }
-        return false;
+      } catch (err) {
+        // Python PIL not available, return BMP file path
+        debugLogger.debug(
+          'Python PIL not available; BMP-to-PNG conversion failed:',
+          err,
+        );
+        return bmpPath;
       }
     }
     try {
@@ -330,11 +326,12 @@ export async function saveClipboardImage(
     const tool = getLinuxClipboardTool();
 
     if (tool === 'wl-paste') {
-      if (await saveFileWithWlPaste(pngPath)) {
+      const savedPath = await saveFileWithWlPaste(pngPath);
+      if (savedPath) {
         // Verify the file exists and has content
         try {
-          const stats = await fs.stat(pngPath);
-          if (stats.size > 0) return pngPath;
+          const stats = await fs.stat(savedPath);
+          if (stats.size > 0) return savedPath;
         } catch {
           /* ignore */
         }
