@@ -388,7 +388,13 @@ export function endInteractionSpan(
   metadata?: EndInteractionOptions,
 ): void {
   const spanCtx = interactionContext.getStore() ?? lastInteractionCtx;
-  if (!spanCtx || spanCtx.ended) return;
+  if (!spanCtx) return;
+  if (spanCtx.ended) {
+    debugLogger.debug(
+      `endInteractionSpan: span ${getSpanId(spanCtx.span)} already ended (possible TTL sweep race)`,
+    );
+    return;
+  }
 
   spanCtx.ended = true;
   lastInteractionCtx = undefined;
@@ -749,7 +755,13 @@ export function endToolExecutionSpan(
 ): void {
   const spanId = getSpanId(span);
   const spanCtx = activeSpans.get(spanId)?.deref();
-  if (!spanCtx || spanCtx.ended) return;
+  if (!spanCtx) return;
+  if (spanCtx.ended) {
+    debugLogger.debug(
+      `endToolExecutionSpan: span ${spanId} already ended (possible TTL sweep race)`,
+    );
+    return;
+  }
 
   spanCtx.ended = true;
 
@@ -883,7 +895,13 @@ export function endToolBlockedOnUserSpan(
 ): void {
   const spanId = getSpanId(span);
   const spanCtx = activeSpans.get(spanId)?.deref();
-  if (!spanCtx || spanCtx.ended) return;
+  if (!spanCtx) return;
+  if (spanCtx.ended) {
+    debugLogger.debug(
+      `endToolBlockedOnUserSpan: span ${spanId} already ended (possible TTL sweep race)`,
+    );
+    return;
+  }
 
   spanCtx.ended = true;
 
