@@ -8,8 +8,11 @@ export function StatusIcon({ status }: { status: string }) {
       return <span className={`${styles.icon} ${styles.iconDone}`}>✓</span>;
     case 'failed':
     case 'error':
+    case 'cancelled':
+    case 'canceled':
       return <span className={`${styles.icon} ${styles.iconError}`}>✗</span>;
     case 'in_progress':
+    case 'running':
       return <span className={`${styles.icon} ${styles.iconSpin}`}>⟳</span>;
     default:
       return <span className={`${styles.icon} ${styles.iconPending}`}>○</span>;

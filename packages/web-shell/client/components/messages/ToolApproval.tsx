@@ -60,6 +60,21 @@ function getSafeDefaultIndex(options: PermissionRequest['options']): number {
   return 0;
 }
 
+function getOptionI18nKey(
+  option: PermissionRequest['options'][number],
+): string | undefined {
+  if (option.kind === 'allow_once') return 'approval.option.allowOnce';
+  if (option.kind === 'reject_once') return 'approval.option.rejectOnce';
+  if (option.kind === 'allow_always') {
+    if (option.id === 'proceed_always_project')
+      return 'approval.option.allowAlwaysProject';
+    if (option.id === 'proceed_always_user')
+      return 'approval.option.allowAlwaysUser';
+    if (option.id === 'proceed_always') return 'approval.option.allowAllEdits';
+  }
+  return undefined;
+}
+
 export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   const { t } = useI18n();
   const [selected, setSelected] = useState(() =>
@@ -176,6 +191,8 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
       <div className={styles.options}>
         {request.options.map((option, i) => {
           const isSelected = i === selected;
+          const i18nKey = getOptionI18nKey(option);
+          const label = i18nKey ? t(i18nKey) : option.label;
           return (
             <div
               key={option.id}
@@ -184,7 +201,7 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
             >
               <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>
               <span className={styles.num}>{i + 1}.</span>
-              <span className={styles.label}>{option.label}</span>
+              <span className={styles.label}>{label}</span>
             </div>
           );
         })}

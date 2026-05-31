@@ -670,17 +670,75 @@ function normalizePermissionRequest(
     event.data['toolCall'] !== undefined
       ? redactSensitiveFields(event.data['toolCall'])
       : undefined;
-  return [
-    {
-      ...base,
-      type: 'permission.request',
-      requestId,
-      sessionId: getString(event.data, 'sessionId'),
-      title: describeToolCall(toolCall),
-      options: normalizePermissionOptions(event.data['options']),
-      toolCall,
-    },
-  ];
+
+  const events: DaemonUiEvent[] = [];
+
+  // ── Synthetic tool.update for Agent/SubAgent permission requests ────────
+  //
+  // Background (Session.ts L2335):
+  //   The daemon's `ToolCallEmitter.emitStart()` — which emits the initial
+  //   `session_update.tool_call` event that creates a tool block in the
+  //   transcript — is guarded by `if (!didRequestPermission)`. When an
+  //   Agent tool requires user confirmation, `didRequestPermission = true`
+  //   and `emitStart` is SKIPPED. The ONLY event the daemon sends before
+  //   the agent executes is this `permission_request`.
+  //
+  // Problem:
+  //   After permission is resolved, sub-tool events arrive with
+  //   `parentToolCallId` referencing the Agent's `toolCallId`. But since
+  //   no tool block exists in the transcript for that callId, the
+  //   transcript reducer cannot resolve `parentBlockId`, leaving sub-tools
+  //   as orphan top-level blocks. Downstream renderers (e.g., web-shell's
+  //   `transcriptBlocksToDaemonMessages`) fail to nest them under the
+  //   Agent, breaking parallel-agent grouping and subagent panel rendering.
+  //
+  // Fix:
+  //   When the permission_request's `toolCall` carries `rawInput.subagent_type`
+  //   (definitive signal of an Agent/SubAgent tool), emit a synthetic
+  //   `tool.update` event BEFORE the `permission.request`. This creates
+  //   the tool block early, so sub-tools arriving later find their parent.
+  //   For auto-approved agents (no permission needed), the daemon already
+  //   emits `tool_call` via `emitStart`, so `upsertToolBlock` simply
+  //   updates the existing block — no duplication.
+  //
+  // Detection: only trigger for Agent tools (rawInput.subagent_type present),
+  // not for regular tools (Bash/Edit/etc.) which DO get their own tool_call.
+  if (isRecord(toolCall)) {
+    const toolCallId = getString(toolCall, 'toolCallId');
+    const rawInput = isRecord(toolCall['rawInput'])
+      ? (toolCall['rawInput'] as Record<string, unknown>)
+      : undefined;
+    const subagentType = rawInput
+      ? getString(rawInput, 'subagent_type')
+      : undefined;
+    if (toolCallId && subagentType) {
+      events.push({
+        ...base,
+        type: 'tool.update',
+        toolCallId,
+        toolName:
+          getString(toolCall, 'toolName') ??
+          getString(toolCall, 'name') ??
+          'Agent',
+        title: getString(toolCall, 'title') ?? subagentType,
+        status: getString(toolCall, 'status') ?? 'confirming',
+        subagentType,
+        rawInput,
+      });
+    }
+  }
+
+  events.push({
+    ...base,
+    type: 'permission.request',
+    requestId,
+    sessionId: getString(event.data, 'sessionId'),
+    title: describeToolCall(toolCall),
+    options: normalizePermissionOptions(event.data['options']),
+    toolCall,
+  });
+
+  return events;
 }
 
 function normalizePermissionResolved(

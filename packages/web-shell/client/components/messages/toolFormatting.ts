@@ -282,6 +282,9 @@ function extractRawOutputText(rawOutput: unknown): string | null {
   if (typeof raw.output === 'string') return raw.output;
   if (typeof raw.stdout === 'string') return raw.stdout;
   if (typeof raw.content === 'string') return raw.content;
+  if (typeof raw.reason === 'string') return raw.reason;
+  if (typeof raw.terminateReason === 'string') return raw.terminateReason;
+  if (typeof raw.error === 'string') return raw.error;
   if (typeof raw.text === 'string') return raw.text;
   return null;
 }

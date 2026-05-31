@@ -398,6 +398,7 @@ export function App({
   const [currentModel, setCurrentModel] = useState('');
   const [currentMode, setCurrentMode] = useState('default');
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
+  const [followBottomSignal, setFollowBottomSignal] = useState(0);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
   const nextQueuedPromptIdRef = useRef(1);
   const drainingQueueRef = useRef(false);
@@ -1119,6 +1120,17 @@ export function App({
     ],
   );
 
+  const handleEditorSubmit = useCallback(
+    (text: string, images?: PromptImage[]) => {
+      const accepted = handleSubmit(text, images);
+      if (accepted) {
+        setFollowBottomSignal((signal) => signal + 1);
+      }
+      return accepted;
+    },
+    [handleSubmit],
+  );
+
   useEffect(() => {
     if (drainingQueueRef.current) return;
     if (!connected) return;
@@ -1164,10 +1176,15 @@ export function App({
   );
 
   const handleCancel = useCallback(() => {
-    sessionActions.cancel().catch((error: unknown) => {
-      reportError(error, 'Failed to cancel request');
-    });
-  }, [sessionActions, reportError]);
+    sessionActions
+      .cancel()
+      .then(() => {
+        store.dispatch([{ type: 'status', text: t('request.cancelled') }]);
+      })
+      .catch((error: unknown) => {
+        reportError(error, 'Failed to cancel request');
+      });
+  }, [sessionActions, store, t, reportError]);
 
   const handleFocusActiveAgents = useCallback((): boolean => {
     if (floatingAgents.length === 0) return false;
@@ -1422,7 +1439,7 @@ export function App({
           <CompactModeContext.Provider value={compactMode}>
             <div
               className={
-                displayMessages.length > 0 || streamingState !== 'idle'
+                floatingTodos.length > 0 || floatingAgents.length > 0
                   ? `${styles.content} ${styles.contentHasMessages}`
                   : styles.content
               }
@@ -1432,6 +1449,7 @@ export function App({
                 messages={displayMessages}
                 pendingApproval={pendingApproval}
                 onConfirm={handleConfirm}
+                followBottomSignal={followBottomSignal}
                 workspaceCwd={connection.workspaceCwd || ''}
                 welcomeHeader={
                   <WelcomeHeader
@@ -1461,7 +1479,7 @@ export function App({
                 <QueuedPromptDisplay prompts={queuedPrompts} t={t} />
                 <Editor
                   ref={editorRef}
-                  onSubmit={handleSubmit}
+                  onSubmit={handleEditorSubmit}
                   onCycleMode={handleCycleMode}
                   onToggleShortcuts={handleToggleShortcuts}
                   disabled={isDisabled}

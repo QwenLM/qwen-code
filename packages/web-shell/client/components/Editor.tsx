@@ -12,6 +12,7 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import {
   acceptCompletion,
   autocompletion,
+  closeCompletion,
   completionStatus,
   startCompletion,
   type CompletionSource,
@@ -159,6 +160,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     push,
     navigateUp,
     navigateDown,
+    isNavigating,
     reset,
     getReverseMatches,
     getLastEntry,
@@ -168,6 +170,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     push,
     navigateUp,
     navigateDown,
+    isNavigating,
     reset,
     getReverseMatches,
     getLastEntry,
@@ -177,6 +180,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     push,
     navigateUp,
     navigateDown,
+    isNavigating,
     reset,
     getReverseMatches,
     getLastEntry,
@@ -279,11 +283,20 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       {
         key: 'ArrowUp',
         run: (view) => {
-          if (completionStatus(view.state) === 'active') return false;
+          const history = shellModeRef.current
+            ? shellHistoryActionsRef.current
+            : historyActionsRef.current;
+          const isBrowsingHistory = history.isNavigating();
+          if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
+            return false;
+          }
+          if (isBrowsingHistory) {
+            closeCompletion(view);
+          }
           if (view.state.doc.lines > 1) return false;
           if (shellModeRef.current) {
             const current = view.state.doc.toString();
-            const prev = shellHistoryActionsRef.current.navigateUp(current);
+            const prev = history.navigateUp(current);
             if (prev === null) return true;
             view.dispatch({
               changes: { from: 0, to: view.state.doc.length, insert: prev },
@@ -306,7 +319,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             }
           }
           const current = view.state.doc.toString();
-          const prev = historyActionsRef.current.navigateUp(current);
+          const prev = history.navigateUp(current);
           if (prev === null) return false;
           view.dispatch({
             changes: { from: 0, to: view.state.doc.length, insert: prev },
@@ -318,10 +331,19 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       {
         key: 'ArrowDown',
         run: (view) => {
-          if (completionStatus(view.state) === 'active') return false;
+          const history = shellModeRef.current
+            ? shellHistoryActionsRef.current
+            : historyActionsRef.current;
+          const isBrowsingHistory = history.isNavigating();
+          if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
+            return false;
+          }
+          if (isBrowsingHistory) {
+            closeCompletion(view);
+          }
           if (view.state.doc.lines > 1) return false;
           if (shellModeRef.current) {
-            const next = shellHistoryActionsRef.current.navigateDown();
+            const next = history.navigateDown();
             if (next === null) return true;
             view.dispatch({
               changes: { from: 0, to: view.state.doc.length, insert: next },
@@ -329,7 +351,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             });
             return true;
           }
-          const next = historyActionsRef.current.navigateDown();
+          const next = history.navigateDown();
           if (next === null) {
             return onFocusActiveAgentsRef.current?.() ?? false;
           }

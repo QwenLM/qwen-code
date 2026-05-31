@@ -92,6 +92,15 @@
   margin-left: 6px;
 }
 
+.agentSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: 22px;
+  margin-top: 2px;
+}
+
 .lineOutput {
   margin-left: 16px;
   font-size: 12px;
@@ -112,16 +121,17 @@
 }
 
 .expandedOutput {
-  padding: 8px 10px;
+  padding: 0px 0px 0 16px;
   font-size: 12px;
   line-height: 1.5;
-  background: var(--editor-bg);
+  /* background: var(--editor-bg); */
   color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-word;
   overflow-x: auto;
   max-height: 400px;
   overflow-y: auto;
+  margin-bottom: 0;
 }
 
 .expandedEdit {

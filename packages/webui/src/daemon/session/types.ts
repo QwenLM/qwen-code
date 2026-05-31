@@ -65,6 +65,7 @@ export interface DaemonSessionProviderProps {
   clientId?: string;
   createSessionRequest?: Omit<CreateSessionRequest, 'workspaceCwd'>;
   maxQueued?: number;
+  maxBlocks?: number;
   suppressOwnUserEcho?: boolean;
   includeRawEvent?: boolean;
   autoConnect?: boolean;

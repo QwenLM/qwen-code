@@ -1,6 +1,7 @@
 import {
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useCallback,
   useMemo,
@@ -25,7 +26,7 @@ interface MessageListProps {
     selectedOption: string,
     answers?: Record<string, string>,
   ) => void;
-  forceScrollToBottom?: boolean;
+  followBottomSignal?: number;
   welcomeHeader?: ReactNode;
   workspaceCwd?: string;
 }
@@ -36,6 +37,14 @@ function isAskUserQuestion(request: PermissionRequest): boolean {
   );
 }
 
+function toolMatchesApproval(tool: ACPToolCall, toolCallId: string): boolean {
+  if (tool.callId === toolCallId) return true;
+  if (tool.subTools) {
+    return tool.subTools.some((sub) => toolMatchesApproval(sub, toolCallId));
+  }
+  return false;
+}
+
 function approvalMatchesToolGroup(
   messages: Message[],
   approval: PermissionRequest | null,
@@ -43,7 +52,8 @@ function approvalMatchesToolGroup(
   if (!approval?.toolCallId) return false;
   for (const msg of messages) {
     if (msg.role === 'tool_group') {
-      if (msg.tools.some((t) => t.callId === approval.toolCallId)) return true;
+      if (msg.tools.some((t) => toolMatchesApproval(t, approval.toolCallId!)))
+        return true;
     }
   }
   return false;
@@ -75,8 +85,8 @@ function isForceExpandGroup(
 ): boolean {
   if (msg.role !== 'tool_group') return false;
   if (
-    pendingApproval &&
-    msg.tools.some((t) => t.callId === pendingApproval.toolCallId)
+    pendingApproval?.toolCallId &&
+    msg.tools.some((t) => toolMatchesApproval(t, pendingApproval.toolCallId!))
   )
     return true;
   return false;
@@ -192,8 +202,9 @@ export function MessageList({
   messages,
   pendingApproval,
   onConfirm,
-  forceScrollToBottom,
+  followBottomSignal,
   welcomeHeader,
+  workspaceCwd,
 }: MessageListProps) {
   const compactMode = useContext(CompactModeContext);
   const mergedMessages = useMemo(
@@ -209,6 +220,9 @@ export function MessageList({
   );
   const containerRef = useRef<HTMLDivElement>(null);
   const shouldAutoScroll = useRef(true);
+  const programmaticScroll = useRef(false);
+  const lastScrollTop = useRef(0);
+  const scrollFrame = useRef<number | null>(null);
   const prevMsgCount = useRef(messages.length);
   const prevLastUserMessageId = useRef<string | null>(
     getLastUserMessageId(messages),
@@ -225,23 +239,70 @@ export function MessageList({
   const totalCount =
     headerOffset + displayItems.length + (hasTailApproval ? 1 : 0);
 
+  const scrollToBottom = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    programmaticScroll.current = true;
+    el.scrollTop = el.scrollHeight;
+    lastScrollTop.current = el.scrollTop;
+    window.requestAnimationFrame(() => {
+      programmaticScroll.current = false;
+    });
+  }, []);
+
   const virtualizer = useVirtualizer({
     count: totalCount,
     getScrollElement: () => containerRef.current,
+    getItemKey: (index) => {
+      if (hasHeader && index === HEADER_INDEX) return 'header';
+      if (hasTailApproval && index === totalCount - 1) {
+        return pendingApproval ? `approval-${pendingApproval.id}` : 'approval';
+      }
+      const item = displayItems[index - headerOffset];
+      return item?.key ?? `row-${index}`;
+    },
     estimateSize: (index) => {
       if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
       if (hasTailApproval && index === totalCount - 1) return ESTIMATE_APPROVAL;
       return ESTIMATE_MESSAGE;
     },
     overscan: 5,
+    useAnimationFrameWithResizeObserver: true,
   });
 
   const handleScroll = useCallback(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
-    shouldAutoScroll.current = atBottom;
+    if (scrollFrame.current !== null) return;
+    scrollFrame.current = window.requestAnimationFrame(() => {
+      scrollFrame.current = null;
+      const el = containerRef.current;
+      if (!el) return;
+      const distanceFromBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight;
+      const scrollingUp = el.scrollTop < lastScrollTop.current - 1;
+      lastScrollTop.current = el.scrollTop;
+
+      if (programmaticScroll.current) {
+        shouldAutoScroll.current = true;
+        return;
+      }
+      if (scrollingUp) {
+        shouldAutoScroll.current = false;
+        return;
+      }
+      if (distanceFromBottom <= 4) {
+        shouldAutoScroll.current = true;
+      }
+    });
   }, []);
+
+  useEffect(
+    () => () => {
+      if (scrollFrame.current !== null) {
+        window.cancelAnimationFrame(scrollFrame.current);
+      }
+    },
+    [],
+  );
 
   // Reset auto-scroll on clear screen
   useEffect(() => {
@@ -252,19 +313,13 @@ export function MessageList({
   }, [messages.length]);
 
   // Auto-scroll to bottom when content changes
-  const totalSize = virtualizer.getTotalSize();
   useEffect(() => {
     if (shouldAutoScroll.current) {
-      requestAnimationFrame(() => {
-        const el = containerRef.current;
-        if (el) {
-          el.scrollTop = el.scrollHeight;
-        }
-      });
+      requestAnimationFrame(scrollToBottom);
     }
-  }, [messages, pendingApproval, totalSize]);
+  }, [messages, pendingApproval, scrollToBottom]);
 
-  // Force auto-scroll when user sends a new message
+  // A user send explicitly starts a new tail-following interaction.
   useEffect(() => {
     const lastUserMessageId = getLastUserMessageId(messages);
     if (
@@ -272,27 +327,17 @@ export function MessageList({
       lastUserMessageId !== prevLastUserMessageId.current
     ) {
       shouldAutoScroll.current = true;
-      requestAnimationFrame(() => {
-        const el = containerRef.current;
-        if (el) {
-          el.scrollTop = el.scrollHeight;
-        }
-      });
+      requestAnimationFrame(scrollToBottom);
     }
     prevLastUserMessageId.current = lastUserMessageId;
-  }, [messages]);
+  }, [messages, scrollToBottom]);
 
-  useEffect(() => {
-    if (forceScrollToBottom) {
+  useLayoutEffect(() => {
+    if (followBottomSignal !== undefined) {
       shouldAutoScroll.current = true;
-      requestAnimationFrame(() => {
-        const el = containerRef.current;
-        if (el) {
-          el.scrollTop = el.scrollHeight;
-        }
-      });
+      scrollToBottom();
     }
-  }, [forceScrollToBottom]);
+  }, [followBottomSignal, scrollToBottom]);
 
   const renderVirtualItem = useCallback(
     (index: number) => {
@@ -333,6 +378,7 @@ export function MessageList({
           message={item.message}
           pendingApproval={pendingApproval}
           onConfirm={onConfirm}
+          workspaceCwd={workspaceCwd}
         />
       );
     },
@@ -345,16 +391,24 @@ export function MessageList({
       onConfirm,
       headerOffset,
       displayItems,
+      workspaceCwd,
     ],
   );
 
   const virtualItems = virtualizer.getVirtualItems();
+  const totalVirtualSize = virtualizer.getTotalSize();
+
+  useLayoutEffect(() => {
+    if (shouldAutoScroll.current) {
+      scrollToBottom();
+    }
+  }, [totalVirtualSize, scrollToBottom]);
 
   return (
     <div ref={containerRef} className={styles.list} onScroll={handleScroll}>
       <div
         style={{
-          height: virtualizer.getTotalSize(),
+          height: totalVirtualSize,
           width: '100%',
           position: 'relative',
         }}

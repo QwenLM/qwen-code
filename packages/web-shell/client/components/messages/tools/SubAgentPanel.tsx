@@ -12,6 +12,9 @@ import styles from './SubAgentPanel.module.css';
 
 interface SubAgentPanelProps {
   tool: ACPToolCall;
+  defaultExpanded?: boolean;
+  hideHeader?: boolean;
+  inline?: boolean;
 }
 
 interface TaskExecution {
@@ -21,6 +24,7 @@ interface TaskExecution {
   taskPrompt?: string;
   status?: string;
   result?: string;
+  tokenCount?: number;
   toolCalls?: TaskToolCall[];
   executionSummary?: {
     totalToolCalls?: number;
@@ -72,6 +76,25 @@ function getToolOutput(tool: ACPToolCall): string {
         if (firstLine.length > 80) return firstLine.slice(0, 80) + '...';
         return firstLine;
       }
+    }
+  }
+  const raw = tool.rawOutput;
+  if (raw) {
+    const text =
+      typeof raw === 'string'
+        ? raw
+        : typeof raw === 'object' && !Array.isArray(raw)
+          ? typeof (raw as Record<string, unknown>).output === 'string'
+            ? ((raw as Record<string, unknown>).output as string)
+            : typeof (raw as Record<string, unknown>).content === 'string'
+              ? ((raw as Record<string, unknown>).content as string)
+              : typeof (raw as Record<string, unknown>).text === 'string'
+                ? ((raw as Record<string, unknown>).text as string)
+                : null
+          : null;
+    if (text) {
+      const firstLine = text.split('\n')[0] ?? '';
+      return firstLine.length > 80 ? firstLine.slice(0, 80) + '...' : firstLine;
     }
   }
   return '';
@@ -129,14 +152,49 @@ function getAgentResultText(tool: ACPToolCall): string {
     if (typeof raw.output === 'string') return raw.output;
     if (typeof raw.result === 'string') return raw.result;
     if (typeof raw.content === 'string') return raw.content;
+    if (typeof raw.reason === 'string') return raw.reason;
+    if (
+      typeof raw.terminateReason === 'string' &&
+      raw.terminateReason !== 'GOAL'
+    ) {
+      return raw.terminateReason;
+    }
+    if (typeof raw.error === 'string') return raw.error;
     if (typeof raw.text === 'string') return raw.text;
   }
   return '';
 }
 
-function formatTokens(summary?: TaskExecution['executionSummary']): string {
-  if (!summary?.totalTokens) return '';
-  const t = summary.totalTokens;
+function getAgentStatus(tool: ACPToolCall): ACPToolCall['status'] {
+  if (tool.status === 'failed') return 'failed';
+  if (!tool.rawOutput || typeof tool.rawOutput !== 'object') {
+    return tool.status;
+  }
+  const raw = tool.rawOutput as Record<string, unknown>;
+  const status = typeof raw.status === 'string' ? raw.status.toLowerCase() : '';
+  const terminateReason =
+    typeof raw.terminateReason === 'string' ? raw.terminateReason : '';
+  const reason =
+    (typeof raw.reason === 'string' && raw.reason) ||
+    (terminateReason && terminateReason !== 'GOAL' && terminateReason) ||
+    (typeof raw.error === 'string' && raw.error) ||
+    '';
+  if (
+    status === 'cancelled' ||
+    status === 'canceled' ||
+    reason.toLowerCase().includes('cancel')
+  ) {
+    return 'failed';
+  }
+  return tool.status;
+}
+
+function formatTokens(taskExec?: TaskExecution | null): string {
+  const t =
+    taskExec?.tokenCount && taskExec.tokenCount > 0
+      ? taskExec.tokenCount
+      : taskExec?.executionSummary?.totalTokens;
+  if (!t) return '';
   if (t >= 1000000) return `${(t / 1000000).toFixed(1)}M tokens`;
   if (t >= 1000) return `${Math.round(t / 1000)}k tokens`;
   return `${t} tokens`;
@@ -144,9 +202,15 @@ function formatTokens(summary?: TaskExecution['executionSummary']): string {
 
 type SubAgentTab = 'result' | 'tools';
 
-export function SubAgentPanel({ tool }: SubAgentPanelProps) {
+export function SubAgentPanel({
+  tool,
+  defaultExpanded,
+  hideHeader,
+  inline,
+}: SubAgentPanelProps) {
   const isComplete = tool.status === 'completed' || tool.status === 'failed';
-  const [expanded, setExpanded] = useState(false);
+  const displayStatus = getAgentStatus(tool);
+  const [expanded, setExpanded] = useState(defaultExpanded ?? false);
   const [activeTab, setActiveTab] = useState<SubAgentTab>('result');
 
   const taskExec = isTaskExecution(tool.rawOutput) ? tool.rawOutput : null;
@@ -165,7 +229,7 @@ export function SubAgentPanel({ tool }: SubAgentPanelProps) {
   const elapsed =
     formatElapsed(tool.startTime, tool.endTime) ||
     formatDurationMs(taskExec?.executionSummary?.totalDurationMs);
-  const tokens = formatTokens(taskExec?.executionSummary);
+  const tokens = formatTokens(taskExec);
   const resultText = isComplete ? getAgentResultText(tool) : '';
 
   const taskToolCalls = useMemo(() => {
@@ -181,24 +245,26 @@ export function SubAgentPanel({ tool }: SubAgentPanelProps) {
   const showTabs = hasResult && hasTools;
 
   return (
-    <div className={styles.panel}>
-      <div className={styles.header} onClick={() => setExpanded(!expanded)}>
-        <StatusIcon status={tool.status} />
-        <span className={chromeStyles.lineName}>{agentType}:</span>
-        {description && (
-          <span className={styles.desc}>{truncateText(description, 50)}</span>
-        )}
-        {isComplete && subToolCount > 0 && (
-          <span className={styles.meta}>· {subToolCount} tools</span>
-        )}
-        {elapsed && <span className={styles.meta}>· {elapsed}</span>}
-        {tokens && <span className={styles.meta}>· {tokens}</span>}
-        {!isComplete && (
-          <span className={styles.toggle}>{expanded ? '▼' : '▶'}</span>
-        )}
-      </div>
+    <div className={inline ? undefined : styles.panel}>
+      {!hideHeader && (
+        <div className={styles.header} onClick={() => setExpanded(!expanded)}>
+          <StatusIcon status={displayStatus} />
+          <span className={chromeStyles.lineName}>{agentType}:</span>
+          {description && (
+            <span className={styles.desc}>{truncateText(description, 50)}</span>
+          )}
+          {isComplete && subToolCount > 0 && (
+            <span className={styles.meta}>· {subToolCount} tools</span>
+          )}
+          {elapsed && <span className={styles.meta}>· {elapsed}</span>}
+          {tokens && <span className={styles.meta}>· {tokens}</span>}
+          {!isComplete && (
+            <span className={styles.toggle}>{expanded ? '▼' : '▶'}</span>
+          )}
+        </div>
+      )}
 
-      {expanded && (
+      {(expanded || hideHeader) && (
         <div className={styles.body}>
           {showTabs && (
             <div className={styles.tabBar}>

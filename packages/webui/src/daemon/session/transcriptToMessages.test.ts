@@ -76,6 +76,8 @@ function toolBlock(
     content: overrides.content,
     locations: overrides.locations,
     details: overrides.details,
+    parentToolCallId: overrides.parentToolCallId,
+    subagentType: overrides.subagentType,
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: overrides.updatedAt ?? createdAt,
@@ -264,6 +266,254 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ).not.toHaveProperty('subTools');
   });
 
+  it('merges parallel subagent completion by callId instead of stack order', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-1-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: first',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('agent-2-start', 'agent-2', 'in_progress', 20, {
+        title: 'Agent: second',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('agent-1-end', 'agent-1', 'completed', 30, {
+        title: 'Agent: first done',
+        toolName: 'agent',
+        rawOutput: {
+          type: 'task_execution',
+          result: 'first result',
+        },
+        updatedAt: 35,
+      }),
+      toolBlock('agent-2-end', 'agent-2', 'completed', 40, {
+        title: 'Agent: second done',
+        toolName: 'agent',
+        rawOutput: {
+          type: 'task_execution',
+          result: 'second result',
+        },
+        updatedAt: 45,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages).toMatchObject([
+      {
+        id: 'tg-agent-1-start',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-1',
+            status: 'completed',
+            title: 'Agent: first done',
+            rawOutput: { result: 'first result' },
+          },
+        ],
+      },
+      {
+        id: 'tg-agent-2-start',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-2',
+            status: 'completed',
+            title: 'Agent: second done',
+            rawOutput: { result: 'second result' },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('merges cancelled parallel subagent by callId without closing sibling', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-1-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: first',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('agent-2-start', 'agent-2', 'in_progress', 20, {
+        title: 'Agent: second',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('agent-1-cancel', 'agent-1', 'cancelled', 30, {
+        title: 'Agent: first',
+        toolName: 'agent',
+        details: 'Agent was cancelled by user',
+        updatedAt: 35,
+      }),
+      toolBlock('agent-2-end', 'agent-2', 'completed', 40, {
+        title: 'Agent: second done',
+        toolName: 'agent',
+        rawOutput: {
+          type: 'task_execution',
+          result: 'second result',
+        },
+        updatedAt: 45,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages).toMatchObject([
+      {
+        id: 'tg-agent-1-start',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-1',
+            status: 'completed',
+            endTime: 35,
+            rawOutput: {
+              status: 'cancelled',
+              reason: 'Agent was cancelled by user',
+              text: 'Agent was cancelled by user',
+            },
+          },
+        ],
+      },
+      {
+        id: 'tg-agent-2-start',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-2',
+            status: 'completed',
+            title: 'Agent: second done',
+            endTime: 45,
+            rawOutput: { result: 'second result' },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('keeps background subagent launches pending and resumes main thread', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: Correctness review',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('agent-background', 'agent-1', 'completed', 20, {
+        title: 'Agent: Correctness review',
+        toolName: 'agent',
+        rawOutput: {
+          type: 'task_execution',
+          taskDescription: 'Agent 1: Correctness review',
+          status: 'background',
+        },
+        updatedAt: 25,
+      }),
+      textBlock('thought-main', 'thought', 'wait for background agent', 30),
+      textBlock('assistant-main', 'assistant', 'main continues', 40),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      id: 'tg-agent-start',
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'agent-1',
+          status: 'pending',
+          rawOutput: {
+            status: 'background',
+            taskDescription: 'Agent 1: Correctness review',
+          },
+        },
+      ],
+    });
+    expect(
+      messages[0].role === 'tool_group'
+        ? messages[0].tools[0].endTime
+        : undefined,
+    ).toBeUndefined();
+    expect(messages[1]).toMatchObject({
+      id: 'thought-main',
+      role: 'assistant',
+      content: 'main continues',
+      thinking: 'wait for background agent',
+    });
+  });
+
+  it('does not treat merged background subagent blocks as active stack entries', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-background', 'agent-1', 'completed', 20, {
+        title: 'Agent: Correctness review',
+        toolName: 'agent',
+        rawInput: {
+          description: 'Agent 1: Correctness review',
+          subagent_type: 'general-purpose',
+          run_in_background: true,
+        },
+        rawOutput: {
+          type: 'task_execution',
+          taskDescription: 'Agent 1: Correctness review',
+          status: 'background',
+        },
+        updatedAt: 25,
+      }),
+      textBlock('thought-main', 'thought', 'server diff looks clean', 30),
+      textBlock('assistant-main', 'assistant', 'waiting for agents', 40),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      id: 'tg-agent-background',
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'agent-1',
+          status: 'pending',
+          rawOutput: {
+            status: 'background',
+            taskDescription: 'Agent 1: Correctness review',
+          },
+        },
+      ],
+    });
+    expect(messages[1]).toMatchObject({
+      id: 'thought-main',
+      role: 'assistant',
+      content: 'waiting for agents',
+      thinking: 'server diff looks clean',
+    });
+  });
+
+  it('hides unparented assistant text while parallel subagents are active', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-1', 'agent-call-1', 'in_progress', 10, {
+        title: 'Agent: first',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('agent-2', 'agent-call-2', 'in_progress', 20, {
+        title: 'Agent: second',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      textBlock('a1', 'assistant', 'unparented stream', 30),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'agent-call-1' }],
+    });
+    expect(messages[1]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'agent-call-2' }],
+    });
+    const assistant = messages.find((message) => message.role === 'assistant');
+    expect(assistant).toBeUndefined();
+    expect(
+      messages[1]?.role === 'tool_group' && messages[1].tools[0],
+    ).not.toHaveProperty('subContent');
+  });
+
   it('merges streaming assistant chunks into one message', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('a1', 'assistant', 'hello ', 1, true),
@@ -336,5 +586,934 @@ describe('transcriptBlocksToDaemonMessages', () => {
       role: 'tool_group',
       tools: [{ rawOutput: 'chunk1\nchunk2\n' }],
     });
+  });
+
+  it('merges thought across interleaved tool blocks but splits content after tools', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('t1', 'thought', 'thinking part 1', 1),
+      toolBlock('tool1', 'tc1', 'completed', 2, { toolName: 'Read' }),
+      textBlock('t2', 'thought', ' thinking part 2', 3),
+      textBlock('a1', 'assistant', 'response part 1', 4),
+      toolBlock('tool2', 'tc2', 'completed', 5, { toolName: 'Edit' }),
+      textBlock('a2', 'assistant', ' response part 2', 6),
+    ]);
+
+    const assistantMsgs = messages.filter((m) => m.role === 'assistant');
+    expect(assistantMsgs).toHaveLength(3);
+    expect(assistantMsgs[0]).toMatchObject({
+      role: 'assistant',
+      content: '',
+      thinking: 'thinking part 1',
+    });
+    expect(assistantMsgs[1]).toMatchObject({
+      role: 'assistant',
+      content: 'response part 1',
+      thinking: ' thinking part 2',
+    });
+    expect(assistantMsgs[2]).toMatchObject({
+      role: 'assistant',
+      content: ' response part 2',
+    });
+
+    const toolGroups = messages.filter((m) => m.role === 'tool_group');
+    expect(toolGroups).toHaveLength(2);
+  });
+
+  it('keeps thought blocks after tool groups in transcript order', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('t1', 'thought', 'first thought', 1),
+      toolBlock('tool1', 'tc1', 'completed', 2, { toolName: 'Read' }),
+      textBlock('t2', 'thought', 'second thought', 3),
+      toolBlock('tool2', 'tc2', 'completed', 4, { toolName: 'ListFiles' }),
+      textBlock('t3', 'thought', 'third thought', 5),
+      toolBlock('tool3', 'tc3', 'completed', 6, { toolName: 'Glob' }),
+      textBlock('t4', 'thought', 'final thought', 7),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'assistant', thinking: 'first thought' },
+      { role: 'tool_group', tools: [{ callId: 'tc1' }] },
+      { role: 'assistant', thinking: 'second thought' },
+      { role: 'tool_group', tools: [{ callId: 'tc2' }] },
+      { role: 'assistant', thinking: 'third thought' },
+      { role: 'tool_group', tools: [{ callId: 'tc3' }] },
+      { role: 'assistant', thinking: 'final thought' },
+    ]);
+  });
+
+  it('preserves title, args, and rawOutput on completed parallel agents', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-1', 'call-1', 'completed', 10, {
+        title: 'Agent: 分析项目核心原理',
+        toolName: 'agent',
+        rawInput: {
+          description: '分析项目核心原理',
+          prompt: '请分析...',
+          subagent_type: 'general-purpose',
+          run_in_background: true,
+        },
+        rawOutput: {
+          type: 'task_execution',
+          subagentName: 'general-purpose',
+          taskDescription: '分析项目核心原理',
+          status: 'background',
+        },
+        updatedAt: 11,
+      }),
+      toolBlock('agent-2', 'call-2', 'completed', 10, {
+        title: 'Agent: 分析项目使用场景和性能',
+        toolName: 'agent',
+        rawInput: {
+          description: '分析项目使用场景和性能',
+          prompt: '请分析...',
+          subagent_type: 'general-purpose',
+          run_in_background: true,
+        },
+        rawOutput: {
+          type: 'task_execution',
+          subagentName: 'general-purpose',
+          taskDescription: '分析项目使用场景和性能',
+          status: 'background',
+        },
+        updatedAt: 11,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    const tool1 =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    const tool2 =
+      messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
+    expect(tool1).toMatchObject({
+      callId: 'call-1',
+      title: 'Agent: 分析项目核心原理',
+      args: { description: '分析项目核心原理' },
+      rawOutput: { taskDescription: '分析项目核心原理' },
+    });
+    expect(tool2).toMatchObject({
+      callId: 'call-2',
+      title: 'Agent: 分析项目使用场景和性能',
+      args: { description: '分析项目使用场景和性能' },
+      rawOutput: { taskDescription: '分析项目使用场景和性能' },
+    });
+  });
+
+  it('keeps cancelled subagent tools complete with cancellation reason', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: Analyze TanStack Virtual architecture',
+        toolName: 'agent',
+        rawInput: {
+          description: 'Analyze TanStack Virtual architecture',
+          subagent_type: 'general-purpose',
+        },
+      }),
+      toolBlock('agent-end', 'agent-1', 'cancelled', 20, {
+        title: 'Agent: Analyze TanStack Virtual architecture',
+        toolName: 'agent',
+        details: 'Agent was cancelled by user',
+        updatedAt: 30,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'agent-1',
+          status: 'completed',
+          endTime: 30,
+          rawOutput: {
+            status: 'cancelled',
+            reason: 'Agent was cancelled by user',
+            text: 'Agent was cancelled by user',
+          },
+        },
+      ],
+    });
+  });
+
+  it('does not merge assistant text across user message boundaries', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'first reply', 1),
+      toolBlock('tool1', 'tc1', 'completed', 2, { toolName: 'Read' }),
+      textBlock('u1', 'user', 'follow up', 3),
+      textBlock('a2', 'assistant', 'second reply', 4),
+    ]);
+
+    const assistantMsgs = messages.filter((m) => m.role === 'assistant');
+    expect(assistantMsgs).toHaveLength(2);
+    expect(assistantMsgs[0]).toMatchObject({ content: 'first reply' });
+    expect(assistantMsgs[1]).toMatchObject({ content: 'second reply' });
+  });
+
+  it('skips permission blocks entirely', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'let me run that', 1),
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Allow Bash?',
+        options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
+        toolCall: { toolCallId: 'tc-1', rawInput: { command: 'ls' } },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+      textBlock('a2', 'assistant', ' done', 3),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'let me run that done',
+    });
+  });
+
+  it('converts error blocks to system messages with error variant', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'err-1',
+        kind: 'error' as const,
+        text: 'Connection lost',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'err-1',
+        role: 'system',
+        content: 'Connection lost',
+        variant: 'error',
+      },
+    ]);
+  });
+
+  it('converts debug blocks to system messages with info variant', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'dbg-1',
+        kind: 'debug' as const,
+        text: 'Session initialized',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'dbg-1',
+        role: 'system',
+        content: 'Session initialized',
+        variant: 'info',
+      },
+    ]);
+  });
+
+  it('creates assistant message with empty content for thought-only blocks', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('t1', 'thought', 'let me think about this', 1),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 't1',
+        role: 'assistant',
+        content: '',
+        thinking: 'let me think about this',
+        isStreaming: false,
+      },
+    ]);
+  });
+
+  it('appends shell output to last subTool rawOutput inside subagent', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: run tests',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('bash-1', 'bash-call-1', 'completed', 20, {
+        toolName: 'bash',
+        toolKind: 'execute',
+      }),
+      shellBlock('sh1', 'PASS all tests\n', 30),
+      shellBlock('sh2', 'Done in 2.3s\n', 31),
+      toolBlock('agent-end', 'agent-1', 'completed', 40, {
+        title: 'Agent: run tests',
+        toolName: 'agent',
+        rawOutput: { type: 'task_execution' },
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const agentTool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agentTool?.subTools).toHaveLength(1);
+    expect(agentTool?.subTools?.[0]).toMatchObject({
+      callId: 'bash-call-1',
+      rawOutput: 'PASS all tests\nDone in 2.3s\n',
+    });
+  });
+
+  it('handles nested subagent via parentToolCallId', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('parent-start', 'parent-1', 'in_progress', 10, {
+        title: 'Agent: outer',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      {
+        id: 'child-start',
+        kind: 'tool' as const,
+        toolCallId: 'child-1',
+        title: 'Agent: inner',
+        status: 'in_progress',
+        toolName: 'agent',
+        preview: { kind: 'generic' as const },
+        rawInput: { subagent_type: 'Explore' },
+        parentToolCallId: 'parent-1',
+        clientReceivedAt: 20,
+        createdAt: 20,
+        updatedAt: 20,
+      },
+      toolBlock('read-inner', 'read-1', 'completed', 30, {
+        toolName: 'Read',
+        title: 'Read file.ts',
+      }),
+      {
+        id: 'child-end',
+        kind: 'tool' as const,
+        toolCallId: 'child-1',
+        title: 'Agent: inner',
+        status: 'completed',
+        toolName: 'agent',
+        preview: { kind: 'generic' as const },
+        rawOutput: { type: 'task_execution' },
+        parentToolCallId: 'parent-1',
+        clientReceivedAt: 40,
+        createdAt: 40,
+        updatedAt: 40,
+      },
+      toolBlock('parent-end', 'parent-1', 'completed', 50, {
+        title: 'Agent: outer',
+        toolName: 'agent',
+        rawOutput: { type: 'task_execution' },
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const parentTool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(parentTool?.callId).toBe('parent-1');
+    expect(parentTool?.subTools).toHaveLength(1);
+    const childTool = parentTool?.subTools?.[0];
+    expect(childTool?.callId).toBe('child-1');
+    expect(childTool?.subTools).toHaveLength(1);
+    expect(childTool?.subTools?.[0]?.callId).toBe('read-1');
+  });
+
+  it('user message resets all state including subagent stack', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'first', 1),
+      textBlock('u1', 'user', 'question', 2),
+      textBlock('a2', 'assistant', 'second', 3),
+    ]);
+
+    expect(messages).toEqual([
+      { id: 'a1', role: 'assistant', content: 'first', isStreaming: false },
+      { id: 'u1', role: 'user', content: 'question' },
+      { id: 'a2', role: 'assistant', content: 'second', isStreaming: false },
+    ]);
+  });
+
+  it('merges thought and assistant without tools into single message', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('t1', 'thought', 'analyzing...', 1),
+      textBlock('a1', 'assistant', 'here is my answer', 2),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 't1',
+        role: 'assistant',
+        content: 'here is my answer',
+        thinking: 'analyzing...',
+        isStreaming: false,
+      },
+    ]);
+  });
+
+  it('returns empty array for empty blocks', () => {
+    const messages = transcriptBlocksToDaemonMessages([]);
+    expect(messages).toEqual([]);
+  });
+
+  it('shell inside subagent appends to subContent when no subTools exist', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: check',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      shellBlock('sh1', 'some output\n', 20),
+      toolBlock('agent-end', 'agent-1', 'completed', 30, {
+        title: 'Agent: check',
+        toolName: 'agent',
+        rawOutput: { type: 'task_execution' },
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const agentTool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agentTool?.subContent).toBe('some output\n');
+    expect(agentTool?.subTools).toBeUndefined();
+  });
+
+  it('status blocks inside subagent append to subContent', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: analyze',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      statusBlock('st1', 'Working on it...', 20),
+      toolBlock('agent-end', 'agent-1', 'completed', 30, {
+        title: 'Agent: analyze',
+        toolName: 'agent',
+        rawOutput: { type: 'task_execution' },
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const agentTool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agentTool?.subContent).toBe('Working on it...\n');
+  });
+
+  it('closeAt auto-pops already-completed agent before next block', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-1', 'call-1', 'completed', 10, {
+        title: 'Agent: quick',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+        rawOutput: { type: 'task_execution' },
+        updatedAt: 20,
+      }),
+      textBlock('a1', 'assistant', 'after agent', 25),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'call-1', status: 'completed' }],
+    });
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'after agent',
+    });
+  });
+
+  it('isImplicitTopLevelSubAgent creates new group when active subagent exists', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-1-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: first',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('agent-2-start', 'agent-2', 'in_progress', 20, {
+        title: 'Agent: second',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'agent-1' }],
+    });
+    expect(messages[1]).toMatchObject({
+      role: 'tool_group',
+      tools: [{ callId: 'agent-2' }],
+    });
+  });
+
+  it('cancelled agent without details returns rawOutput as-is', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: working',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('agent-end', 'agent-1', 'cancelled', 20, {
+        title: 'Agent: working',
+        toolName: 'agent',
+        updatedAt: 25,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.status).toBe('completed');
+    expect(tool?.endTime).toBe(25);
+    expect(tool?.rawOutput).toBeUndefined();
+  });
+
+  it('cancelled agent with existing rawOutput object spreads and adds status/reason', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: analyze',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('agent-end', 'agent-1', 'cancelled', 20, {
+        title: 'Agent: analyze',
+        toolName: 'agent',
+        rawOutput: { type: 'task_execution', subagentName: 'general-purpose' },
+        details: 'User cancelled',
+        updatedAt: 30,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.rawOutput).toEqual({
+      type: 'task_execution',
+      subagentName: 'general-purpose',
+      status: 'cancelled',
+      reason: 'User cancelled',
+    });
+  });
+
+  it('inferToolKind uses toolKind over toolName when both present', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, {
+        toolName: 'bash',
+        toolKind: 'search',
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.kind).toBe('search');
+  });
+
+  it('inferToolKind uses exact match for grep and glob', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, { toolName: 'grep' }),
+      toolBlock('t2', 'tc2', 'completed', 2, { toolName: 'glob' }),
+      toolBlock('t3', 'tc3', 'completed', 3, { toolName: 'mygrep' }),
+    ]);
+
+    const tool1 =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    const tool2 =
+      messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
+    const tool3 =
+      messages[2].role === 'tool_group' ? messages[2].tools[0] : undefined;
+    expect(tool1?.kind).toBe('search');
+    expect(tool2?.kind).toBe('search');
+    expect(tool3?.kind).toBeUndefined();
+  });
+
+  it('getToolRawOutput fallback returns rawOutput ?? details for non-cancelled', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, {
+        toolName: 'Read',
+        rawOutput: undefined,
+        details: 'some detail info',
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.rawOutput).toBe('some detail info');
+  });
+
+  it('mergeToolCall updates fields from completion block', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: work',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      toolBlock('agent-end', 'agent-1', 'completed', 20, {
+        title: 'Agent: work done',
+        toolName: 'agent',
+        rawOutput: { type: 'task_execution', totalTokens: 500 },
+        updatedAt: 25,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.title).toBe('Agent: work done');
+    expect(tool?.status).toBe('completed');
+    expect(tool?.endTime).toBe(25);
+    expect(tool?.rawOutput).toEqual({
+      type: 'task_execution',
+      totalTokens: 500,
+    });
+  });
+
+  it('does not merge assistant across error block', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'analyzing...', 1),
+      {
+        id: 'err-1',
+        kind: 'error' as const,
+        text: 'Connection lost',
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+      textBlock('a2', 'assistant', 'recovered', 3),
+    ]);
+
+    expect(messages).toHaveLength(3);
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'analyzing...',
+    });
+    expect(messages[1]).toMatchObject({
+      role: 'system',
+      variant: 'error',
+      content: 'Connection lost',
+    });
+    expect(messages[2]).toMatchObject({
+      role: 'assistant',
+      content: 'recovered',
+    });
+  });
+
+  it('does not merge assistant across plan status block', () => {
+    const plan = {
+      sessionUpdate: 'plan',
+      entries: [{ content: 'Step 1', status: 'in_progress' }],
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'let me plan', 1),
+      statusBlock('plan-1', `plan: ${JSON.stringify(plan)}`, 2),
+      textBlock('a2', 'assistant', 'executing', 3),
+    ]);
+
+    expect(messages).toHaveLength(3);
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'let me plan',
+    });
+    expect(messages[1]).toMatchObject({ role: 'plan' });
+    expect(messages[2]).toMatchObject({
+      role: 'assistant',
+      content: 'executing',
+    });
+  });
+
+  it('does not merge assistant across system status block', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'working...', 1),
+      statusBlock('st1', 'Model switched to opus', 2),
+      textBlock('a2', 'assistant', 'continuing', 3),
+    ]);
+
+    expect(messages).toHaveLength(3);
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'working...',
+    });
+    expect(messages[1]).toMatchObject({
+      role: 'system',
+      content: 'Model switched to opus',
+    });
+    expect(messages[2]).toMatchObject({
+      role: 'assistant',
+      content: 'continuing',
+    });
+  });
+
+  it('does not merge assistant across standalone shell block', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'before shell', 1),
+      textBlock('u1', 'user', '! ls', 2),
+      shellBlock('sh1', 'file.ts\n', 3),
+      textBlock('a2', 'assistant', 'after shell', 4),
+    ]);
+
+    const assistantMsgs = messages.filter((m) => m.role === 'assistant');
+    expect(assistantMsgs).toHaveLength(2);
+    expect(assistantMsgs[0]).toMatchObject({ content: 'before shell' });
+    expect(assistantMsgs[1]).toMatchObject({ content: 'after shell' });
+  });
+
+  it('failed subAgent completion pops from stack and allows assistant to return to main thread', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: investigate',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+      }),
+      textBlock('sub-a1', 'assistant', 'Looking into it', 15),
+      toolBlock('agent-end', 'agent-1', 'failed', 20, {
+        title: 'Agent: investigate',
+        toolName: 'agent',
+        rawOutput: { error: 'Context limit exceeded' },
+        updatedAt: 25,
+      }),
+      textBlock('a1', 'assistant', 'The agent failed, let me try directly', 30),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    const agentTool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agentTool?.status).toBe('failed');
+    expect(agentTool?.endTime).toBe(25);
+    expect(agentTool?.subContent).toBe('Looking into it');
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'The agent failed, let me try directly',
+    });
+  });
+
+  it('status mapping covers running, pending, failed, and canceled (alternate spelling)', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'running', 1, { toolName: 'Bash' }),
+      toolBlock('t2', 'tc2', 'pending', 2, { toolName: 'Read' }),
+      toolBlock('t3', 'tc3', 'failed', 3, { toolName: 'Edit' }),
+      toolBlock('t4', 'tc4', 'canceled', 4, {
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+        updatedAt: 5,
+      }),
+    ]);
+
+    const tool1 =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    const tool2 =
+      messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
+    const tool3 =
+      messages[2].role === 'tool_group' ? messages[2].tools[0] : undefined;
+    const tool4 =
+      messages[3].role === 'tool_group' ? messages[3].tools[0] : undefined;
+    expect(tool1?.status).toBe('in_progress');
+    expect(tool2?.status).toBe('pending');
+    expect(tool3?.status).toBe('failed');
+    expect(tool4?.status).toBe('completed');
+    expect(tool4?.endTime).toBe(5);
+  });
+
+  it('closeAt window: blocks with createdAt before closeAt remain inside subAgent', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-1', 'call-1', 'completed', 10, {
+        title: 'Agent: fast',
+        toolName: 'agent',
+        rawInput: { subagent_type: 'general-purpose' },
+        rawOutput: { type: 'task_execution' },
+        updatedAt: 30,
+      }),
+      shellBlock('sh1', 'output from agent\n', 20),
+      textBlock('a1', 'assistant', 'inside agent window', 25),
+      textBlock('a2', 'assistant', 'after agent', 35),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    const agentTool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agentTool?.subContent).toContain('inside agent window');
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'after agent',
+    });
+  });
+
+  it('identifies subAgent by toolName task and rawOutput.type task_execution', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('task-start', 'task-1', 'in_progress', 10, {
+        title: 'Task: build',
+        toolName: 'task',
+      }),
+      textBlock('sub-text', 'assistant', 'Building...', 15),
+      toolBlock('sub-tool', 'sub-tc', 'completed', 20, {
+        toolName: 'Bash',
+        parentToolCallId: 'task-1',
+      }),
+      toolBlock('task-end', 'task-1', 'completed', 30, {
+        title: 'Task: build',
+        toolName: 'task',
+        rawOutput: { type: 'task_execution', result: 'Build passed' },
+        updatedAt: 35,
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const taskTool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(taskTool?.toolName).toBe('task');
+    expect(taskTool?.status).toBe('completed');
+    expect(taskTool?.subContent).toBe('Building...');
+    expect(taskTool?.subTools).toHaveLength(1);
+    expect(taskTool?.subTools?.[0].callId).toBe('sub-tc');
+
+    const taskExecByRawOutput = transcriptBlocksToDaemonMessages([
+      toolBlock('exec-start', 'exec-1', 'in_progress', 10, {
+        title: 'Custom Tool',
+        toolName: 'my_runner',
+        rawOutput: { type: 'task_execution' },
+      }),
+      textBlock('sub-text2', 'assistant', 'Running...', 15),
+      toolBlock('exec-end', 'exec-1', 'completed', 20, {
+        toolName: 'my_runner',
+        rawOutput: { type: 'task_execution', result: 'done' },
+        updatedAt: 25,
+      }),
+    ]);
+
+    expect(taskExecByRawOutput).toHaveLength(1);
+    const execTool =
+      taskExecByRawOutput[0].role === 'tool_group'
+        ? taskExecByRawOutput[0].tools[0]
+        : undefined;
+    expect(execTool?.subContent).toBe('Running...');
+  });
+
+  it('does not pass content, locations, or preview to DaemonMessageToolCall', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'tc1', 'completed', 1, {
+        toolName: 'Edit',
+        content: [
+          {
+            type: 'diff',
+            path: '/path/file.ts',
+            oldText: 'old',
+            newText: 'new',
+          },
+        ] as DaemonToolTranscriptBlock['content'],
+        locations: [{ file: '/path/file.ts', line: 10 }],
+        preview: { kind: 'generic', summary: 'Edit file.ts' },
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool).toBeDefined();
+    expect(tool?.callId).toBe('tc1');
+    expect('content' in tool!).toBe(false);
+    expect('locations' in tool!).toBe(false);
+    expect('preview' in tool!).toBe(false);
+  });
+
+  it('Agent tool with confirming status (from permission_request) nests sub-tools via parentToolCallId', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'agent-call-1', 'confirming', 100, {
+        toolName: 'Agent',
+        title: 'Query website',
+        rawInput: {
+          description: 'Query website',
+          prompt: 'fetch data',
+          subagent_type: 'Explore',
+        },
+      }),
+      toolBlock('t2', 'sub-tool-1', 'completed', 200, {
+        toolName: 'web_fetch',
+        title: 'Fetch page',
+        parentToolCallId: 'agent-call-1',
+        rawOutput: 'page content',
+      }),
+      toolBlock('t3', 'sub-tool-2', 'in_progress', 300, {
+        toolName: 'web_fetch',
+        title: 'Fetch another page',
+        parentToolCallId: 'agent-call-1',
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe('tool_group');
+    const agent =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agent).toBeDefined();
+    expect(agent!.callId).toBe('agent-call-1');
+    expect(agent!.toolName).toBe('Agent');
+    expect(agent!.status).toBe('pending');
+    expect(agent!.subTools).toHaveLength(2);
+    expect(agent!.subTools![0].callId).toBe('sub-tool-1');
+    expect(agent!.subTools![1].callId).toBe('sub-tool-2');
+  });
+
+  it('two parallel Agents from permission_request each nest their own sub-tools', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'agent-1', 'confirming', 100, {
+        toolName: 'Agent',
+        title: 'Agent A',
+        rawInput: { subagent_type: 'Explore', prompt: 'a' },
+      }),
+      toolBlock('t2', 'agent-2', 'confirming', 100, {
+        toolName: 'Agent',
+        title: 'Agent B',
+        rawInput: { subagent_type: 'Explore', prompt: 'b' },
+      }),
+      toolBlock('t3', 'sub-a1', 'completed', 200, {
+        toolName: 'web_fetch',
+        parentToolCallId: 'agent-1',
+        rawOutput: 'data-a',
+      }),
+      toolBlock('t4', 'sub-b1', 'completed', 200, {
+        toolName: 'web_fetch',
+        parentToolCallId: 'agent-2',
+        rawOutput: 'data-b',
+      }),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    const agentA =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    const agentB =
+      messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
+    expect(agentA!.callId).toBe('agent-1');
+    expect(agentA!.subTools).toHaveLength(1);
+    expect(agentA!.subTools![0].callId).toBe('sub-a1');
+    expect(agentB!.callId).toBe('agent-2');
+    expect(agentB!.subTools).toHaveLength(1);
+    expect(agentB!.subTools![0].callId).toBe('sub-b1');
+  });
+
+  it('hides unparented thought text while parallel subagents are active', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'agent-1', 'running', 100, {
+        toolName: 'Agent',
+        title: 'Agent A',
+        rawInput: { subagent_type: 'Explore', prompt: 'a' },
+      }),
+      toolBlock('t2', 'agent-2', 'running', 100, {
+        toolName: 'Agent',
+        title: 'Agent B',
+        rawInput: { subagent_type: 'Security', prompt: 'b' },
+      }),
+      textBlock('th1', 'thought', 'I need to review the PR diff.', 150),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages.every((message) => message.role === 'tool_group')).toBe(
+      true,
+    );
+    const assistant = messages.find((message) => message.role === 'assistant');
+    expect(assistant).toBeUndefined();
+    const agentA =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    const agentB =
+      messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
+    expect(agentA!.subContent).toBeUndefined();
+    expect(agentB!.subContent).toBeUndefined();
   });
 });

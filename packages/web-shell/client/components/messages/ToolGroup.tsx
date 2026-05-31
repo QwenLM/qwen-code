@@ -11,9 +11,11 @@ import { ToolApproval } from './ToolApproval';
 import { parseAnsi, hasAnsi } from '../../utils/ansi';
 import { extractTodosFromToolCall } from '../../utils/todos';
 import {
+  formatDurationMs,
   formatElapsed,
   formatToolDisplayName,
   StatusIcon,
+  truncateText,
 } from './tools/toolDisplay';
 import {
   extractText,
@@ -135,6 +137,7 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
   const [showAll, setShowAll] = useState(false);
   const output = extractText(tool) || '';
   const lines = output.split('\n');
+  const isUserShell = tool.toolName === 'shell';
   const isLong = lines.length > MAX_BASH_LINES;
   const hiddenLinesCount = Math.max(0, lines.length - MAX_BASH_LINES);
   const displayText =
@@ -163,7 +166,7 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
             ))
           : displayText}
       </pre>
-      {isLong && (
+      {isLong && isUserShell && (
         <button
           className={styles.expandBtn}
           onClick={() => setShowAll(!showAll)}
@@ -331,6 +334,136 @@ interface ToolLineProps {
   workspaceCwd?: string;
 }
 
+function isTaskExecutionRaw(raw: unknown): Record<string, unknown> | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const record = raw as Record<string, unknown>;
+  return record['type'] === 'task_execution' ? record : undefined;
+}
+
+function getStringField(
+  record: Record<string, unknown> | undefined,
+  field: string,
+): string {
+  const value = record?.[field];
+  return typeof value === 'string' ? value : '';
+}
+
+function getAgentCancellationReason(tool: ACPToolCall): string {
+  const raw = tool.rawOutput;
+  if (typeof raw === 'string') return '';
+  const record =
+    raw && typeof raw === 'object'
+      ? (raw as Record<string, unknown>)
+      : undefined;
+  const terminateReason = getStringField(record, 'terminateReason');
+  return (
+    getStringField(record, 'reason') ||
+    (terminateReason !== 'GOAL' ? terminateReason : '') ||
+    getStringField(record, 'error')
+  );
+}
+
+function isCancelledAgent(tool: ACPToolCall, reason: string): boolean {
+  const raw = tool.rawOutput;
+  const record =
+    raw && typeof raw === 'object'
+      ? (raw as Record<string, unknown>)
+      : undefined;
+  const rawStatus = getStringField(record, 'status').toLowerCase();
+  return (
+    tool.status === 'failed' ||
+    rawStatus === 'cancelled' ||
+    rawStatus === 'canceled' ||
+    reason.toLowerCase().includes('cancel')
+  );
+}
+
+function getAgentDisplayInfo(tool: ACPToolCall): {
+  agentType: string;
+  description: string;
+  subToolCount: number;
+  elapsed: string;
+  tokens: string;
+  status: ACPToolCall['status'];
+  reason: string;
+} {
+  const taskExec = isTaskExecutionRaw(tool.rawOutput);
+  const reason = getAgentCancellationReason(tool);
+  const status = isCancelledAgent(tool, reason) ? 'failed' : tool.status;
+
+  const agentType =
+    (taskExec &&
+      typeof taskExec['subagentName'] === 'string' &&
+      taskExec['subagentName']) ||
+    (typeof tool.args?.subagent_type === 'string' && tool.args.subagent_type) ||
+    (tool.toolName === 'task' ? 'task' : 'general-purpose');
+
+  let description = '';
+  if (tool.title) {
+    const colonIdx = tool.title.indexOf(': ');
+    if (colonIdx > 0) description = tool.title.slice(colonIdx + 2);
+  }
+  if (!description) {
+    const desc = tool.args?.description;
+    if (typeof desc === 'string' && desc.trim()) description = desc.trim();
+  }
+  if (!description && taskExec) {
+    const td = taskExec['taskDescription'];
+    if (typeof td === 'string' && td.trim()) description = td.trim();
+  }
+
+  const subToolCount =
+    tool.subTools?.length ||
+    (taskExec?.['toolCalls'] as unknown[] | undefined)?.length ||
+    0;
+
+  const stats = taskExec?.['executionSummary'] as
+    | Record<string, unknown>
+    | undefined;
+  const elapsed =
+    stats && typeof stats['totalDurationMs'] === 'number'
+      ? formatDurationMs(stats['totalDurationMs'])
+      : formatElapsed(tool.startTime, tool.endTime);
+
+  const totalTokens =
+    taskExec &&
+    typeof taskExec['tokenCount'] === 'number' &&
+    taskExec['tokenCount'] > 0
+      ? (taskExec['tokenCount'] as number)
+      : stats &&
+          typeof stats['totalTokens'] === 'number' &&
+          stats['totalTokens'] > 0
+        ? (stats['totalTokens'] as number)
+        : 0;
+  let tokens = '';
+  if (totalTokens > 0) {
+    if (totalTokens >= 1000)
+      tokens = (totalTokens / 1000).toFixed(1).replace(/\.0$/, '') + 'k tokens';
+    else tokens = `${totalTokens} tokens`;
+  }
+
+  return {
+    agentType,
+    description,
+    subToolCount,
+    elapsed,
+    tokens,
+    status,
+    reason,
+  };
+}
+
+function toolHasApprovalInSubTools(
+  tool: ACPToolCall,
+  toolCallId: string,
+): boolean {
+  if (!tool.subTools) return false;
+  return tool.subTools.some(
+    (sub) =>
+      sub.callId === toolCallId || toolHasApprovalInSubTools(sub, toolCallId),
+  );
+}
+
 function shouldAutoExpand(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (name === 'write_file' || name === 'writefile') return true;
@@ -345,6 +478,17 @@ function getActiveTool(tools: ACPToolCall[]): ACPToolCall {
   );
 }
 
+function getCompactDisplayStatus(tool: ACPToolCall): ACPToolCall['status'] {
+  if (tool.status !== 'completed') return tool.status;
+  const raw = tool.rawOutput;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return tool.status;
+  const record = raw as Record<string, unknown>;
+  const rawStatus =
+    typeof record.status === 'string' ? record.status.toLowerCase() : '';
+  if (rawStatus === 'cancelled' || rawStatus === 'canceled') return 'failed';
+  return tool.status;
+}
+
 function CompactToolGroup({
   tools,
   workspaceCwd,
@@ -354,9 +498,11 @@ function CompactToolGroup({
 }) {
   const { t } = useI18n();
   const activeTool = getActiveTool(tools);
-  const overallStatus = activeTool.status;
+  const overallStatus = getCompactDisplayStatus(activeTool);
   const description = getToolDescription(activeTool, workspaceCwd);
-  const elapsed = formatElapsed(activeTool.startTime, activeTool.endTime);
+  const elapsed = isShellToolName(activeTool.toolName)
+    ? ''
+    : formatElapsed(activeTool.startTime, activeTool.endTime);
 
   return (
     <div className={styles.compactGroup}>
@@ -396,8 +542,31 @@ function areToolLinePropsEqual(
     a.endTime === b.endTime &&
     a.subContent === b.subContent &&
     a.rawOutput === b.rawOutput &&
-    a.title === b.title
+    a.title === b.title &&
+    areSubToolsEqual(a.subTools, b.subTools)
   );
+}
+
+function areSubToolsEqual(
+  prev: ACPToolCall[] | undefined,
+  next: ACPToolCall[] | undefined,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  if (prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i++) {
+    const a = prev[i];
+    const b = next[i];
+    if (
+      a.callId !== b.callId ||
+      a.status !== b.status ||
+      a.endTime !== b.endTime ||
+      a.rawOutput !== b.rawOutput
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 const ToolLine = memo(function ToolLine({
@@ -418,17 +587,80 @@ const ToolLine = memo(function ToolLine({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [compactMode, tool.callId, tool.toolName],
   );
-  if (isSubAgentToolCall(tool)) return <SubAgentPanel tool={tool} />;
+  const hasApproval = approval && approval.toolCallId === tool.callId;
+  const hasSubToolApproval =
+    !hasApproval &&
+    approval?.toolCallId &&
+    isSubAgentToolCall(tool) &&
+    toolHasApprovalInSubTools(tool, approval.toolCallId);
+
+  if (isSubAgentToolCall(tool)) {
+    const info = getAgentDisplayInfo(tool);
+    const isComplete = tool.status === 'completed' || tool.status === 'failed';
+    const showExpanded = expanded || !!hasSubToolApproval;
+    return (
+      <div className={styles.line}>
+        <div className={styles.lineMain}>
+          <StatusIcon status={tool.status} />
+          <span className={styles.lineName}>Agent</span>
+          {info.description && (
+            <span className={styles.lineArg}>
+              {truncateText(info.description, 60)}
+            </span>
+          )}
+        </div>
+        {isComplete && (
+          <div
+            className={`${styles.agentSummary} ${styles.lineExpandable}`}
+            onClick={() => setExpanded(!expanded)}
+          >
+            <StatusIcon status={info.status} />
+            <span className={styles.lineName}>{info.agentType}:</span>
+            <span className={styles.lineArg}>
+              {truncateText(info.description, 50)}
+            </span>
+            {info.subToolCount > 0 && (
+              <span className={styles.lineElapsed}>
+                · {info.subToolCount} tools
+              </span>
+            )}
+            {info.elapsed && (
+              <span className={styles.lineElapsed}>· {info.elapsed}</span>
+            )}
+            {info.tokens && (
+              <span className={styles.lineElapsed}>· {info.tokens}</span>
+            )}
+            {info.reason && (
+              <span className={styles.lineElapsed}>
+                · {truncateText(info.reason, 80)}
+              </span>
+            )}
+          </div>
+        )}
+        {hasApproval && onConfirm && (
+          <ToolApproval request={approval} onConfirm={onConfirm} />
+        )}
+        {hasSubToolApproval && onConfirm && (
+          <ToolApproval request={approval!} onConfirm={onConfirm} />
+        )}
+        {showExpanded && (
+          <div className={styles.lineDetail}>
+            <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
+          </div>
+        )}
+      </div>
+    );
+  }
 
   const description = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
-  const elapsed = formatElapsed(tool.startTime, tool.endTime);
+  const elapsed = isShellToolName(tool.toolName)
+    ? ''
+    : formatElapsed(tool.startTime, tool.endTime);
   const expandable = hasExpandableContent(tool);
 
   const name = tool.toolName.toLowerCase();
   const isTodo = name === 'todowrite';
-
-  const hasApproval = approval && approval.toolCallId === tool.callId;
 
   return (
     <div className={styles.line}>
@@ -442,9 +674,6 @@ const ToolLine = memo(function ToolLine({
         </span>
         {description && <span className={styles.lineArg}>{description}</span>}
         {elapsed && <span className={styles.lineElapsed}>{elapsed}</span>}
-        {/* {expandable && (
-          <span className={styles.lineChevron}>{expanded ? '▼' : '▶'}</span>
-        )} */}
       </div>
       {hasApproval && onConfirm && (
         <ToolApproval request={approval} onConfirm={onConfirm} />
@@ -479,8 +708,12 @@ export const ToolGroup = memo(function ToolGroup({
 }: ToolGroupProps) {
   const compactMode = useContext(CompactModeContext);
   const hasApprovalTool =
-    pendingApproval &&
-    tools.some((t) => t.callId === pendingApproval.toolCallId);
+    pendingApproval?.toolCallId &&
+    tools.some(
+      (t) =>
+        t.callId === pendingApproval.toolCallId ||
+        toolHasApprovalInSubTools(t, pendingApproval.toolCallId!),
+    );
   const showCompact = compactMode && !hasApprovalTool;
 
   if (showCompact) {

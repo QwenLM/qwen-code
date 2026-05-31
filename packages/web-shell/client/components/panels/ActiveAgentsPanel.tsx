@@ -15,7 +15,7 @@ interface ActiveAgentsPanelProps {
   onReturnToInput?: (text?: string) => void;
 }
 
-const MAX_VISIBLE = 5;
+const MAX_VISIBLE = 10;
 
 interface TaskExecution {
   type: 'task_execution';

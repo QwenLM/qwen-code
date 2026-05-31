@@ -73,6 +73,8 @@ export function useInputHistory(storageKey = DEFAULT_STORAGE_KEY) {
     }
   }, []);
 
+  const isNavigating = useCallback(() => indexRef.current !== -1, []);
+
   const reset = useCallback(() => {
     indexRef.current = -1;
     searchIndexRef.current = -1;
@@ -130,6 +132,7 @@ export function useInputHistory(storageKey = DEFAULT_STORAGE_KEY) {
     push,
     navigateUp,
     navigateDown,
+    isNavigating,
     reset,
     searchReverse,
     getReverseMatches,

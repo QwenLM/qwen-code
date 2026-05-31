@@ -107,6 +107,7 @@ const DaemonWorkspaceEventSignalsContext = createContext<
   DaemonWorkspaceEventSignals | undefined
 >(undefined);
 const TERMINAL_SESSION_HTTP_STATUSES = new Set([401, 403, 404, 410]);
+const DEFAULT_MAX_BLOCKS = 200_000;
 
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   memoryVersion: 0,
@@ -138,6 +139,7 @@ export function DaemonSessionProvider({
   clientId,
   createSessionRequest,
   maxQueued = 1024,
+  maxBlocks = DEFAULT_MAX_BLOCKS,
   suppressOwnUserEcho = true,
   includeRawEvent = false,
   autoConnect = true,
@@ -158,7 +160,10 @@ export function DaemonSessionProvider({
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
 
-  const store = useMemo(() => createDaemonTranscriptStore(), []);
+  const store = useMemo(
+    () => createDaemonTranscriptStore({ maxBlocks }),
+    [maxBlocks],
+  );
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
