@@ -161,4 +161,28 @@ describe('clipboardUtils', () => {
       await expect(cleanupOldClipboardImages('.')).resolves.not.toThrow();
     });
   });
+
+  describe('macOS/Windows fallback', () => {
+    it('should return false on non-linux platform when @teddyzhu/clipboard fails', async () => {
+      vi.stubGlobal('process', {
+        ...process,
+        platform: 'darwin',
+      });
+
+      // @teddyzhu/clipboard mock returns false by default
+      const result = await clipboardHasImage();
+      expect(result).toBe(false);
+    });
+
+    it('should return null on non-linux platform when saving fails', async () => {
+      vi.stubGlobal('process', {
+        ...process,
+        platform: 'win32',
+      });
+
+      // @teddyzhu/clipboard mock returns false by default
+      const result = await saveClipboardImage('/tmp/test');
+      expect(result).toBe(null);
+    });
+  });
 });

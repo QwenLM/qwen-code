@@ -98,6 +98,12 @@ async function saveFromCommand(
 
     child.stdout.pipe(fileStream);
 
+    child.stdout.on('error', (err) => {
+      debugLogger.debug(`stdout error for ${command}:`, err);
+      clearTimeout(timer);
+      safeResolve(false);
+    });
+
     child.on('error', (err) => {
       debugLogger.debug(`Failed to spawn ${command}:`, err);
       clearTimeout(timer);
@@ -300,7 +306,7 @@ async function saveFileWithWlPaste(
   }
 
   if (imageTypes.includes('image/bmp')) {
-    const bmpPath = tempFilePath.replace('.png', '.bmp');
+    const bmpPath = tempFilePath.replace(/\.png$/, '.bmp');
     const bmpSuccess = await saveFromCommand(
       'wl-paste',
       ['--no-newline', '--type', 'image/bmp'],
