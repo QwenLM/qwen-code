@@ -51,6 +51,7 @@ import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { escapeSystemReminderTags, escapeXml } from '../utils/xml.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
+import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
@@ -838,6 +839,10 @@ export class CoreToolScheduler {
     this.getPreferredEditor = options.getPreferredEditor;
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
+  }
+
+  private get memoryMonitor(): MemoryPressureMonitor | undefined {
+    return this.config.getMemoryPressureMonitor?.();
   }
 
   private setStatusInternal(
@@ -2599,6 +2604,7 @@ export class CoreToolScheduler {
       // _executeToolCallBody pre-sets status (OK / FAILURE / CANCELLED) via
       // setToolSpan*; finalize without metadata to preserve that.
       this.finalizeToolSpan(callId);
+      this.memoryMonitor?.scheduleCheck();
     }
   }
 
