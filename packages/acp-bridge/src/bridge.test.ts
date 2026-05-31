@@ -3856,6 +3856,77 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does NOT reconcile when applyModelServiceId roundtrip fails on attach', async () => {
+      // F4oaj: the attach-time model apply (`applyModelServiceId`) gates
+      // reconcile on the same `succeeded` flag as `setSessionModel`. When the
+      // agent rejects `unstable_setSessionModel`, `publishModelSwitched` never
+      // runs and the cache is unchanged, so reconciliation must be skipped (no
+      // status read) — otherwise a corrective `model_switched` would be paired
+      // with the `model_switch_failed`. The agent's status deliberately drifts
+      // so any (incorrect) reconcile would produce an observable corrective.
+      let statusReads = 0;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/status/session/context') {
+              statusReads += 1;
+              return Promise.resolve({
+                state: { models: { currentModelId: 'qwen-turbo' } },
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async () => {
+                throw new Error('agent denied');
+              };
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      // Spawn WITHOUT a model so the only model apply is the failing one on the
+      // second attach (a spawn-time apply would succeed and legitimately read
+      // status, muddying the assertion).
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      // Attach with a model — the agent rejects it. The attach swallows the
+      // failure (shared session stays alive) and surfaces it as a bus event.
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        modelServiceId: 'rejected',
+      });
+
+      const it = iter[Symbol.asyncIterator]();
+      const failed = await it.next();
+      expect(failed.value?.type).toBe('model_switch_failed');
+      // Give any (incorrectly) scheduled reconcile a tick to fire.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(statusReads).toBe(0);
+      abort.abort();
+      await bridge.shutdown();
+    });
+
     it('serializes concurrent model-change calls (FIFO)', async () => {
       const callOrder: string[] = [];
       const factory: ChannelFactory = async () => {

@@ -1835,9 +1835,10 @@ export class Session implements SessionContext {
         sessionId: this.sessionId,
         currentModeId: params.modeId,
       })
-      .catch(() => {
+      .catch((error) => {
         // Advisory only; a failed notification must not fail the mode
         // switch. Matches the model-update extNotification in `setModel`.
+        debugLogger.debug('mode-update extNotification failed', error);
       });
   }
 
@@ -1895,8 +1896,9 @@ export class Session implements SessionContext {
         sessionId: this.sessionId,
         currentModelId: effectiveModelId,
       })
-      .catch(() => {
+      .catch((error) => {
         // Advisory only; a failed notification must not fail the model switch.
+        debugLogger.debug('model-update extNotification failed', error);
       });
 
     if (options.persistDefault ?? true) {
@@ -1970,9 +1972,10 @@ export class Session implements SessionContext {
         currentModeId: newModeId,
         legacyFrameSent: true,
       })
-      .catch(() => {
+      .catch((error) => {
         // Advisory only; a failed notification must not fail the mode
         // change. Matches the model-update extNotification in `setModel`.
+        debugLogger.debug('mode-update extNotification failed', error);
       });
   }
 

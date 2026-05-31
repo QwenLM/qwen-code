@@ -122,8 +122,9 @@ const EARLY_EVENT_TTL_MS = 60_000;
 // Known approval-mode ids accepted on the in-session `current_mode_update`
 // demux path. Mirrors the `modeMap` keys in `Session.setMode` (CLI); an id
 // outside this set is dropped before it fans out to SSE clients / the SDK
-// reducer. Keep the two in lockstep.
-const KNOWN_APPROVAL_MODES: ReadonlySet<string> = new Set([
+// reducer. Keep the two in lockstep. Exported so the bridge's reconcile and
+// snapshot-seed paths apply the same enum backstop to agent-supplied mode ids.
+export const KNOWN_APPROVAL_MODES: ReadonlySet<string> = new Set([
   'plan',
   'default',
   'auto-edit',
@@ -579,17 +580,15 @@ export class BridgeClient implements Client {
         entry.activePromptOriginatorClientId,
       );
     } else {
-      try {
-        entry.events.publish({
-          type: 'model_switched',
-          data: { sessionId, modelId: currentModelId },
-          ...(entry.activePromptOriginatorClientId
-            ? { originatorClientId: entry.activePromptOriginatorClientId }
-            : {}),
-        });
-      } catch {
-        /* bus closed */
-      }
+      // `EventBus.publish` never throws (closed bus → undefined no-op); per
+      // its documented contract we don't wrap it.
+      entry.events.publish({
+        type: 'model_switched',
+        data: { sessionId, modelId: currentModelId },
+        ...(entry.activePromptOriginatorClientId
+          ? { originatorClientId: entry.activePromptOriginatorClientId }
+          : {}),
+      });
     }
     writeStderrLine(
       `[demux] session=${sessionId} type=current_model_update action=promoted model=${currentModelId}`,
@@ -647,31 +646,31 @@ export class BridgeClient implements Client {
         entry.activePromptOriginatorClientId,
       );
     } else {
-      try {
-        // Fallback path (no `onModePromoted` injected — tests / non-bridge
-        // consumers; production always wires the bridge callback). Mirror
-        // the main path's full payload: the SDK's
-        // `isApprovalModeChangedData` requires `previous` (non-empty
-        // string) and `persisted` (boolean), so a `{ sessionId, next }`
-        // shape fails validation and `asKnownDaemonEvent` drops the event.
-        // `previous` is unavailable on this path (the cache lives on the
-        // bridge's `SessionEntry`, not the demux interface), so seed it
-        // with the protocol default.
-        entry.events.publish({
-          type: 'approval_mode_changed',
-          data: {
-            sessionId,
-            previous: 'default',
-            next: currentModeId,
-            persisted: false,
-          },
-          ...(entry.activePromptOriginatorClientId
-            ? { originatorClientId: entry.activePromptOriginatorClientId }
-            : {}),
-        });
-      } catch {
-        /* bus closed */
-      }
+      // Fallback path (no `onModePromoted` injected — tests / non-bridge
+      // consumers; production always wires the bridge callback). Mirror
+      // the main path's full payload: the SDK's
+      // `isApprovalModeChangedData` requires `previous` (non-empty
+      // string) and `persisted` (boolean), so a `{ sessionId, next }`
+      // shape fails validation and `asKnownDaemonEvent` drops the event.
+      // `previous` is unavailable on this path (the cache lives on the
+      // bridge's `SessionEntry`, not the demux interface), so seed it
+      // with the protocol default.
+      //
+      // `EventBus.publish` never throws (a closed bus is a return-undefined
+      // no-op and subscriber-enqueue failures are caught internally), so
+      // per its documented contract we don't wrap it in try/catch.
+      entry.events.publish({
+        type: 'approval_mode_changed',
+        data: {
+          sessionId,
+          previous: 'default',
+          next: currentModeId,
+          persisted: false,
+        },
+        ...(entry.activePromptOriginatorClientId
+          ? { originatorClientId: entry.activePromptOriginatorClientId }
+          : {}),
+      });
     }
     // TODO(dual-emit-removal): also emit the legacy generic
     // `session_update{current_mode_update}` for one release cycle so the
@@ -701,23 +700,21 @@ export class BridgeClient implements Client {
       );
       return;
     }
-    try {
-      entry.events.publish({
-        type: 'session_update',
-        data: {
-          sessionId,
-          update: {
-            sessionUpdate: 'current_mode_update',
-            currentModeId,
-          },
+    // `EventBus.publish` never throws (closed bus → undefined no-op); per its
+    // documented contract we don't wrap it in try/catch.
+    entry.events.publish({
+      type: 'session_update',
+      data: {
+        sessionId,
+        update: {
+          sessionUpdate: 'current_mode_update',
+          currentModeId,
         },
-        ...(entry.activePromptOriginatorClientId
-          ? { originatorClientId: entry.activePromptOriginatorClientId }
-          : {}),
-      });
-    } catch {
-      /* bus closed */
-    }
+      },
+      ...(entry.activePromptOriginatorClientId
+        ? { originatorClientId: entry.activePromptOriginatorClientId }
+        : {}),
+    });
     writeStderrLine(
       `[demux] session=${sessionId} type=current_mode_update action=promoted mode=${currentModeId}`,
     );

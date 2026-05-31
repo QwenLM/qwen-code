@@ -78,7 +78,7 @@ import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
-import { BridgeClient } from './bridgeClient.js';
+import { BridgeClient, KNOWN_APPROVAL_MODES } from './bridgeClient.js';
 import {
   CANCEL_VOTE_SENTINEL,
   createNoOpPermissionAuditPublisher,
@@ -1305,7 +1305,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // `ensureChannel`, never spawning a fresh one. Tear down the
     // empty channel so the next attempt gets a clean spawn.
     const ci = await ensureChannel();
-    let newSessionResp: { sessionId: string };
+    let newSessionResp: {
+      sessionId: string;
+      models?: { currentModelId?: unknown } | null;
+      modes?: { currentModeId?: unknown } | null;
+    };
     try {
       newSessionResp = await telemetry.withSpan(
         'session.new',
@@ -1354,6 +1358,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       newSessionResp.sessionId,
       boundWorkspace,
     );
+    seedSnapshotCaches(entry, newSessionResp);
     const clientId = registerClient(entry, requestedClientId);
     // `defaultEntry` is the single-scope attach target — only sessions
     // SPAWNED UNDER `'single'` may claim it. A thread-scope spawn must
@@ -1462,20 +1467,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } catch (err) {
         // Surface the failure to ALL attached clients, not just the
         // caller — a shared session swallowing a denied model change
-        // silently would surprise the others.
-        try {
-          entry.events.publish({
-            type: 'model_switch_failed',
-            data: {
-              sessionId: entry.sessionId,
-              requestedModelId: modelId,
-              error: err instanceof Error ? err.message : String(err),
-            },
-            ...(originatorClientId ? { originatorClientId } : {}),
-          });
-        } catch {
-          /* bus closed */
-        }
+        // silently would surprise the others. `publish()` never throws
+        // (see `publishModelSwitched`), so no wrapper.
+        entry.events.publish({
+          type: 'model_switch_failed',
+          data: {
+            sessionId: entry.sessionId,
+            requestedModelId: modelId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
         throw err;
       } finally {
         entry.modelRoundtripInFlight = false;
@@ -1740,15 +1742,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   ): void => {
     entry.currentModelId = modelId;
     entry.modelPublishGeneration++;
-    try {
-      entry.events.publish({
-        type: 'model_switched',
-        data: { sessionId: entry.sessionId, modelId },
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
-    } catch {
-      /* bus closed */
-    }
+    // `EventBus.publish` never throws (a closed bus is a return-undefined
+    // no-op); per its documented contract we don't wrap it — a try/catch
+    // here would be dead code for "bus closed" and would mislabel a real
+    // programming error (e.g. a `TypeError`) as a benign bus-closed swallow.
+    entry.events.publish({
+      type: 'model_switched',
+      data: { sessionId: entry.sessionId, modelId },
+      ...(originatorClientId ? { originatorClientId } : {}),
+    });
   };
 
   const publishApprovalModeChanged = (
@@ -1758,20 +1760,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   ): void => {
     entry.currentApprovalMode = payload.next;
     entry.approvalModePublishGeneration++;
-    try {
-      entry.events.publish({
-        type: 'approval_mode_changed',
-        data: {
-          sessionId: entry.sessionId,
-          previous: payload.previous,
-          next: payload.next,
-          persisted: payload.persisted,
-        },
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
-    } catch {
-      /* bus closed */
-    }
+    // See `publishModelSwitched`: `publish()` never throws, so no wrapper.
+    entry.events.publish({
+      type: 'approval_mode_changed',
+      data: {
+        sessionId: entry.sessionId,
+        previous: payload.previous,
+        next: payload.next,
+        persisted: payload.persisted,
+      },
+      ...(originatorClientId ? { originatorClientId } : {}),
+    });
   };
 
   // §2.2 post-roundtrip reconciliation — after a bridge-driven model or
@@ -1830,7 +1829,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const actual = (
           status?.state?.modes as { currentModeId?: string } | undefined
         )?.currentModeId;
-        if (actual && actual !== entry.currentApprovalMode) {
+        // Same enum backstop as the demux path (`handleInSessionModeUpdate`):
+        // `actual` is an agent-supplied id typed `unknown`, and the SDK's
+        // `isApprovalModeChangedData` is a structural check (deliberately
+        // forward-compatible with a future 5th mode), NOT an enum gate. An
+        // unknown id here would fan out to every SSE client and land in the
+        // reducer's `state.approvalMode`, so drop it before publishing.
+        if (actual && !KNOWN_APPROVAL_MODES.has(actual)) {
+          writeStderrLine(
+            `[reconcile] session=${entry.sessionId} target=approvalMode action=dropped reason=unknown_mode mode=${actual}`,
+          );
+        } else if (actual && actual !== entry.currentApprovalMode) {
           writeStderrLine(
             `[reconcile] session=${entry.sessionId} target=approvalMode action=corrected cached=${entry.currentApprovalMode ?? '<unset>'} actual=${actual}`,
           );
@@ -1897,6 +1906,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // freshly-created EventBus. Idempotent on unknown sessionIds.
     ci.client.drainEarlyEvents(entry.sessionId, entry);
     return entry;
+  };
+
+  // A5: seed the snapshot caches from the agent's session-create response
+  // (`newSession` / `loadSession` / `resumeSession` all return `models` +
+  // `modes`). Without this the caches stay unset until the first change, so a
+  // cold `?snapshot=1` attach to a session that never switched would return
+  // `{ currentModelId: null, currentApprovalMode: null }` and the SDK reducer's
+  // `!= null` guard would leave the client unseeded — defeating A5's primary
+  // (initial-attach) use case. The agent's `currentModelId` is already the
+  // canonical `model(authType)` form (acpAgent `formatAcpModelId`), matching
+  // what `reconcileAfterRoundtrip` reads back, so seeding it keeps the model
+  // comparison format-stable. Mode ids pass the same `KNOWN_APPROVAL_MODES`
+  // backstop the demux/reconcile paths use.
+  const seedSnapshotCaches = (
+    entry: SessionEntry,
+    resp: {
+      models?: { currentModelId?: unknown } | null;
+      modes?: { currentModeId?: unknown } | null;
+    },
+  ): void => {
+    const model = resp.models?.currentModelId;
+    if (typeof model === 'string' && model.length > 0) {
+      entry.currentModelId = model;
+    }
+    const mode = resp.modes?.currentModeId;
+    if (typeof mode === 'string' && KNOWN_APPROVAL_MODES.has(mode)) {
+      entry.currentApprovalMode = mode;
+    }
   };
 
   const isAcpSessionResourceNotFound = (
@@ -2162,6 +2199,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         restoreEvents,
       );
       entry.restoreState = state;
+      seedSnapshotCaches(entry, state);
       const clientId = registerClient(entry, req.clientId);
       // Fold synchronous coalesce reservations into the new entry's
       // `attachCount`. By this point all coalescers that beat us must
@@ -3477,20 +3515,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // Mirror `applyModelServiceId`'s observability contract: surface
         // failed model changes on the SSE bus so subscribers can update
         // their UI / retry. Without this the only signal is the HTTP
-        // 5xx, which doesn't reach passive viewers.
-        try {
-          entry.events.publish({
-            type: 'model_switch_failed',
-            data: {
-              sessionId: entry.sessionId,
-              requestedModelId: req.modelId,
-              error: err instanceof Error ? err.message : String(err),
-            },
-            ...(originatorClientId ? { originatorClientId } : {}),
-          });
-        } catch {
-          /* bus closed */
-        }
+        // 5xx, which doesn't reach passive viewers. `publish()` never
+        // throws (see `publishModelSwitched`), so no wrapper.
+        entry.events.publish({
+          type: 'model_switch_failed',
+          data: {
+            sessionId: entry.sessionId,
+            requestedModelId: req.modelId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
         throw err;
       }
       // model_switched is published inside the work callback above (while the
@@ -3600,6 +3635,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               },
               entry.sessionId,
             );
+            // F3Qgp: a persisted change rewrites the workspace default, so the
+            // peers we just notified now hold a stale `currentApprovalMode` in
+            // their SessionEntry cache. Their GET status / session_snapshot
+            // would report the pre-change mode until their own next roundtrip.
+            // `byId` is the per-workspace session map (the bridge is bound per
+            // workspace), so mirror the new default into every peer's cache;
+            // skip the originator, whose cache `publishApprovalModeChanged`
+            // already updated.
+            for (const peer of byId.values()) {
+              if (peer.sessionId === entry.sessionId) {
+                continue;
+              }
+              peer.currentApprovalMode = response.current;
+            }
           }
           succeeded = true;
           return {
