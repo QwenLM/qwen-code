@@ -891,6 +891,62 @@ describe('Server Config (config.ts)', () => {
       } as ConfigParameters);
       expect(config.getFailedMcpServerNames()).toEqual([]);
     });
+
+    it('getFailedMcpServerNames skips project servers pending approval', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        mcpServers: {
+          pending: {
+            command: 'node',
+            source: 'project',
+            pendingApproval: true,
+          },
+        },
+      } as ConfigParameters);
+
+      expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('does not let extensions replace pending project MCP servers', () => {
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        mcpServers: {
+          server: {
+            command: 'node',
+            args: ['project.js'],
+            source: 'project',
+            pendingApproval: true,
+          },
+        },
+      } as ConfigParameters);
+      vi.spyOn(config, 'getActiveExtensions').mockReturnValue([
+        {
+          isActive: true,
+          config: {
+            name: 'test-extension',
+            mcpServers: {
+              server: { command: 'extension' },
+              other: { command: 'other-extension' },
+            },
+          },
+        },
+      ] as never);
+
+      expect(config.getMcpServers()).toEqual({
+        server: {
+          command: 'node',
+          args: ['project.js'],
+          source: 'project',
+          pendingApproval: true,
+        },
+        other: {
+          command: 'other-extension',
+          extensionName: 'test-extension',
+        },
+      });
+    });
   });
 
   describe('refreshAuth', () => {

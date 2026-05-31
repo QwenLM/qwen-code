@@ -7,49 +7,13 @@
 import type { CommandModule } from 'yargs';
 import { loadSettings } from '../../config/settings.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import {
-  Config,
-  FileDiscoveryService,
-  ExtensionManager,
-} from '@qwen-code/qwen-code-core';
-import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
+import { Config, FileDiscoveryService } from '@qwen-code/qwen-code-core';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import { getMcpServersFromConfig } from './servers.js';
 
-async function getMcpServersFromConfig(
-  extensionManager?: ExtensionManager,
-): Promise<Record<string, MCPServerConfig>> {
-  const settings = loadSettings();
-  const extManager =
-    extensionManager ??
-    new ExtensionManager({
-      isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
-      telemetrySettings: settings.merged.telemetry,
-    });
-
-  if (!extensionManager) {
-    await extManager.refreshCache();
-  }
-  const extensions = extManager.getLoadedExtensions();
-  const mcpServers = { ...(settings.merged.mcpServers || {}) };
-  for (const extension of extensions) {
-    if (extension.isActive) {
-      Object.entries(extension.config.mcpServers || {}).forEach(
-        ([key, server]) => {
-          if (mcpServers[key]) {
-            return;
-          }
-          mcpServers[key] = {
-            ...server,
-            extensionName: extension.config.name,
-          };
-        },
-      );
-    }
-  }
-  return mcpServers;
-}
-
-async function createMinimalConfig(): Promise<Config> {
+async function createMinimalConfig(
+  mcpServers: Record<string, MCPServerConfig>,
+): Promise<Config> {
   const settings = loadSettings();
   const cwd = process.cwd();
   const fileService = new FileDiscoveryService(cwd);
@@ -59,7 +23,7 @@ async function createMinimalConfig(): Promise<Config> {
     targetDir: cwd,
     cwd,
     debugMode: false,
-    mcpServers: settings.merged.mcpServers || {},
+    mcpServers,
     fileDiscoveryService: fileService,
     mcpServerCommand: settings.merged.mcp?.serverCommand,
   });
@@ -94,7 +58,7 @@ async function reconnectMcpServer(serverName: string): Promise<void> {
   writeStdoutLine(`Reconnecting to server "${serverName}"...`);
 
   try {
-    const config = await createMinimalConfig();
+    const config = await createMinimalConfig(mcpServers);
     const toolRegistry = config.getToolRegistry();
     await toolRegistry.discoverToolsForServer(serverName);
     writeStdoutLine(`Successfully reconnected to server "${serverName}".`);
@@ -108,14 +72,7 @@ async function reconnectMcpServer(serverName: string): Promise<void> {
 }
 
 async function reconnectAllMcpServers(): Promise<void> {
-  const settings = loadSettings();
-  const extensionManager = new ExtensionManager({
-    isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
-    telemetrySettings: settings.merged.telemetry,
-  });
-  await extensionManager.refreshCache();
-
-  const mcpServers = await getMcpServersFromConfig(extensionManager);
+  const mcpServers = await getMcpServersFromConfig();
   const serverNames = Object.keys(mcpServers);
 
   if (serverNames.length === 0) {
@@ -127,7 +84,7 @@ async function reconnectAllMcpServers(): Promise<void> {
 
   let config: Config | undefined;
   try {
-    config = await createMinimalConfig();
+    config = await createMinimalConfig(mcpServers);
     const toolRegistry = config.getToolRegistry();
 
     for (const serverName of serverNames) {

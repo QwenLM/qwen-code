@@ -49,6 +49,10 @@ import * as path from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import stripJsonComments from 'strip-json-comments';
+import {
+  loadProjectMcpServers,
+  mergeProjectMcpServers,
+} from './projectMcpConfig.js';
 
 import { resolvePath } from '../utils/resolvePath.js';
 import { getCliVersion } from '../utils/version.js';
@@ -1789,7 +1793,10 @@ export async function loadCliConfig(
     mcpServers: bareMode
       ? {}
       : (() => {
-          const base = settings.mcpServers || {};
+          const base = mergeProjectMcpServers(
+            settings.mcpServers || {},
+            loadProjectMcpServers(cwd),
+          );
           const cliMcpServers = parseMcpConfig(argv.mcpConfig);
           return cliMcpServers ? { ...base, ...cliMcpServers } : base;
         })(),

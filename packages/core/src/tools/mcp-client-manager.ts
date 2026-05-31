@@ -5,7 +5,10 @@
  */
 
 import type { Config, MCPServerConfig } from '../config/config.js';
-import { isSdkMcpServerConfig } from '../config/config.js';
+import {
+  isProjectMcpServerPendingApproval,
+  isSdkMcpServerConfig,
+} from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
 import {
   McpClient,
@@ -971,6 +974,10 @@ export class McpClientManager {
             debugLogger.debug(`Skipping disabled MCP server: ${name}`);
             return;
           }
+          if (isProjectMcpServerPendingApproval(config)) {
+            debugLogger.debug(`Skipping pending project MCP server: ${name}`);
+            return;
+          }
 
           // Budget gate (PR 14): synchronous slot reservation BEFORE the
           // `await client.connect()` below. Refusal only happens under
@@ -1133,6 +1140,10 @@ export class McpClientManager {
     // Production `Config` always defines the method.
     if (this.cliConfig.isMcpServerDisabled?.(serverName)) {
       debugLogger.debug(`Skipping disabled MCP server: ${serverName}`);
+      return;
+    }
+    if (isProjectMcpServerPendingApproval(serverConfig)) {
+      debugLogger.debug(`Skipping pending project MCP server: ${serverName}`);
       return;
     }
 
@@ -1620,6 +1631,13 @@ export class McpClientManager {
           }
           continue;
         }
+        if (isProjectMcpServerPendingApproval(servers[name])) {
+          debugLogger.debug(`Skipping pending project MCP server: ${name}`);
+          if (this.clients.has(name)) {
+            await this.removeServer(name);
+          }
+          continue;
+        }
         const existingClient = this.clients.get(name);
         if (!existingClient) {
           // PR 14 fix (review #4247 wenshao R6 line 956): pre-reservation
@@ -1977,6 +1995,9 @@ export class McpClientManager {
       // its actual reason rather than a misleading budget refusal.
       if (this.cliConfig.isMcpServerDisabled(serverName)) {
         throw new Error(`MCP server '${serverName}' is disabled.`);
+      }
+      if (isProjectMcpServerPendingApproval(serverConfig)) {
+        throw new Error(`MCP server '${serverName}' is pending approval.`);
       }
 
       // Budget gate (PR 14): a lazy `readResource` against a server

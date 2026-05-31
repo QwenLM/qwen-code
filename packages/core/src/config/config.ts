@@ -538,6 +538,9 @@ export class MCPServerConfig {
      * call sites.
      */
     readonly discoveryTimeoutMs?: number,
+    readonly source?: 'project',
+    readonly pendingApproval?: boolean,
+    readonly projectConfigPath?: string,
   ) {}
 }
 
@@ -546,6 +549,12 @@ export class MCPServerConfig {
  */
 export function isSdkMcpServerConfig(config: MCPServerConfig): boolean {
   return config.type === 'sdk';
+}
+
+export function isProjectMcpServerPendingApproval(
+  config: MCPServerConfig | undefined,
+): boolean {
+  return config?.source === 'project' && config.pendingApproval === true;
 }
 
 export enum AuthProviderType {
@@ -1831,6 +1840,9 @@ export class Config {
       if (this.isMcpServerDisabled(name)) {
         continue;
       }
+      if (isProjectMcpServerPendingApproval(servers[name])) {
+        continue;
+      }
       if (getMCPServerStatus(name) !== MCPServerStatus.CONNECTED) {
         failed.push(name);
       }
@@ -2602,7 +2614,9 @@ export class Config {
     for (const extension of extensions) {
       Object.entries(extension.config.mcpServers || {}).forEach(
         ([key, server]) => {
-          if (mcpServers[key]) return;
+          if (mcpServers[key]) {
+            return;
+          }
           mcpServers[key] = {
             ...server,
             extensionName: extension.config.name,

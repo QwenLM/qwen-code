@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { listMcpServers } from './list.js';
 import { loadSettings } from '../../config/settings.js';
@@ -34,6 +37,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     DISCONNECTED: 'DISCONNECTED',
   },
   ExtensionManager: vi.fn(),
+  isProjectMcpServerPendingApproval: (
+    config: { source?: string; pendingApproval?: boolean } | undefined,
+  ) => config?.source === 'project' && config.pendingApproval === true,
   getErrorMessage: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }));
 vi.mock('@modelcontextprotocol/sdk/client/index.js');
@@ -110,9 +116,7 @@ describe('mcp list command', () => {
 
     await listMcpServers();
 
-    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-      'Configured MCP servers:\n',
-    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith('MCP servers:\n');
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'stdio-server: /path/to/server arg1 (stdio) - Connected',
@@ -180,6 +184,100 @@ describe('mcp list command', () => {
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'extension-server: /ext/server  (stdio) - Connected',
+      ),
+    );
+  });
+
+  it('shows project .mcp.json servers as pending without connecting', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'qwen-mcp-list-'));
+    writeFileSync(
+      path.join(dir, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          project: {
+            command: 'node',
+            args: ['server.js'],
+          },
+        },
+      }),
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    mockedLoadSettings.mockReturnValue({ merged: { mcpServers: {} } });
+
+    await listMcpServers();
+
+    expect(mockedCreateTransport).not.toHaveBeenCalled();
+    expect(mockClient.connect).not.toHaveBeenCalled();
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'project: node server.js (stdio) - Pending approval',
+      ),
+    );
+  });
+
+  it('keeps settings servers active when .mcp.json uses the same name', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'qwen-mcp-list-'));
+    writeFileSync(
+      path.join(dir, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          server: {
+            command: 'node',
+            args: ['project.js'],
+          },
+        },
+      }),
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    mockedLoadSettings.mockReturnValue({
+      merged: {
+        mcpServers: {
+          server: { command: 'node', args: ['settings.js'] },
+        },
+      },
+    });
+    mockClient.connect.mockResolvedValue(undefined);
+    mockClient.ping.mockResolvedValue(undefined);
+
+    await listMcpServers();
+
+    expect(mockedCreateTransport).toHaveBeenCalledOnce();
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('server: node settings.js (stdio) - Connected'),
+    );
+  });
+
+  it('keeps a pending project server when an extension uses the same name', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'qwen-mcp-list-'));
+    writeFileSync(
+      path.join(dir, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          server: {
+            command: 'node',
+            args: ['project.js'],
+          },
+        },
+      }),
+    );
+    vi.spyOn(process, 'cwd').mockReturnValue(dir);
+    mockedLoadSettings.mockReturnValue({ merged: { mcpServers: {} } });
+    mockExtensionManager.getLoadedExtensions.mockReturnValue([
+      {
+        isActive: true,
+        config: {
+          name: 'test-extension',
+          mcpServers: { server: { command: '/ext/server' } },
+        },
+      },
+    ]);
+
+    await listMcpServers();
+
+    expect(mockedCreateTransport).not.toHaveBeenCalled();
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'server: node project.js (stdio) - Pending approval',
       ),
     );
   });
