@@ -8276,6 +8276,60 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       abort.abort();
       await bridge.shutdown();
     });
+
+    it('seeds snapshot from newSession response without any intermediate notification (cold attach)', async () => {
+      // F7qEJ: seedSnapshotCaches fills the cache from the newSession
+      // response alone — no extNotification or setSessionModel needed.
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          newSessionImpl: (p) =>
+            Promise.resolve({
+              sessionId: `sess:${p.cwd}`,
+              models: {
+                currentModelId: 'qwen-plus',
+                availableModels: [{ modelId: 'qwen-plus', name: 'Qwen Plus' }],
+              },
+              modes: {
+                currentModeId: 'auto-edit',
+                availableModes: [
+                  { modeId: 'auto-edit', id: 'auto-edit', name: 'Auto Edit' },
+                ],
+              },
+            }),
+        });
+        new AgentSideConnection(() => fakeAgent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // Subscribe with snapshot=true, no lastEventId — pure cold attach.
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+        snapshot: true,
+      });
+      const it2 = iter[Symbol.asyncIterator]();
+      const first = await it2.next();
+      expect(first.value?.type).toBe('session_snapshot');
+      const data = first.value?.data as {
+        currentModelId: string | null;
+        currentApprovalMode: string | null;
+      };
+      expect(data.currentModelId).toBe('qwen-plus');
+      expect(data.currentApprovalMode).toBe('auto-edit');
+      abort.abort();
+      await bridge.shutdown();
+    });
   });
 
   describe('§2.2 — post-roundtrip reconciliation', () => {
@@ -8743,6 +8797,141 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
       expect(nexts).toEqual([]);
       abort.abort();
       await collecting;
+      await bridge.shutdown();
+    });
+
+    it('drops unknown agent-returned approval mode without publishing a corrective event', async () => {
+      // F7qEL: when the agent returns a mode not in KNOWN_APPROVAL_MODES,
+      // reconcile should drop it (action=dropped reason=unknown_mode)
+      // instead of broadcasting an invalid approval_mode_changed.
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/status/session/context') {
+              return Promise.resolve({
+                state: { modes: { currentModeId: 'super-yolo' } },
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        const augmented = new Proxy(fakeAgent, {
+          get(target, prop) {
+            if (prop === 'unstable_setSessionModel') {
+              return async () => ({});
+            }
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return (target as any)[prop];
+          },
+        });
+        new AgentSideConnection(() => augmented as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        modelServiceId: 'qwen-turbo',
+      });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      const events: string[] = [];
+      const collecting = (async () => {
+        for await (const e of iter) {
+          events.push(e.type);
+        }
+      })();
+
+      // The model switch triggers reconcile. Agent reports 'super-yolo'
+      // which is not a known mode — the corrective should be dropped.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(events.filter((e) => e === 'approval_mode_changed')).toEqual([]);
+      abort.abort();
+      await collecting;
+      await bridge.shutdown();
+    });
+
+    it('syncs peer session cache on persisted approval-mode change (snapshot reflects new mode)', async () => {
+      // F7qEK: when session A persists a mode change, peer session B's
+      // cache should be updated so a subsequent snapshot on B reports
+      // the new workspace default — not the stale pre-change value.
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/session/approval_mode') {
+              return Promise.resolve({
+                previous: 'default',
+                current: (params as { mode: string }).mode,
+              });
+            }
+            if (method === 'qwen/status/session/context') {
+              return Promise.resolve({
+                state: {
+                  modes: {
+                    currentModeId:
+                      (params as { mode?: string }).mode ?? 'default',
+                  },
+                },
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => fakeAgent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'thread',
+        persistApprovalMode: async () => {},
+      });
+      // Two sessions in the same workspace (thread scope → each attach
+      // creates a new session).
+      const sessionA = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sessionB = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(sessionA.sessionId).not.toBe(sessionB.sessionId);
+
+      // Persist a mode change on A.
+      await bridge.setSessionApprovalMode(
+        sessionA.sessionId,
+        ApprovalMode.YOLO,
+        { persist: true },
+        undefined,
+      );
+
+      // Subscribe on B with snapshot — should reflect the persisted mode.
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(sessionB.sessionId, {
+        signal: abort.signal,
+        snapshot: true,
+      });
+      const it2 = iter[Symbol.asyncIterator]();
+      const first = await it2.next();
+      expect(first.value?.type).toBe('session_snapshot');
+      expect(
+        (first.value?.data as { currentApprovalMode: string | null })
+          .currentApprovalMode,
+      ).toBe('yolo');
+      abort.abort();
       await bridge.shutdown();
     });
   });
