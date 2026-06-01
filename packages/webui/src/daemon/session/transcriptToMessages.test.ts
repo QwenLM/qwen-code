@@ -774,6 +774,45 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('does not synthesize a generic tool card for AskUserQuestion permissions', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'I will ask for student info.', 1),
+      {
+        id: 'perm-ask-1',
+        kind: 'permission',
+        requestId: 'req-ask-1',
+        sessionId: 'sess-1',
+        title: 'Ask user 4 questions',
+        options: [{ optionId: 'proceed_once', label: 'Submit', raw: {} }],
+        toolCall: {
+          toolCallId: 'ask-call-1',
+          kind: 'think',
+          status: 'pending',
+          title: 'Ask user 4 questions',
+          rawInput: {
+            questions: [
+              {
+                header: '姓名',
+                question: '请输入学生的姓名：',
+                options: [{ label: '张三', description: '示例姓名' }],
+              },
+            ],
+          },
+        },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 2,
+        createdAt: 2,
+        updatedAt: 2,
+      },
+    ]);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      content: 'I will ask for student info.',
+    });
+  });
+
   it('renders pending subagent permission blocks as agent tools', () => {
     const messages = transcriptBlocksToDaemonMessages([
       {

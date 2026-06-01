@@ -576,6 +576,12 @@ function permissionBlockToToolCall(
   if (!toolCall) return undefined;
 
   const rawInput = getToolCallRawInput(toolCall);
+  // AskUserQuestion permissions are rendered by the shell as a dedicated
+  // interactive form from the pending permission itself. Emitting a synthetic
+  // generic tool card here would show the same permission twice, especially
+  // when older daemon events only expose it as kind: "think".
+  if (Array.isArray(rawInput?.['questions'])) return undefined;
+
   const meta = getRecord(toolCall['_meta']);
   const kind = getString(toolCall, 'kind');
   const toolName =
