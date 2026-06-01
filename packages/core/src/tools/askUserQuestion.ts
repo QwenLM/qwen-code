@@ -79,8 +79,10 @@ const askUserQuestionToolSchemaData: FunctionDeclaration = {
             },
             header: {
               description:
-                'Very short label displayed as a chip/tag (max 12 chars). Examples: "Auth method", "Library", "Approach".',
+                'Required: 1-12 characters. Very short label displayed as a chip/tag. Examples: "Auth method", "Library", "Approach".',
               type: 'string',
+              minLength: 1,
+              maxLength: 12,
             },
             options: {
               description:

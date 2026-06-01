@@ -36,6 +36,24 @@ describe('AskUserQuestionTool', () => {
     });
   });
 
+  describe('JSON Schema', () => {
+    it('should enforce header maxLength 12 and minLength 1 in the schema', () => {
+      const schema = tool.schema.parametersJsonSchema as Record<
+        string,
+        unknown
+      >;
+      const questions = (schema['properties'] ?? {}) as Record<string, unknown>;
+      const items = (questions['questions'] ?? {}) as Record<string, unknown>;
+      const questionProps = (items['items'] ?? {}) as Record<string, unknown>;
+      const header = (questionProps['properties'] ?? {}) as Record<
+        string,
+        unknown
+      >;
+      expect(header['maxLength']).toBe(12);
+      expect(header['minLength']).toBe(1);
+    });
+  });
+
   describe('validateToolParams', () => {
     it('should accept valid params with single question', () => {
       const params = {
