@@ -14,9 +14,9 @@ import {
 import { EventEmitter } from 'node:events';
 
 // Use vi.hoisted to define mock functions before vi.mock is hoisted
-const { mockSpawn, mockExecFileSync } = vi.hoisted(() => ({
+const { mockSpawn, mockExecSync } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
-  mockExecFileSync: vi.fn(),
+  mockExecSync: vi.fn(),
 }));
 
 // Mock @teddyzhu/clipboard
@@ -37,12 +37,12 @@ vi.mock('@teddyzhu/clipboard', () => ({
 vi.mock('node:child_process', () => ({
   default: {
     spawn: mockSpawn,
-    execFileSync: mockExecFileSync,
+    execSync: mockExecSync,
     exec: vi.fn(),
     execFile: vi.fn(),
   },
   spawn: mockSpawn,
-  execFileSync: mockExecFileSync,
+  execSync: mockExecSync,
   exec: vi.fn(),
   execFile: vi.fn(),
 }));
@@ -103,7 +103,7 @@ describe('clipboardUtils', () => {
   describe('clipboardHasImage', () => {
     it('should return true when clipboard contains image', async () => {
       // Mock execSync to return successfully (wl-paste found)
-      mockExecFileSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
 
       const mockChild = createMockChild('image/png\nimage/bmp\n', 0);
       mockSpawn.mockReturnValue(mockChild);
@@ -114,7 +114,7 @@ describe('clipboardUtils', () => {
 
     it('should return false when clipboard does not contain image', async () => {
       // Mock execSync to return successfully (wl-paste found)
-      mockExecFileSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
 
       const mockChild = createMockChild('text/plain\n', 0);
       mockSpawn.mockReturnValue(mockChild);
@@ -125,7 +125,7 @@ describe('clipboardUtils', () => {
 
     it('should return false when wl-paste is not found', async () => {
       // Mock execSync to throw (wl-paste not found)
-      mockExecFileSync.mockImplementation(() => {
+      mockExecSync.mockImplementation(() => {
         throw new Error('command not found');
       });
 
@@ -137,7 +137,7 @@ describe('clipboardUtils', () => {
   describe('saveClipboardImage', () => {
     it('should return null when no clipboard tool is available', async () => {
       // Mock execSync to throw (wl-paste not found)
-      mockExecFileSync.mockImplementation(() => {
+      mockExecSync.mockImplementation(() => {
         throw new Error('command not found');
       });
 
@@ -147,7 +147,7 @@ describe('clipboardUtils', () => {
 
     it('should return null on spawn error', async () => {
       // Mock execSync to return successfully (wl-paste found)
-      mockExecFileSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
 
       // Mock spawn to throw an error
       mockSpawn.mockImplementation(() => {
@@ -160,26 +160,27 @@ describe('clipboardUtils', () => {
 
     it('should return file path on successful PNG save', async () => {
       // Mock execSync to return successfully (wl-paste found)
-      mockExecFileSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
 
       // Mock spawn to return successful children for both calls
       let callCount = 0;
       mockSpawn.mockImplementation(() => {
         callCount++;
         const child = new EventEmitter();
-        child.stdout = new EventEmitter();
-        child.kill = vi.fn();
-        child.killed = false;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const childWithStdout = child as any;
+        childWithStdout.stdout = new EventEmitter();
+        childWithStdout.kill = vi.fn();
+        childWithStdout.killed = false;
 
         if (callCount === 1) {
           // First call: wl-paste --list-types
           process.nextTick(() => {
-            child.stdout.emit('data', Buffer.from('image/png\n'));
+            childWithStdout.stdout.emit('data', Buffer.from('image/png\n'));
             child.emit('close', 0);
           });
         } else {
           // Second call: wl-paste --type image/png (save)
-          // Simulate successful save by making fileStream.writableFinished true
           process.nextTick(() => {
             child.emit('close', 0);
           });
@@ -234,7 +235,7 @@ describe('clipboardUtils', () => {
 
   describe('cache behavior', () => {
     it('should reset wl-paste cache between clipboardHasImage calls', async () => {
-      mockExecFileSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
 
       // First call: returns image
       const mockChild1 = createMockChild('image/png\n', 0);

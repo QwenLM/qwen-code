@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
-import { execFileSync, spawn } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
@@ -77,7 +77,7 @@ function getLinuxClipboardTool(): 'wl-paste' | 'xclip' | null {
   }
 
   try {
-    execFileSync('command', ['-v', toolName], { stdio: 'ignore' });
+    execSync('command -v ' + toolName, { stdio: 'ignore' });
     linuxClipboardTool = toolName;
     return toolName;
   } catch {
