@@ -115,31 +115,36 @@ describe('standalone-update', () => {
   });
 
   describe('ensureBinWrapper', () => {
-    it('creates a Unix shell wrapper script', () => {
-      const libDir = path.join(tempDir, '.local', 'lib');
-      const standaloneDir = path.join(libDir, 'qwen-code');
-      fs.mkdirSync(standaloneDir, { recursive: true });
+    // Unix wrapper test relies on POSIX file permissions (mode bits) and
+    // the SHELL env var, neither of which behave consistently on Windows.
+    it.skipIf(process.platform === 'win32')(
+      'creates a Unix shell wrapper script',
+      () => {
+        const libDir = path.join(tempDir, '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        fs.mkdirSync(standaloneDir, { recursive: true });
 
-      // Isolate HOME so ensurePathInShellRc doesn't touch real shell rc
-      const origHome = process.env['HOME'];
-      const origShell = process.env['SHELL'];
-      process.env['HOME'] = tempDir;
-      process.env['SHELL'] = '/bin/zsh';
-      try {
-        ensureBinWrapper(standaloneDir, 'darwin-arm64');
-      } finally {
-        process.env['HOME'] = origHome;
-        process.env['SHELL'] = origShell;
-      }
+        // Isolate HOME so ensurePathInShellRc doesn't touch real shell rc
+        const origHome = process.env['HOME'];
+        const origShell = process.env['SHELL'];
+        process.env['HOME'] = tempDir;
+        process.env['SHELL'] = '/bin/zsh';
+        try {
+          ensureBinWrapper(standaloneDir, 'darwin-arm64');
+        } finally {
+          process.env['HOME'] = origHome;
+          process.env['SHELL'] = origShell;
+        }
 
-      const wrapperPath = path.join(tempDir, '.local', 'bin', 'qwen');
-      expect(fs.existsSync(wrapperPath)).toBe(true);
-      const content = fs.readFileSync(wrapperPath, 'utf-8');
-      expect(content).toContain('#!/bin/sh');
-      expect(content).toContain(standaloneDir);
-      const mode = fs.statSync(wrapperPath).mode;
-      expect(mode & 0o111).toBeGreaterThan(0);
-    });
+        const wrapperPath = path.join(tempDir, '.local', 'bin', 'qwen');
+        expect(fs.existsSync(wrapperPath)).toBe(true);
+        const content = fs.readFileSync(wrapperPath, 'utf-8');
+        expect(content).toContain('#!/bin/sh');
+        expect(content).toContain(standaloneDir);
+        const mode = fs.statSync(wrapperPath).mode;
+        expect(mode & 0o111).toBeGreaterThan(0);
+      },
+    );
 
     it('creates a Windows cmd wrapper', () => {
       const libDir = path.join(tempDir, '.local', 'lib');
@@ -154,32 +159,37 @@ describe('standalone-update', () => {
       expect(content).toContain('@echo off');
     });
 
-    it('does not overwrite existing wrapper', () => {
-      const libDir = path.join(tempDir, '.local', 'lib');
-      const standaloneDir = path.join(libDir, 'qwen-code');
-      const binDir = path.join(tempDir, '.local', 'bin');
-      fs.mkdirSync(standaloneDir, { recursive: true });
-      fs.mkdirSync(binDir, { recursive: true });
+    it.skipIf(process.platform === 'win32')(
+      'does not overwrite existing wrapper',
+      () => {
+        const libDir = path.join(tempDir, '.local', 'lib');
+        const standaloneDir = path.join(libDir, 'qwen-code');
+        const binDir = path.join(tempDir, '.local', 'bin');
+        fs.mkdirSync(standaloneDir, { recursive: true });
+        fs.mkdirSync(binDir, { recursive: true });
 
-      const origHome = process.env['HOME'];
-      const origShell = process.env['SHELL'];
-      process.env['HOME'] = tempDir;
-      process.env['SHELL'] = '/bin/zsh';
+        const origHome = process.env['HOME'];
+        const origShell = process.env['SHELL'];
+        process.env['HOME'] = tempDir;
+        process.env['SHELL'] = '/bin/zsh';
 
-      const wrapperPath = path.join(binDir, 'qwen');
-      fs.writeFileSync(wrapperPath, 'existing-content', { mode: 0o755 });
+        const wrapperPath = path.join(binDir, 'qwen');
+        fs.writeFileSync(wrapperPath, 'existing-content', { mode: 0o755 });
 
-      try {
-        ensureBinWrapper(standaloneDir, 'linux-x64');
-        expect(fs.readFileSync(wrapperPath, 'utf-8')).toBe('existing-content');
-      } finally {
-        process.env['HOME'] = origHome;
-        process.env['SHELL'] = origShell;
-      }
-    });
+        try {
+          ensureBinWrapper(standaloneDir, 'linux-x64');
+          expect(fs.readFileSync(wrapperPath, 'utf-8')).toBe(
+            'existing-content',
+          );
+        } finally {
+          process.env['HOME'] = origHome;
+          process.env['SHELL'] = origShell;
+        }
+      },
+    );
   });
 
-  describe('ensurePathInShellRc', () => {
+  describe.skipIf(process.platform === 'win32')('ensurePathInShellRc', () => {
     it('appends PATH export to zshrc when SHELL is zsh', () => {
       const binDir = path.join(tempDir, 'bin');
       const zshrc = path.join(tempDir, '.zshrc');
