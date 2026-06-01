@@ -20,6 +20,32 @@ let linuxClipboardTool: 'wl-paste' | 'xclip' | null | undefined;
 // Cache for wl-paste image types (reset after each paste operation)
 let cachedWlPasteImageTypes: string[] | null = null;
 
+// Cache for @teddyzhu/clipboard module (macOS/Windows fallback)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let cachedClipboardModule: any = null;
+let clipboardLoadAttempted = false;
+
+/**
+ * Get and cache the @teddyzhu/clipboard module.
+ * Only used on macOS/Windows as fallback for Linux platform-native tools.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function getClipboardModule(): Promise<any | null> {
+  if (clipboardLoadAttempted) return cachedClipboardModule;
+  clipboardLoadAttempted = true;
+
+  try {
+    const modName = '@teddyzhu/clipboard';
+    cachedClipboardModule = await import(modName);
+    return cachedClipboardModule;
+  } catch (_e) {
+    debugLogger.error(
+      'Failed to load @teddyzhu/clipboard native module. Clipboard image features will be unavailable.',
+    );
+    return null;
+  }
+}
+
 /**
  * Reset the cached Linux clipboard tool. Used for testing.
  */
@@ -240,8 +266,8 @@ export async function clipboardHasImage(): Promise<boolean> {
   }
 
   try {
-    const modName = '@teddyzhu/clipboard';
-    const mod = await import(modName);
+    const mod = await getClipboardModule();
+    if (!mod) return false;
     const clipboard = new mod.ClipboardManager();
     return clipboard.hasFormat('image');
   } catch (error) {
@@ -443,8 +469,8 @@ export async function saveClipboardImage(
       return null;
     }
 
-    const modName = '@teddyzhu/clipboard';
-    const mod = await import(modName);
+    const mod = await getClipboardModule();
+    if (!mod) return null;
     const clipboard = new mod.ClipboardManager();
 
     if (!clipboard.hasFormat('image')) {
