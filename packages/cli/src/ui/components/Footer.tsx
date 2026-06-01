@@ -35,6 +35,7 @@ export const Footer: React.FC = () => {
     lines: statusLineLines,
     useThemeColors,
     respectUserColors,
+    hideContextIndicator,
   } = useStatusLine();
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
@@ -117,7 +118,7 @@ export const Footer: React.FC = () => {
   // alongside the other background-task kinds. The previous `✦ dreaming`
   // right-column indicator was removed to avoid two simultaneous signals
   // for the same underlying state.
-  if (promptTokenCount > 0 && contextWindowSize) {
+  if (promptTokenCount > 0 && contextWindowSize && !hideContextIndicator) {
     rightItems.push({
       key: 'context',
       node: (

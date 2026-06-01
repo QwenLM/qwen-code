@@ -117,6 +117,7 @@ describe('<Footer />', () => {
       lines: [],
       useThemeColors: false,
       respectUserColors: false,
+      hideContextIndicator: false,
     });
   });
 
@@ -146,6 +147,7 @@ describe('<Footer />', () => {
         lines: ['model-name (main) ctx:34%', '████░░░░ 34% context'],
         useThemeColors: false,
         respectUserColors: false,
+        hideContextIndicator: false,
       });
       const { lastFrame } = renderWithWidth(120, createMockUIState());
       const frame = lastFrame()!;
@@ -158,6 +160,7 @@ describe('<Footer />', () => {
         lines: ['status info'],
         useThemeColors: false,
         respectUserColors: false,
+        hideContextIndicator: false,
       });
       const { lastFrame } = renderWithWidth(120, createMockUIState());
       expect(lastFrame()).not.toContain('? for shortcuts');
@@ -168,10 +171,22 @@ describe('<Footer />', () => {
         lines: ['\x1b[38;2;99;102;241m🤖 qwen\x1b[0m'],
         useThemeColors: false,
         respectUserColors: true,
+        hideContextIndicator: false,
       });
       const { lastFrame } = renderWithWidth(120, createMockUIState());
       const frame = lastFrame()!;
       expect(frame).toContain('🤖 qwen');
+    });
+
+    it('hides context indicator when hideContextIndicator is true', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: [],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: true,
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      expect(lastFrame()).not.toMatch(/\d+(\.\d+)?% context used/);
     });
   });
 
@@ -205,6 +220,7 @@ describe('<Footer />', () => {
         lines: ['model-name ctx:34%'],
         useThemeColors: false,
         respectUserColors: false,
+        hideContextIndicator: false,
       });
       const { lastFrame } = renderWithWidth(
         120,

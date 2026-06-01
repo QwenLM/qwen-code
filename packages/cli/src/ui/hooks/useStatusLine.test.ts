@@ -43,7 +43,12 @@ const mockUIState = {
   streamingState: StreamingState.Idle,
   statusLineSettingsVersion: 0,
   statusLineConfigOverride: undefined as
-    | { type: 'preset'; items: string[]; useThemeColors?: boolean }
+    | {
+        type: 'preset';
+        items: string[];
+        useThemeColors?: boolean;
+        hideContextIndicator?: boolean;
+      }
     | undefined,
 };
 vi.mock('../contexts/UIStateContext.js', () => ({
@@ -107,8 +112,14 @@ function setStatusLineConfig(
         command: string;
         refreshInterval?: number;
         respectUserColors?: boolean;
+        hideContextIndicator?: boolean;
       }
-    | { type: 'preset'; items: string[]; useThemeColors?: boolean }
+    | {
+        type: 'preset';
+        items: string[];
+        useThemeColors?: boolean;
+        hideContextIndicator?: boolean;
+      }
     | undefined,
 ) {
   mockSettings.merged = config ? { ui: { statusLine: config } } : {};
@@ -230,6 +241,32 @@ describe('useStatusLine', () => {
       });
       const { result } = renderHook(() => useStatusLine());
       expect(result.current.respectUserColors).toBe(false);
+    });
+
+    it('returns hideContextIndicator false by default', () => {
+      setStatusLineConfig({ type: 'command', command: 'echo hello' });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
+    it('returns hideContextIndicator true when set in command config', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo hello',
+        hideContextIndicator: true,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(true);
+    });
+
+    it('returns hideContextIndicator true when set in preset config', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+        hideContextIndicator: true,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(true);
     });
   });
 
