@@ -351,25 +351,38 @@ before/after result, and the tmux logs that back it.
 
 ### Stage 5: Final Decision
 
-Approve only if all are true:
+The earlier stages are mechanical checks. Before deciding, step back and
+re-examine three things honestly — your judgment, not a checklist:
+
+1. **Is the need real?** Does this solve an actual user problem, or is it change
+   for its own sake — a feature nobody asked for, a fix for a non-problem? If you
+   cannot name who is hurting without it, it is not merge-ready.
+2. **Is the code simple?** Minimal and direct, with no over-engineering, no
+   speculative flexibility, no defenses for impossible cases. If a smaller
+   version would do the job, it is not merge-ready.
+3. **Are you actually confident to merge this yourself, or does it need a
+   maintainer?** Weigh blast radius, reversibility, and how sure you really are.
+   Real doubt here means a maintainer decides — that is the correct call, not a
+   failure.
+
+Approve as merge-ready only if all are true:
 
 - template passed;
 - direction is aligned;
 - no critical KISS, correctness, security, or regression issue remains;
 - real-scenario testing passed — not skipped (only a change with no runnable
   behavior, e.g. docs-only, is exempt);
+- the three questions above answer cleanly;
 - the blast radius is small enough that you are confident.
-
-Use:
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body-file /tmp/pr-gate-approve.md
 ```
 
-If anything is uncertain, do not approve. Post a final comment and ask a
-maintainer to check. Use `$QWEN_MAINTAINER_HANDLE` (a GitHub login without the
-leading `@`) when set; otherwise write "maintainer review requested" without
-inventing a handle.
+If anything is uncertain — especially question 3 — do not approve. Post a final
+comment summarizing what you found and ask a maintainer to decide. Use
+`$QWEN_MAINTAINER_HANDLE` (a GitHub login without the leading `@`) when set;
+otherwise write "maintainer review requested" without inventing a handle.
 
 ## Final Output To The CI Log
 
