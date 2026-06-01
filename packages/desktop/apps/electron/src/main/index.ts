@@ -410,9 +410,8 @@ app.whenReady().then(async () => {
 
   // Application menu is created after windowManager initialization (see below)
 
-  // Set dock icon on macOS (required for dev mode, bundled apps use Info.plist)
-  if (process.platform === 'darwin' && app.dock) {
-    // In packaged app, resources are at dist/resources/ (same level as __dirname)
+  // Set dock icon on macOS in dev mode; packaged apps use Info.plist/.icns.
+  if (process.platform === 'darwin' && app.dock && !app.isPackaged) {
     // In dev, resources are at ../resources/ (sibling of dist/)
     // Brand-aware: use brand-specific icon when available, fall back to default
     const brandIconRelPath = BRAND.id === 'qwen-code' ? 'resources/icon.png' : `resources/brands/${BRAND.id}/icon.png`
