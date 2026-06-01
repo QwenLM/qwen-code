@@ -172,6 +172,18 @@ describe('extractShellOperations', () => {
     expect(ops).toEqual([{ virtualTool: 'list_directory', filePath: CWD }]);
   });
 
+  it('find: extracts write ops from exec clauses', () => {
+    const ops = extractShellOperations(
+      'find . -exec cp payload .qwen/settings.json ;',
+      CWD,
+    );
+    expect(ops).toEqual([
+      { virtualTool: 'list_directory', filePath: CWD },
+      { virtualTool: 'read_file', filePath: `${CWD}/payload` },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen/settings.json` },
+    ]);
+  });
+
   // ── touch / mkdir ──────────────────────────────────────────────────────────
 
   it('touch: creates a file (write_file)', () => {
@@ -494,6 +506,23 @@ describe('extractShellOperationsAcrossCommand', () => {
     ).toEqual([
       { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
       { virtualTool: 'write_file', filePath: '/repo/.qwen/hooks/run.sh' },
+    ]);
+  });
+
+  it('does not treat heredoc body lines as executable shell segments', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        [
+          'cd .qwen',
+          "cat <<'EOF'",
+          'cd /tmp',
+          'EOF',
+          'echo > settings.json',
+        ].join('\n'),
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
     ]);
   });
 

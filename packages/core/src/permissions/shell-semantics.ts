@@ -237,6 +237,12 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
         toRemove.add(i + 1);
         i++;
       }
+    } else if (tok === '<<' || tok === '<<-') {
+      toRemove.add(i);
+      if (tokens[i + 1]) {
+        toRemove.add(i + 1);
+        i++;
+      }
     } else if (tok === '<') {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
@@ -259,10 +265,14 @@ function extractRedirects(tokens: string[], cwd: string): RedirectResult {
     }
     // ── Combined redirect tokens without space: `>file`, `>>file`, etc. ───
     else {
-      const m = tok.match(/^(>>|>|2>>|2>|&>>|&>|<)(.+)$/);
+      const m = tok.match(/^(<<-?|>>|>|2>>|2>|&>>|&>|<)(.+)$/);
       if (m) {
         const op = m[1]!;
         const target = m[2]!;
+        if (op.startsWith('<<')) {
+          toRemove.add(i);
+          continue;
+        }
         if (target !== '/dev/null' && looksLikePath(target)) {
           if (op === '<') {
             readFiles.push(resolvePath(target, cwd));
@@ -978,12 +988,18 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       if (looksLikePath(arg)) startingPoints.push(resolvePath(arg, cwd));
     }
     if (startingPoints.length === 0) {
-      return [{ virtualTool: 'list_directory', filePath: cwd }];
+      return [
+        { virtualTool: 'list_directory', filePath: cwd },
+        ...extractFindExecOps(args, cwd),
+      ];
     }
-    return startingPoints.map((p) => ({
-      virtualTool: 'list_directory' as const,
-      filePath: p,
-    }));
+    return [
+      ...startingPoints.map((p) => ({
+        virtualTool: 'list_directory' as const,
+        filePath: p,
+      })),
+      ...extractFindExecOps(args, cwd),
+    ];
   },
 
   tree: (args, cwd) =>
@@ -1847,13 +1863,75 @@ export function extractShellOperationsAcrossCommand(
   return walkCompoundCommand(command, cwd, 0, false);
 }
 
+function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
+  const ops: ShellOperation[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const marker = args[i]!;
+    if (
+      marker !== '-exec' &&
+      marker !== '-execdir' &&
+      marker !== '-ok' &&
+      marker !== '-okdir'
+    ) {
+      continue;
+    }
+
+    const inner: string[] = [];
+    i++;
+    while (i < args.length && args[i] !== ';' && args[i] !== '+') {
+      inner.push(args[i]!);
+      i++;
+    }
+    if (inner.length === 0) continue;
+
+    const innerCommand = inner.join(' ');
+    const innerOps = extractShellOperationsAcrossCommand(innerCommand, cwd);
+    ops.push(
+      ...(marker.endsWith('dir')
+        ? markCwdUnknownOps(innerOps, innerCommand, cwd)
+        : innerOps),
+    );
+  }
+  return ops;
+}
+
+function stripHeredocBodies(command: string): string {
+  const lines = command.split('\n');
+  const kept: string[] = [];
+  const pendingDelimiters: string[] = [];
+
+  for (const line of lines) {
+    if (pendingDelimiters.length > 0) {
+      if (line.trim() === pendingDelimiters[0]) {
+        pendingDelimiters.shift();
+      }
+      continue;
+    }
+
+    kept.push(line);
+    pendingDelimiters.push(...getHeredocDelimiters(line));
+  }
+
+  return kept.join('\n');
+}
+
+function getHeredocDelimiters(line: string): string[] {
+  const delimiters: string[] = [];
+  const re = /(?:^|[^<])<<-?(?!<)\s*(["']?)([A-Za-z0-9_./-]+)\1/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(line)) !== null) {
+    delimiters.push(match[2]!);
+  }
+  return delimiters;
+}
+
 function walkCompoundCommand(
   command: string,
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommand(command);
+  const subCommands = splitCompoundCommand(stripHeredocBodies(command));
 
   const ops: ShellOperation[] = [];
   let effectiveCwd = cwd;
