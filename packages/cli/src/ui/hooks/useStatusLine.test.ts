@@ -102,7 +102,12 @@ let mockKill: ReturnType<typeof vi.fn>;
 
 function setStatusLineConfig(
   config:
-    | { type: string; command: string; refreshInterval?: number }
+    | {
+        type: string;
+        command: string;
+        refreshInterval?: number;
+        respectUserColors?: boolean;
+      }
     | { type: 'preset'; items: string[]; useThemeColors?: boolean }
     | undefined,
 ) {
@@ -200,6 +205,31 @@ describe('useStatusLine', () => {
       const { result } = renderHook(() => useStatusLine());
       expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
+    });
+
+    it('returns respectUserColors false by default for command type', () => {
+      setStatusLineConfig({ type: 'command', command: 'echo hello' });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.respectUserColors).toBe(false);
+    });
+
+    it('returns respectUserColors true when set in config', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo hello',
+        respectUserColors: true,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.respectUserColors).toBe(true);
+    });
+
+    it('returns respectUserColors false for preset type', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.respectUserColors).toBe(false);
     });
   });
 
