@@ -83,6 +83,17 @@ describe('HookPlanner', () => {
       });
     });
 
+    it('returns file path targets for instruction load events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.InstructionsLoaded, {
+          filePath: '/repo/.qwen/QWEN.local.md',
+        }),
+      ).toEqual({
+        kind: 'filePath',
+        target: '/repo/.qwen/QWEN.local.md',
+      });
+    });
+
     it('returns undefined for events without matcher semantics', () => {
       expect(getHookMatcherTarget(HookEventName.UserPromptSubmit)).toBe(
         undefined,
@@ -516,6 +527,46 @@ describe('HookPlanner', () => {
       });
 
       expect(result).not.toBeNull();
+    });
+
+    it('should match instruction loaded file paths with regex', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.InstructionsLoaded,
+        matcher: '\\.qwen/QWEN\\.local\\.md$',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.InstructionsLoaded,
+        {
+          filePath: '/repo/.qwen/QWEN.local.md',
+        },
+      );
+
+      expect(result).not.toBeNull();
+    });
+
+    it('should not match unrelated instruction loaded file paths', () => {
+      const entry: HookRegistryEntry = {
+        config: { type: HookType.Command, command: 'echo test' },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.InstructionsLoaded,
+        matcher: '\\.qwen/QWEN\\.local\\.md$',
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([entry]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.InstructionsLoaded,
+        {
+          filePath: '/repo/QWEN.md',
+        },
+      );
+
+      expect(result).toBeNull();
     });
 
     it('should match auth_success notification type', () => {

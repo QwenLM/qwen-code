@@ -43,6 +43,10 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
       { code: 0, description: t('stdout/stderr not shown') },
       { code: 'Other', description: t('show stderr to user only') },
     ],
+    [HookEventName.InstructionsLoaded]: [
+      { code: 0, description: t('stdout/stderr not shown') },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
     [HookEventName.UserPromptSubmit]: [
       { code: 0, description: t('stdout shown to Qwen') },
       {
@@ -127,6 +131,7 @@ export function getHookShortDescription(eventName: string): string {
     [HookEventName.PostToolUse]: t('After tool execution'),
     [HookEventName.PostToolUseFailure]: t('After tool execution fails'),
     [HookEventName.Notification]: t('When notifications are sent'),
+    [HookEventName.InstructionsLoaded]: t('When instruction files are loaded'),
     [HookEventName.UserPromptSubmit]: t('When the user submits a prompt'),
     [HookEventName.SessionStart]: t('When a new session is started'),
     [HookEventName.Stop]: t('Right before Qwen Code concludes its response'),
@@ -167,6 +172,9 @@ export function getHookDescription(eventName: string): string {
     ),
     [HookEventName.Notification]: t(
       'Input to command is JSON with notification message and type.',
+    ),
+    [HookEventName.InstructionsLoaded]: t(
+      'Input to command is JSON with file_path, memory_type, load_reason, and optional globs, trigger_file_path, and parent_file_path.',
     ),
     [HookEventName.UserPromptSubmit]: t(
       'Input to command is JSON with original user prompt text.',

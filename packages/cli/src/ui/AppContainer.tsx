@@ -1307,6 +1307,22 @@ export const AppContainer = (props: AppContainerProps) => {
           config.isTrustedFolder(),
           settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
           config.getContextRuleExcludes(),
+          {
+            onInstructionsLoaded: async (notification) => {
+              await config
+                .getHookSystem()
+                ?.fireInstructionsLoadedEvent(
+                  notification.filePath,
+                  notification.memoryType,
+                  notification.loadReason,
+                  {
+                    globs: notification.globs,
+                    triggerFilePath: notification.triggerFilePath,
+                    parentFilePath: notification.parentFilePath,
+                  },
+                );
+            },
+          },
         );
 
       config.setUserMemory(memoryContent);
@@ -2304,8 +2320,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isRewindSelectorOpen ||
     isDiffDialogOpen ||
     bgTasksDialogOpen ||
-    showWorktreeExitDialog ||
-    !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
+    showWorktreeExitDialog;
   dialogsVisibleRef.current = dialogsVisible;
   const shouldShowStickyTodos =
     stickyTodos !== null &&

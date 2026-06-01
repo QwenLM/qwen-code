@@ -12,9 +12,11 @@ import { loadServerHierarchicalMemory } from './memoryDiscovery.js';
 import {
   setGeminiMdFilename,
   DEFAULT_CONTEXT_FILENAME,
+  LOCAL_CONTEXT_FILENAME,
 } from '../memory/const.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { QWEN_DIR } from './paths.js';
+import type { InstructionsLoadedNotification } from './memoryDiscovery.js';
 
 vi.mock('os', async (importOriginal) => {
   const actualOs = await importOriginal<typeof os>();
@@ -438,6 +440,162 @@ describe('loadServerHierarchicalMemory', () => {
     });
   });
 
+  it('notifies when startup instruction files are loaded', async () => {
+    const globalFile = await createTestFile(
+      path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),
+      'global context',
+    );
+    const projectFile = await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context',
+    );
+    const extensionFile = await createTestFile(
+      path.join(testRootDir, 'extensions/ext1/QWEN.md'),
+      'extension context',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [extensionFile],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        {
+          filePath: globalFile,
+          memoryType: 'user',
+          loadReason: 'session_start',
+        },
+        {
+          filePath: projectFile,
+          memoryType: 'project',
+          loadReason: 'session_start',
+        },
+        {
+          filePath: extensionFile,
+          memoryType: 'extension',
+          loadReason: 'session_start',
+        },
+      ]),
+    );
+  });
+
+  it('notifies when imported instruction files are loaded', async () => {
+    await createEmptyDir(path.join(projectRoot, '.git'));
+    const importedFile = await createTestFile(
+      path.join(projectRoot, 'included.md'),
+      'included content',
+    );
+    const projectFile = await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context @./included.md',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filePath: importedFile,
+          memoryType: 'project',
+          loadReason: 'include',
+          parentFilePath: projectFile,
+        }),
+      ]),
+    );
+  });
+
+  it('classifies extension-owned imports as extension memory', async () => {
+    const extensionDir = path.join(testRootDir, 'extensions/ext1');
+    const importedFile = await createTestFile(
+      path.join(extensionDir, 'included.md'),
+      'extension included content',
+    );
+    const extensionFile = await createTestFile(
+      path.join(extensionDir, DEFAULT_CONTEXT_FILENAME),
+      'extension context @./included.md',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [extensionFile],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filePath: importedFile,
+          memoryType: 'extension',
+          loadReason: 'include',
+          parentFilePath: extensionFile,
+        }),
+      ]),
+    );
+  });
+
+  it('still loads memory when instruction load notification fails', async () => {
+    const projectFile = await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context',
+    );
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: () => {
+          throw new Error('hook failed');
+        },
+      },
+    );
+
+    expect(result.fileCount).toBe(1);
+    expect(result.memoryContent).toContain(
+      `--- Context from: ${path.relative(cwd, projectFile)} ---\nproject context`,
+    );
+  });
+
   it('should load memory from included directories', async () => {
     const includedDir = await createEmptyDir(
       path.join(testRootDir, 'included'),
@@ -564,6 +722,39 @@ describe('loadServerHierarchicalMemory', () => {
       expect(result.fileCount).toBe(1);
       expect(result.memoryContent).toContain(
         `--- Context from: ${path.relative(cwd, localFile)} ---\nlocal context content`,
+      );
+    });
+
+    it('notifies when QWEN.local.md is loaded', async () => {
+      const localFile = await createTestFile(
+        path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME),
+        'local context content',
+      );
+      const notifications: InstructionsLoadedNotification[] = [];
+
+      await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+        'tree',
+        [],
+        {
+          onInstructionsLoaded: (notification) => {
+            notifications.push(notification);
+          },
+        },
+      );
+
+      expect(notifications).toEqual(
+        expect.arrayContaining([
+          {
+            filePath: localFile,
+            memoryType: 'local',
+            loadReason: 'session_start',
+          },
+        ]),
       );
     });
 

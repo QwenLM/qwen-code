@@ -39,6 +39,17 @@ export interface ProcessImportsResult {
   importTree: MemoryFile;
 }
 
+export interface ImportedFileNotification {
+  filePath: string;
+  parentFilePath: string;
+}
+
+export interface ProcessImportsOptions {
+  onFileImported?: (
+    notification: ImportedFileNotification,
+  ) => void | Promise<void>;
+}
+
 // `findProjectRoot` now lives in `./projectRoot.ts` and is shared with
 // memoryDiscovery. It returns `string | null`; `processImports` below
 // preserves the previous "fall back to startDir" contract at the call
@@ -190,6 +201,7 @@ export async function processImports(
   },
   projectRoot?: string,
   importFormat: 'flat' | 'tree' = 'tree',
+  options: ProcessImportsOptions = {},
 ): Promise<ProcessImportsResult> {
   if (!projectRoot) {
     // Preserve the previous local helper's contract: if no `.git`
@@ -268,6 +280,10 @@ export async function processImports(
         try {
           await fs.access(fullPath);
           const importedContent = await fs.readFile(fullPath, 'utf-8');
+          await options.onFileImported?.({
+            filePath: normalizedFullPath,
+            parentFilePath: normalizedPath,
+          });
 
           // Process the imported file
           await processFlat(
@@ -339,6 +355,10 @@ export async function processImports(
     try {
       await fs.access(fullPath);
       const fileContent = await fs.readFile(fullPath, 'utf-8');
+      await options.onFileImported?.({
+        filePath: fullPath,
+        parentFilePath: importState.currentFile ?? path.resolve(basePath),
+      });
       // Mark this file as processed for this import chain
       const newImportState: ImportState = {
         ...importState,
@@ -353,6 +373,7 @@ export async function processImports(
         newImportState,
         projectRoot,
         importFormat,
+        options,
       );
       result += `<!-- Imported from: ${importPath} -->\n${imported.content}\n<!-- End of import from: ${importPath} -->`;
       imports.push(imported.importTree);

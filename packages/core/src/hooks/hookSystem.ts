@@ -34,6 +34,8 @@ import type {
   StopFailureErrorType,
   TodoItem,
   TodoStatus,
+  InstructionMemoryType,
+  InstructionLoadReason,
 } from './types.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
 import type { AsyncHookRegistry } from './asyncHookRegistry.js';
@@ -149,6 +151,29 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)
+      : undefined;
+  }
+
+  async fireInstructionsLoadedEvent(
+    filePath: string,
+    memoryType: InstructionMemoryType,
+    loadReason: InstructionLoadReason,
+    options: {
+      globs?: string[];
+      triggerFilePath?: string;
+      parentFilePath?: string;
+    } = {},
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireInstructionsLoadedEvent(
+      filePath,
+      memoryType,
+      loadReason,
+      options,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('InstructionsLoaded', result.finalOutput)
       : undefined;
   }
 
