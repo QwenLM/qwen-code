@@ -9,6 +9,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useState,
 } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -16,14 +17,27 @@ import { SettingScope } from '../../config/settings.js';
 
 export type VimMode = 'NORMAL' | 'INSERT';
 
-interface VimModeContextType {
+// ── State context: only vimEnabled + vimMode ──
+interface VimModeStateType {
   vimEnabled: boolean;
   vimMode: VimMode;
+}
+
+const VimModeStateContext = createContext<VimModeStateType | undefined>(
+  undefined,
+);
+
+// ── Actions context: stable callbacks, never changes after mount ──
+interface VimModeActionsType {
   toggleVimEnabled: () => Promise<boolean>;
   setVimMode: (mode: VimMode) => void;
 }
 
-const VimModeContext = createContext<VimModeContextType | undefined>(undefined);
+const VimModeActionsContext = createContext<VimModeActionsType | undefined>(
+  undefined,
+);
+
+// ── Provider ──
 
 export const VimModeProvider = ({
   children,
@@ -39,10 +53,8 @@ export const VimModeProvider = ({
   );
 
   useEffect(() => {
-    // Initialize vimEnabled from settings on mount
     const enabled = settings.merged.general?.vimMode ?? false;
     setVimEnabled(enabled);
-    // When vim mode is enabled, always start in NORMAL mode
     if (enabled) {
       setVimMode('NORMAL');
     }
@@ -51,7 +63,6 @@ export const VimModeProvider = ({
   const toggleVimEnabled = useCallback(async () => {
     const newValue = !vimEnabled;
     setVimEnabled(newValue);
-    // When enabling vim mode, start in NORMAL mode
     if (newValue) {
       setVimMode('NORMAL');
     }
@@ -59,22 +70,47 @@ export const VimModeProvider = ({
     return newValue;
   }, [vimEnabled, settings]);
 
-  const value = {
-    vimEnabled,
-    vimMode,
-    toggleVimEnabled,
-    setVimMode,
-  };
+  const stateValue = useMemo(
+    () => ({ vimEnabled, vimMode }),
+    [vimEnabled, vimMode],
+  );
+
+  const actionsValue = useMemo(
+    () => ({ toggleVimEnabled, setVimMode }),
+    [toggleVimEnabled, setVimMode],
+  );
 
   return (
-    <VimModeContext.Provider value={value}>{children}</VimModeContext.Provider>
+    <VimModeActionsContext.Provider value={actionsValue}>
+      <VimModeStateContext.Provider value={stateValue}>
+        {children}
+      </VimModeStateContext.Provider>
+    </VimModeActionsContext.Provider>
   );
 };
 
-export const useVimMode = () => {
-  const context = useContext(VimModeContext);
+// ── Hooks ──
+
+/** Subscribe to vim mode state (vimEnabled, vimMode). Re-renders on mode change. */
+export const useVimModeState = () => {
+  const context = useContext(VimModeStateContext);
   if (context === undefined) {
-    throw new Error('useVimMode must be used within a VimModeProvider');
+    throw new Error('useVimModeState must be used within a VimModeProvider');
   }
   return context;
 };
+
+/** Subscribe to vim mode actions (toggleVimEnabled, setVimMode). Stable — never triggers re-render. */
+export const useVimModeActions = () => {
+  const context = useContext(VimModeActionsContext);
+  if (context === undefined) {
+    throw new Error('useVimModeActions must be used within a VimModeProvider');
+  }
+  return context;
+};
+
+/** Combined hook for consumers that need both state and actions. Prefer the split hooks when possible. */
+export const useVimMode = () => ({
+    ...useVimModeState(),
+    ...useVimModeActions(),
+  });

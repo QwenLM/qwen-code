@@ -20,6 +20,14 @@ const mockVimContext = {
 };
 
 vi.mock('../contexts/VimModeContext.js', () => ({
+  useVimModeState: () => ({
+    vimEnabled: mockVimContext.vimEnabled,
+    vimMode: mockVimContext.vimMode,
+  }),
+  useVimModeActions: () => ({
+    toggleVimEnabled: mockVimContext.toggleVimEnabled,
+    setVimMode: mockVimContext.setVimMode,
+  }),
   useVimMode: () => mockVimContext,
   VimModeProvider: ({ children }: { children: React.ReactNode }) => children,
 }));

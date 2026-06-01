@@ -141,7 +141,7 @@ import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
-import { useVimMode } from './contexts/VimModeContext.js';
+import { useVimMode, useVimModeActions } from './contexts/VimModeContext.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
@@ -171,6 +171,7 @@ describe('AppContainer State Management', () => {
   const mockedUseAutoAcceptIndicator = useAutoAcceptIndicator as Mock;
   const mockedUseGitBranchName = useGitBranchName as Mock;
   const mockedUseVimMode = useVimMode as Mock;
+  const mockedUseVimModeActions = useVimModeActions as Mock;
   const mockedUseSessionStats = useSessionStats as Mock;
   const mockedUseTextBuffer = useTextBuffer as Mock;
   const mockedUseLogger = useLogger as Mock;
@@ -308,6 +309,10 @@ describe('AppContainer State Management', () => {
     mockedUseVimMode.mockReturnValue({
       isVimEnabled: false,
       toggleVimEnabled: vi.fn(),
+    });
+    mockedUseVimModeActions.mockReturnValue({
+      toggleVimEnabled: vi.fn(),
+      setVimMode: vi.fn(),
     });
     mockedUseSessionStats.mockReturnValue({ stats: {} });
     mockedUseTextBuffer.mockReturnValue({

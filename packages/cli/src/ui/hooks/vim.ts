@@ -8,7 +8,10 @@ import { useCallback, useReducer, useEffect } from 'react';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Key } from './useKeypress.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
+import {
+  useVimModeState,
+  useVimModeActions,
+} from '../contexts/VimModeContext.js';
 
 export type VimMode = 'NORMAL' | 'INSERT';
 
@@ -129,7 +132,8 @@ const vimReducer = (state: VimState, action: VimAction): VimState => {
  * @returns Object with vim state and input handler
  */
 export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
-  const { vimEnabled, vimMode, setVimMode } = useVimMode();
+  const { vimEnabled, vimMode } = useVimModeState();
+  const { setVimMode } = useVimModeActions();
   const [state, dispatch] = useReducer(vimReducer, initialVimState);
 
   // Sync vim mode from context to local state

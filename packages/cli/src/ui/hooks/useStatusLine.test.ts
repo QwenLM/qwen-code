@@ -74,6 +74,11 @@ const mockVimMode = {
   vimMode: 'INSERT' as string,
 };
 vi.mock('../contexts/VimModeContext.js', () => ({
+  useVimModeState: () => mockVimMode,
+  useVimModeActions: () => ({
+    toggleVimEnabled: vi.fn(),
+    setVimMode: vi.fn(),
+  }),
   useVimMode: () => mockVimMode,
 }));
 
