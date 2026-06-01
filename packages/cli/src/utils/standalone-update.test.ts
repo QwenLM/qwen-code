@@ -258,6 +258,38 @@ describe('standalone-update', () => {
     });
   });
 
+  describe('ensureBinWrapper — shell safety', () => {
+    it('rejects standaloneDir with backtick', () => {
+      const libDir = path.join(tempDir, '.local', 'lib');
+      const standaloneDir = path.join(libDir, 'qwen`id`');
+      fs.mkdirSync(standaloneDir, { recursive: true });
+
+      expect(() => ensureBinWrapper(standaloneDir, 'linux-x64')).toThrow(
+        'unsafe for shell embedding',
+      );
+    });
+
+    it('rejects standaloneDir with dollar sign', () => {
+      const libDir = path.join(tempDir, '.local', 'lib');
+      const standaloneDir = path.join(libDir, 'qwen$(rm -rf /)');
+      fs.mkdirSync(standaloneDir, { recursive: true });
+
+      expect(() => ensureBinWrapper(standaloneDir, 'linux-x64')).toThrow(
+        'unsafe for shell embedding',
+      );
+    });
+
+    it('rejects standaloneDir with embedded double-quote', () => {
+      const libDir = path.join(tempDir, '.local', 'lib');
+      const standaloneDir = path.join(libDir, 'qwen"code');
+      fs.mkdirSync(standaloneDir, { recursive: true });
+
+      expect(() => ensureBinWrapper(standaloneDir, 'linux-x64')).toThrow(
+        'unsafe for shell embedding',
+      );
+    });
+  });
+
   describe.skipIf(process.platform === 'win32')('ensurePathInShellRc', () => {
     it('appends PATH export to zshrc when SHELL is zsh', () => {
       const binDir = path.join(tempDir, 'bin');

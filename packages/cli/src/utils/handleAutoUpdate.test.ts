@@ -12,6 +12,7 @@ import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
 import EventEmitter from 'node:events';
 import { handleAutoUpdate, setUpdateHandler } from './handleAutoUpdate.js';
+import { performStandaloneUpdate } from './standalone-update.js';
 import { MessageType } from '../ui/types.js';
 
 vi.mock('./installationInfo.js', async () => {
@@ -21,6 +22,10 @@ vi.mock('./installationInfo.js', async () => {
     getInstallationInfo: vi.fn(),
   };
 });
+
+vi.mock('./standalone-update.js', () => ({
+  performStandaloneUpdate: vi.fn(),
+}));
 
 vi.mock('./updateEventEmitter.js', async () => {
   const { EventEmitter } = await import('node:events');
@@ -38,6 +43,7 @@ interface MockChildProcess extends EventEmitter {
 }
 
 const mockGetInstallationInfo = vi.mocked(getInstallationInfo);
+const mockPerformStandaloneUpdate = vi.mocked(performStandaloneUpdate);
 
 describe('handleAutoUpdate', () => {
   let mockSpawn: Mock;
@@ -260,6 +266,125 @@ describe('handleAutoUpdate', () => {
       message:
         'Update successful! The new version will be used on your next run.',
     });
+  });
+});
+
+describe('handleAutoUpdate — standalone path', () => {
+  let mockSpawn: Mock;
+  let mockUpdateInfo: UpdateObject;
+  let mockSettings: LoadedSettings;
+  let emitSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    mockSpawn = vi.fn();
+    vi.clearAllMocks();
+    emitSpy = vi.spyOn(updateEventEmitter, 'emit');
+    mockUpdateInfo = {
+      update: {
+        latest: '2.0.0',
+        current: '1.0.0',
+        type: 'major',
+        name: '@qwen-code/qwen-code',
+      },
+      message: 'An update is available!',
+    };
+    mockSettings = {
+      merged: { general: { enableAutoUpdate: true } },
+    } as LoadedSettings;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('calls performStandaloneUpdate and does NOT spawn npm', async () => {
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
+      updateMessage: '',
+      isGlobal: false,
+      isStandalone: true,
+      standaloneDir: '/home/user/.local/lib/qwen-code',
+      packageManager: PackageManager.NPM,
+    });
+    mockPerformStandaloneUpdate.mockResolvedValue('done');
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+    await vi.waitFor(() =>
+      expect(emitSpy).toHaveBeenCalledWith('update-success', expect.anything()),
+    );
+
+    expect(mockPerformStandaloneUpdate).toHaveBeenCalledWith(
+      '/home/user/.local/lib/qwen-code',
+      '2.0.0',
+    );
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('emits deferred message when result is "deferred"', async () => {
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: undefined,
+      updateMessage: '',
+      isGlobal: false,
+      isStandalone: true,
+      standaloneDir: '/home/user/.local/lib/qwen-code',
+      packageManager: PackageManager.NPM,
+    });
+    mockPerformStandaloneUpdate.mockResolvedValue('deferred');
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+    await vi.waitFor(() =>
+      expect(emitSpy).toHaveBeenCalledWith('update-success', expect.anything()),
+    );
+
+    expect(emitSpy).toHaveBeenCalledWith('update-success', {
+      message:
+        'Update downloaded. It will be applied after you exit this session.',
+    });
+  });
+
+  it('emits "done" success message when result is "done"', async () => {
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: undefined,
+      updateMessage: '',
+      isGlobal: false,
+      isStandalone: true,
+      standaloneDir: '/home/user/.local/lib/qwen-code',
+      packageManager: PackageManager.NPM,
+    });
+    mockPerformStandaloneUpdate.mockResolvedValue('done');
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+    await vi.waitFor(() =>
+      expect(emitSpy).toHaveBeenCalledWith('update-success', expect.anything()),
+    );
+
+    expect(emitSpy).toHaveBeenCalledWith('update-success', {
+      message:
+        'Update successful! The new version will be used on your next run.',
+    });
+  });
+
+  it('emits update-failed on rejection', async () => {
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: undefined,
+      updateMessage: '',
+      isGlobal: false,
+      isStandalone: true,
+      standaloneDir: '/home/user/.local/lib/qwen-code',
+      packageManager: PackageManager.NPM,
+    });
+    mockPerformStandaloneUpdate.mockRejectedValue(new Error('Download failed'));
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+    await vi.waitFor(() =>
+      expect(emitSpy).toHaveBeenCalledWith('update-failed', expect.anything()),
+    );
+
+    expect(emitSpy).toHaveBeenCalledWith('update-failed', {
+      message:
+        'Automatic update failed: Download failed. Re-run the installer to update manually.',
+    });
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });
 
