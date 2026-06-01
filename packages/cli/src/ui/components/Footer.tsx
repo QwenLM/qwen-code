@@ -31,7 +31,11 @@ export const Footer: React.FC = () => {
   const config = useConfig();
   const settings = useSettings();
   const { vimEnabled, vimMode } = useVimMode();
-  const { lines: statusLineLines, useThemeColors } = useStatusLine();
+  const {
+    lines: statusLineLines,
+    useThemeColors,
+    respectUserColors,
+  } = useStatusLine();
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
@@ -153,8 +157,14 @@ export const Footer: React.FC = () => {
           statusLineLines.map((line, i) => (
             <Text
               key={`status-line-${i}`}
-              color={useThemeColors ? theme.text.accent : undefined}
-              dimColor={!useThemeColors}
+              color={
+                respectUserColors
+                  ? undefined
+                  : useThemeColors
+                    ? theme.text.accent
+                    : undefined
+              }
+              dimColor={respectUserColors ? false : !useThemeColors}
               wrap="truncate"
             >
               {line}

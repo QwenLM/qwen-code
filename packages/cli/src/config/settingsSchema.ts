@@ -642,6 +642,7 @@ const SETTINGS_SCHEMA = {
                   type: 'command';
                   command: string;
                   refreshInterval?: number;
+                  respectUserColors?: boolean;
                 }
               | {
                   type: 'preset';
@@ -651,7 +652,7 @@ const SETTINGS_SCHEMA = {
             )
           | undefined,
         description:
-          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
+          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling.',
         showInDialog: false,
       },
       customThemes: {
