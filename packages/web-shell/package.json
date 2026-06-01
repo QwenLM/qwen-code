@@ -18,7 +18,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && vite build --config vite.lib.config.ts && tsc -p tsconfig.lib.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:ci": "vitest run"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.0",

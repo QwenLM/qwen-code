@@ -145,7 +145,7 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
   const [showAll, setShowAll] = useState(false);
   const output = useMemo(() => extractText(tool) || '', [tool]);
   const lines = useMemo(() => output.split('\n'), [output]);
-  const isUserShell = tool.toolName === 'shell';
+  const isUserShell = isShellToolName(tool.toolName);
   const isLong = lines.length > MAX_BASH_LINES;
   const hiddenLinesCount = Math.max(0, lines.length - MAX_BASH_LINES);
   const displayText = useMemo(

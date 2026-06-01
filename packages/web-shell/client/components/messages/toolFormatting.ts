@@ -100,7 +100,12 @@ export function getToolResultSummary(tool: ACPToolCall): string {
     return `${matchCount} result(s)`;
   }
 
-  if (name === 'edit' || name === 'write' || name === 'editfile') {
+  if (
+    name === 'edit' ||
+    name === 'write' ||
+    name === 'write_file' ||
+    name === 'editfile'
+  ) {
     return '';
   }
 

@@ -39,6 +39,7 @@
     "dev": "vite build --watch",
     "build": "vite build",
     "test": "vitest run",
+    "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix",

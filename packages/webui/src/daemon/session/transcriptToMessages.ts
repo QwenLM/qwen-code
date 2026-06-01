@@ -34,6 +34,10 @@ export function transcriptBlocksToDaemonMessages(
   blocks: readonly DaemonTranscriptBlock[],
 ): DaemonMessage[] {
   const messages: DaemonMessage[] = [];
+  // Replay can contain thousands of blocks. Keep top-level tool calls indexed
+  // by callId so later tool updates and permission placeholders merge in O(1)
+  // instead of scanning the rendered message list for every block.
+  const topLevelToolsByCallId = new Map<string, DaemonMessageToolCall>();
   const subAgentStack: ActiveSubAgent[] = [];
   let currentAssistantIdx: number | null = null;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
@@ -139,10 +143,7 @@ export function transcriptBlocksToDaemonMessages(
         const parentSubAgent = toolCall.parentToolCallId
           ? findSubAgent(subAgentStack, toolCall.parentToolCallId)
           : undefined;
-        const existingTopLevelTool = findTopLevelTool(
-          messages,
-          toolCall.callId,
-        );
+        const existingTopLevelTool = topLevelToolsByCallId.get(toolCall.callId);
 
         if (isSubAgentToolCall(toolCall)) {
           const matchingSubAgentIndex = findSubAgentIndex(
@@ -186,6 +187,7 @@ export function transcriptBlocksToDaemonMessages(
         }
 
         appendToolCallMessage(messages, block.id, toolCall);
+        topLevelToolsByCallId.set(toolCall.callId, toolCall);
         needsNewContentMessage = true;
 
         if (isSubAgentToolCall(toolCall) && !isBackgroundSubAgent(toolCall)) {
@@ -262,6 +264,24 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
 
+        const existingTopLevelPermission = topLevelToolsByCallId.get(
+          permissionToolCall.callId,
+        );
+        if (existingTopLevelPermission) {
+          if (permBlock.resolved) {
+            if (isApprovedPermissionResolution(permBlock.resolved)) {
+              permissionToolCall.status = isSubAgentPermission
+                ? permissionToolCall.status
+                : 'in_progress';
+            } else {
+              permissionToolCall.status = 'failed';
+              permissionToolCall.endTime = permBlock.updatedAt;
+            }
+          }
+          mergeToolCall(existingTopLevelPermission, permissionToolCall);
+          break;
+        }
+
         if (permBlock.resolved) {
           // Resolved permission with no matching real tool block:
           // - Approved: the daemon may still skip the initial agent tool_call
@@ -276,6 +296,10 @@ export function transcriptBlocksToDaemonMessages(
               permissionToolCall.status = 'in_progress';
             }
             appendToolCallMessage(messages, block.id, permissionToolCall);
+            topLevelToolsByCallId.set(
+              permissionToolCall.callId,
+              permissionToolCall,
+            );
             needsNewContentMessage = true;
             if (isSubAgentPermission) {
               subAgentStack.push({ tool: permissionToolCall });
@@ -284,6 +308,10 @@ export function transcriptBlocksToDaemonMessages(
             permissionToolCall.status = 'failed';
             permissionToolCall.endTime = permBlock.updatedAt;
             appendToolCallMessage(messages, block.id, permissionToolCall);
+            topLevelToolsByCallId.set(
+              permissionToolCall.callId,
+              permissionToolCall,
+            );
             needsNewContentMessage = true;
           }
           break;
@@ -291,6 +319,10 @@ export function transcriptBlocksToDaemonMessages(
 
         // Unresolved: render as pending agent awaiting approval.
         appendToolCallMessage(messages, block.id, permissionToolCall);
+        topLevelToolsByCallId.set(
+          permissionToolCall.callId,
+          permissionToolCall,
+        );
         needsNewContentMessage = true;
         if (isSubAgentPermission) {
           subAgentStack.push({ tool: permissionToolCall });
@@ -382,18 +414,6 @@ function appendSubTool(
 ): void {
   parent.subTools ||= [];
   parent.subTools.push(toolCall);
-}
-
-function findTopLevelTool(
-  messages: DaemonMessage[],
-  callId: string,
-): DaemonMessageToolCall | undefined {
-  for (const message of messages) {
-    if (message.role !== 'tool_group') continue;
-    const match = message.tools.find((tool) => tool.callId === callId);
-    if (match) return match;
-  }
-  return undefined;
 }
 
 function closeCompletedSubAgentsBefore(
