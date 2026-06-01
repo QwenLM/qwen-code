@@ -58,6 +58,12 @@ function getBrowserViewBackgroundColor(): string {
   return nativeTheme.shouldUseDarkColors ? '#2b292e' : '#fafafb'
 }
 
+function isNavigationAbortError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const candidate = error as { code?: unknown; errno?: unknown }
+  return candidate.code === 'ERR_ABORTED' || candidate.errno === -3
+}
+
 const THEME_COLOR_EXTRACTOR_FN = String.raw`
 () => {
   const toHex = (r, g, b) => '#' + [r, g, b].map(c => c.toString(16).padStart(2, '0')).join('');
@@ -547,6 +553,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
         }
       })
     void this.loadEmptyStatePage(instance).catch((error) => {
+      if (isNavigationAbortError(error)) return
       mainLog.warn(`[browser-pane] empty-state load failed id=${instance.id}: ${error instanceof Error ? error.message : String(error)}`)
       void pageView.webContents.loadURL('about:blank')
     })
@@ -757,7 +764,26 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null
 
     try {
-      const loaded = instance.pageView.webContents.loadURL(normalizedUrl)
+      const loaded = (async () => {
+        instance.pageView.webContents.stop()
+        if (!instance.isLoading) {
+          instance.isLoading = true
+          this.emitStateChange(instance)
+          void this.pushToolbarState(instance)
+        }
+        try {
+          await instance.pageView.webContents.loadURL(normalizedUrl)
+        } catch (error) {
+          if (!isNavigationAbortError(error)) throw error
+          instance.pageView.webContents.stop()
+          if (!instance.isLoading) {
+            instance.isLoading = true
+            this.emitStateChange(instance)
+            void this.pushToolbarState(instance)
+          }
+          await instance.pageView.webContents.loadURL(normalizedUrl)
+        }
+      })()
       const timeout = new Promise<never>((_, reject) => {
         timeoutHandle = setTimeout(() => reject(new Error(`Navigation to "${normalizedUrl}" timed out after ${timeoutMs / 1000}s`)), timeoutMs)
       })

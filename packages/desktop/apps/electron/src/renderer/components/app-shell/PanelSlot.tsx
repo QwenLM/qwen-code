@@ -144,7 +144,7 @@ export function PanelSlot({
           borderTopRightRadius: RADIUS_INNER,
           borderBottomRightRadius: isAtRightEdge ? RADIUS_EDGE : RADIUS_INNER,
           ...(isOnly
-            ? { flexGrow: 1, minWidth: 0 }
+            ? { flexGrow: 1, minWidth: isCompact ? 0 : PANEL_MIN_WIDTH }
             : {
                 flexGrow: proportion,
                 flexShrink: 1,

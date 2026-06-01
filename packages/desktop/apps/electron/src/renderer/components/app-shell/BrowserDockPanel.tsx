@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { Maximize2, Minimize2, X } from 'lucide-react'
+import { Spinner } from '@craft-agent/ui'
 import { fullscreenOverlayOpenAtom } from '@/atoms/overlay'
 import {
   activeBrowserInstanceIdAtom,
@@ -14,7 +15,7 @@ import { HeaderIconButton } from '@/components/ui/HeaderIconButton'
 import { RADIUS_EDGE } from './panel-constants'
 import type { BrowserInstanceInfo } from '../../../shared/types'
 
-const DOCK_WIDTH = 'clamp(480px, 42vw, 640px)'
+const DOCK_WIDTH = 'clamp(640px, 48vw, 960px)'
 const DOCK_HEADER_HEIGHT = 48
 const DOCK_NATIVE_LEFT_INSET = 4
 
@@ -234,13 +235,25 @@ export function BrowserDockPanel({
     >
       <div
         className={cn(
-          'flex items-center justify-between gap-2 px-3',
+          'relative flex items-center justify-between gap-2 px-3',
           'border-b border-foreground/10 bg-background/95',
         )}
         style={{ height: DOCK_HEADER_HEIGHT }}
       >
-        <div className="min-w-0 flex-1 truncate text-sm font-medium text-foreground/80">
-          {dockedInstance.title || 'Browser'}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <span
+            className={cn(
+              'flex h-3.5 w-3.5 shrink-0 items-center justify-center',
+              'transition-opacity duration-150',
+              dockedInstance.isLoading ? 'opacity-100' : 'opacity-0',
+            )}
+            aria-hidden={!dockedInstance.isLoading}
+          >
+            <Spinner className="text-[10px] text-foreground/60" />
+          </span>
+          <div className="min-w-0 flex-1 truncate text-sm font-medium text-foreground/80">
+            {dockedInstance.title || 'Browser'}
+          </div>
         </div>
         <div className="relative flex shrink-0 items-center gap-1">
           {tooltipLabel && (
@@ -273,6 +286,21 @@ export function BrowserDockPanel({
             onClick={handleClose}
           />
         </div>
+        {dockedInstance.isLoading && (
+          <div
+            className="absolute inset-x-0 bottom-0 h-[2px] overflow-hidden"
+            role="progressbar"
+            aria-label="Loading page"
+          >
+            <div
+              className="h-full w-full animate-shimmer-loading"
+              style={{
+                background:
+                  'linear-gradient(90deg, transparent 0%, var(--accent) 50%, transparent 100%)',
+              }}
+            />
+          </div>
+        )}
       </div>
       <div
         ref={viewportRef}

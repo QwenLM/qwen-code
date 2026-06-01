@@ -9,6 +9,8 @@ import { describe, it, expect, beforeEach, mock } from 'bun:test'
 
 const createdWindows: any[] = []
 let toolbarLoadFailuresRemaining = 0
+let emptyStateLoadError: unknown = null
+const pageLoadErrorsByUrl = new Map<string, unknown[]>()
 const mockShellOpenExternal = mock(async () => {})
 const mockIpcMainHandle = mock(() => {})
 
@@ -23,14 +25,22 @@ function createMockWebContents() {
       listeners[event].push(cb)
     },
     loadURL: mock(async (url: string) => {
-      currentUrl = url
       const isToolbarUrl = typeof url === 'string' && url.includes('browser-toolbar.html')
       if (isToolbarUrl && toolbarLoadFailuresRemaining > 0) {
         toolbarLoadFailuresRemaining--
         throw new Error('mock toolbar load failure')
       }
+      const pageLoadErrors = pageLoadErrorsByUrl.get(url)
+      const pageLoadError = pageLoadErrors?.shift()
+      if (pageLoadError) throw pageLoadError
+      currentUrl = url
     }),
     loadFile: mock(async (_path: string, _opts?: unknown) => {
+      if (_path.includes('browser-empty-state.html') && emptyStateLoadError) {
+        const error = emptyStateLoadError
+        emptyStateLoadError = null
+        throw error
+      }
       if (toolbarLoadFailuresRemaining > 0) {
         toolbarLoadFailuresRemaining--
         throw new Error('mock toolbar load failure')
@@ -265,6 +275,8 @@ describe('BrowserPaneManager', () => {
   beforeEach(() => {
     createdWindows.length = 0
     toolbarLoadFailuresRemaining = 0
+    emptyStateLoadError = null
+    pageLoadErrorsByUrl.clear()
     mockShellOpenExternal.mockClear()
     mockIpcMainHandle.mockClear()
     manager = new BrowserPaneManager()
@@ -352,6 +364,59 @@ describe('BrowserPaneManager', () => {
     instance.pageView.webContents._emit('did-start-loading')
     instance.pageView.webContents._emit('dom-ready')
     expect(instance.pageView.webContents.insertCSS.mock.calls.length).toBeGreaterThan(insertCallsBeforeNavigation)
+  })
+
+  it('does not blank the page when empty-state loading is aborted by navigation', async () => {
+    emptyStateLoadError = Object.assign(new Error('navigation aborted'), {
+      code: 'ERR_ABORTED',
+      errno: -3,
+    })
+
+    manager.createInstance('dock-race', {
+      show: true,
+      presentation: 'docked',
+    } as any)
+    const instance = (manager as any).instances.get('dock-race')
+
+    await manager.navigate('dock-race', 'https://github.com/anthropics/claude-plugins-official')
+    await Promise.resolve()
+
+    expect(instance.pageView.webContents.loadURL.mock.calls).toContainEqual([
+      'https://github.com/anthropics/claude-plugins-official',
+    ])
+    expect(instance.pageView.webContents.loadURL.mock.calls).not.toContainEqual([
+      'about:blank',
+    ])
+  })
+
+  it('retries aborted navigation when reusing the docked browser', async () => {
+    const secondUrl = 'https://second.example'
+    pageLoadErrorsByUrl.set(secondUrl, [
+      Object.assign(new Error('navigation aborted'), {
+        code: 'ERR_ABORTED',
+        errno: -3,
+      }),
+    ])
+
+    manager.createInstance('dock-reuse', {
+      show: true,
+      presentation: 'docked',
+    } as any)
+    const instance = (manager as any).instances.get('dock-reuse')
+
+    await manager.navigate('dock-reuse', 'https://first.example')
+    await manager.navigate('dock-reuse', secondUrl)
+
+    expect(instance.pageView.webContents.stop.mock.calls.length).toBeGreaterThanOrEqual(3)
+    expect(instance.pageView.webContents.loadURL.mock.calls).toContainEqual([
+      'https://first.example',
+    ])
+    expect(
+      instance.pageView.webContents.loadURL.mock.calls.filter(
+        ([url]: [string]) => url === secondUrl,
+      ),
+    ).toHaveLength(2)
+    expect(instance.pageView.webContents.getURL()).toBe(secondUrl)
   })
 
   it('allows http(s) popups with shared browser partition', () => {
@@ -511,6 +576,23 @@ describe('BrowserPaneManager', () => {
     const instance = (manager as any).instances.get('nav-2')
     expect(instance.pageView.webContents.loadURL).toHaveBeenCalledWith(
       'https://duckduckgo.com/?q=craft%20agents%20browser%20tools'
+    )
+  })
+
+  it('emits loading state immediately when navigation starts', async () => {
+    const states: any[] = []
+    manager.onStateChange((info) => states.push(info))
+
+    manager.createInstance('nav-loading')
+    states.length = 0
+
+    await manager.navigate('nav-loading', 'https://example.com')
+
+    expect(states).toContainEqual(
+      expect.objectContaining({
+        id: 'nav-loading',
+        isLoading: true,
+      }),
     )
   })
 
