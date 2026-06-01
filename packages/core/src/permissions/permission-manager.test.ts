@@ -2558,4 +2558,24 @@ describe('PermissionManager — compound shell write attribution', () => {
       }),
     ).toBe('ask');
   });
+
+  it('preserves wildcard deny rules for dynamic-cd writes', async () => {
+    const pm = new PermissionManager(
+      makeConfig({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(*)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      }),
+    );
+    pm.initialize();
+
+    expect(
+      await pm.evaluate({
+        toolName: 'run_shell_command',
+        command: 'cd "$TARGET" && echo hi > settings.json',
+        cwd: '/repo',
+      }),
+    ).toBe('deny');
+  });
 });

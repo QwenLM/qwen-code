@@ -511,6 +511,41 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  it('marks writes after popd with expansion args as cwd-unknown', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "popd $DIR && printf '{}' > settings.local.json",
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/settings.local.json',
+        cwdUnknown: true,
+        pathMayDependOnCwd: true,
+      },
+    ]);
+  });
+
+  it.each(['pushd', 'pushd +2', 'pushd -2', 'pushd -n /tmp'])(
+    'marks writes after `%s` as cwd-unknown',
+    (command) => {
+      expect(
+        extractShellOperationsAcrossCommand(
+          `${command} && printf '{}' > settings.local.json`,
+          '/repo',
+        ),
+      ).toEqual([
+        {
+          virtualTool: 'write_file',
+          filePath: '/repo/settings.local.json',
+          cwdUnknown: true,
+          pathMayDependOnCwd: true,
+        },
+      ]);
+    },
+  );
+
   it('marks relative writes after dynamic `cd` targets as cwd-unknown', () => {
     // Keep the guessed path, but mark it unsafe to trust as final.
     expect(

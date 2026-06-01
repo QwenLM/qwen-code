@@ -367,27 +367,27 @@ export class PermissionManager {
     let worst: PermissionDecision = 'default';
 
     for (const op of ops) {
-      if (
-        op.cwdUnknown &&
-        op.pathMayDependOnCwd &&
-        this.hasDenyOrAskRuleForTool(op.virtualTool)
-      ) {
-        debugLogger.info(
-          `PermissionManager: cwdUnknown escalation to 'ask' for virtualTool=${op.virtualTool} filePath=${op.filePath}`,
-        );
-        worst = 'ask';
-        continue;
-      }
-
       // Evaluate the virtual operation using the standard rule-matching path.
       // Since op.virtualTool ≠ 'run_shell_command', this will not recurse back
       // into the shell-semantics branch.
-      const opDecision = this.evaluateSingle({
+      let opDecision = this.evaluateSingle({
         toolName: op.virtualTool,
         cwd: pathCtx?.cwd,
         filePath: op.filePath,
         domain: op.domain,
       });
+
+      if (
+        op.cwdUnknown &&
+        op.pathMayDependOnCwd &&
+        DECISION_PRIORITY[opDecision] < DECISION_PRIORITY.ask &&
+        this.hasDenyOrAskRuleForTool(op.virtualTool)
+      ) {
+        debugLogger.info(
+          `PermissionManager: cwdUnknown escalation to 'ask' for virtualTool=${op.virtualTool} filePath=${op.filePath}`,
+        );
+        opDecision = 'ask';
+      }
 
       if (DECISION_PRIORITY[opDecision] > DECISION_PRIORITY[worst]) {
         worst = opDecision;
