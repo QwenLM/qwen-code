@@ -89,7 +89,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
-import { vi, type Mock, type MockInstance } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
