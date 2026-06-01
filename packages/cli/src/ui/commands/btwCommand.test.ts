@@ -105,6 +105,16 @@ describe('btwCommand', () => {
     });
   });
 
+  it('should return error when question exceeds BTW_MAX_INPUT_LENGTH', async () => {
+    const result = await btwCommand.action!(mockContext, 'x'.repeat(4097));
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('too long'),
+    });
+  });
+
   it('should return error when config is not loaded', async () => {
     const noConfigContext = createMockCommandContext({
       services: { config: null },

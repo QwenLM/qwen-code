@@ -39,7 +39,7 @@ export function buildBtwCacheSafeParams(
     const generationConfig = chat.getGenerationConfig();
     if (!generationConfig) return null;
     const maxHistoryEntries = 40;
-    const history = geminiClient.getHistoryTail(maxHistoryEntries, false);
+    const history = geminiClient.getHistoryTail(maxHistoryEntries, true);
     return {
       generationConfig: structuredClone(generationConfig),
       history,

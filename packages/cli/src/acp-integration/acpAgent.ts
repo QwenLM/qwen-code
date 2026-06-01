@@ -2568,7 +2568,7 @@ class QwenAgent implements Agent {
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'Invalid or missing question (max 4096 chars)',
+            `Invalid or missing question (max ${BTW_MAX_INPUT_LENGTH} chars)`,
           );
         }
         const session = this.sessionOrThrow(sessionId);
