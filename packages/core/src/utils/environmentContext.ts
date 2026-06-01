@@ -296,6 +296,37 @@ export function getStartupContextLength(history: Content[]): number {
 }
 
 /**
+ * True when `content` is a *pure* system-reminder entry: it has parts and
+ * EVERY part is a text part wrapped in `<system-reminder>…</system-reminder>`.
+ *
+ * These are structural history entries — the startup-context prelude
+ * (history[0]) and the mid-history MCP added-tool reminders injected by
+ * `GeminiClient.drainPendingAddedMcpToolsReminder` — NOT real user turns.
+ *
+ * The "every part" requirement is load-bearing. Per-turn reminders (plan
+ * mode, subagent list, recalled memory) are prepended as an extra part to the
+ * SAME user `Content` as the actual prompt: `GeminiClient.sendMessageStream`
+ * assembles `[...systemReminders, ...userPrompt]` into one `createUserContent`
+ * that persists in history. Such a turn has a non-reminder prompt part, so it
+ * is NOT pure — matching on `parts[0]` alone would misclassify a genuine user
+ * prompt as structural (e.g. dropping it from rewind truncation, or
+ * preserving an orphaned failed turn whose prompt then leaks via coalescing).
+ *
+ * Mirrors `getStartupContextLength`'s open+close requirement so a user message
+ * that merely quotes the literal tag text isn't misclassified.
+ */
+export function isSystemReminderContent(content: Content): boolean {
+  const parts = content.parts;
+  if (!parts || parts.length === 0) return false;
+  return parts.every(
+    (part) =>
+      typeof part.text === 'string' &&
+      part.text.startsWith(SYSTEM_REMINDER_OPEN) &&
+      part.text.includes(SYSTEM_REMINDER_CLOSE),
+  );
+}
+
+/**
  * Strip the leading startup context reminder from a chat history. Used when
  * forwarding a parent session's history to a child agent that will generate
  * its own startup context for its own working directory.

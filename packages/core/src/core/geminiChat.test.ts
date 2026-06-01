@@ -4790,6 +4790,37 @@ describe('GeminiChat', async () => {
       ]);
     });
 
+    it('pops a failed turn whose reminder shares a Content with the prompt', () => {
+      // In plan mode (and with subagent/memory reminders) the per-turn
+      // reminder is prepended as an extra part to the SAME user Content as the
+      // prompt — sendMessageStream records [<system-reminder>…, prompt] as one
+      // entry. A failed turn leaves that combined entry trailing. Matching
+      // parts[0] alone would treat it as structural and preserve the user's
+      // prompt text, which then leaks into the next turn via
+      // appendCuratedContent. It must be popped because not every part is a
+      // reminder.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nPlan mode is active.\n</system-reminder>`,
+            },
+            { text: 'the actual user prompt' },
+          ],
+        },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
+      ]);
+    });
+
     it('should be a no-op when last entry is a model response', () => {
       const history = [
         { role: 'user', parts: [{ text: 'hello' }] },

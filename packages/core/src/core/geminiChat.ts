@@ -57,7 +57,7 @@ import {
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
-import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
+import { isSystemReminderContent } from '../utils/environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
 
@@ -2542,18 +2542,21 @@ export class GeminiChat {
       this.history.length > 0 &&
       this.history[this.history.length - 1]!.role === 'user'
     ) {
-      // Never pop a system-reminder user entry. These are structural, not
-      // orphaned turns: the startup-context prelude (history[0]) and
+      // Never pop a *pure* system-reminder user entry. These are structural,
+      // not orphaned turns: the startup-context prelude (history[0]) and
       // mid-history MCP added-tool reminders injected by
       // drainPendingAddedMcpToolsReminder. Popping the latter would lose the
       // announcement permanently — pendingAddedMcpTools is already cleared and
       // the tool name is already in announcedDeferredToolNames, so
       // queueAddedMcpToolsReminder won't re-queue it.
-      const lastText = this.history[this.history.length - 1]?.parts?.[0]?.text;
-      if (
-        typeof lastText === 'string' &&
-        lastText.startsWith(SYSTEM_REMINDER_OPEN)
-      ) {
+      //
+      // Must check EVERY part, not just parts[0]: a failed user turn in plan
+      // mode (or with subagent/memory reminders) is recorded as one Content
+      // whose parts are [<system-reminder>…, actual prompt]. Matching parts[0]
+      // alone would treat that as structural and preserve the user's prompt
+      // text, which then leaks into the next turn via appendCuratedContent.
+      const lastEntry = this.history[this.history.length - 1];
+      if (lastEntry && isSystemReminderContent(lastEntry)) {
         break;
       }
       this.history.pop();
