@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { HistoryItem } from '../types.js';
+import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content } from '@google/genai';
 import { getStartupContextLength } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
@@ -14,9 +14,20 @@ import { isSlashCommand } from './commandUtils.js';
  * sent to the model, as opposed to a slash-command invocation (`/help`,
  * `/stats`, …) which is stored with `type: 'user'` in the UI but never
  * reaches the API history or `turnParentUuids`.
+ *
+ * Typed as a type predicate so callers can drop their `as HistoryItemUser`
+ * casts — a regression that loosened either side of the narrowing would now
+ * be caught by tsc instead of silently bypassing it.
  */
-export function isRealUserTurn(item: HistoryItem): boolean {
+export function isRealUserTurn(
+  item: HistoryItem,
+): item is HistoryItem & HistoryItemUser {
   if (item.type !== 'user' || !item.text) return false;
+  if (typeof item.sentToModel === 'boolean') return item.sentToModel;
+  // Legacy resumed sessions do not have sentToModel, so this fallback is
+  // intentionally coupled to isSlashCommand's current lexical classifier.
+  // Changes to slash-command classification must account for old sessions that
+  // still rely on this inference.
   return !isSlashCommand(item.text) && !item.text.startsWith('?');
 }
 

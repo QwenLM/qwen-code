@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFile } from 'node:fs/promises';
 import type {
   Content,
   GenerateContentConfig,
@@ -20,7 +21,7 @@ export interface SideQueryJsonOptions<TResponse> {
   abortSignal: AbortSignal;
   /**
    * Override the model used for this query. Defaults to
-   * `config.getFastModelForSideQuery?.() ?? config.getFastModel?.() ?? config.getModel() ?? DEFAULT_QWEN_MODEL`
+   * `config.getFastModel?.() ?? config.getModel() ?? DEFAULT_QWEN_MODEL`
    * — side queries run on the fast model when one is configured, including
    * fast models registered under a different authType than the main session.
    * Pass an explicit value to pin to the main model (e.g. long-form
@@ -63,7 +64,7 @@ export interface SideQueryTextOptions {
   abortSignal: AbortSignal;
   /**
    * Override the model used for this query. Defaults to
-   * `config.getFastModelForSideQuery?.() ?? config.getFastModel?.() ?? config.getModel() ?? DEFAULT_QWEN_MODEL`
+   * `config.getFastModel?.() ?? config.getModel() ?? DEFAULT_QWEN_MODEL`
    * — side queries run on the fast model when one is configured, including
    * fast models registered under a different authType than the main session.
    * Pass an explicit value to pin to the main model (e.g. long-form
@@ -105,7 +106,6 @@ function buildDefaultPromptId(purpose?: string): string {
 function resolveDefaultModel(config: Config, override?: string): string {
   return (
     override ??
-    config.getFastModelForSideQuery?.() ??
     config.getFastModel?.() ??
     config.getModel() ??
     DEFAULT_QWEN_MODEL
@@ -122,6 +122,50 @@ function applyThinkingDefault(
       ? { includeThoughts: false, ...thinkingOverride }
       : { includeThoughts: false },
   };
+}
+
+async function getOutputLanguageInstruction(
+  config: Config,
+): Promise<string | undefined> {
+  const outputLanguageFilePath = config.getOutputLanguageFilePath?.();
+  if (!outputLanguageFilePath) return undefined;
+
+  try {
+    const preference = (await readFile(outputLanguageFilePath, 'utf8')).trim();
+    if (!preference) return undefined;
+
+    return [
+      'Follow the user-visible output language preference below for this side query.',
+      preference,
+    ].join('\n\n');
+  } catch {
+    return undefined;
+  }
+}
+
+function appendSystemInstruction(
+  systemInstruction: string | Part | Part[] | Content | undefined,
+  outputLanguageInstruction: string | undefined,
+): string | Part | Part[] | Content | undefined {
+  if (!outputLanguageInstruction) return systemInstruction;
+  if (systemInstruction === undefined) return outputLanguageInstruction;
+  if (typeof systemInstruction === 'string') {
+    return `${systemInstruction}\n\n${outputLanguageInstruction}`;
+  }
+  if (Array.isArray(systemInstruction)) {
+    return [...systemInstruction, { text: outputLanguageInstruction }];
+  }
+  if (
+    typeof systemInstruction === 'object' &&
+    'parts' in systemInstruction &&
+    Array.isArray(systemInstruction.parts)
+  ) {
+    return {
+      ...systemInstruction,
+      parts: [...systemInstruction.parts, { text: outputLanguageInstruction }],
+    };
+  }
+  return [systemInstruction as Part, { text: outputLanguageInstruction }];
 }
 
 function isJsonOptions<TResponse>(
@@ -148,6 +192,10 @@ export async function runSideQuery<TResponse>(
   const model = resolveDefaultModel(config, options.model);
   const promptId = options.promptId ?? buildDefaultPromptId(options.purpose);
   const requestConfig = applyThinkingDefault(options.config);
+  const systemInstruction = appendSystemInstruction(
+    options.systemInstruction,
+    await getOutputLanguageInstruction(config),
+  );
 
   if (isJsonOptions(options)) {
     const response = (await config.getBaseLlmClient().generateJson({
@@ -155,7 +203,7 @@ export async function runSideQuery<TResponse>(
       schema: options.schema,
       abortSignal: options.abortSignal,
       model,
-      systemInstruction: options.systemInstruction,
+      systemInstruction,
       promptId,
       config: requestConfig,
       ...(options.maxAttempts !== undefined && {
@@ -179,7 +227,7 @@ export async function runSideQuery<TResponse>(
   const result = await config.getBaseLlmClient().generateText({
     contents: options.contents,
     model,
-    systemInstruction: options.systemInstruction,
+    systemInstruction,
     abortSignal: options.abortSignal,
     promptId,
     config: requestConfig,

@@ -176,12 +176,13 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PreCompact);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostCompact);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PermissionRequest);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PermissionDenied);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.TodoCreated);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.TodoCompleted);
     });
 
-    it('should have 16 events', () => {
-      expect(DISPLAY_HOOK_EVENTS).toHaveLength(16);
+    it('should have 17 events', () => {
+      expect(DISPLAY_HOOK_EVENTS).toHaveLength(17);
     });
   });
 

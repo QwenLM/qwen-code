@@ -7,6 +7,8 @@
 import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
+import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { APPROVAL_MODES, TrustGateError } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   bearerAuth,
@@ -14,6 +16,19 @@ import {
   denyBrowserOriginCors,
   hostAllowlist,
 } from './auth.js';
+import {
+  DeviceFlowRegistry,
+  setDeviceFlowRegistry,
+  TooManyActiveDeviceFlowsError,
+  UnsupportedDeviceFlowProviderError,
+  UpstreamDeviceFlowError,
+  type DeviceFlowEventSink,
+  type DeviceFlowProvider,
+  type DeviceFlowProviderId,
+  type DeviceFlowPublicView,
+} from './auth/deviceFlow.js';
+import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
+import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
@@ -23,9 +38,12 @@ import {
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  WorkspaceInitConflictError,
   WorkspaceMismatchError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
@@ -39,6 +57,55 @@ import {
   type CapabilitiesEnvelope,
   type ServeOptions,
 } from './types.js';
+import { getDemoHtml } from './demo.js';
+import { mountWorkspaceMemoryRoutes } from './workspaceMemory.js';
+import { mountWorkspaceAgentsRoutes } from './workspaceAgents.js';
+import {
+  createWorkspaceFileSystemFactory,
+  type WorkspaceFileSystemFactory,
+} from './fs/index.js';
+import { registerWorkspaceFileReadRoutes } from './routes/workspaceFileRead.js';
+import { registerWorkspaceFileWriteRoutes } from './routes/workspaceFileWrite.js';
+
+/**
+ * Build a no-op fs-audit emitter that logs a warning every
+ * `WARN_EVERY` dropped events with as much context as the audit
+ * payload exposes. The default factory uses this so a regression
+ * that silently strips audit events shows up in operator logs
+ * instead of disappearing — the earlier one-shot warn was a
+ * permanent silent no-op after the first event, which made a PR
+ * 19/20 regression where `runQwenServe` forgets to inject the real
+ * factory completely invisible (every write 403s; nothing in
+ * audit; one stale stderr line easy to miss for background
+ * daemons). Periodic warning + dropped-event count + first-event
+ * `errorKind` + `pathHash` make the regression actionable.
+ *
+ * PR 19/20's `runQwenServe` injection replaces this with a real
+ * per-session emit, so legitimate production traffic never hits
+ * the warning.
+ */
+export function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
+  const WARN_EVERY = 100;
+  let droppedCount = 0;
+  return (event: BridgeEvent) => {
+    droppedCount += 1;
+    if (droppedCount === 1 || droppedCount % WARN_EVERY === 0) {
+      const data = event.data as
+        | { errorKind?: string; pathHash?: string; intent?: string }
+        | undefined;
+      const ctx: string[] = [];
+      if (data?.errorKind) ctx.push(`errorKind=${data.errorKind}`);
+      if (data?.intent) ctx.push(`intent=${data.intent}`);
+      if (data?.pathHash) ctx.push(`pathHash=${data.pathHash}`);
+      const ctxStr = ctx.length > 0 ? ` (${ctx.join(' ')})` : '';
+      writeStderrLine(
+        `qwen serve: fs audit emit is the default no-op — ${droppedCount} event(s) dropped so far. ` +
+          `Latest type=${event.type}${ctxStr}. ` +
+          `Inject deps.fsFactory in createServeApp to wire audit into the EventBus.`,
+      );
+    }
+  };
+}
 
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
@@ -56,6 +123,37 @@ export interface ServeAppDeps {
    * process.cwd()` itself.
    */
   boundWorkspace?: string;
+  /**
+   * Workspace filesystem boundary factory (#4175 PR 18). When
+   * supplied, PR 19/20 routes will pull a per-request
+   * `WorkspaceFileSystem` off it; when omitted, `createServeApp`
+   * builds a strict default (`trusted: false`, warn-once no-op
+   * `emit`) so an upstream refactor that forgets to inject
+   * `fsFactory` never silently allows writes against an untrusted
+   * workspace. No PR 18 routes consume the factory yet — the slot
+   * is wired so PR 19 read-only file routes can drop in without
+   * re-shaping `ServeAppDeps`. Once PR 19 lands, `runQwenServe`
+   * will inject a factory whose `trusted` flag mirrors
+   * `Config.isTrustedFolder()` and whose `emit` plumbs into the
+   * per-session EventBus.
+   */
+  fsFactory?: WorkspaceFileSystemFactory;
+  /**
+   * Issue #4175 PR 21 — device-flow auth registry. Tests inject a fake
+   * (`now` / `schedule` overrides for deterministic timer control,
+   * stubbed providers, captured event sink). Production callers omit
+   * this and `createServeApp` constructs a default wired to the
+   * shipped Qwen provider, the bridge's `publishWorkspaceEvent`,
+   * and a stderr audit sink.
+   */
+  deviceFlowRegistry?: DeviceFlowRegistry;
+  /**
+   * Issue #4175 PR 21 — extra device-flow providers for tests / future
+   * extensions. Production builds register only `QwenOAuthDeviceFlowProvider`;
+   * passing extra entries here registers them in addition to the default
+   * Qwen provider. Used by tests that stub the OAuth flow.
+   */
+  deviceFlowProviders?: DeviceFlowProvider[];
 }
 
 /**
@@ -70,10 +168,17 @@ export interface ServeAppDeps {
  * Stage 1 routes shipped (matches §04 of issue #3803):
  *   - `GET  /health`
  *   - `GET  /capabilities`
+ *   - `GET  /workspace/mcp`
+ *   - `GET  /workspace/skills`
+ *   - `GET  /workspace/providers`
+ *   - `GET  /workspace/env`
+ *   - `GET  /workspace/preflight`
  *   - `POST /session`
  *   - `POST /session/:id/load`
  *   - `POST /session/:id/resume`
  *   - `GET  /workspace/:id/sessions`
+ *   - `GET  /session/:id/context`
+ *   - `GET  /session/:id/supported-commands`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
  *   - `POST /session/:id/heartbeat`
@@ -143,7 +248,160 @@ export function createServeApp(
         ? { eventRingSize: opts.eventRingSize }
         : {}),
       boundWorkspace,
+      // PR 22b/2 (wenshao/gpt-5.5 review fold-in #4304): symmetric
+      // with `runQwenServe.ts` — direct embeds / tests that don't
+      // inject `deps.bridge` would otherwise silently lose the
+      // daemon env + preflight cells the default server app
+      // reported pre-injection. Wiring the production status provider
+      // here preserves byte-for-byte route output on the default
+      // bridge construction path.
+      statusProvider: createDaemonStatusProvider(),
     });
+
+  // Allow same-origin requests from the demo page. Browsers send an
+  // `Origin` header on same-origin POST/fetch calls; `denyBrowserOriginCors`
+  // below would reject them. This middleware strips `Origin` when it
+  // matches the daemon's own address so the demo page's API calls pass
+  // through. Only loopback origins are matched — non-loopback deployments
+  // require the operator to front the daemon with a reverse proxy for
+  // browser access anyway (per the threat-model docs).
+  let cachedStripPort = -1;
+  let cachedSelfOrigins: Set<string> = new Set();
+  app.use((req: import('express').Request, _res, next) => {
+    const origin = req.headers.origin;
+    if (origin) {
+      const port = getPort();
+      if (port !== cachedStripPort) {
+        cachedStripPort = port;
+        cachedSelfOrigins = new Set([
+          `http://127.0.0.1:${port}`,
+          `http://localhost:${port}`,
+          `http://[::1]:${port}`,
+          `http://host.docker.internal:${port}`,
+        ]);
+      }
+      if (cachedSelfOrigins.has(origin)) {
+        delete req.headers.origin;
+      }
+    }
+    next();
+  });
+
+  // Strict-default factory: `trusted: false` so an upstream refactor
+  // that forgets to inject `deps.fsFactory` never silently allows
+  // writes against an untrusted workspace. Read-shaped intents still
+  // succeed (so tests / direct embeds can exercise the read path
+  // without a config), but every mutating intent throws
+  // `untrusted_workspace`. The default `emit` is a no-op that warns
+  // once on first call so a future regression that silently swallows
+  // audit events surfaces in operator logs the first time it bites.
+  // Callers passing `deps.fsFactory` get full control of trust +
+  // audit destination — `runQwenServe` will inject one whose
+  // `trusted` mirrors `Config.isTrustedFolder()` and whose `emit`
+  // plumbs into the per-session EventBus once PR 19/20 lands.
+  const fsFactory: WorkspaceFileSystemFactory =
+    deps.fsFactory ??
+    createWorkspaceFileSystemFactory({
+      boundWorkspace,
+      trusted: false,
+      emit: createDefaultFsAuditEmit(),
+    });
+  // Park the factory on `app.locals` so PR 19/20 route handlers can
+  // pick it up via `req.app.locals.fsFactory` without re-threading
+  // the value through every handler signature, and so PR 18 tests
+  // can assert the factory is reachable. Express types `locals` as
+  // a generic record; we cast to keep a precise property name.
+  (app.locals as { fsFactory?: WorkspaceFileSystemFactory }).fsFactory =
+    fsFactory;
+  // Surface the bound workspace on `app.locals` so the PR 19 read
+  // routes can compute workspace-relative response paths without
+  // re-resolving. Same canonical form `/capabilities` advertises
+  // and the bridge enforces — keeping every layer in agreement.
+  (app.locals as { boundWorkspace?: string }).boundWorkspace = boundWorkspace;
+
+  // Issue #4175 PR 21 — wire the device-flow registry. Default builds
+  // a single Qwen provider; tests inject `deps.deviceFlowRegistry`
+  // wholesale (with controlled clock/scheduler) or
+  // `deps.deviceFlowProviders` to stub the OAuth client only.
+  const deviceFlowProviderMap = new Map<
+    DeviceFlowProviderId,
+    DeviceFlowProvider
+  >();
+  for (const provider of deps.deviceFlowProviders ?? []) {
+    deviceFlowProviderMap.set(provider.providerId, provider);
+  }
+  if (!deviceFlowProviderMap.has('qwen-oauth')) {
+    deviceFlowProviderMap.set('qwen-oauth', new QwenOAuthDeviceFlowProvider());
+  }
+  const deviceFlowEventSink: DeviceFlowEventSink = {
+    publish(emission, originatorClientId) {
+      // PR #4255 fold-in 9: PR 16 (#4249) landed
+      // `publishWorkspaceEvent` with the same fan-out semantics as
+      // PR 21's `broadcastWorkspaceEvent`. The closed-bus +
+      // all-failed-stderr operator-visibility features that PR 21
+      // added have been folded INTO `publishWorkspaceEvent`; PR 21
+      // now uses the canonical helper.
+      bridge.publishWorkspaceEvent({
+        type: `auth_device_flow_${emission.type}`,
+        data: emission.data,
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+    },
+  };
+  const deviceFlowRegistry =
+    deps.deviceFlowRegistry ??
+    new DeviceFlowRegistry({
+      events: deviceFlowEventSink,
+      audit: {
+        record(line) {
+          // Structured stderr breadcrumb; deviceFlowId truncated to first
+          // 8 chars (mirrors PR 16 audit-event-stamp shape) so log
+          // skimmers can follow a flow without retaining full uuids.
+          const id = line.deviceFlowId.slice(0, 8);
+          const parts = [
+            `[serve] auth.device-flow:`,
+            `provider=${line.providerId}`,
+            `deviceFlowId=${id}...`,
+            line.clientId ? `clientId=${line.clientId}` : 'clientId=-',
+            `status=${line.status}`,
+          ];
+          if (line.errorKind) parts.push(`errorKind=${line.errorKind}`);
+          if (line.expiresInMs !== undefined) {
+            parts.push(`expiresInMs=${Math.max(0, line.expiresInMs)}`);
+          }
+          // PR #4255 round-12 #7 (gpt-5.5 review CzSpd): include
+          // `line.hint` in the production stderr line. The
+          // registry uses the hint slot for operator-only
+          // breadcrumbs that aren't surfaced over SSE: the static
+          // catch-all hint "provider.poll() threw (raw): ..."
+          // (round-8 #1), `lost_success_after_timeout` (round-8
+          // #7's split-brain detector), `persist_also_failed_past_expiry`
+          // (round-8 #13), `take-over` audit on per-provider
+          // singleton, and `deferred (persist in flight; ...)` on
+          // cancel-during-persist. Without echoing here, the
+          // documented troubleshooting trail is invisible in
+          // production. Bound at 1 KiB so a misbehaving caller
+          // can't spam stderr.
+          if (line.hint) {
+            const STDERR_HINT_MAX = 1_024;
+            const hint =
+              line.hint.length > STDERR_HINT_MAX
+                ? `${line.hint.slice(0, STDERR_HINT_MAX)}…[+${line.hint.length - STDERR_HINT_MAX} bytes truncated]`
+                : line.hint;
+            // Quote the hint so multi-word values stay parseable.
+            parts.push(`hint=${JSON.stringify(hint)}`);
+          }
+          writeStderrLine(parts.join(' '));
+        },
+      },
+      resolveProvider: (providerId) => deviceFlowProviderMap.get(providerId),
+    });
+  // Park the registry on `app.locals` so request handlers can reach it
+  // without closure capture (and so future helper extracts can find it
+  // without threading it through their args). Typed accessor (fold-in 4
+  // review thread D) prevents a string-key typo from silently
+  // detaching `runQwenServe`'s shutdown dispose call.
+  setDeviceFlowRegistry(app, deviceFlowRegistry);
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -151,6 +409,38 @@ export function createServeApp(
   // amplified CPU/memory cost from any wrong-token client.
   app.use(denyBrowserOriginCors);
   app.use(hostAllowlist(opts.hostname, getPort));
+
+  // --- Demo page: mirrors the `/health` loopback-gating pattern.
+  // On loopback binds, registered BEFORE bearerAuth so browsers can
+  // reach the page via address-bar navigation (which cannot attach
+  // Authorization headers). On non-loopback binds, registered AFTER
+  // bearerAuth — an unauthenticated `/demo` on a public interface
+  // would leak the full API surface (route enumeration + interactive
+  // console), far more than `/health`'s `{"status":"ok"}`.
+  // X-Frame-Options: DENY + CSP frame-ancestors 'none' prevent
+  // clickjacking — a malicious site embedding the demo in an iframe
+  // could trick a user into performing daemon actions via transparent
+  // overlay (the iframe's same-origin fetches bypass CORS).
+  const demoHandler = (
+    _req: import('express').Request,
+    res: import('express').Response,
+  ) => {
+    try {
+      res
+        .type('html')
+        .set('X-Frame-Options', 'DENY')
+        .set(
+          'Content-Security-Policy',
+          "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+        )
+        .send(getDemoHtml(getPort()));
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: /demo render failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      res.status(500).json({ error: 'Failed to render demo page' });
+    }
+  };
 
   // `/health` is exempted from `bearerAuth` ONLY on loopback binds —
   // the canonical liveness-probe case (k8s/Compose probes don't
@@ -214,17 +504,21 @@ export function createServeApp(
   const exposeHealthPreAuth = loopback && !opts.requireAuth;
   if (exposeHealthPreAuth) {
     app.get('/health', healthHandler);
+    app.get('/demo', demoHandler);
   }
 
   app.use(bearerAuth(opts.token));
+
   app.use(express.json({ limit: '10mb' }));
 
   if (!exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
-    // `/health` AFTER `bearerAuth` so probes must carry the token.
-    // Otherwise unauthenticated callers can ping any reachable
-    // address:port to confirm a daemon exists.
+    // `/health` and `/demo` AFTER `bearerAuth` so probes must carry
+    // the token. Otherwise unauthenticated callers can ping any
+    // reachable address:port to confirm a daemon exists (and `/demo`
+    // leaks the full API surface).
     app.get('/health', healthHandler);
+    app.get('/demo', demoHandler);
   }
 
   // Issue #4175 PR 15. Mutation-route gate factory. Today's existing
@@ -257,6 +551,298 @@ export function createServeApp(
       workspaceCwd: boundWorkspace,
     };
     res.status(200).json(envelope);
+  });
+
+  app.get('/workspace/mcp', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceMcpStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/mcp' });
+    }
+  });
+
+  app.get('/workspace/skills', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceSkillsStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/skills' });
+    }
+  });
+
+  app.get('/workspace/providers', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceProvidersStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/providers' });
+    }
+  });
+
+  // Issue #4175 PR 16: workspace memory + agents CRUD. Routes mounted
+  // through factories so server.ts stays the composition root while
+  // the feature modules own their own validation, error mapping, and
+  // event fan-out. Both factories receive the shared `mutate` gate
+  // and the request-helpers `parseClientIdHeader` / `safeBody` so
+  // strict mutation gating and pollution-key scrubbing match the
+  // existing routes bit-for-bit.
+  mountWorkspaceMemoryRoutes(app, {
+    bridge,
+    boundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  mountWorkspaceAgentsRoutes(app, {
+    bridge,
+    boundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+
+  // TODO(#4175 PR 24 — PermissionMediator audit log): emit an
+  // `audit.diagnostic_read` event from these two routes so a security
+  // operator can correlate "who read what when". Read-only diagnostic
+  // surfaces are reconnaissance vectors (env: secret-var presence;
+  // preflight: workspace path + CLI entry + Node version) and the absence
+  // of audit emission here is a deliberate scope deferral, not an
+  // oversight — the audit topic does not yet exist; PR 24 lands the
+  // shared `bridge.emitAudit` infrastructure that this and PR 18's
+  // `fs.access` events will both use.
+  app.get('/workspace/env', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceEnvStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/env' });
+    }
+  });
+
+  app.get('/workspace/preflight', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspacePreflightStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/preflight' });
+    }
+  });
+
+  // Issue #4175 PR 19 — read-only workspace file routes
+  // (`GET /file|/list|/glob|/stat`). Registered after the workspace
+  // diagnostics routes so the file surface sits next to its sibling
+  // workspace-scoped reads and shares the same auth posture (no
+  // `mutate()` gate; only the global `bearerAuth` middleware
+  // applies). Mutation file routes (`POST /file/write|/edit`) come
+  // in PR 20.
+  registerWorkspaceFileReadRoutes(app, {
+    parseClientId: parseClientIdHeader,
+  });
+  registerWorkspaceFileWriteRoutes(app, {
+    bridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+
+  // -- Issue #4175 PR 21 — auth device-flow routes ------------------------
+
+  app.post(
+    '/workspace/auth/device-flow',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const body = safeBody(req);
+      const providerIdRaw = body['providerId'];
+      // PR #4255 review W2: split `invalid_request` (request shape is
+      // wrong — missing/non-string field) from `unsupported_provider`
+      // (the field is well-formed but its value isn't in the
+      // daemon's known set). Conflating the two surfaced misleading
+      // remediation hints to SDK consumers branching on `code`
+      // ("this provider isn't supported here" when the actual cause
+      // was a serializer dropping the field).
+      if (typeof providerIdRaw !== 'string' || providerIdRaw.length === 0) {
+        res.status(400).json({
+          error: '`providerId` must be a non-empty string',
+          code: 'invalid_request',
+        });
+        return;
+      }
+      // PR #4255 round-12 #3 (gpt-5.5 review CzSpe): validate
+      // against the runtime provider map, not the static
+      // `DEVICE_FLOW_SUPPORTED_PROVIDERS` tuple. The static tuple
+      // is the SDK-facing default; `deps.deviceFlowProviders` is
+      // the documented extension hook for tests / future
+      // providers. Hardcoding the static tuple here meant
+      // injected providers were rejected at the route while still
+      // being registered in `deviceFlowProviderMap` — easy to
+      // break when adding a second provider.
+      if (!deviceFlowProviderMap.has(providerIdRaw as DeviceFlowProviderId)) {
+        res.status(400).json({
+          error: `Unsupported device-flow provider: ${providerIdRaw}`,
+          code: 'unsupported_provider',
+          supportedProviders: Array.from(deviceFlowProviderMap.keys()),
+        });
+        return;
+      }
+      const providerId = providerIdRaw as DeviceFlowProviderId;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const { view, attached } = await deviceFlowRegistry.start({
+          providerId,
+          ...(clientId !== undefined ? { initiatorClientId: clientId } : {}),
+        });
+        // Idempotent take-over → 200 with `attached: true`. Fresh start →
+        // 201 + `attached: false`. The registry is the source of truth on
+        // which branch fired (it's the one that decided not to call
+        // `provider.start()` again).
+        res
+          .status(attached ? 200 : 201)
+          .json(toDeviceFlowStartResponseBody(view, attached, clientId));
+      } catch (err) {
+        if (err instanceof UnsupportedDeviceFlowProviderError) {
+          res
+            .status(400)
+            .json({ error: err.message, code: 'unsupported_provider' });
+          return;
+        }
+        if (err instanceof TooManyActiveDeviceFlowsError) {
+          res
+            .status(409)
+            .json({ error: err.message, code: 'too_many_active_flows' });
+          return;
+        }
+        if (err instanceof UpstreamDeviceFlowError) {
+          // IdP-side failure (network / parse / non-2xx). 502 distinguishes
+          // "the upstream we depend on misbehaved" from a daemon bug (5xx
+          // generic) so SDK clients can branch on retry strategy.
+          res.status(502).json({ error: err.message, code: 'upstream_error' });
+          return;
+        }
+        sendBridgeError(res, err, {
+          route: 'POST /workspace/auth/device-flow',
+        });
+      }
+    },
+  );
+
+  // PR #4255 fold-in 3: this GET surfaces `userCode` /
+  // `verificationUri` / `verificationUriComplete` for pending entries
+  // — material an attacker on the same loopback host could use to
+  // shoulder-surf the IdP approval flow. POST + DELETE are already
+  // strict; aligning GET to `mutate({ strict: true })` closes the
+  // information-disclosure asymmetry (the sibling
+  // `GET /workspace/auth/status` stays bearer-only because its
+  // pendingDeviceFlows entries intentionally omit `userCode`).
+  //
+  // PR #4291 follow-up review (qwen-latest, #4): GET now also runs
+  // `parseClientIdHeader` to drive the `callerIsInitiator` gate in
+  // `toDeviceFlowStateBody`. INTENTIONAL contract change: a malformed
+  // `X-Qwen-Client-Id` (>128 chars or invalid characters) returns
+  // `400 invalid_client_id` instead of the previous 200, matching the
+  // POST/DELETE behavior. SDK clients that send the header on POST
+  // should send a valid value on GET too. Anonymous callers (header
+  // absent) are unaffected and continue to work as pre-PR-4291 — the
+  // both-undefined branch in `callerIsInitiator` covers them.
+  app.get(
+    '/workspace/auth/device-flow/:id',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const id = req.params['id'];
+      if (!id) {
+        res.status(404).json({
+          error: 'Device-flow id required',
+          code: 'device_flow_not_found',
+        });
+        return;
+      }
+      const view = deviceFlowRegistry.get(id);
+      if (!view) {
+        res.status(404).json({
+          error: `Device-flow ${id} not found`,
+          code: 'device_flow_not_found',
+        });
+        return;
+      }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      // PR #4291 follow-up review (qwen-latest, N4): when the
+      // `callerIsInitiator` gate redacts the verification fields,
+      // operators triaging "SDK got HTTP 200 but no userCode" have
+      // zero signal in daemon stderr / audit. The redaction happens
+      // INSIDE the body shaper which doesn't have an audit sink, so
+      // the route handler is the right layer to record it. Use
+      // QWEN_SERVE_DEBUG-gated stderr (rather than unconditional
+      // audit) — multi-SDK setups sharing a bearer token will cause
+      // legitimate "different caller GETs same flow" traffic that
+      // would otherwise flood production logs. Operators who hit
+      // the symptom can flip QWEN_SERVE_DEBUG=1 and get the
+      // breadcrumb on the next reproduction.
+      const callerIsInitiator =
+        (view.initiatorClientId === undefined && clientId === undefined) ||
+        (view.initiatorClientId !== undefined &&
+          clientId !== undefined &&
+          clientId === view.initiatorClientId);
+      if (
+        !callerIsInitiator &&
+        process.env['QWEN_SERVE_DEBUG'] &&
+        !['0', 'false', 'off', 'no'].includes(
+          (process.env['QWEN_SERVE_DEBUG'] ?? '').trim().toLowerCase(),
+        )
+      ) {
+        writeStderrLine(
+          `qwen serve debug: GET /workspace/auth/device-flow/${id} redacted verification fields — caller-clientId mismatch (initiator=${view.initiatorClientId ?? 'anonymous'}, caller=${clientId ?? 'anonymous'})`,
+        );
+      }
+      res.status(200).json(toDeviceFlowStateBody(view, clientId));
+    },
+  );
+
+  app.delete(
+    '/workspace/auth/device-flow/:id',
+    mutate({ strict: true }),
+    (req, res) => {
+      const id = req.params['id'];
+      if (!id) {
+        res.status(404).json({
+          error: 'Device-flow id required',
+          code: 'device_flow_not_found',
+        });
+        return;
+      }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      const result = deviceFlowRegistry.cancel(id, clientId);
+      if (result === undefined) {
+        res.status(404).json({
+          error: `Device-flow ${id} not found`,
+          code: 'device_flow_not_found',
+        });
+        return;
+      }
+      // Both freshly-cancelled and already-terminal are 204 (idempotent).
+      res.status(204).end();
+    },
+  );
+
+  app.get('/workspace/auth/status', (_req, res) => {
+    const pending = deviceFlowRegistry.listPending();
+    res.status(200).json({
+      v: 1,
+      workspaceCwd: boundWorkspace,
+      // GET /workspace/auth/status read-side intentionally minimal in
+      // this PR: a future PR can broaden the per-provider view (e.g.
+      // by reading SharedTokenManager.getCachedSnapshot for an `ok` /
+      // `expired` cell), but landing the additive route shape now
+      // unblocks SDK clients that need to know "is there a flow
+      // running?" without subscribing to SSE.
+      providers: [],
+      pendingDeviceFlows: pending.map((view) => ({
+        deviceFlowId: view.deviceFlowId,
+        providerId: view.providerId,
+        ...(view.expiresAt !== undefined ? { expiresAt: view.expiresAt } : {}),
+      })),
+      // PR #4255 round-12 #3: derive from runtime provider map so
+      // injected providers are surfaced. Single source of truth
+      // matches the POST validation above.
+      supportedDeviceFlowProviders: Array.from(deviceFlowProviderMap.keys()),
+    });
   });
 
   app.post('/session', mutate(), async (req, res) => {
@@ -466,6 +1052,44 @@ export function createServeApp(
 
   app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
   app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
+
+  app.get('/session/:id/context', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    try {
+      res.status(200).json(await bridge.getSessionContextStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/context',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/supported-commands', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    try {
+      res
+        .status(200)
+        .json(await bridge.getSessionSupportedCommandsStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/supported-commands',
+        sessionId,
+      });
+    }
+  });
 
   app.post('/session/:id/prompt', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
@@ -731,6 +1355,208 @@ export function createServeApp(
       });
     }
   });
+
+  app.post(
+    '/session/:id/approval-mode',
+    mutate({ strict: true }),
+    async (req, res) => {
+      // #4175 Wave 4 PR 17 — first strict-gated session mutation
+      // surface after PR 14 v1. Validates `mode` against the closed
+      // `APPROVAL_MODES` enum and an optional `persist: boolean` flag.
+      // The bridge applies the change inside the ACP child's per-session
+      // `Config` and (when `persist: true`) writes `tools.approvalMode`
+      // to workspace settings via the `persistApprovalMode` hook wired
+      // in `runQwenServe.ts`.
+      const sessionId = req.params['id'];
+      const body = safeBody(req);
+      const mode = body['mode'];
+      const persist = body['persist'];
+      if (
+        typeof mode !== 'string' ||
+        !APPROVAL_MODES.includes(mode as ApprovalMode)
+      ) {
+        res.status(400).json({
+          error: '`mode` is required and must be one of the allowed values',
+          code: 'invalid_approval_mode',
+          allowed: APPROVAL_MODES,
+        });
+        return;
+      }
+      if (persist !== undefined && typeof persist !== 'boolean') {
+        res.status(400).json({
+          error: '`persist` must be a boolean when provided',
+          code: 'invalid_persist_flag',
+        });
+        return;
+      }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const response = await bridge.setSessionApprovalMode(
+          sessionId,
+          mode as ApprovalMode,
+          { persist: persist === true },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(response);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /session/:id/approval-mode',
+          sessionId,
+        });
+      }
+    },
+  );
+
+  app.post(
+    '/workspace/mcp/:server/restart',
+    mutate({ strict: true }),
+    async (req, res) => {
+      // #4175 Wave 4 PR 17. Forwards through the ACP child's
+      // `McpClientManager.discoverMcpToolsForServer` after a budget
+      // pre-check on PR 14 v1's accounting. Soft refusals are 200 OK
+      // with `{restarted:false, skipped:true, reason}`; unknown server
+      // names or no live ACP channel are hard errors mapped to 4xx/5xx
+      // via sendBridgeError.
+      const serverName = req.params['server'];
+      if (!serverName || typeof serverName !== 'string') {
+        res.status(400).json({
+          error: 'Server name path parameter is required',
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      // #4282 fold-in 4 (qwen-latest S1): match the
+      // `MAX_TOOL_NAME_LENGTH` cap so the server name (which propagates
+      // into SSE event bodies, ACP messages, and error responses) can't
+      // be used to bloat any of those surfaces with an unbounded
+      // path-parameter input.
+      if (serverName.length > MAX_SERVER_NAME_LENGTH) {
+        res.status(400).json({
+          error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      // #4282 fold-in 1 (gpt-5.5 C2): validate `X-Qwen-Client-Id`
+      // against `bridge.knownClientIds()` so the originator stamped
+      // onto `mcp_server_restart*` events is grounded in a known
+      // identity rather than a forged header.
+      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
+      if (clientId === null) return;
+      try {
+        const result = await bridge.restartMcpServer(serverName, clientId);
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /workspace/mcp/:server/restart',
+        });
+      }
+    },
+  );
+
+  app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
+    // #4175 Wave 4 PR 17. Scaffold-only init: the bridge writes an
+    // empty QWEN.md without invoking the LLM. Default refuses
+    // overwrite (409); body `{force: true}` overrides.
+    const body = safeBody(req);
+    const force = body['force'];
+    if (force !== undefined && typeof force !== 'boolean') {
+      res.status(400).json({
+        error: '`force` must be a boolean when provided',
+        code: 'invalid_force_flag',
+      });
+      return;
+    }
+    // #4282 fold-in 1 (gpt-5.5 C2): validate against known client ids.
+    const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
+    if (clientId === null) return;
+    try {
+      const result = await bridge.initWorkspace(
+        { force: force === true },
+        clientId,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'POST /workspace/init' });
+    }
+  });
+
+  app.post(
+    '/workspace/tools/:name/enable',
+    mutate({ strict: true }),
+    async (req, res) => {
+      // #4175 Wave 4 PR 17. Toggles a tool name in the workspace
+      // `tools.disabled` settings list. Strict-gated alongside other
+      // Wave 4 mutation routes; bridge writes the file directly (no
+      // ACP roundtrip) and fan-outs `tool_toggled` to every live
+      // session SSE bus. Already-registered tools in live sessions
+      // are NOT retroactively unregistered — toggling takes effect on
+      // the next ACP child spawn or session refresh.
+      const rawToolName = req.params['name'];
+      if (!rawToolName || typeof rawToolName !== 'string') {
+        res.status(400).json({
+          error: 'Tool name path parameter is required',
+          code: 'invalid_tool_name',
+        });
+        return;
+      }
+      // #4282 fold-in 4 (qwen-latest C3): trim before persistence so the
+      // write path matches the read path. `loadCliConfig` applies
+      // `.trim()` when consuming `tools.disabled` at child spawn, so a
+      // leading/trailing space stored verbatim would never round-trip:
+      // disable would persist `" Bash "`, the spawn would key on
+      // `"Bash"`, and a re-enable for `"Bash"` would leave the original
+      // entry permanently stuck.
+      const toolName = rawToolName.trim();
+      if (toolName.length === 0) {
+        res.status(400).json({
+          error: 'Tool name path parameter is required',
+          code: 'invalid_tool_name',
+        });
+        return;
+      }
+      // #4282 fold-in 2 (deepseek SV1): cap the tool name length so
+      // an extremely long path parameter can't bloat the workspace
+      // settings file. Sized at 256 to comfortably accommodate the
+      // longest legitimate MCP qualified names
+      // (`mcp__<server>__<tool>`) while staying well under any
+      // settings-file pathological-input concern. Mirrors the
+      // explicit caps on `cwd` (`MAX_WORKSPACE_PATH_LENGTH`) and
+      // `X-Qwen-Client-Id` (`MAX_CLIENT_ID_LENGTH`).
+      if (toolName.length > MAX_TOOL_NAME_LENGTH) {
+        res.status(400).json({
+          error: `Tool name exceeds ${MAX_TOOL_NAME_LENGTH}-character limit`,
+          code: 'invalid_tool_name',
+        });
+        return;
+      }
+      const body = safeBody(req);
+      const enabled = body['enabled'];
+      if (typeof enabled !== 'boolean') {
+        res.status(400).json({
+          error: '`enabled` is required and must be a boolean',
+          code: 'invalid_enabled_flag',
+        });
+        return;
+      }
+      // #4282 fold-in 1 (gpt-5.5 C2): validate against known client ids.
+      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
+      if (clientId === null) return;
+      try {
+        const result = await bridge.setWorkspaceToolEnabled(
+          toolName,
+          enabled,
+          clientId,
+        );
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /workspace/tools/:name/enable',
+        });
+      }
+    },
+  );
 
   app.post('/session/:id/permission/:requestId', mutate(), (req, res) => {
     const sessionId = req.params['id'];
@@ -1087,6 +1913,10 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
 
 const CLIENT_ID_HEADER = 'x-qwen-client-id';
 const MAX_CLIENT_ID_LENGTH = 128;
+/** #4282 fold-in 2 (deepseek SV1) — see /workspace/tools/:name/enable. */
+const MAX_TOOL_NAME_LENGTH = 256;
+/** #4282 fold-in 4 (qwen-latest S1) — see /workspace/mcp/:server/restart. */
+const MAX_SERVER_NAME_LENGTH = 256;
 const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
 const INVALID_PERMISSION_OUTCOME_ERROR =
   '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
@@ -1147,6 +1977,135 @@ function parseOptionalWorkspaceCwd(
   return cwd;
 }
 
+/**
+ * PR 21 — translate the registry's redacted `DeviceFlowPublicView` into
+ * the wire shape declared by `DaemonDeviceFlowStartResult`. Splitting
+ * "start response" from "state body" preserves the `attached` field
+ * the start route needs without polluting the GET shape.
+ */
+function toDeviceFlowStartResponseBody(
+  view: DeviceFlowPublicView,
+  attached: boolean,
+  callerClientId?: string,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    deviceFlowId: view.deviceFlowId,
+    providerId: view.providerId,
+    status: view.status,
+    expiresAt: view.expiresAt ?? 0,
+    intervalMs: view.intervalMs ?? 0,
+    attached,
+  };
+  // PR #4291 follow-up review (gpt-5.5, #3): policy consistency with
+  // `toDeviceFlowStateBody` — only the original starter sees the
+  // verification material. Earlier shape unconditionally returned
+  // `userCode` / `verificationUri` / `verificationUriComplete` on
+  // every POST, including the `attached: true` take-over case, so any
+  // bearer-token holder that POSTed `providerId: <existing>` got the
+  // verification code another client started. That bypassed the
+  // closed-out GET redaction completely. Apply the same gate here.
+  // Fresh starts naturally pass the gate because `view.initiatorClientId`
+  // was set from the same `callerClientId` on this very request.
+  // Take-over callers that don't match the initiator now see the
+  // public envelope only. The both-undefined branch preserves the
+  // anonymous-start → anonymous-reattach use case.
+  const callerIsInitiator =
+    (view.initiatorClientId === undefined && callerClientId === undefined) ||
+    (view.initiatorClientId !== undefined &&
+      callerClientId !== undefined &&
+      callerClientId === view.initiatorClientId);
+  if (callerIsInitiator) {
+    body['userCode'] = view.userCode ?? '';
+    body['verificationUri'] = view.verificationUri ?? '';
+    if (view.verificationUriComplete) {
+      body['verificationUriComplete'] = view.verificationUriComplete;
+    }
+  }
+  // PR #4255 round-12 #6 (gpt-5.5 review CzHOK): minor info-leak
+  // close-out — only echo `initiatorClientId` back to a take-over
+  // POST when the caller is the same client that started the flow
+  // (or when the take-over caller explicitly identified
+  // themselves and matches the original starter). An anonymous
+  // take-over caller (no `X-Qwen-Client-Id`) gets no echo of the
+  // original starter's id; this preserves the symmetry "the
+  // daemon respects the absence of `X-Qwen-Client-Id` as a
+  // privacy signal." Bearer-gated already, so the blast radius
+  // was small, but the asymmetry is now closed.
+  if (
+    view.initiatorClientId &&
+    callerClientId !== undefined &&
+    callerClientId === view.initiatorClientId
+  ) {
+    body['initiatorClientId'] = view.initiatorClientId;
+  }
+  return body;
+}
+
+function toDeviceFlowStateBody(
+  view: DeviceFlowPublicView,
+  callerClientId?: string,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    deviceFlowId: view.deviceFlowId,
+    providerId: view.providerId,
+    status: view.status,
+    createdAt: view.createdAt,
+  };
+  if (view.errorKind) body['errorKind'] = view.errorKind;
+  if (view.hint) body['hint'] = view.hint;
+  if (view.expiresAt !== undefined) body['expiresAt'] = view.expiresAt;
+  if (view.intervalMs !== undefined) body['intervalMs'] = view.intervalMs;
+  if (view.lastPolledAt !== undefined) body['lastPolledAt'] = view.lastPolledAt;
+  // PR #4255 follow-up review thread (deepseek-v4-pro): symmetrize with
+  // the POST take-over response shape — only echo `userCode` /
+  // `verificationUri` / `verificationUriComplete` / `initiatorClientId`
+  // back to the original starter (matched by `X-Qwen-Client-Id`). An
+  // anonymous GET caller, or a caller identifying as a different client,
+  // sees only the public envelope (`status` / `errorKind` / `hint` /
+  // timestamps). Bearer-token gated already (the route uses
+  // `mutate({ strict: true })`), so the blast radius was small, but
+  // multi-client setups sharing a single daemon token could otherwise
+  // enumerate other clients' verification codes.
+  //
+  // **Threat model (PR #4291 follow-up review by Copilot):** this gate
+  // is BEST-EFFORT ATTRIBUTION, not authentication. `X-Qwen-Client-Id`
+  // is a syntactic header, not bound to a server-validated identity —
+  // anyone holding the bearer token can spoof it. The bearer token IS
+  // the auth boundary; this gate exists to prevent ACCIDENTAL
+  // cross-client reads in well-behaved multi-SDK setups (and to keep
+  // GET symmetric with the POST take-over shape closed out in
+  // round-12 #6 of #4255). A determined attacker who has compromised
+  // the daemon bearer token already wins; locking down GET further
+  // would require binding identity into bearer-token issuance, which
+  // is a separate architectural change.
+  // PR #4291 follow-up review (qwen-latest, #3): the gate must accept
+  // the both-undefined case too, otherwise an anonymously-started flow
+  // (POST without `X-Qwen-Client-Id` → `initiatorClientId === undefined`)
+  // becomes silently unreadable: even the same anonymous caller GETting
+  // the same id can no longer retrieve `userCode`/`verificationUri` —
+  // the body switches from "what they got from POST" to a redacted
+  // public envelope, with HTTP 200, no error. Pre-PR-4291 GET returned
+  // these fields to anyone with the bearer; this gate's purpose is to
+  // prevent CROSS-client reads, not to lock anonymous flows out of
+  // their own data.
+  const callerIsInitiator =
+    (view.initiatorClientId === undefined && callerClientId === undefined) ||
+    (view.initiatorClientId !== undefined &&
+      callerClientId !== undefined &&
+      callerClientId === view.initiatorClientId);
+  if (callerIsInitiator) {
+    if (view.userCode) body['userCode'] = view.userCode;
+    if (view.verificationUri) body['verificationUri'] = view.verificationUri;
+    if (view.verificationUriComplete) {
+      body['verificationUriComplete'] = view.verificationUriComplete;
+    }
+    if (view.initiatorClientId) {
+      body['initiatorClientId'] = view.initiatorClientId;
+    }
+  }
+  return body;
+}
+
 function parseClientIdHeader(
   req: import('express').Request,
   res: import('express').Response,
@@ -1158,6 +2117,37 @@ function parseClientIdHeader(
       error:
         '`X-Qwen-Client-Id` must be a non-empty token of 128 characters or fewer',
       code: 'invalid_client_id',
+    });
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * #4282 fold-in 1 (gpt-5.5 C2). Workspace-level mutation routes validate
+ * the parsed `X-Qwen-Client-Id` against `bridge.knownClientIds()` so the
+ * `originatorClientId` stamped onto fan-out events is grounded in a
+ * client identity the daemon previously issued. Without this check, any
+ * authenticated caller could forge the originator on `tool_toggled`,
+ * `workspace_initialized`, and `mcp_server_restart*` events.
+ *
+ * Mirrors the inline check pattern in `workspaceMemory.ts` /
+ * `workspaceAgents.ts` from PR 16. Returns the validated client id
+ * (or `undefined` when no header was supplied), `null` when a 400 has
+ * already been emitted by `parseClientIdHeader` or this validator.
+ */
+function parseAndValidateWorkspaceClientId(
+  req: import('express').Request,
+  res: import('express').Response,
+  bridge: HttpAcpBridge,
+): string | undefined | null {
+  const raw = parseClientIdHeader(req, res);
+  if (raw === null || raw === undefined) return raw;
+  if (!bridge.knownClientIds().has(raw)) {
+    res.status(400).json({
+      error: `Client id "${raw}" is not registered for this workspace`,
+      code: 'invalid_client_id',
+      clientId: raw,
     });
     return null;
   }
@@ -1365,6 +2355,59 @@ function sendBridgeError(
   err: unknown,
   ctx?: { route?: string; sessionId?: string },
 ): void {
+  if (err instanceof WorkspaceInitConflictError) {
+    // #4175 Wave 4 PR 17. The target file already exists with non-
+    // whitespace content and the caller did not pass `force: true`.
+    // Body carries the resolved path + size so SDK clients can render
+    // a "file already exists; pass force: true to overwrite" prompt
+    // without re-stat'ing the workspace.
+    res.status(409).json({
+      error: err.message,
+      code: 'workspace_init_conflict',
+      path: err.path,
+      existingSize: err.existingSize,
+    });
+    return;
+  }
+  if (err instanceof McpServerNotFoundError) {
+    // #4282 fold-in 1 (gpt-5.5 C5). Stable 404 for "MCP server name
+    // not in `mcpServers` config" so callers can distinguish a typo
+    // from an internal daemon failure.
+    res.status(404).json({
+      error: err.message,
+      code: 'mcp_server_not_found',
+      serverName: err.serverName,
+    });
+    return;
+  }
+  if (err instanceof McpServerRestartFailedError) {
+    // #4282 fold-in 1 (gpt-5.5 C4). 502 because the daemon understood
+    // the request and the upstream (the MCP server / its child
+    // process) failed to come back online. `errorKind: 'protocol_error'`
+    // shares the closed PR-13 taxonomy.
+    res.status(502).json({
+      error: err.message,
+      code: 'mcp_server_restart_failed',
+      errorKind: 'protocol_error',
+      serverName: err.serverName,
+      mcpStatus: err.mcpStatus,
+    });
+    return;
+  }
+  if (err instanceof TrustGateError) {
+    // #4175 Wave 4 PR 17: trust-folder rejection from
+    // `Config.setApprovalMode`. 403 because the daemon understood the
+    // request but the workspace's trust posture forbids the privileged
+    // mode. `errorKind: 'auth_env_error'` shares the closed PR 13
+    // taxonomy so SDK consumers branch on the same enum already used by
+    // preflight / env diagnostics.
+    res.status(403).json({
+      error: err.message,
+      code: 'trust_gate',
+      errorKind: 'auth_env_error',
+    });
+    return;
+  }
   if (err instanceof SessionNotFoundError) {
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
     return;

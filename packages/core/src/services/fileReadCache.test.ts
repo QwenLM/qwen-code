@@ -332,6 +332,17 @@ describe('FileReadCache', () => {
         expect(afterWrite.entry.lastReadCacheable).toBe(true);
       }
     });
+
+    it('can record structured writes as non-cacheable', () => {
+      const cache = new FileReadCache();
+      const entry = cache.recordWrite('/x/notebook.ipynb', makeStats(), {
+        cacheable: false,
+      });
+
+      expect(entry.lastReadWasFull).toBe(true);
+      expect(entry.lastReadCacheable).toBe(false);
+      expect(entry.lastReadAt).toBe(entry.lastWriteAt);
+    });
   });
 
   describe('read-then-write-then-read ordering', () => {
@@ -503,6 +514,311 @@ describe('FileReadCache', () => {
       fs.utimesSync(file, future, future);
 
       expect(cache.check(fs.statSync(file)).state).toBe('stale');
+    });
+  });
+
+  describe('readResidentInHistory / markReadEvictedFromHistory (issue #4239)', () => {
+    it('a fresh recordRead is resident in history', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      const entry = cache.recordRead('/x/foo.ts', stats, {
+        full: true,
+        cacheable: true,
+      });
+      expect(entry.readResidentInHistory).toBe(true);
+    });
+
+    it('a fresh recordWrite is resident in history', () => {
+      const cache = new FileReadCache();
+      const entry = cache.recordWrite('/x/foo.ts', makeStats());
+      expect(entry.readResidentInHistory).toBe(true);
+    });
+
+    it('markReadEvictedFromHistory disarms only the fast-path, preserving read-before-write state', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
+
+      expect(cache.markReadEvictedFromHistory(stats)).toBe(true);
+
+      const result = cache.check(stats);
+      expect(result.state).toBe('fresh');
+      if (result.state === 'fresh') {
+        // Fast-path disarmed...
+        expect(result.entry.readResidentInHistory).toBe(false);
+        // ...but everything read-before-write depends on is intact.
+        expect(result.entry.lastReadAt).toBeDefined();
+        expect(result.entry.lastReadWasFull).toBe(true);
+        expect(result.entry.lastReadCacheable).toBe(true);
+      }
+    });
+
+    it('returns false (caller must fall back to clear) when there is no entry for the stats', () => {
+      const cache = new FileReadCache();
+      // No entry, or stats resolved to a different inode than recorded
+      // — the caller treats this like an unstattable path.
+      expect(cache.markReadEvictedFromHistory(makeStats())).toBe(false);
+      expect(cache.check(makeStats()).state).toBe('unknown');
+
+      // Entry exists under inode A; a stat for inode B must not match.
+      cache.recordRead('/x/foo.ts', makeStats({ ino: 1 }), {
+        full: true,
+        cacheable: true,
+      });
+      expect(cache.markReadEvictedFromHistory(makeStats({ ino: 2 }))).toBe(
+        false,
+      );
+    });
+
+    it('a subsequent real read re-arms the fast-path (resident again)', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
+      cache.markReadEvictedFromHistory(stats);
+
+      // The model voluntarily re-read the file: its bytes are back in
+      // history, so the fast-path is honest again.
+      cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
+
+      const result = cache.check(stats);
+      expect(result.state).toBe('fresh');
+      if (result.state === 'fresh') {
+        expect(result.entry.readResidentInHistory).toBe(true);
+      }
+    });
+
+    it('a subsequent write re-arms the fast-path (resident again)', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
+      cache.markReadEvictedFromHistory(stats);
+
+      cache.recordWrite('/x/foo.ts', makeStats({ mtimeMs: 2000 }));
+
+      const result = cache.check(makeStats({ mtimeMs: 2000 }));
+      expect(result.state).toBe('fresh');
+      if (result.state === 'fresh') {
+        expect(result.entry.readResidentInHistory).toBe(true);
+      }
+    });
+
+    it('a PARTIAL read does NOT re-arm an evicted full read', () => {
+      // Regression for the Codex P2: after microcompaction blanks a
+      // full read, a later partial read of the unchanged file used to
+      // unconditionally re-arm readResidentInHistory while
+      // lastReadWasFull stayed sticky-true — so a follow-up full Read
+      // would get a file_unchanged placeholder pointing at bytes no
+      // longer in history (only a slice is resident).
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
+      cache.markReadEvictedFromHistory(stats);
+
+      // Same unchanged bytes, but only a slice read this time.
+      cache.recordRead('/x/foo.ts', stats, { full: false, cacheable: true });
+
+      const result = cache.check(stats);
+      expect(result.state).toBe('fresh');
+      if (result.state === 'fresh') {
+        // Still disarmed — the full bytes are NOT back in history.
+        expect(result.entry.readResidentInHistory).toBe(false);
+        // lastReadWasFull stays sticky-true (read-rights preserved).
+        expect(result.entry.lastReadWasFull).toBe(true);
+      }
+    });
+
+    it('a partial read leaves a still-resident full read armed', () => {
+      const cache = new FileReadCache();
+      const stats = makeStats();
+      cache.recordRead('/x/foo.ts', stats, { full: true, cacheable: true });
+      // No eviction — the full read is still in history.
+      cache.recordRead('/x/foo.ts', stats, { full: false, cacheable: true });
+
+      const result = cache.check(stats);
+      expect(result.state).toBe('fresh');
+      if (result.state === 'fresh') {
+        expect(result.entry.readResidentInHistory).toBe(true);
+      }
+    });
+  });
+
+  describe('eviction', () => {
+    it('evicts the oldest entry when the cache exceeds MAX_ENTRIES', () => {
+      // Fill cache to capacity (MAX_ENTRIES = 4096).
+      const cache = new FileReadCache();
+      for (let i = 0; i < 4096; i++) {
+        cache.recordRead(`/x/file-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+      expect(cache.size()).toBe(4096);
+
+      // The 4097th write triggers eviction of the oldest (ino=0).
+      cache.recordWrite('/x/file-new.ts', makeStats({ ino: 4096 }));
+      expect(cache.size()).toBeLessThanOrEqual(4096);
+      expect(cache.check(makeStats({ ino: 0 })).state).toBe('unknown');
+      expect(cache.check(makeStats({ ino: 4096 })).state).toBe('fresh');
+    });
+
+    it('keeps size at MAX_ENTRIES after multiple overflows', () => {
+      const cache = new FileReadCache();
+      // Add MAX_ENTRIES + 100 distinct inodes.
+      for (let i = 0; i < 4196; i++) {
+        cache.recordRead(`/x/file-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+      expect(cache.size()).toBeLessThanOrEqual(4096);
+    });
+
+    it('should have bumped entries survive eviction', () => {
+      const cache = new FileReadCache();
+      // Fill to capacity.
+      for (let i = 0; i < 4096; i++) {
+        cache.recordRead(`/x/file-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+
+      // Frequently update ino=0 — after bump lands this moves it to the
+      // back of the eviction queue.
+      for (let i = 0; i < 10; i++) {
+        cache.recordRead('/x/file-0.ts', makeStats({ ino: 0 }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+
+      // Add 50 new entries — they push the *least* recently bumped out.
+      for (let i = 4096; i < 4146; i++) {
+        cache.recordRead(`/x/file-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+
+      expect(cache.size()).toBeLessThanOrEqual(4096);
+      expect(cache.check(makeStats({ ino: 0 })).state).not.toBe('unknown');
+    });
+  });
+
+  describe('evictNotAccessedSince', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('evicts entries with lastReadAt before the cutoff', () => {
+      const cache = new FileReadCache();
+      const now = 2_000_000_000;
+      const old = now - 100 * 60_000; // 100 minutes ago
+      const recent = now - 5 * 60_000; // 5 minutes ago
+
+      const oldStats = makeStats({ ino: 1 });
+      const recentStats = makeStats({ ino: 2 });
+
+      vi.useFakeTimers();
+      vi.setSystemTime(old);
+      cache.recordRead('/x/old.ts', oldStats, { full: true, cacheable: true });
+
+      vi.setSystemTime(recent);
+      cache.recordRead('/x/recent.ts', recentStats, {
+        full: true,
+        cacheable: true,
+      });
+
+      // Now set time to "now" and evict entries older than 30 minutes
+      vi.setSystemTime(now);
+
+      const evicted = cache.evictNotAccessedSince(30);
+      expect(evicted).toBe(1);
+      expect(cache.check(oldStats).state).toBe('unknown');
+      expect(cache.check(recentStats).state).toBe('fresh');
+    });
+
+    it('evicts entries that were only written, never read', () => {
+      const cache = new FileReadCache();
+      vi.useFakeTimers();
+
+      const pastWrite = 1000; // some fixed timestamp in the past
+      vi.setSystemTime(pastWrite);
+      cache.recordWrite('/x/old-write.ts', makeStats({ ino: 2 }));
+
+      // Advance time by 120 minutes
+      vi.setSystemTime(pastWrite + 120 * 60_000);
+
+      const evicted = cache.evictNotAccessedSince(60);
+      expect(evicted).toBe(1);
+      expect(cache.size()).toBe(0);
+    });
+
+    it('preserves recently accessed entries', () => {
+      const cache = new FileReadCache();
+      vi.useFakeTimers();
+
+      const now = Date.now();
+      vi.setSystemTime(now);
+
+      cache.recordRead('/x/recent.ts', makeStats({ ino: 1 }), {
+        full: true,
+        cacheable: true,
+      });
+
+      const evicted = cache.evictNotAccessedSince(30);
+      expect(evicted).toBe(0);
+      expect(cache.size()).toBe(1);
+    });
+
+    it('returns correct eviction count', () => {
+      const cache = new FileReadCache();
+      vi.useFakeTimers();
+
+      const now = Date.now();
+      vi.setSystemTime(now);
+
+      // 3 recent entries
+      for (let i = 0; i < 3; i++) {
+        cache.recordRead(`/x/recent-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+
+      // Jump 120 minutes back, add 2 old entries
+      vi.setSystemTime(now - 120 * 60_000);
+      for (let i = 10; i < 12; i++) {
+        cache.recordRead(`/x/old-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+
+      // Back to now
+      vi.setSystemTime(now);
+
+      const evicted = cache.evictNotAccessedSince(60);
+      expect(evicted).toBe(2);
+      expect(cache.size()).toBe(3);
+    });
+
+    it('returns 0 for empty cache', () => {
+      const cache = new FileReadCache();
+      expect(cache.evictNotAccessedSince(30)).toBe(0);
+    });
+
+    it('does not evict entries for sub-minute windows', () => {
+      const cache = new FileReadCache();
+      cache.recordRead('/x/recent.ts', makeStats({ ino: 1 }), {
+        full: true,
+        cacheable: true,
+      });
+
+      expect(cache.evictNotAccessedSince(0)).toBe(0);
+      expect(cache.evictNotAccessedSince(-30)).toBe(0);
+      expect(cache.evictNotAccessedSince(0.0000001)).toBe(0);
+      expect(cache.size()).toBe(1);
     });
   });
 });

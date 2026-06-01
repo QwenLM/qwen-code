@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ModelsConfig } from './modelsConfig.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
@@ -236,7 +236,7 @@ describe('ModelsConfig', () => {
     });
 
     // User manually updates credentials via updateCredentials.
-    // Note: In practice, handleAuthSelect prevents using a modelId that matches a provider model,
+    // Note: In practice, the /auth provider-setup flow prevents using a modelId that matches a provider model,
     // but if syncAfterAuthRefresh is called with a modelId that exists in registry,
     // we should use provider config.
     modelsConfig.updateCredentials({ apiKey: 'manual-key' });
@@ -1329,6 +1329,123 @@ describe('ModelsConfig', () => {
     // Both should be consistent
     expect(modelsConfig.getModel()).toBe('custom-model');
     expect(modelsConfig.getGenerationConfig().model).toBe('custom-model');
+  });
+
+  it('recomputes raw model modalities instead of carrying provider multimodal defaults', async () => {
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'qwen3.6-plus',
+          name: 'Qwen 3.6 Plus',
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          envKey: 'DASHSCOPE_API_KEY',
+          generationConfig: {
+            contextWindowSize: 12345,
+            modalities: { image: true, video: true },
+          },
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'qwen3.6-plus');
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
+    });
+
+    await modelsConfig.setModel('qwen3.7-max');
+
+    expect(modelsConfig.getModel()).toBe('qwen3.7-max');
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({});
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'computed',
+      detail: 'auto-detected from model',
+    });
+    expect(modelsConfig.getGenerationConfig().contextWindowSize).not.toBe(
+      12345,
+    );
+    expect(
+      modelsConfig.getGenerationConfigSources()['contextWindowSize'],
+    ).toEqual({
+      kind: 'computed',
+      detail: 'auto-detected from model',
+    });
+  });
+
+  it('notifies the owner to refresh after a raw model switch', async () => {
+    const onModelChange = vi.fn();
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'qwen3.6-plus',
+        modalities: { image: true, video: true },
+      },
+      onModelChange,
+    });
+
+    await modelsConfig.setModel('qwen3.7-max');
+
+    expect(onModelChange).toHaveBeenCalledWith(AuthType.USE_OPENAI, true);
+  });
+
+  it('preserves explicitly configured modalities during raw model switches', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'custom-vision-model',
+        modalities: { image: true },
+      },
+      generationConfigSources: {
+        modalities: {
+          kind: 'settings',
+          settingsPath: 'model.generationConfig.modalities',
+        },
+      },
+    });
+
+    await modelsConfig.setModel('custom-vision-model-v2');
+
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+    });
+    expect(modelsConfig.getGenerationConfigSources()['modalities']).toEqual({
+      kind: 'settings',
+      settingsPath: 'model.generationConfig.modalities',
+    });
+  });
+
+  it('rolls back raw model state when owner refresh fails', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'qwen3.6-plus',
+        modalities: { image: true, video: true },
+      },
+      generationConfigSources: {
+        modalities: {
+          kind: 'computed',
+          detail: 'auto-detected from model',
+        },
+      },
+      onModelChange: async () => {
+        throw new Error('refresh failed');
+      },
+    });
+
+    await expect(modelsConfig.setModel('qwen3.7-max')).rejects.toThrow(
+      'refresh failed',
+    );
+
+    expect(modelsConfig.getModel()).toBe('qwen3.6-plus');
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
+    });
   });
 
   it('should maintain consistency between currentModelId and _generationConfig.model during updateCredentials', () => {

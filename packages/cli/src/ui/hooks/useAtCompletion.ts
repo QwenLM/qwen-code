@@ -211,9 +211,13 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
           return;
         }
 
+        // isDirectory relies on crawler.ts in @qwen-code/qwen-code-core
+        // always normalizing paths with posix '/' via fdir.withPathSeparator('/').
+        // If the crawler ever switches to path.sep, this check must be updated.
         const suggestions = results.map((p) => ({
           label: p,
           value: escapePath(p),
+          isDirectory: p.endsWith('/'),
         }));
         dispatch({ type: 'SEARCH_SUCCESS', payload: suggestions });
       } catch (error) {

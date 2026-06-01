@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
-import { HookPlanner } from './hookPlanner.js';
+import { getHookMatcherTarget, HookPlanner } from './hookPlanner.js';
 import { HookEventName, HookType, HooksConfigSource } from './types.js';
 
 describe('HookPlanner', () => {
@@ -18,6 +18,76 @@ describe('HookPlanner', () => {
       getHooksForEvent: vi.fn(),
     } as unknown as HookRegistry;
     planner = new HookPlanner(mockRegistry);
+  });
+
+  describe('getHookMatcherTarget', () => {
+    it('returns tool name targets for tool events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.PreToolUse, {
+          toolName: 'shell',
+        }),
+      ).toEqual({ kind: 'toolName', target: 'shell' });
+      expect(getHookMatcherTarget(HookEventName.PostToolUse)).toEqual({
+        kind: 'toolName',
+        target: '',
+      });
+      expect(
+        getHookMatcherTarget(HookEventName.PermissionDenied, {
+          toolName: 'Bash',
+        }),
+      ).toEqual({ kind: 'toolName', target: 'Bash' });
+      // PermissionDenied is permission-related, so it uses the same tool-name
+      // matcher as PermissionRequest rather than a classifier-reason matcher.
+    });
+
+    it('returns agent type targets for subagent events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.SubagentStart, {
+          agentType: 'explorer',
+        }),
+      ).toEqual({ kind: 'agentType', target: 'explorer' });
+    });
+
+    it('returns trigger targets for compact events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.PreCompact, {
+          trigger: 'manual',
+        }),
+      ).toEqual({ kind: 'trigger', target: 'manual' });
+    });
+
+    it('returns session trigger targets for session events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.SessionStart, {
+          trigger: 'startup',
+        }),
+      ).toEqual({ kind: 'sessionTrigger', target: 'startup' });
+    });
+
+    it('returns error targets for stop failure events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.StopFailure, {
+          error: 'rate_limit',
+        }),
+      ).toEqual({ kind: 'error', target: 'rate_limit' });
+    });
+
+    it('returns notification type targets for notification events', () => {
+      expect(
+        getHookMatcherTarget(HookEventName.Notification, {
+          notificationType: 'permission_prompt',
+        }),
+      ).toEqual({
+        kind: 'notificationType',
+        target: 'permission_prompt',
+      });
+    });
+
+    it('returns undefined for events without matcher semantics', () => {
+      expect(getHookMatcherTarget(HookEventName.UserPromptSubmit)).toBe(
+        undefined,
+      );
+    });
   });
 
   describe('createExecutionPlan', () => {

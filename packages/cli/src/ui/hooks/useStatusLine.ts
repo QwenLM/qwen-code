@@ -45,6 +45,18 @@ export interface StatusLineCommandInput {
   git?: {
     branch: string;
   };
+  /**
+   * Present when the session is inside an active worktree (created by
+   * `enter_worktree`). Field names mirror claude-code's StatusLine payload
+   * so users can share statusline scripts across both CLIs.
+   */
+  worktree?: {
+    name: string;
+    path: string;
+    branch: string;
+    original_cwd: string;
+    original_branch: string;
+  };
   metrics: {
     models: Record<
       string,
@@ -225,7 +237,11 @@ export function useStatusLine(): {
   // Initialized with current values so the state-change effect
   // does not fire redundantly on mount.
   const { lastPromptTokenCount } = uiState.sessionStats;
-  const { currentModel, branchName, streamingState } = uiState;
+  const { currentModel, branchName, activeWorktree, streamingState } = uiState;
+  // Track only the slug — equality on the whole object would re-fire on
+  // every render because `activeWorktree` is rebuilt by AppContainer's
+  // useMemo each time the sidecar reloads.
+  const worktreeSlug = activeWorktree?.slug;
   const totalToolCalls = uiState.sessionStats.metrics.tools.totalCalls;
   const totalLinesAdded = uiState.sessionStats.metrics.files.totalLinesAdded;
   const totalLinesRemoved =
@@ -236,6 +252,7 @@ export function useStatusLine(): {
     currentModel: string;
     effectiveVim: string | undefined;
     branchName: string | undefined;
+    worktreeSlug: string | undefined;
     totalToolCalls: number;
     totalLinesAdded: number;
     totalLinesRemoved: number;
@@ -245,6 +262,7 @@ export function useStatusLine(): {
     currentModel,
     effectiveVim,
     branchName,
+    worktreeSlug,
     totalToolCalls,
     totalLinesAdded,
     totalLinesRemoved,
@@ -355,12 +373,13 @@ export function useStatusLine(): {
 
       const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(m);
 
-      const contextWindowSize =
-        cfg.getContentGeneratorConfig()?.contextWindowSize || 0;
+      const contentGeneratorConfig = cfg.getContentGeneratorConfig();
+      const contextWindowSize = contentGeneratorConfig?.contextWindowSize || 0;
       const data = buildStatusLinePresetData({
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
         modelDisplayName: ui.currentModel || cfg.getModel(),
+        reasoning: contentGeneratorConfig?.reasoning,
         currentDir,
         branch: ui.branchName,
         pullRequestNumber: pullRequestNumberRef.current,
@@ -426,6 +445,15 @@ export function useStatusLine(): {
       ...(ui.branchName && {
         git: {
           branch: ui.branchName,
+        },
+      }),
+      ...(ui.activeWorktree && {
+        worktree: {
+          name: ui.activeWorktree.slug,
+          path: ui.activeWorktree.path,
+          branch: ui.activeWorktree.branch,
+          original_cwd: ui.activeWorktree.originalCwd,
+          original_branch: ui.activeWorktree.originalBranch,
         },
       }),
       metrics: buildMetricsPayload(m),
@@ -536,6 +564,7 @@ export function useStatusLine(): {
       currentModel !== prev.currentModel ||
       effectiveVim !== prev.effectiveVim ||
       branchName !== prev.branchName ||
+      worktreeSlug !== prev.worktreeSlug ||
       totalToolCalls !== prev.totalToolCalls ||
       totalLinesAdded !== prev.totalLinesAdded ||
       totalLinesRemoved !== prev.totalLinesRemoved ||
@@ -545,6 +574,7 @@ export function useStatusLine(): {
       prev.currentModel = currentModel;
       prev.effectiveVim = effectiveVim;
       prev.branchName = branchName;
+      prev.worktreeSlug = worktreeSlug;
       prev.totalToolCalls = totalToolCalls;
       prev.totalLinesAdded = totalLinesAdded;
       prev.totalLinesRemoved = totalLinesRemoved;
@@ -561,6 +591,7 @@ export function useStatusLine(): {
     currentModel,
     effectiveVim,
     branchName,
+    worktreeSlug,
     totalToolCalls,
     totalLinesAdded,
     totalLinesRemoved,

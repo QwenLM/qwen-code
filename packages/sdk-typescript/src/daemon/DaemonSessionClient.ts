@@ -13,8 +13,10 @@ import {
 } from './DaemonClient.js';
 import type {
   DaemonEvent,
+  DaemonSessionContextStatus,
   DaemonSessionState,
   DaemonSession,
+  DaemonSessionSupportedCommandsStatus,
   HeartbeatResult,
   PermissionResponse,
   PromptResult,
@@ -79,14 +81,34 @@ export class DaemonSessionClient {
     clientId?: string,
   ): Promise<DaemonSessionClient> {
     const session = await client.createOrAttachSession(req, clientId);
-    // `modelServiceId` switch failures are reported on SSE, not the
-    // create/attach HTTP response. Seed the first subscription from the
-    // daemon replay ring so create-then-subscribe clients observe attach-time
-    // `model_switch_failed` / `model_switched` events. The daemon treats
-    // Last-Event-ID: 0 as "replay from the beginning of the bounded ring";
-    // if older events have already been evicted, clients receive the retained
-    // suffix and continue live from there.
-    const lastEventId = req.modelServiceId ? 0 : undefined;
+    // Seed the first subscription from the daemon replay ring whenever
+    // events can fire during the session-creation window — otherwise
+    // they land in the per-session ring before the consumer's first
+    // `events()` call and never reach the live stream.
+    //
+    // Two such windows exist today:
+    // - **Newly-created sessions** (`session.attached === false`): the
+    //   child's `newSession` handler runs MCP discovery synchronously
+    //   in legacy blocking mode and as background work in progressive
+    //   mode. PR 14b's `mcp_budget_warning` / `mcp_child_refused_batch`
+    //   push events fire during this window and are buffered on
+    //   `BridgeClient.earlyEvents` until `byId.set` runs, then drained
+    //   into the per-session bus before `spawnOrAttach` returns. The
+    //   guardrail events advertised via `mcp_guardrail_events` are
+    //   useless without this seed because they predate any live
+    //   subscription.
+    // - **Pre-PR 14b carve-out**: `modelServiceId` switch failures are
+    //   reported on SSE, not the create/attach HTTP response. The
+    //   original carve-out covered just this case; the unified rule
+    //   below subsumes it (newly-created sessions always seed) while
+    //   preserving the semantics for re-attached sessions where the
+    //   caller may have an existing event cursor it doesn't want to
+    //   reset.
+    //
+    // The daemon treats Last-Event-ID: 0 as "replay from the beginning
+    // of the bounded ring"; if older events have already been evicted,
+    // clients receive the retained suffix and continue live from there.
+    const lastEventId = !session.attached || req.modelServiceId ? 0 : undefined;
     return new DaemonSessionClient({ client, session, lastEventId });
   }
 
@@ -192,6 +214,17 @@ export class DaemonSessionClient {
     return await this.client.setSessionModel(
       this.sessionId,
       modelId,
+      this.clientId,
+    );
+  }
+
+  async context(): Promise<DaemonSessionContextStatus> {
+    return await this.client.sessionContext(this.sessionId, this.clientId);
+  }
+
+  async supportedCommands(): Promise<DaemonSessionSupportedCommandsStatus> {
+    return await this.client.sessionSupportedCommands(
+      this.sessionId,
       this.clientId,
     );
   }

@@ -44,6 +44,7 @@ import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCa
 import type { RequestContext } from '../openaiContentGenerator/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import {
   getErrorMessage,
   getErrorStatus,
@@ -60,6 +61,7 @@ import {
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
   API_CALL_FAILED_SPAN_STATUS_MESSAGE,
 } from '../../telemetry/tracer.js';
+import { hasUserVisibleContent } from './streamContentDetection.js';
 
 const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
@@ -75,6 +77,7 @@ export class LoggingContentGenerator implements ContentGenerator {
   private openaiLogger?: OpenAILogger;
   private schemaCompliance?: 'auto' | 'openapi_30';
   private modalities?: InputModalities;
+  private readonly generatorAuthType: ContentGeneratorConfig['authType'];
 
   constructor(
     private readonly wrapped: ContentGenerator,
@@ -82,6 +85,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     generatorConfig: ContentGeneratorConfig,
   ) {
     this.modalities = generatorConfig.modalities;
+    this.generatorAuthType = generatorConfig.authType;
 
     // Extract fields needed for initialization from passed config
     // (config.getContentGeneratorConfig() may not be available yet during refreshAuth)
@@ -130,7 +134,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         model,
         durationMs,
         prompt_id,
-        this.config.getAuthType(),
+        this.generatorAuthType,
         usageMetadata,
         responseText,
         subagentNameContext.getStore(),
@@ -160,7 +164,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         model,
         durationMs,
         promptId: prompt_id,
-        authType: this.config.getAuthType(),
+        authType: this.generatorAuthType,
         errorMessage,
         errorType,
         statusCode: errorStatus,
@@ -224,6 +228,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     const isInternal = isInternalPromptId(userPromptId);
     const session = this.startCaptureSession();
     try {
+      runtimeDiagnostics.recordGenerateContentRequest(req, {
+        stream: false,
+        source: 'generateContent',
+      });
       if (!isInternal) {
         addSystemPromptAttributes(
           this.config,
@@ -278,6 +286,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         success: true,
         inputTokens: response.usageMetadata?.promptTokenCount,
         outputTokens: response.usageMetadata?.candidatesTokenCount,
+        cachedInputTokens: response.usageMetadata?.cachedContentTokenCount,
         durationMs: Date.now() - startTime,
       });
       return response;
@@ -334,6 +343,10 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
+      runtimeDiagnostics.recordGenerateContentRequest(req, {
+        stream: true,
+        source: 'generateContentStream',
+      });
       if (!isInternal) {
         addSystemPromptAttributes(
           this.config,
@@ -451,6 +464,14 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let errorOccurred = false;
+
+    // TTFT (time to first token): wall-clock from generateContentStream
+    // dispatch to the first stream chunk containing user-visible content.
+    // Method-local closure variable — NEVER an instance field — because
+    // LoggingContentGenerator is shared across concurrent generateContentStream
+    // calls (one per ContentGenerator, see contentGenerator.ts:createContentGenerator).
+    // See docs/design/telemetry-llm-request-timing-design.md (D1, D2).
+    let ttftMs: number | undefined;
     // Tracks whether the idle timeout fired and ended the span. If so,
     // a resumed-after-timeout consumer must not call endLLMRequestSpan
     // again (the helper would no-op, but more importantly we skip the
@@ -505,6 +526,13 @@ export class LoggingContentGenerator implements ContentGenerator {
         if (response.usageMetadata) {
           lastUsageMetadata = response.usageMetadata;
         }
+        // Capture TTFT on the first stream chunk that contains user-visible
+        // content. hasUserVisibleContent skips role-only / usageMetadata-only
+        // chunks, so TTFT reflects "model produced something the operator can
+        // attribute to user-perceived latency."
+        if (ttftMs === undefined && hasUserVisibleContent(response)) {
+          ttftMs = Date.now() - startTime;
+        }
         resetSpanTimeout?.();
         yield response;
       }
@@ -520,47 +548,61 @@ export class LoggingContentGenerator implements ContentGenerator {
       const streamResponseText = isInternal
         ? undefined
         : this.extractResponseText(consolidatedResponse);
-      runInSpan(() =>
-        this.safelyLogApiResponse(
-          firstResponseId,
-          durationMs,
-          firstModelVersion || model,
-          userPromptId,
-          lastUsageMetadata,
-          streamResponseText,
-        ),
-      );
-      if (!isInternal && span) {
-        addModelOutputAttributes(this.config, span, streamResponseText);
+      // If the idle timeout already closed the span as failed, do not contradict
+      // it with a "success" api_response log or model-output span attributes.
+      // The OpenAI interaction log is also skipped — telemetry already carries
+      // the timeout signal and a parallel "success" record would be confusing
+      // during incident response (#4212).
+      if (!spanEndedByTimeout) {
+        runInSpan(() =>
+          this.safelyLogApiResponse(
+            firstResponseId,
+            durationMs,
+            firstModelVersion || model,
+            userPromptId,
+            lastUsageMetadata,
+            streamResponseText,
+          ),
+        );
+        if (!isInternal && span) {
+          addModelOutputAttributes(this.config, span, streamResponseText);
+        }
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(
+            openaiRequest,
+            consolidatedResponse,
+            undefined,
+            userPromptId,
+          ),
+        );
       }
-      await runInSpan(() =>
-        this.safelyLogOpenAIInteraction(
-          openaiRequest,
-          consolidatedResponse,
-          undefined,
-          userPromptId,
-        ),
-      );
     } catch (error) {
       errorOccurred = true;
-      const durationMs = Date.now() - startTime;
-      runInSpan(() =>
-        this.safelyLogApiError(
-          firstResponseId,
-          durationMs,
-          error,
-          firstModelVersion || model,
-          userPromptId,
-        ),
-      );
-      await runInSpan(() =>
-        this.safelyLogOpenAIInteraction(
-          openaiRequest,
-          undefined,
-          error,
-          userPromptId,
-        ),
-      );
+      // Same gating as the success path above: if the idle timeout already
+      // closed the span as failed, do not emit a parallel api_error log
+      // (the span is the canonical signal). Otherwise we'd produce the
+      // exact contradictory pair the timeout fix targets — span timed-out
+      // + api_error log — just on the error branch (#4302 review).
+      if (!spanEndedByTimeout) {
+        const durationMs = Date.now() - startTime;
+        runInSpan(() =>
+          this.safelyLogApiError(
+            firstResponseId,
+            durationMs,
+            error,
+            firstModelVersion || model,
+            userPromptId,
+          ),
+        );
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(
+            openaiRequest,
+            undefined,
+            error,
+            userPromptId,
+          ),
+        );
+      }
       throw error;
     } finally {
       if (spanEndTimeout !== undefined) {
@@ -576,6 +618,8 @@ export class LoggingContentGenerator implements ContentGenerator {
           success: !errorOccurred,
           inputTokens: lastUsageMetadata?.promptTokenCount,
           outputTokens: lastUsageMetadata?.candidatesTokenCount,
+          cachedInputTokens: lastUsageMetadata?.cachedContentTokenCount,
+          ttftMs,
           durationMs: Date.now() - startTime,
           error: errorOccurred
             ? aborted

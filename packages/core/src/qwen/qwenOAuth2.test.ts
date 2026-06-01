@@ -110,6 +110,11 @@ vi.mock('node:fs', () => ({
     writeFile: vi.fn(),
     unlink: vi.fn(),
     mkdir: vi.fn().mockResolvedValue(undefined),
+    // PR #4255 round-11 #2 (gpt-5.5 review): atomic write uses
+    // temp-file → chmod → rename. Tests need chmod + rename in the
+    // mocked fs surface; both default to no-op success.
+    chmod: vi.fn().mockResolvedValue(undefined),
+    rename: vi.fn().mockResolvedValue(undefined),
   },
 }));
 

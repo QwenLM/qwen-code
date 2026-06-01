@@ -8,6 +8,7 @@ import type {
   MCPServerConfig,
   BugCommandSettings,
   TelemetrySettings,
+  OutboundCorrelationSettings,
   AuthType,
   ChatCompressionSettings,
   ModelProvidersConfig,
@@ -620,6 +621,16 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      autoModeAcknowledged: {
+        type: 'boolean',
+        label: 'Auto Mode Acknowledged',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'True once the user has seen the first-time information message about the AUTO approval mode. Set automatically; not intended for manual configuration.',
+        showInDialog: false,
+      },
       statusLine: {
         type: 'object',
         label: 'Status Line',
@@ -650,6 +661,16 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: {} as Record<string, CustomTheme>,
         description: 'Custom theme definitions.',
+        showInDialog: false,
+      },
+      hideBuiltinWorktreeIndicator: {
+        type: 'boolean',
+        label: 'Hide Built-in Worktree Indicator',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When true, the built-in `⎇ worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself — otherwise an active worktree silently has no UI affordance.',
         showInDialog: false,
       },
       hideWindowTitle: {
@@ -992,8 +1013,51 @@ const SETTINGS_SCHEMA = {
           type: 'boolean',
           default: false,
         },
+        resourceAttributes: {
+          description:
+            'Static resource attributes attached to every span/log/metric the SDK exports (OTLP or file outfile — they share the same Resource). Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version, session.id) are dropped with a warning.',
+          type: 'object',
+          additionalProperties: { type: 'string' },
+          default: {},
+        },
+        metrics: {
+          description: 'Per-signal cardinality controls for exported metrics.',
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            includeSessionId: {
+              description:
+                'Include session.id on every metric data point. WARNING: each CLI session creates a new value, causing unbounded metric time-series fan-out at the backend. Only enable for short-term debugging — spans and logs still carry session.id.',
+              type: 'boolean',
+              default: false,
+            },
+          },
+        },
       },
       additionalProperties: true,
+    },
+  },
+
+  outboundCorrelation: {
+    type: 'object',
+    label: 'Outbound Correlation',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: undefined as OutboundCorrelationSettings | undefined,
+    description:
+      "SECURITY-RELEVANT. Controls what client-side correlation data qwen-code writes into outbound LLM API requests (DashScope, OpenAI, Anthropic, etc.) — separate from `telemetry.*` which governs data flow into the operator's OWN OTLP collector. All values default to off. Opt in only when the LLM provider also reports into your OTel collector for cross-process trace stitching (e.g. ARMS Tracing + DashScope).",
+    showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'object',
+      properties: {
+        propagateTraceContext: {
+          description:
+            "Requires `telemetry.enabled: true`. Inject W3C `traceparent` header on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...). Default: false — trace context stays internal to the operator's OTLP collector and is NOT written onto third-party request streams. Set true only when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope). Client HTTP spans are still emitted in either case; this flag only governs the wire `traceparent` header.",
+          type: 'boolean',
+          default: false,
+        },
+      },
+      additionalProperties: false,
     },
   },
 
@@ -1036,6 +1100,26 @@ const SETTINGS_SCHEMA = {
           'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
         showInDialog: false,
       },
+      maxWallTimeSeconds: {
+        type: 'number',
+        label: 'Max Wall-Clock Time (seconds)',
+        category: 'Model',
+        requiresRestart: false,
+        default: -1,
+        description:
+          'Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).',
+        showInDialog: false,
+      },
+      maxToolCalls: {
+        type: 'number',
+        label: 'Max Tool Calls',
+        category: 'Model',
+        requiresRestart: false,
+        default: -1,
+        description:
+          'Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.',
+        showInDialog: false,
+      },
       chatCompression: {
         type: 'object',
         label: 'Chat Compression',
@@ -1069,7 +1153,8 @@ const SETTINGS_SCHEMA = {
         category: 'Model',
         requiresRestart: false,
         default: true,
-        description: 'Disable all loop detection checks (streaming and LLM).',
+        description:
+          'Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.',
         showInDialog: false,
       },
       skipStartupContext: {
@@ -1354,7 +1439,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Managed Auto-Dream',
         category: 'Memory',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
           'Enable automatic consolidation (dream) of collected memories.',
         showInDialog: false,
@@ -1364,7 +1449,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Auto Skill',
         category: 'Memory',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
           'Enable background review for reusable project skills after tool-heavy sessions.',
         showInDialog: false,
@@ -1447,6 +1532,62 @@ const SETTINGS_SCHEMA = {
           'Examples: "ShellTool", "Bash(rm -rf *)".',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
+      },
+      autoMode: {
+        type: 'object',
+        label: 'Auto Mode',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description: 'Settings consumed by the AUTO approval mode classifier.',
+        showInDialog: false,
+        properties: {
+          hints: {
+            type: 'object',
+            label: 'Classifier Hints',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description:
+              'Natural-language hints injected into the classifier system prompt.',
+            showInDialog: false,
+            properties: {
+              allow: {
+                type: 'array',
+                label: 'Auto Mode Allow Hints',
+                category: 'Tools',
+                requiresRestart: true,
+                default: undefined as string[] | undefined,
+                description:
+                  'Natural-language descriptions of actions AUTO mode should allow.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.UNION,
+              },
+              deny: {
+                type: 'array',
+                label: 'Auto Mode Deny Hints',
+                category: 'Tools',
+                requiresRestart: true,
+                default: undefined as string[] | undefined,
+                description:
+                  'Natural-language descriptions of actions AUTO mode should block.',
+                showInDialog: false,
+                mergeStrategy: MergeStrategy.UNION,
+              },
+            },
+          },
+          environment: {
+            type: 'array',
+            label: 'Auto Mode Environment',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as string[] | undefined,
+            description:
+              'Environment / context lines injected into the classifier system prompt.',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.UNION,
+          },
+        },
       },
     },
   },
@@ -1571,6 +1712,17 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
+      disabled: {
+        type: 'array',
+        label: 'Disabled Tools',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
       approvalMode: {
         type: 'enum',
         label: 'Tool Approval Mode',
@@ -1584,6 +1736,7 @@ const SETTINGS_SCHEMA = {
           { value: ApprovalMode.PLAN, label: 'Plan' },
           { value: ApprovalMode.DEFAULT, label: 'Default' },
           { value: ApprovalMode.AUTO_EDIT, label: 'Auto Edit' },
+          { value: ApprovalMode.AUTO, label: 'Auto' },
           { value: ApprovalMode.YOLO, label: 'YOLO' },
         ],
       },
@@ -1653,6 +1806,28 @@ const SETTINGS_SCHEMA = {
         default: DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         description: 'The number of lines to keep when truncating tool output.',
         showInDialog: false,
+      },
+      computerUse: {
+        type: 'object',
+        label: 'Computer Use',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Cross-platform desktop automation via the upstream open-computer-use MCP server. Tools: list_apps, get_app_state, click, type_text, scroll, drag, press_key, perform_secondary_action, set_value. On first invocation, the upstream binary is fetched via npx and the user is walked through macOS Accessibility / Screen Recording permissions if needed.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable Computer Use',
+            category: 'Tools',
+            requiresRestart: true,
+            default: true,
+            description:
+              'When enabled (default), the 9 computer_use__* tools are registered as deferred built-ins.',
+            showInDialog: true,
+          },
+        },
       },
     },
   },
@@ -2161,6 +2336,41 @@ const SETTINGS_SCHEMA = {
         description:
           'Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.',
         showInDialog: true,
+      },
+    },
+  },
+
+  worktree: {
+    type: 'object',
+    label: 'Worktree',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Configuration for general-purpose git worktrees created by the ' +
+      'CLI (the `enter_worktree` tool, the `agent isolation: "worktree"` ' +
+      'parameter, and the startup `--worktree` flag). Does NOT affect ' +
+      'Agent Arena worktrees — see `agents.arena.worktreeBaseDir` for those.',
+    showInDialog: false,
+    properties: {
+      symlinkDirectories: {
+        type: 'array',
+        label: 'Symlink Directories Into Worktrees',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string[] | undefined,
+        description:
+          'Directories under the main repository to symlink into every ' +
+          'general-purpose worktree on creation. Useful for sharing ' +
+          'large opt-in dirs like `node_modules` so the model can run ' +
+          'tests / builds inside the worktree without a fresh install. ' +
+          'Paths must be relative to the repo root; absolute paths, ' +
+          'anything containing `..`, and any path inside `.git` or ' +
+          '`.qwen` (the CLI-managed metadata tree, which contains ' +
+          'the worktrees directory itself) are rejected. Missing ' +
+          'source dirs and existing destination paths are silently ' +
+          'skipped (no overwrite, no failure).',
+        showInDialog: false,
       },
     },
   },

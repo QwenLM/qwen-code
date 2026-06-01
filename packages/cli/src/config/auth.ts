@@ -165,7 +165,7 @@ export function validateAuthMethod(
   authMethod: string,
   config?: Config,
 ): string | null {
-  const settings = loadSettings();
+  const settings = loadSettings(process.cwd(), false);
   loadEnvironment(settings.merged);
 
   if (authMethod === AuthType.USE_OPENAI) {

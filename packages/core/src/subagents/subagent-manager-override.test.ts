@@ -140,7 +140,7 @@ describe('SubagentManager.buildSubagentContextOverride bound-tool isolation', ()
     (parent as any).toolRegistry = parentRegistry;
 
     // Layer 1: actual createApprovalModeOverride (sets the marker).
-    const upstreamWrapper = await createApprovalModeOverride(
+    const { config: upstreamWrapper } = await createApprovalModeOverride(
       parent,
       ApprovalMode.AUTO_EDIT,
     );
