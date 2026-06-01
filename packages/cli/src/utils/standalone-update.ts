@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { spawn, execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import { fetch } from 'undici';
@@ -147,6 +147,8 @@ async function verifyChecksum(
   }
 }
 
+const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024; // 512 MB
+
 async function downloadToFile(
   versionPath: string,
   filename: string,
@@ -155,8 +157,30 @@ async function downloadToFile(
   const response = await downloadWithFallback(versionPath, filename);
   const body = response.body;
   if (!body) throw new Error('Empty response body');
+
+  const contentLength = response.headers.get('content-length');
+  if (contentLength && parseInt(contentLength, 10) > MAX_DOWNLOAD_BYTES) {
+    await body.cancel().catch(() => {});
+    throw new Error(
+      `Download too large: ${contentLength} bytes exceeds ${MAX_DOWNLOAD_BYTES} limit`,
+    );
+  }
+
+  let bytesWritten = 0;
   const dest = fs.createWriteStream(destPath);
-  await pipeline(Readable.fromWeb(body), dest);
+  const sizeGuard = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      bytesWritten += chunk.length;
+      if (bytesWritten > MAX_DOWNLOAD_BYTES) {
+        callback(
+          new Error(`Download exceeded ${MAX_DOWNLOAD_BYTES} byte limit`),
+        );
+      } else {
+        callback(null, chunk);
+      }
+    },
+  });
+  await pipeline(Readable.fromWeb(body), sizeGuard, dest);
 }
 
 async function extractArchive(
@@ -351,7 +375,7 @@ function isProcessAlive(pid: number): boolean {
  * Backslash is only dangerous in POSIX shells — on Windows cmd/bat it is
  * the standard path separator. We validate per-platform in ensureBinWrapper.
  */
-const UNSAFE_SHELL_META_UNIX = /[`$"\\\n\r]/;
+const UNSAFE_SHELL_META_UNIX = /[`$"\\;'\n\r]/;
 const UNSAFE_SHELL_META_WIN = /[`$"\n\r]/;
 
 function assertSafeForShellEmbed(label: string, value: string): void {
@@ -687,6 +711,10 @@ export async function performStandaloneUpdate(
       const stat = fs.lstatSync(extractDir);
       if (stat.isDirectory() && !stat.isSymbolicLink()) {
         fs.rmSync(extractDir, { recursive: true, force: true });
+      } else {
+        debugLogger.warn(
+          `Skipping cleanup of extractDir (unexpected type): ${extractDir}`,
+        );
       }
     } catch {
       // Already removed or never created — nothing to clean
