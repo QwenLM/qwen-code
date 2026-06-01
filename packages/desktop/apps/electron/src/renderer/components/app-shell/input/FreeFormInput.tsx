@@ -8,7 +8,6 @@ import {
   ArrowUp,
   Square,
   Check,
-  DatabaseZap,
   ChevronDown,
   AlertCircle,
   CornerDownRight,
@@ -69,8 +68,6 @@ import {
 import { resolveEffectiveConnectionSlug } from '@config/llm-connections';
 import { useOptionalAppShellContext } from '@/context/AppShellContext';
 import { EditPopover, getEditConfig } from '@/components/ui/EditPopover';
-import { SourceAvatar } from '@/components/ui/source-avatar';
-import { SourceSelectorPopover } from '@/components/ui/SourceSelectorPopover';
 import { FreeFormInputContextBadge } from './FreeFormInputContextBadge';
 import type {
   AvailableSlashCommand,
@@ -824,7 +821,6 @@ export function FreeFormInput({
 
   const [isDraggingOver, setIsDraggingOver] = React.useState(false);
   const [loadingCount, setLoadingCount] = React.useState(0);
-  const [sourceDropdownOpen, setSourceDropdownOpen] = React.useState(false);
   const [inputMaxHeight, setInputMaxHeight] = React.useState(540);
   const [modelDropdownOpen, setModelDropdownOpen] = React.useState(false);
 
@@ -871,7 +867,6 @@ export function FreeFormInput({
 
   const dragCounterRef = React.useRef(0);
   const containerRef = React.useRef<HTMLDivElement>(null);
-  const sourceButtonRef = React.useRef<HTMLButtonElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   // Merge refs for RichTextInput
@@ -2470,7 +2465,7 @@ export function FreeFormInput({
               onChange={handleFileInputChange}
             />
 
-            {/* Compact mode: permission mode drawer + standard icon badges for attach/sources/working dir */}
+            {/* Compact mode: permission mode drawer + standard icon badges for attach/working dir */}
             {compactMode && (
               <>
                 {onPermissionModeChange && (
@@ -2493,92 +2488,6 @@ export function FreeFormInput({
                   tooltip={t('chat.attachFilesTooltip')}
                   disabled={disabled}
                 />
-                {onSourcesChange && (
-                  <div className="relative shrink min-w-0">
-                    <FreeFormInputContextBadge
-                      buttonRef={sourceButtonRef}
-                      icon={
-                        optimisticSourceSlugs.length === 0 ? (
-                          <DatabaseZap className="h-4 w-4" />
-                        ) : (
-                          <div className="flex items-center -ml-0.5">
-                            {(() => {
-                              const enabledSources = sources.filter((s) =>
-                                optimisticSourceSlugs.includes(s.config.slug),
-                              );
-                              const displaySources = enabledSources.slice(0, 3);
-                              const remainingCount = enabledSources.length - 3;
-                              return (
-                                <>
-                                  {displaySources.map((source, index) => (
-                                    <div
-                                      key={source.config.slug}
-                                      className={cn(
-                                        'relative h-5 w-5 rounded-[4px] bg-background shadow-minimal flex items-center justify-center',
-                                        index > 0 && '-ml-1',
-                                      )}
-                                      style={{ zIndex: index + 1 }}
-                                    >
-                                      <SourceAvatar source={source} size="xs" />
-                                    </div>
-                                  ))}
-                                  {remainingCount > 0 && (
-                                    <div
-                                      className="-ml-1 h-5 w-5 rounded-[4px] bg-background shadow-minimal flex items-center justify-center text-[8px] font-medium text-muted-foreground"
-                                      style={{
-                                        zIndex: displaySources.length + 1,
-                                      }}
-                                    >
-                                      +{remainingCount}
-                                    </div>
-                                  )}
-                                </>
-                              );
-                            })()}
-                          </div>
-                        )
-                      }
-                      label={
-                        optimisticSourceSlugs.length === 0
-                          ? t('chat.sourcesTooltip')
-                          : (() => {
-                              const enabledSources = sources.filter((s) =>
-                                optimisticSourceSlugs.includes(s.config.slug),
-                              );
-                              if (enabledSources.length === 1)
-                                return enabledSources[0].config.name;
-                              return t('chat.sourcesCount', {
-                                count: enabledSources.length,
-                              });
-                            })()
-                      }
-                      isExpanded={false}
-                      hasSelection={optimisticSourceSlugs.length > 0}
-                      showChevron={false}
-                      isOpen={sourceDropdownOpen}
-                      disabled={disabled}
-                      onClick={() => setSourceDropdownOpen((prev) => !prev)}
-                      tooltip={t('chat.sourcesTooltip')}
-                    />
-                    <SourceSelectorPopover
-                      open={sourceDropdownOpen}
-                      onOpenChange={setSourceDropdownOpen}
-                      anchorRef={sourceButtonRef}
-                      sources={sources}
-                      selectedSlugs={optimisticSourceSlugs}
-                      onToggleSlug={(slug) => {
-                        const isEnabled = optimisticSourceSlugs.includes(slug);
-                        const newSlugs = isEnabled
-                          ? optimisticSourceSlugs.filter(
-                              (currentSlug) => currentSlug !== slug,
-                            )
-                          : [...optimisticSourceSlugs, slug];
-                        setOptimisticSourceSlugs(newSlugs);
-                        onSourcesChange?.(newSlugs);
-                      }}
-                    />
-                  </div>
-                )}
                 {onWorkingDirectoryChange && (
                   <WorkingDirectoryBadge
                     workingDirectory={workingDirectory}
@@ -2610,101 +2519,7 @@ export function FreeFormInput({
                   disabled={disabled}
                 />
 
-                {/* 2. Source Selector Badge - only show if onSourcesChange is provided */}
-                {onSourcesChange && (
-                  <div className="relative shrink min-w-0 overflow-hidden">
-                    <FreeFormInputContextBadge
-                      buttonRef={sourceButtonRef}
-                      icon={
-                        optimisticSourceSlugs.length === 0 ? (
-                          <DatabaseZap className="h-4 w-4" />
-                        ) : (
-                          <div className="flex items-center -ml-0.5">
-                            {(() => {
-                              const enabledSources = sources.filter((s) =>
-                                optimisticSourceSlugs.includes(s.config.slug),
-                              );
-                              const displaySources = enabledSources.slice(0, 3);
-                              const remainingCount = enabledSources.length - 3;
-                              return (
-                                <>
-                                  {displaySources.map((source, index) => (
-                                    <div
-                                      key={source.config.slug}
-                                      className={cn(
-                                        'relative h-5 w-5 rounded-[4px] bg-background shadow-minimal flex items-center justify-center',
-                                        index > 0 && '-ml-1',
-                                      )}
-                                      style={{ zIndex: index + 1 }}
-                                    >
-                                      <SourceAvatar source={source} size="xs" />
-                                    </div>
-                                  ))}
-                                  {remainingCount > 0 && (
-                                    <div
-                                      className="-ml-1 h-5 w-5 rounded-[4px] bg-background shadow-minimal flex items-center justify-center text-[8px] font-medium text-muted-foreground"
-                                      style={{
-                                        zIndex: displaySources.length + 1,
-                                      }}
-                                    >
-                                      +{remainingCount}
-                                    </div>
-                                  )}
-                                </>
-                              );
-                            })()}
-                          </div>
-                        )
-                      }
-                      label={
-                        optimisticSourceSlugs.length === 0
-                          ? t('chat.chooseSources')
-                          : (() => {
-                              const enabledSources = sources.filter((s) =>
-                                optimisticSourceSlugs.includes(s.config.slug),
-                              );
-                              if (enabledSources.length === 1)
-                                return enabledSources[0].config.name;
-                              if (enabledSources.length === 2)
-                                return enabledSources
-                                  .map((s) => s.config.name)
-                                  .join(', ');
-                              return t('chat.sourcesCount', {
-                                count: enabledSources.length,
-                              });
-                            })()
-                      }
-                      isExpanded={false}
-                      hasSelection={optimisticSourceSlugs.length > 0}
-                      showChevron={true}
-                      isOpen={sourceDropdownOpen}
-                      disabled={disabled}
-                      data-tutorial="source-selector-button"
-                      onClick={() => setSourceDropdownOpen((prev) => !prev)}
-                      tooltip={t('chat.sourcesTooltip')}
-                    />
-
-                    <SourceSelectorPopover
-                      open={sourceDropdownOpen}
-                      onOpenChange={setSourceDropdownOpen}
-                      anchorRef={sourceButtonRef}
-                      sources={sources}
-                      selectedSlugs={optimisticSourceSlugs}
-                      onToggleSlug={(slug) => {
-                        const isEnabled = optimisticSourceSlugs.includes(slug);
-                        const newSlugs = isEnabled
-                          ? optimisticSourceSlugs.filter(
-                              (currentSlug) => currentSlug !== slug,
-                            )
-                          : [...optimisticSourceSlugs, slug];
-                        setOptimisticSourceSlugs(newSlugs);
-                        onSourcesChange?.(newSlugs);
-                      }}
-                    />
-                  </div>
-                )}
-
-                {/* 3. Working Directory Selector Badge */}
+                {/* 2. Working Directory Selector Badge */}
                 {onWorkingDirectoryChange && (
                   <WorkingDirectoryBadge
                     workingDirectory={workingDirectory}
