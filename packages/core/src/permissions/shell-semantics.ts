@@ -136,7 +136,19 @@ function pushToken(tokens: string[], token: string): void {
 }
 
 function trimShellSyntax(token: string): string {
-  return token.replace(/^\(+/, '').replace(/\)+&?$|&+$/g, '');
+  let start = 0;
+  let end = token.length;
+
+  while (start < end && token[start] === '(') {
+    start++;
+  }
+  while (end > start) {
+    const ch = token[end - 1];
+    if (ch !== ')' && ch !== '&') break;
+    end--;
+  }
+
+  return token.slice(start, end);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
