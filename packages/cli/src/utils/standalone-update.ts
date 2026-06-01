@@ -22,6 +22,7 @@ const OSS_BASE =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code';
 const GITHUB_BASE = 'https://github.com/QwenLM/qwen-code/releases/download';
 const FETCH_TIMEOUT_MS = 30_000;
+const ARCHIVE_TIMEOUT_MS = 300_000; // 5 min — archives are 50–150 MB
 
 const VALID_TARGETS = new Set([
   'darwin-arm64',
@@ -57,10 +58,13 @@ function escapePS(s: string): string {
   return s.replace(/'/g, "''");
 }
 
-async function tryFetch(url: string): Promise<UndiciResponse | null> {
+async function tryFetch(
+  url: string,
+  timeoutMs = FETCH_TIMEOUT_MS,
+): Promise<UndiciResponse | null> {
   try {
     const res = await fetch(url, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (res.ok) return res;
     // Consume body to release the socket back to the connection pool
@@ -74,13 +78,14 @@ async function tryFetch(url: string): Promise<UndiciResponse | null> {
 async function downloadWithFallback(
   versionPath: string,
   filename: string,
+  timeoutMs = FETCH_TIMEOUT_MS,
 ): Promise<UndiciResponse> {
   const ossUrl = `${OSS_BASE}/${versionPath}/${filename}`;
-  const ossRes = await tryFetch(ossUrl);
+  const ossRes = await tryFetch(ossUrl, timeoutMs);
   if (ossRes) return ossRes;
 
   const ghUrl = `${GITHUB_BASE}/${versionPath}/${filename}`;
-  const ghRes = await tryFetch(ghUrl);
+  const ghRes = await tryFetch(ghUrl, timeoutMs);
   if (ghRes) return ghRes;
 
   throw new Error(
@@ -154,7 +159,11 @@ async function downloadToFile(
   filename: string,
   destPath: string,
 ): Promise<void> {
-  const response = await downloadWithFallback(versionPath, filename);
+  const response = await downloadWithFallback(
+    versionPath,
+    filename,
+    ARCHIVE_TIMEOUT_MS,
+  );
   const body = response.body;
   if (!body) throw new Error('Empty response body');
 
@@ -219,20 +228,20 @@ async function extractArchive(
 }
 
 /**
- * Runs a command and captures stdout/exit code.
+ * Runs a command and captures stdout, stderr, and exit code.
  */
 function spawnAndCapture(
   command: string,
   args: string[],
   timeoutMs: number,
-): Promise<{ exitCode: number; stdout: string }> {
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const child = execFile(
       command,
       args,
       { timeout: timeoutMs },
-      (err, out) => {
+      (err, out, stderr) => {
         if (settled) return;
         settled = true;
         if (
@@ -244,7 +253,7 @@ function spawnAndCapture(
         }
         const exitCode =
           err && 'code' in err && typeof err.code === 'number' ? err.code : 0;
-        resolve({ exitCode, stdout: out || '' });
+        resolve({ exitCode, stdout: out || '', stderr: stderr || '' });
       },
     );
     child.on('error', (e) => {
@@ -294,14 +303,15 @@ async function smokeTest(newInstallDir: string, target: string): Promise<void> {
     throw new Error(`Smoke test failed: cli.js not found at ${cliBin}`);
   }
 
-  const { exitCode, stdout } = await spawnAndCapture(
+  const { exitCode, stdout, stderr } = await spawnAndCapture(
     nodeBin,
     [cliBin, '--version'],
     10_000,
   );
   if (exitCode !== 0) {
+    const detail = stderr.trim() ? `: ${stderr.trim()}` : '';
     throw new Error(
-      `Smoke test failed: new binary exited with code ${exitCode}`,
+      `Smoke test failed: new binary exited with code ${exitCode}${detail}`,
     );
   }
   const version = stdout.trim();
@@ -727,21 +737,34 @@ export async function performStandaloneUpdate(
   }
 }
 
+export type RollbackResult =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: 'no-old' | 'no-manifest' | 'rename-failed';
+      detail: string;
+    };
+
 /**
  * Rolls back a standalone installation to the previous version (.old directory).
- * Returns true if rollback succeeded, false if no rollback available.
  */
-export function rollbackStandaloneUpdate(standaloneDir: string): boolean {
+export function rollbackStandaloneUpdate(
+  standaloneDir: string,
+): RollbackResult {
   const oldDir = `${standaloneDir}.old`;
 
   if (!fs.existsSync(oldDir)) {
-    return false;
+    return { ok: false, reason: 'no-old', detail: `${oldDir} does not exist` };
   }
 
   const oldManifest = path.join(oldDir, 'manifest.json');
   if (!fs.existsSync(oldManifest)) {
     debugLogger.error('Rollback failed: .old directory has no manifest.json');
-    return false;
+    return {
+      ok: false,
+      reason: 'no-manifest',
+      detail: `${oldDir}/manifest.json missing — .old may be corrupt`,
+    };
   }
 
   const failedDir = `${standaloneDir}.failed`;
@@ -753,7 +776,7 @@ export function rollbackStandaloneUpdate(standaloneDir: string): boolean {
     fs.renameSync(oldDir, standaloneDir);
     fs.rmSync(failedDir, { recursive: true, force: true });
     debugLogger.info('Rollback successful.');
-    return true;
+    return { ok: true };
   } catch (err) {
     debugLogger.error('Rollback failed:', err);
     // Attempt to restore current if we moved it
@@ -764,6 +787,10 @@ export function rollbackStandaloneUpdate(standaloneDir: string): boolean {
         // Critical failure — both dirs are in bad state
       }
     }
-    return false;
+    return {
+      ok: false,
+      reason: 'rename-failed',
+      detail: `Filesystem error: ${(err as Error).message}. Manual recovery: mv "${oldDir}" "${standaloneDir}"`,
+    };
   }
 }

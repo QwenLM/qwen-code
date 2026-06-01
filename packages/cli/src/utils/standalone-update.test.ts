@@ -27,7 +27,7 @@ describe('standalone-update', () => {
   });
 
   describe('rollbackStandaloneUpdate', () => {
-    it('returns false when .old directory does not exist', () => {
+    it('returns no-old when .old directory does not exist', () => {
       const standaloneDir = path.join(tempDir, 'qwen-code');
       fs.mkdirSync(standaloneDir);
       fs.writeFileSync(
@@ -39,10 +39,11 @@ describe('standalone-update', () => {
       );
 
       const result = rollbackStandaloneUpdate(standaloneDir);
-      expect(result).toBe(false);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe('no-old');
     });
 
-    it('returns false when .old directory has no manifest.json', () => {
+    it('returns no-manifest when .old directory has no manifest.json', () => {
       const standaloneDir = path.join(tempDir, 'qwen-code');
       const oldDir = `${standaloneDir}.old`;
       fs.mkdirSync(standaloneDir);
@@ -56,7 +57,8 @@ describe('standalone-update', () => {
       );
 
       const result = rollbackStandaloneUpdate(standaloneDir);
-      expect(result).toBe(false);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toBe('no-manifest');
     });
 
     it('swaps current with .old directory on valid rollback', () => {
@@ -86,7 +88,7 @@ describe('standalone-update', () => {
       fs.writeFileSync(path.join(oldDir, 'marker.txt'), 'old');
 
       const result = rollbackStandaloneUpdate(standaloneDir);
-      expect(result).toBe(true);
+      expect(result.ok).toBe(true);
 
       const manifest = JSON.parse(
         fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf-8'),
@@ -111,7 +113,7 @@ describe('standalone-update', () => {
       fs.writeFileSync(path.join(oldDir, 'manifest.json'), '{}');
 
       const result = rollbackStandaloneUpdate(standaloneDir);
-      expect(result).toBe(true);
+      expect(result.ok).toBe(true);
     });
   });
 

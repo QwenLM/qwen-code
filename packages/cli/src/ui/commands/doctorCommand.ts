@@ -437,13 +437,18 @@ function rollbackDoctorAction(context: CommandContext) {
     };
   }
 
-  const success = rollbackStandaloneUpdate(installInfo.standaloneDir);
-  const msg = success
-    ? t(
-        'Rollback successful. Restart your terminal to use the previous version.',
-      )
-    : t('Rollback failed: no previous version found (.old directory missing).');
-  const messageType = success ? 'info' : 'error';
+  const result = rollbackStandaloneUpdate(installInfo.standaloneDir);
+  let msg: string;
+  let messageType: 'info' | 'error';
+  if (result.ok) {
+    msg = t(
+      'Rollback successful. Restart your terminal to use the previous version.',
+    );
+    messageType = 'info';
+  } else {
+    msg = t(`Rollback failed: ${result.detail}`);
+    messageType = 'error';
+  }
 
   if (context.executionMode === 'interactive') {
     context.ui.addItem({ type: messageType, text: msg }, Date.now());
