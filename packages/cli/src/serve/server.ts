@@ -11,6 +11,7 @@ import type { Application, NextFunction, Request, Response } from 'express';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
   APPROVAL_MODES,
+  BTW_MAX_INPUT_LENGTH,
   SessionService,
   TrustGateError,
   emitDaemonLog,
@@ -2107,11 +2108,10 @@ export function createServeApp(
     if (
       typeof question !== 'string' ||
       question.trim().length === 0 ||
-      question.length > 4096
+      question.length > BTW_MAX_INPUT_LENGTH
     ) {
       res.status(400).json({
-        error:
-          '`question` is required, must be a non-empty string, and at most 4096 characters',
+        error: `\`question\` is required, must be a non-empty string, and at most ${BTW_MAX_INPUT_LENGTH} characters`,
       });
       return;
     }

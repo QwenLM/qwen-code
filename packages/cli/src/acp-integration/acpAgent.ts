@@ -2575,6 +2575,7 @@ class QwenAgent implements Agent {
         const config = session.getConfig();
         const cacheSafeParams = buildBtwCacheSafeParams(config);
         if (!cacheSafeParams) {
+          debugLogger.debug(`btw: no cacheSafeParams for session=${sessionId}`);
           return { sessionId, answer: null };
         }
         const childSignal = AbortSignal.timeout(BTW_CHILD_TIMEOUT_MS);
