@@ -291,8 +291,10 @@ Uncertain concerns belong in the summary comment, not inline.
 
 ### Stage 4: Real-Scenario Testing
 
-If Stages 1-3 pass, prove the change works the way a user hits it — by driving
-the real product in a tmux TUI session, not by writing unit tests. Build the
+If Stages 1-3 pass, prove the change works the way a user hits it by driving the
+real product in a tmux TUI session. This is mandatory: it cannot be skipped, unit
+tests do not substitute for it (other CI covers units), and an unrelated build
+failure is never an excuse to skip — exhaust every workaround first. Build the
 scenario from the PR's core behavior: what does a user actually do to exercise
 what this PR adds or fixes?
 
@@ -306,12 +308,22 @@ what this PR adds or fixes?
   - **Before** — a build without this PR: the installed `qwen` (or `main`). The
     log should show the bug reproducing.
   - **After** — this PR's code via `npm run dev`. The log should show it fixed.
+- Get it running by any means. Prefer `npm run dev`, which runs the source
+  directly — an unrelated `npm run bundle` / packaging failure does not block it.
+  If a package or channel unrelated to this PR fails to build, install the missing
+  dependency, disable that module, or work around it; the installed `qwen`
+  baseline needs no build at all. A failure outside this PR's code is never a
+  reason to skip the test.
 - The readable tmux logs are the evidence. Post them to the PR as proof — the
   before and after frames inline, plus the full `tmux-readable-full.log` artifact
   path — so the result is verifiable, not just asserted.
-- Never run untrusted fork code with write tokens or secrets. If the PR is from
-  an untrusted fork or the environment is unsafe, skip execution and post why
-  instead.
+- Run untrusted fork code with write tokens and secrets stripped from the
+  environment — sandbox it, do not skip it. The token is only for posting results
+  and is never exposed to the PR's code during the run.
+
+If, after genuinely exhausting these, the real scenario truly cannot run, that is
+a blocker, not a pass: report it as FAIL with exactly what you tried and why each
+attempt failed, and do not approve. A skipped tmux test never counts as PASS.
 
 Post a Stage 4 testing report: the scenario, the exact steps a user took, the
 before/after result, and the tmux logs that back it.
@@ -323,7 +335,8 @@ Approve only if all are true:
 - template passed;
 - direction is aligned;
 - no critical KISS, correctness, security, or regression issue remains;
-- testing passed or was safely inapplicable;
+- real-scenario testing passed — not skipped (only a change with no runnable
+  behavior, e.g. docs-only, is exempt);
 - the blast radius is small enough that you are confident.
 
 Use:
