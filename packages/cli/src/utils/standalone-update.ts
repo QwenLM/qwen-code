@@ -285,6 +285,15 @@ async function smokeTest(newInstallDir: string, target: string): Promise<void> {
   debugLogger.info(`Smoke test passed: ${version}`);
 }
 
+/**
+ * Sentinel written by the Windows deferred-update bat script while it is
+ * mid-rename. acquireLock refuses to reclaim a stale PID lock when this
+ * file exists, preventing a concurrent update from racing the rename.
+ */
+function sentinelPath(lockPath: string): string {
+  return `${lockPath}.swap`;
+}
+
 function acquireLock(lockPath: string): boolean {
   try {
     fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
@@ -294,7 +303,12 @@ function acquireLock(lockPath: string): boolean {
       const pidStr = fs.readFileSync(lockPath, 'utf-8').trim();
       const pid = parseInt(pidStr, 10);
       // NaN (empty/corrupt file) or dead PID → stale lock, reclaim it
+      // — UNLESS the bat helper is mid-rename (sentinel file present).
       if (Number.isNaN(pid) || !isProcessAlive(pid)) {
+        if (fs.existsSync(sentinelPath(lockPath))) {
+          // Deferred update still swapping directories; do not reclaim.
+          return false;
+        }
         fs.unlinkSync(lockPath);
         try {
           fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
@@ -327,6 +341,29 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Rejects paths that would break out of a `"..."` quoted shell context.
+ * Conservative on purpose: `~/.local/lib/qwen-code` is the documented
+ * install path, so any of these characters indicates a misconfigured
+ * or hostile environment and we prefer to abort rather than evaluate
+ * `$(...)`, backticks, or `\` escapes inside a wrapper script.
+ *
+ * Backslash is only dangerous in POSIX shells — on Windows cmd/bat it is
+ * the standard path separator. We validate per-platform in ensureBinWrapper.
+ */
+const UNSAFE_SHELL_META_UNIX = /[`$"\\\n\r]/;
+const UNSAFE_SHELL_META_WIN = /[`$"\n\r]/;
+
+function assertSafeForShellEmbed(label: string, value: string): void {
+  const pattern =
+    os.platform() === 'win32' ? UNSAFE_SHELL_META_WIN : UNSAFE_SHELL_META_UNIX;
+  if (pattern.test(value)) {
+    throw new Error(
+      `${label} contains characters unsafe for shell embedding: ${value}`,
+    );
+  }
+}
+
 function atomicReplace(
   standaloneDir: string,
   newDir: string,
@@ -349,7 +386,7 @@ function atomicReplace(
     fs.renameSync(newDir, pendingDir);
 
     // Validate paths don't contain cmd.exe metacharacters that could break the script
-    const unsafeCmdChars = /[&|<>^%!]/;
+    const unsafeCmdChars = /[&|<>^%!"`\n\r]/;
     if (
       unsafeCmdChars.test(standaloneDir) ||
       unsafeCmdChars.test(oldDir) ||
@@ -361,6 +398,16 @@ function atomicReplace(
     }
 
     const lockFile = lockPath;
+    const sentinelFile = sentinelPath(lockPath);
+    const logFile = path.join(path.dirname(standaloneDir), 'qwen-update.log');
+    // Bat script runs detached after Node exits. It must:
+    // 1. Wait for this Node process to release file locks (<= 30s).
+    // 2. Write a sentinel so a concurrently-launched qwen does not reclaim the
+    //    stale-PID lock and start another update mid-rename.
+    // 3. Run both moves with errorlevel checks; if move #2 fails, roll back
+    //    move #1 so the user is never left without a working install.
+    // 4. Log success/failure to qwen-update.log for post-mortem (the bat
+    //    runs with stdio:ignore — the log is the only diagnostic surface).
     const script = [
       '@echo off',
       'set /a TRIES=0',
@@ -369,9 +416,28 @@ function atomicReplace(
       'if %TRIES% GTR 30 goto proceed',
       `tasklist /FI "PID eq ${process.pid}" 2>nul | find "${process.pid}" >nul && (timeout /t 1 >nul & goto wait)`,
       ':proceed',
+      `echo swap-in-progress > "${sentinelFile}"`,
+      `echo [%DATE% %TIME%] starting swap >> "${logFile}"`,
       `move /Y "${standaloneDir}" "${oldDir}"`,
+      'if errorlevel 1 goto move1_failed',
       `move /Y "${pendingDir}" "${standaloneDir}"`,
-      'rem Keep .old for rollback; release update lock',
+      'if errorlevel 1 goto move2_failed',
+      `echo [%DATE% %TIME%] swap completed >> "${logFile}"`,
+      'goto cleanup',
+      ':move1_failed',
+      `echo [%DATE% %TIME%] ERROR: failed to rename install to .old (errorlevel %errorlevel%) >> "${logFile}"`,
+      'goto cleanup',
+      ':move2_failed',
+      `echo [%DATE% %TIME%] ERROR: failed to promote .new; rolling back >> "${logFile}"`,
+      `move /Y "${oldDir}" "${standaloneDir}"`,
+      'if errorlevel 1 (',
+      `  echo [%DATE% %TIME%] CRITICAL: rollback also failed; manual recovery: move "${oldDir}" "${standaloneDir}" >> "${logFile}"`,
+      ') else (',
+      `  echo [%DATE% %TIME%] rollback succeeded >> "${logFile}"`,
+      ')',
+      ':cleanup',
+      'rem Release sentinel and update lock; keep .old (if present) for rollback',
+      `del /F /Q "${sentinelFile}" 2>nul`,
       `del /F /Q "${lockFile}" 2>nul`,
       `del "%~f0"`,
     ].join('\r\n');
@@ -392,9 +458,21 @@ function atomicReplace(
     fs.renameSync(standaloneDir, oldDir);
     try {
       fs.renameSync(newDir, standaloneDir);
-    } catch (err) {
-      fs.renameSync(oldDir, standaloneDir);
-      throw err;
+    } catch (promoteErr) {
+      // Recovery rename can also fail (e.g. FS hiccup, oldDir grabbed by
+      // another process). Surface BOTH errors with manual-recovery steps so
+      // the user is never silently left with a missing install.
+      try {
+        fs.renameSync(oldDir, standaloneDir);
+      } catch (rollbackErr) {
+        const detail =
+          `Standalone update failed AND rollback failed.\n` +
+          `Original error: ${(promoteErr as Error).message}\n` +
+          `Rollback error: ${(rollbackErr as Error).message}\n` +
+          `Manual recovery: mv "${oldDir}" "${standaloneDir}"`;
+        throw new Error(detail);
+      }
+      throw promoteErr;
     }
     // Keep .old for rollback instead of deleting immediately
     return 'done';
@@ -406,7 +484,11 @@ function atomicReplace(
  * Required for npm→standalone migration so the new binary is on PATH.
  */
 export function ensureBinWrapper(standaloneDir: string, target: string): void {
+  // Validate before embedding in any shell/cmd context
+  assertSafeForShellEmbed('standaloneDir', standaloneDir);
   const binDir = path.join(path.dirname(standaloneDir), '..', 'bin');
+  assertSafeForShellEmbed('binDir', binDir);
+
   try {
     fs.mkdirSync(binDir, { recursive: true });
     if (target.startsWith('win')) {
