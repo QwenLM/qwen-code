@@ -80,7 +80,7 @@ export type ContentGeneratorConfig = {
   authType?: AuthType | undefined;
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
-  timeout?: number; // Total request timeout in milliseconds (time-to-first-headers)
+  timeout?: number; // Total request timeout in milliseconds (hard deadline from request start)
   bodyTimeout?: number; // Inter-chunk idle timeout for streaming (ms). 0 = disabled (default).
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry

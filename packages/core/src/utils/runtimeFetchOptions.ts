@@ -632,7 +632,7 @@ function sanitizeBodyTimeout(value: number | undefined): number {
 }
 
 function buildFetchOptionsWithDispatcher(
-  sdkType: SDKType,
+  _sdkType: SDKType,
   proxyUrl?: string,
   options?: RuntimeFetchBehaviorOptions,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
