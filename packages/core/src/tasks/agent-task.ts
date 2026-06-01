@@ -91,6 +91,22 @@ export function setAgentBackgroundCapForTest(cap: number | undefined): void {
 }
 
 /**
+ * Test-only: reset the module-level singletons this file owns
+ * (notification + register callbacks, the message-waiters map, and the
+ * background-agent cap). The bare `TaskRegistry._resetForTest()` only
+ * clears the registry's own entries + listeners — leftover module-
+ * level state from a prior test would still be visible to the next.
+ * `_resetTaskKindModuleState()` in `tasks/index.ts` calls this plus
+ * the monitor/shell siblings.
+ */
+export function _resetAgentTaskModuleStateForTest(): void {
+  notificationCallback = undefined;
+  registerCallback = undefined;
+  messageWaiters.clear();
+  setAgentBackgroundCapForTest(undefined);
+}
+
+/**
  * Cap on how many fully-finalized terminal entries (those that have
  * already emitted their terminal `task-notification`) the registry
  * retains. Without this cap, every short-lived background subagent
@@ -648,6 +664,12 @@ export function agentFinalizeCancellationIfPending(
  * Append a recent tool activity to a running entry's rolling buffer.
  * No-op if the entry is not running — late events after a cancellation
  * shouldn't leak into the Progress section.
+ *
+ * Silent mutation — the dialog list / footer pill don't render
+ * activity, only the per-entry detail view does, and that view has its
+ * own subscription that re-reads the registry on each tick. Firing the
+ * registry-wide listener on every tool call would churn list-mode
+ * renderers needlessly. Mirrors the pattern in `monitorEmitEvent`.
  */
 export function agentAppendActivity(
   registry: TaskRegistry,
@@ -657,7 +679,7 @@ export function agentAppendActivity(
   const entry = registry.get(agentId) as AgentTask | undefined;
   if (!entry || entry.kind !== 'agent' || entry.status !== 'running') return;
 
-  registry.update<AgentTask>(agentId, (current) => {
+  registry.mutateSilent<AgentTask>(agentId, (current) => {
     const prior = current.recentActivities ?? [];
     const next = [...prior, activity];
     if (next.length > MAX_RECENT_ACTIVITIES) {

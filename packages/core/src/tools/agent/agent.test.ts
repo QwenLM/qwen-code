@@ -142,6 +142,13 @@ describe('AgentTool', () => {
         if (next !== current) stubEntries.set(id, next);
         return next;
       }),
+      mutateSilent: vi.fn((id: string, updater: (t: unknown) => unknown) => {
+        const current = stubEntries.get(id);
+        if (!current) return undefined;
+        const next = updater(current);
+        if (next !== current) stubEntries.set(id, next);
+        return next;
+      }),
       evict: vi.fn((id: string) => {
         stubEntries.delete(id);
       }),
@@ -1943,6 +1950,7 @@ describe('AgentTool', () => {
       getAll: ReturnType<typeof vi.fn>;
       getByKind: ReturnType<typeof vi.fn>;
       update: ReturnType<typeof vi.fn>;
+      mutateSilent: ReturnType<typeof vi.fn>;
       evict: ReturnType<typeof vi.fn>;
       kill: ReturnType<typeof vi.fn>;
       subscribe: ReturnType<typeof vi.fn>;
@@ -1985,6 +1993,13 @@ describe('AgentTool', () => {
         getAll: vi.fn(() => Array.from(innerEntries.values())),
         getByKind: vi.fn(() => []),
         update: vi.fn((id: string, updater: (t: unknown) => unknown) => {
+          const current = innerEntries.get(id);
+          if (!current) return undefined;
+          const next = updater(current);
+          if (next !== current) innerEntries.set(id, next);
+          return next;
+        }),
+        mutateSilent: vi.fn((id: string, updater: (t: unknown) => unknown) => {
           const current = innerEntries.get(id);
           if (!current) return undefined;
           const next = updater(current);

@@ -102,6 +102,9 @@ describe('ShellTool', () => {
         update: vi.fn((id: string, updater: (t: unknown) => unknown) =>
           updater({}),
         ),
+        mutateSilent: vi.fn(
+          (id: string, updater: (t: unknown) => unknown) => updater({}),
+        ),
         evict: vi.fn(),
         kill: vi.fn(),
         subscribe: vi.fn(() => () => {}),

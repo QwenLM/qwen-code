@@ -208,6 +208,19 @@ export function setMonitorAgentLifecycleCallback(
 }
 
 /**
+ * Test-only: reset every module-level singleton this file owns
+ * (monitor + agent-routed callbacks, plus the owner-routed callback
+ * Maps). Pair with `TaskRegistry._resetForTest()` so the next test
+ * starts with a clean slate.
+ */
+export function _resetMonitorTaskModuleStateForTest(): void {
+  notificationCallback = undefined;
+  registerCallback = undefined;
+  agentNotificationCallbacks.clear();
+  agentLifecycleCallbacks.clear();
+}
+
+/**
  * Read a monitor entry from the registry with the kind narrowed.
  * Returns `undefined` for missing ids and for ids that resolve to a
  * non-monitor kind.
@@ -296,7 +309,15 @@ export function monitorEmitEvent(
   const entry = registry.get(monitorId) as MonitorTask | undefined;
   if (!entry || entry.kind !== 'monitor' || entry.status !== 'running') return;
 
-  registry.update<MonitorTask>(monitorId, (current) => {
+  // Per-event mutations are silent — the dialog list and footer pill
+  // key off `id+kind+status`, none of which change here. The detail
+  // view's per-entry subscription re-reads the registry on its own
+  // tick so `eventCount` still surfaces live. Firing the registry-
+  // wide listener on every monitor stdout line caused noticeable UI
+  // churn in the pre-fix code (the old `MonitorRegistry.emitEvent`
+  // deliberately excluded these mutations from `statusChangeCallback`
+  // for the same reason).
+  registry.mutateSilent<MonitorTask>(monitorId, (current) => {
     current.eventCount += 1;
     current.lastEventTime = Date.now();
     return current;
@@ -320,14 +341,7 @@ export function monitorEmitEvent(
     debugLogger.info(
       `Monitor ${monitorId} reached max events (${entry.maxEvents}), stopping`,
     );
-    registry.update<MonitorTask>(monitorId, (current) => {
-      current.error = 'Max events reached';
-      current.status = 'completed';
-      current.endTime = Date.now();
-      return current;
-    });
-    clearIdleTimer(entry);
-    pruneTerminalEntries(registry);
+    settle(registry, entry, 'completed', { error: 'Max events reached' });
     entry.abortController.abort();
     emitTerminalNotification(entry, 'Max events reached');
   }
@@ -342,13 +356,12 @@ export function monitorComplete(
   const entry = registry.get(monitorId) as MonitorTask | undefined;
   if (!entry || entry.kind !== 'monitor' || entry.status !== 'running') return;
 
-  if (exitCode !== null) {
-    registry.update<MonitorTask>(monitorId, (current) => {
-      current.exitCode = exitCode;
-      return current;
-    });
-  }
-  settle(registry, entry, 'completed');
+  settle(
+    registry,
+    entry,
+    'completed',
+    exitCode !== null ? { exitCode } : {},
+  );
   debugLogger.info(
     `Monitor completed: ${monitorId} (exit ${exitCode}, ${entry.eventCount} events)`,
   );
@@ -367,11 +380,7 @@ export function monitorFail(
   const entry = registry.get(monitorId) as MonitorTask | undefined;
   if (!entry || entry.kind !== 'monitor' || entry.status !== 'running') return;
 
-  registry.update<MonitorTask>(monitorId, (current) => {
-    current.error = error;
-    return current;
-  });
-  settle(registry, entry, 'failed');
+  settle(registry, entry, 'failed', { error });
   debugLogger.info(`Monitor failed: ${monitorId}: ${error}`);
   emitTerminalNotification(entry, error);
 }
@@ -539,10 +548,18 @@ function settle(
   registry: TaskRegistry,
   entry: MonitorTask,
   status: 'completed' | 'failed' | 'cancelled',
+  extras: { exitCode?: number; error?: string } = {},
 ): void {
+  // Single `update` so the change listener fires exactly once per
+  // terminal transition. Earlier code did two updates (status fields
+  // first, then `settle`'s status flip) which churned the dialog and
+  // pill renderers twice for every completed/failed monitor. Mirrors
+  // the single-update pattern in `shellComplete`/`shellFail`.
   registry.update<MonitorTask>(entry.monitorId, (current) => {
     current.status = status;
     current.endTime = Date.now();
+    if (extras.exitCode !== undefined) current.exitCode = extras.exitCode;
+    if (extras.error !== undefined) current.error = extras.error;
     return current;
   });
   clearIdleTimer(entry);

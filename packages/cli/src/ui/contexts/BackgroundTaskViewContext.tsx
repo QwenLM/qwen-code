@@ -231,15 +231,31 @@ export function BackgroundTaskViewProvider({
       registry: config.getTaskRegistry(),
       memoryManager: config.getMemoryManager(),
     };
-    void Promise.resolve(
-      getTaskByType(target.kind).kill(entryId(target), ctx),
-    ).catch((err) => {
+    // `getTaskByType(kind)` throws synchronously for unregistered kinds
+    // (defensive — should not happen, but our React tree shouldn't
+    // crash if it does). Catch the sync throw from the lookup with a
+    // try/catch, then dispatch the (async) kill call through a Promise
+    // chain so any later async rejection is also captured. Keeping
+    // `kill()` synchronous-at-call-site preserves the test contract
+    // "pressing 'x' invokes kill before the next tick."
+    try {
+      const taskKind = getTaskByType(target.kind);
+      void Promise.resolve(taskKind.kill(entryId(target), ctx)).catch(
+        (err) => {
+          debugLogger.warn(
+            `cancelSelected: kill for ${target.kind} task ${entryId(target)} failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        },
+      );
+    } catch (err) {
       debugLogger.warn(
-        `cancelSelected: kill for ${target.kind} task ${entryId(target)} failed: ${
+        `cancelSelected: kind dispatch for ${target.kind} threw: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
-    });
+    }
   }, [config, entries, selectedIndex]);
 
   const resumeSelected = useCallback(async () => {

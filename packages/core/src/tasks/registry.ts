@@ -150,6 +150,40 @@ export class TaskRegistry {
   }
 
   /**
+   * Like {@link update} but does NOT fire the change listener. Use for
+   * high-frequency in-place mutations whose change-listener fanout
+   * would churn the dialog/pill renderers without changing
+   * `id+kind+status` (the shape every dialog consumer keys off).
+   *
+   * Concrete example: monitor stdout events bump `eventCount` and
+   * `lastEventTime` many times per second. The old `MonitorRegistry.
+   * emitEvent` deliberately did NOT call `statusChangeCallback` for
+   * those mutations — using `update` here is a regression. Use
+   * `mutateSilent` for the per-event bump and reserve `update` for the
+   * auto-stop transition where the status actually flips.
+   *
+   * Per-entry detail subscribers (LiveAgentPanel, the dialog detail
+   * view) still get fresh data because they re-read the registry on
+   * their own per-entry tick — the silence here only prevents the
+   * list-mode fan-out from churning.
+   *
+   * No-op if the entry is missing; returns `undefined` so callers can
+   * detect the missing case without a separate `get()`.
+   */
+  mutateSilent<T extends TaskState>(
+    id: string,
+    updater: (current: T) => T,
+  ): T | undefined {
+    const current = this.entries.get(id) as T | undefined;
+    if (!current) return undefined;
+    const next = updater(current);
+    if (next !== current) {
+      this.entries.set(id, next as TaskState);
+    }
+    return next;
+  }
+
+  /**
    * Drop a task from the registry without firing terminal notifications
    * or any kind-local cleanup. Per-kind helpers must perform that
    * cleanup before calling `evict`; this method exists so terminal +

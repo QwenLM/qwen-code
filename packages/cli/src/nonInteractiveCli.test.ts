@@ -210,6 +210,7 @@ describe('runNonInteractive', () => {
       get: vi.fn(),
       register: vi.fn(),
       update: vi.fn(),
+        mutateSilent: vi.fn(),
       evict: vi.fn(),
       kill: vi.fn(),
       subscribe: vi.fn(() => () => {}),

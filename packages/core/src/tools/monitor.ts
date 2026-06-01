@@ -45,6 +45,8 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { isSubpaths } from '../utils/paths.js';
 import {
   getMonitorOutputPath,
+  getRunningMonitorTasks,
+  MAX_CONCURRENT_MONITORS,
   monitorCancel,
   monitorComplete,
   monitorEmitEvent,
@@ -52,7 +54,6 @@ import {
   monitorRegister,
   type MonitorTaskRegistration,
 } from '../tasks/monitor-task.js';
-import { MAX_CONCURRENT_MONITORS } from '../tasks/monitor-task.js';
 import {
   extractCommandRules,
   isShellCommandReadOnlyAST,
@@ -323,9 +324,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const ownerAgentId = getCurrentAgentId() ?? undefined;
 
     // Check concurrent monitor limit before spawning
-    const running = registry
-      .getByKind('monitor')
-      .filter((e) => e.status === 'running');
+    const running = getRunningMonitorTasks(registry);
     if (running.length >= MAX_CONCURRENT_MONITORS) {
       return {
         llmContent: `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. Stop an existing monitor first.`,
