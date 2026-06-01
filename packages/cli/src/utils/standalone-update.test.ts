@@ -12,6 +12,7 @@ import {
   rollbackStandaloneUpdate,
   ensureBinWrapper,
   ensurePathInShellRc,
+  performStandaloneUpdate,
 } from './standalone-update.js';
 
 describe('standalone-update', () => {
@@ -187,6 +188,74 @@ describe('standalone-update', () => {
         }
       },
     );
+  });
+
+  describe('performStandaloneUpdate', () => {
+    it('rejects invalid version format', async () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      fs.mkdirSync(standaloneDir);
+      fs.writeFileSync(
+        path.join(standaloneDir, 'manifest.json'),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          target: 'darwin-arm64',
+        }),
+      );
+
+      await expect(
+        performStandaloneUpdate(standaloneDir, 'not-a-version'),
+      ).rejects.toThrow('Invalid version format');
+    });
+
+    it('rejects directory without manifest as non-managed install', async () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      fs.mkdirSync(standaloneDir);
+      // No manifest.json — could be user data
+
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.0.0'),
+      ).rejects.toThrow('not a Qwen Code standalone install');
+    });
+
+    it('rejects unknown target in manifest', async () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      fs.mkdirSync(standaloneDir);
+      fs.writeFileSync(
+        path.join(standaloneDir, 'manifest.json'),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          target: 'freebsd-mips',
+        }),
+      );
+
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.0.0'),
+      ).rejects.toThrow('Unknown target');
+    });
+
+    it('fails gracefully when another update is in progress', async () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const parentDir = path.dirname(standaloneDir);
+      fs.mkdirSync(standaloneDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(standaloneDir, 'manifest.json'),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          target: 'darwin-arm64',
+        }),
+      );
+
+      // Simulate held lock from a live process (current PID)
+      const lockPath = path.join(parentDir, '.qwen-update.lock');
+      fs.writeFileSync(lockPath, String(process.pid));
+
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.0.0'),
+      ).rejects.toThrow('Another update is already in progress');
+
+      // Clean up lock
+      fs.unlinkSync(lockPath);
+    });
   });
 
   describe.skipIf(process.platform === 'win32')('ensurePathInShellRc', () => {
