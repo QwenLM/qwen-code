@@ -107,6 +107,11 @@ function minimalBridge(
     getHeartbeatState: vi.fn().mockReturnValue(undefined),
     publishWorkspaceEvent: vi.fn(),
     knownClientIds: vi.fn().mockReturnValue(knownIds),
+    isChannelLive: vi.fn().mockReturnValue(false),
+    queryWorkspaceStatus: vi
+      .fn()
+      .mockImplementation((_method: string, idle: () => unknown) => idle()),
+    invokeWorkspaceCommand: vi.fn().mockResolvedValue({}),
     killSession: vi.fn().mockResolvedValue(undefined),
     detachClient: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),

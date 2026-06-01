@@ -313,6 +313,15 @@ export function createDaemonWorkspaceService(
               `regular file (or remove it) before re-running init.`,
           );
         }
+        if (!lst.isFile()) {
+          throw new WorkspaceInitSymlinkError(
+            target,
+            'target',
+            `Workspace context file ${JSON.stringify(target)} is not a regular file ` +
+              `(mode=${lst.mode.toString(8)}). Refusing to proceed — ` +
+              `FIFOs, sockets, and device nodes can block or misbehave on read/write.`,
+          );
+        }
       } catch (err) {
         if (err instanceof WorkspaceInitSymlinkError) throw err;
         const code = (err as { code?: unknown } | null | undefined)?.code;

@@ -10,7 +10,10 @@ import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
-import type { DaemonWorkspaceService , WorkspaceRequestContext } from '../workspace-service/types.js';
+import type {
+  DaemonWorkspaceService,
+  WorkspaceRequestContext,
+} from '../workspace-service/types.js';
 import type { AcpConnection } from './connectionRegistry.js';
 import {
   QWEN_META_KEY,
