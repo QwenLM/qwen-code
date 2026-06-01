@@ -20,7 +20,7 @@ import {
  * not byte counts — for CJK / multi-byte text the byte/char ratio differs
  * from 1, so a "bytes" name would mislead. Programmatically aliased to
  * compactionInputSlimming.ts's TOKEN_TO_CHAR_RATIO so the auto-compaction
- * trigger and the compression splitter can never drift on this constant.
+ * trigger and the compression size estimator can never drift on this constant.
  * Matches claude-code's roughTokenCountEstimation default. (review #4168 R3.1)
  */
 export const CHARS_PER_TOKEN = TOKEN_TO_CHAR_RATIO;
@@ -30,8 +30,8 @@ export const CHARS_PER_TOKEN = TOKEN_TO_CHAR_RATIO;
  *
  * Reuses `estimateContentChars` so that inlineData / functionCall /
  * functionResponse get the same treatment they receive when computing
- * compression split points — keeping the two estimators in sync prevents
- * the auto-compaction trigger and the splitter from disagreeing on size.
+ * compression size estimates — keeping the two estimators in sync prevents
+ * the auto-compaction trigger and the compressor from disagreeing on size.
  *
  * Intended for the pre-send threshold gate only. char/4 is a conservative
  * lower bound (real tokenizers vary ±30%); using it to TRIGGER compaction

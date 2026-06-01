@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -11,6 +11,7 @@
     "packages/channels/telegram",
     "packages/channels/weixin",
     "packages/channels/dingtalk",
+    "packages/channels/feishu",
     "packages/channels/plugin-example"
   ],
   "repository": {
@@ -18,7 +19,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.16.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.17.0"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",

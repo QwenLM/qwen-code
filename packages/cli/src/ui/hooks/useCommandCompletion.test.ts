@@ -599,7 +599,11 @@ describe('useCommandCompletion', () => {
     it('should not append trailing space for directory completions', async () => {
       setupMocks({
         atSuggestions: [
-          { label: 'src/components/', value: 'src/components/', isDirectory: true },
+          {
+            label: 'src/components/',
+            value: 'src/components/',
+            isDirectory: true,
+          },
         ],
       });
 
@@ -696,9 +700,7 @@ describe('useCommandCompletion', () => {
         result.current.handleAutocomplete(0);
       });
 
-      expect(result.current.textBuffer.text).toBe(
-        '@src/components/ is a dir',
-      );
+      expect(result.current.textBuffer.text).toBe('@src/components/ is a dir');
     });
   });
 

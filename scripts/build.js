@@ -50,6 +50,7 @@ const buildOrder = [
   'packages/channels/telegram',
   'packages/channels/weixin',
   'packages/channels/dingtalk',
+  'packages/channels/feishu',
   'packages/channels/plugin-example',
   'packages/acp-bridge',
   'packages/cli',

@@ -26,7 +26,7 @@ import {
 } from './constants.js';
 import { clearDetailedSpanState } from './detailed-span-attributes.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
-import { getSessionContext } from './session-context.js';
+import { getSessionContext, setSessionContext } from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
@@ -291,10 +291,14 @@ export function startInteractionSpan(
     'interaction.sequence': interactionSequence,
   };
 
-  const span = getTracer().startSpan(SPAN_INTERACTION, {
-    kind: SpanKind.INTERNAL,
-    attributes,
-  });
+  // Pin to session root directly — resolveParentContext() would prefer
+  // any active OTel span, but interaction is a turn boundary (#4486).
+  const sessionCtx = getSessionContext() ?? otelContext.active();
+  const span = getTracer().startSpan(
+    SPAN_INTERACTION,
+    { kind: SpanKind.INTERNAL, attributes },
+    sessionCtx,
+  );
 
   const spanId = getSpanId(span);
   const spanContextObj: SpanContext = {
@@ -957,6 +961,8 @@ export function clearSessionTracingForTesting(): void {
   interactionSequence = 0;
   lastInteractionCtx = undefined;
   clearDetailedSpanState();
+  // Reach into session-context module to prevent cross-test leakage (#4486).
+  setSessionContext(undefined);
 }
 
 /**

@@ -47,7 +47,6 @@ import {
 } from './turn.js';
 
 // Services
-import { COMPRESSION_PRESERVE_THRESHOLD } from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -2192,7 +2191,3 @@ export class GeminiClient {
     return info;
   }
 }
-
-export const TEST_ONLY = {
-  COMPRESSION_PRESERVE_THRESHOLD,
-};

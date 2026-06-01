@@ -925,8 +925,8 @@ describe('SessionService', () => {
         type: 'assistant',
         usageMetadata: {
           promptTokenCount: 200,
-          candidatesTokenCount: 60,
-          thoughtsTokenCount: 40,
+          candidatesTokenCount: 40,
+          thoughtsTokenCount: 60,
         },
       };
       expect(

@@ -373,12 +373,13 @@ export function useStatusLine(): {
 
       const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(m);
 
-      const contextWindowSize =
-        cfg.getContentGeneratorConfig()?.contextWindowSize || 0;
+      const contentGeneratorConfig = cfg.getContentGeneratorConfig();
+      const contextWindowSize = contentGeneratorConfig?.contextWindowSize || 0;
       const data = buildStatusLinePresetData({
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
         modelDisplayName: ui.currentModel || cfg.getModel(),
+        reasoning: contentGeneratorConfig?.reasoning,
         currentDir,
         branch: ui.branchName,
         pullRequestNumber: pullRequestNumberRef.current,
