@@ -41,7 +41,7 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
 // 5. acp-bridge (depends on core - used by cli)
 // 6. cli (depends on core, acp-bridge, web-templates, channel packages)
 // 7. webui (shared UI components - used by vscode companion)
-// 8. sdk (no internal dependencies)
+// 8. sdk (build-time devDep on acp-bridge for shared constants)
 // 9. vscode-ide-companion (depends on webui)
 const buildOrder = [
   'packages/core',

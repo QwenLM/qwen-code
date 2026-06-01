@@ -58,6 +58,7 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^7.13.0",
     "@typescript-eslint/parser": "^7.13.0",

@@ -79,6 +79,7 @@ import type {
   HttpAcpBridge,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
+import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 import { BridgeClient } from './bridgeClient.js';
@@ -588,18 +589,6 @@ function hasControlCharacter(value: string): boolean {
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const PERSIST_TIMEOUT_MS = 5_000;
-/**
- * #4282 fold-in 2 (gpt-5.5 CV2). Bridge-race deadline for the
- * `workspace/mcp/:server/restart` ACP extMethod. The MCP manager's
- * per-server discovery deadline can be up to 5 minutes
- * (`McpClientManager.MAX_DISCOVERY_TIMEOUT_MS`), so reusing
- * `initTimeoutMs` (10s) here produced a guaranteed false-timeout for
- * any stdio MCP server slower than 10s while the ACP child kept
- * reconnecting in the background. The bridge race is purely a safety
- * net against a completely wedged ACP channel; it should be at least
- * as long as the slowest legitimate per-server discovery.
- */
-const MCP_RESTART_TIMEOUT_MS = 300_000;
 /**
  * Backstop timeout for `qwen/control/session/recap`. The underlying
  * side-query is single-attempt with `maxOutputTokens: 300`, so a
@@ -3726,7 +3715,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
               SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
               params,
             ),
-            MCP_RESTART_TIMEOUT_MS,
+            MCP_RESTART_SERVER_DEADLINE_MS,
             SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
           ),
           getChannelClosedReject(info),
@@ -3866,7 +3855,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
             { name, config, originatorClientId },
           ),
-          MCP_RESTART_TIMEOUT_MS,
+          MCP_RESTART_SERVER_DEADLINE_MS,
           SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
         ),
         getChannelClosedReject(info),
@@ -3917,7 +3906,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
               SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
               { name, originatorClientId },
             ),
-            MCP_RESTART_TIMEOUT_MS,
+            MCP_RESTART_SERVER_DEADLINE_MS,
             SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove,
           ),
           getChannelClosedReject(info),
