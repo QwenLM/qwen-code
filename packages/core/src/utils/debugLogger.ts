@@ -174,6 +174,8 @@ export function resetDebugLoggingState(): void {
   hasWriteFailure = false;
   ensureDebugDirPromise = null;
   ensuredDebugDirPath = null;
+  cachedSessionId = undefined;
+  cachedTraceId = undefined;
 }
 
 const DEBUG_LATEST_ALIAS = 'latest';

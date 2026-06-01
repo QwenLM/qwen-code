@@ -35,10 +35,7 @@ import {
 } from './file-exporters.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
-import {
-  getCurrentSessionId,
-  setSessionContext,
-} from './session-context.js';
+import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { endInteractionSpan } from './session-tracing.js';
 
 function createTelemetryDiagLogger(): DiagLogger {
@@ -156,10 +153,14 @@ function validateUrl(url: string | undefined): string | undefined {
 
 class SessionIdSpanProcessor implements SpanProcessor {
   onStart(span: SdkSpan): void {
-    if ((span as unknown as ReadableSpan).attributes?.['session.id']) return;
-    const sessionId = getCurrentSessionId();
-    if (sessionId) {
-      span.setAttribute('session.id', sessionId);
+    try {
+      if ((span as unknown as ReadableSpan).attributes?.['session.id']) return;
+      const sessionId = getCurrentSessionId();
+      if (sessionId) {
+        span.setAttribute('session.id', sessionId);
+      }
+    } catch {
+      // OTel processor errors must not break span creation
     }
   }
   onEnd(_span: ReadableSpan): void {}
