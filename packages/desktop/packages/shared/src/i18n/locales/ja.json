@@ -776,7 +776,7 @@
   "settings.appearance.title": "外観",
   "settings.appearance.toolHeader": "ツール",
   "settings.appearance.toolIcons": "ツールアイコン",
-  "settings.appearance.toolIconsDesc": "チャットアクティビティのCLIコマンドの横に表示されるアイコンです。~/.craft-agent/tool-icons/に保存されます。",
+  "settings.appearance.toolIconsDesc": "チャットアクティビティのCLIコマンドの横に表示されるアイコンです。",
   "settings.appearance.useDefault": "デフォルトを使用",
   "settings.appearance.useDefaultWithTheme": "デフォルトを使用 ({{theme}})",
   "settings.appearance.usingBundledFallback": "バンドルされたフォールバックを使用中",
@@ -1490,6 +1490,6 @@
   "workspace.selectWorkspaceDesc": "このサーバー上のWorkspaceを選択するか、新規作成してください。",
   "workspace.selectWorkspacePlaceholder": "Workspaceを選択...",
   "workspace.serverAuthToken": "サーバー認証トークン",
-  "workspace.underDefaultFolder": ".craft-agentフォルダ内",
+  "workspace.underDefaultFolder": "デフォルトフォルダ内",
   "workspace.unpinWorkspace": "ワークスペースの固定を解除"
 }

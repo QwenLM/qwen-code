@@ -776,7 +776,7 @@
   "settings.appearance.title": "Megjelenés",
   "settings.appearance.toolHeader": "Eszköz",
   "settings.appearance.toolIcons": "Eszközikonok",
-  "settings.appearance.toolIconsDesc": "A CLI parancsok mellett megjelenő ikonok a csevegési tevékenységben. Tárolás helye: ~/.craft-agent/tool-icons/.",
+  "settings.appearance.toolIconsDesc": "A CLI parancsok mellett megjelenő ikonok a csevegési tevékenységben.",
   "settings.appearance.useDefault": "Alapértelmezett használata",
   "settings.appearance.useDefaultWithTheme": "Alapértelmezett használata ({{theme}})",
   "settings.appearance.usingBundledFallback": "csomagolt tartalék használata",
@@ -1490,6 +1490,6 @@
   "workspace.selectWorkspaceDesc": "Válassz egy munkaterületet ezen a szerveren, vagy hozz létre újat.",
   "workspace.selectWorkspacePlaceholder": "Válassz munkaterületet...",
   "workspace.serverAuthToken": "Szerver hitelesítési token",
-  "workspace.underDefaultFolder": "a .craft-agent mappában",
+  "workspace.underDefaultFolder": "az alapértelmezett mappában",
   "workspace.unpinWorkspace": "Munkaterület rögzítésének feloldása"
 }

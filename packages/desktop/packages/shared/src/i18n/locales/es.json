@@ -776,7 +776,7 @@
   "settings.appearance.title": "Apariencia",
   "settings.appearance.toolHeader": "Herramienta",
   "settings.appearance.toolIcons": "Iconos de herramientas",
-  "settings.appearance.toolIconsDesc": "Iconos que se muestran junto a los comandos CLI en la actividad del chat. Se almacenan en ~/.craft-agent/tool-icons/.",
+  "settings.appearance.toolIconsDesc": "Iconos que se muestran junto a los comandos CLI en la actividad del chat.",
   "settings.appearance.useDefault": "Usar predeterminado",
   "settings.appearance.useDefaultWithTheme": "Usar predeterminado ({{theme}})",
   "settings.appearance.usingBundledFallback": "usando el tema de respaldo incluido",
@@ -1490,6 +1490,6 @@
   "workspace.selectWorkspaceDesc": "Elige un Workspace en este servidor o crea uno nuevo.",
   "workspace.selectWorkspacePlaceholder": "Selecciona un Workspace...",
   "workspace.serverAuthToken": "Token de autenticación del servidor",
-  "workspace.underDefaultFolder": "bajo la carpeta .craft-agent",
+  "workspace.underDefaultFolder": "bajo la carpeta predeterminada",
   "workspace.unpinWorkspace": "Desfijar espacio de trabajo"
 }

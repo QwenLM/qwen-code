@@ -776,7 +776,7 @@
   "settings.appearance.title": "外观",
   "settings.appearance.toolHeader": "工具",
   "settings.appearance.toolIcons": "工具图标",
-  "settings.appearance.toolIconsDesc": "聊天活动中 CLI 命令旁显示的图标。存储在 ~/.craft-agent/tool-icons/。",
+  "settings.appearance.toolIconsDesc": "聊天活动中 CLI 命令旁显示的图标。",
   "settings.appearance.useDefault": "使用默认",
   "settings.appearance.useDefaultWithTheme": "使用默认 ({{theme}})",
   "settings.appearance.usingBundledFallback": "使用内置备选",
@@ -1490,6 +1490,6 @@
   "workspace.selectWorkspaceDesc": "选择此服务器上的 Workspace 或创建新的。",
   "workspace.selectWorkspacePlaceholder": "选择 Workspace...",
   "workspace.serverAuthToken": "服务器认证令牌",
-  "workspace.underDefaultFolder": ".craft-agent 文件夹下",
+  "workspace.underDefaultFolder": "默认文件夹下",
   "workspace.unpinWorkspace": "取消固定工作区"
 }
