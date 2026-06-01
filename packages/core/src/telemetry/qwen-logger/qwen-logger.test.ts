@@ -24,8 +24,6 @@ import {
   KittySequenceOverflowEvent,
   IdeConnectionType,
   HookCallEvent,
-  ToolOutputTruncatedEvent,
-  ToolOutputTruncationFailedEvent,
   SkillLaunchEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
@@ -389,81 +387,6 @@ describe('QwenLogger', () => {
           },
           snapshots: JSON.stringify({
             truncated_sequence: 'truncated...',
-          }),
-        }),
-      );
-    });
-
-    it('should log only the saved output basename for tool output truncation events', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      const event = new ToolOutputTruncatedEvent('prompt-id-1', {
-        toolName: 'test-tool',
-        callId: 'call-id-1',
-        originalContentLength: 1000,
-        truncatedContentLength: 100,
-        threshold: 500,
-        lines: 10,
-        outputFile: '/Users/test-user/.qwen/tmp/project-hash/test-tool.output',
-      });
-
-      logger.logToolOutputTruncatedEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'action',
-          type: 'tool',
-          name: 'tool_output_truncated',
-          properties: {
-            tool_name: 'test-tool',
-            prompt_id: 'prompt-id-1',
-            call_id: 'call-id-1',
-          },
-          snapshots: JSON.stringify({
-            original_content_length: 1000,
-            truncated_content_length: 100,
-            threshold: 500,
-            lines: 10,
-            output_file: 'test-tool.output',
-          }),
-        }),
-      );
-    });
-
-    it('should log tool output truncation failures', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      const fsError = Object.assign(
-        new Error(
-          "EACCES: permission denied, open 'C:\\Users\\Mary Jane\\AppData\\Roaming\\Qwen\\test-tool.output'",
-        ),
-        { code: 'EACCES' },
-      );
-      const event = new ToolOutputTruncationFailedEvent('prompt-id-1', {
-        toolName: 'test-tool',
-        callId: 'call-id-1',
-        originalContentLength: 1000,
-        error: fsError,
-      });
-
-      logger.logToolOutputTruncationFailedEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'action',
-          type: 'tool',
-          name: 'tool_output_truncation_failed',
-          properties: {
-            tool_name: 'test-tool',
-            prompt_id: 'prompt-id-1',
-            call_id: 'call-id-1',
-            error_type: 'EACCES',
-          },
-          snapshots: JSON.stringify({
-            original_content_length: 1000,
-            error_message: "EACCES: permission denied, open 'test-tool.output'",
           }),
         }),
       );

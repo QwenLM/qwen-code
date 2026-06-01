@@ -36,14 +36,10 @@ import {
   ToolConfirmationOutcome,
   ApprovalMode,
   logToolCall,
-  logToolOutputTruncationFailed,
   ToolErrorType,
   ToolCallEvent,
-  ToolOutputTruncationFailedEvent,
   InputFormat,
   Kind,
-  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '../index.js';
 import type {
   FunctionResponse,
@@ -55,6 +51,7 @@ import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { escapeSystemReminderTags, escapeXml } from '../utils/xml.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
+import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
@@ -114,11 +111,7 @@ import {
   type HookSpanMetadata,
 } from '../telemetry/index.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
-import {
-  shouldTruncateContent,
-  truncateContentInMemory,
-  truncateToolOutput,
-} from '../utils/truncation.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
@@ -168,49 +161,6 @@ const TRUNCATION_EDIT_REJECTION =
   'first write_file with a skeleton/partial content, ' +
   'then use edit to add the remaining sections incrementally. ' +
   'Do NOT retry with the same large content.';
-
-function readTruncationLimits(
-  config: Config,
-  fallbackToDefaults = false,
-): { threshold: number; lines: number } | undefined {
-  try {
-    const threshold = config.getTruncateToolOutputThreshold();
-    const lines = config.getTruncateToolOutputLines();
-    if (threshold <= 0 || lines <= 0) {
-      return undefined;
-    }
-    return { threshold, lines };
-  } catch {
-    if (!fallbackToDefaults) {
-      return undefined;
-    }
-    return {
-      threshold: DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
-      lines: DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-    };
-  }
-}
-
-function halfTruncationLimits(limits: { threshold: number; lines: number }): {
-  threshold: number;
-  lines: number;
-} {
-  return {
-    threshold: Math.max(Math.floor(limits.threshold / 2), 1),
-    lines: Math.max(Math.floor(limits.lines / 2), 1),
-  };
-}
-
-function readFallbackTruncationLimits(
-  config: Config,
-  useSplitBudget: boolean,
-): { threshold: number; lines: number } | undefined {
-  const fallbackLimits = readTruncationLimits(config, true);
-  if (!fallbackLimits) {
-    return undefined;
-  }
-  return useSplitBudget ? halfTruncationLimits(fallbackLimits) : fallbackLimits;
-}
 
 function setToolSpanFailure(
   span: Span,
@@ -731,14 +681,6 @@ function toParts(input: PartListUnion): Part[] {
   return parts;
 }
 
-function getApproxSerializedLength(value: unknown): number | 'unknown' {
-  try {
-    return JSON.stringify(value)?.length ?? 0;
-  } catch {
-    return 'unknown';
-  }
-}
-
 const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
 
 /** Directive injected when a tool call repeatedly fails validation. */
@@ -898,6 +840,10 @@ export class CoreToolScheduler {
     this.getPreferredEditor = options.getPreferredEditor;
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
+  }
+
+  private get memoryMonitor(): MemoryPressureMonitor | undefined {
+    return this.config.getMemoryPressureMonitor?.();
   }
 
   private setStatusInternal(
@@ -2659,6 +2605,7 @@ export class CoreToolScheduler {
       // _executeToolCallBody pre-sets status (OK / FAILURE / CANCELLED) via
       // setToolSpan*; finalize without metadata to preserve that.
       this.finalizeToolSpan(callId);
+      this.memoryMonitor?.scheduleCheck();
     }
   }
 
@@ -2891,7 +2838,7 @@ export class CoreToolScheduler {
       if (toolResult.error === undefined) {
         let content = toolResult.llmContent;
         let resultDisplay = toolResult.returnDisplay;
-        const originalContentLength =
+        const contentLength =
           typeof content === 'string' ? content.length : undefined;
         let postToolUseAdditionalContext: string | undefined;
 
@@ -2933,9 +2880,8 @@ export class CoreToolScheduler {
                   },
           );
 
-          // Defer appending hook context until after raw tool-output
-          // truncation, so the structure-blind head/tail truncator cannot
-          // bisect hook-injected metadata or reminders.
+          // Defer hook context until after raw string output truncation so the
+          // head/tail truncator does not bisect hook-injected metadata.
           if (postHookResult.additionalContext) {
             postToolUseAdditionalContext = postHookResult.additionalContext;
           }
@@ -2965,155 +2911,21 @@ export class CoreToolScheduler {
           }
         }
 
-        const truncationLimits = readTruncationLimits(this.config);
-        const useSplitBudget =
-          !!truncationLimits &&
-          typeof content === 'string' &&
-          !toolResult.alreadyTruncated &&
-          !!postToolUseAdditionalContext &&
-          shouldTruncateContent(
+        if (typeof content === 'string') {
+          const truncated = await truncateToolOutput(
+            this.config,
+            toolName,
             content,
-            truncationLimits.threshold,
-            truncationLimits.lines,
-          ) &&
-          shouldTruncateContent(
-            postToolUseAdditionalContext,
-            truncationLimits.threshold,
-            truncationLimits.lines,
           );
-        const componentTruncationLimits = useSplitBudget
-          ? halfTruncationLimits(truncationLimits)
-          : undefined;
-
-        if (typeof content === 'string' && !toolResult.alreadyTruncated) {
-          try {
-            const truncated = await truncateToolOutput(
-              this.config,
-              toolName,
-              content,
-              scheduledCall.request.prompt_id,
-              {
-                ...componentTruncationLimits,
-                callId: scheduledCall.request.callId,
-              },
-            );
-            const originalContent = content;
-            content = truncated.content;
-            if (truncated.outputFile) {
-              if (typeof resultDisplay === 'string') {
-                const separator = resultDisplay.length > 0 ? '\n' : '';
-                resultDisplay =
-                  `${resultDisplay}${separator}` +
-                  `Output too long and was saved to: ${truncated.outputFile}`;
-              } else {
-                debugLogger.info(
-                  `Truncation file path ${truncated.outputFile} not surfaced in TUI: ` +
-                    `resultDisplay is ${typeof resultDisplay} (${toolName})`,
-                );
-              }
-            } else if (
-              content !== originalContent &&
-              typeof resultDisplay === 'string'
-            ) {
-              const separator = resultDisplay.length > 0 ? '\n' : '';
-              resultDisplay = `${resultDisplay}${separator}Output too long (truncated in memory)`;
-            }
-          } catch (truncationError) {
-            debugLogger.warn(
-              `Tool output truncation failed for ${toolName} ` +
-                `(callId=${scheduledCall.request.callId}, prompt_id=${scheduledCall.request.prompt_id}): ` +
-                (truncationError instanceof Error
-                  ? truncationError.message
-                  : String(truncationError)),
-            );
-            logToolOutputTruncationFailed(
-              this.config,
-              new ToolOutputTruncationFailedEvent(
-                scheduledCall.request.prompt_id,
-                {
-                  toolName,
-                  callId: scheduledCall.request.callId,
-                  originalContentLength: content.length,
-                  error: truncationError,
-                },
-              ),
-            );
-            const fallbackLimits = readFallbackTruncationLimits(
-              this.config,
-              useSplitBudget,
-            );
-            if (fallbackLimits) {
-              const fallbackContent = truncateContentInMemory(
-                content,
-                fallbackLimits.threshold,
-                fallbackLimits.lines,
-              );
-              if (
-                fallbackContent !== content &&
-                typeof resultDisplay === 'string'
-              ) {
-                const separator = resultDisplay.length > 0 ? '\n' : '';
-                resultDisplay = `${resultDisplay}${separator}Output too long (truncated in memory)`;
-              }
-              content = fallbackContent;
-            }
+          content = truncated.content;
+          if (truncated.outputFile && typeof resultDisplay === 'string') {
+            resultDisplay +=
+              (resultDisplay ? '\n' : '') +
+              `Output too long and was saved to: ${truncated.outputFile}`;
           }
-        } else if (typeof content !== 'string') {
-          const approxSerializedLength = getApproxSerializedLength(content);
-          debugLogger.debug(
-            `Skipping tool output truncation for ${toolName} ` +
-              `(callId=${scheduledCall.request.callId}, prompt_id=${scheduledCall.request.prompt_id}): ` +
-              `non-string content (~${approxSerializedLength} chars)`,
-          );
         }
 
         if (postToolUseAdditionalContext) {
-          try {
-            const truncatedHookContext = await truncateToolOutput(
-              this.config,
-              `${toolName}__post_tool_use_additional_context`,
-              postToolUseAdditionalContext,
-              scheduledCall.request.prompt_id,
-              {
-                ...componentTruncationLimits,
-                contentLabel: 'PostToolUse hook context',
-                callId: scheduledCall.request.callId,
-              },
-            );
-            postToolUseAdditionalContext = truncatedHookContext.content;
-          } catch (truncationError) {
-            debugLogger.warn(
-              `PostToolUse additional context truncation failed for ${toolName} ` +
-                `(callId=${scheduledCall.request.callId}, prompt_id=${scheduledCall.request.prompt_id}): ` +
-                (truncationError instanceof Error
-                  ? truncationError.message
-                  : String(truncationError)),
-            );
-            logToolOutputTruncationFailed(
-              this.config,
-              new ToolOutputTruncationFailedEvent(
-                scheduledCall.request.prompt_id,
-                {
-                  toolName: `${toolName}__post_tool_use_additional_context`,
-                  callId: scheduledCall.request.callId,
-                  originalContentLength: postToolUseAdditionalContext.length,
-                  error: truncationError,
-                },
-              ),
-            );
-            const fallbackLimits = readFallbackTruncationLimits(
-              this.config,
-              useSplitBudget,
-            );
-            if (fallbackLimits) {
-              postToolUseAdditionalContext = truncateContentInMemory(
-                postToolUseAdditionalContext,
-                fallbackLimits.threshold,
-                fallbackLimits.lines,
-                'PostToolUse hook context',
-              );
-            }
-          }
           content = appendAdditionalContext(
             content,
             postToolUseAdditionalContext,
@@ -3200,7 +3012,6 @@ export class CoreToolScheduler {
             );
           }
         }
-        const contentLength = originalContentLength;
 
         // Guard the JSON serialization for non-string content. Tool
         // results can contain Part[] with large inlineData/media payloads

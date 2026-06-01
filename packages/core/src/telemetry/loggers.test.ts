@@ -52,7 +52,6 @@ import {
   logRipgrepFallback,
   logSkillLaunch,
   logToolOutputTruncated,
-  logToolOutputTruncationFailed,
   logExtensionEnable,
   logExtensionDisable,
   logExtensionInstallEvent,
@@ -77,7 +76,6 @@ import {
   makeChatCompressionEvent,
   FileOperationEvent,
   ToolOutputTruncatedEvent,
-  ToolOutputTruncationFailedEvent,
   ExtensionEnableEvent,
   ExtensionDisableEvent,
   ExtensionInstallEvent,
@@ -1294,12 +1292,10 @@ describe('loggers', () => {
     it('should log a tool output truncated event', () => {
       const event = new ToolOutputTruncatedEvent('prompt-id-1', {
         toolName: 'test-tool',
-        callId: 'call-id-1',
         originalContentLength: 1000,
         truncatedContentLength: 100,
         threshold: 500,
         lines: 10,
-        outputFile: '/tmp/test-tool.output',
       });
 
       logToolOutputTruncated(mockConfig, event);
@@ -1313,52 +1309,10 @@ describe('loggers', () => {
           eventName: 'tool_output_truncated',
           prompt_id: 'prompt-id-1',
           tool_name: 'test-tool',
-          call_id: 'call-id-1',
           original_content_length: 1000,
           truncated_content_length: 100,
           threshold: 500,
           lines: 10,
-          output_file: 'test-tool.output',
-        },
-      });
-    });
-  });
-
-  describe('logToolOutputTruncationFailed', () => {
-    const mockConfig = {
-      getSessionId: () => 'test-session-id',
-      getUsageStatisticsEnabled: () => true,
-    } as unknown as Config;
-
-    it('should log a tool output truncation failed event', () => {
-      const fsError = Object.assign(
-        new Error(
-          "EACCES: permission denied, open '/Users/Mary Jane/Library/Application Support/Qwen/test-tool.output'",
-        ),
-        { code: 'EACCES' },
-      );
-      const event = new ToolOutputTruncationFailedEvent('prompt-id-1', {
-        toolName: 'test-tool',
-        callId: 'call-id-1',
-        originalContentLength: 1000,
-        error: fsError,
-      });
-
-      logToolOutputTruncationFailed(mockConfig, event);
-
-      expect(mockLogger.emit).toHaveBeenCalledWith({
-        body: 'Tool output truncation failed for test-tool.',
-        attributes: {
-          'session.id': 'test-session-id',
-          'event.name': 'tool_output_truncation_failed',
-          'event.timestamp': '2025-01-01T00:00:00.000Z',
-          eventName: 'tool_output_truncation_failed',
-          prompt_id: 'prompt-id-1',
-          tool_name: 'test-tool',
-          call_id: 'call-id-1',
-          original_content_length: 1000,
-          error_type: 'EACCES',
-          error_message: "EACCES: permission denied, open 'test-tool.output'",
         },
       });
     });

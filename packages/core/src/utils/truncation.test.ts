@@ -5,99 +5,21 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import {
-  truncateAndSaveToFile,
-  truncateContentInMemory,
-  truncateToolOutput,
-} from './truncation.js';
+import { truncateAndSaveToFile } from './truncation.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Config } from '../config/config.js';
 
 vi.mock('node:fs/promises');
-
-const toolOutputTruncatedEvents = vi.hoisted(
-  (): Array<{
-    prompt_id: string;
-    call_id?: string;
-    output_file?: string;
-  }> => [],
-);
-const toolOutputTruncationFailedEvents = vi.hoisted(
-  (): Array<{
-    prompt_id: string;
-    call_id?: string;
-    error_message?: string;
-  }> => [],
-);
-const debugWarnMessages = vi.hoisted((): string[] => []);
-
-vi.mock('../telemetry/loggers.js', () => ({
-  logToolOutputTruncated: vi.fn(
-    (_config: Config, event: { prompt_id: string }) => {
-      toolOutputTruncatedEvents.push(event);
-    },
-  ),
-  logToolOutputTruncationFailed: vi.fn(
-    (
-      _config: Config,
-      event: {
-        prompt_id: string;
-        call_id?: string;
-        error_message?: string;
-      },
-    ) => {
-      toolOutputTruncationFailedEvents.push(event);
-    },
-  ),
-}));
-
-vi.mock('./debugLogger.js', () => ({
-  createDebugLogger: () => ({
-    warn: (message: string) => {
-      debugWarnMessages.push(message);
-    },
-  }),
-}));
-
-describe('truncateContentInMemory', () => {
-  it('returns content unchanged when below threshold and line limit', () => {
-    expect(truncateContentInMemory('small', 100, 10)).toBe('small');
-  });
-
-  it('truncates with a custom content label', () => {
-    const result = truncateContentInMemory(
-      Array.from({ length: 20 }, (_, i) => `line-${i}`).join('\n'),
-      40,
-      4,
-      'PostToolUse hook context',
-    );
-
-    expect(result).toContain(
-      'PostToolUse hook context was too large and has been truncated.',
-    );
-    expect(result).toContain(
-      '[Note: Could not save full posttooluse hook context to file]',
-    );
-    expect(result).toContain('Truncated part of the posttooluse hook context:');
-    expect(result).not.toContain('Truncated part of the output:');
-  });
-});
 
 describe('truncateAndSaveToFile', () => {
   const mockWriteFile = vi.mocked(fs.writeFile);
   const mockMkdir = vi.mocked(fs.mkdir);
-  const mockChmod = vi.mocked(fs.chmod);
   const THRESHOLD = 40_000;
   const TRUNCATE_LINES = 1000;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    toolOutputTruncatedEvents.length = 0;
-    toolOutputTruncationFailedEvents.length = 0;
-    debugWarnMessages.length = 0;
     mockMkdir.mockResolvedValue(undefined);
-    mockChmod.mockResolvedValue(undefined);
   });
 
   it('should return content unchanged if below both threshold and line limit', async () => {
@@ -142,9 +64,7 @@ describe('truncateAndSaveToFile', () => {
     );
     expect(mockMkdir).toHaveBeenCalledWith(projectTempDir, {
       recursive: true,
-      mode: 0o700,
     });
-    expect(mockChmod).toHaveBeenCalledWith(projectTempDir, 0o700);
 
     const head = Math.floor(TRUNCATE_LINES / 5);
     const beginning = lines.slice(0, head);
@@ -221,12 +141,10 @@ describe('truncateAndSaveToFile', () => {
     );
     expect(mockMkdir).toHaveBeenCalledWith(projectTempDir, {
       recursive: true,
-      mode: 0o700,
     });
     expect(mockWriteFile).toHaveBeenCalledWith(
       path.join(projectTempDir, `${fileName}.output`),
       content,
-      { mode: 0o600 },
     );
 
     // Effective lines = min(1000, 40000/5) = 1000 (line limit is binding)
@@ -267,7 +185,6 @@ describe('truncateAndSaveToFile', () => {
     expect(mockWriteFile).toHaveBeenCalledWith(
       path.join(projectTempDir, `${fileName}.output`),
       content,
-      { mode: 0o600 },
     );
 
     expect(result.content).toContain(
@@ -328,47 +245,10 @@ describe('truncateAndSaveToFile', () => {
     );
 
     expect(result.outputFile).toBeUndefined();
-    expect(result.saveError).toEqual(new Error('File write failed'));
     expect(result.content).toContain(
-      '[Note: Could not save full tool output to file]',
+      '[Note: Could not save full output to file]',
     );
     expect(mockWriteFile).toHaveBeenCalled();
-    expect(debugWarnMessages).toEqual([
-      expect.stringContaining(
-        `Failed to save truncated tool output to ${path.join(
-          projectTempDir,
-          `${fileName}.output`,
-        )}: File write failed`,
-      ),
-    ]);
-  });
-
-  it('should still save output if directory chmod fails', async () => {
-    const content = 'a'.repeat(2_000_000);
-    const fileName = 'test-file';
-    const projectTempDir = '/tmp';
-
-    mockChmod.mockRejectedValue(new Error('chmod failed'));
-    mockWriteFile.mockResolvedValue(undefined);
-
-    const result = await truncateAndSaveToFile(
-      content,
-      fileName,
-      projectTempDir,
-      THRESHOLD,
-      TRUNCATE_LINES,
-    );
-
-    const expectedPath = path.join(projectTempDir, `${fileName}.output`);
-    expect(result.outputFile).toBe(expectedPath);
-    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content, {
-      mode: 0o600,
-    });
-    expect(debugWarnMessages).toEqual([
-      expect.stringContaining(
-        `Failed to enforce private permissions on ${projectTempDir}: chmod failed`,
-      ),
-    ]);
   });
 
   it('should save to correct file path with file name', async () => {
@@ -388,9 +268,7 @@ describe('truncateAndSaveToFile', () => {
 
     const expectedPath = path.join(projectTempDir, `${fileName}.output`);
     expect(result.outputFile).toBe(expectedPath);
-    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content, {
-      mode: 0o600,
-    });
+    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content);
   });
 
   it('should include helpful instructions in truncated message', async () => {
@@ -420,32 +298,6 @@ describe('truncateAndSaveToFile', () => {
     );
   });
 
-  it('should use custom content labels in saved-file truncation messages', async () => {
-    const content = 'a'.repeat(2_000_000);
-    mockWriteFile.mockResolvedValue(undefined);
-
-    const result = await truncateAndSaveToFile(
-      content,
-      'hook-context',
-      '/tmp',
-      THRESHOLD,
-      TRUNCATE_LINES,
-      'PostToolUse hook context',
-    );
-
-    expect(result.content).toContain(
-      'The full posttooluse hook context has been saved to:',
-    );
-    expect(result.content).toContain(
-      'To read the complete posttooluse hook context, use the read_file tool',
-    );
-    expect(result.content).toContain(
-      'Truncated part of the posttooluse hook context:',
-    );
-    expect(result.content).not.toContain('The full output has been saved to:');
-    expect(result.content).not.toContain('Truncated part of the output:');
-  });
-
   it('should sanitize fileName to prevent path traversal', async () => {
     const content = 'a'.repeat(200_000);
     const fileName = '../../../../../etc/passwd';
@@ -462,74 +314,6 @@ describe('truncateAndSaveToFile', () => {
     );
 
     const expectedPath = path.join(projectTempDir, 'passwd.output');
-    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content, {
-      mode: 0o600,
-    });
-  });
-
-  it('should log truncation telemetry with the caller prompt id and output file', async () => {
-    const content = 'a'.repeat(200_000);
-    const config = {
-      getTruncateToolOutputThreshold: () => 100,
-      getTruncateToolOutputLines: () => 10,
-      storage: { getProjectTempDir: () => '/tmp/safe_dir' },
-    } as unknown as Config;
-
-    mockWriteFile.mockResolvedValue(undefined);
-
-    await truncateToolOutput(
-      config,
-      'largeOutputTool',
-      content,
-      'prompt-large-1',
-      { callId: 'call-large-1' },
-    );
-
-    expect(toolOutputTruncatedEvents).toContainEqual(
-      expect.objectContaining({
-        prompt_id: 'prompt-large-1',
-        call_id: 'call-large-1',
-        output_file: expect.stringMatching(
-          new RegExp(
-            `${path
-              .join('/tmp/safe_dir', 'largeOutputTool_')
-              .replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}[a-f0-9]+\\.output$`,
-          ),
-        ),
-      }),
-    );
-  });
-
-  it('should log failure telemetry when saving the full output fails', async () => {
-    const content = 'a'.repeat(200_000);
-    const config = {
-      getTruncateToolOutputThreshold: () => 100,
-      getTruncateToolOutputLines: () => 10,
-      storage: { getProjectTempDir: () => '/tmp/safe_dir' },
-    } as unknown as Config;
-
-    mockWriteFile.mockRejectedValue(
-      new Error("EACCES: permission denied, open '/tmp/safe_dir/secret'"),
-    );
-
-    const result = await truncateToolOutput(
-      config,
-      'largeOutputTool',
-      content,
-      'prompt-large-1',
-      { callId: 'call-large-1' },
-    );
-
-    expect(result.outputFile).toBeUndefined();
-    expect(result.content).toContain(
-      '[Note: Could not save full tool output to file]',
-    );
-    expect(toolOutputTruncationFailedEvents).toContainEqual(
-      expect.objectContaining({
-        prompt_id: 'prompt-large-1',
-        call_id: 'call-large-1',
-        error_message: "EACCES: permission denied, open 'secret'",
-      }),
-    );
+    expect(mockWriteFile).toHaveBeenCalledWith(expectedPath, content);
   });
 });

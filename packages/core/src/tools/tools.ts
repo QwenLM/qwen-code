@@ -442,13 +442,6 @@ export interface ToolResult {
   resultFilePaths?: string[];
 
   /**
-   * True when the tool has already bounded its model-facing string output.
-   * The scheduler uses this structured signal to avoid wrapping the same
-   * output again without relying on human-readable truncation text.
-   */
-  alreadyTruncated?: boolean;
-
-  /**
    * If this property is present, the tool call is considered a failure.
    */
   error?: {

@@ -6,7 +6,6 @@
 
 import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
 import { logs } from '@opentelemetry/api-logs';
-import path from 'node:path';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
@@ -96,7 +95,6 @@ import type {
   ContentRetryFailureEvent,
   RipgrepFallbackEvent,
   ToolOutputTruncatedEvent,
-  ToolOutputTruncationFailedEvent,
   ExtensionDisableEvent,
   ExtensionEnableEvent,
   ExtensionUninstallEvent,
@@ -270,7 +268,6 @@ export function logToolOutputTruncated(
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
     ...event,
-    output_file: path.basename(event.output_file),
     'event.name': 'tool_output_truncated',
     'event.timestamp': new Date().toISOString(),
   };
@@ -280,29 +277,6 @@ export function logToolOutputTruncated(
     body: `Tool output truncated for ${event.tool_name}.`,
     attributes,
   };
-  logger.emit(logRecord);
-}
-
-export function logToolOutputTruncationFailed(
-  config: Config,
-  event: ToolOutputTruncationFailedEvent,
-): void {
-  QwenLogger.getInstance(config)?.logToolOutputTruncationFailedEvent(event);
-  if (!isTelemetrySdkInitialized()) return;
-
-  const attributes: LogAttributes = {
-    ...getCommonAttributes(config),
-    ...event,
-    'event.name': 'tool_output_truncation_failed',
-    'event.timestamp': new Date().toISOString(),
-  };
-
-  const logRecord: LogRecord = {
-    body: `Tool output truncation failed for ${event.tool_name}.`,
-    attributes,
-  };
-
-  const logger = logs.getLogger(SERVICE_NAME);
   logger.emit(logRecord);
 }
 

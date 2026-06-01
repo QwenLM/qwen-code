@@ -5,7 +5,6 @@
  */
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
-import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import type { ApprovalMode } from '../config/config.js';
 import type { CompletedToolCall } from '../core/coreToolScheduler.js';
@@ -703,104 +702,25 @@ export class ToolOutputTruncatedEvent implements BaseTelemetryEvent {
   threshold: number;
   lines: number;
   prompt_id: string;
-  call_id: string;
-  output_file: string;
 
   constructor(
     prompt_id: string,
     details: {
       toolName: string;
-      callId: string;
       originalContentLength: number;
       truncatedContentLength: number;
       threshold: number;
       lines: number;
-      outputFile: string;
     },
   ) {
     this['event.name'] = this.eventName;
     this.prompt_id = prompt_id;
     this.tool_name = details.toolName;
-    this.call_id = details.callId;
     this.original_content_length = details.originalContentLength;
     this.truncated_content_length = details.truncatedContentLength;
     this.threshold = details.threshold;
     this.lines = details.lines;
-    this.output_file = details.outputFile;
   }
-}
-
-export class ToolOutputTruncationFailedEvent implements BaseTelemetryEvent {
-  readonly eventName = 'tool_output_truncation_failed';
-  readonly 'event.timestamp' = new Date().toISOString();
-  'event.name': string;
-  tool_name: string;
-  prompt_id: string;
-  call_id: string;
-  original_content_length: number;
-  error_type: string;
-  error_message: string;
-
-  constructor(
-    prompt_id: string,
-    details: {
-      toolName: string;
-      callId: string;
-      originalContentLength: number;
-      error: unknown;
-    },
-  ) {
-    this['event.name'] = this.eventName;
-    this.prompt_id = prompt_id;
-    this.tool_name = details.toolName;
-    this.call_id = details.callId;
-    this.original_content_length = details.originalContentLength;
-    this.error_type = getTelemetryErrorType(details.error);
-    this.error_message = sanitizeTelemetryErrorMessage(
-      details.error instanceof Error
-        ? details.error.message
-        : String(details.error),
-    );
-  }
-}
-
-function getTelemetryErrorType(error: unknown): string {
-  const code = getTelemetryErrorCode(error);
-  if (code) {
-    return code;
-  }
-  return error instanceof Error ? error.name : typeof error;
-}
-
-function getTelemetryErrorCode(error: unknown): string | undefined {
-  if (!error || typeof error !== 'object') {
-    return undefined;
-  }
-  const code = (error as { code?: unknown }).code;
-  if (typeof code === 'string' && code.length > 0) {
-    return code;
-  }
-  if (typeof code === 'number' && Number.isFinite(code)) {
-    return String(code);
-  }
-  return undefined;
-}
-
-function sanitizeTelemetryErrorMessage(message: string): string {
-  const sanitizedQuotedPaths = message.replace(/'([^']+)'/g, (match, p) => {
-    if (!p.includes('/') && !p.includes('\\')) {
-      return match;
-    }
-    return `'${p.includes('\\') ? path.win32.basename(p) : path.posix.basename(p)}'`;
-  });
-
-  return sanitizedQuotedPaths.replace(
-    /(?:[A-Za-z]:)?[\\/](?:[^\\/\s'"]+[\\/])*[^\\/\s'"]+/g,
-    (match) =>
-      match.includes('\\')
-        ? path.win32.basename(match)
-        : path.posix.basename(match),
-  );
 }
 
 export class ExtensionUninstallEvent implements BaseTelemetryEvent {
@@ -1048,7 +968,6 @@ export type TelemetryEvent =
   | ExtensionInstallEvent
   | ExtensionUninstallEvent
   | ToolOutputTruncatedEvent
-  | ToolOutputTruncationFailedEvent
   | ModelSlashCommandEvent
   | AuthEvent
   | HookCallEvent
