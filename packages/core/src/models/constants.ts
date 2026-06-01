@@ -31,6 +31,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'extra_body',
   'modalities',
   'splitToolMedia',
+  'bodyTimeout',
 ] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;
 
 /**

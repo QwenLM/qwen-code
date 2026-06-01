@@ -77,34 +77,28 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
-  it('returns Agent with disabled timeouts for OpenAI when no proxy is set', () => {
+  it('returns dispatcher with bodyTimeout=0 for OpenAI when no proxy is set', () => {
     const result = buildRuntimeFetchOptions('openai');
     expect(result).toBeDefined();
-    expect(result && 'fetchOptions' in result).toBe(true);
     const dispatcher = (
       result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
     ).fetchOptions?.dispatcher;
     expect(dispatcher?.options).toMatchObject({
-      headersTimeout: 0,
       bodyTimeout: 0,
-      keepAliveTimeout: 60_000,
+      headersTimeout: 0,
     });
-    expect((result as { fetch?: unknown }).fetch).toBe(mockUndiciFetch);
   });
 
-  it('returns Agent with disabled timeouts for Anthropic when no proxy is set', () => {
+  it('returns dispatcher with bodyTimeout=0 for Anthropic when no proxy is set', () => {
     const result = buildRuntimeFetchOptions('anthropic');
     expect(result).toBeDefined();
-    expect(result && 'fetchOptions' in result).toBe(true);
     const dispatcher = (
       result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
     ).fetchOptions?.dispatcher;
     expect(dispatcher?.options).toMatchObject({
-      headersTimeout: 0,
       bodyTimeout: 0,
-      keepAliveTimeout: 60_000,
+      headersTimeout: 0,
     });
-    expect((result as { fetch?: unknown }).fetch).toBe(mockUndiciFetch);
   });
 
   it('uses ProxyAgent with disabled timeouts when proxy is set', () => {
@@ -159,10 +153,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     );
   });
 
-  it('injects undiciFetch when no proxy is set', () => {
-    // No-proxy path uses a bundled undici Agent with disabled timeouts,
-    // so it also pins undiciFetch to avoid version-mismatch between the
-    // bundled undici and Node.js built-in undici.
+  it('pins fetch to undici when no proxy is set (dispatcher version compatibility)', () => {
     const openaiResult = buildRuntimeFetchOptions('openai');
     expect((openaiResult as { fetch?: unknown }).fetch).toBe(mockUndiciFetch);
 
@@ -172,10 +163,76 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     );
   });
 
-  it('returns undefined for OpenAI when dispatcher creation fails', () => {
+  it('respects custom bodyTimeout option in no-proxy path', () => {
+    const result = buildRuntimeFetchOptions('openai', undefined, {
+      bodyTimeout: 60000,
+    });
+    const dispatcher = (
+      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
+    ).fetchOptions?.dispatcher;
+    expect(dispatcher?.options).toMatchObject({
+      bodyTimeout: 60000,
+      headersTimeout: 0,
+    });
+  });
+
+  it('caches no-proxy dispatchers by bodyTimeout value', () => {
+    const result1 = buildRuntimeFetchOptions('openai', undefined, {
+      bodyTimeout: 0,
+    });
+    const result2 = buildRuntimeFetchOptions('openai', undefined, {
+      bodyTimeout: 0,
+    });
+    const dispatcher1 = (
+      result1 as {
+        fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+      }
+    ).fetchOptions?.dispatcher;
+    const dispatcher2 = (
+      result2 as {
+        fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+      }
+    ).fetchOptions?.dispatcher;
+    expect(dispatcher1).toBe(dispatcher2);
+  });
+
+  it.each([
+    { input: -1, expected: 0, label: 'negative' },
+    { input: 3.14, expected: 0, label: 'float' },
+    { input: NaN, expected: 0, label: 'NaN' },
+    { input: Infinity, expected: 0, label: 'Infinity' },
+    { input: undefined, expected: 0, label: 'undefined' },
+    { input: 0, expected: 0, label: 'zero' },
+    { input: 60000, expected: 60000, label: 'positive integer' },
+  ])(
+    'sanitizes invalid bodyTimeout ($label → $expected)',
+    ({ input, expected }) => {
+      const result = buildRuntimeFetchOptions('openai', undefined, {
+        bodyTimeout: input as number,
+      });
+      const dispatcher = (
+        result as {
+          fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+        }
+      ).fetchOptions?.dispatcher;
+      expect(dispatcher?.options).toMatchObject({
+        bodyTimeout: expected,
+        headersTimeout: 0,
+      });
+    },
+  );
+
+  it('falls back to no-proxy dispatcher when proxy creation fails (OpenAI)', () => {
     const result = buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
-    // Should fallback to undefined (no dispatcher) on error
-    expect(result).toBeUndefined();
+    // Should fallback to a no-proxy Agent with bodyTimeout preserved
+    expect(result).toBeDefined();
+    const dispatcher = (
+      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
+    ).fetchOptions?.dispatcher;
+    expect(dispatcher?.options).toMatchObject({
+      bodyTimeout: 0,
+      headersTimeout: 0,
+    });
     // Should log the failure for visibility
     expect(mockWarn).toHaveBeenCalledOnce();
     expect(mockWarn).toHaveBeenCalledWith(
@@ -188,13 +245,20 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     );
   });
 
-  it('returns empty object for Anthropic when dispatcher creation fails', () => {
+  it('falls back to no-proxy dispatcher when proxy creation fails (Anthropic)', () => {
     const result = buildRuntimeFetchOptions(
       'anthropic',
       'http://invalid-proxy',
     );
-    // Should fallback to empty object on error
-    expect(result).toEqual({});
+    // Should fallback to a no-proxy Agent with bodyTimeout preserved
+    expect(result).toBeDefined();
+    const dispatcher = (
+      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
+    ).fetchOptions?.dispatcher;
+    expect(dispatcher?.options).toMatchObject({
+      bodyTimeout: 0,
+      headersTimeout: 0,
+    });
     // Should log the failure for visibility
     expect(mockWarn).toHaveBeenCalledOnce();
     expect(mockWarn).toHaveBeenCalledWith(
@@ -205,13 +269,41 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect(mockConsoleError).toHaveBeenCalledWith(
       expect.stringContaining('[RUNTIME_FETCH]'),
     );
+  });
+
+  it('preserves custom bodyTimeout in proxy-failure fallback', () => {
+    const result = buildRuntimeFetchOptions('openai', 'http://invalid-proxy', {
+      bodyTimeout: 60000,
+    });
+    const dispatcher = (
+      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
+    ).fetchOptions?.dispatcher;
+    expect(dispatcher?.options).toMatchObject({
+      bodyTimeout: 60000,
+      headersTimeout: 0,
+    });
+  });
+
+  it('returns different dispatchers for different bodyTimeout values', () => {
+    const result0 = buildRuntimeFetchOptions('openai', undefined, {
+      bodyTimeout: 0,
+    });
+    const result60k = buildRuntimeFetchOptions('openai', undefined, {
+      bodyTimeout: 60000,
+    });
+    const dispatcher0 = (result0 as { fetchOptions?: { dispatcher?: unknown } })
+      .fetchOptions?.dispatcher;
+    const dispatcher60k = (
+      result60k as { fetchOptions?: { dispatcher?: unknown } }
+    ).fetchOptions?.dispatcher;
+    expect(dispatcher0).not.toBe(dispatcher60k);
   });
 
   it('redacts credentials from proxy URL in error message', () => {
     // http://invalid-proxy triggers dispatcher failure whose error message
     // contains credentials that should be redacted
     const result = buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
-    expect(result).toBeUndefined();
+    expect(result).toBeDefined();
     // Should redact credentials in the log message
     expect(mockWarn).toHaveBeenCalledWith(
       expect.stringContaining('<redacted>'),

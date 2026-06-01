@@ -556,6 +556,11 @@
             "contextWindowSize": {
               "description": "Overrides the default context window size for the selected model. Use this setting when a provider's effective context limit differs from Qwen Code's default. This value defines the model's assumed maximum context capacity, not a per-request token limit.",
               "type": "number"
+            },
+            "bodyTimeout": {
+              "description": "Streaming body timeout in milliseconds. Maximum idle time allowed between data chunks during streaming. Set to 0 (default) to disable the body timeout, which prevents timeout errors with slow local model servers (Ollama, mlx_lm.server). Set a positive value to impose a safety timeout between chunks.",
+              "type": "number",
+              "default": 0
             }
           }
         }

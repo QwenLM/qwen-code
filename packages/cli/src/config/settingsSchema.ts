@@ -1288,6 +1288,17 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
+          bodyTimeout: {
+            type: 'number',
+            label: 'Body Timeout',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: 0,
+            description:
+              'Streaming body timeout in milliseconds. Maximum idle time allowed between data chunks during streaming. Set to 0 (default) to disable the body timeout, which prevents timeout errors with slow local model servers (Ollama, mlx_lm.server). Set a positive value to impose a safety timeout between chunks.',
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
         },
       },
     },

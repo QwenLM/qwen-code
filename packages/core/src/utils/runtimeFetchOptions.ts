@@ -69,11 +69,20 @@ export type AnthropicRuntimeFetchOptions = {
 export type SDKType = 'openai' | 'anthropic';
 
 /**
+ * Options for configuring fetch behavior.
+ */
+export interface RuntimeFetchBehaviorOptions {
+  /** Streaming body timeout in ms. 0 = disabled (default). */
+  bodyTimeout?: number;
+}
+
+/**
  * Build runtime-specific fetch options for OpenAI SDK
  */
 export function buildRuntimeFetchOptions(
   sdkType: 'openai',
   proxyUrl?: string,
+  options?: RuntimeFetchBehaviorOptions,
 ): OpenAIRuntimeFetchOptions;
 /**
  * Build runtime-specific fetch options for Anthropic SDK
@@ -81,6 +90,7 @@ export function buildRuntimeFetchOptions(
 export function buildRuntimeFetchOptions(
   sdkType: 'anthropic',
   proxyUrl?: string,
+  options?: RuntimeFetchBehaviorOptions,
 ): AnthropicRuntimeFetchOptions;
 /**
  * Build runtime-specific fetch options based on the detected runtime and SDK type
@@ -88,20 +98,22 @@ export function buildRuntimeFetchOptions(
  * across Node.js and Bun, ensuring user-configured timeout works as expected.
  *
  * @param sdkType - The SDK type ('openai' or 'anthropic') to determine return type
+ * @param proxyUrl - Optional proxy URL
+ * @param options - Optional behavior configuration (bodyTimeout, etc.)
  * @returns Runtime-specific options compatible with the specified SDK
  */
 export function buildRuntimeFetchOptions(
   sdkType: SDKType,
   proxyUrl?: string,
+  options?: RuntimeFetchBehaviorOptions,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   const runtime = detectRuntime();
 
   // When using a custom dispatcher (proxy mode), disable undici timeouts (set to 0)
   // to let SDK's timeout parameter control the total request time. This ensures
   // user-configured timeouts work as expected for long-running requests.
-  // When no proxy is configured, a bundled undici Agent with disabled timeouts
-  // is used so local LLM backends (LM Studio, Ollama, etc.) are not limited
-  // by undici's 300s default bodyTimeout.
+  // When no proxy is configured, the runtime's built-in fetch is used with its
+  // default timeout behavior.
 
   switch (runtime) {
     case 'bun': {
@@ -136,15 +148,15 @@ export function buildRuntimeFetchOptions(
     }
 
     case 'node': {
-      // Node.js: Use a custom undici dispatcher with disabled timeouts in both
-      // proxy and no-proxy paths so SDK timeout controls the total request time.
-      // No-proxy uses a plain Agent (not ProxyAgent) for local LLM backends.
-      return buildFetchOptionsWithDispatcher(sdkType, proxyUrl);
+      // Node.js: Use a custom undici dispatcher to control body timeout.
+      // With proxy: routes through ProxyAgent with bodyTimeout disabled.
+      // Without proxy: uses plain Agent with configurable bodyTimeout.
+      return buildFetchOptionsWithDispatcher(sdkType, proxyUrl, options);
     }
 
     default: {
       // Unknown runtime: treat as Node.js-like environment.
-      return buildFetchOptionsWithDispatcher(sdkType, proxyUrl);
+      return buildFetchOptionsWithDispatcher(sdkType, proxyUrl, options);
     }
   }
 }
@@ -156,19 +168,29 @@ export function buildRuntimeFetchOptions(
 const dispatcherCache = new Map<string, Dispatcher>();
 
 /**
+ * Cache of no-proxy Agent dispatchers keyed by bodyTimeout value.
+ */
+const noProxyDispatcherCache = new Map<number, Dispatcher>();
+
+function getOrCreateNoProxyDispatcher(bodyTimeout: number): Dispatcher {
+  const cached = noProxyDispatcherCache.get(bodyTimeout);
+  if (cached) {
+    return cached;
+  }
+
+  const dispatcher = new Agent({
+    bodyTimeout,
+    headersTimeout: 0,
+  });
+
+  noProxyDispatcherCache.set(bodyTimeout, dispatcher);
+  return dispatcher;
+}
+
+/**
  * Proxy dispatcher creation failure counts keyed by sanitized host.
  */
 const proxyFailureCounts = new Map<string, number>();
-
-/**
- * Fallback return value when no custom dispatcher is used.
- * OpenAI SDK accepts `undefined` for fetchOptions to use runtime built-in fetch;
- * Anthropic SDK requires an empty object `{}`.
- */
-const NO_DISPATCHER_FALLBACK = {
-  openai: undefined,
-  anthropic: {},
-} as const;
 
 /**
  * Get or create a shared undici dispatcher for the given proxy configuration.
@@ -201,6 +223,7 @@ export function getOrCreateSharedDispatcher(proxyUrl: string): Dispatcher {
  */
 export function resetDispatcherCache(): void {
   dispatcherCache.clear();
+  noProxyDispatcherCache.clear();
   proxyFailureCounts.clear();
 }
 
@@ -593,44 +616,46 @@ function recordProxyFailure(hostname: string): number {
   return failureCount;
 }
 
+/**
+ * Sanitize bodyTimeout to a value accepted by undici Agent constructor.
+ * undici requires a non-negative integer; invalid values default to 0 (disabled).
+ */
+function sanitizeBodyTimeout(value: number | undefined): number {
+  if (value === undefined || value === null) {
+    return 0;
+  }
+  if (!Number.isInteger(value) || value < 0) {
+    debugLogger.warn(
+      `Invalid bodyTimeout value ${value} (must be a non-negative integer). Defaulting to 0 (disabled).`,
+    );
+    return 0;
+  }
+  return value;
+}
+
 function buildFetchOptionsWithDispatcher(
   sdkType: SDKType,
   proxyUrl?: string,
+  options?: RuntimeFetchBehaviorOptions,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
-  // When no proxy is configured, use a cached plain undici Agent with disabled
-  // timeouts (headersTimeout: 0, bodyTimeout: 0). This prevents undici's 300s
-  // default bodyTimeout from aborting long-running requests to local LLM
-  // backends (LM Studio, Ollama, llama.cpp, MLX). The Agent is cached for
-  // connection pool reuse, matching the proxy path's caching behavior.
+  const resolvedBodyTimeout = sanitizeBodyTimeout(options?.bodyTimeout);
+
   if (!proxyUrl) {
-    const NO_PROXY_KEY = '__no_proxy__';
-    let dispatcher = dispatcherCache.get(NO_PROXY_KEY);
-    if (!dispatcher) {
-      dispatcher = new Agent({
-        headersTimeout: 0,
-        bodyTimeout: 0,
-        keepAliveTimeout: 60_000,
-      });
-      dispatcherCache.set(NO_PROXY_KEY, dispatcher);
-    }
+    // Create a plain Agent with configurable bodyTimeout to prevent undici's
+    // default 300s idle timeout from killing streaming connections to slow
+    // local model servers (Ollama, mlx_lm.server) during tool call generation.
+    // Pin fetch to bundled undici to avoid version-mismatch with the dispatcher.
+    const dispatcher = getOrCreateNoProxyDispatcher(resolvedBodyTimeout);
     return { fetchOptions: { dispatcher }, fetch: undiciFetch };
   }
 
   try {
     const dispatcher = getOrCreateSharedDispatcher(proxyUrl);
-    // Pin fetch to undici's own implementation so the dispatcher and fetch
-    // come from the same undici version. Node's bundled undici may differ in
-    // major version from the project's bundled one (e.g. v8 vs v6), which
-    // breaks dispatcher handler-interface checks (`invalid onError method`).
-    // The no-proxy branch above also pins undiciFetch for consistency.
+    // Pin fetch to bundled undici so dispatcher and fetch share a version.
+    // Node's built-in undici may differ in major version (e.g. v8 vs v6),
+    // which breaks dispatcher handler-interface checks (`invalid onError method`).
     return { fetchOptions: { dispatcher }, fetch: undiciFetch };
   } catch (error) {
-    // Log dispatcher creation failure - requests will fallback to direct connection
-    // bypassing the configured proxy. This is important for environments requiring
-    // proxy for security controls (TLS inspection, traffic logging).
-    // Log only the hostname (without credentials) to avoid credential leakage,
-    // and do not deduplicate so that administrators can see each credential change
-    // attempt's failure when debugging proxy issues.
     const hostname = extractHostnameFromProxyUrl(proxyUrl);
     const failureCount = recordProxyFailure(hostname);
     const failureLabel =
@@ -639,11 +664,10 @@ function buildFetchOptionsWithDispatcher(
     const redactedMessage = redactProxyCredentials(errorMessage);
     const logMessage = `Failed to create proxy dispatcher for ${hostname} (${failureLabel}), falling back to direct connection: ${redactedMessage}`;
     debugLogger.warn(logMessage);
-    // Dual logging: debugLogger writes to ~/.qwen/debug/ (for local debugging),
-    // console.error writes to stderr (captured by container orchestrators and log aggregators).
-    // This ensures visibility in production even when debug sessions are inactive.
     // eslint-disable-next-line no-console
     console.error(`[RUNTIME_FETCH] ${logMessage}`);
-    return NO_DISPATCHER_FALLBACK[sdkType];
+    // Fall back to a no-proxy Agent so bodyTimeout protection is preserved
+    const dispatcher = getOrCreateNoProxyDispatcher(resolvedBodyTimeout);
+    return { fetchOptions: { dispatcher }, fetch: undiciFetch };
   }
 }

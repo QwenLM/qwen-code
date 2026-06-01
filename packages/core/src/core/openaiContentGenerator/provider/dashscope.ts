@@ -140,12 +140,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
     const defaultHeaders = this.buildHeaders();
-    // Configure fetch options for proxy support and timeout handling.
-    // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
-    // request; without proxy, no custom dispatcher is installed.
     const runtimeOptions = buildRuntimeFetchOptions(
       'openai',
       this.cliConfig.getProxy(),
+      { bodyTimeout: this.contentGeneratorConfig.bodyTimeout },
     );
     return new OpenAI({
       apiKey,

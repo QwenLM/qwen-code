@@ -80,7 +80,8 @@ export type ContentGeneratorConfig = {
   authType?: AuthType | undefined;
   enableOpenAILogging?: boolean;
   openAILoggingDir?: string;
-  timeout?: number; // Timeout configuration in milliseconds
+  timeout?: number; // Total request timeout in milliseconds (time-to-first-headers)
+  bodyTimeout?: number; // Inter-chunk idle timeout for streaming (ms). 0 = disabled (default).
   maxRetries?: number; // Maximum retries for rate-limit errors
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
   enableCacheControl?: boolean; // Enable cache control for DashScope providers
