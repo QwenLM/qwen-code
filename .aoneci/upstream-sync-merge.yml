@@ -228,10 +228,18 @@ jobs:
           echo "📦 基于 fork/main 创建 sync 分支，替换内容为 upstream/main + patches"
           git checkout -B "$SYNC_BRANCH" "origin/$TARGET_BRANCH"
 
-          # 用 upstream/main 的文件内容替换工作区（保留 .fork/ .aoneci/ .qwen/）
+          # 用 upstream/main 的文件内容替换工作区，然后恢复 fork 独有文件
           git rm -rf --quiet . 2>/dev/null || true
           git checkout upstream/main -- .
           git checkout "origin/$TARGET_BRANCH" -- .fork/ .aoneci/ .qwen/ 2>/dev/null || true
+
+          # 恢复 fork 独有文件（存在于 main 但不存在于 upstream 的文件）
+          echo "🔄 恢复 fork 独有文件..."
+          comm -23 \
+            <(git ls-tree -r --name-only "origin/$TARGET_BRANCH" | sort) \
+            <(git ls-tree -r --name-only upstream/main | sort) \
+          | grep -v "^\.fork/\|^\.aoneci/\|^\.qwen/" \
+          | xargs -I{} git checkout "origin/$TARGET_BRANCH" -- "{}" 2>/dev/null || true
 
           SYNC_CHECKPOINT=$(git rev-parse upstream/main)
           echo "$SYNC_CHECKPOINT" > "$SYNC_CHECKPOINT_FILE"
