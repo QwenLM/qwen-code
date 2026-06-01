@@ -92,7 +92,7 @@ export class DefaultOpenAICompatibleProvider
       timeout,
       maxRetries,
       defaultHeaders,
-      ...(runtimeOptions || {}),
+      ...runtimeOptions,
     });
   }
 

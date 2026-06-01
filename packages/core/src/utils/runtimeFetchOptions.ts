@@ -36,21 +36,14 @@ export function detectRuntime(): Runtime {
 /**
  * Runtime fetch options for OpenAI SDK
  */
-export type OpenAIRuntimeFetchOptions =
-  | {
-      fetchOptions?: {
-        dispatcher?: Dispatcher;
-        timeout?: false;
-      };
-      // Optional fetch override. When a custom dispatcher is being passed,
-      // we pin this to the bundled undici's fetch so the dispatcher and
-      // fetch share a single undici version — otherwise Node's built-in
-      // fetch (newer undici) rejects a ProxyAgent from the bundled undici
-      // (e.g. v6) with `invalid onError method`.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      fetch?: any;
-    }
-  | undefined;
+export type OpenAIRuntimeFetchOptions = {
+  fetchOptions?: {
+    dispatcher?: Dispatcher;
+    timeout?: false;
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  fetch?: any;
+};
 
 /**
  * Runtime fetch options for Anthropic SDK
@@ -109,11 +102,10 @@ export function buildRuntimeFetchOptions(
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   const runtime = detectRuntime();
 
-  // When using a custom dispatcher (proxy mode), disable undici timeouts (set to 0)
-  // to let SDK's timeout parameter control the total request time. This ensures
-  // user-configured timeouts work as expected for long-running requests.
-  // When no proxy is configured, the runtime's built-in fetch is used with its
-  // default timeout behavior.
+  // All Node.js paths use a custom undici dispatcher with configurable bodyTimeout.
+  // With proxy: ProxyAgent with bodyTimeout=0 (SDK timeout controls the request).
+  // Without proxy: plain Agent with configurable bodyTimeout (default 0 = disabled).
+  // Bun: uses its own timeout: false mechanism.
 
   switch (runtime) {
     case 'bun': {

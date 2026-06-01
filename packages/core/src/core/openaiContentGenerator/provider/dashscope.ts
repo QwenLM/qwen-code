@@ -151,7 +151,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       timeout,
       maxRetries,
       defaultHeaders,
-      ...(runtimeOptions || {}),
+      ...runtimeOptions,
     });
   }
 
