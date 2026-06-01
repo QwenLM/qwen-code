@@ -16,6 +16,7 @@ import {
 } from './config.js';
 import { Storage } from './storage.js';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
 import {
@@ -289,6 +290,13 @@ vi.mock('../ide/ide-client.js', () => ({
 
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 
+const MEMORY_PRESSURE_ENV_KEYS = [
+  'QWEN_MEMORY_PRESSURE_SOFT',
+  'QWEN_MEMORY_PRESSURE_HARD',
+  'QWEN_MEMORY_PRESSURE_CRITICAL',
+  'QWEN_MEMORY_ENABLE_GC',
+];
+
 vi.mock('../core/baseLlmClient.js');
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
@@ -329,6 +337,9 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
+      delete process.env[envName];
+    }
     (fs.existsSync as Mock).mockReturnValue(true);
     (fs.readdirSync as Mock).mockReturnValue([]);
     (fs.statSync as Mock).mockReturnValue({
@@ -420,6 +431,192 @@ describe('Server Config (config.ts)', () => {
       // call — recorded entries would vanish between operations.
       const config = new Config(baseParams);
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('MemoryPressureMonitor isolation', () => {
+    it('returns a distinct monitor for child Configs created via Object.create', async () => {
+      const parent = new Config(baseParams);
+      await parent.initialize({ skipGeminiInitialization: true });
+      const child = Object.create(parent) as Config;
+
+      const parentMonitor = parent.getMemoryPressureMonitor();
+      const childMonitor = child.getMemoryPressureMonitor();
+
+      expect(parentMonitor).toBeDefined();
+      expect(childMonitor).toBeDefined();
+      expect(childMonitor).not.toBe(parentMonitor);
+      expect(child.getMemoryPressureMonitor()).toBe(childMonitor);
+    });
+
+    it('resets monitor cleanup state when starting a new session', async () => {
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      const monitor = config.getMemoryPressureMonitor();
+      expect(monitor).toBeDefined();
+      const resetSpy = vi.spyOn(monitor!, 'resetForNewSession');
+
+      config.startNewSession();
+
+      expect(resetSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('MemoryPressure configuration environment', () => {
+    const restorers: Array<() => void> = [];
+    const originalEnv = new Map<string, string | undefined>();
+
+    beforeEach(() => {
+      originalEnv.clear();
+      for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
+        originalEnv.set(envName, process.env[envName]);
+        delete process.env[envName];
+      }
+    });
+
+    afterEach(() => {
+      while (restorers.length > 0) {
+        restorers.pop()?.();
+      }
+      for (const [envName, value] of originalEnv) {
+        if (value === undefined) {
+          delete process.env[envName];
+        } else {
+          process.env[envName] = value;
+        }
+      }
+      originalEnv.clear();
+    });
+
+    function mockMemoryRatio(rssRatio: number, heapUsedBytes = 0): void {
+      const spy = vi.spyOn(process, 'memoryUsage').mockReturnValue({
+        rss: Math.ceil(os.totalmem() * rssRatio),
+        heapTotal: 512 * 1024 * 1024,
+        heapUsed: heapUsedBytes,
+        external: 0,
+        arrayBuffers: 0,
+      });
+      restorers.push(() => spy.mockRestore());
+    }
+
+    function mockStderrWrite(): Mock {
+      const spy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      restorers.push(() => spy.mockRestore());
+      return spy as unknown as Mock;
+    }
+
+    it('applies valid memory pressure env overrides', async () => {
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.35);
+
+      expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+        'soft',
+      );
+    });
+
+    it('falls back to defaults and warns on strict env parse failures', async () => {
+      const stderrSpy = mockStderrWrite();
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3extra';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.35);
+
+      expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+        'normal',
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Invalid memory pressure config'),
+      );
+    });
+
+    it('falls back to defaults and warns on invalid threshold ordering', async () => {
+      const stderrSpy = mockStderrWrite();
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.7';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+
+      expect(config.getMemoryPressureMonitor()).toBeDefined();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'softPressureRatio must be < hardPressureRatio',
+        ),
+      );
+    });
+
+    it.each(['NaN', 'Infinity', '0'])(
+      'falls back to defaults for invalid soft threshold %s',
+      async (value) => {
+        const stderrSpy = mockStderrWrite();
+        process.env['QWEN_MEMORY_PRESSURE_SOFT'] = value;
+
+        const config = new Config(baseParams);
+        await config.initialize({ skipGeminiInitialization: true });
+        mockMemoryRatio(0.35);
+
+        expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+          'normal',
+        );
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Invalid memory pressure config'),
+        );
+      },
+    );
+
+    it('enables explicit GC when requested by env', async () => {
+      process.env['QWEN_MEMORY_ENABLE_GC'] = '1';
+      const globalWithGc = global as typeof global & { gc?: () => void };
+      const originalGc = globalWithGc.gc;
+      const gcSpy = vi.fn();
+      Object.defineProperty(globalWithGc, 'gc', {
+        value: gcSpy,
+        configurable: true,
+      });
+      restorers.push(() => {
+        if (originalGc) {
+          Object.defineProperty(globalWithGc, 'gc', {
+            value: originalGc,
+            configurable: true,
+          });
+        } else {
+          delete globalWithGc.gc;
+        }
+      });
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.85);
+
+      config.getMemoryPressureMonitor()?.performCheck();
+      await Promise.resolve();
+
+      expect(gcSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('child Config monitors inherit the parent memory pressure config snapshot', async () => {
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+      const parent = new Config(baseParams);
+      await parent.initialize({ skipGeminiInitialization: true });
+
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.9';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.95';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.97';
+      const child = Object.create(parent) as Config;
+      mockMemoryRatio(0.35);
+
+      expect(child.getMemoryPressureMonitor()?.getPressureLevel()).toBe('soft');
     });
   });
 

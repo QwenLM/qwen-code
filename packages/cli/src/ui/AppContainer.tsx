@@ -2320,7 +2320,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isRewindSelectorOpen ||
     isDiffDialogOpen ||
     bgTasksDialogOpen ||
-    showWorktreeExitDialog;
+    showWorktreeExitDialog ||
+    !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
   dialogsVisibleRef.current = dialogsVisible;
   const shouldShowStickyTodos =
     stickyTodos !== null &&
