@@ -47,7 +47,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
       buildRuntimeFetchOptions as unknown as MockedFunction<
         (sdkType: 'openai', proxyUrl?: string) => OpenAIRuntimeFetchOptions
       >;
-    mockedBuildRuntimeFetchOptions.mockReturnValue(undefined);
+    mockedBuildRuntimeFetchOptions.mockReturnValue({});
 
     // Mock ContentGeneratorConfig
     mockContentGeneratorConfig = {
