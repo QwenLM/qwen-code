@@ -300,15 +300,21 @@ what this PR adds or fixes?
   tmux session and walk the user's path end to end (the slash command, dialog,
   flag, or workflow the PR touches), taking a `tmux capture-pane -p` snapshot
   after each meaningful state change.
-- The readable tmux log is the evidence. Post it to the PR as proof — the key
-  rendered frames inline, plus the full `tmux-readable-full.log` artifact path —
-  so the result is verifiable, not just asserted.
+- For a bug fix or behavior change, capture a **before/after** comparison so the
+  maintainer can confirm the fix is real, not just claimed. Run the same scenario
+  on two builds, changing only the build:
+  - **Before** — a build without this PR: the installed `qwen` (or `main`). The
+    log should show the bug reproducing.
+  - **After** — this PR's code via `npm run dev`. The log should show it fixed.
+- The readable tmux logs are the evidence. Post them to the PR as proof — the
+  before and after frames inline, plus the full `tmux-readable-full.log` artifact
+  path — so the result is verifiable, not just asserted.
 - Never run untrusted fork code with write tokens or secrets. If the PR is from
   an untrusted fork or the environment is unsafe, skip execution and post why
   instead.
 
-Post a Stage 4 testing report: the scenario, the exact steps a user took,
-PASS/FAIL, and the tmux log that backs it.
+Post a Stage 4 testing report: the scenario, the exact steps a user took, the
+before/after result, and the tmux logs that back it.
 
 ### Stage 5: Final Decision
 
