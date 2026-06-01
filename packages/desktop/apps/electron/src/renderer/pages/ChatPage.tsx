@@ -523,15 +523,15 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     const cachedCommands = qwenCapabilitySnapshot.availableCommands
     const cachedSkills = qwenCapabilitySnapshot.availableSkills
     const cachedSkillDetails = qwenCapabilitySnapshot.availableSkillDetails
-    const availableCommands = session.availableCommands?.length
-      ? session.availableCommands
-      : cachedCommands
-    const availableSkills = session.availableSkills?.length
-      ? session.availableSkills
-      : cachedSkills
-    const availableSkillDetails = session.availableSkillDetails?.length
-      ? session.availableSkillDetails
-      : cachedSkillDetails
+    const availableCommands = cachedCommands.length
+      ? cachedCommands
+      : session.availableCommands
+    const availableSkills =
+      cachedSkills !== undefined ? cachedSkills : session.availableSkills
+    const availableSkillDetails =
+      cachedSkillDetails !== undefined
+        ? cachedSkillDetails
+        : session.availableSkillDetails
 
     if (
       availableCommands === session.availableCommands &&

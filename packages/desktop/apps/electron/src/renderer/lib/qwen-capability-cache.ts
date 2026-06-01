@@ -60,9 +60,11 @@ export function providerSkillsFromQwenCapabilities(
 export function qwenCapabilitiesFromSkills(
   skills: LoadedSkill[],
 ): QwenCapabilitySnapshot {
+  const invocableSkills = skills.filter((skill) => skill.enabled !== false)
+
   return {
     availableCommands: [],
-    availableSkills: skills.map((skill) => skill.slug),
+    availableSkills: invocableSkills.map((skill) => skill.slug),
     availableSkillDetails: skills.map(skillDetailFromProviderSkill),
     skills,
   }
