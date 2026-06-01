@@ -89,16 +89,6 @@ import { ShellTaskKind, shellAbortAll } from '../tasks/shell-task.js';
 import { MonitorTaskKind, monitorAbortAll } from '../tasks/monitor-task.js';
 import { DreamTaskKind } from '../tasks/dream-task.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
-
-// Register every task kind with the dispatcher at module load. Mirrors
-// claw-code's `tasks.ts` pattern: a single place where each kind's
-// `Task` implementation is wired up. Idempotent — re-importing this
-// module (or constructing additional Config instances) does not
-// re-register.
-registerTaskKind(AgentTaskKind);
-registerTaskKind(ShellTaskKind);
-registerTaskKind(MonitorTaskKind);
-registerTaskKind(DreamTaskKind);
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
@@ -186,6 +176,17 @@ import {
 } from '../models/index.js';
 import { resolveModelId } from '../utils/modelId.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
+
+// Register every task kind with the dispatcher at module load. Mirrors
+// claw-code's `tasks.ts` pattern: a single place where each kind's
+// `Task` implementation is wired up. Placed after all imports so the
+// executable side-effect doesn't visually interrupt the import block.
+// Idempotent — re-importing this module (or constructing additional
+// Config instances) does not re-register.
+registerTaskKind(AgentTaskKind);
+registerTaskKind(ShellTaskKind);
+registerTaskKind(MonitorTaskKind);
+registerTaskKind(DreamTaskKind);
 
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };

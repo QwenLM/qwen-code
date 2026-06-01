@@ -398,8 +398,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // ----- Line buffering & throttling state ---------------------------------
     // Declared up-front (before `abortHandler`) so that the synchronous abort
     // path — either `entryAc.signal.aborted` already true at registration
-    // time, or `monitorRegister(registry, )` throwing — can flush via
-    // `flushPartialLineBuffers` without hitting a TDZ ReferenceError.
+    // time, or `monitorRegister(registry, registration)` throwing — can flush
+    // via `flushPartialLineBuffers` without hitting a TDZ ReferenceError.
     const stdoutBuf = { value: '' };
     const stderrBuf = { value: '' };
     let tokenBucket = THROTTLE_BURST_SIZE;

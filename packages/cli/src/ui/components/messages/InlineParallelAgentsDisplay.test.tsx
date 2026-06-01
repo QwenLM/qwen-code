@@ -60,7 +60,7 @@ function makeRegistryConfig(entries: Array<Partial<AgentTask>>): {
     }
   }
   const config = {
-    getBackgroundTaskRegistry: () => ({
+    getTaskRegistry: () => ({
       get: (id: string) => store.get(id),
     }),
   } as unknown as Config;

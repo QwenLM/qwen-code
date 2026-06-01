@@ -84,21 +84,20 @@ export function entryId(entry: DialogEntry): string {
  * Signature of the registry fields the dialog list / pill renderers
  * depend on: id, kind, status. Activity bursts and event-count bumps
  * mutate in place and don't change this signature, so the hook can
- * suppress the setEntries fan-out for them. Per-entry surfaces
- * (LiveAgentPanel, the dialog's selected-entry tick) carry their own
- * subscriptions.
+ * suppress both the merge work and the setEntries fan-out for them.
+ * Per-entry surfaces (LiveAgentPanel, the dialog's selected-entry
+ * tick) carry their own subscriptions.
  *
- * Dream entries are exempt: their dialog-visible fields (progressText,
- * lockReleaseError, metadataWriteError) can change without a status
- * transition, so the dream subscription bypasses this filter and uses
- * `dreamSnapshotSignature` (which advances on any updatedAt bump) for
- * its own dedup.
+ * Computed directly from `TaskState`s (not merged + dreams) so the
+ * cheap probe inside the registry subscription doesn't pay the
+ * `listDreamTasks` + MemoryManager cost on every `fireChange`. Dreams
+ * have their own subscription with a separate signature
+ * (`dreamSnapshotSignature`).
  */
-function registrySnapshotShape(entries: readonly DialogEntry[]): string {
+function registrySnapshotShape(entries: readonly TaskState[]): string {
   let sig = '';
   for (const e of entries) {
-    if (e.kind === 'dream') continue;
-    sig += `${e.kind}:${entryId(e)}:${e.status}|`;
+    sig += `${e.kind}:${e.id}:${e.status}|`;
   }
   return sig;
 }
@@ -152,17 +151,19 @@ export function useBackgroundTaskView(
 
     const initial = buildMerged();
     setEntries(initial);
-    lastRegistryShape = registrySnapshotShape(initial);
+    lastRegistryShape = registrySnapshotShape(registry.getAll());
     lastDreamSig = dreamSnapshotSignature(
       memoryManager.listTasksByType('dream', projectRoot),
     );
 
     const unsubscribeRegistry = registry.subscribe(() => {
-      const merged = buildMerged();
-      const shape = registrySnapshotShape(merged);
+      // Cheap probe BEFORE buildMerged to avoid the `listDreamTasks` +
+      // sort cost on activity bursts and monitor event bumps, which
+      // mutate in place and don't change `id+kind+status`.
+      const shape = registrySnapshotShape(registry.getAll());
       if (shape === lastRegistryShape) return;
       lastRegistryShape = shape;
-      setEntries(merged);
+      setEntries(buildMerged());
     });
 
     const unsubscribeMemory = subscribeDreams(memoryManager, () => {

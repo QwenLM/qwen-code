@@ -147,7 +147,9 @@ describe('useBackgroundTaskView', () => {
     const { config } = makeConfig(registry);
     const { result } = renderHook(() => useBackgroundTaskView(config));
     expect(result.current.entries).toHaveLength(3);
-    expect(result.current.entries.map(entryId)).toEqual(['s1', 'a1', 'm1']);
+    // `buildMerged` puts running entries first, sorted by startTime DESC
+    // (most recent launch on top). startTimes: a1=100, s1=50, m1=200.
+    expect(result.current.entries.map(entryId)).toEqual(['m1', 'a1', 's1']);
   });
 
   it('tags each merged entry with the right `kind` discriminator', () => {
@@ -175,7 +177,8 @@ describe('useBackgroundTaskView', () => {
     act(() => {
       monitorRegister(registry, monitorReg('m1', 50));
     });
-    expect(result.current.entries.map(entryId)).toEqual(['m1', 'a1']);
+    // startTime DESC: a1=100 sorts before m1=50.
+    expect(result.current.entries.map(entryId)).toEqual(['a1', 'm1']);
   });
 
   it('clears the registry subscription and the dream subscription on unmount', () => {

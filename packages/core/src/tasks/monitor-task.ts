@@ -428,6 +428,14 @@ export function monitorAbortAll(
   for (const entry of registry.getByKind('monitor')) {
     monitorCancel(registry, entry.monitorId, options);
   }
+  // Drop the module-level owner-routed callbacks so a follow-up `Config`
+  // instance (or session recycle in long-lived daemons like `qwen serve`)
+  // doesn't route notifications to handlers bound to the dead agents.
+  // Distinct from `monitorReset`, which is called on full session
+  // teardown — `abortAll` runs on cancel paths that still keep the
+  // registry alive but tear down owners.
+  agentNotificationCallbacks.clear();
+  agentLifecycleCallbacks.clear();
   debugLogger.info('Aborted all monitors');
 }
 

@@ -20,8 +20,12 @@
  * registry`, which ESM tolerates but JS hoisting around `const`
  * exports does not.
  *
- * Init order: `Config.initialize()` calls `registerAllTaskKinds()`
- * before any registry consumer can run.
+ * Init order: registration happens as a module-load side effect at the
+ * top of `config.ts` (after the import block), so by the time any
+ * `TaskRegistry` consumer runs, every kind is already in the
+ * dispatcher's table. Tests that need a clean dispatcher can call
+ * {@link _resetTaskKindsForTest} and then re-import `config.ts` to
+ * trigger re-registration.
  */
 
 import type { TaskKind } from './types.js';

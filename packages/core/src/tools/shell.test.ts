@@ -3591,7 +3591,6 @@ describe('ShellTool', () => {
       it('registers a bg_xxx entry on `result.promoted: true` and returns promote-flavored ToolResult', async () => {
         const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
         writeFileSyncSpy.mockReturnValue(undefined);
-        const registry = mockConfig.getTaskRegistry();
         const invocation = shellTool.build({
           command: 'tail -f /tmp/never.log',
           is_background: false,
@@ -3609,8 +3608,8 @@ describe('ShellTool', () => {
         const result = await promise;
 
         // Entry registered with the spawn pid + promote AbortController.
-        expect(registry.register).toHaveBeenCalledTimes(1);
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(shellTaskModule.shellRegister).toHaveBeenCalledTimes(1);
+        const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
         expect(entry.command).toBe('tail -f /tmp/never.log');
         expect(entry.cwd).toBe('/test/dir');
         expect(entry.status).toBe('running');
@@ -3678,7 +3677,7 @@ describe('ShellTool', () => {
           });
           await promise;
 
-          const entry = (registry.register as Mock).mock.calls[0][0];
+          const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
           // Trigger the cancellation path the way `task_stop` does.
           entry.abortController.abort();
           // Sync part of cancelChild runs as a microtask after abort:
@@ -3693,7 +3692,8 @@ describe('ShellTool', () => {
           // Registry entry transitions to 'cancelled' synchronously
           // after SIGKILL — so /tasks reflects user intent without
           // waiting for the (non-existent) settle path.
-          expect(registry.cancel).toHaveBeenCalledWith(
+          expect(shellTaskModule.shellCancel).toHaveBeenCalledWith(
+          registry,
             entry.shellId,
             expect.any(Number),
           );
@@ -3716,7 +3716,6 @@ describe('ShellTool', () => {
         // registration.
         const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
         writeFileSyncSpy.mockReturnValue(undefined);
-        const registry = mockConfig.getTaskRegistry();
         const invocation = shellTool.build({
           command: 'tail -f /tmp/never.log',
           is_background: false,
@@ -3732,7 +3731,7 @@ describe('ShellTool', () => {
         });
         await promise;
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
         expect(entry.abortController.signal.aborted).toBe(false);
       });
 
@@ -3741,7 +3740,6 @@ describe('ShellTool', () => {
         writeFileSyncSpy.mockImplementation(() => {
           throw new Error('ENOSPC: no space left on device');
         });
-        const registry = mockConfig.getTaskRegistry();
         const invocation = shellTool.build({
           command: 'tail -f /tmp/never.log',
           is_background: false,
@@ -3760,7 +3758,7 @@ describe('ShellTool', () => {
         // The disk write failure is logged + swallowed: the entry is
         // still valuable on its own; the file is the inspection
         // surface, not the source of truth.
-        expect(registry.register).toHaveBeenCalledTimes(1);
+        expect(shellTaskModule.shellRegister).toHaveBeenCalledTimes(1);
         expect(result.llmContent).toContain('promoted to background');
       });
 
@@ -3774,7 +3772,6 @@ describe('ShellTool', () => {
         // actually executed.
         const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
         writeFileSyncSpy.mockReturnValue(undefined);
-        const registry = mockConfig.getTaskRegistry();
         const rawCommand = 'git commit -m "feat: ship promote"';
         const invocation = shellTool.build({
           command: rawCommand,
@@ -3798,7 +3795,7 @@ describe('ShellTool', () => {
         expect(commandPassedToService).not.toBe(rawCommand); // sanity: rewrite happened
         expect(commandPassedToService).toContain('Co-authored-by');
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
         expect(entry.command).toBe(commandPassedToService);
         expect(entry.command).not.toBe(rawCommand);
 
@@ -3896,7 +3893,7 @@ describe('ShellTool', () => {
         expect(String(result.llmContent)).toContain('oops too late');
       });
 
-      it('rethrows + kills child when registry.register throws — no orphan zombie', async () => {
+      it('rethrows + kills child when shellRegister throws — no orphan zombie', async () => {
         // #3894 review: today `BackgroundShellRegistry.register` is
         // internally safe (Map.set + emit) but if a future
         // implementation throws, the promoted child is already
@@ -3911,8 +3908,7 @@ describe('ShellTool', () => {
         try {
           const writeFileSyncSpy = vi.mocked(fs.writeFileSync);
           writeFileSyncSpy.mockReturnValue(undefined);
-          const registry = mockConfig.getTaskRegistry();
-          (registry.register as Mock).mockImplementation(() => {
+          (shellTaskModule.shellRegister as Mock).mockImplementation(() => {
             throw new Error('boom: registry borked');
           });
           const invocation = shellTool.build({
@@ -3967,7 +3963,6 @@ describe('ShellTool', () => {
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           writeStreamMock as unknown as fs.WriteStream,
         );
-        const registry = mockConfig.getTaskRegistry();
         const invocation = shellTool.build({
           command: 'tail -f /tmp/never.log',
           is_background: false,
@@ -3984,7 +3979,7 @@ describe('ShellTool', () => {
         });
         await promise;
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
         // Stream opened in overwrite mode at promote time so a stale
         // file under the same shellId (vanishingly unlikely given
         // randomBytes) starts fresh.
@@ -4058,8 +4053,9 @@ describe('ShellTool', () => {
           endTime: 1700000000000,
         });
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
-        expect(registry.complete).toHaveBeenCalledWith(
+        const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
+        expect(shellTaskModule.shellComplete).toHaveBeenCalledWith(
+          registry,
           entry.shellId,
           0,
           1700000000000,
@@ -4098,11 +4094,12 @@ describe('ShellTool', () => {
             };
           }
         ).postPromote.onSettle;
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
 
         // Non-zero exitCode → fail with "Exited with code N".
         onSettle({ exitCode: 137, signal: null, endTime: 1 });
-        expect(registry.fail).toHaveBeenCalledWith(
+        expect(shellTaskModule.shellFail).toHaveBeenCalledWith(
+          registry,
           entry.shellId,
           'Exited with code 137',
           1,
@@ -4110,7 +4107,8 @@ describe('ShellTool', () => {
 
         // signal-killed (no exitCode) → fail with "Terminated by signal N".
         onSettle({ exitCode: null, signal: 15, endTime: 2 });
-        expect(registry.fail).toHaveBeenCalledWith(
+        expect(shellTaskModule.shellFail).toHaveBeenCalledWith(
+          registry,
           entry.shellId,
           'Terminated by signal 15',
           2,
@@ -4123,7 +4121,12 @@ describe('ShellTool', () => {
           error: new Error('ENOENT'),
           endTime: 3,
         });
-        expect(registry.fail).toHaveBeenCalledWith(entry.shellId, 'ENOENT', 3);
+        expect(shellTaskModule.shellFail).toHaveBeenCalledWith(
+          registry,
+          entry.shellId,
+          'ENOENT',
+          3,
+        );
       });
 
       it('queued-settle race: onSettle fires BEFORE handlePromotedForeground completes — entry settles + llmContent reflects final status', async () => {
@@ -4198,10 +4201,11 @@ describe('ShellTool', () => {
           is_background: false,
         });
         const result = await invocation.execute(mockAbortSignal);
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
 
         // Registry transitioned to completed via the queued-settle drain.
-        expect(registry.complete).toHaveBeenCalledWith(
+        expect(shellTaskModule.shellComplete).toHaveBeenCalledWith(
+          registry,
           entry.shellId,
           0,
           1700000000123,
@@ -4272,9 +4276,10 @@ describe('ShellTool', () => {
           is_background: false,
         });
         const result = await invocation.execute(mockAbortSignal);
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
 
-        expect(registry.fail).toHaveBeenCalledWith(
+        expect(shellTaskModule.shellFail).toHaveBeenCalledWith(
+          registry,
           entry.shellId,
           'Exited with code 1',
           1700000000456,
@@ -4363,12 +4368,12 @@ describe('ShellTool', () => {
           is_background: false,
         });
         const result = await invocation.execute(mockAbortSignal);
-        const entry = (registry.register as Mock).mock.calls[0][0];
+        const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
 
         // Stream's 'finish' handler captured but NOT yet invoked, so
         // the registry transition is genuinely deferred at this point.
         expect(capturedFinishHandler).not.toBeNull();
-        expect(registry.complete).not.toHaveBeenCalled();
+        expect(shellTaskModule.shellComplete).not.toHaveBeenCalled();
 
         // Model-facing copy still reports the correct terminal status
         // because `postPromoteSettleObserved` was flipped sync inside
@@ -4380,7 +4385,8 @@ describe('ShellTool', () => {
 
         // Fire 'finish' now — registry transition runs post-flush.
         capturedFinishHandler!();
-        expect(registry.complete).toHaveBeenCalledWith(
+        expect(shellTaskModule.shellComplete).toHaveBeenCalledWith(
+          registry,
           entry.shellId,
           0,
           1700000000999,
@@ -4462,8 +4468,9 @@ describe('ShellTool', () => {
         ).postPromote.onSettle;
         onSettle({ exitCode: 0, signal: null, endTime: 1700000111111 });
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
-        expect(registry.complete).toHaveBeenCalledWith(
+        const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
+        expect(shellTaskModule.shellComplete).toHaveBeenCalledWith(
+          registry,
           entry.shellId,
           0,
           1700000111111,
@@ -4556,13 +4563,14 @@ describe('ShellTool', () => {
 
           // stream.once('finish') was NOT fired — registry should
           // NOT have transitioned yet.
-          expect(registry.complete).not.toHaveBeenCalled();
+          expect(shellTaskModule.shellComplete).not.toHaveBeenCalled();
 
           // Advance past the 10s flush timeout.
           vi.advanceTimersByTime(10_001);
 
-          const entry = (registry.register as Mock).mock.calls[0][0];
-          expect(registry.complete).toHaveBeenCalledWith(
+          const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
+          expect(shellTaskModule.shellComplete).toHaveBeenCalledWith(
+          registry,
             entry.shellId,
             0,
             1700000222222,
@@ -4774,8 +4782,9 @@ describe('ShellTool', () => {
         });
         capturedPostPromote?.onData?.({ type: 'data', chunk: 'post-settle' });
 
-        const entry = (registry.register as Mock).mock.calls[0][0];
-        expect(registry.complete).toHaveBeenCalledWith(
+        const entry = (shellTaskModule.shellRegister as Mock).mock.calls[0][1];
+        expect(shellTaskModule.shellComplete).toHaveBeenCalledWith(
+          registry,
           entry.shellId,
           0,
           1700002222222,

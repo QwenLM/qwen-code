@@ -221,14 +221,16 @@ export const InlineParallelAgentsDisplay: React.FC<
   // mutates `recentActivities` in place, so without a tick the
   // component would freeze on the first row of activity.
   const rows: RowData[] = useMemo(() => {
-    const registry = config?.getBackgroundTaskRegistry();
+    const registry = config?.getTaskRegistry();
     // Touch `now` so a future "remove dead dep" cleanup can't silently
     // freeze the panel — the registry mutates in place and we need to
     // re-read on every tick to surface fresh activity.
     void now;
     return agentEntries.map(({ toolCall, result }) => {
       const agentId = deriveAgentId(toolCall, result);
-      const live = registry?.get(agentId);
+      const liveEntry = registry?.get(agentId);
+      const live =
+        liveEntry?.kind === 'agent' ? liveEntry : undefined;
       const recent = live?.recentActivities?.at(-1);
       return {
         agentId,

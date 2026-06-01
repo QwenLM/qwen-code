@@ -7,10 +7,7 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import {
-  SessionEndReason,
-  SessionStartSource,
-} from '@qwen-code/qwen-code-core';
+import { SessionEndReason } from '@qwen-code/qwen-code-core';
 
 // Hoisted spies for the kind-local abort helpers and the
 // resetBackgroundStateForSessionSwitch helper. The mock factory below
@@ -121,7 +118,7 @@ describe('clearCommand', () => {
     expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
   });
 
-  it('should fire SessionEnd event before clearing and SessionStart event after clearing', async () => {
+  it('should fire SessionEnd event before clearing', async () => {
     if (!clearCommand.action) {
       throw new Error('clearCommand must have an action.');
     }
@@ -132,17 +129,10 @@ describe('clearCommand', () => {
     expect(mockFireSessionEndEvent).toHaveBeenCalledWith(
       SessionEndReason.Clear,
     );
-    expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
-      SessionStartSource.Clear,
-      'test-model',
-      expect.any(String),
-    );
-
-    const sessionEndCallOrder =
-      mockFireSessionEndEvent.mock.invocationCallOrder[0];
-    const sessionStartCallOrder =
-      mockFireSessionStartEvent.mock.invocationCallOrder[0];
-    expect(sessionEndCallOrder).toBeLessThan(sessionStartCallOrder);
+    // PR #4115 moved SessionStart firing out of `/clear` so the hook's
+    // additionalContext lands inside the new chat session rather than
+    // before it. The clear command now only fires SessionEnd.
+    expect(mockFireSessionStartEvent).not.toHaveBeenCalled();
   });
 
   it('aborts old background work before starting a new session', async () => {

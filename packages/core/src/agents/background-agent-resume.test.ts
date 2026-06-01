@@ -17,7 +17,9 @@ import {
   agentRegister,
   agentWaitForMessages,
   getAgentTask,
+  setAgentBackgroundCapForTest,
 } from '../tasks/agent-task.js';
+import * as monitorTaskModule from '../tasks/monitor-task.js';
 import { BackgroundAgentResumeService } from './background-agent-resume.js';
 import {
   getAgentJsonlPath,
@@ -42,6 +44,8 @@ describe('BackgroundAgentResumeService', () => {
   });
 
   afterEach(() => {
+    setAgentBackgroundCapForTest(undefined);
+    vi.restoreAllMocks();
     fs.rmSync(tempDir, {
       recursive: true,
       force: true,
@@ -77,10 +81,22 @@ describe('BackgroundAgentResumeService', () => {
       getAllToolNames: vi.fn().mockReturnValue([]),
       stop: vi.fn().mockResolvedValue(undefined),
     };
+    // The collapsed task-registry architecture exposes
+    // `setMonitorAgentNotificationCallback` / `setMonitorAgentLifecycleCallback`
+    // / `monitorCancelRunningForOwner` as module-level free functions in
+    // `tasks/monitor-task.ts`, replacing the old `MonitorRegistry` methods.
+    // Spy on the namespace so assertions framed in terms of the old
+    // registry handle keep reading naturally.
     const monitorRegistry = {
-      setAgentNotificationCallback: vi.fn(),
-      setAgentLifecycleCallback: vi.fn(),
-      cancelRunningForOwner: vi.fn(),
+      setAgentNotificationCallback: vi
+        .spyOn(monitorTaskModule, 'setMonitorAgentNotificationCallback')
+        .mockImplementation(() => {}),
+      setAgentLifecycleCallback: vi
+        .spyOn(monitorTaskModule, 'setMonitorAgentLifecycleCallback')
+        .mockImplementation(() => {}),
+      cancelRunningForOwner: vi
+        .spyOn(monitorTaskModule, 'monitorCancelRunningForOwner')
+        .mockImplementation(() => {}),
     };
     const config = {
       storage: {
@@ -463,9 +479,8 @@ describe('BackgroundAgentResumeService', () => {
   });
 
   it('can resume into the final background concurrency slot', async () => {
-    registry = new BackgroundTaskRegistry({
-      maxConcurrentBackgroundAgents: 1,
-    });
+    setAgentBackgroundCapForTest(1);
+    registry = new TaskRegistry();
     const sessionId = 'session-resume-cap';
     const agentId = 'agent-resume-cap';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -495,7 +510,7 @@ describe('BackgroundAgentResumeService', () => {
       'utf8',
     );
 
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Resume at cap',
       subagentType: 'researcher',
@@ -533,15 +548,14 @@ describe('BackgroundAgentResumeService', () => {
   });
 
   it('keeps a paused agent paused when resume cannot claim a background slot', async () => {
-    registry = new BackgroundTaskRegistry({
-      maxConcurrentBackgroundAgents: 1,
-    });
+    setAgentBackgroundCapForTest(1);
+    registry = new TaskRegistry();
     const sessionId = 'session-resume-full';
     const agentId = 'agent-resume-full';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
     const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
 
-    registry.register({
+    agentRegister(registry, {
       agentId: 'already-running',
       description: 'Already running',
       subagentType: 'researcher',
@@ -575,7 +589,7 @@ describe('BackgroundAgentResumeService', () => {
       }) + '\n',
       'utf8',
     );
-    registry.register({
+    agentRegister(registry, {
       agentId,
       description: 'Resume while full',
       subagentType: 'researcher',
@@ -1018,6 +1032,7 @@ describe('BackgroundAgentResumeService', () => {
         undefined,
       );
       expect(monitorRegistry.cancelRunningForOwner).toHaveBeenCalledWith(
+      registry,
         agentId,
         {
           notify: false,
@@ -1108,6 +1123,7 @@ describe('BackgroundAgentResumeService', () => {
       undefined,
     );
     expect(monitorRegistry.cancelRunningForOwner).toHaveBeenCalledWith(
+      registry,
       agentId,
       {
         notify: false,
