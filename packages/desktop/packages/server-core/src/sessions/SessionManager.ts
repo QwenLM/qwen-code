@@ -10007,6 +10007,14 @@ export class SessionManager implements ISessionManager {
       )
       return { success: false, error: 'Session not found' }
     }
+    if (options?.workspaceId && managed.workspace.id !== options.workspaceId) {
+      sessionLog.warn('refreshAvailableCommands: session workspace mismatch', {
+        sessionId,
+        sessionWorkspaceId: managed.workspace.id,
+        requestedWorkspaceId: options.workspaceId,
+      })
+      return this.refreshDraftAvailableCommands(options)
+    }
 
     sessionLog.info('refreshAvailableCommands: starting', {
       sessionId,

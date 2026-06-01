@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
-import { MoreHorizontal, Zap } from 'lucide-react'
+import { Loader2, MoreHorizontal, Zap } from 'lucide-react'
 import { SkillAvatar } from '@/components/ui/skill-avatar'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
@@ -30,6 +30,7 @@ export interface SkillsListPanelProps {
   selectedSkillSlug?: string | null
   workspaceId?: string
   workspaceRootPath?: string
+  isLoading?: boolean
   className?: string
 }
 
@@ -41,6 +42,7 @@ export function SkillsListPanel({
   selectedSkillSlug,
   workspaceId,
   workspaceRootPath,
+  isLoading = false,
   className,
 }: SkillsListPanelProps) {
   const { t } = useTranslation()
@@ -76,26 +78,34 @@ export function SkillsListPanel({
           onItemClick={onSkillClick}
           className="min-h-0"
           emptyState={
-            <EntityListEmptyScreen
-              icon={<Zap />}
-              title={t('skillsList.noSkillsConfigured')}
-              description={t('skillsList.emptyDescription')}
-              docKey="skills"
-            >
-              <div className="flex items-center gap-2">
-                {workspaceRootPath && (
-                  <EditPopover
-                    align="center"
-                    trigger={
-                      <Button size="sm" variant="outline">
-                        {t('skillsList.addSkill')}
-                      </Button>
-                    }
-                    {...getEditConfig('add-skill', workspaceRootPath)}
-                  />
-                )}
-              </div>
-            </EntityListEmptyScreen>
+            isLoading ? (
+              <EntityListEmptyScreen
+                icon={<Loader2 className="animate-spin" />}
+                title={t('common.loading')}
+                description=""
+              />
+            ) : (
+              <EntityListEmptyScreen
+                icon={<Zap />}
+                title={t('skillsList.noSkillsConfigured')}
+                description={t('skillsList.emptyDescription')}
+                docKey="skills"
+              >
+                <div className="flex items-center gap-2">
+                  {workspaceRootPath && (
+                    <EditPopover
+                      align="center"
+                      trigger={
+                        <Button size="sm" variant="outline">
+                          {t('skillsList.addSkill')}
+                        </Button>
+                      }
+                      {...getEditConfig('add-skill', workspaceRootPath)}
+                    />
+                  )}
+                </div>
+              </EntityListEmptyScreen>
+            )
           }
           mapItem={(skill) => {
             const canManageProviderSkill =

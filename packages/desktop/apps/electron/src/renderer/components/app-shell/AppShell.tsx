@@ -252,6 +252,14 @@ interface SessionSearchResult {
   workspaceName: string
 }
 
+type WorkspaceSkillsState = {
+  skills: LoadedSkill[]
+  status: 'loading' | 'ready' | 'error'
+  requestId: number
+}
+
+const EMPTY_SKILLS: LoadedSkill[] = []
+
 function SidebarSessionSearch({
   workspaces,
   workspaceSessions,
@@ -1324,8 +1332,16 @@ function AppShellContent({
     setSourcesAtom(sources)
   }, [sources, setSourcesAtom])
 
-  // Skills state (workspace-scoped)
-  const [skills, setSkills] = React.useState<LoadedSkill[]>([])
+  // Skills state is bucketed by workspace so slow loads from a previous
+  // workspace cannot overwrite the currently visible workspace.
+  const [skillsByWorkspaceId, setSkillsByWorkspaceId] = React.useState<
+    Record<string, WorkspaceSkillsState>
+  >({})
+  const skillsRequestIdRef = React.useRef(0)
+  const activeSkillsState = activeWorkspaceId
+    ? skillsByWorkspaceId[activeWorkspaceId]
+    : undefined
+  const skills = activeSkillsState?.skills ?? EMPTY_SKILLS
   // Sync skills to atom for NavigationContext auto-selection
   const setSkillsAtom = useSetAtom(skillsAtom)
   React.useEffect(() => {
@@ -1333,6 +1349,7 @@ function AppShellContent({
   }, [skills, setSkillsAtom])
   // Automations — state, handlers, loading, subscriptions
   const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId)
+  const remoteWorkspaceId = activeWorkspace?.remoteServer?.remoteWorkspaceId
 
   // Send to Workspace dialog state (driven by sendToWorkspaceAtom set from SessionMenu/BatchSessionMenu)
   const sendToWorkspaceIds = useAtomValue(sendToWorkspaceAtom)
@@ -1925,16 +1942,27 @@ function AppShellContent({
   const activeSessionMeta = session.selected
     ? sessionMetaMap.get(session.selected)
     : undefined
-  const activeSessionWorkingDirectory = activeSessionMeta?.workingDirectory
+  const activeSessionBelongsToActiveWorkspace = Boolean(
+    activeSessionMeta &&
+      activeWorkspaceId &&
+      (activeSessionMeta.workspaceId === activeWorkspaceId ||
+        (remoteWorkspaceId &&
+          activeSessionMeta.workspaceId === remoteWorkspaceId)),
+  )
+  const scopedActiveSessionMeta = activeSessionBelongsToActiveWorkspace
+    ? activeSessionMeta
+    : undefined
+  const activeSessionWorkingDirectory =
+    scopedActiveSessionMeta?.workingDirectory
   const activeEffectiveConnectionSlug = React.useMemo(
     () =>
       resolveEffectiveConnectionSlug(
-        activeSessionMeta?.llmConnection,
+        scopedActiveSessionMeta?.llmConnection,
         workspaceDefaultLlmConnection,
         llmConnections,
       ),
     [
-      activeSessionMeta?.llmConnection,
+      scopedActiveSessionMeta?.llmConnection,
       llmConnections,
       workspaceDefaultLlmConnection,
     ],
@@ -1950,13 +1978,20 @@ function AppShellContent({
   )
   const shouldUseQwenAcpSkills =
     activeEffectiveConnection?.providerType === 'qwen'
-  const activeQwenSessionId = shouldUseQwenAcpSkills ? session.selected : null
+  const activeQwenSessionId =
+    shouldUseQwenAcpSkills && activeSessionBelongsToActiveWorkspace
+      ? session.selected
+      : null
   const shouldLoadSkills = shouldLoadWorkspaceSkills({
     isSkillsNavigation:
       isSkillsNavigation(navState) || isSkillMarketplaceNavigation(navState),
     llmConnectionCount: llmConnections.length,
     providerType: activeEffectiveConnection?.providerType,
   })
+  const skillsLoading =
+    shouldLoadSkills &&
+    (!activeSkillsState ||
+      (activeSkillsState.status === 'loading' && skills.length === 0))
 
   // Subscribe to live skill updates (when skills are added/removed dynamically)
   React.useEffect(() => {
@@ -1968,27 +2003,72 @@ function AppShellContent({
           shouldUseQwenAcpSkills
         )
           return
-        setSkills(updatedSkills || [])
+        setSkillsByWorkspaceId((prev) => ({
+          ...prev,
+          [workspaceId]: {
+            skills: updatedSkills || [],
+            status: 'ready',
+            requestId: prev[workspaceId]?.requestId ?? 0,
+          },
+        }))
       },
     )
     return cleanup
   }, [activeWorkspaceId, shouldLoadSkills, shouldUseQwenAcpSkills])
 
   const reloadSkills = React.useCallback(async () => {
-    if (!activeWorkspaceId) return
+    const workspaceId = activeWorkspaceId
+    if (!workspaceId) return
+    const requestId = ++skillsRequestIdRef.current
     if (!shouldLoadSkills) {
-      setSkills([])
+      setSkillsByWorkspaceId((prev) => ({
+        ...prev,
+        [workspaceId]: {
+          skills: [],
+          status: 'ready',
+          requestId,
+        },
+      }))
       return
     }
+    setSkillsByWorkspaceId((prev) => ({
+      ...prev,
+      [workspaceId]: {
+        skills: prev[workspaceId]?.skills ?? [],
+        status: 'loading',
+        requestId,
+      },
+    }))
     try {
       const loaded = await window.electronAPI.getSkills(
-        activeWorkspaceId,
+        workspaceId,
         activeSessionWorkingDirectory,
         activeQwenSessionId ?? undefined,
       )
-      setSkills(loaded || [])
+      setSkillsByWorkspaceId((prev) => {
+        if (prev[workspaceId]?.requestId !== requestId) return prev
+        return {
+          ...prev,
+          [workspaceId]: {
+            skills: loaded || [],
+            status: 'ready',
+            requestId,
+          },
+        }
+      })
     } catch (err) {
       console.error('[Chat] Failed to load skills:', err)
+      setSkillsByWorkspaceId((prev) => {
+        if (prev[workspaceId]?.requestId !== requestId) return prev
+        return {
+          ...prev,
+          [workspaceId]: {
+            skills: prev[workspaceId]?.skills ?? [],
+            status: 'error',
+            requestId,
+          },
+        }
+      })
     }
   }, [
     activeWorkspaceId,
@@ -2005,7 +2085,6 @@ function AppShellContent({
   // workspaceSessionsAtom. sessionMetaMapAtom still carries live event updates.
   // For remote workspaces, sessions have the remote workspace ID (not the local one),
   // so we match live metadata against both the local and remote workspace IDs.
-  const remoteWorkspaceId = activeWorkspace?.remoteServer?.remoteWorkspaceId
   const workspaceSessionMetas = useMemo(() => {
     const liveMetas = Array.from(sessionMetaMap.values())
     if (!activeWorkspaceId) return liveMetas.filter((s) => !s.hidden)
@@ -3426,7 +3505,9 @@ function AppShellContent({
                         {
                           id: 'nav:skills',
                           title: t('sidebar.skills'),
-                          label: String(skills.length),
+                          label: skillsLoading
+                            ? undefined
+                            : String(skills.length),
                           icon: Zap,
                           variant: isSkillsNavigation(navState)
                             ? 'default'
@@ -4651,6 +4732,7 @@ function AppShellContent({
                     skills={skills}
                     workspaceId={activeWorkspaceId}
                     workspaceRootPath={activeWorkspace?.rootPath}
+                    isLoading={skillsLoading}
                     onSkillClick={handleSkillSelect}
                     onDeleteSkill={handleDeleteSkill}
                     onSetSkillEnabled={handleSetSkillEnabled}
