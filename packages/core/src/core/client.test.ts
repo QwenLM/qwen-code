@@ -174,9 +174,27 @@ vi.mock('../utils/environmentContext', () => ({
     const first = history?.[0];
     if (first?.role !== 'user') return 0;
     const text = first.parts?.[0]?.text;
-    return typeof text === 'string' && text.startsWith('<system-reminder>')
-      ? 1
-      : 0;
+    if (typeof text === 'string' && text.startsWith('<system-reminder>')) {
+      return 1;
+    }
+    // Legacy format: [user(env), model("Got it. Thanks for the context!")].
+    if (
+      history?.[1]?.role === 'model' &&
+      history?.[1]?.parts?.[0]?.text === 'Got it. Thanks for the context!'
+    ) {
+      return 2;
+    }
+    return 0;
+  }),
+  isSystemReminderContent: vi.fn((content) => {
+    const parts = content?.parts;
+    if (!parts || parts.length === 0) return false;
+    return parts.every(
+      (part: { text?: string }) =>
+        typeof part.text === 'string' &&
+        part.text.startsWith('<system-reminder>') &&
+        part.text.includes('</system-reminder>'),
+    );
   }),
 }));
 vi.mock('../utils/generateContentResponseUtilities', () => ({
@@ -962,6 +980,48 @@ describe('Gemini Client (client.ts)', () => {
       await client.refreshStartupContextReminder();
 
       expect(mockChat.setHistory).toHaveBeenCalledWith(currentHistory.slice(1));
+    });
+
+    it('removes the full legacy 2-entry prelude, not just the first entry', async () => {
+      // Restored pre-PR sessions store startup context as a
+      // [user(env), model("Got it. Thanks for the context!")] pair, so
+      // getStartupContextLength returns 2. A hardcoded slice(1) would leave
+      // the orphaned model ack behind; slicing by the detected length removes
+      // both legacy entries before re-prepending the fresh prelude.
+      const legacyEnv: Content = {
+        role: 'user',
+        parts: [{ text: 'This is the environment context.' }],
+      };
+      const legacyAck: Content = {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the context!' }],
+      };
+      const currentHistory: Content[] = [
+        legacyEnv,
+        legacyAck,
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'hi' }] },
+      ];
+      const newPrelude: Content = {
+        role: 'user',
+        parts: [
+          { text: '<system-reminder>\nfresh prelude\n</system-reminder>' },
+        ],
+      };
+      const mockChat: Partial<GeminiChat> = {
+        getHistory: vi.fn().mockReturnValue(currentHistory),
+        setHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([newPrelude]);
+
+      await client.refreshStartupContextReminder();
+
+      // slice(2) drops BOTH legacy entries; slice(1) would have left legacyAck.
+      expect(mockChat.setHistory).toHaveBeenCalledWith([
+        newPrelude,
+        ...currentHistory.slice(2),
+      ]);
     });
   });
 

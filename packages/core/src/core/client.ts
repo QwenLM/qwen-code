@@ -640,11 +640,16 @@ export class GeminiClient {
     }
 
     const currentHistory = this.getChat().getHistory();
-    if (getStartupContextLength(currentHistory) === 0) {
+    const startupLength = getStartupContextLength(currentHistory);
+    if (startupLength === 0) {
       return;
     }
 
-    const remaining = currentHistory.slice(1);
+    // Slice by the detected prelude length, not a hardcoded 1: a restored
+    // legacy session stores startup context as a [user(env), model("Got
+    // it…")] pair (getStartupContextLength === 2), so slice(1) would leave
+    // the orphaned model-ack entry behind when re-prepending the prelude.
+    const remaining = currentHistory.slice(startupLength);
     const [startupContext] = await getInitialChatHistory(this.config);
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
