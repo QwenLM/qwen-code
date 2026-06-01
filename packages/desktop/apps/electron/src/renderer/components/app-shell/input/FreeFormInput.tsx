@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Command as CommandPrimitive } from 'cmdk';
+// eslint-disable-next-line import/no-internal-modules
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Paperclip,
@@ -82,9 +83,7 @@ import {
   PERMISSION_MODE_ORDER,
   type PermissionMode,
 } from '@craft-agent/shared/agent/modes';
-import {
-  type ThinkingLevel,
-} from '@craft-agent/shared/agent/thinking-levels';
+import { type ThinkingLevel } from '@craft-agent/shared/agent/thinking-levels';
 import { useEscapeInterrupt } from '@/context/EscapeInterruptContext';
 import { hasOpenOverlay } from '@/lib/overlay-detection';
 import { ToolbarStatusSlot } from './ToolbarStatusSlot';
@@ -484,6 +483,8 @@ export function FreeFormInput({
   const showSessionLabelsUi = FEATURE_FLAGS.sessionLabelsUi;
   const visibleLabels = showSessionLabelsUi ? labels : [];
   const visibleSessionLabels = showSessionLabelsUi ? sessionLabels : [];
+  const onSubmitRef = React.useRef(onSubmit);
+  onSubmitRef.current = onSubmit;
 
   // Default rotating placeholders for onboarding/empty state (i18n-aware)
   const defaultPlaceholders = React.useMemo(() => {
@@ -1109,7 +1110,7 @@ export function FreeFormInput({
           planPath: pending.planPath,
           draftInput: pending.draftInputSnapshot,
         });
-        onSubmit(executionMessage, undefined);
+        onSubmitRef.current(executionMessage, undefined);
 
         await window.electronAPI.sessionCommand(sessionId, {
           type: 'clearPendingPlanExecution',
@@ -1148,7 +1149,7 @@ export function FreeFormInput({
         handleCompactionComplete as unknown as EventListener,
       );
     };
-  }, [sessionId, onSubmit]);
+  }, [sessionId]);
 
   // Listen for craft:focus-input events (restore focus after popover/dropdown closes)
   React.useEffect(() => {
@@ -2836,7 +2837,6 @@ export function FreeFormInput({
                         })}
                       </>
                     )}
-
                   </StyledDropdownMenuContent>
                 </DropdownMenu>
               )}
