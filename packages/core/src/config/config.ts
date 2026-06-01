@@ -2002,6 +2002,9 @@ export class Config {
 
     const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
+    // Unconditional: startNewSession is only called on the canonical Config
+    // instance (the one that already claimed via sessionEnvClaimed), so this
+    // correctly updates the env var to reflect the new active session.
     if (process.env) {
       process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
     }

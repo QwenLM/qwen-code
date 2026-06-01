@@ -155,4 +155,18 @@ describe('Config sessionEnvClaimed guard', () => {
       secondConfig.getSessionId(),
     );
   });
+
+  it('startNewSession updates env var to the new session ID', async () => {
+    const { Config } = await import('./config.js');
+    const config = new Config({ ...baseParams });
+    const originalSessionId = config.getSessionId();
+
+    expect(process.env['QWEN_CODE_SESSION_ID']).toBe(originalSessionId);
+
+    // Simulate /clear or session switch
+    config.startNewSession('new-session-uuid-123');
+
+    expect(process.env['QWEN_CODE_SESSION_ID']).toBe('new-session-uuid-123');
+    expect(process.env['QWEN_CODE_SESSION_ID']).not.toBe(originalSessionId);
+  });
 });
