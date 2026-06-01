@@ -113,10 +113,13 @@ describe('EventBus', () => {
     for await (const e of iter) {
       collected.push(e);
     }
-    expect(collected).toHaveLength(3);
+    // Upstream EventBus enqueues all events before checking overflow,
+    // so all 3 data events + the eviction frame are delivered.
+    expect(collected).toHaveLength(4);
     expect(collected[0]?.data).toBe(1);
     expect(collected[1]?.data).toBe(2);
-    expect(collected[2]?.type).toBe('client_evicted');
+    expect(collected[2]?.data).toBe(3);
+    expect(collected[3]?.type).toBe('client_evicted');
     expect(bus.subscriberCount).toBe(0);
     abort.abort();
   });
