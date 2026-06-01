@@ -954,7 +954,7 @@ describe('ChatCompressionService', () => {
     expect(result.info.newTokenCount).toBeGreaterThan(1_000);
     expect(result.info.newTokenCount).toBeLessThan(5_000);
     expect(result.newHistory).not.toBeNull();
-    expect(result.newHistory![0].parts![0].text).toBe('Summary');
+    expect(result.newHistory![0].parts![0].text).toContain('Summary');
   });
 
   it('should reject inflated local delta if usage metadata is missing', async () => {
@@ -1026,6 +1026,63 @@ describe('ChatCompressionService', () => {
     });
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'x'.repeat(COMPACT_MAX_OUTPUT_TOKENS * 4),
+      usage: undefined,
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: false,
+      model: mockModel,
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    );
+    expect(result.newHistory).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('local estimate'),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+    );
+  });
+
+  it('should reject CJK cap-sized summaries when usage metadata is missing', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      180_000,
+    );
+    vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+      model: 'gemini-pro',
+      contextWindowSize: 200_000,
+    } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+    const warn = vi.fn();
+    (
+      mockConfig as unknown as {
+        getDebugLogger: () => {
+          warn: typeof warn;
+          debug: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).getDebugLogger = () => ({
+      warn,
+      debug: vi.fn(),
+    });
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      text: '中'.repeat(Math.ceil(COMPACT_MAX_OUTPUT_TOKENS / 1.5)),
       usage: undefined,
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({

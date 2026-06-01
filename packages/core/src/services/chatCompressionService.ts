@@ -92,6 +92,30 @@ export const HARD_BUFFER = 3_000;
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
+const CJK_CHAR_TOKEN_MULTIPLIER = 1.5;
+const CJK_CHAR_PATTERN =
+  /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/g;
+
+function estimateSummaryOutputTokens(
+  summary: string,
+  imageTokenEstimate: number,
+): number {
+  const genericEstimate = estimateContentTokens(
+    [{ role: 'model', parts: [{ text: summary }] }],
+    imageTokenEstimate,
+  );
+  const cjkCharCount = summary.match(CJK_CHAR_PATTERN)?.length ?? 0;
+  if (cjkCharCount === 0) {
+    return genericEstimate;
+  }
+
+  const nonCjkCharCount = Math.max(0, summary.length - cjkCharCount);
+  const cjkAwareEstimate =
+    Math.ceil(nonCjkCharCount / CHARS_PER_TOKEN) +
+    Math.ceil(cjkCharCount * CJK_CHAR_TOKEN_MULTIPLIER);
+  return Math.max(genericEstimate, cjkAwareEstimate);
+}
+
 export interface CompactionThresholds {
   /** Token count at which UI warn tier triggers. */
   readonly warn: number;
@@ -392,8 +416,8 @@ export class ChatCompressionService {
       );
     }
     if (compressionOutputTokenCount === undefined && !isSummaryEmpty) {
-      compressionOutputTokenCount = estimateContentTokens(
-        [{ role: 'model', parts: [{ text: summary }] }],
+      compressionOutputTokenCount = estimateSummaryOutputTokens(
+        summary,
         slimmingConfig.imageTokenEstimate,
       );
       config
