@@ -5,37 +5,39 @@
  * only provide a data mapping via `mapItem`.
  */
 
-import * as React from 'react'
-import { useAction } from '@/actions'
-import { EntityList } from './entity-list'
-import { EntityRow } from './entity-row'
-import { useEntityListInteractions } from '@/hooks/useEntityListInteractions'
-import type { createEntitySelection } from '@/hooks/useEntitySelection'
+import * as React from 'react';
+import { useAction } from '@/actions';
+import { EntityList, type EntityListGroup } from './entity-list';
+import { EntityRow } from './entity-row';
+import { useEntityListInteractions } from '@/hooks/useEntityListInteractions';
+import type { createEntitySelection } from '@/hooks/useEntitySelection';
 
 export interface EntityPanelItem {
-  icon?: React.ReactNode
-  title: React.ReactNode
-  badges?: React.ReactNode
-  trailing?: React.ReactNode
-  controls?: React.ReactNode
-  menu?: React.ReactNode
-  hideMoreButton?: boolean
-  dataAttributes?: Record<string, string | undefined>
+  icon?: React.ReactNode;
+  title: React.ReactNode;
+  badges?: React.ReactNode;
+  trailing?: React.ReactNode;
+  controls?: React.ReactNode;
+  menu?: React.ReactNode;
+  hideMoreButton?: boolean;
+  dataAttributes?: Record<string, string | undefined>;
 }
 
 export interface EntityPanelProps<T> {
-  items: T[]
-  getId: (item: T) => string
-  mapItem: (item: T) => EntityPanelItem
-  selection: ReturnType<typeof createEntitySelection>
-  onItemClick: (item: T) => void
-  selectedId?: string | null
-  emptyState?: React.ReactNode
-  className?: string
+  items: T[];
+  groups?: EntityListGroup<T>[];
+  getId: (item: T) => string;
+  mapItem: (item: T) => EntityPanelItem;
+  selection: ReturnType<typeof createEntitySelection>;
+  onItemClick: (item: T) => void;
+  selectedId?: string | null;
+  emptyState?: React.ReactNode;
+  className?: string;
 }
 
 export function EntityPanel<T>({
   items,
+  groups,
   getId,
   mapItem,
   selection,
@@ -44,9 +46,12 @@ export function EntityPanel<T>({
   emptyState,
   className,
 }: EntityPanelProps<T>) {
-  const selectionStore = selection.useSelectionStore()
+  const interactionItems = groups?.length
+    ? groups.flatMap((group) => group.items)
+    : items;
+  const selectionStore = selection.useSelectionStore();
   const interactions = useEntityListInteractions<T>({
-    items,
+    items: interactionItems,
     getId,
     keyboard: {
       onNavigate: (item) => onItemClick(item),
@@ -54,30 +59,36 @@ export function EntityPanel<T>({
     },
     multiSelect: true,
     selectionStore,
-  })
+  });
 
   useAction(
     'navigator.clearSelection',
     () => {
-      interactions.selection.clear()
+      interactions.selection.clear();
     },
     {
       enabled: () => interactions.selection.isMultiSelectActive,
     },
     [interactions.selection],
-  )
+  );
 
   return (
     <EntityList
       items={items}
+      groups={groups}
       getKey={getId}
       containerRef={interactions.listProps.containerRef}
       containerProps={interactions.listProps.containerProps}
       className={className}
       emptyState={emptyState}
       renderItem={(item, index, isFirst) => {
-        const mapped = mapItem(item)
-        const rowProps = interactions.getRowProps(item, index)
+        const mapped = mapItem(item);
+        const interactionIndex = groups?.length
+          ? interactionItems.findIndex(
+              (candidate) => getId(candidate) === getId(item),
+            )
+          : index;
+        const rowProps = interactions.getRowProps(item, interactionIndex);
         return (
           <EntityRow
             icon={mapped.icon}
@@ -89,9 +100,9 @@ export function EntityPanel<T>({
             isInMultiSelect={rowProps.isInMultiSelect}
             showSeparator={!isFirst}
             onMouseDown={(e) => {
-              rowProps.onMouseDown(e)
+              rowProps.onMouseDown(e);
               if (!e.metaKey && !e.ctrlKey && !e.shiftKey && e.button !== 2) {
-                onItemClick(item)
+                onItemClick(item);
               }
             }}
             buttonProps={rowProps.buttonProps}
@@ -99,8 +110,8 @@ export function EntityPanel<T>({
             hideMoreButton={mapped.hideMoreButton}
             dataAttributes={mapped.dataAttributes}
           />
-        )
+        );
       }}
     />
-  )
+  );
 }

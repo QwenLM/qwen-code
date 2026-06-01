@@ -1364,6 +1364,12 @@ function AppShellContent({
     : undefined
   const activeSessionWorkingDirectory =
     scopedActiveSessionMeta?.workingDirectory
+  const [workspaceSkillWorkingDirectory, setWorkspaceSkillWorkingDirectory] =
+    React.useState<string | undefined>(undefined)
+  const activeSkillsWorkingDirectory =
+    activeSessionWorkingDirectory ??
+    workspaceSkillWorkingDirectory ??
+    activeWorkspace?.rootPath
 
   // Skills state is bucketed by workspace + working directory so project-level
   // skills from one session do not overwrite another session in the same workspace.
@@ -1376,7 +1382,7 @@ function AppShellContent({
   const skillsRequestIdRef = React.useRef(0)
   const activeSkillsScopeKey = getWorkspaceSkillsCacheKey(
     activeWorkspaceId,
-    activeSessionWorkingDirectory,
+    activeSkillsWorkingDirectory,
   )
   const activeSkillsState = activeSkillsScopeKey
     ? skillsByScopeKey[activeSkillsScopeKey]
@@ -1420,14 +1426,23 @@ function AppShellContent({
     ...PERMISSION_MODE_ORDER,
   ])
 
-  // Load workspace settings (for localMcpEnabled and cyclablePermissionModes) on workspace change
+  // Load workspace settings (for localMcpEnabled, cyclablePermissionModes, and default skill cwd) on workspace change
   React.useEffect(() => {
-    if (!activeWorkspaceId) return
+    if (!activeWorkspaceId) {
+      setWorkspaceSkillWorkingDirectory(undefined)
+      return
+    }
+    setWorkspaceSkillWorkingDirectory(activeWorkspace?.rootPath)
+    let cancelled = false
     window.electronAPI
       .getWorkspaceSettings(activeWorkspaceId)
       .then((settings) => {
+        if (cancelled) return
         if (settings) {
           setLocalMcpEnabled(settings.localMcpEnabled ?? true)
+          setWorkspaceSkillWorkingDirectory(
+            settings.workingDirectory ?? activeWorkspace?.rootPath,
+          )
           // Load cyclablePermissionModes from workspace settings
           if (
             settings.cyclablePermissionModes &&
@@ -1438,9 +1453,13 @@ function AppShellContent({
         }
       })
       .catch((err) => {
+        if (cancelled) return
         console.error('[Chat] Failed to load workspace settings:', err)
       })
-  }, [activeWorkspaceId])
+    return () => {
+      cancelled = true
+    }
+  }, [activeWorkspaceId, activeWorkspace?.rootPath])
 
   // Reset UI state when workspace changes
   // This prevents stale search queries, focused items, and filter state from persisting
@@ -1959,6 +1978,28 @@ function AppShellContent({
     workspaceSessionMetaCacheRef.current = workspaceSessionMetaCache
   }, [workspaceSessionMetaCache])
 
+  const firstActiveWorkspaceSessionMeta = React.useMemo<
+    SessionMeta | undefined
+  >(() => {
+    if (!activeWorkspaceId) return undefined
+
+    const orderedWorkspaceMetas = getWorkspaceSessionMetas(
+      workspaceSessions,
+      activeWorkspaceId,
+    )
+    const liveWorkspaceMetas = Array.from(sessionMetaMap.values()).filter(
+      (s) =>
+        s.workspaceId === activeWorkspaceId ||
+        (remoteWorkspaceId && s.workspaceId === remoteWorkspaceId),
+    )
+    const workspaceMetas =
+      liveWorkspaceMetas.length === 0 && orderedWorkspaceMetas.length > 0
+        ? orderedWorkspaceMetas
+        : mergeStableSessionMetaList(orderedWorkspaceMetas, liveWorkspaceMetas)
+
+    return workspaceMetas.find((s) => !s.hidden && !s.isArchived)
+  }, [activeWorkspaceId, remoteWorkspaceId, sessionMetaMap, workspaceSessions])
+
   const hasPendingPrompt = React.useCallback(
     (sessionId: string) => {
       return (pendingPermissions.get(sessionId)?.length ?? 0) > 0
@@ -1971,15 +2012,17 @@ function AppShellContent({
     Record<string, boolean>
   >({})
 
+  const skillDiscoverySessionMeta =
+    scopedActiveSessionMeta ?? firstActiveWorkspaceSessionMeta
   const activeEffectiveConnectionSlug = React.useMemo(
     () =>
       resolveEffectiveConnectionSlug(
-        scopedActiveSessionMeta?.llmConnection,
+        skillDiscoverySessionMeta?.llmConnection,
         workspaceDefaultLlmConnection,
         llmConnections,
       ),
     [
-      scopedActiveSessionMeta?.llmConnection,
+      skillDiscoverySessionMeta?.llmConnection,
       llmConnections,
       workspaceDefaultLlmConnection,
     ],
@@ -1996,12 +2039,14 @@ function AppShellContent({
   const shouldUseQwenAcpSkills =
     activeEffectiveConnection?.providerType === 'qwen'
   const activeQwenSessionId =
-    shouldUseQwenAcpSkills && activeSessionBelongsToActiveWorkspace
-      ? session.selected
+    shouldUseQwenAcpSkills
+      ? activeSessionBelongsToActiveWorkspace
+        ? (session.selected ?? null)
+        : (firstActiveWorkspaceSessionMeta?.id ?? null)
       : null
   const activeQwenCapabilityCacheKey = getQwenCapabilityCacheKey(
     activeWorkspaceId,
-    activeSessionWorkingDirectory,
+    activeSkillsWorkingDirectory,
     activeEffectiveConnectionSlug,
   )
   const activeQwenCapabilitySnapshot = activeQwenCapabilityCacheKey
@@ -2026,9 +2071,53 @@ function AppShellContent({
         workingDirectory,
         connectionSlug,
       )
-      return key ? qwenCapabilityCache[key] : undefined
+      if (key && qwenCapabilityCache[key]) return qwenCapabilityCache[key]
+
+      if (!workspaceId || workspaceId !== activeWorkspaceId) return undefined
+
+      const requestedDirectory = (workingDirectory ?? '').trim()
+      const defaultDirectories = [
+        activeSkillsWorkingDirectory,
+        workspaceSkillWorkingDirectory,
+        activeWorkspace?.rootPath,
+      ].filter(
+        (directory): directory is string =>
+          Boolean(directory && directory.trim()),
+      )
+      const fallbackDirectories = new Set<string | null>()
+
+      if (!requestedDirectory) {
+        for (const directory of defaultDirectories) {
+          fallbackDirectories.add(directory)
+        }
+      } else if (
+        defaultDirectories.some(
+          (directory) => directory.trim() === requestedDirectory,
+        )
+      ) {
+        fallbackDirectories.add(null)
+      }
+
+      for (const fallbackDirectory of fallbackDirectories) {
+        const fallbackKey = getQwenCapabilityCacheKey(
+          workspaceId,
+          fallbackDirectory,
+          connectionSlug,
+        )
+        if (fallbackKey && qwenCapabilityCache[fallbackKey]) {
+          return qwenCapabilityCache[fallbackKey]
+        }
+      }
+
+      return undefined
     },
-    [qwenCapabilityCache],
+    [
+      activeSkillsWorkingDirectory,
+      activeWorkspace?.rootPath,
+      activeWorkspaceId,
+      qwenCapabilityCache,
+      workspaceSkillWorkingDirectory,
+    ],
   )
   const shouldLoadSkills = shouldLoadWorkspaceSkills({
     isSkillsNavigation:
@@ -2195,7 +2284,7 @@ function AppShellContent({
       try {
         const loaded = await window.electronAPI.getSkills(
           workspaceId,
-          activeSessionWorkingDirectory,
+          activeSkillsWorkingDirectory,
           activeQwenSessionId ?? undefined,
         )
         if (shouldUseQwenAcpSkills && activeQwenCapabilityCacheKey) {
@@ -2244,7 +2333,7 @@ function AppShellContent({
       activeQwenCapabilitySnapshot,
       activeSkillsScopeKey,
       activeWorkspaceId,
-      activeSessionWorkingDirectory,
+      activeSkillsWorkingDirectory,
       activeQwenSessionId,
       shouldLoadSkills,
       shouldUseQwenAcpSkills,
@@ -2836,7 +2925,7 @@ function AppShellContent({
       skills,
       reloadSkills,
       getQwenCapabilitySnapshot,
-      activeSessionWorkingDirectory,
+      activeSessionWorkingDirectory: activeSkillsWorkingDirectory,
       labels: displayLabelConfigs,
       onSessionLabelsChange: handleSessionLabelsChange,
       enabledModes,
@@ -2866,7 +2955,7 @@ function AppShellContent({
       skills,
       reloadSkills,
       getQwenCapabilitySnapshot,
-      activeSessionWorkingDirectory,
+      activeSkillsWorkingDirectory,
       displayLabelConfigs,
       handleSessionLabelsChange,
       enabledModes,
@@ -3278,7 +3367,7 @@ function AppShellContent({
         await window.electronAPI.deleteSkill(
           activeWorkspace.id,
           skillSlug,
-          activeSessionWorkingDirectory,
+          activeSkillsWorkingDirectory,
           activeQwenSessionId ?? undefined,
         )
         await reloadSkills({ force: true })
@@ -3289,7 +3378,7 @@ function AppShellContent({
       }
     },
     [
-      activeSessionWorkingDirectory,
+      activeSkillsWorkingDirectory,
       activeQwenSessionId,
       activeWorkspace,
       reloadSkills,
@@ -3298,15 +3387,17 @@ function AppShellContent({
   )
 
   const handleSetSkillEnabled = useCallback(
-    async (skillSlug: string, enabled: boolean) => {
+    async (skill: LoadedSkill, enabled: boolean) => {
       if (!activeWorkspace) return
+      const scope = skill.providerLevel === 'project' ? 'project' : 'global'
       try {
         await window.electronAPI.setSkillEnabled(
           activeWorkspace.id,
-          skillSlug,
+          skill.slug,
           enabled,
-          activeSessionWorkingDirectory,
+          activeSkillsWorkingDirectory,
           activeQwenSessionId ?? undefined,
+          scope,
         )
         await reloadSkills({ force: true })
       } catch (error) {
@@ -3316,7 +3407,7 @@ function AppShellContent({
       }
     },
     [
-      activeSessionWorkingDirectory,
+      activeSkillsWorkingDirectory,
       activeQwenSessionId,
       activeWorkspace,
       reloadSkills,
@@ -4926,7 +5017,7 @@ function AppShellContent({
                   activeWorkspaceId && (
                     <SkillMarketplacePanel
                       workspaceId={activeWorkspaceId}
-                      workingDirectory={activeSessionWorkingDirectory}
+                      workingDirectory={activeSkillsWorkingDirectory}
                       activeSessionId={activeQwenSessionId}
                       selectedSkillId={
                         navState.details?.type === 'marketplaceSkill'

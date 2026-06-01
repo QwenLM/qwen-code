@@ -547,23 +547,39 @@ export function FreeFormInput({
       : refreshedAvailableCommands;
   const effectiveAvailableSkills =
     availableSkills !== undefined ? availableSkills : refreshedAvailableSkills;
+  const hasProvidedQwenCapabilities =
+    availableCommands !== undefined || availableSkills !== undefined;
   const useQwenAcpSkillMentions =
     !connectionUnavailable &&
     (currentLlmConnection?.providerType === 'qwen' ||
       effectiveAvailableSkills.length > 0);
+  const disabledMentionSkillSlugs = React.useMemo(
+    () =>
+      new Set(
+        skills
+          .filter((skill) => skill.enabled === false)
+          .map((skill) => skill.slug.toLowerCase()),
+      ),
+    [skills],
+  );
   const qwenAcpMentionSkills = React.useMemo<LoadedSkill[]>(
     () =>
-      effectiveAvailableSkills.map((skillName) => ({
-        slug: skillName,
-        metadata: {
-          name: skillName,
-          description: '',
-        },
-        content: '',
-        path: '',
-        source: 'provider' as const,
-      })),
-    [effectiveAvailableSkills],
+      effectiveAvailableSkills
+        .filter(
+          (skillName) =>
+            !disabledMentionSkillSlugs.has(skillName.toLowerCase()),
+        )
+        .map((skillName) => ({
+          slug: skillName,
+          metadata: {
+            name: skillName,
+            description: '',
+          },
+          content: '',
+          path: '',
+          source: 'provider' as const,
+        })),
+    [disabledMentionSkillSlugs, effectiveAvailableSkills],
   );
   const enabledMentionSkills = React.useMemo(
     () => skills.filter((skill) => skill.enabled !== false),
@@ -1298,6 +1314,7 @@ export function FreeFormInput({
     if (
       !enableQwenSlashCommands ||
       !sessionId ||
+      hasProvidedQwenCapabilities ||
       effectiveAvailableCommands.length > 0 ||
       effectiveAvailableSkills.length > 0
     )
@@ -1365,6 +1382,7 @@ export function FreeFormInput({
     enableQwenSlashCommands,
     effectiveAvailableCommands.length,
     effectiveAvailableSkills.length,
+    hasProvidedQwenCapabilities,
     enabledSourceSlugs,
     currentModel,
     permissionMode,

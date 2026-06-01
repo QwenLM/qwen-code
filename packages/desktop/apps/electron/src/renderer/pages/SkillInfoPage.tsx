@@ -6,33 +6,73 @@
  * Uses the Info_ component system for consistent styling with SourceInfoPage.
  */
 
-import * as React from 'react'
-import { useTranslation } from 'react-i18next'
-import { useEffect, useState, useCallback } from 'react'
-import { Check, X, Minus } from 'lucide-react'
+import * as React from 'react';
+import { useTranslation } from 'react-i18next';
+import { useEffect, useState, useCallback } from 'react';
+import { Check, X, Minus } from 'lucide-react';
 import {
   EditPopover,
   EditButton,
   getEditConfig,
-} from '@/components/ui/EditPopover'
-import { toast } from 'sonner'
-import { SkillMenu } from '@/components/app-shell/SkillMenu'
-import { SkillAvatar } from '@/components/ui/skill-avatar'
-import { routes, navigate } from '@/lib/navigate'
-import { useActiveWorkspace } from '@/context/AppShellContext'
+} from '@/components/ui/EditPopover';
+import { toast } from 'sonner';
+import { SkillMenu } from '@/components/app-shell/SkillMenu';
+import { SkillAvatar } from '@/components/ui/skill-avatar';
+import { routes, navigate } from '@/lib/navigate';
+import { useActiveWorkspace } from '@/context/AppShellContext';
 import {
   Info_Page,
   Info_Section,
   Info_Table,
   Info_Markdown,
-} from '@/components/info'
-import type { LoadedSkill } from '../../shared/types'
+} from '@/components/info';
+import type { LoadedSkill } from '../../shared/types';
 
 interface SkillInfoPageProps {
-  skillSlug: string
-  workspaceId: string
-  workingDirectory?: string
-  activeSessionId?: string | null
+  skillSlug: string;
+  workspaceId: string;
+  workingDirectory?: string;
+  activeSessionId?: string | null;
+}
+
+type Translate = ReturnType<typeof useTranslation>['t'];
+
+function getSkillSourceLabel(skill: LoadedSkill, t: Translate): string {
+  if (skill.source === 'provider') {
+    if (skill.providerLevel === 'bundled') {
+      return t('skillInfo.sourceBuiltIn', 'Built-in');
+    }
+    if (skill.providerLevel === 'user') return t('skillInfo.sourceGlobal');
+    if (skill.providerLevel === 'project') return t('skillInfo.sourceProject');
+    return 'Qwen Code';
+  }
+  if (skill.source === 'project') return t('skillInfo.sourceProject');
+  if (skill.source === 'global') return t('skillInfo.sourceGlobal');
+  return t('skillInfo.sourceWorkspace');
+}
+
+function getSkillLocationLabel(skill: LoadedSkill, t: Translate): string {
+  if (skill.source === 'provider' && skill.providerLevel === 'bundled') {
+    return t('skillInfo.locationBuiltIn', 'Built-in');
+  }
+  if (!skill.path) return '';
+
+  const skillFile = `${skill.path.replace(/[\\/]+$/, '')}/SKILL.md`;
+  if (
+    skill.source === 'global' ||
+    (skill.source === 'provider' && skill.providerLevel === 'user')
+  ) {
+    return formatGlobalSkillPath(skillFile);
+  }
+  return skillFile;
+}
+
+function formatGlobalSkillPath(path: string): string {
+  for (const marker of ['/.qwen/skills/', '/.agents/skills/']) {
+    const index = path.indexOf(marker);
+    if (index >= 0) return `~${path.slice(index)}`;
+  }
+  return path;
 }
 
 export default function SkillInfoPage({
@@ -41,18 +81,18 @@ export default function SkillInfoPage({
   workingDirectory,
   activeSessionId,
 }: SkillInfoPageProps) {
-  const { t } = useTranslation()
-  const [skill, setSkill] = useState<LoadedSkill | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const activeWorkspace = useActiveWorkspace()
-  const canRevealLocally = !activeWorkspace?.remoteServer
+  const { t } = useTranslation();
+  const [skill, setSkill] = useState<LoadedSkill | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const activeWorkspace = useActiveWorkspace();
+  const canRevealLocally = !activeWorkspace?.remoteServer;
 
   // Load skill data
   useEffect(() => {
-    let isMounted = true
-    setLoading(true)
-    setError(null)
+    let isMounted = true;
+    setLoading(true);
+    setError(null);
 
     const loadSkill = async () => {
       try {
@@ -60,107 +100,104 @@ export default function SkillInfoPage({
           workspaceId,
           workingDirectory,
           activeSessionId ?? undefined,
-        )
+        );
 
-        if (!isMounted) return
+        if (!isMounted) return;
 
         // Find the skill by slug
-        const found = skills.find((s) => s.slug === skillSlug)
+        const found = skills.find((s) => s.slug === skillSlug);
         if (found) {
-          setSkill(found)
+          setSkill(found);
         } else {
-          setError(t('skillInfo.notFound'))
+          setError(t('skillInfo.notFound'));
         }
       } catch (err) {
-        if (!isMounted) return
+        if (!isMounted) return;
         setError(
           err instanceof Error ? err.message : t('skillInfo.failedToLoad'),
-        )
+        );
       } finally {
-        if (isMounted) setLoading(false)
+        if (isMounted) setLoading(false);
       }
-    }
+    };
 
-    loadSkill()
+    loadSkill();
 
     // Subscribe to skill changes
     const unsubscribe = window.electronAPI.onSkillsChanged?.(
       (changedWorkspaceId, skills) => {
-        if (changedWorkspaceId !== workspaceId) return
-        const updated = skills.find((s) => s.slug === skillSlug)
+        if (changedWorkspaceId !== workspaceId) return;
+        const updated = skills.find((s) => s.slug === skillSlug);
         if (updated) {
-          setSkill(updated)
+          setSkill(updated);
         }
       },
-    )
+    );
 
     return () => {
-      isMounted = false
-      unsubscribe?.()
-    }
-  }, [workspaceId, skillSlug, workingDirectory, activeSessionId, t])
+      isMounted = false;
+      unsubscribe?.();
+    };
+  }, [workspaceId, skillSlug, workingDirectory, activeSessionId, t]);
 
   // Handle open in finder
   const handleOpenInFinder = useCallback(async () => {
-    if (!skill) return
+    if (!skill) return;
 
     try {
-      if (!canRevealLocally || !skill.path) return
-      await window.electronAPI.showInFolder(`${skill.path}/SKILL.md`)
+      if (!canRevealLocally || !skill.path) return;
+      await window.electronAPI.showInFolder(`${skill.path}/SKILL.md`);
     } catch (err) {
-      console.error('Failed to open skill in finder:', err)
+      console.error('Failed to open skill in finder:', err);
     }
-  }, [canRevealLocally, skill])
+  }, [canRevealLocally, skill]);
 
   // Handle delete
   const handleDelete = useCallback(async () => {
-    if (!skill) return
+    if (!skill) return;
 
     try {
-      if (skill.source !== 'workspace') return
+      if (skill.source !== 'workspace') return;
       await window.electronAPI.deleteSkill(
         workspaceId,
         skillSlug,
         workingDirectory,
         activeSessionId ?? undefined,
-      )
-      toast.success(t('skillInfo.deletedSkill', { name: skill.metadata.name }))
-      navigate(routes.view.skills())
+      );
+      toast.success(t('skillInfo.deletedSkill', { name: skill.metadata.name }));
+      navigate(routes.view.skills());
     } catch (err) {
       toast.error(t('skillInfo.failedToDelete'), {
         description: err instanceof Error ? err.message : undefined,
-      })
+      });
     }
-  }, [activeSessionId, skill, skillSlug, t, workingDirectory, workspaceId])
+  }, [activeSessionId, skill, skillSlug, t, workingDirectory, workspaceId]);
 
   // Handle opening in new window
   const handleOpenInNewWindow = useCallback(() => {
     window.electronAPI.openUrl(
       `craftagents://skills/skill/${skillSlug}?window=focused`,
-    )
-  }, [skillSlug])
+    );
+  }, [skillSlug]);
 
   // Get skill name for header
-  const skillName = skill?.metadata.name || skillSlug
-  const canDeleteSkill = skill?.source === 'workspace'
-  const canEditSkill = Boolean(skill?.path) && skill?.source !== 'provider'
+  const skillName = skill?.metadata.name || skillSlug;
+  const canDeleteSkill = skill?.source === 'workspace';
+  const canEditSkill = Boolean(skill?.path) && skill?.source !== 'provider';
 
-  // Format path to show just the skill-relative portion (skills/{slug}/)
-  const formatPath = (path: string) => {
-    const skillsIndex = path.indexOf('/skills/')
-    if (skillsIndex !== -1) {
-      return path.slice(skillsIndex + 1) // Remove leading slash, keep "skills/{slug}/..."
-    }
-    return path
-  }
+  const sourceLabel = skill ? getSkillSourceLabel(skill, t) : '';
+  const locationLabel = skill ? getSkillLocationLabel(skill, t) : '';
+  const canOpenLocation =
+    Boolean(skill?.path) &&
+    canRevealLocally &&
+    skill?.providerLevel !== 'bundled';
 
   // Open the skill folder in Finder with SKILL.md selected
   const handleLocationClick = () => {
-    if (!skill) return
-    // Show the SKILL.md file in Finder (this reveals the enclosing folder with file focused)
-    if (!canRevealLocally || !skill.path) return
-    window.electronAPI.showInFolder(`${skill.path}/SKILL.md`)
-  }
+    if (!skill) return;
+    if (!canOpenLocation || !skill.path) return;
+    window.electronAPI.showInFolder(`${skill.path}/SKILL.md`);
+  };
 
   return (
     <Info_Page
@@ -221,22 +258,20 @@ export default function SkillInfoPage({
                 {skill.metadata.description}
               </Info_Table.Row>
               <Info_Table.Row label={t('common.source')}>
-                {skill.source === 'project'
-                  ? t('skillInfo.sourceProject')
-                  : skill.source === 'global'
-                    ? t('skillInfo.sourceGlobal')
-                    : skill.source === 'provider'
-                      ? 'Qwen Code'
-                      : t('skillInfo.sourceWorkspace')}
+                {sourceLabel}
               </Info_Table.Row>
-              {skill.path && (
+              {locationLabel && (
                 <Info_Table.Row label={t('common.location')}>
-                  <button
-                    onClick={handleLocationClick}
-                    className="hover:underline cursor-pointer text-left"
-                  >
-                    {formatPath(skill.path)}
-                  </button>
+                  {canOpenLocation ? (
+                    <button
+                      onClick={handleLocationClick}
+                      className="hover:underline cursor-pointer text-left"
+                    >
+                      {locationLabel}
+                    </button>
+                  ) : (
+                    locationLabel
+                  )}
                 </Info_Table.Row>
               )}
               {skill.metadata.requiredSources &&
@@ -323,5 +358,5 @@ export default function SkillInfoPage({
         </Info_Page.Content>
       )}
     </Info_Page>
-  )
+  );
 }

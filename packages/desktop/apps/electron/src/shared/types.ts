@@ -720,6 +720,7 @@ export interface ElectronAPI {
     enabled: boolean,
     workingDirectory?: string,
     activeSessionId?: string,
+    scope?: 'global' | 'project',
   ): Promise<void>;
   listSkillMarketplace(
     workspaceId: string,

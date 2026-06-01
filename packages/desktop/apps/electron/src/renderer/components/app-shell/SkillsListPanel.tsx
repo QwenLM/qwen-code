@@ -1,37 +1,38 @@
-import * as React from 'react'
-import { useTranslation } from 'react-i18next'
-import { Loader2, MoreHorizontal, Zap } from 'lucide-react'
-import { SkillAvatar } from '@/components/ui/skill-avatar'
-import { Button } from '@/components/ui/button'
-import { Switch } from '@/components/ui/switch'
-import { EntityPanel } from '@/components/ui/entity-panel'
-import { EntityListEmptyScreen } from '@/components/ui/entity-list-empty'
+import * as React from 'react';
+import { useTranslation } from 'react-i18next';
+import { Loader2, MoreHorizontal, Zap } from 'lucide-react';
+import { SkillAvatar } from '@/components/ui/skill-avatar';
+import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
+import { EntityPanel } from '@/components/ui/entity-panel';
+import { EntityListEmptyScreen } from '@/components/ui/entity-list-empty';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   StyledDropdownMenuContent,
-} from '@/components/ui/styled-dropdown'
-import { DropdownMenuProvider } from '@/components/ui/menu-context'
-import { skillSelection } from '@/hooks/useEntitySelection'
-import { SkillMenu } from './SkillMenu'
-import { SendResourceToWorkspaceDialog } from './SendResourceToWorkspaceDialog'
-import { EditPopover, getEditConfig } from '@/components/ui/EditPopover'
+} from '@/components/ui/styled-dropdown';
+import { DropdownMenuProvider } from '@/components/ui/menu-context';
+import { skillSelection } from '@/hooks/useEntitySelection';
+import { SkillMenu } from './SkillMenu';
+import { SendResourceToWorkspaceDialog } from './SendResourceToWorkspaceDialog';
+import { EditPopover, getEditConfig } from '@/components/ui/EditPopover';
 import {
   useActiveWorkspace,
   useAppShellContext,
-} from '@/context/AppShellContext'
-import type { LoadedSkill } from '../../../shared/types'
+} from '@/context/AppShellContext';
+import type { LoadedSkill } from '../../../shared/types';
+import type { EntityListGroup } from '@/components/ui/entity-list';
 
 export interface SkillsListPanelProps {
-  skills: LoadedSkill[]
-  onDeleteSkill: (skillSlug: string) => void
-  onSetSkillEnabled?: (skillSlug: string, enabled: boolean) => Promise<void>
-  onSkillClick: (skill: LoadedSkill) => void
-  selectedSkillSlug?: string | null
-  workspaceId?: string
-  workspaceRootPath?: string
-  isLoading?: boolean
-  className?: string
+  skills: LoadedSkill[];
+  onDeleteSkill: (skillSlug: string) => void;
+  onSetSkillEnabled?: (skill: LoadedSkill, enabled: boolean) => Promise<void>;
+  onSkillClick: (skill: LoadedSkill) => void;
+  selectedSkillSlug?: string | null;
+  workspaceId?: string;
+  workspaceRootPath?: string;
+  isLoading?: boolean;
+  className?: string;
 }
 
 export function SkillsListPanel({
@@ -45,21 +46,25 @@ export function SkillsListPanel({
   isLoading = false,
   className,
 }: SkillsListPanelProps) {
-  const { t } = useTranslation()
-  const activeWorkspace = useActiveWorkspace()
-  const canRevealLocally = !activeWorkspace?.remoteServer
-  const { workspaces, activeWorkspaceId } = useAppShellContext()
-  const hasOtherWorkspaces = workspaces.length > 1
+  const { t } = useTranslation();
+  const activeWorkspace = useActiveWorkspace();
+  const canRevealLocally = !activeWorkspace?.remoteServer;
+  const { workspaces, activeWorkspaceId } = useAppShellContext();
+  const hasOtherWorkspaces = workspaces.length > 1;
   const [updatingSkillSlug, setUpdatingSkillSlug] = React.useState<
     string | null
-  >(null)
+  >(null);
 
   // Send to Workspace dialog state
-  const [sendDialogOpen, setSendDialogOpen] = React.useState(false)
+  const [sendDialogOpen, setSendDialogOpen] = React.useState(false);
   const [sendResourceSlug, setSendResourceSlug] = React.useState<string | null>(
     null,
-  )
-  const [sendResourceLabel, setSendResourceLabel] = React.useState('')
+  );
+  const [sendResourceLabel, setSendResourceLabel] = React.useState('');
+  const groupedSkills = React.useMemo<EntityListGroup<LoadedSkill>[]>(
+    () => buildSkillGroups(skills, t),
+    [skills, t],
+  );
 
   return (
     <>
@@ -72,6 +77,7 @@ export function SkillsListPanel({
       >
         <EntityPanel<LoadedSkill>
           items={skills}
+          groups={groupedSkills}
           getId={(s) => s.slug}
           selection={skillSelection}
           selectedId={selectedSkillSlug}
@@ -108,13 +114,17 @@ export function SkillsListPanel({
             )
           }
           mapItem={(skill) => {
-            const canManageProviderSkill =
-              skill.source === 'provider' && skill.providerLevel === 'user'
+            const canDeleteProviderSkill =
+              skill.source === 'provider' && skill.providerLevel === 'user';
+            const canToggleProviderSkill =
+              skill.source === 'provider' &&
+              (skill.providerLevel === 'user' ||
+                skill.providerLevel === 'project');
             const canDelete =
-              skill.source === 'workspace' || canManageProviderSkill
+              skill.source === 'workspace' || canDeleteProviderSkill;
             const canToggle =
-              canManageProviderSkill && Boolean(onSetSkillEnabled)
-            const isUpdating = updatingSkillSlug === skill.slug
+              canToggleProviderSkill && Boolean(onSetSkillEnabled);
+            const isUpdating = updatingSkillSlug === skill.slug;
             const menu = (
               <SkillMenu
                 skillSlug={skill.slug}
@@ -128,7 +138,7 @@ export function SkillsListPanel({
                   if (canRevealLocally && skill.path) {
                     void window.electronAPI.showInFolder(
                       `${skill.path}/SKILL.md`,
-                    )
+                    );
                   }
                 }}
                 canShowInFinder={canRevealLocally && Boolean(skill.path)}
@@ -140,14 +150,14 @@ export function SkillsListPanel({
                 onSendToWorkspace={
                   hasOtherWorkspaces && skill.source === 'workspace'
                     ? () => {
-                        setSendResourceSlug(skill.slug)
-                        setSendResourceLabel(skill.metadata.name)
-                        setSendDialogOpen(true)
+                        setSendResourceSlug(skill.slug);
+                        setSendResourceLabel(skill.metadata.name);
+                        setSendDialogOpen(true);
                       }
                     : undefined
                 }
               />
-            )
+            );
 
             return {
               icon: (
@@ -193,18 +203,18 @@ export function SkillsListPanel({
                     checked={skill.enabled ?? true}
                     disabled={isUpdating}
                     onCheckedChange={(checked) => {
-                      if (!onSetSkillEnabled) return
-                      setUpdatingSkillSlug(skill.slug)
-                      void onSetSkillEnabled(skill.slug, checked).finally(() =>
+                      if (!onSetSkillEnabled) return;
+                      setUpdatingSkillSlug(skill.slug);
+                      void onSetSkillEnabled(skill, checked).finally(() =>
                         setUpdatingSkillSlug(null),
-                      )
+                      );
                     }}
                   />
                 </>
               ) : undefined,
               menu,
               hideMoreButton: canToggle,
-            }
+            };
           }}
         />
       </div>
@@ -222,5 +232,42 @@ export function SkillsListPanel({
         />
       )}
     </>
-  )
+  );
+}
+
+function skillGroupKey(
+  skill: LoadedSkill,
+): 'project' | 'global' | 'builtin' | 'workspace' | 'other' {
+  if (skill.source === 'provider') {
+    if (skill.providerLevel === 'project') return 'project';
+    if (skill.providerLevel === 'user') return 'global';
+    if (skill.providerLevel === 'bundled') return 'builtin';
+    return 'other';
+  }
+  if (skill.source === 'project') return 'project';
+  if (skill.source === 'global') return 'global';
+  if (skill.source === 'workspace') return 'workspace';
+  return 'other';
+}
+
+function buildSkillGroups(
+  skills: LoadedSkill[],
+  t: ReturnType<typeof useTranslation>['t'],
+): EntityListGroup<LoadedSkill>[] {
+  const labels = {
+    project: t('skillsList.groupProject', 'Project'),
+    global: t('skillsList.groupGlobal', 'Global'),
+    builtin: t('skillsList.groupBuiltIn', 'Built-in'),
+    workspace: t('skillsList.groupWorkspace', 'Workspace'),
+    other: t('skillsList.groupOther', 'Other'),
+  };
+  const order = ['project', 'global', 'builtin', 'workspace', 'other'] as const;
+
+  return order
+    .map((key) => ({
+      key,
+      label: labels[key],
+      items: skills.filter((skill) => skillGroupKey(skill) === key),
+    }))
+    .filter((group) => group.items.length > 0);
 }

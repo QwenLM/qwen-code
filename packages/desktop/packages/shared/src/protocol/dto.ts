@@ -924,7 +924,7 @@ export interface QwenSkillDeleteResult {
 export interface QwenSkillSetEnabledRequest {
   slug: string
   enabled: boolean
-  scope?: 'global'
+  scope?: 'global' | 'project'
 }
 
 export interface QwenSkillSetEnabledResult {

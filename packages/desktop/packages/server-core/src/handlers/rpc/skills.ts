@@ -470,6 +470,7 @@ export function registerSkillsHandlers(
       enabled: boolean,
       workingDirectory?: string,
       activeSessionId?: string,
+      scope?: 'global' | 'project',
     ) => {
       const workspace = getWorkspaceByNameOrId(workspaceId)
       if (!workspace) throw new Error('Workspace not found')
@@ -482,7 +483,7 @@ export function registerSkillsHandlers(
 
       const result = await deps.sessionManager.setQwenSkillEnabled(
         skillAcpSessionId('skills-discovery', workspaceId, activeSessionId),
-        { slug: skillSlug, enabled, scope: 'global' },
+        { slug: skillSlug, enabled, scope: scope ?? 'global' },
         { workspaceId, workingDirectory },
       )
       if (!result.success) {
