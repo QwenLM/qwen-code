@@ -111,6 +111,6 @@ export const useVimModeActions = () => {
 
 /** Combined hook for consumers that need both state and actions. Prefer the split hooks when possible. */
 export const useVimMode = () => ({
-    ...useVimModeState(),
-    ...useVimModeActions(),
-  });
+  ...useVimModeState(),
+  ...useVimModeActions(),
+});
