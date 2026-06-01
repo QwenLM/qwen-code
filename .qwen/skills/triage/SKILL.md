@@ -309,8 +309,10 @@ what this PR adds or fixes?
     log should show the bug reproducing.
   - **After** — this PR's code via `npm run dev`. The log should show it fixed.
 
-  `-p` runs a single prompt headless and exits, so `npm run dev -- -p '…'` is the
-  dev-build equivalent of `qwen -p '…'` — a clean A/B you capture in tmux:
+  `npm run dev -- <args>` runs the working tree exactly as `qwen <args>` runs the
+  installed build — same command, only the build differs. So before/after is one
+  invocation run two ways: `qwen …` (no PR) vs `npm run dev -- …` (this PR). A
+  quick headless check uses `-p` (one prompt, then exits):
 
   ```bash
   S=triage-test-$(date +%H%M%S); mkdir -p "tmp/$S"
@@ -324,8 +326,8 @@ what this PR adds or fixes?
   ```
 
   Poll the pane for completion between commands (see `tmux-real-user-testing`).
-  For interactive TUI changes (dialogs, selectors, keyboard nav), `-p` is not
-  enough — drive the live TUI with that skill.
+  `-p` is just one invocation. For interactive TUI changes, launch `qwen` and
+  `npm run dev` without `-p` and drive the live TUI the same way in both.
 
 - Get it running by any means. Prefer `npm run dev`, which runs the source
   directly — an unrelated `npm run bundle` / packaging failure does not block it.
