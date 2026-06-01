@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpanStatusCode } from '@opentelemetry/api';
+import { SpanStatusCode, type Context } from '@opentelemetry/api';
 
 const mockState = vi.hoisted(() => ({
   sdkInitialized: true,
@@ -141,6 +141,7 @@ import {
   runTTLSweepForTesting,
   truncateSpanError,
 } from './session-tracing.js';
+import { setSessionContext } from './session-context.js';
 
 function createMockConfig(
   overrides: Partial<{
@@ -277,6 +278,52 @@ describe('session-tracing', () => {
       const setAttrs = mockSpans[0]!.setAttributesCalls[0]!;
       expect(setAttrs).toHaveProperty('interaction.duration_ms');
       expect(setAttrs['qwen-code.turn_status']).toBe('ok');
+    });
+  });
+
+  describe('interaction span — trace context (#4486)', () => {
+    it('attaches to the session root context returned by getSessionContext', () => {
+      const fakeRoot = { __sessionRoot: true } as unknown as Context;
+      setSessionContext(fakeRoot, 'test-session');
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toBe(fakeRoot);
+    });
+
+    it('anchors at session root even when an unrelated OTel span is active', () => {
+      const fakeRoot = { __sessionRoot: true } as unknown as Context;
+      setSessionContext(fakeRoot, 'test-session');
+      mockState.activeOtelSpan = { name: 'unrelated-wrapper-span' };
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toBe(fakeRoot);
+    });
+
+    it('falls back to otelContext.active() when no session context is set', () => {
+      // Intentionally NOT calling setSessionContext — exercises the fallback.
+      const fakeActive = { kind: 'fake-active-span' };
+      mockState.activeOtelSpan = fakeActive;
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toMatchObject({ __activeSpan: fakeActive });
     });
   });
 

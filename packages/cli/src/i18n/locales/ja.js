@@ -594,6 +594,7 @@ export default {
   'Auto-memory: {{status}}': '自動メモリ: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     '自動統合: {{status}} · {{lastDream}} · /dream で実行',
+  'Auto-skill: {{status}}': '自動スキル: {{status}}',
   never: '未実行',
   on: 'オン',
   off: 'オフ',

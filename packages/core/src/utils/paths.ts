@@ -44,7 +44,7 @@ export function _resetValidatePathCacheForTest(): void {
  * Includes: spaces, parentheses, brackets, braces, semicolons, ampersands, pipes,
  * asterisks, question marks, dollar signs, backticks, quotes, hash, and other shell metacharacters.
  */
-export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~]/;
+export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~,]/;
 
 // Single shared list of path-argument keys used across file tools.
 // file_path (Edit, ReadFile, WriteFile), path (Glob, Grep, Ls, RipGrep),

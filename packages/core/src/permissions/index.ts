@@ -14,12 +14,14 @@ export {
   applyAutoModeDecision,
   evaluateAutoMode,
   formatClassifierBlockMessage,
+  getAutoModePermissionDeniedReason,
   type AutoModeDecision,
   type AutoModeOutcome,
   type EvaluateAutoModeInput,
   SAFE_TOOL_ALLOWLIST,
   isInSafeToolAllowlist,
   passesAcceptEditsFastPath,
+  shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
 export {

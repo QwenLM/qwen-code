@@ -47,7 +47,7 @@ const pressKey = (overrides: Partial<Key>) => {
 describe('AgentTabBar', () => {
   const switchToMain = vi.fn();
   const setAgentTabBarFocused = vi.fn();
-  const setBgPillFocused = vi.fn();
+  const setLivePanelFocused = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -86,7 +86,7 @@ describe('AgentTabBar', () => {
       entries: [{ kind: 'agent', agentId: 'bg-agent' }],
     } as never);
     vi.mocked(useBackgroundTaskViewActions).mockReturnValue({
-      setPillFocused: setBgPillFocused,
+      setLivePanelFocused,
     } as never);
     vi.mocked(useUIState).mockReturnValue({
       embeddedShellFocused: false,
@@ -101,6 +101,6 @@ describe('AgentTabBar', () => {
 
     pressKey({ name: 'n', sequence: '\u000E', ctrl: true });
     expect(switchToMain).toHaveBeenCalledTimes(1);
-    expect(setBgPillFocused).toHaveBeenCalledWith(true);
+    expect(setLivePanelFocused).toHaveBeenCalledWith(true);
   });
 });
