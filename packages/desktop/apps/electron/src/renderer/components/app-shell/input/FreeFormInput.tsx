@@ -476,8 +476,8 @@ export function FreeFormInput({
   compactMode = false,
   currentConnection,
   connectionUnavailable = false,
-  availableCommands = EMPTY_AVAILABLE_COMMANDS,
-  availableSkills = EMPTY_AVAILABLE_SKILLS,
+  availableCommands,
+  availableSkills,
 }: FreeFormInputProps) {
   const { t } = useTranslation();
   const showSessionLabelsUi = FEATURE_FLAGS.sessionLabelsUi;
@@ -545,11 +545,11 @@ export function FreeFormInput({
   const [refreshedAvailableSkills, setRefreshedAvailableSkills] =
     React.useState<string[]>(EMPTY_AVAILABLE_SKILLS);
   const effectiveAvailableCommands =
-    availableCommands.length > 0
+    availableCommands !== undefined
       ? availableCommands
       : refreshedAvailableCommands;
   const effectiveAvailableSkills =
-    availableSkills.length > 0 ? availableSkills : refreshedAvailableSkills;
+    availableSkills !== undefined ? availableSkills : refreshedAvailableSkills;
   const useQwenAcpSkillMentions =
     !connectionUnavailable &&
     (currentLlmConnection?.providerType === 'qwen' ||
