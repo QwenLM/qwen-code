@@ -406,9 +406,7 @@ export interface AcpSessionBridge {
   ): Promise<ShellCommandResult>;
 
   /**
-
-  /**
-   * Add a runtime MCP server through the ACP child's
+   * T2.8 (#4514): Add a runtime MCP server through the ACP child's
    * `McpClientManager.addRuntimeMcpServer`. On success, broadcasts an
    * `mcp_server_added` event to every session bus. Soft-refuse
    * (`budget_warning_only` skip) does NOT emit an event — the caller

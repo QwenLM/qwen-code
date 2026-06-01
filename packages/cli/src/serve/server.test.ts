@@ -1003,7 +1003,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(clientId !== undefined ? { clientId } : {}),
       });
     },
-    async queryWorkspaceStatus(method: string, idle: () => unknown) {
+    isChannelLive() {
+      return false;
+    },
+    async queryWorkspaceStatus<T>(method: string, idle: () => T) {
       // Dispatch based on method to mirror ACP child routing.
       if (method === 'qwen/status/workspace/mcp') {
         workspaceMcpCalls += 1;
@@ -1026,6 +1029,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async invokeWorkspaceCommand(
       method: string,
       params?: Record<string, unknown>,
+      _opts?: { timeoutMs?: number },
     ) {
       if (method === 'qwen/control/workspace/mcp/restart') {
         const serverName = (params?.['serverName'] as string) ?? '';
