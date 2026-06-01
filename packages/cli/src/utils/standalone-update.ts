@@ -228,14 +228,36 @@ function spawnAndCapture(
 }
 
 /**
+ * Validates that a resolved path lies within the expected parent directory.
+ * Guards against path traversal when constructing executable paths.
+ */
+function assertPathWithin(filePath: string, parentDir: string): void {
+  const resolved = path.resolve(filePath);
+  const resolvedParent = path.resolve(parentDir) + path.sep;
+  if (
+    !resolved.startsWith(resolvedParent) &&
+    resolved !== path.resolve(parentDir)
+  ) {
+    throw new Error(
+      `Path traversal detected: ${resolved} is outside ${resolvedParent}`,
+    );
+  }
+}
+
+/**
  * Verifies the new installation can actually run by invoking --version.
  * Prevents replacing a working install with a broken binary.
  */
 async function smokeTest(newInstallDir: string, target: string): Promise<void> {
+  const resolvedInstallDir = path.resolve(newInstallDir);
   const nodeBin = target.startsWith('win')
-    ? path.join(newInstallDir, 'node', 'node.exe')
-    : path.join(newInstallDir, 'node', 'bin', 'node');
-  const cliBin = path.join(newInstallDir, 'lib', 'cli.js');
+    ? path.join(resolvedInstallDir, 'node', 'node.exe')
+    : path.join(resolvedInstallDir, 'node', 'bin', 'node');
+  const cliBin = path.join(resolvedInstallDir, 'lib', 'cli.js');
+
+  // Validate paths stay within the installation directory (CodeQL: shell command safety)
+  assertPathWithin(nodeBin, resolvedInstallDir);
+  assertPathWithin(cliBin, resolvedInstallDir);
 
   if (!fs.existsSync(nodeBin)) {
     throw new Error(`Smoke test failed: node binary not found at ${nodeBin}`);
