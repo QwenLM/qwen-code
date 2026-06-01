@@ -53,7 +53,7 @@ interface TransportClient extends RpcClient {
 
 const webContentsId: number = ipcRenderer.sendSync('__get-web-contents-id')
 const isClientOnly = !!process.env.CRAFT_SERVER_URL
-const DESKTOP_RPC_REQUEST_TIMEOUT_MS = 60_000
+const DESKTOP_RPC_REQUEST_TIMEOUT_MS = 150_000
 
 let client: TransportClient
 

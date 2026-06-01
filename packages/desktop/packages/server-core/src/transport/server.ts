@@ -619,7 +619,7 @@ export class WsRpcServer implements RpcServer {
   // -------------------------------------------------------------------------
 
   /** Server-side timeout for RPC handler execution (ms). */
-  private static readonly HANDLER_TIMEOUT_MS = 60_000
+  private static readonly HANDLER_TIMEOUT_MS = 150_000
 
   private async onRequest(client: ClientConnection, envelope: MessageEnvelope): Promise<void> {
     const { channel, id, args } = envelope
