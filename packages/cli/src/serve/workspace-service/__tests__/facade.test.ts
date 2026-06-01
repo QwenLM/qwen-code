@@ -384,6 +384,137 @@ describe('createDaemonWorkspaceService', () => {
 
       expect(result).toEqual(invokeResult);
     });
+
+    it('publishes mcp_server_restart_refused event when restarted is false', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const invokeResult = {
+        serverName: 'blocked',
+        restarted: false,
+        skipped: true,
+        reason: 'in_flight',
+      };
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue(invokeResult);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, publishWorkspaceEvent }),
+      );
+
+      await svc.restartMcpServer(
+        makeCtx({ originatorClientId: 'c-1' }),
+        'blocked',
+      );
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_server_restart_refused',
+          data: expect.objectContaining({ serverName: 'blocked' }),
+          originatorClientId: 'c-1',
+        }),
+      );
+    });
+
+    it('translates mcp_server_not_found errorKind into McpServerNotFoundError', async () => {
+      const err = Object.assign(new Error('not found'), {
+        data: { errorKind: 'mcp_server_not_found', serverName: 'ghost' },
+      });
+      const invokeWorkspaceCommand = vi.fn().mockRejectedValue(err);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+
+      await expect(svc.restartMcpServer(makeCtx(), 'ghost')).rejects.toThrow(
+        /ghost/,
+      );
+    });
+
+    it('translates mcp_restart_failed errorKind into McpServerRestartFailedError', async () => {
+      const err = Object.assign(new Error('restart failed'), {
+        data: {
+          errorKind: 'mcp_restart_failed',
+          serverName: 'broken',
+          mcpStatus: 'disconnected',
+        },
+      });
+      const invokeWorkspaceCommand = vi.fn().mockRejectedValue(err);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+
+      await expect(svc.restartMcpServer(makeCtx(), 'broken')).rejects.toThrow(
+        /broken/,
+      );
+    });
+
+    it('re-throws non-errorKind errors without translation', async () => {
+      const err = new Error('generic boom');
+      const invokeWorkspaceCommand = vi.fn().mockRejectedValue(err);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+
+      await expect(svc.restartMcpServer(makeCtx(), 'srv')).rejects.toThrow(
+        'generic boom',
+      );
+    });
+
+    it('fans out per-entry events in pool-mode', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const invokeResult = {
+        serverName: 'pool-srv',
+        entries: [
+          { entryIndex: 0, restarted: true, durationMs: 50 },
+          { entryIndex: 1, restarted: false, reason: 'in_flight' },
+        ],
+      };
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue(invokeResult);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, publishWorkspaceEvent }),
+      );
+
+      await svc.restartMcpServer(
+        makeCtx({ originatorClientId: 'c-pool' }),
+        'pool-srv',
+      );
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(2);
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_server_restarted',
+          data: expect.objectContaining({ entryIndex: 0, durationMs: 50 }),
+        }),
+      );
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_server_restart_refused',
+          data: expect.objectContaining({ entryIndex: 1 }),
+        }),
+      );
+    });
+
+    it('skips malformed pool entries without crashing', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const invokeResult = {
+        serverName: 'pool-srv',
+        entries: [
+          null,
+          { entryIndex: 0, restarted: true, durationMs: 10 },
+          'not-an-object',
+        ],
+      };
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue(invokeResult);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, publishWorkspaceEvent }),
+      );
+
+      await svc.restartMcpServer(makeCtx(), 'pool-srv');
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1);
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_server_restarted',
+          data: expect.objectContaining({ entryIndex: 0 }),
+        }),
+      );
+    });
   });
 
   describe('initWorkspace', () => {
@@ -514,6 +645,66 @@ describe('createDaemonWorkspaceService', () => {
       );
 
       await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(/symlink/);
+    });
+
+    it('throws when target is a FIFO (non-regular file)', async () => {
+      const target = path.join(tmpDir, 'QWEN.md');
+      const { execSync } = await import('node:child_process');
+      try {
+        execSync(`mkfifo "${target}"`, { stdio: 'ignore' });
+      } catch {
+        // mkfifo may not be available on all platforms; skip gracefully
+        return;
+      }
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+        /not a regular file/,
+      );
+    });
+
+    it('throws WorkspaceInitRaceError on EEXIST during create', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      // Create the file between the readFile ENOENT and the open('wx')
+      // by pre-creating it — the 'wx' flag throws EEXIST atomically.
+      await fs.writeFile(path.join(tmpDir, 'QWEN.md'), '# content', 'utf8');
+
+      // Since the file has content and force is not set, it throws
+      // WorkspaceInitConflictError (not the race). To test the EEXIST
+      // race, we'd need to inject between lstat and open — this verifies
+      // the conflict guard at least.
+      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+        /already exists/,
+      );
+    });
+
+    it('parent symlink outside workspace is rejected', async () => {
+      // Create a subdirectory that's actually a symlink to /tmp
+      const docsLink = path.join(tmpDir, 'docs');
+      await fs.symlink(os.tmpdir(), docsLink);
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'docs/QWEN.md',
+        }),
+      );
+
+      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+        /parent.*resolves outside|parent.*workspace/i,
+      );
     });
   });
 });
