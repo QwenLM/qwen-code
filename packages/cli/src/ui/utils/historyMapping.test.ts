@@ -157,6 +157,73 @@ describe('computeApiTruncationIndex', () => {
     });
   });
 
+  describe('with mid-history system-reminder entries', () => {
+    const mcpReminder = (): Content =>
+      userContent(
+        `${SYSTEM_REMINDER_OPEN}\nNew tools available: foo\n${SYSTEM_REMINDER_CLOSE}`,
+      );
+
+    it('does not count an MCP added-tool reminder as a user prompt', () => {
+      // drainPendingAddedMcpToolsReminder injects a pure <system-reminder>
+      // user entry mid-history. It is role:'user' with text, so a naive count
+      // treats it as a real prompt and lands the truncation index one turn
+      // early, silently dropping a turn's context.
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+        userItem(5),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('prompt 1'),
+        modelContent('response 1'),
+        mcpReminder(), // must NOT count as a user turn
+        userContent('prompt 3'),
+        modelContent('response 3'),
+        userContent('prompt 5'),
+        modelContent('response 5'),
+      ];
+      // Rewind to turn 5 (2 real turns before it). If the reminder counted,
+      // the walk would stop at its successor (idx 4) and drop turn 3's
+      // context; excluding it lands correctly at prompt 5 (idx 6).
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(6);
+    });
+
+    it('still counts a real turn that has a per-turn reminder prepended', () => {
+      // In plan mode the reminder is an extra part on the SAME Content as the
+      // prompt: parts = [<system-reminder>…, prompt]. That entry IS a real
+      // user turn (it has a non-reminder prompt part), so it must be counted —
+      // a parts[0]-only exclusion would wrongly skip it and miscount.
+      const planTurn = (id: number): Content => ({
+        role: 'user',
+        parts: [
+          {
+            text: `${SYSTEM_REMINDER_OPEN}\nPlan mode is active.\n${SYSTEM_REMINDER_CLOSE}`,
+          } as Part,
+          { text: `prompt ${id}` } as Part,
+        ],
+      });
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        planTurn(1),
+        modelContent('response 1'),
+        planTurn(3),
+        modelContent('response 3'),
+      ];
+      // Rewind to turn 3 → keep startup + turn 1 = 3 entries.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
+  });
+
   describe('with tool call entries (functionResponse)', () => {
     it('skips functionResponse entries when counting user prompts', () => {
       const ui: HistoryItem[] = [

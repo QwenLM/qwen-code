@@ -57,6 +57,7 @@ import {
   getSubagentSystemReminder,
   getArenaSystemReminder,
   getStartupContextLength,
+  isSystemReminderContent,
   evaluatePermissionFlow,
   needsConfirmation,
   isPlanModeBlocked,
@@ -477,6 +478,14 @@ export class Session implements SessionContext {
       (part) => 'functionResponse' in part,
     );
     if (hasFunctionResponse) return false;
+
+    // Exclude pure <system-reminder> entries (the startup prelude and the
+    // mid-history MCP added-tool reminders). They are structural, not real
+    // user prompts; counting them would shift the rewind truncation index and
+    // silently drop a real turn. A genuine user turn that merely has a
+    // per-turn reminder prepended still has a non-reminder prompt part, so it
+    // is NOT excluded.
+    if (isSystemReminderContent(content)) return false;
 
     return content.parts.some((part) => 'text' in part && part.text);
   }

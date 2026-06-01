@@ -6,7 +6,10 @@
 
 import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content } from '@google/genai';
-import { getStartupContextLength } from '@qwen-code/qwen-code-core';
+import {
+  getStartupContextLength,
+  isSystemReminderContent,
+} from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
 
 /**
@@ -43,6 +46,14 @@ function isUserTextContent(content: Content): boolean {
     (part) => 'functionResponse' in part,
   );
   if (hasFunctionResponse) return false;
+
+  // Exclude pure <system-reminder> entries (the startup prelude and the
+  // mid-history MCP added-tool reminders). They are structural, not real user
+  // prompts; counting them here would shift the rewind truncation index and
+  // silently drop a real turn's context. A genuine user turn that merely has
+  // a per-turn reminder prepended still has a non-reminder prompt part, so it
+  // is NOT excluded.
+  if (isSystemReminderContent(content)) return false;
 
   return content.parts.some((part) => 'text' in part && part.text);
 }
