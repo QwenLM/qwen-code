@@ -5,7 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
-import { createWriteStream, statSync } from 'node:fs';
+import { createWriteStream } from 'node:fs';
 import { execSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
@@ -70,8 +70,11 @@ async function saveFromCommand(
   destination: string,
 ): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     const fileStream = createWriteStream(destination);
+    let stderr = '';
     let resolved = false;
 
     const safeResolve = (value: boolean) => {
@@ -96,6 +99,10 @@ async function saveFromCommand(
       safeResolve(false);
     }, PROCESS_TIMEOUT_MS);
 
+    child.stderr.on('data', (data: Buffer) => {
+      stderr += data.toString();
+    });
+
     child.stdout.pipe(fileStream);
 
     child.stdout.on('error', (err) => {
@@ -116,7 +123,7 @@ async function saveFromCommand(
       safeResolve(false);
     });
 
-    child.on('close', async (code) => {
+    child.on('close', (code) => {
       clearTimeout(timer);
       if (resolved) return;
 
@@ -124,17 +131,19 @@ async function saveFromCommand(
         debugLogger.debug(
           `${command} exited with code ${code}. Args: ${args.join(' ')}`,
         );
+        if (stderr) debugLogger.debug(`${command} stderr: ${stderr.trim()}`);
         safeResolve(false);
         return;
       }
 
-      const checkFile = async () => {
-        try {
-          const stats = statSync(destination);
-          safeResolve(stats.size > 0);
-        } catch {
-          safeResolve(false);
-        }
+      const checkFile = () => {
+        fs.stat(destination)
+          .then((stats) => {
+            safeResolve(stats.size > 0);
+          })
+          .catch(() => {
+            safeResolve(false);
+          });
       };
 
       if (fileStream.writableFinished) {
@@ -207,6 +216,7 @@ async function checkClipboardForImage(
  * @returns true if clipboard contains an image
  */
 export async function clipboardHasImage(): Promise<boolean> {
+  cachedWlPasteImageTypes = null; // Fresh check each time
   if (process.platform === 'linux') {
     const tool = getLinuxClipboardTool();
     if (tool === 'wl-paste') {
@@ -264,8 +274,13 @@ async function getWlPasteImageTypes(): Promise<string[]> {
     child.stdout.on('data', (data: Buffer) => {
       stdout += data.toString();
     });
-    child.on('close', () => {
+    child.on('close', (code) => {
       clearTimeout(timer);
+      if (code !== 0) {
+        // Do NOT cache failed result
+        resolve([]);
+        return;
+      }
       const types = stdout
         .trim()
         .split('\n')
@@ -354,7 +369,8 @@ async function saveFileWithWlPaste(
           'Python PIL not available; BMP-to-PNG conversion failed:',
           err,
         );
-        return bmpPath;
+        // Return false to report clean failure — downstream expects .png
+        return false;
       }
     }
     try {
