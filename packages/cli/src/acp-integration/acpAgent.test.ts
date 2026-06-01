@@ -2065,6 +2065,244 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('qwen/skills setEnabled resolves user and project skill files through ACP', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    const tempProject = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-project-skill-'),
+    );
+    vi.mocked(Storage.getGlobalQwenDir).mockReturnValue(tempHome);
+
+    async function writeSkill(root: string, relativeDir: string, name: string) {
+      const skillDir = path.join(root, relativeDir, name);
+      const skillFile = path.join(skillDir, 'SKILL.md');
+      await fs.mkdir(skillDir, { recursive: true });
+      await fs.writeFile(
+        skillFile,
+        `---\nname: ${name}\ndescription: ${name} skill\n---\nBody\n`,
+        'utf8',
+      );
+      return { skillDir, skillFile };
+    }
+
+    const userSkill = await writeSkill(tempHome, '.agents/skills', 'course');
+    const projectSkill = await writeSkill(
+      tempProject,
+      '.qwen/skills',
+      'project-course',
+    );
+
+    const refreshCache = vi.fn().mockResolvedValue(undefined);
+    const listSkills = vi.fn(({ level }: { level: 'user' | 'project' }) =>
+      Promise.resolve([
+        ...(level === 'user'
+          ? [
+              {
+                name: 'course',
+                description: 'course skill',
+                level,
+                filePath: userSkill.skillFile,
+                skillRoot: userSkill.skillDir,
+                body: 'Body',
+              },
+            ]
+          : []),
+        ...(level === 'project'
+          ? [
+              {
+                name: 'project-course',
+                description: 'project-course skill',
+                level,
+                filePath: projectSkill.skillFile,
+                skillRoot: projectSkill.skillDir,
+                body: 'Body',
+              },
+            ]
+          : []),
+      ]),
+    );
+    const parseSkillContent = vi.fn(
+      (content: string, filePath: string, level: string) => {
+        const name =
+          content.match(/^name:\s*(.+)$/m)?.[1] ??
+          path.basename(path.dirname(filePath));
+        return {
+          name,
+          description: `${name} skill`,
+          level,
+          filePath,
+          skillRoot: path.dirname(filePath),
+          body: 'Body',
+        };
+      },
+    );
+    mockConfig = {
+      ...mockConfig,
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills,
+        parseSkillContent,
+        refreshCache,
+      }),
+    } as unknown as Config;
+
+    const settings = makeSessionSettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await expect(
+        agent.extMethod('qwen/skills/setEnabled', {
+          skill: { slug: 'course', enabled: false },
+        }),
+      ).resolves.toMatchObject({
+        slug: 'course',
+        enabled: false,
+        installedPath: userSkill.skillFile,
+      });
+      await expect(fs.readFile(userSkill.skillFile, 'utf8')).resolves.toContain(
+        'disable-model-invocation: true',
+      );
+
+      await expect(
+        agent.extMethod('qwen/skills/setEnabled', {
+          skill: {
+            slug: 'project-course',
+            enabled: false,
+            scope: 'project',
+          },
+        }),
+      ).resolves.toMatchObject({
+        slug: 'project-course',
+        enabled: false,
+        installedPath: projectSkill.skillFile,
+      });
+      await expect(
+        fs.readFile(projectSkill.skillFile, 'utf8'),
+      ).resolves.toContain('disable-model-invocation: true');
+
+      await expect(
+        agent.extMethod('qwen/skills/delete', {
+          skill: { slug: 'course' },
+        }),
+      ).resolves.toMatchObject({
+        slug: 'course',
+        deleted: true,
+      });
+      await expect(fs.stat(userSkill.skillDir)).rejects.toThrow();
+      expect(listSkills).toHaveBeenCalledWith({ level: 'user' });
+      expect(listSkills).toHaveBeenCalledWith({ level: 'project' });
+      expect(parseSkillContent).toHaveBeenCalledWith(
+        expect.stringContaining('name: project-course'),
+        projectSkill.skillFile,
+        'project',
+      );
+      expect(refreshCache).toHaveBeenCalledTimes(3);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+      await fs.rm(tempHome, { recursive: true, force: true });
+      await fs.rm(tempProject, { recursive: true, force: true });
+    }
+  });
+
+  it('qwen/skills setEnabled resolves project skills from the ext method cwd', async () => {
+    const tempProject = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-project-cwd-skill-'),
+    );
+    const skillDir = path.join(tempProject, '.qwen', 'skills', 'issue-fixer');
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(
+      skillFile,
+      `---\nname: bugfix\ndescription: Bugfix skill\n---\nBody\n`,
+      'utf8',
+    );
+
+    const refreshCache = vi.fn().mockResolvedValue(undefined);
+    const listSkills = vi.fn().mockResolvedValue([]);
+    const parseSkillContent = vi.fn(
+      (content: string, filePath: string, level: string) => {
+        const name =
+          content.match(/^name:\s*(.+)$/m)?.[1] ??
+          path.basename(path.dirname(filePath));
+        return {
+          name,
+          description: `${name} skill`,
+          level,
+          filePath,
+          skillRoot: path.dirname(filePath),
+          body: 'Body',
+        };
+      },
+    );
+    const loadSkillsFromDir = vi.fn(async (baseDir: string, level: string) => {
+      const entries = await fs
+        .readdir(baseDir, { withFileTypes: true })
+        .catch(() => []);
+      const skills = [];
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const filePath = path.join(baseDir, entry.name, 'SKILL.md');
+        const content = await fs.readFile(filePath, 'utf8').catch(() => null);
+        if (!content) continue;
+        skills.push(parseSkillContent(content, filePath, level));
+      }
+      return skills;
+    });
+    mockConfig = {
+      ...mockConfig,
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills,
+        loadSkillsFromDir,
+        parseSkillContent,
+        refreshCache,
+      }),
+    } as unknown as Config;
+
+    const settings = makeSessionSettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await expect(
+        agent.extMethod('qwen/skills/setEnabled', {
+          cwd: tempProject,
+          skill: { slug: 'bugfix', enabled: false, scope: 'project' },
+        }),
+      ).resolves.toMatchObject({
+        slug: 'bugfix',
+        enabled: false,
+        installedPath: skillFile,
+      });
+      await expect(fs.readFile(skillFile, 'utf8')).resolves.toContain(
+        'disable-model-invocation: true',
+      );
+      expect(loadSkillsFromDir).toHaveBeenCalledWith(
+        path.join(tempProject, '.qwen', 'skills'),
+        'project',
+      );
+      expect(listSkills).not.toHaveBeenCalled();
+      expect(refreshCache).toHaveBeenCalledTimes(1);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+      await fs.rm(tempProject, { recursive: true, force: true });
+    }
+  });
+
   it('bootstraps ACP config without initializing Gemini chat', async () => {
     await setupSessionMocks('session-bootstrap-skip');
 

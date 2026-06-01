@@ -263,8 +263,17 @@ type QwenSkillDeleteRequest = {
 type QwenSkillSetEnabledRequest = {
   slug: string;
   enabled: boolean;
-  scope: 'global';
+  scope: 'global' | 'project';
 };
+
+type QwenManagedSkillFile = {
+  skillDir: string;
+  skillFile: string;
+  content: string;
+};
+
+const PROJECT_SKILL_DIRS = ['.qwen', '.agents'] as const;
+const SKILLS_DIR = 'skills';
 
 type DownloadedSkillFile = {
   relativePath: string;
@@ -538,9 +547,21 @@ function readSkillSlugRequest(
 function readSkillSetEnabledRequest(
   params: Record<string, unknown>,
 ): QwenSkillSetEnabledRequest {
-  const request = readSkillSlugRequest(params);
   const skillParams = toRecord(params['skill']);
   const input = Object.keys(skillParams).length > 0 ? skillParams : params;
+  const slug = readRequiredString(input['slug'], 'skill.slug');
+  if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
+    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
+  }
+
+  const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
+  if (scope !== 'global' && scope !== 'project') {
+    throw RequestError.invalidParams(
+      undefined,
+      'Only global or project skill management is supported',
+    );
+  }
+
   if (typeof input['enabled'] !== 'boolean') {
     throw RequestError.invalidParams(
       undefined,
@@ -548,7 +569,8 @@ function readSkillSetEnabledRequest(
     );
   }
   return {
-    ...request,
+    slug,
+    scope,
     enabled: input['enabled'],
   };
 }
@@ -3146,18 +3168,11 @@ class QwenAgent implements Agent {
       );
     }
 
-    const skillDir = path.join(
-      Storage.getGlobalQwenDir(),
-      'skills',
+    const { skillDir, skillFile, content } = await this.readManagedSkillFile(
       request.slug,
+      'global',
+      skillManager,
     );
-    const skillFile = path.join(skillDir, 'SKILL.md');
-    const content = await fs.readFile(skillFile, 'utf8').catch(() => {
-      throw RequestError.invalidParams(
-        undefined,
-        `Global skill not found: ${request.slug}`,
-      );
-    });
     const parsed = skillManager.parseSkillContent(content, skillFile, 'user');
     if (parsed.name !== request.slug) {
       throw RequestError.invalidParams(
@@ -3174,8 +3189,96 @@ class QwenAgent implements Agent {
     };
   }
 
+  private async readManagedSkillFile(
+    slug: string,
+    scope: QwenSkillSetEnabledRequest['scope'],
+    skillManager: NonNullable<ReturnType<Config['getSkillManager']>>,
+    cwd?: string,
+  ): Promise<QwenManagedSkillFile> {
+    if (scope === 'global') {
+      const qwenSkillDir = path.join(
+        Storage.getGlobalQwenDir(),
+        'skills',
+        slug,
+      );
+      const qwenSkillFile = path.join(qwenSkillDir, 'SKILL.md');
+      const qwenContent = await fs
+        .readFile(qwenSkillFile, 'utf8')
+        .catch(() => undefined);
+      if (qwenContent !== undefined) {
+        return {
+          skillDir: qwenSkillDir,
+          skillFile: qwenSkillFile,
+          content: qwenContent,
+        };
+      }
+    }
+
+    if (scope === 'project' && cwd?.trim()) {
+      const projectSkill = await this.findProjectSkillFileFromCwd(
+        slug,
+        cwd,
+        skillManager,
+      );
+      if (projectSkill) return projectSkill;
+    }
+
+    const level = scope === 'project' ? 'project' : 'user';
+    const skill = (await skillManager.listSkills({ level })).find(
+      (candidate) => candidate.name === slug,
+    );
+    const skillFile = skill?.filePath;
+    if (!skillFile) {
+      throw RequestError.invalidParams(
+        undefined,
+        `${scope === 'project' ? 'Project' : 'Global'} skill not found: ${slug}`,
+      );
+    }
+
+    const content = await fs.readFile(skillFile, 'utf8').catch(() => {
+      throw RequestError.invalidParams(
+        undefined,
+        `${scope === 'project' ? 'Project' : 'Global'} skill not found: ${slug}`,
+      );
+    });
+    return {
+      skillDir: path.dirname(skillFile),
+      skillFile,
+      content,
+    };
+  }
+
+  private async findProjectSkillFileFromCwd(
+    slug: string,
+    cwd: string,
+    skillManager: NonNullable<ReturnType<Config['getSkillManager']>>,
+  ): Promise<QwenManagedSkillFile | undefined> {
+    const projectRoot = path.resolve(cwd);
+    for (const configDir of PROJECT_SKILL_DIRS) {
+      const baseDir = path.join(projectRoot, configDir, SKILLS_DIR);
+      const skills = await skillManager.loadSkillsFromDir(baseDir, 'project');
+      const skill = skills.find((candidate) => candidate.name === slug);
+      const skillFile = skill?.filePath;
+      if (!skillFile) continue;
+
+      const content = await fs.readFile(skillFile, 'utf8').catch(() => {
+        throw RequestError.invalidParams(
+          undefined,
+          `Project skill not found: ${slug}`,
+        );
+      });
+      return {
+        skillDir: path.dirname(skillFile),
+        skillFile,
+        content,
+      };
+    }
+    return undefined;
+  }
+
   private async setGlobalSkillEnabled(
     request: QwenSkillSetEnabledRequest,
+    cwd?: string,
   ): Promise<Record<string, unknown>> {
     const skillManager = this.config.getSkillManager();
     if (!skillManager) {
@@ -3185,19 +3288,14 @@ class QwenAgent implements Agent {
       );
     }
 
-    const skillDir = path.join(
-      Storage.getGlobalQwenDir(),
-      'skills',
+    const { skillFile, content } = await this.readManagedSkillFile(
       request.slug,
+      request.scope,
+      skillManager,
+      cwd,
     );
-    const skillFile = path.join(skillDir, 'SKILL.md');
-    const content = await fs.readFile(skillFile, 'utf8').catch(() => {
-      throw RequestError.invalidParams(
-        undefined,
-        `Global skill not found: ${request.slug}`,
-      );
-    });
-    const parsed = skillManager.parseSkillContent(content, skillFile, 'user');
+    const level = request.scope === 'project' ? 'project' : 'user';
+    const parsed = skillManager.parseSkillContent(content, skillFile, level);
     if (parsed.name !== request.slug) {
       throw RequestError.invalidParams(
         undefined,
@@ -3206,7 +3304,7 @@ class QwenAgent implements Agent {
     }
 
     const nextContent = setSkillFrontmatterEnabled(content, request.enabled);
-    skillManager.parseSkillContent(nextContent, skillFile, 'user');
+    skillManager.parseSkillContent(nextContent, skillFile, level);
     await fs.writeFile(skillFile, nextContent, 'utf8');
     await skillManager.refreshCache();
     return {
@@ -3220,7 +3318,9 @@ class QwenAgent implements Agent {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const cwd = (params['cwd'] as string) || process.cwd();
+    const requestedCwd =
+      typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
+    const cwd = requestedCwd || process.cwd();
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
@@ -3273,7 +3373,10 @@ class QwenAgent implements Agent {
         return this.deleteGlobalSkill(readSkillSlugRequest(params));
       }
       case 'qwen/skills/setEnabled': {
-        return this.setGlobalSkillEnabled(readSkillSetEnabledRequest(params));
+        return this.setGlobalSkillEnabled(
+          readSkillSetEnabledRequest(params),
+          requestedCwd,
+        );
       }
       case 'qwen/settings/getMemory': {
         return {
