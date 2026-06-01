@@ -177,10 +177,14 @@ describe('doctorCommand', () => {
   it('should complete memory subcommand names', async () => {
     await expect(doctorCommand.completion!(mockContext, '')).resolves.toEqual([
       'memory',
+      'rollback',
     ]);
     await expect(
       doctorCommand.completion!(mockContext, 'mem'),
     ).resolves.toEqual(['memory']);
+    await expect(
+      doctorCommand.completion!(mockContext, 'roll'),
+    ).resolves.toEqual(['rollback']);
     await expect(doctorCommand.completion!(mockContext, 'x')).resolves.toEqual(
       [],
     );
@@ -1049,6 +1053,8 @@ describe('doctorCommand', () => {
   });
 
   it('should advertise the memory subcommand on the parent doctor argumentHint', () => {
-    expect(doctorCommand.argumentHint).toBe('[memory] [--sample] [--snapshot]');
+    expect(doctorCommand.argumentHint).toBe(
+      '[memory|rollback] [--sample] [--snapshot]',
+    );
   });
 });

@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -90,7 +96,10 @@ async function verifyChecksum(
   const response = await downloadWithFallback(versionPath, 'SHA256SUMS');
   const text = await response.text();
 
-  // Verify Ed25519 signature of SHA256SUMS if available (try OSS then GitHub)
+  // Ed25519 signature verification of SHA256SUMS.
+  // NOTE: Currently uses a test key. Once release CI signs with the production
+  // key and publishes SHA256SUMS.sig, set QWEN_REQUIRE_SIGNATURE=1 to enforce.
+  // Until then, verification is best-effort (passes when .sig exists, warns when not).
   const requireSig = process.env['QWEN_REQUIRE_SIGNATURE'] === '1';
   let sigResponse = await tryFetch(`${OSS_BASE}/${versionPath}/SHA256SUMS.sig`);
   if (!sigResponse) {
@@ -107,8 +116,8 @@ async function verifyChecksum(
       'SHA256SUMS.sig not found and QWEN_REQUIRE_SIGNATURE=1 is set',
     );
   } else {
-    debugLogger.debug(
-      'SHA256SUMS.sig not available — skipping signature verification.',
+    debugLogger.info(
+      'SHA256SUMS.sig not available — update integrity relies on SHA256 checksum only.',
     );
   }
 
@@ -193,11 +202,14 @@ function spawnAndCapture(
   timeoutMs: number,
 ): Promise<{ exitCode: number; stdout: string }> {
   return new Promise((resolve, reject) => {
+    let settled = false;
     const child = execFile(
       command,
       args,
       { timeout: timeoutMs },
       (err, out) => {
+        if (settled) return;
+        settled = true;
         if (err && 'killed' in err && err.killed) {
           reject(new Error('Smoke test timed out'));
           return;
@@ -207,7 +219,11 @@ function spawnAndCapture(
         resolve({ exitCode, stdout: out || '' });
       },
     );
-    child.on('error', reject);
+    child.on('error', (e) => {
+      if (settled) return;
+      settled = true;
+      reject(e);
+    });
   });
 }
 
@@ -367,7 +383,7 @@ function atomicReplace(
  * Ensures ~/.local/bin/qwen exists and points to the standalone install.
  * Required for npm→standalone migration so the new binary is on PATH.
  */
-function ensureBinWrapper(standaloneDir: string, target: string): void {
+export function ensureBinWrapper(standaloneDir: string, target: string): void {
   const binDir = path.join(path.dirname(standaloneDir), '..', 'bin');
   try {
     fs.mkdirSync(binDir, { recursive: true });
@@ -383,9 +399,51 @@ function ensureBinWrapper(standaloneDir: string, target: string): void {
         const content = `#!/bin/sh\nexec "${standaloneDir}/bin/qwen" "$@"\n`;
         fs.writeFileSync(wrapperPath, content, { mode: 0o755 });
       }
+      ensurePathInShellRc(binDir);
     }
   } catch (err) {
     debugLogger.debug('Failed to create bin wrapper:', err);
+  }
+}
+
+/**
+ * Appends binDir to the user's shell rc file if not already present.
+ * Mirrors the logic in install-qwen-standalone.sh maybe_update_shell_path.
+ */
+export function ensurePathInShellRc(binDir: string): void {
+  const shell = process.env['SHELL'] || '';
+  let rcFile: string | null = null;
+  const home = process.env['HOME'] || os.homedir();
+
+  if (shell.endsWith('/zsh')) {
+    rcFile = path.join(home, '.zshrc');
+  } else if (shell.endsWith('/bash')) {
+    // Prefer .bashrc; fall back to .bash_profile on macOS
+    const bashrc = path.join(home, '.bashrc');
+    const profile = path.join(home, '.bash_profile');
+    rcFile = fs.existsSync(bashrc) ? bashrc : profile;
+  } else if (shell.endsWith('/fish')) {
+    rcFile = path.join(home, '.config', 'fish', 'config.fish');
+  }
+
+  if (!rcFile) return;
+
+  try {
+    const content = fs.existsSync(rcFile)
+      ? fs.readFileSync(rcFile, 'utf-8')
+      : '';
+    // Use a marker to detect our managed PATH entry precisely,
+    // avoiding false positives from comments or $PATH-appended entries
+    const marker = '# Added by Qwen Code standalone installer';
+    if (content.includes(marker)) return;
+
+    const exportLine = shell.endsWith('/fish')
+      ? `\n${marker}\nfish_add_path "${binDir}"\n`
+      : `\n${marker}\nexport PATH="${binDir}:$PATH"\n`;
+    fs.appendFileSync(rcFile, exportLine);
+    debugLogger.info(`Added ${binDir} to ${rcFile}`);
+  } catch (err) {
+    debugLogger.debug('Failed to update shell rc:', err);
   }
 }
 
@@ -500,6 +558,13 @@ export async function performStandaloneUpdate(
 
     debugLogger.info('Standalone update complete.');
     return result;
+  } catch (err) {
+    // On error: clean orphaned pendingDir (only safe when NOT a successful deferred update)
+    const pendingDir = `${standaloneDir}.new`;
+    if (fs.existsSync(pendingDir)) {
+      fs.rmSync(pendingDir, { recursive: true, force: true });
+    }
+    throw err;
   } finally {
     // On Windows deferred updates, keep the lock alive until the bat script
     // finishes the swap — it will be cleaned up by the next successful update.
@@ -510,11 +575,6 @@ export async function performStandaloneUpdate(
     fs.rmSync(tempDir, { recursive: true, force: true });
     if (fs.existsSync(extractDir)) {
       fs.rmSync(extractDir, { recursive: true, force: true });
-    }
-    // Clean orphaned pendingDir if it exists (from a failed Windows path validation)
-    const pendingDir = `${standaloneDir}.new`;
-    if (fs.existsSync(pendingDir)) {
-      fs.rmSync(pendingDir, { recursive: true, force: true });
     }
   }
 }

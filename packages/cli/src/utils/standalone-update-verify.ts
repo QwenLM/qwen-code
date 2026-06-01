@@ -1,4 +1,10 @@
 /**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
  * Ed25519 signature verification for standalone update integrity.
  *
  * The release CI signs SHA256SUMS with an Ed25519 private key, producing
