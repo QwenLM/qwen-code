@@ -2108,10 +2108,9 @@ export const AppContainer = (props: AppContainerProps) => {
       const ac = new AbortController();
       suggestionAbortRef.current = ac;
 
-      // Use curated history to avoid invalid/empty entries causing API errors
-      const fullHistory = geminiClient.getChat().getHistory(true);
-      const conversationHistory =
-        fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
+      // Only clone the tail — full structuredClone of a large resumed session
+      // causes transient heap peaks that trigger OOM (#4624).
+      const conversationHistory = geminiClient.getHistoryTail(40, true);
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
       })
@@ -2464,7 +2463,7 @@ export const AppContainer = (props: AppContainerProps) => {
             apiTruncateIndex = computeApiTruncationIndex(
               historyManager.history,
               userItem.id,
-              geminiClient.getHistory(),
+              geminiClient.getHistoryShallow(),
             );
             if (apiTruncateIndex < 0) {
               historyManager.addItem(
