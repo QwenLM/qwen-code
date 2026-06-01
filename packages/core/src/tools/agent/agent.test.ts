@@ -2314,10 +2314,10 @@ describe('AgentTool', () => {
         expect.objectContaining({
           isBackgrounded: false,
           outputFile: expect.stringMatching(
-            /subagents\/test-session-id\/agent-file-search-.*\.jsonl$/,
+            /subagents[\\/]test-session-id[\\/]agent-file-search-.*\.jsonl$/,
           ),
           metaPath: expect.stringMatching(
-            /subagents\/test-session-id\/agent-file-search-.*\.meta\.json$/,
+            /subagents[\\/]test-session-id[\\/]agent-file-search-.*\.meta\.json$/,
           ),
         }),
       );
