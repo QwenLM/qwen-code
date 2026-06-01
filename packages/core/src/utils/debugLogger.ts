@@ -94,13 +94,18 @@ function getActiveSpanTraceContext(): TraceContext | null {
   }
 }
 
+let cachedSessionId: string | undefined;
+let cachedTraceId: string | undefined;
+
 function getSessionRootTraceContext(): TraceContext | null {
   try {
     const sessionId = getCurrentSessionId();
-    if (sessionId) {
-      return { traceId: deriveTraceId(sessionId), spanId: '0'.repeat(16) };
+    if (!sessionId) return null;
+    if (sessionId !== cachedSessionId) {
+      cachedSessionId = sessionId;
+      cachedTraceId = deriveTraceId(sessionId);
     }
-    return null;
+    return { traceId: cachedTraceId!, spanId: '0'.repeat(16) };
   } catch {
     return null;
   }
