@@ -168,8 +168,8 @@ export class MemoryDiagnosticsDumper {
 
   private getSuggestion(trigger: 'hard' | 'critical'): string {
     if (trigger === 'critical') {
-      return 'Memory is critically high. Consider running /compact or starting a fresh session to avoid OOM.';
+      return 'Memory is critically high. Consider running /compress or starting a fresh session to avoid OOM.';
     }
-    return 'Memory pressure detected. Running /compact may help reduce memory usage.';
+    return 'Memory pressure detected. Running /compress may help reduce memory usage.';
   }
 }

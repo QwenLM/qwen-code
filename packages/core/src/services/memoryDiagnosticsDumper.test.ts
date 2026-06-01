@@ -103,7 +103,7 @@ describe('MemoryDiagnosticsDumper', () => {
     expect(phase2Content.collectionComplete).toBe(true);
     expect(phase2Content.memoryUsage.rss).toBe(2_000_000_000);
     expect(phase2Content.session.historyEntries).toBe(500);
-    expect(phase2Content.suggestion).toContain('/compact');
+    expect(phase2Content.suggestion).toContain('/compress');
   });
 
   it('respects per-session cap of 3 dumps', async () => {
