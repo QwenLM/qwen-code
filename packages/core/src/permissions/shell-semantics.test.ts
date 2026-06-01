@@ -453,6 +453,50 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  it('splits literal newlines as command boundaries', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'cd .qwen\ncp /tmp/malicious settings.json',
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'read_file',
+        filePath: '/tmp/malicious',
+      },
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/.qwen/settings.json',
+      },
+    ]);
+  });
+
+  it('tracks cwd through brace-grouped commands', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "{ cd .qwen && echo '{}' > settings.json; }",
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/.qwen/settings.json',
+      },
+    ]);
+  });
+
+  it('strips grouping and background syntax from command and path tokens', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        '(echo > .qwen/settings.json) && echo > .qwen/hooks/run.sh&',
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/hooks/run.sh' },
+    ]);
+  });
+
   it('handles `cd --` and other POSIX flag forms before the target', () => {
     expect(
       extractShellOperationsAcrossCommand(

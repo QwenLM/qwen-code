@@ -118,15 +118,25 @@ function tokenize(command: string): string[] {
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
       if (current) {
-        tokens.push(current);
+        pushToken(tokens, current);
         current = '';
       }
       continue;
     }
     current += ch;
   }
-  if (current) tokens.push(current);
+  if (current) pushToken(tokens, current);
   return tokens;
+}
+
+function pushToken(tokens: string[], token: string): void {
+  if (token === '{' || token === '}') return;
+  const normalized = trimShellSyntax(token);
+  if (normalized) tokens.push(normalized);
+}
+
+function trimShellSyntax(token: string): string {
+  return token.replace(/^\(+/, '').replace(/\)+&?$|&+$/g, '');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1753,7 +1763,8 @@ function resolveCdTargetCwd(
           ? { kind: 'dynamic' }
           : { kind: 'not-cd' };
       }
-      words.push(part);
+      if (part === '{' || part === '}') continue;
+      words.push(trimShellSyntax(part));
     }
   } catch {
     return { kind: 'not-cd' };

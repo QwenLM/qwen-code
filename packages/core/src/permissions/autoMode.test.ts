@@ -618,6 +618,52 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ).toBe(true);
   });
 
+  it('returns true for newline-separated protected shell writes after cd', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'cd .qwen\ncp /tmp/malicious settings.json',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true for grouped and metacharacter-suffixed protected writes', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: "{ cd .qwen && echo '{}' > settings.json; }",
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: '(echo > .qwen/settings.json)',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('uses the provided cwd fallback when ctx.cwd is absent', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'echo "{}" > .qwen/settings.json',
+        }),
+        '/repo',
+      ),
+    ).toBe(true);
+  });
+
   it('returns false for ordinary edits and non-edit tools', () => {
     expect(
       shouldForceAutoModeReviewForAllow(

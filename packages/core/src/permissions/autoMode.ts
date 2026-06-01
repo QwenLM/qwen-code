@@ -268,6 +268,7 @@ export function isAutoModeProtectedWritePath(filePath: string): boolean {
  */
 export function shouldForceAutoModeReviewForAllow(
   ctx: PermissionCheckContext,
+  cwdFallback = process.cwd(),
 ): boolean {
   if (
     PROTECTED_WRITE_TOOL_NAMES.has(ctx.toolName) &&
@@ -285,7 +286,7 @@ export function shouldForceAutoModeReviewForAllow(
     ctx.toolName === ToolNames.MONITOR
       ? normalizeMonitorCommand(ctx.command).safetyCommand
       : ctx.command;
-  const cwd = ctx.cwd ?? process.cwd();
+  const cwd = ctx.cwd ?? cwdFallback;
 
   return extractShellOperationsAcrossCommand(command, cwd).some((op) => {
     if (

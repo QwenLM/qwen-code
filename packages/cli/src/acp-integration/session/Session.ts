@@ -1940,7 +1940,7 @@ export class Session implements SessionContext {
       // prompt right after an allow-rule call just worked.
       const forceAutoReviewForAllow =
         approvalMode === ApprovalMode.AUTO &&
-        shouldForceAutoModeReviewForAllow(pmCtx);
+        shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
       const confirmationPermission = getEffectivePermissionForConfirmation(
         finalPermission,
         forceAutoReviewForAllow,
