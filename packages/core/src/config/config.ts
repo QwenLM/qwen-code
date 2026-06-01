@@ -49,8 +49,8 @@ import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 import {
-  DEFAULT_PRESSURE_CONFIG,
   MemoryPressureMonitor,
+  DEFAULT_PRESSURE_CONFIG,
   validateMemoryPressureConfig,
   type MemoryPressureConfig,
 } from '../services/memoryPressureMonitor.js';
@@ -2078,6 +2078,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
@@ -2751,6 +2752,10 @@ export class Config {
     return this.userMemory;
   }
 
+  getOutputLanguageFilePath(): string | undefined {
+    return this.outputLanguageFilePath;
+  }
+
   setUserMemory(newUserMemory: string): void {
     this.userMemory = newUserMemory;
   }
@@ -3131,13 +3136,22 @@ export class Config {
     return this.geminiClient;
   }
 
+  /**
+   * Session-scoped memory pressure monitor. Child Configs created with
+   * `Object.create(parent)` inherit the parent's monitor through the prototype
+   * chain until this getter installs an own monitor backed by the inherited
+   * pressure config snapshot. This mirrors getFileReadCache()'s isolation
+   * contract while keeping type-safe direct field assignment inside the class.
+   */
   getMemoryPressureMonitor(): MemoryPressureMonitor | undefined {
     if (!Object.prototype.hasOwnProperty.call(this, 'memoryPressureMonitor')) {
       const inheritedMonitor = this.memoryPressureMonitor;
       if (inheritedMonitor) {
         const inheritedConfig = this.memoryPressureConfig;
         if (!inheritedConfig) {
-          throw new Error('Inherited memory pressure monitor is missing config');
+          throw new Error(
+            'Inherited memory pressure monitor is missing config',
+          );
         }
         this.memoryPressureConfig = { ...inheritedConfig };
         this.memoryPressureMonitor = new MemoryPressureMonitor(
@@ -3269,10 +3283,6 @@ export class Config {
       ...extensionContextFilePaths,
       ...(this.outputLanguageFilePath ? [this.outputLanguageFilePath] : []),
     ];
-  }
-
-  getOutputLanguageFilePath(): string | undefined {
-    return this.outputLanguageFilePath;
   }
 
   getExperimentalZedIntegration(): boolean {
