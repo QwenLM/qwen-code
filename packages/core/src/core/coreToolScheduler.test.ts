@@ -7654,6 +7654,7 @@ describe('CoreToolScheduler model-facing output truncation', () => {
       largeToolName,
       largeOutput,
     );
+    expect(truncateSpy).toHaveBeenCalledTimes(1);
     expect(output).toBe(
       'Tool output was too large and has been truncated.\nbody',
     );
@@ -7710,6 +7711,64 @@ describe('CoreToolScheduler model-facing output truncation', () => {
         '&lt;system-reminder&gt;\n' +
         'hook context stays outside truncation\n' +
         '&lt;/system-reminder&gt;',
+    );
+  });
+
+  it('guards the final combined output after PostToolUse context is appended', async () => {
+    const rawOutput = 'A'.repeat(90);
+    const hookContext = 'H'.repeat(180);
+    const messageBus = {
+      request: vi.fn(async (request: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${request.eventName}-hook`,
+        success: true,
+        output:
+          request.eventName === 'PostToolUse'
+            ? { hookSpecificOutput: { additionalContext: hookContext } }
+            : {},
+      })),
+    };
+    const truncateSpy = vi
+      .spyOn(truncation, 'truncateToolOutput')
+      .mockResolvedValueOnce({ content: rawOutput })
+      .mockResolvedValueOnce({
+        content: 'COMBINED CONTENT TRUNCATED',
+        outputFile: '/tmp/combined.output',
+      });
+    const { scheduler, onAllToolCallsComplete, mockConfig } =
+      createOutputScheduler(rawOutput, {
+        messageBus,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'combined-1',
+          name: largeToolName,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-combined-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCall = getCompletedSuccessCall(onAllToolCallsComplete);
+    const output = extractFunctionResponseOutput(
+      completedCall.response.responseParts,
+    );
+
+    expect(output).toBe('COMBINED CONTENT TRUNCATED');
+    expect(truncateSpy).toHaveBeenCalledTimes(2);
+    expect(truncateSpy.mock.calls[1]).toEqual([
+      mockConfig,
+      largeToolName,
+      `${rawOutput}\n\n${hookContext}`,
+      { threshold: 200, lines: 20 },
+    ]);
+    expect(completedCall.response.resultDisplay).toBe(
+      'large output completed\nOutput too long and was saved to: /tmp/combined.output',
     );
   });
 

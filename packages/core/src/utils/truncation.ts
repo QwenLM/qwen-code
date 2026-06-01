@@ -119,9 +119,11 @@ export async function truncateToolOutput(
   config: Config,
   toolName: string,
   content: string,
+  limits?: { threshold?: number; lines?: number },
 ): Promise<{ content: string; outputFile?: string }> {
-  const threshold = config.getTruncateToolOutputThreshold();
-  const lines = config.getTruncateToolOutputLines();
+  const threshold =
+    limits?.threshold ?? config.getTruncateToolOutputThreshold();
+  const lines = limits?.lines ?? config.getTruncateToolOutputLines();
 
   if (threshold <= 0 || lines <= 0) {
     return { content };

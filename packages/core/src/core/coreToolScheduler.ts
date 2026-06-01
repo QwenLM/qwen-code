@@ -2841,6 +2841,7 @@ export class CoreToolScheduler {
         const contentLength =
           typeof content === 'string' ? content.length : undefined;
         let postToolUseAdditionalContext: string | undefined;
+        let appendedAdditionalContext = false;
 
         // PostToolUse Hook
         if (hooksEnabled && messageBus) {
@@ -2930,6 +2931,7 @@ export class CoreToolScheduler {
             content,
             postToolUseAdditionalContext,
           );
+          appendedAdditionalContext = true;
         }
 
         // Collect filesystem paths the tool just touched. Different tools
@@ -3010,6 +3012,33 @@ export class CoreToolScheduler {
               content,
               `<system-reminder>\n${body}\n</system-reminder>`,
             );
+            appendedAdditionalContext = true;
+          }
+        }
+
+        if (appendedAdditionalContext && typeof content === 'string') {
+          const threshold = this.config.getTruncateToolOutputThreshold();
+          const lines = this.config.getTruncateToolOutputLines();
+          if (threshold > 0 && lines > 0) {
+            const combinedThreshold = threshold * 2;
+            const combinedLines = lines * 2;
+            const shouldTruncateCombinedContent =
+              content.length > combinedThreshold ||
+              content.split('\n').length > combinedLines;
+            if (shouldTruncateCombinedContent) {
+              const truncated = await truncateToolOutput(
+                this.config,
+                toolName,
+                content,
+                { threshold: combinedThreshold, lines: combinedLines },
+              );
+              content = truncated.content;
+              if (truncated.outputFile && typeof resultDisplay === 'string') {
+                resultDisplay +=
+                  (resultDisplay ? '\n' : '') +
+                  `Output too long and was saved to: ${truncated.outputFile}`;
+              }
+            }
           }
         }
 

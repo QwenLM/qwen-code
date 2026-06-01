@@ -29,6 +29,8 @@ import * as cliConfig from './config/config.js';
 import { loadCliConfig, parseArguments } from './config/config.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
 import {
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
   createMinimalSettings,
   getSettingsWarnings,
   loadSettings,
@@ -104,6 +106,11 @@ import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimiz
 import { installSynchronizedOutput } from './ui/utils/synchronizedOutput.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+
+function clearCorruptionEnvVars(): void {
+  delete process.env[ENV_CORRUPTED_PATH];
+  delete process.env[ENV_WAS_RECOVERED];
+}
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -330,13 +337,13 @@ export async function startInteractiveUI(
                 <VimModeProvider settings={settings}>
                   <AgentViewProvider config={config}>
                     <BackgroundTaskViewProvider config={config}>
-                        <AppContainer
-                          config={config}
-                          settings={settings}
-                          startupWarnings={startupWarnings}
-                          version={version}
-                          initializationResult={initializationResult}
-                        />
+                      <AppContainer
+                        config={config}
+                        settings={settings}
+                        startupWarnings={startupWarnings}
+                        version={version}
+                        initializationResult={initializationResult}
+                      />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>
                 </VimModeProvider>
@@ -427,10 +434,19 @@ export async function main() {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
+  // Load user settings — bare mode uses minimal config, normal mode loads full.
   const settings = isBareMode(argv.bare)
     ? createMinimalSettings()
     : loadSettings();
+
+  // Propagate corruption state to child process via env vars so
+  // relaunchAppInChildProcess() doesn't lose the marker.
+  if (settings.corruptedPath) {
+    process.env[ENV_CORRUPTED_PATH] = settings.corruptedPath;
+    process.env[ENV_WAS_RECOVERED] = settings.wasRecovered ? '1' : '0';
+  }
   await cleanupCheckpoints();
+  // Performance checkpoint
   profileCheckpoint('after_load_settings');
 
   // Emit settings warnings early so the parent process surfaces them
@@ -439,6 +455,15 @@ export async function main() {
   const settingsWarnings = getSettingsWarnings(settings);
   for (const warning of settingsWarnings) {
     writeStderrLine(warning);
+  }
+  // Corruption notification no longer goes through migrationWarnings —
+  // check corruptedPath directly to keep stderr visible in relaunch.
+  if (settings.corruptedPath) {
+    writeStderrLine(
+      'Warning: Settings file had invalid JSON and was reset. ' +
+        'A copy of the corrupted file has been saved at: ' +
+        settings.corruptedPath,
+    );
   }
 
   // Check for invalid input combinations early to prevent crashes
@@ -594,7 +619,9 @@ export async function main() {
     } else {
       // Relaunch app so we always have a child process that can be internally
       // restarted if needed.
-      await relaunchAppInChildProcess(memoryArgs, []);
+      await relaunchAppInChildProcess(memoryArgs, [], {
+        afterSpawn: clearCorruptionEnvVars,
+      });
     }
   }
 
@@ -955,8 +982,15 @@ export async function main() {
         process.cwd(),
         initializationResult!,
       );
+      // Clean up corruption env vars so subsequent relaunch children
+      // and subprocesses don't inherit stale state.
+      clearCorruptionEnvVars();
       return;
     }
+
+    // Also clean up env vars for non-interactive paths so that
+    // subprocesses don't inherit stale state.
+    clearCorruptionEnvVars();
 
     // Non-interactive: defer finalize until after `config.initialize()` runs
     // so MCP discovery events (mcp_first_tool_registered, mcp_all_servers_settled,

@@ -2351,8 +2351,7 @@ export const useGeminiStream = (
           config
             .getChatRecordingService()
             ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
-          // Record in UI history so the transcript stays complete.
-          addItem({ type: MessageType.USER, text: msg }, Date.now());
+          addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
         }
       }
 
