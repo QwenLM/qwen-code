@@ -3344,6 +3344,20 @@ export class CoreToolScheduler {
             this.config,
             denialState,
           );
+          if (
+            !this.config.getDisableAllHooks() &&
+            shouldFirePermissionDeniedForAutoMode(decision, outcome)
+          ) {
+            await this.config
+              .getHookSystem?.()
+              ?.firePermissionDeniedEvent(
+                pendingTool.request.name,
+                toolParams,
+                pendingTool.request.callId,
+                getAutoModePermissionDeniedReason(decision),
+                signal,
+              );
+          }
           switch (outcome.kind) {
             case 'approved':
               this.setToolCallOutcome(

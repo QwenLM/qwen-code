@@ -2203,6 +2203,103 @@ describe('Session', () => {
       expect(executeSpy).toHaveBeenCalled();
     });
 
+    it('routes ACP protected L4 allow writes through AUTO review', async () => {
+      const cwd = '/repo';
+      let denialState = {
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      };
+      const baseLlmClient = {
+        generateJson: vi.fn().mockResolvedValue({ shouldBlock: false }),
+      };
+      const getHistoryTail = vi.fn().mockReturnValue([]);
+      const permissionManager = {
+        isToolEnabled: vi.fn().mockResolvedValue(true),
+        hasRelevantRules: vi.fn().mockReturnValue(true),
+        evaluate: vi.fn().mockResolvedValue('allow'),
+        hasMatchingAskRule: vi.fn().mockReturnValue(false),
+        findMatchingDenyRule: vi.fn(),
+      };
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const invocation = {
+        params: { file_path: '/repo/.qwen/settings.json', content: '{}' },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'edit',
+          title: 'Confirm file write',
+          fileName: '/repo/.qwen/settings.json',
+          fileDiff: 'diff',
+          onConfirm: vi.fn(),
+        }),
+        getDescription: vi.fn().mockReturnValue('Write file'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: core.ToolNames.WRITE_FILE,
+        kind: core.Kind.Edit,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.AUTO);
+      mockConfig.getTargetDir = vi.fn().mockReturnValue(cwd);
+      mockConfig.getCwd = vi.fn().mockReturnValue(cwd);
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue(permissionManager);
+      mockConfig.getAutoModeDenialState = vi
+        .fn()
+        .mockImplementation(() => denialState);
+      mockConfig.setAutoModeDenialState = vi
+        .fn()
+        .mockImplementation((next: typeof denialState) => {
+          denialState = next;
+        });
+      mockConfig.getBaseLlmClient = vi.fn().mockReturnValue(baseLlmClient);
+      mockConfig.getGeminiClient = vi
+        .fn()
+        .mockReturnValue({ ...mockGeminiClient, getHistoryTail });
+      mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+      mockConfig.getModel = vi.fn().mockReturnValue('test-model');
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-protected-write',
+                  name: core.ToolNames.WRITE_FILE,
+                  args: {
+                    file_path: '/repo/.qwen/settings.json',
+                    content: '{}',
+                  },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run shell command' }],
+      });
+
+      expect(permissionManager.evaluate).toHaveBeenCalled();
+      expect(getHistoryTail).toHaveBeenCalled();
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(executeSpy).toHaveBeenCalled();
+    });
+
     describe('hooks', () => {
       describe('PermissionDenied hook', () => {
         it('fires PermissionDenied hooks for AUTO classifier blocks', async () => {

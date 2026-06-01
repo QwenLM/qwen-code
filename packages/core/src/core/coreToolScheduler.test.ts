@@ -2750,18 +2750,30 @@ describe('CoreToolScheduler request queueing', () => {
     expect(sources).toEqual(['auto', 'auto', 'cli']);
   });
 
-  it('runs AUTO classifier for pending L4 allow that writes protected paths', async () => {
+  type TestDenialState = {
+    consecutiveBlock: number;
+    consecutiveUnavailable: number;
+    totalBlock: number;
+    totalUnavailable: number;
+  };
+
+  function createPendingProtectedWriteHarness(options?: {
+    denialState?: TestDenialState;
+    disableHooks?: boolean;
+  }) {
     const cwd = '/repo';
-    let denialState = {
+    let denialState = options?.denialState ?? {
       consecutiveBlock: 0,
       consecutiveUnavailable: 0,
       totalBlock: 0,
       totalUnavailable: 0,
     };
-    runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
     const setAutoModeDenialState = vi.fn((next: typeof denialState) => {
       denialState = next;
     });
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
     const permissionManager = {
       hasRelevantRules: vi.fn().mockReturnValue(true),
       evaluate: vi.fn().mockResolvedValue('allow'),
@@ -2787,7 +2799,10 @@ describe('CoreToolScheduler request queueing', () => {
       getModel: () => 'test-model',
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
-      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getHookSystem: () => hookSystem,
+      getDisableAllHooks: vi
+        .fn()
+        .mockReturnValue(options?.disableHooks ?? true),
     } as unknown as Config;
 
     const onToolCallsUpdate = vi.fn();
@@ -2832,6 +2847,24 @@ describe('CoreToolScheduler request queueing', () => {
       },
     ];
 
+    return {
+      scheduler,
+      permissionManager,
+      setAutoModeDenialState,
+      onToolCallsUpdate,
+      hookSystem,
+    };
+  }
+
+  it('runs AUTO classifier for pending L4 allow that writes protected paths', async () => {
+    runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
+    const {
+      scheduler,
+      permissionManager,
+      setAutoModeDenialState,
+      onToolCallsUpdate,
+    } = createPendingProtectedWriteHarness();
+
     await (
       scheduler as unknown as {
         autoApproveCompatiblePendingTools: (
@@ -2846,9 +2879,85 @@ describe('CoreToolScheduler request queueing', () => {
 
     expect(permissionManager.evaluate).toHaveBeenCalled();
     expect(runSideQueryMock).toHaveBeenCalled();
-    expect(setAutoModeDenialState).toHaveBeenCalledWith(denialState);
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    });
     const latestCalls = onToolCallsUpdate.mock.calls.at(-1)?.[0] as ToolCall[];
     expect(latestCalls[0]?.status).toBe('scheduled');
+  });
+
+  it('fires PermissionDenied hooks for pending AUTO classifier blocks', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({
+        shouldBlock: true,
+        reason: 'protected write',
+        thinking: 'confirmed',
+      });
+    const { scheduler, onToolCallsUpdate, hookSystem } =
+      createPendingProtectedWriteHarness({ disableHooks: false });
+
+    await (
+      scheduler as unknown as {
+        autoApproveCompatiblePendingTools: (
+          signal: AbortSignal,
+          triggeringCallId: string,
+        ) => Promise<void>;
+      }
+    ).autoApproveCompatiblePendingTools(
+      new AbortController().signal,
+      'approved-sibling',
+    );
+
+    expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalledWith(
+      ToolNames.SHELL,
+      { command: "echo '{}' > .qwen/settings.json" },
+      'pending-protected-write',
+      'classifier_blocked',
+      expect.any(AbortSignal),
+    );
+    const statuses = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0] as ToolCall[])
+      .map((call) => call.status);
+    expect(statuses).toContain('error');
+  });
+
+  it('leaves pending protected writes awaiting approval during AUTO fallback', async () => {
+    runSideQueryMock.mockReset();
+    const { scheduler, onToolCallsUpdate, hookSystem } =
+      createPendingProtectedWriteHarness({
+        denialState: {
+          consecutiveBlock: 3,
+          consecutiveUnavailable: 0,
+          totalBlock: 3,
+          totalUnavailable: 0,
+        },
+        disableHooks: false,
+      });
+
+    await (
+      scheduler as unknown as {
+        autoApproveCompatiblePendingTools: (
+          signal: AbortSignal,
+          triggeringCallId: string,
+        ) => Promise<void>;
+      }
+    ).autoApproveCompatiblePendingTools(
+      new AbortController().signal,
+      'approved-sibling',
+    );
+
+    expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+    expect(onToolCallsUpdate).not.toHaveBeenCalled();
+    const toolCalls = (
+      scheduler as unknown as {
+        toolCalls: ToolCall[];
+      }
+    ).toolCalls;
+    expect(toolCalls[0]?.status).toBe('awaiting_approval');
   });
 });
 
