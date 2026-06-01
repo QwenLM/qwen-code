@@ -56,19 +56,26 @@ alphanumeric keywords first (see Stage 3). A crafted title such as
 
 ## Skip If Already Handled
 
-This skill runs in CI and can be re-invoked (retries, `workflow_dispatch`
-replays, repeated triggers). Before running any stage, check the fetched context
-and stop early when the target was already triaged, so reruns do not post
-duplicate comments or conflicting reviews:
+Skip a draft PR (`isDraft: true`) in any mode — do not review work in progress.
 
-- Issue: stop if a prior triage comment from this workflow already exists (the
-  staged `## Stage N` bilingual format is its signature).
-- PR: stop if `reviewDecision` is already `APPROVED`, or a prior triage review
-  or `## Stage N` comment from this workflow exists. Also stop if the PR is a
-  draft (`isDraft: true`); do not review work in progress.
+The duplicate-run skip below exists only to stop **unattended** re-runs (CI
+retries, `workflow_dispatch` replays, repeated event triggers) from posting
+duplicate comments or conflicting reviews. It never applies to a hand-typed
+`/triage`: an explicit invocation always runs in full, even on an
+already-triaged target, so re-running picks up the latest workflow (e.g. the
+current Stage 4).
 
-When already handled, write "already triaged, skipping" to the CI log and exit
-without further GitHub writes.
+When running unattended (`CI` or `GITHUB_ACTIONS` is set) and the target was
+already handled, write "already triaged, skipping" to the CI log and exit
+without further GitHub writes:
+
+- Issue: a prior triage comment from this workflow exists (the staged
+  `## Stage N` bilingual format is its signature).
+- PR: `reviewDecision` is already `APPROVED`, or a prior triage review or
+  `## Stage N` comment from this workflow exists.
+
+On an explicit re-run of an already-triaged target, run every stage again and
+update your prior `## Stage N` comments in place instead of posting duplicates.
 
 ## Required Comment Format
 
