@@ -1353,9 +1353,9 @@ const SETTINGS_SCHEMA = {
             label: 'Custom Ignore Files',
             category: 'Context',
             requiresRestart: true,
-            default: ['.agentignore', '.aiignore'],
+            default: ['.agentignore', '.aiignore'] as string[],
             description:
-              'Additional project-root-relative ignore files to respect when respectQwenIgnore is enabled. .qwenignore is always included when respectQwenIgnore is enabled.',
+              'Project-root-relative ignore files to use instead of the defaults (`.agentignore`, `.aiignore`) when respectQwenIgnore is enabled. .qwenignore is always included when respectQwenIgnore is enabled.',
             showInDialog: true,
             items: { type: 'string' },
           },
