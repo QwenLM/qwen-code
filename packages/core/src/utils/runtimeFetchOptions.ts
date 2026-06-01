@@ -181,6 +181,7 @@ function getOrCreateNoProxyDispatcher(bodyTimeout: number): Dispatcher {
   const dispatcher = new Agent({
     bodyTimeout,
     headersTimeout: 0,
+    keepAliveTimeout: 60_000,
   });
 
   noProxyDispatcherCache.set(bodyTimeout, dispatcher);

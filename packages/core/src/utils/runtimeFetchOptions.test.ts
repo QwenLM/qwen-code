@@ -86,6 +86,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect(dispatcher?.options).toMatchObject({
       bodyTimeout: 0,
       headersTimeout: 0,
+      keepAliveTimeout: 60_000,
     });
   });
 
