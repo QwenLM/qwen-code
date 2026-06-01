@@ -1625,6 +1625,7 @@ describe('Qwen native history loading', () => {
         { name: 'project:fix', description: 'Run project fix' },
       ],
       availableSkills: ['commit'],
+      workspaceId: workspace.id,
     });
     const persisted = loadSession(workspaceRoot, sessionId);
     expect(session?.createdAt).toBe(timestamp);

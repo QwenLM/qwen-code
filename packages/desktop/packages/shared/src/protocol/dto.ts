@@ -190,8 +190,12 @@ export interface PermissionModeState {
 // Session events (main → renderer)
 // ---------------------------------------------------------------------------
 
+interface SessionEventContext {
+  workspaceId?: string
+}
+
 // turnId: Correlation ID from the API's message.id, groups all events in an assistant turn
-export type SessionEvent =
+export type SessionEvent = (
   | { type: 'text_delta'; sessionId: string; delta: string; turnId?: string }
   | {
       type: 'text_complete'
@@ -399,6 +403,8 @@ export type SessionEvent =
       annotations: AnnotationV1[]
     }
   | { type: 'working_directory_error'; sessionId: string; error: string }
+) &
+  SessionEventContext
 
 export interface SendMessageOptions {
   skillSlugs?: string[]

@@ -1225,6 +1225,9 @@ export default function App() {
 
       // Check if session is currently streaming (atom is source of truth)
       const atomSession = store.get(sessionAtomFamily(sessionId))
+      const metaSession = store.get(sessionMetaMapAtom).get(sessionId)
+      const eventWorkspaceId =
+        event.workspaceId ?? atomSession?.workspaceId ?? metaSession?.workspaceId ?? workspaceId
       const isStreaming = atomSession?.isProcessing === true
       const isHandoff = handoffEventTypes.has(event.type)
 
@@ -1237,7 +1240,7 @@ export default function App() {
         const { session: updatedSession, effects } = processAgentEvent(
           agentEvent,
           currentSession,
-          workspaceId
+          eventWorkspaceId
         )
 
         // Update atom directly (UI sees update immediately)
@@ -1275,7 +1278,7 @@ export default function App() {
       const { session: updatedSession, effects } = processAgentEvent(
         agentEvent,
         currentSession,
-        workspaceId
+        eventWorkspaceId
       )
 
       // Handle side effects

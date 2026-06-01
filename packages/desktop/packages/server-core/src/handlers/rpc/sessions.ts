@@ -296,6 +296,7 @@ export function registerSessionsHandlers(
     ) => {
       // Capture the caller's clientId for error routing
       const callerClientId = ctx.clientId;
+      const callerWorkspaceId = ctx.workspaceId ?? undefined;
 
       // Start processing in background, errors are sent via event stream
       sessionManager
@@ -305,6 +306,8 @@ export function registerSessionsHandlers(
           attachments,
           storedAttachments,
           options,
+          undefined,
+          callerClientId,
         )
         .catch((err) => {
           log.error('Error in sendMessage:', err);
@@ -317,6 +320,7 @@ export function registerSessionsHandlers(
               type: 'error',
               sessionId,
               error: err instanceof Error ? err.message : 'Unknown error',
+              workspaceId: callerWorkspaceId,
             } as SessionEvent,
           );
           // Also send complete event to clear processing state
@@ -327,6 +331,7 @@ export function registerSessionsHandlers(
             {
               type: 'complete',
               sessionId,
+              workspaceId: callerWorkspaceId,
             } as SessionEvent,
           );
         });

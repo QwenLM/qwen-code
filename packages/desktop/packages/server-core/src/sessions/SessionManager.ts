@@ -96,6 +96,7 @@ import {
   generateSessionId,
   sessionPersistenceQueue,
   getHeaderMetadataSignature,
+  createSessionHeader,
   writeSessionJsonl,
   serializeSession,
   validateBundle,
@@ -1001,6 +1002,7 @@ interface ManagedSession {
     options?: SendMessageOptions
     messageId?: string // Pre-generated ID for matching with UI
     optimisticMessageId?: string // Frontend's ID for reliable event matching
+    eventClientId?: string // Renderer that initiated the send, for workspace-switch continuity
     midTurnPending?: boolean // Backup replay until ACP confirms injection
   }>
   // Map of shellId -> command for killing background shells
@@ -1186,6 +1188,16 @@ type StoredSessionWithHeaderOptions = StoredSession & {
   preserveSessionTimestamps?: boolean
 }
 
+function isQwenCanonicalManagedSession(
+  managed: Pick<ManagedSession, 'sdkSessionId' | 'llmConnection'>,
+): boolean {
+  return (
+    !!managed.sdkSessionId &&
+    (managed.llmConnection === QWEN_CODE_CONNECTION_SLUG ||
+      managed.llmConnection === undefined)
+  )
+}
+
 function stripQwenCanonicalStoredFields<T extends Partial<StoredSession>>(
   session: T,
 ): T {
@@ -1213,14 +1225,30 @@ function managedToSession(
   m: ManagedSession,
   overrides?: Partial<Session>,
 ): Session {
+  const persistableMessages = m.messages.filter(
+    (message) => message.role !== 'status',
+  )
+  const derivedHeader =
+    persistableMessages.length > 0 && !isQwenCanonicalManagedSession(m)
+      ? createSessionHeader({
+          ...pickSessionFields(m),
+          workspaceRootPath: m.workspace.rootPath,
+          messages: persistableMessages.map(messageToStored),
+          tokenUsage: m.tokenUsage ?? DEFAULT_TOKEN_USAGE,
+        } as StoredSession)
+      : undefined
+
   return {
     ...pickSessionFields(m),
     // Pre-computed fields from header (not in SESSION_PERSISTENT_FIELDS)
-    preview: m.preview,
-    lastMessageRole: m.lastMessageRole,
+    preview: derivedHeader?.preview ?? m.preview,
+    lastMessageRole: derivedHeader?.lastMessageRole ?? m.lastMessageRole,
     tokenUsage: m.tokenUsage,
-    messageCount: m.messageCount,
-    lastFinalMessageId: m.lastFinalMessageId,
+    messageCount: isQwenCanonicalManagedSession(m)
+      ? undefined
+      : (derivedHeader?.messageCount ?? m.messageCount),
+    lastFinalMessageId:
+      derivedHeader?.lastFinalMessageId ?? m.lastFinalMessageId,
     // Runtime-only fields
     permissionMode: m.permissionMode,
     previousPermissionMode: m.previousPermissionMode,
@@ -1341,6 +1369,8 @@ export class SessionManager implements ISessionManager {
   private taskOutputIndex: Map<string, string> = new Map()
   /** Monotonic clock to ensure strictly increasing message timestamps */
   private lastTimestamp = 0
+  /** Originating renderer for an active send; keeps events flowing across workspace switches. */
+  private sessionEventClientIds: Map<string, string> = new Map()
   private currentGlobalPermissionMode: PermissionMode =
     loadConfigDefaults().workspaceDefaults.permissionMode
 
@@ -2397,11 +2427,10 @@ export class SessionManager implements ISessionManager {
   }
 
   private isQwenCanonicalMessageSession(managed: ManagedSession): boolean {
-    return (
-      !!managed.sdkSessionId &&
-      this.resolveExternalSessionConnectionSlug(managed) ===
-        QWEN_CODE_CONNECTION_SLUG
-    )
+    return isQwenCanonicalManagedSession({
+      sdkSessionId: managed.sdkSessionId,
+      llmConnection: this.resolveExternalSessionConnectionSlug(managed),
+    })
   }
 
   private resolveQwenCanonicalCwd(managed: ManagedSession): string {
@@ -7720,6 +7749,7 @@ export class SessionManager implements ISessionManager {
     storedAttachments?: StoredAttachment[],
     options?: SendMessageOptions,
     existingMessageId?: string,
+    eventClientId?: string,
     _isAuthRetry?: boolean,
   ): Promise<void> {
     const managed = this.sessions.get(sessionId)
@@ -7783,11 +7813,16 @@ export class SessionManager implements ISessionManager {
         options,
         messageId: userMessage.id,
         optimisticMessageId: options?.optimisticMessageId,
+        eventClientId,
         midTurnPending: canInjectMidTurn,
       })
 
       this.persistSession(managed)
       return
+    }
+
+    if (eventClientId) {
+      this.sessionEventClientIds.set(sessionId, eventClientId)
     }
 
     // Add user message with stored attachments for persistence. Queued replay
@@ -8606,6 +8641,7 @@ export class SessionManager implements ISessionManager {
             retryStoredAttachments,
             retryOptions,
             undefined, // existingMessageId
+            undefined, // eventClientId - keep the existing active route
             true, // _isAuthRetry - prevents infinite retry loop
           )
           sessionLog.info(
@@ -8761,6 +8797,7 @@ export class SessionManager implements ISessionManager {
         },
         managed.workspace.id,
       )
+      this.sessionEventClientIds.delete(sessionId)
     }
 
     // 6. Always persist
@@ -8810,6 +8847,7 @@ export class SessionManager implements ISessionManager {
         next.storedAttachments,
         next.options,
         next.messageId,
+        next.eventClientId,
       ).catch((err) => {
         sessionLog.error('Error processing queued message:', err)
         // Report queued message failures via runtime hooks
@@ -11176,10 +11214,27 @@ export class SessionManager implements ISessionManager {
       return
     }
 
+    const eventWithContext: SessionEvent = { ...event, workspaceId }
+    const eventClientId = this.sessionEventClientIds.get(event.sessionId)
+
+    if (eventClientId) {
+      this.eventSink(
+        RPC_CHANNELS.sessions.EVENT,
+        { to: 'workspace', workspaceId, exclude: eventClientId },
+        eventWithContext,
+      )
+      this.eventSink(
+        RPC_CHANNELS.sessions.EVENT,
+        { to: 'client', clientId: eventClientId },
+        eventWithContext,
+      )
+      return
+    }
+
     this.eventSink(
       RPC_CHANNELS.sessions.EVENT,
       { to: 'workspace', workspaceId },
-      event,
+      eventWithContext,
     )
   }
 
