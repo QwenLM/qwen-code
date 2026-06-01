@@ -217,27 +217,46 @@ If the template passes, post a Stage 1 comment and continue.
 
 ### Stage 2: Product Direction Gate
 
-You can reason about this PR well, but you do not hold the context that decides
-direction — unwritten maintainer decisions, roadmap intent, and past rejections
-that are not in this repo. So reason hard, then route the call to a human; do
-not rule on it yourself.
+You usually lack the context to judge product direction — it lives in maintainer
+decisions and discussions not in this repo. So do not rule on it. Think hard,
+show what you found, and route the call to a human.
 
-- Back any direction claim with a citation you actually read: a line in
-  `docs/developers/roadmap.md`, a prior PR/issue, or a maintainer statement. No
-  citation → it is an open question, not a verdict.
-- Before concluding "aligned," argue the opposite once. If it is not obvious, or
-  it touches auth, sandbox, model selection, telemetry, release flow, or a
-  public CLI/SDK contract, it is a maintainer's call.
-- When anything is uncertain, escalate: add `status/ready-for-human` and post a
-  warm, non-committal comment that names the one open question and says a
-  maintainer will weigh in. Never auto-reject on direction — `--request-changes`
-  on direction is a maintainer's call, not yours.
+**The decisive signal is Claude Code parity.** Qwen Code tracks Claude Code's
+capabilities, so the most efficient direction check is whether Claude Code
+already ships this. Search its changelog (try a few term variants — its wording
+may differ from the PR's):
 
-Call direction "aligned" and continue to Stage 3 only for plainly in-scope work
-(a bug fix, docs, tests, an obvious reliability win) that touches no core
-contract above — and even then, write the Stage 2 comment as your reading, not a
-ruling. Otherwise you have escalated: stop here. Do not run code review, testing,
-or approval — those happen only after a maintainer confirms the direction.
+```bash
+curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md | grep -iC1 "<feature keywords>"
+```
+
+If Claude Code clearly ships the capability, direction is **aligned** — cite the
+changelog version and line, and continue to Stage 3. Absence is **not** a
+rejection: Qwen Code has its own scope (e.g. Qwen-specific auth and
+integrations), so a feature Claude Code lacks falls through to the checks below,
+never an auto-reject.
+
+For what the changelog does not settle:
+
+- **Cite or don't claim.** Any direction claim must point to the Claude Code
+  changelog above, a prior PR/issue, or a maintainer statement you actually
+  read. No citation → it is an open question, not a verdict.
+- **Stress-test yourself.** Before concluding "aligned," look for the strongest
+  reason it is off-direction. If you have to talk yourself into it — or it
+  touches auth, sandbox, model selection, telemetry, release, or a public
+  contract — it is a maintainer's call.
+- **Escalate by default.** When anything is uncertain, add `status/ready-for-human`,
+  hand the maintainer what you found, and post a warm, non-committal note that
+  names the one open question. Wrongly discouraging a contributor is the costly
+  error.
+- **Never auto-reject on direction.** Reserve `gh pr review --request-changes`
+  for the template gate and for rejections a maintainer has confirmed.
+
+Aligned — Claude Code parity, or plainly in-scope work (a bug fix, docs, tests,
+an obvious reliability win) touching no core contract — continues to Stage 3, as
+your reading, not a ruling. Otherwise you have escalated: stop here. Do not run
+code review, testing, or approval; those happen only after a maintainer confirms
+the direction.
 
 ### Stage 3: KISS-Focused Code Review
 
