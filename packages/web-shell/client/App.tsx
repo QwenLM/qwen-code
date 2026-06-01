@@ -80,6 +80,7 @@ export const CompactModeContext = createContext(false);
 const WEB_SHELL_VERSION = __WEB_SHELL_VERSION__;
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
+const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
 
 interface QueuedPrompt {
   id: number;
@@ -120,8 +121,10 @@ function replaceSessionUrl(sessionId: string): void {
   if (typeof window === 'undefined') return;
   const url = new URL(window.location.href);
   url.pathname = `/session/${encodeURIComponent(sessionId)}`;
-  url.searchParams.delete('token');
-  url.searchParams.delete('daemon');
+  if (!import.meta.env.DEV) {
+    url.searchParams.delete('token');
+    url.searchParams.delete('daemon');
+  }
   window.history.replaceState(null, '', url);
 }
 
@@ -269,7 +272,11 @@ function QueuedPromptDisplay({
   return (
     <div className={styles.queuedPrompts}>
       {prompts.slice(0, MAX_DISPLAYED_QUEUED_PROMPTS).map((prompt) => {
-        const preview = prompt.text.replace(/\s+/g, ' ');
+        const normalizedPreview = prompt.text.replace(/\s+/g, ' ').trim();
+        const preview =
+          normalizedPreview.length > MAX_QUEUED_PROMPT_PREVIEW_CHARS
+            ? `${normalizedPreview.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS)}...`
+            : normalizedPreview;
         const imageCount = prompt.images?.length ?? 0;
         return (
           <div key={prompt.id} className={styles.queuedPrompt}>

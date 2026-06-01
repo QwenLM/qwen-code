@@ -121,7 +121,7 @@ export function getToolResultSummary(tool: ACPToolCall): string {
   }
 
   if (name === 'ask_user_question') {
-    return text;
+    return '';
   }
 
   const firstLine = lines[0] || '';

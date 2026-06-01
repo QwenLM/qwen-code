@@ -145,7 +145,7 @@ function ExpandedBashOutput({ tool }: { tool: ACPToolCall }) {
   const [showAll, setShowAll] = useState(false);
   const output = useMemo(() => extractText(tool) || '', [tool]);
   const lines = useMemo(() => output.split('\n'), [output]);
-  const isUserShell = isShellToolName(tool.toolName);
+  const isUserShell = tool.toolName === 'shell';
   const isLong = lines.length > MAX_BASH_LINES;
   const hiddenLinesCount = Math.max(0, lines.length - MAX_BASH_LINES);
   const displayText = useMemo(
@@ -245,28 +245,6 @@ function getWriteContent(tool: ACPToolCall): string {
     if (typeof raw.newContent === 'string') return raw.newContent;
   }
   return '';
-}
-
-function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
-  const content = useMemo(() => getWriteContent(tool), [tool]);
-  const lines = useMemo(() => {
-    const nextLines = content.split('\n');
-    if (nextLines.length > 0 && nextLines[nextLines.length - 1] === '') {
-      nextLines.pop();
-    }
-    return nextLines;
-  }, [content]);
-  if (!content) return null;
-
-  return (
-    <div className={styles.expandedWrite}>
-      <pre className={styles.expandedOutput}>
-        {lines.map((line, i) => (
-          <span key={i} className={styles.writeAdd}>{`+ ${line}\n`}</span>
-        ))}
-      </pre>
-    </div>
-  );
 }
 
 function TodoWriteContent({ tool }: { tool: ACPToolCall }) {
@@ -653,7 +631,7 @@ const ToolLine = memo(function ToolLine({
         <div className={styles.lineDetail}>
           {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
           {(name === 'write_file' || name === 'writefile') && (
-            <ExpandedWriteContent tool={tool} />
+            <ExpandedEditDiff tool={tool} />
           )}
           {(name === 'edit' || name === 'write' || name === 'editfile') && (
             <ExpandedEditDiff tool={tool} />
