@@ -568,7 +568,13 @@ export function FreeFormInput({
       })),
     [effectiveAvailableSkills],
   );
-  const mentionSkills = useQwenAcpSkillMentions ? qwenAcpMentionSkills : skills;
+  const enabledMentionSkills = React.useMemo(
+    () => skills.filter((skill) => skill.enabled !== false),
+    [skills],
+  );
+  const mentionSkills = useQwenAcpSkillMentions
+    ? qwenAcpMentionSkills
+    : enabledMentionSkills;
   const enableQwenSlashCommands =
     !connectionUnavailable &&
     (currentLlmConnection?.providerType === 'qwen' ||
