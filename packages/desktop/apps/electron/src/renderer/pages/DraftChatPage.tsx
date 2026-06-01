@@ -17,6 +17,7 @@ import {
 import { defaultSessionOptions } from '@/hooks/useSessionOptions';
 import { resolveEffectiveConnectionSlug } from '@config/llm-connections';
 import { getWorkspaceDisplayName } from '@/utils/workspace';
+import { qwenCapabilitiesFromSkills } from '@/lib/qwen-capability-cache';
 import { contentBadgesToTextElements } from '@craft-agent/core/utils';
 import type {
   CreateSessionOptions,
@@ -46,6 +47,7 @@ export default function DraftChatPage() {
     onOpenUrl,
     enabledSources,
     skills,
+    getQwenCapabilitySnapshot,
     labels,
     enabledModes,
     globalPermissionMode,
@@ -251,18 +253,45 @@ export default function DraftChatPage() {
     sourcesTouched,
   ]);
 
+  const effectiveConnectionSlug = React.useMemo(
+    () =>
+      resolveEffectiveConnectionSlug(
+        llmConnection,
+        workspaceDefaultLlmConnection,
+        llmConnections,
+      ),
+    [llmConnection, workspaceDefaultLlmConnection, llmConnections],
+  );
+
+  const effectiveConnection = React.useMemo(
+    () =>
+      effectiveConnectionSlug
+        ? llmConnections.find(
+            (candidate) => candidate.slug === effectiveConnectionSlug,
+          )
+        : null,
+    [effectiveConnectionSlug, llmConnections],
+  );
+
+  const qwenCapabilitySnapshot = getQwenCapabilitySnapshot?.(
+    activeWorkspaceId,
+    workingDirectory,
+    effectiveConnectionSlug,
+  );
+  const fallbackQwenCapabilitySnapshot = React.useMemo(
+    () =>
+      effectiveConnection?.providerType === 'qwen'
+        ? qwenCapabilitiesFromSkills(skills ?? [])
+        : undefined,
+    [effectiveConnection?.providerType, skills],
+  );
+  const draftQwenCapabilitySnapshot =
+    qwenCapabilitySnapshot ?? fallbackQwenCapabilitySnapshot;
+
   const currentModel = React.useMemo(() => {
     if (model) return model;
-    const connectionSlug = resolveEffectiveConnectionSlug(
-      llmConnection,
-      workspaceDefaultLlmConnection,
-      llmConnections,
-    );
-    const connection = connectionSlug
-      ? llmConnections.find((candidate) => candidate.slug === connectionSlug)
-      : null;
-    return connection?.defaultModel ?? '';
-  }, [model, llmConnection, workspaceDefaultLlmConnection, llmConnections]);
+    return effectiveConnection?.defaultModel ?? '';
+  }, [model, effectiveConnection]);
 
   const draftSession = React.useMemo<Session>(
     () => ({
@@ -281,6 +310,14 @@ export default function DraftChatPage() {
       enabledSourceSlugs,
       sessionStatus,
       labels: sessionLabels,
+      ...(draftQwenCapabilitySnapshot
+        ? {
+            availableCommands: draftQwenCapabilitySnapshot.availableCommands,
+            availableSkills: draftQwenCapabilitySnapshot.availableSkills ?? [],
+            availableSkillDetails:
+              draftQwenCapabilitySnapshot.availableSkillDetails,
+          }
+        : {}),
     }),
     [
       activeWorkspaceId,
@@ -295,6 +332,7 @@ export default function DraftChatPage() {
       enabledSourceSlugs,
       sessionStatus,
       sessionLabels,
+      draftQwenCapabilitySnapshot,
     ],
   );
 
