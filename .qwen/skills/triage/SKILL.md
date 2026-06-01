@@ -308,6 +308,25 @@ what this PR adds or fixes?
   - **Before** — a build without this PR: the installed `qwen` (or `main`). The
     log should show the bug reproducing.
   - **After** — this PR's code via `npm run dev`. The log should show it fixed.
+
+  `-p` runs a single prompt headless and exits, so `npm run dev -- -p '…'` is the
+  dev-build equivalent of `qwen -p '…'` — a clean A/B you capture in tmux:
+
+  ```bash
+  S=triage-test-$(date +%H%M%S); mkdir -p "tmp/$S"
+  tmux new-session -d -s "$S" -x 200 -y 50 -c "$(pwd)"
+  # before — installed qwen, no PR: the bug should reproduce
+  tmux send-keys -t "$S" "qwen -p '<scenario>' 2>&1 | tee tmp/$S/before.log" Enter
+  # wait until the shell prompt returns, then after — this PR via dev build:
+  tmux send-keys -t "$S" "npm run dev -- -p '<scenario>' 2>&1 | tee tmp/$S/after.log" Enter
+  # wait again, capture the session, clean up
+  tmux capture-pane -t "$S" -p -S -5000 > "tmp/$S/session.txt"; tmux kill-session -t "$S"
+  ```
+
+  Poll the pane for completion between commands (see `tmux-real-user-testing`).
+  For interactive TUI changes (dialogs, selectors, keyboard nav), `-p` is not
+  enough — drive the live TUI with that skill.
+
 - Get it running by any means. Prefer `npm run dev`, which runs the source
   directly — an unrelated `npm run bundle` / packaging failure does not block it.
   If a package or channel unrelated to this PR fails to build, install the missing
