@@ -141,11 +141,11 @@ jobs:
           # dist/ 已由 publish-packages.js 构建完成（含正确版本号）
           # 直接打包为可部署的 tarball
           # STANDALONE_DIR 和 ARTIFACT_DIR 必须与 prepare-artifact.sh 的查找路径一致
-          ARCH="amd64"
-          WORKSPACE_DIR="/workspace"
-          SOURCE_DIR="."
-          STANDALONE_DIR="/workspace/build/qwen-code"
-          ARTIFACT_DIR="/workspace/build"
+          export ARCH="amd64"
+          export WORKSPACE_DIR="/workspace"
+          export SOURCE_DIR="."
+          export STANDALONE_DIR="/workspace/build/qwen-code"
+          export ARTIFACT_DIR="/workspace/build"
           bash .aoneci/scripts/build-standalone-ci.sh
 
       - name: 'Prepare artifact'
