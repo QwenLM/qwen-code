@@ -7,7 +7,11 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { GeminiChat } from '../core/geminiChat.js';
-import { type ChatCompressionInfo, CompressionStatus } from '../core/turn.js';
+import {
+  type ChatCompressionInfo,
+  type CompactionTriggerReason,
+  CompressionStatus,
+} from '../core/turn.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
@@ -194,6 +198,11 @@ export class ChatCompressionService {
       signal,
     } = opts;
     const compactTrigger = trigger ?? (force ? 'manual' : 'auto');
+    // Why this compaction fired, surfaced on the COMPRESSED result so the UI
+    // notice is accurate. Defaults by trigger; the gate below upgrades it to
+    // 'image_overflow' when the screenshot trigger is what let it through.
+    let triggerReason: CompactionTriggerReason =
+      compactTrigger === 'manual' ? 'manual' : 'token_limit';
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
     const tuning = resolveCompactionTuning(chatCompressionSettings);
@@ -257,6 +266,8 @@ export class ChatCompressionService {
             },
           };
         }
+        // Below the token threshold but the screenshot trigger fired.
+        triggerReason = 'image_overflow';
       }
     }
 
@@ -600,6 +611,7 @@ export class ChatCompressionService {
           originalTokenCount,
           newTokenCount,
           compressionStatus: CompressionStatus.COMPRESSED,
+          triggerReason,
         },
       };
     }

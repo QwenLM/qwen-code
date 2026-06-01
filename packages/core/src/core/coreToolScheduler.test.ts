@@ -646,6 +646,7 @@ describe('CoreToolScheduler', () => {
     setAutoModeDenialState?: ReturnType<typeof vi.fn>;
     onAllToolCallsComplete?: ReturnType<typeof vi.fn>;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
+    memoryMonitor?: { scheduleCheck: () => void };
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -696,6 +697,7 @@ describe('CoreToolScheduler', () => {
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
+        getMemoryPressureMonitor: () => options.memoryMonitor,
         getMessageBus: vi.fn().mockReturnValue(options.messageBus),
         getHookSystem: vi.fn().mockReturnValue(options.hookSystem),
         getDisableAllHooks: vi
@@ -776,6 +778,43 @@ describe('CoreToolScheduler', () => {
     expect(completedCalls.every((call) => call.status === 'success')).toBe(
       true,
     );
+  });
+
+  it('schedules a memory pressure check after tool execution', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'mockTool',
+        new MockTool({
+          name: 'mockTool',
+          execute,
+        }),
+      ],
+    ]);
+    const scheduleCheck = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      memoryMonitor: { scheduleCheck },
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'memory-check',
+          name: 'mockTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-memory-check',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(scheduleCheck).toHaveBeenCalledTimes(1);
   });
 
   it('applies canonical legacy tool names to the deny-list fallback', async () => {

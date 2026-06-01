@@ -5,14 +5,16 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { HookEventName, HooksConfigSource } from '@qwen-code/qwen-code-core';
+import {
+  HookEventName,
+  HooksConfigSource,
+  hookEventSupportsMatcher,
+} from '@qwen-code/qwen-code-core';
 
-// Mock i18n module
 vi.mock('../../../i18n/index.js', () => ({
   t: vi.fn((key: string) => key),
 }));
 
-// Import after mocking
 import {
   getHookExitCodes,
   getHookShortDescription,
@@ -20,6 +22,7 @@ import {
   getTranslatedSourceDisplayMap,
   createEmptyHookEventInfo,
   DISPLAY_HOOK_EVENTS,
+  supportsMatchers,
 } from './constants.js';
 
 describe('hooks constants', () => {
@@ -90,6 +93,24 @@ describe('hooks constants', () => {
       expect(exitCodes).toHaveLength(3);
     });
 
+    it('should return exit codes for PostCompact event', () => {
+      const exitCodes = getHookExitCodes(HookEventName.PostCompact);
+      expect(exitCodes).toHaveLength(2);
+      expect(exitCodes[0].code).toBe(0);
+      expect(exitCodes[1].code).toBe('Other');
+    });
+
+    it('should return exit codes for StopFailure event', () => {
+      // Fire-and-forget per hookAggregator — both rows are documented as ignored.
+      const exitCodes = getHookExitCodes(HookEventName.StopFailure);
+      expect(exitCodes).toHaveLength(2);
+      expect(exitCodes[0].code).toBe(0);
+      expect(exitCodes[1].code).toBe('Other');
+      for (const row of exitCodes) {
+        expect(row.description).toContain('fire-and-forget');
+      }
+    });
+
     it('should return empty array for unknown event', () => {
       const exitCodes = getHookExitCodes('unknown_event' as HookEventName);
       expect(exitCodes).toEqual([]);
@@ -115,6 +136,17 @@ describe('hooks constants', () => {
     it('should return description for SessionStart', () => {
       const desc = getHookShortDescription(HookEventName.SessionStart);
       expect(desc).toBe('When a new session is started');
+    });
+
+    it('should return description for PostCompact', () => {
+      const desc = getHookShortDescription(HookEventName.PostCompact);
+      expect(desc).toBe('After conversation compaction');
+    });
+
+    it('should return description for StopFailure', () => {
+      const desc = getHookShortDescription(HookEventName.StopFailure);
+      expect(desc).toContain('API error');
+      expect(desc).toContain('Stop');
     });
 
     it('should return description for PermissionDenied', () => {
@@ -153,6 +185,19 @@ describe('hooks constants', () => {
       expect(desc).toBe('');
     });
 
+    it('should return description for PostCompact', () => {
+      const desc = getHookDescription(HookEventName.PostCompact);
+      expect(desc).toContain('trigger');
+      expect(desc).toContain('compact_summary');
+    });
+
+    it('should return description for StopFailure', () => {
+      const desc = getHookDescription(HookEventName.StopFailure);
+      expect(desc).toContain('error');
+      expect(desc).toContain('rate_limit');
+      expect(desc).toContain('Fire-and-forget');
+    });
+
     it('should return empty string for unknown event', () => {
       const desc = getHookDescription('unknown_event' as HookEventName);
       expect(desc).toBe('');
@@ -172,7 +217,6 @@ describe('hooks constants', () => {
     it('should return translated strings', () => {
       const map = getTranslatedSourceDisplayMap();
 
-      // All values should be strings (translated)
       Object.values(map).forEach((value) => {
         expect(typeof value).toBe('string');
         expect(value.length).toBeGreaterThan(0);
@@ -206,6 +250,40 @@ describe('hooks constants', () => {
     });
   });
 
+  describe('supportsMatchers', () => {
+    it('returns true for events with meaningful matchers', () => {
+      expect(supportsMatchers(HookEventName.PreToolUse)).toBe(true);
+      expect(supportsMatchers(HookEventName.PostToolUse)).toBe(true);
+      expect(supportsMatchers(HookEventName.PostToolUseFailure)).toBe(true);
+      expect(supportsMatchers(HookEventName.PermissionRequest)).toBe(true);
+      expect(supportsMatchers(HookEventName.Notification)).toBe(true);
+      expect(supportsMatchers(HookEventName.SessionStart)).toBe(true);
+      expect(supportsMatchers(HookEventName.SessionEnd)).toBe(true);
+      expect(supportsMatchers(HookEventName.SubagentStart)).toBe(true);
+      expect(supportsMatchers(HookEventName.SubagentStop)).toBe(true);
+      expect(supportsMatchers(HookEventName.PreCompact)).toBe(true);
+      expect(supportsMatchers(HookEventName.PostCompact)).toBe(true);
+      expect(supportsMatchers(HookEventName.StopFailure)).toBe(true);
+    });
+
+    it('returns false for events without matchers', () => {
+      expect(supportsMatchers(HookEventName.Stop)).toBe(false);
+      expect(supportsMatchers(HookEventName.UserPromptSubmit)).toBe(false);
+      expect(supportsMatchers(HookEventName.TodoCreated)).toBe(false);
+      expect(supportsMatchers(HookEventName.TodoCompleted)).toBe(false);
+    });
+
+    it('returns false for unknown events', () => {
+      expect(supportsMatchers('unknown_event' as HookEventName)).toBe(false);
+    });
+
+    it('covers every HookEventName value and matches core dispatch', () => {
+      for (const event of Object.values(HookEventName)) {
+        expect(supportsMatchers(event)).toBe(hookEventSupportsMatcher(event));
+      }
+    });
+  });
+
   describe('createEmptyHookEventInfo', () => {
     it('should create empty info for PreToolUse', () => {
       const info = createEmptyHookEventInfo(HookEventName.PreToolUse);
@@ -216,7 +294,7 @@ describe('hooks constants', () => {
         'Input to command is JSON of tool call arguments.',
       );
       expect(info.exitCodes).toHaveLength(3);
-      expect(info.configs).toEqual([]);
+      expect(info.matcherGroups).toEqual([]);
     });
 
     it('should create empty info for Stop', () => {
@@ -228,7 +306,7 @@ describe('hooks constants', () => {
       );
       expect(info.description).toBe('');
       expect(info.exitCodes).toHaveLength(3);
-      expect(info.configs).toEqual([]);
+      expect(info.matcherGroups).toEqual([]);
     });
 
     it('should create empty info for unknown event', () => {
@@ -238,7 +316,7 @@ describe('hooks constants', () => {
       expect(info.shortDescription).toBe('');
       expect(info.description).toBe('');
       expect(info.exitCodes).toEqual([]);
-      expect(info.configs).toEqual([]);
+      expect(info.matcherGroups).toEqual([]);
     });
 
     it('should create empty info for PermissionDenied', () => {
@@ -250,7 +328,7 @@ describe('hooks constants', () => {
       );
       expect(info.description).toContain('tool_use_id');
       expect(info.exitCodes).toHaveLength(2);
-      expect(info.configs).toEqual([]);
+      expect(info.matcherGroups).toEqual([]);
     });
 
     it('should create empty info for TodoCreated', () => {
@@ -260,7 +338,7 @@ describe('hooks constants', () => {
       expect(info.shortDescription).toBe('When a new todo item is created');
       expect(info.description).toContain('todo_id');
       expect(info.exitCodes).toHaveLength(3);
-      expect(info.configs).toEqual([]);
+      expect(info.matcherGroups).toEqual([]);
     });
 
     it('should create empty info for TodoCompleted', () => {
@@ -272,7 +350,7 @@ describe('hooks constants', () => {
       );
       expect(info.description).toContain('previous_status');
       expect(info.exitCodes).toHaveLength(3);
-      expect(info.configs).toEqual([]);
+      expect(info.matcherGroups).toEqual([]);
     });
   });
 });

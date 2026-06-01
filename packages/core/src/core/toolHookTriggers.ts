@@ -10,7 +10,6 @@ import type {
   HookExecutionRequest,
   HookExecutionResponse,
 } from '../confirmation-bus/types.js';
-import type { PermissionDeniedReason } from '../permissions/autoMode.js';
 import {
   createHookOutput,
   type PreToolUseHookOutput,
@@ -510,68 +509,6 @@ export async function firePermissionRequestHook(
       `PermissionRequest hook error: ${error instanceof Error ? error.message : String(error)}`,
     );
     return { hasDecision: false };
-  }
-}
-
-/**
- * Result of PermissionDenied hook execution
- */
-export interface PermissionDeniedHookResult {
-  /** Reserved for future non-blocking hook diagnostics */
-  hookError?: string;
-}
-
-/**
- * Fire PermissionDenied hook via MessageBus.
- * Called after AUTO mode blocks a tool call without asking the user.
- * This hook is observational only; it cannot approve or modify the call.
- */
-export async function firePermissionDeniedHook(
-  messageBus: MessageBus | undefined,
-  toolName: string,
-  toolInput: Record<string, unknown>,
-  toolUseId: string,
-  reason: PermissionDeniedReason,
-  signal?: AbortSignal,
-): Promise<PermissionDeniedHookResult> {
-  if (!messageBus) {
-    return {};
-  }
-
-  try {
-    const response = await messageBus.request<
-      HookExecutionRequest,
-      HookExecutionResponse
-    >(
-      {
-        type: MessageBusType.HOOK_EXECUTION_REQUEST,
-        eventName: 'PermissionDenied',
-        input: {
-          tool_name: toolName,
-          tool_input: toolInput,
-          tool_use_id: toolUseId,
-          reason,
-        },
-        signal,
-      },
-      MessageBusType.HOOK_EXECUTION_RESPONSE,
-    );
-    if (!response.success || !response.output) {
-      const message =
-        response.error?.message || 'hook runner returned no output';
-      debugLogger.warn(
-        `PermissionDenied hook response failure for ${toolName}: ${message}`,
-      );
-      return { hookError: message };
-    }
-
-    return {};
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    debugLogger.warn(
-      `PermissionDenied hook error: ${message}`,
-    );
-    return { hookError: message };
   }
 }
 

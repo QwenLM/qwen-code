@@ -13,7 +13,6 @@ import {
   fireNotificationHook,
   appendAdditionalContext,
   firePermissionRequestHook,
-  firePermissionDeniedHook,
 } from './toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { NotificationType } from '../hooks/types.js';
@@ -1070,85 +1069,6 @@ describe('toolHookTriggers', () => {
       );
 
       expect(result2.hasDecision).toBe(true);
-    });
-  });
-
-  describe('firePermissionDeniedHook', () => {
-    it('should return empty result when no messageBus is provided', async () => {
-      const result = await firePermissionDeniedHook(
-        undefined,
-        'run_shell_command',
-        { command: 'rm -rf /' },
-        'toolu_123',
-        'classifier_blocked',
-      );
-
-      expect(result).toEqual({});
-    });
-
-    it('should send PermissionDenied payload to MessageBus', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      await firePermissionDeniedHook(
-        mockMessageBus,
-        'run_shell_command',
-        { command: 'rm -rf /' },
-        'toolu_123',
-        'classifier_blocked',
-      );
-
-      expect(mockMessageBus.request).toHaveBeenCalledWith(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'PermissionDenied',
-          input: {
-            tool_name: 'run_shell_command',
-            tool_input: { command: 'rm -rf /' },
-            tool_use_id: 'toolu_123',
-            reason: 'classifier_blocked',
-          },
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
-    });
-
-    it('should report hook runner failures', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-        error: { message: 'runner failed' },
-      });
-
-      const result = await firePermissionDeniedHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'toolu_123',
-        'classifier_unavailable',
-      );
-
-      expect(result).toEqual({ hookError: 'runner failed' });
-    });
-
-    it('should report hook execution errors', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error('Network error'),
-      );
-
-      const result = await firePermissionDeniedHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'toolu_123',
-        'classifier_unavailable',
-      );
-
-      expect(result).toEqual({ hookError: 'Network error' });
     });
   });
 });

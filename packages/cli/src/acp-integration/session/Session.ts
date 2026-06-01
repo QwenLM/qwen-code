@@ -43,7 +43,6 @@ import {
   Storage,
   ToolNames,
   fireNotificationHook,
-  firePermissionDeniedHook,
   firePermissionRequestHook,
   firePreToolUseHook,
   firePostToolUseHook,
@@ -1152,8 +1151,12 @@ export class Session implements SessionContext {
         compressionInfo = compressed;
         this.#recordCompressionTokenCount(compressed);
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+          const reasonClause =
+            compressed.triggerReason === 'image_overflow'
+              ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
+              : `approached the input token limit for ${this.config.getModel()}`;
           compressionDiagnostic =
-            `IMPORTANT: This conversation approached the input token limit for ${this.config.getModel()}. ` +
+            `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${compressed.originalTokenCount ?? 'unknown'} to ` +
             `${compressed.newTokenCount ?? 'unknown'} tokens).`;
@@ -2032,19 +2035,6 @@ export class Session implements SessionContext {
               `Auto mode blocked (${outcome.reason}): tool=${fc.name}, ` +
                 formatDenialStateLog(denialState),
             );
-            if (!this.config.getDisableAllHooks?.()) {
-              const messageBus = this.config.getMessageBus?.();
-              if (messageBus) {
-                void firePermissionDeniedHook(
-                  messageBus,
-                  fc.name,
-                  toolParams,
-                  toolUseId,
-                  outcome.reason,
-                  abortSignal,
-                );
-              }
-            }
             return earlyErrorResponse(new Error(outcome.errorMessage), fc.name);
           case 'fallback':
             // Drop through to the manual-approval flow below.
