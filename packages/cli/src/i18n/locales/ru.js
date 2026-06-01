@@ -400,7 +400,7 @@ export default {
   Text: 'Текст',
   JSON: 'JSON',
   Plan: 'План',
-  Default: 'По умолчанию',
+  'Ask permissions': 'Запрашивать разрешения',
   'Auto Edit': 'Авторедактирование',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Включение/выключение режима vim',

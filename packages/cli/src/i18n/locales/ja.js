@@ -292,7 +292,7 @@ export default {
   Text: 'テキスト',
   JSON: 'JSON',
   Plan: 'プラン',
-  Default: 'デフォルト',
+  'Ask permissions': '許可を確認',
   'Auto Edit': '自動編集',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim モードのオン/オフを切り替え',
