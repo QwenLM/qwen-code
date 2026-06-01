@@ -48,6 +48,12 @@ import { GitService } from '../services/gitService.js';
 import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
+import {
+  DEFAULT_PRESSURE_CONFIG,
+  MemoryPressureMonitor,
+  validateMemoryPressureConfig,
+  type MemoryPressureConfig,
+} from '../services/memoryPressureMonitor.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
 import {
@@ -156,6 +162,7 @@ import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
+const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 import {
   ModelsConfig,
@@ -849,6 +856,53 @@ function normalizeConfigOutputFormat(
   }
 }
 
+function loadMemoryPressureConfig(): MemoryPressureConfig {
+  const config: MemoryPressureConfig = { ...DEFAULT_PRESSURE_CONFIG };
+
+  try {
+    config.softPressureRatio = readMemoryPressureRatioEnv(
+      'QWEN_MEMORY_PRESSURE_SOFT',
+      config.softPressureRatio,
+    );
+    config.hardPressureRatio = readMemoryPressureRatioEnv(
+      'QWEN_MEMORY_PRESSURE_HARD',
+      config.hardPressureRatio,
+    );
+    config.criticalRatio = readMemoryPressureRatioEnv(
+      'QWEN_MEMORY_PRESSURE_CRITICAL',
+      config.criticalRatio,
+    );
+
+    if (process.env['QWEN_MEMORY_ENABLE_GC'] === '1') {
+      config.enableExplicitGC = true;
+    }
+
+    validateMemoryPressureConfig(config);
+  } catch (err) {
+    const fallbackMsg =
+      '[QWEN] WARNING: Invalid memory pressure config; using defaults. ' +
+      `Error: ${getErrorMessage(err)}`;
+    process.stderr.write(`${fallbackMsg}\n`);
+    memoryPressureConfigLogger.warn(fallbackMsg);
+    return { ...DEFAULT_PRESSURE_CONFIG };
+  }
+
+  return config;
+}
+
+function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
+  const raw = process.env[envName];
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${envName} must be a finite number`);
+  }
+  return parsed;
+}
+
 /**
  * Options for Config.initialize()
  */
@@ -904,6 +958,8 @@ export class Config {
   private pendingMcpBudgetCallback?: (event: McpBudgetEvent) => void;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
+  private memoryPressureConfig?: MemoryPressureConfig;
+  private memoryPressureMonitor?: MemoryPressureMonitor;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
   private readonly monitorRegistry = new MonitorRegistry();
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
@@ -1506,6 +1562,12 @@ export class Config {
       await this.skillManager.startWatching();
     }
     this.debugLogger.debug('Skill manager initialized');
+
+    this.memoryPressureConfig = loadMemoryPressureConfig();
+    this.memoryPressureMonitor = new MemoryPressureMonitor(
+      this,
+      this.memoryPressureConfig,
+    );
 
     this.permissionManager = new PermissionManager(this);
     this.permissionManager.initialize();
@@ -3069,6 +3131,24 @@ export class Config {
     return this.geminiClient;
   }
 
+  getMemoryPressureMonitor(): MemoryPressureMonitor | undefined {
+    if (!Object.prototype.hasOwnProperty.call(this, 'memoryPressureMonitor')) {
+      const inheritedMonitor = this.memoryPressureMonitor;
+      if (inheritedMonitor) {
+        const inheritedConfig = this.memoryPressureConfig;
+        if (!inheritedConfig) {
+          throw new Error('Inherited memory pressure monitor is missing config');
+        }
+        this.memoryPressureConfig = { ...inheritedConfig };
+        this.memoryPressureMonitor = new MemoryPressureMonitor(
+          this,
+          this.memoryPressureConfig,
+        );
+      }
+    }
+    return this.memoryPressureMonitor;
+  }
+
   getCronScheduler(): CronScheduler {
     if (!this.cronScheduler) {
       this.cronScheduler = new CronScheduler();
@@ -3189,6 +3269,10 @@ export class Config {
       ...extensionContextFilePaths,
       ...(this.outputLanguageFilePath ? [this.outputLanguageFilePath] : []),
     ];
+  }
+
+  getOutputLanguageFilePath(): string | undefined {
+    return this.outputLanguageFilePath;
   }
 
   getExperimentalZedIntegration(): boolean {
