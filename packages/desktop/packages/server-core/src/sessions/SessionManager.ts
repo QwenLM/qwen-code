@@ -2501,12 +2501,14 @@ export class SessionManager implements ISessionManager {
     this.persistSession(managed)
     await sessionPersistenceQueue.flush(sdkSessionId)
 
+    // This is a rename, not a delete+create. Emitting session_deleted +
+    // session_created leaves the renderer unable to correlate the two events,
+    // so it deselects the active session (on delete) and never re-selects it
+    // (the create doesn't auto-select), stranding the open chat on a dead id.
+    // A single rename event lets the renderer migrate selection + per-session
+    // state from previousId -> sdkSessionId in place.
     this.sendEvent(
-      { type: 'session_deleted', sessionId: previousId },
-      workspace.id,
-    )
-    this.sendEvent(
-      { type: 'session_created', sessionId: sdkSessionId },
+      { type: 'session_id_changed', previousId, sessionId: sdkSessionId },
       workspace.id,
     )
     sessionLog.info(

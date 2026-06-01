@@ -356,6 +356,15 @@ export type SessionEvent = (
     }
   | { type: 'session_deleted'; sessionId: string }
   | { type: 'session_created'; sessionId: string }
+  | {
+      // Emitted when a session's id is canonicalized in place (e.g. a Qwen
+      // managed session adopting the ACP/SDK session id after the first turn).
+      // This is a rename, NOT a delete+create: renderers must migrate the
+      // active selection and per-session state from previousId -> sessionId.
+      type: 'session_id_changed'
+      previousId: string
+      sessionId: string
+    }
   | { type: 'session_shared'; sessionId: string; sharedUrl: string }
   | { type: 'session_unshared'; sessionId: string }
   | {

@@ -1208,6 +1208,67 @@ export default function App() {
         return
       }
 
+      // In-place id rename (e.g. Qwen managed session adopting the ACP session
+      // id after its first turn). This is NOT a delete+create: migrate the
+      // active selection and per-session state from previousId -> sessionId so
+      // the open chat keeps working (otherwise the next session-scoped action,
+      // e.g. switching approval mode, hits a dead id -> "session not found").
+      if (event.type === 'session_id_changed') {
+        const previousId = event.previousId
+        const nextId = event.sessionId
+        if (previousId === nextId) return
+
+        const wasSelected = sessionSelection.selected === previousId
+
+        // Migrate per-session UI state keyed by the old id (synchronous).
+        setSessionOptions(prev => {
+          if (!prev.has(previousId)) return prev
+          const next = new Map(prev)
+          const opts = next.get(previousId)
+          next.delete(previousId)
+          if (opts && !next.has(nextId)) next.set(nextId, opts)
+          return next
+        })
+        const draft = sessionDraftsRef.current.get(previousId)
+        if (draft !== undefined && !sessionDraftsRef.current.has(nextId)) {
+          sessionDraftsRef.current.set(nextId, draft)
+        }
+        sessionDraftsRef.current.delete(previousId)
+
+        window.electronAPI.getSessionMessages(nextId)
+          .then((renamed: Session | null) => {
+            if (renamed) {
+              const existingMeta = store.get(sessionMetaMapAtom).has(nextId)
+              if (existingMeta) {
+                updateSessionDirect(nextId, () => renamed)
+              } else {
+                addSession(renamed)
+              }
+              syncSessionOptionsFromSession(renamed)
+              if (workspaceId) {
+                cacheWorkspaceSessionMetas(
+                  workspaceId,
+                  Array.from(store.get(sessionMetaMapAtom).values())
+                    .filter(meta => meta.workspaceId === workspaceId || (windowRemoteWorkspaceId && meta.workspaceId === windowRemoteWorkspaceId))
+                    .map(meta => sessionFromMeta(meta, renamed.workspaceName)),
+                )
+              }
+            }
+            // Drop the stale id only after the canonical session is in place,
+            // then follow the rename with the active selection AND the route.
+            // ChatPage derives its sessionId from navigation state (not the
+            // selection atom), so without re-navigating the open chat keeps
+            // rendering the dead previousId -> "此会话已不存在".
+            removeSession(previousId)
+            if (wasSelected) {
+              setSession({ selected: nextId })
+              navigate(routes.view.allSessions(nextId))
+            }
+          })
+          .catch((error: unknown) => console.error('Failed to handle session_id_changed event:', error))
+        return
+      }
+
       const agentEvent = event as unknown as AgentEvent
 
       // Track activity for stale session watchdog
