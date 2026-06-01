@@ -217,25 +217,25 @@ If the template passes, post a Stage 1 comment and continue.
 
 ### Stage 2: Product Direction Gate
 
-Read the PR motivation, changed files, linked issues, docs, and relevant source.
-Decide whether the change fits Qwen Code's product direction.
+You can reason about this PR well, but you do not hold the context that decides
+direction — unwritten maintainer decisions, roadmap intent, and past rejections
+that are not in this repo. So reason hard, then route the call to a human; do
+not rule on it yourself.
 
-Use this bar:
+- Back any direction claim with a citation you actually read: a line in
+  `docs/developers/roadmap.md`, a prior PR/issue, or a maintainer statement. No
+  citation → it is an open question, not a verdict.
+- Before concluding "aligned," argue the opposite once. If it is not obvious, or
+  it touches auth, sandbox, model selection, telemetry, release flow, or a
+  public CLI/SDK contract, it is a maintainer's call.
+- When anything is uncertain, escalate: add `status/ready-for-human` and post a
+  warm, non-committal comment that names the one open question and says a
+  maintainer will weigh in. Never auto-reject on direction — `--request-changes`
+  on direction is a maintainer's call, not yours.
 
-- Is this actually needed by Qwen Code, or is it better handled by docs,
-  settings, an extension, or an existing workflow?
-- Does it preserve the CLI's simplicity?
-- Does it add long-term maintenance burden disproportionate to the benefit?
-- Is the idea good but the solution too broad?
-
-Post a Stage 2 direction comment with the decision and reasoning.
-
-If direction is not aligned, request changes (or post a maintainer-review
-request) and stop. Do not proceed to code review or testing:
-
-```bash
-gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-gate-direction.md
-```
+Call direction "aligned" and continue only for plainly in-scope work (a bug fix,
+docs, tests, an obvious reliability win) that touches no core contract above —
+and even then, write the Stage 2 comment as your reading, not a ruling.
 
 ### Stage 3: KISS-Focused Code Review
 
