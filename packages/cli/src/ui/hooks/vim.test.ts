@@ -91,8 +91,11 @@ describe('useVim hook', () => {
       insert: vi.fn(),
       newline: vi.fn(),
       replaceRangeByOffset: vi.fn(),
+      replaceRange: vi.fn(),
       handleInput: vi.fn(),
       setText: vi.fn(),
+      undo: vi.fn(),
+      redo: vi.fn(),
       // Vim-specific methods
       vimDeleteWordForward: vi.fn(),
       vimDeleteWordBackward: vi.fn(),
@@ -105,10 +108,23 @@ describe('useVim hook', () => {
       vimDeleteToEndOfLine: vi.fn(),
       vimChangeToEndOfLine: vi.fn(),
       vimChangeMovement: vi.fn(),
-      vimMoveLeft: vi.fn(),
-      vimMoveRight: vi.fn(),
-      vimMoveUp: vi.fn(),
-      vimMoveDown: vi.fn(),
+      vimMoveLeft: vi.fn().mockImplementation((count = 1) => {
+        const [row, col] = cursorState.pos;
+        cursorState.pos = [row, Math.max(0, col - count)];
+      }),
+      vimMoveRight: vi.fn().mockImplementation((count = 1) => {
+        const [row, col] = cursorState.pos;
+        const line = lines[row] || '';
+        cursorState.pos = [row, Math.min(line.length, col + count)];
+      }),
+      vimMoveUp: vi.fn().mockImplementation((count = 1) => {
+        const [row, col] = cursorState.pos;
+        cursorState.pos = [Math.max(0, row - count), col];
+      }),
+      vimMoveDown: vi.fn().mockImplementation((count = 1) => {
+        const [row, col] = cursorState.pos;
+        cursorState.pos = [Math.min(lines.length - 1, row + count), col];
+      }),
       vimMoveWordForward: vi.fn(),
       vimMoveWordBackward: vi.fn(),
       vimMoveWordEnd: vi.fn(),
@@ -126,12 +142,33 @@ describe('useVim hook', () => {
       vimOpenLineAbove: vi.fn(),
       vimAppendAtLineEnd: vi.fn(),
       vimInsertAtLineStart: vi.fn(),
-      vimMoveToLineStart: vi.fn(),
-      vimMoveToLineEnd: vi.fn(),
-      vimMoveToFirstNonWhitespace: vi.fn(),
-      vimMoveToFirstLine: vi.fn(),
-      vimMoveToLastLine: vi.fn(),
-      vimMoveToLine: vi.fn(),
+      vimMoveToLineStart: vi.fn().mockImplementation(() => {
+        const [row] = cursorState.pos;
+        cursorState.pos = [row, 0];
+      }),
+      vimMoveToLineEnd: vi.fn().mockImplementation(() => {
+        const [row] = cursorState.pos;
+        const line = lines[row] || '';
+        cursorState.pos = [row, line.length];
+      }),
+      vimMoveToFirstNonWhitespace: vi.fn().mockImplementation(() => {
+        const [row] = cursorState.pos;
+        const line = lines[row] || '';
+        const match = line.match(/\S/);
+        cursorState.pos = [row, match ? match.index! : 0];
+      }),
+      vimMoveToFirstLine: vi.fn().mockImplementation(() => {
+        cursorState.pos = [0, 0];
+      }),
+      vimMoveToLastLine: vi.fn().mockImplementation(() => {
+        cursorState.pos = [lines.length - 1, 0];
+      }),
+      vimMoveToLine: vi.fn().mockImplementation((lineNum: number) => {
+        cursorState.pos = [
+          Math.min(lines.length - 1, Math.max(0, lineNum - 1)),
+          0,
+        ];
+      }),
       vimEscapeInsertMode: vi.fn().mockImplementation(() => {
         // Escape moves cursor left unless at beginning of line
         const [row, col] = cursorState.pos;
@@ -1718,6 +1755,304 @@ describe('useVim hook', () => {
         expect(result.lines).toEqual(['']);
         expect(result.cursorRow).toBe(0);
         expect(result.cursorCol).toBe(0);
+      });
+    });
+  });
+
+  describe('New vim commands', () => {
+    describe('u (undo)', () => {
+      it('should undo last operation', () => {
+        const buffer = createMockBuffer('hello world');
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 'x' }));
+        act(() => result.current.handleInput({ sequence: 'u' }));
+
+        // Undo should call buffer.undo()
+        expect(buffer.undo).toHaveBeenCalled();
+      });
+    });
+
+    describe('r (replace char)', () => {
+      it('should replace character under cursor', () => {
+        const buffer = createMockBuffer('hello world', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 'r' }));
+        act(() => result.current.handleInput({ sequence: 'x' }));
+
+        // Should replace 'h' with 'x' using replaceRange
+        expect(buffer.replaceRange).toHaveBeenCalled();
+      });
+    });
+
+    describe('~ (toggle case)', () => {
+      it('should toggle case of character under cursor', () => {
+        const buffer = createMockBuffer('Hello', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: '~' }));
+
+        // Should replace 'H' with 'h' and move cursor right
+        expect(buffer.replaceRange).toHaveBeenCalled();
+      });
+    });
+
+    describe('J (join lines)', () => {
+      it('should join current line with next line', () => {
+        const buffer = createMockBuffer('hello\nworld', [0, 5]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 'J' }));
+
+        // Should call replaceRange to join lines
+        expect(buffer.replaceRange).toHaveBeenCalled();
+      });
+    });
+
+    describe('>> (indent line)', () => {
+      it('should indent current line', () => {
+        const buffer = createMockBuffer('hello', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: '>' }));
+        act(() => result.current.handleInput({ sequence: '>' }));
+
+        // Should insert spaces at line start
+        expect(buffer.replaceRange).toHaveBeenCalled();
+      });
+    });
+
+    describe('<< (unindent line)', () => {
+      it('should unindent current line', () => {
+        const buffer = createMockBuffer('  hello', [0, 2]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: '<' }));
+        act(() => result.current.handleInput({ sequence: '<' }));
+
+        // Should remove spaces from line start
+        expect(buffer.replaceRange).toHaveBeenCalled();
+      });
+    });
+
+    describe('W (big word forward)', () => {
+      it('should move to next big word', () => {
+        const buffer = createMockBuffer('hello.world test', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 'W' }));
+
+        // Should use vim movement methods to move to 'test'
+        expect(buffer.vimMoveToLineStart).toHaveBeenCalled();
+      });
+    });
+
+    describe('B (big word backward)', () => {
+      it('should move to previous big word', () => {
+        const buffer = createMockBuffer('hello.world test', [0, 12]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 'B' }));
+
+        // Should use vim movement methods to move to 'hello'
+        expect(buffer.vimMoveToLineStart).toHaveBeenCalled();
+      });
+    });
+
+    describe('E (big word end)', () => {
+      it('should move to end of big word', () => {
+        const buffer = createMockBuffer('hello.world test', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 'E' }));
+
+        // E uses vimMoveRight to move to end of word
+        expect(buffer.vimMoveRight).toHaveBeenCalled();
+      });
+    });
+
+    describe('f (find char forward)', () => {
+      it('should find character forward on line', () => {
+        const buffer = createMockBuffer('hello world', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 'f' }));
+        act(() => result.current.handleInput({ sequence: 'o' }));
+
+        // Should set cursor to first 'o' (position 4)
+        expect(buffer.cursor[1]).toBe(4);
+      });
+    });
+
+    describe('F (find char backward)', () => {
+      it('should find character backward on line', () => {
+        const buffer = createMockBuffer('hello world', [0, 9]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 'F' }));
+        act(() => result.current.handleInput({ sequence: 'o' }));
+
+        // Should set cursor to 'o' in 'world' (position 7)
+        expect(buffer.cursor[1]).toBe(7);
+      });
+    });
+
+    describe('t (find char forward before)', () => {
+      it('should find character forward and stop before it', () => {
+        const buffer = createMockBuffer('hello world', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 't' }));
+        act(() => result.current.handleInput({ sequence: 'o' }));
+
+        // Should set cursor to position 3 (before 'o')
+        expect(buffer.cursor[1]).toBe(3);
+      });
+    });
+
+    describe('T (find char backward after)', () => {
+      it('should find character backward and stop after it', () => {
+        const buffer = createMockBuffer('hello world', [0, 9]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 'T' }));
+        act(() => result.current.handleInput({ sequence: 'o' }));
+
+        // Should set cursor to position 8 (after 'o' in world)
+        expect(buffer.cursor[1]).toBe(8);
+      });
+    });
+
+    describe('; (repeat find)', () => {
+      it('should repeat last f command', () => {
+        const buffer = createMockBuffer('hello world', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        // First find 'o'
+        act(() => result.current.handleInput({ sequence: 'f' }));
+        act(() => result.current.handleInput({ sequence: 'o' }));
+
+        expect(buffer.cursor[1]).toBe(4);
+
+        // Repeat find
+        act(() => result.current.handleInput({ sequence: ';' }));
+
+        // Should find next 'o' in 'world' (position 7)
+        expect(buffer.cursor[1]).toBe(7);
+      });
+    });
+
+    describe(', (reverse repeat find)', () => {
+      it('should reverse repeat last f command', () => {
+        const buffer = createMockBuffer('hello world', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        // First find 'o' forward (finds at position 4)
+        act(() => result.current.handleInput({ sequence: 'f' }));
+        act(() => result.current.handleInput({ sequence: 'o' }));
+
+        expect(buffer.cursor[1]).toBe(4);
+
+        // Reverse repeat find - should go back to previous 'o' (none before position 0, stays at 4)
+        act(() => result.current.handleInput({ sequence: ',' }));
+
+        // No 'o' before position 0, so stays at 4
+        expect(buffer.cursor[1]).toBe(4);
+      });
+    });
+
+    describe('y (yank)', () => {
+      it('should yank to system clipboard with yy', () => {
+        const buffer = createMockBuffer('hello world');
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 'y' }));
+        act(() => result.current.handleInput({ sequence: 'y' }));
+
+        // Should copy line to clipboard
+        // Note: writeClipboard is called internally
+      });
+    });
+
+    describe('Y (yank line)', () => {
+      it('should yank entire line', () => {
+        const buffer = createMockBuffer('hello world');
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput({ sequence: 'Y' }));
+
+        // Should copy entire line to clipboard
+      });
+    });
+
+    describe('p (paste after)', () => {
+      it('should paste after cursor', () => {
+        const buffer = createMockBuffer('hello world', [0, 5]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        // First yank something
+        act(() => result.current.handleInput({ sequence: 'y' }));
+        act(() => result.current.handleInput({ sequence: 'w' }));
+
+        // Then paste
+        act(() => result.current.handleInput({ sequence: 'p' }));
+
+        // Should insert yanked text after cursor
+      });
+    });
+
+    describe('P (paste before)', () => {
+      it('should paste before cursor', () => {
+        const buffer = createMockBuffer('hello world', [0, 5]);
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        // First yank something
+        act(() => result.current.handleInput({ sequence: 'y' }));
+        act(() => result.current.handleInput({ sequence: 'w' }));
+
+        // Then paste before
+        act(() => result.current.handleInput({ sequence: 'P' }));
+
+        // Should insert yanked text before cursor
       });
     });
   });
