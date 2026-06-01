@@ -9,14 +9,23 @@ import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { AlertCircle, Flag, Info } from 'lucide-react'
-import { ChatDisplay, type ChatDisplayHandle } from '@/components/app-shell/ChatDisplay'
+import {
+  ChatDisplay,
+  type ChatDisplayHandle,
+} from '@/components/app-shell/ChatDisplay'
 import { PanelHeader } from '@/components/app-shell/PanelHeader'
 import { SessionMenu } from '@/components/app-shell/SessionMenu'
 import { SessionInfoPopover } from '@/components/app-shell/SessionInfoPopover'
 import { RenameDialog } from '@/components/ui/rename-dialog'
 import { toast } from 'sonner'
 import { PanelHeaderCenterButton } from '@/components/ui/PanelHeaderCenterButton'
-import { useAppShellContext, usePendingPermission, usePendingCredential, useSessionOptionsFor, useSession as useSessionData } from '@/context/AppShellContext'
+import {
+  useAppShellContext,
+  usePendingPermission,
+  usePendingCredential,
+  useSessionOptionsFor,
+  useSession as useSessionData,
+} from '@/context/AppShellContext'
 import { rendererPerf } from '@/lib/perf'
 import { routes } from '@/lib/navigate'
 import { coerceInputText } from '@/lib/input-text'
@@ -26,10 +35,17 @@ import {
   shouldShowForegroundMessageLoading,
   shouldShowMissingSessionState,
 } from '@/lib/session-load'
-import { ensureSessionMessagesLoadedAtom, loadedSessionsAtom, sessionMetaMapAtom } from '@/atoms/sessions'
+import {
+  ensureSessionMessagesLoadedAtom,
+  loadedSessionsAtom,
+  sessionMetaMapAtom,
+} from '@/atoms/sessions'
 import { getSessionTitle } from '@/utils/session'
 // Model resolution: connection.defaultModel (no hardcoded defaults)
-import { resolveEffectiveConnectionSlug, isSessionConnectionUnavailable } from '@config/llm-connections'
+import {
+  resolveEffectiveConnectionSlug,
+  isSessionConnectionUnavailable,
+} from '@config/llm-connections'
 import type { Message } from '../../shared/types'
 
 export interface ChatPageProps {
@@ -42,22 +58,36 @@ function getConnectionModelIds(
   connection: { models?: Array<string | { id: string }> } | null | undefined,
 ): string[] {
   return (connection?.models ?? [])
-    .map(model => typeof model === 'string' ? model : model.id)
+    .map((model) => (typeof model === 'string' ? model : model.id))
     .filter(Boolean)
 }
 
 function resolveDisplayModel(
   sessionModel: string | undefined,
-  connection: { providerType?: string; defaultModel?: string; models?: Array<string | { id: string }> } | null | undefined,
+  connection:
+    | {
+        providerType?: string
+        defaultModel?: string
+        models?: Array<string | { id: string }>
+      }
+    | null
+    | undefined,
 ): string {
   const modelIds = getConnectionModelIds(connection)
   if (sessionModel) {
-    if (connection?.providerType !== 'qwen' || modelIds.length === 0 || modelIds.includes(sessionModel)) {
+    if (
+      connection?.providerType !== 'qwen' ||
+      modelIds.length === 0 ||
+      modelIds.includes(sessionModel)
+    ) {
       return sessionModel
     }
   }
 
-  if (connection?.defaultModel && (modelIds.length === 0 || modelIds.includes(connection.defaultModel))) {
+  if (
+    connection?.defaultModel &&
+    (modelIds.length === 0 || modelIds.includes(connection.defaultModel))
+  ) {
     return connection.defaultModel
   }
 
@@ -91,6 +121,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     onAttachmentsChange,
     enabledSources,
     skills,
+    getQwenCapabilitySnapshot,
     labels,
     onSessionLabelsChange,
     enabledModes,
@@ -132,8 +163,8 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   const [missingSessionStartedAt, setMissingSessionStartedAt] = React.useState<
     number | null
   >(null)
-  const [missingSessionCheckAt, setMissingSessionCheckAt] = React.useState(
-    () => Date.now(),
+  const [missingSessionCheckAt, setMissingSessionCheckAt] = React.useState(() =>
+    Date.now(),
   )
 
   React.useEffect(() => {
@@ -155,7 +186,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
 
   // Fallback: ensure messages are loaded when session is viewed
   const ensureMessagesLoaded = useSetAtom(ensureSessionMessagesLoadedAtom)
-  const [messageLoadError, setMessageLoadError] = React.useState<string | null>(null)
+  const [messageLoadError, setMessageLoadError] = React.useState<string | null>(
+    null,
+  )
   const [messageLoadRetryNonce, setMessageLoadRetryNonce] = React.useState(0)
 
   React.useEffect(() => {
@@ -182,7 +215,10 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
           return
         }
 
-        console.error(`[ChatPage] Failed to load messages for session ${sessionId}:`, error)
+        console.error(
+          `[ChatPage] Failed to load messages for session ${sessionId}:`,
+          error,
+        )
         setMessageLoadError(formatSessionLoadFailure(error))
       }
     }
@@ -225,7 +261,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     if (session && isWindowFocused && isFocusedPanel !== false) {
       onSetActiveViewingSession(session.id)
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, isWindowFocused, isFocusedPanel, onSetActiveViewingSession])
 
   // Get pending permission and credential for this session
@@ -233,7 +269,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   const pendingCredential = usePendingCredential(sessionId)
 
   // Track draft value for this session
-  const [inputValue, setInputValue] = React.useState(() => coerceInputText(getDraft(sessionId)))
+  const [inputValue, setInputValue] = React.useState(() =>
+    coerceInputText(getDraft(sessionId)),
+  )
   const inputValueRef = React.useRef(inputValue)
   inputValueRef.current = inputValue
 
@@ -265,7 +303,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     return () => clearInterval(interval)
   }, [sessionId, getDraft])
 
-  const [queuedInputMessages, setQueuedInputMessages] = React.useState<Message[]>([])
+  const [queuedInputMessages, setQueuedInputMessages] = React.useState<
+    Message[]
+  >([])
 
   // Listen for restore-input events (queued messages restored to input on abort)
   React.useEffect(() => {
@@ -288,27 +328,43 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
 
   React.useEffect(() => {
     const handleAdd = (e: Event) => {
-      const { sessionId: targetId, message, optimisticMessageId } = (e as CustomEvent).detail ?? {}
+      const {
+        sessionId: targetId,
+        message,
+        optimisticMessageId,
+      } = (e as CustomEvent).detail ?? {}
       if (targetId !== sessionId || !message) return
 
-      setQueuedInputMessages(prev => {
-        const existingIndex = prev.findIndex(item =>
-          item.id === message.id || (!!optimisticMessageId && item.id === optimisticMessageId)
+      setQueuedInputMessages((prev) => {
+        const existingIndex = prev.findIndex(
+          (item) =>
+            item.id === message.id ||
+            (!!optimisticMessageId && item.id === optimisticMessageId),
         )
         if (existingIndex >= 0) {
-          return prev.map((item, index) => index === existingIndex ? message : item)
+          return prev.map((item, index) =>
+            index === existingIndex ? message : item,
+          )
         }
         return [...prev, message]
       })
     }
 
     const handleRemove = (e: Event) => {
-      const { sessionId: targetId, messageId, optimisticMessageId } = (e as CustomEvent).detail ?? {}
+      const {
+        sessionId: targetId,
+        messageId,
+        optimisticMessageId,
+      } = (e as CustomEvent).detail ?? {}
       if (targetId !== sessionId) return
 
-      setQueuedInputMessages(prev => prev.filter(item =>
-        item.id !== messageId && (!optimisticMessageId || item.id !== optimisticMessageId)
-      ))
+      setQueuedInputMessages((prev) =>
+        prev.filter(
+          (item) =>
+            item.id !== messageId &&
+            (!optimisticMessageId || item.id !== optimisticMessageId),
+        ),
+      )
     }
 
     window.addEventListener('craft:queued-input-add', handleAdd)
@@ -319,17 +375,22 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     }
   }, [sessionId])
 
-  const handleInputChange = React.useCallback((value: string) => {
-    const nextText = coerceInputText(value)
-    setInputValue(nextText)
-    inputValueRef.current = nextText
-    onInputChange(sessionId, nextText)
-  }, [sessionId, onInputChange])
+  const handleInputChange = React.useCallback(
+    (value: string) => {
+      const nextText = coerceInputText(value)
+      setInputValue(nextText)
+      inputValueRef.current = nextText
+      onInputChange(sessionId, nextText)
+    },
+    [sessionId, onInputChange],
+  )
 
   // Attachments draft state — hydrated async from persisted refs on session switch.
   // `[]` is the safe default while hydration is in flight; FreeFormInput seeds its
   // local state from this prop and swaps in the restored list when ready.
-  const [attachmentsValue, setAttachmentsValue] = React.useState<import('../../shared/types').FileAttachment[]>([])
+  const [attachmentsValue, setAttachmentsValue] = React.useState<
+    import('../../shared/types').FileAttachment[]
+  >([])
 
   React.useEffect(() => {
     let cancelled = false
@@ -337,84 +398,170 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     hydrateDraftAttachments(sessionId).then((atts) => {
       if (!cancelled) setAttachmentsValue(atts)
     })
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [sessionId, hydrateDraftAttachments])
 
-  const handleAttachmentsChange = React.useCallback((attachments: import('../../shared/types').FileAttachment[]) => {
-    setAttachmentsValue(attachments)
-    onAttachmentsChange(sessionId, attachments)
-  }, [sessionId, onAttachmentsChange])
+  const handleAttachmentsChange = React.useCallback(
+    (attachments: import('../../shared/types').FileAttachment[]) => {
+      setAttachmentsValue(attachments)
+      onAttachmentsChange(sessionId, attachments)
+    },
+    [sessionId, onAttachmentsChange],
+  )
 
-  const handleSendChatMessage = React.useCallback((
-    message: string,
-    attachments?: import('../../shared/types').FileAttachment[],
-    skillSlugs?: string[],
-  ) => {
-    onSendMessage(sessionId, message, attachments, skillSlugs)
-  }, [onSendMessage, sessionId])
+  const handleSendChatMessage = React.useCallback(
+    (
+      message: string,
+      attachments?: import('../../shared/types').FileAttachment[],
+      skillSlugs?: string[],
+    ) => {
+      onSendMessage(sessionId, message, attachments, skillSlugs)
+    },
+    [onSendMessage, sessionId],
+  )
 
   const handleNoopSendMessage = React.useCallback(() => {}, [])
 
   // Session model change handler - persists per-session model and connection
-  const handleModelChange = React.useCallback((model: string, connection?: string) => {
-    const nextConnection = connection ?? resolveEffectiveConnectionSlug(
-      session?.llmConnection,
-      workspaceDefaultLlmConnection,
-      llmConnections
-    )
-    onOptimisticDefaultModelChange(model, nextConnection)
+  const handleModelChange = React.useCallback(
+    (model: string, connection?: string) => {
+      const nextConnection =
+        connection ??
+        resolveEffectiveConnectionSlug(
+          session?.llmConnection,
+          workspaceDefaultLlmConnection,
+          llmConnections,
+        )
+      onOptimisticDefaultModelChange(model, nextConnection)
 
-    if (activeWorkspaceId) {
-      window.electronAPI.setSessionModel(sessionId, activeWorkspaceId, model, nextConnection)
-    }
-  }, [
-    activeWorkspaceId,
-    llmConnections,
-    onOptimisticDefaultModelChange,
-    session?.llmConnection,
-    sessionId,
-    workspaceDefaultLlmConnection,
-  ])
+      if (activeWorkspaceId) {
+        window.electronAPI.setSessionModel(
+          sessionId,
+          activeWorkspaceId,
+          model,
+          nextConnection,
+        )
+      }
+    },
+    [
+      activeWorkspaceId,
+      llmConnections,
+      onOptimisticDefaultModelChange,
+      session?.llmConnection,
+      sessionId,
+      workspaceDefaultLlmConnection,
+    ],
+  )
 
   // Session connection change handler - can only change before first message
-  const handleConnectionChange = React.useCallback(async (connectionSlug: string) => {
-    try {
-      await window.electronAPI.sessionCommand(sessionId, { type: 'setConnection', connectionSlug })
-    } catch (error) {
-      // Connection change may fail if session already started or connection is invalid
-      console.error('Failed to change connection:', error)
-    }
-  }, [sessionId])
+  const handleConnectionChange = React.useCallback(
+    async (connectionSlug: string) => {
+      try {
+        await window.electronAPI.sessionCommand(sessionId, {
+          type: 'setConnection',
+          connectionSlug,
+        })
+      } catch (error) {
+        // Connection change may fail if session already started or connection is invalid
+        console.error('Failed to change connection:', error)
+      }
+    },
+    [sessionId],
+  )
 
   // Check if session's locked connection has been removed
-  const connectionUnavailable = React.useMemo(() =>
-    isSessionConnectionUnavailable(session?.llmConnection, llmConnections),
-    [session?.llmConnection, llmConnections]
+  const connectionUnavailable = React.useMemo(
+    () =>
+      isSessionConnectionUnavailable(session?.llmConnection, llmConnections),
+    [session?.llmConnection, llmConnections],
   )
 
   // Effective model for this session (session-specific or global fallback)
+  const effectiveConnectionSlug = React.useMemo(() => {
+    if (connectionUnavailable) return session?.llmConnection
+
+    return resolveEffectiveConnectionSlug(
+      session?.llmConnection,
+      workspaceDefaultLlmConnection,
+      llmConnections,
+    )
+  }, [
+    connectionUnavailable,
+    session?.llmConnection,
+    workspaceDefaultLlmConnection,
+    llmConnections,
+  ])
+
   const effectiveModel = React.useMemo(() => {
     // When connection is unavailable, don't resolve through a different connection
     if (connectionUnavailable) return session?.model ?? ''
 
-    const connectionSlug = resolveEffectiveConnectionSlug(
-      session?.llmConnection, workspaceDefaultLlmConnection, llmConnections
-    )
-    const connection = connectionSlug ? llmConnections.find(c => c.slug === connectionSlug) : null
+    const connection = effectiveConnectionSlug
+      ? llmConnections.find((c) => c.slug === effectiveConnectionSlug)
+      : null
 
     return resolveDisplayModel(session?.model, connection)
-  }, [session?.id, session?.model, session?.llmConnection, workspaceDefaultLlmConnection, llmConnections, connectionUnavailable])
+  }, [
+    session?.model,
+    llmConnections,
+    connectionUnavailable,
+    effectiveConnectionSlug,
+  ])
 
   // Working directory for this session
   const workingDirectory = session?.workingDirectory
+  const qwenCapabilitySnapshot = getQwenCapabilitySnapshot?.(
+    activeWorkspaceId,
+    workingDirectory,
+    effectiveConnectionSlug,
+  )
+  const displaySession = React.useMemo(() => {
+    if (!session || !qwenCapabilitySnapshot) return session
+
+    const cachedCommands = qwenCapabilitySnapshot.availableCommands
+    const cachedSkills = qwenCapabilitySnapshot.availableSkills
+    const cachedSkillDetails = qwenCapabilitySnapshot.availableSkillDetails
+    const availableCommands = session.availableCommands?.length
+      ? session.availableCommands
+      : cachedCommands
+    const availableSkills = session.availableSkills?.length
+      ? session.availableSkills
+      : cachedSkills
+    const availableSkillDetails = session.availableSkillDetails?.length
+      ? session.availableSkillDetails
+      : cachedSkillDetails
+
+    if (
+      availableCommands === session.availableCommands &&
+      availableSkills === session.availableSkills &&
+      availableSkillDetails === session.availableSkillDetails
+    ) {
+      return session
+    }
+
+    return {
+      ...session,
+      ...(availableCommands ? { availableCommands } : {}),
+      ...(availableSkills ? { availableSkills } : {}),
+      ...(availableSkillDetails ? { availableSkillDetails } : {}),
+    }
+  }, [session, qwenCapabilitySnapshot])
   const activeWorkspace = React.useMemo(
     () => workspaces.find((w) => w.id === activeWorkspaceId) || null,
-    [workspaces, activeWorkspaceId]
+    [workspaces, activeWorkspaceId],
   )
-  const handleWorkingDirectoryChange = React.useCallback(async (path: string) => {
-    if (!session) return
-    await window.electronAPI.sessionCommand(session.id, { type: 'updateWorkingDirectory', dir: path })
-  }, [session])
+  const handleWorkingDirectoryChange = React.useCallback(
+    async (path: string) => {
+      if (!session) return
+      await window.electronAPI.sessionCommand(session.id, {
+        type: 'updateWorkingDirectory',
+        dir: path,
+      })
+    },
+    [session],
+  )
 
   const handleOpenFile = React.useCallback(
     async (path: string) => {
@@ -440,8 +587,13 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
           const parentDir = resolved.slice(0, lastSlash)
           const fileName = resolved.slice(lastSlash + 1)
           try {
-            const matches = await window.electronAPI.searchFiles(parentDir, fileName)
-            const files = matches.filter((m) => m.type === 'file' && m.name === fileName)
+            const matches = await window.electronAPI.searchFiles(
+              parentDir,
+              fileName,
+            )
+            const files = matches.filter(
+              (m) => m.type === 'file' && m.name === fileName,
+            )
             const exact = files.find((m) => m.path === resolved)
             if (exact) {
               onOpenFile(exact.path)
@@ -450,7 +602,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
 
             if (files.length === 1) {
               onOpenFile(files[0].path)
-              toast.info(t('chat.openedClosestMatch', { path: files[0].relativePath }))
+              toast.info(
+                t('chat.openedClosestMatch', { path: files[0].relativePath }),
+              )
               return
             }
           } catch {
@@ -461,14 +615,14 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
 
       onOpenFile(resolved)
     },
-    [onOpenFile, workingDirectory, activeWorkspace?.rootPath]
+    [onOpenFile, workingDirectory, activeWorkspace?.rootPath],
   )
 
   const handleOpenUrl = React.useCallback(
     (url: string) => {
       onOpenUrl(url)
     },
-    [onOpenUrl]
+    [onOpenUrl],
   )
 
   // Perf: Mark when data is ready
@@ -497,24 +651,38 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
       ? getSessionTitle(sessionMeta)
       : session
         ? getSessionTitle(session)
-        : (sessionMeta ? getSessionTitle(sessionMeta) : t('chat.session'))
+        : sessionMeta
+          ? getSessionTitle(sessionMeta)
+          : t('chat.session')
   const renameInitialTitle = session?.name || sessionMeta?.name || displayTitle
   const isFlagged = session?.isFlagged || sessionMeta?.isFlagged || false
   const isArchived = session?.isArchived || sessionMeta?.isArchived || false
-  const currentSessionStatus = session?.sessionStatus || sessionMeta?.sessionStatus || 'todo'
-  const expectedMessageCount = sessionMeta?.messageCount ?? session?.messageCount
-  const hasExistingConversationHint = hasSessionContentHint(sessionMeta ?? session)
-  const messagesLoading = !messageLoadError && shouldShowForegroundMessageLoading(
-    messagesLoaded,
-    session?.messages?.length,
-    expectedMessageCount,
-    hasExistingConversationHint,
+  const currentSessionStatus =
+    session?.sessionStatus || sessionMeta?.sessionStatus || 'todo'
+  const expectedMessageCount =
+    sessionMeta?.messageCount ?? session?.messageCount
+  const hasExistingConversationHint = hasSessionContentHint(
+    sessionMeta ?? session,
   )
+  const messagesLoading =
+    !messageLoadError &&
+    shouldShowForegroundMessageLoading(
+      messagesLoaded,
+      session?.messages?.length,
+      expectedMessageCount,
+      hasExistingConversationHint,
+    )
   const hasUnreadMessages = sessionMeta
-    ? !!(sessionMeta.lastFinalMessageId && sessionMeta.lastFinalMessageId !== sessionMeta.lastReadMessageId)
+    ? !!(
+        sessionMeta.lastFinalMessageId &&
+        sessionMeta.lastFinalMessageId !== sessionMeta.lastReadMessageId
+      )
     : false
   // Use isAsyncOperationOngoing for shimmer effect (sharing, updating share, revoking, title regeneration)
-  const isAsyncOperationOngoing = session?.isAsyncOperationOngoing || sessionMeta?.isAsyncOperationOngoing || false
+  const isAsyncOperationOngoing =
+    session?.isAsyncOperationOngoing ||
+    sessionMeta?.isAsyncOperationOngoing ||
+    false
   const shouldShowMissingSession = shouldShowMissingSessionState({
     hasSession: Boolean(session),
     hasSessionMeta: Boolean(sessionMeta),
@@ -562,13 +730,19 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     onMarkSessionUnread(sessionId)
   }, [sessionId, onMarkSessionUnread])
 
-  const handleSessionStatusChange = React.useCallback((state: string) => {
-    onSessionStatusChange(sessionId, state)
-  }, [sessionId, onSessionStatusChange])
+  const handleSessionStatusChange = React.useCallback(
+    (state: string) => {
+      onSessionStatusChange(sessionId, state)
+    },
+    [sessionId, onSessionStatusChange],
+  )
 
-  const handleLabelsChange = React.useCallback((newLabels: string[]) => {
-    onSessionLabelsChange?.(sessionId, newLabels)
-  }, [sessionId, onSessionLabelsChange])
+  const handleLabelsChange = React.useCallback(
+    (newLabels: string[]) => {
+      onSessionLabelsChange?.(sessionId, newLabels)
+    },
+    [sessionId, onSessionLabelsChange],
+  )
 
   const handleDelete = React.useCallback(async () => {
     await onDeleteSession(sessionId, false, displayTitle)
@@ -593,12 +767,12 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
         sessionId={sessionId}
         sessionFolderPath={session?.sessionFolderPath}
         presentation="drawer"
-        trigger={(
+        trigger={
           <PanelHeaderCenterButton
             icon={<Info className="h-4 w-4" />}
-            aria-label={t("chat.sessionInfo")}
+            aria-label={t('chat.sessionInfo')}
           />
-        )}
+        }
       />
     )
   }, [isCompactMode, sessionId, session?.sessionFolderPath, sessionMeta])
@@ -612,54 +786,62 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     <div className="flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center text-muted-foreground">
       <AlertCircle className="h-9 w-9 text-destructive/70" />
       <div className="space-y-1">
-        <p className="text-sm font-medium text-foreground">{t("common.errorLoadingContent")}</p>
-        <p className="max-w-md text-xs text-muted-foreground break-words">{messageLoadError}</p>
+        <p className="text-sm font-medium text-foreground">
+          {t('common.errorLoadingContent')}
+        </p>
+        <p className="max-w-md text-xs text-muted-foreground break-words">
+          {messageLoadError}
+        </p>
       </div>
       <button
         type="button"
         onClick={retryMessageLoad}
         className="mt-1 inline-flex h-8 items-center justify-center rounded-[8px] bg-foreground px-3 text-sm font-medium text-background transition-opacity hover:opacity-90"
       >
-        {t("common.retry")}
+        {t('common.retry')}
       </button>
     </div>
   ) : null
 
   // Build title menu content for chat sessions using shared SessionMenu
-  const titleMenu = React.useMemo(() => sessionMeta ? (
-    <SessionMenu
-      item={sessionMeta}
-      hideShareAction
-      hideMessagingAction
-      hideStatusAction
-      sessionStatuses={sessionStatuses ?? []}
-      labels={labels ?? []}
-      onLabelsChange={handleLabelsChange}
-      onRename={handleRename}
-      onFlag={handleFlag}
-      onUnflag={handleUnflag}
-      onArchive={handleArchive}
-      onUnarchive={handleUnarchive}
-      onMarkUnread={handleMarkUnread}
-      onSessionStatusChange={handleSessionStatusChange}
-      onOpenInNewWindow={handleOpenInNewWindow}
-      onDelete={handleDelete}
-    />
-  ) : null, [
-    sessionMeta,
-    sessionStatuses,
-    labels,
-    handleLabelsChange,
-    handleRename,
-    handleFlag,
-    handleUnflag,
-    handleArchive,
-    handleUnarchive,
-    handleMarkUnread,
-    handleSessionStatusChange,
-    handleOpenInNewWindow,
-    handleDelete,
-  ])
+  const titleMenu = React.useMemo(
+    () =>
+      sessionMeta ? (
+        <SessionMenu
+          item={sessionMeta}
+          hideShareAction
+          hideMessagingAction
+          hideStatusAction
+          sessionStatuses={sessionStatuses ?? []}
+          labels={labels ?? []}
+          onLabelsChange={handleLabelsChange}
+          onRename={handleRename}
+          onFlag={handleFlag}
+          onUnflag={handleUnflag}
+          onArchive={handleArchive}
+          onUnarchive={handleUnarchive}
+          onMarkUnread={handleMarkUnread}
+          onSessionStatusChange={handleSessionStatusChange}
+          onOpenInNewWindow={handleOpenInNewWindow}
+          onDelete={handleDelete}
+        />
+      ) : null,
+    [
+      sessionMeta,
+      sessionStatuses,
+      labels,
+      handleLabelsChange,
+      handleRename,
+      handleFlag,
+      handleUnflag,
+      handleArchive,
+      handleUnarchive,
+      handleMarkUnread,
+      handleSessionStatusChange,
+      handleOpenInNewWindow,
+      handleDelete,
+    ],
+  )
 
   // Handle missing session - loading or deleted
   if (!session) {
@@ -682,7 +864,14 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
       return (
         <>
           <div className="h-full flex flex-col">
-            <PanelHeader title={displayTitle} badge={titleBadge} titleMenu={titleMenu} leadingAction={leadingAction} actions={headerActions} isRegeneratingTitle={isAsyncOperationOngoing} />
+            <PanelHeader
+              title={displayTitle}
+              badge={titleBadge}
+              titleMenu={titleMenu}
+              leadingAction={leadingAction}
+              actions={headerActions}
+              isRegeneratingTitle={isAsyncOperationOngoing}
+            />
             <div className="flex-1 flex flex-col min-h-0">
               {messageLoadErrorView ?? (
                 <ChatDisplay
@@ -699,7 +888,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
                   pendingCredential={undefined}
                   onRespondToCredential={onRespondToCredential}
                   thinkingLevel={sessionOpts.thinkingLevel}
-                  onThinkingLevelChange={(level) => setOption('thinkingLevel', level)}
+                  onThinkingLevelChange={(level) =>
+                    setOption('thinkingLevel', level)
+                  }
                   permissionMode={sessionOpts.permissionMode}
                   onPermissionModeChange={setPermissionMode}
                   enabledModes={enabledModes}
@@ -713,7 +904,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
                   sessionStatuses={sessionStatuses}
                   onSessionStatusChange={handleSessionStatusChange}
                   workspaceId={activeWorkspaceId || undefined}
-                  onSourcesChange={(slugs) => onSessionSourcesChange?.(sessionId, slugs)}
+                  onSourcesChange={(slugs) =>
+                    onSessionSourcesChange?.(sessionId, slugs)
+                  }
                   workingDirectory={sessionMeta.workingDirectory}
                   onWorkingDirectoryChange={handleWorkingDirectoryChange}
                   messagesLoading={shouldShowForegroundMessageLoading(
@@ -756,7 +949,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     // Session truly doesn't exist
     return (
       <div className="h-full flex flex-col">
-        <PanelHeader  title={t('chat.session')} leadingAction={leadingAction} />
+        <PanelHeader title={t('chat.session')} leadingAction={leadingAction} />
         <div className="flex-1 flex flex-col items-center justify-center gap-3 text-muted-foreground">
           <AlertCircle className="h-10 w-10" />
           <p className="text-sm">{t('chat.sessionNoLongerExists')}</p>
@@ -768,12 +961,21 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   return (
     <>
       <div className="h-full flex flex-col">
-        <PanelHeader title={displayTitle} badge={titleBadge} titleMenu={titleMenu} leadingAction={leadingAction} actions={headerActions} isRegeneratingTitle={isAsyncOperationOngoing} />
+        <PanelHeader
+          title={displayTitle}
+          badge={titleBadge}
+          titleMenu={titleMenu}
+          leadingAction={leadingAction}
+          actions={headerActions}
+          isRegeneratingTitle={isAsyncOperationOngoing}
+        />
         <div className="flex-1 flex flex-col min-h-0">
-          {messageLoadError && session.messages.length === 0 ? messageLoadErrorView : (
+          {messageLoadError && session.messages.length === 0 ? (
+            messageLoadErrorView
+          ) : (
             <ChatDisplay
               ref={chatDisplayRef}
-              session={session}
+              session={displaySession ?? session}
               onSendMessage={handleSendChatMessage}
               onOpenFile={handleOpenFile}
               onOpenUrl={handleOpenUrl}
@@ -785,7 +987,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
               pendingCredential={pendingCredential}
               onRespondToCredential={onRespondToCredential}
               thinkingLevel={sessionOpts.thinkingLevel}
-              onThinkingLevelChange={(level) => setOption('thinkingLevel', level)}
+              onThinkingLevelChange={(level) =>
+                setOption('thinkingLevel', level)
+              }
               permissionMode={sessionOpts.permissionMode}
               onPermissionModeChange={setPermissionMode}
               enabledModes={enabledModes}
@@ -797,11 +1001,15 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
               sources={enabledSources}
               skills={skills}
               labels={labels}
-              onLabelsChange={(newLabels) => onSessionLabelsChange?.(sessionId, newLabels)}
+              onLabelsChange={(newLabels) =>
+                onSessionLabelsChange?.(sessionId, newLabels)
+              }
               sessionStatuses={sessionStatuses}
               onSessionStatusChange={handleSessionStatusChange}
               workspaceId={activeWorkspaceId || undefined}
-              onSourcesChange={(slugs) => onSessionSourcesChange?.(sessionId, slugs)}
+              onSourcesChange={(slugs) =>
+                onSessionSourcesChange?.(sessionId, slugs)
+              }
               workingDirectory={workingDirectory}
               onWorkingDirectoryChange={handleWorkingDirectoryChange}
               sessionFolderPath={session?.sessionFolderPath}

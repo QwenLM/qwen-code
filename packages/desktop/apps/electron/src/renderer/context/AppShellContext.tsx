@@ -25,8 +25,12 @@ import type {
   LlmConnectionWithStatus,
   TestAutomationResult,
 } from '../../shared/types'
+import type { QwenCapabilitySnapshot } from '@/lib/qwen-capability-cache'
 import type { SessionStatus as SessionStatusConfig } from '@/config/session-status-config'
-import type { SessionOptions, SessionOptionUpdates } from '../hooks/useSessionOptions'
+import type {
+  SessionOptions,
+  SessionOptionUpdates,
+} from '../hooks/useSessionOptions'
 import { defaultSessionOptions } from '../hooks/useSessionOptions'
 import { sessionAtomFamily } from '../atoms/sessions'
 import type { ViewRoute } from '../../shared/routes'
@@ -49,13 +53,18 @@ export interface AppShellContextType {
   /** Refresh LLM connections from config */
   refreshLlmConnections: () => Promise<void>
   /** Optimistically update a connection's default model before backend refresh completes */
-  onOptimisticDefaultModelChange: (model: string, connectionSlug?: string) => void
+  onOptimisticDefaultModelChange: (
+    model: string,
+    connectionSlug?: string,
+  ) => void
   pendingPermissions: Map<string, PermissionRequest[]>
   pendingCredentials: Map<string, CredentialRequest[]>
   /** Get draft input text for a session - reads from ref without triggering re-renders */
   getDraft: (sessionId: string) => string
   /** Get persisted attachment refs (path + name) for a session's draft - no file IO */
-  getDraftAttachmentRefs: (sessionId: string) => import('@craft-agent/shared/config').DraftAttachmentRef[]
+  getDraftAttachmentRefs: (
+    sessionId: string,
+  ) => import('@craft-agent/shared/config').DraftAttachmentRef[]
   /** Hydrate persisted attachment refs into full FileAttachment objects (async, reads files) */
   hydrateDraftAttachments: (sessionId: string) => Promise<FileAttachment[]>
   /** All enabled sources for this workspace - provided by AppShell component */
@@ -63,7 +72,13 @@ export interface AppShellContextType {
   /** All skills for this workspace - provided by AppShell component (for @mentions) */
   skills?: LoadedSkill[]
   /** Reload skills for the active workspace after install/delete/update operations. */
-  reloadSkills?: () => Promise<void> | void
+  reloadSkills?: (options?: { force?: boolean }) => Promise<void> | void
+  /** Provider-advertised Qwen commands/skills cached by workspace and working directory. */
+  getQwenCapabilitySnapshot?: (
+    workspaceId?: string | null,
+    workingDirectory?: string | null,
+    connectionSlug?: string | null,
+  ) => QwenCapabilitySnapshot | undefined
   /** Working directory of the active session — needed for project-level skill resolution */
   activeSessionWorkingDirectory?: string
   /** All label configs (tree) for label menu and badge display */
@@ -82,8 +97,17 @@ export interface AppShellContextType {
   sessionOptions: Map<string, SessionOptions>
 
   // Session callbacks
-  onCreateSession: (workspaceId: string, options?: import('../../shared/types').CreateSessionOptions) => Promise<Session>
-  onSendMessage: (sessionId: string, message: string, attachments?: FileAttachment[], skillSlugs?: string[], badges?: import('@craft-agent/core').ContentBadge[]) => void
+  onCreateSession: (
+    workspaceId: string,
+    options?: import('../../shared/types').CreateSessionOptions,
+  ) => Promise<Session>
+  onSendMessage: (
+    sessionId: string,
+    message: string,
+    attachments?: FileAttachment[],
+    skillSlugs?: string[],
+    badges?: import('@craft-agent/core').ContentBadge[],
+  ) => void
   onRenameSession: (sessionId: string, name: string) => void
   onFlagSession: (sessionId: string) => void
   onUnflagSession: (sessionId: string) => void
@@ -94,7 +118,11 @@ export interface AppShellContextType {
   /** Track which session user is viewing (for unread state machine) */
   onSetActiveViewingSession: (sessionId: string) => void
   onSessionStatusChange: (sessionId: string, state: SessionStatus) => void
-  onDeleteSession: (sessionId: string, skipConfirmation?: boolean, displayTitle?: string) => Promise<boolean>
+  onDeleteSession: (
+    sessionId: string,
+    skipConfirmation?: boolean,
+    displayTitle?: string,
+  ) => Promise<boolean>
 
   // Permission handling
   onRespondToPermission?: (
@@ -102,14 +130,14 @@ export interface AppShellContextType {
     requestId: string,
     allowed: boolean,
     alwaysAllow: boolean,
-    options?: import('../../shared/types').PermissionResponseOptions
+    options?: import('../../shared/types').PermissionResponseOptions,
   ) => void
 
   // Credential handling
   onRespondToCredential?: (
     sessionId: string,
     requestId: string,
-    response: CredentialResponse
+    response: CredentialResponse,
   ) => void
 
   // File/URL handlers - these can open in previews, the built-in browser,
@@ -118,7 +146,11 @@ export interface AppShellContextType {
   onOpenUrl: (url: string) => void
 
   // Workspace
-  onSelectWorkspace: (id: string, openInNewWindow?: boolean, options?: { route?: ViewRoute; suppressSessionListLoading?: boolean }) => void | Promise<void>
+  onSelectWorkspace: (
+    id: string,
+    openInNewWindow?: boolean,
+    options?: { route?: ViewRoute; suppressSessionListLoading?: boolean },
+  ) => void | Promise<void>
   onRefreshWorkspaces?: () => void
 
   // App actions
@@ -128,13 +160,19 @@ export interface AppShellContextType {
   onReset: () => void
 
   // Unified session options callback
-  onSessionOptionsChange: (sessionId: string, updates: SessionOptionUpdates) => void
+  onSessionOptionsChange: (
+    sessionId: string,
+    updates: SessionOptionUpdates,
+  ) => void
 
   // Input draft callback
   onInputChange: (sessionId: string, value: string) => void
 
   // Attachment draft callback — persists attachment refs per session
-  onAttachmentsChange: (sessionId: string, attachments: FileAttachment[]) => void
+  onAttachmentsChange: (
+    sessionId: string,
+    attachments: FileAttachment[],
+  ) => void
 
   // Source selection callback (per-session) - provided by AppShell component
   onSessionSourcesChange?: (sessionId: string, sourceSlugs: string[]) => void
@@ -164,7 +202,12 @@ export interface AppShellContextType {
   /** Ref to ChatDisplay for navigation between matches */
   chatDisplayRef?: React.RefObject<ChatDisplayHandle>
   /** Callback when ChatDisplay match info changes (for immediate UI updates) */
-  onChatMatchInfoChange?: (info: { sessionId: string | null; count: number; index: number; isHighlighting: boolean }) => void
+  onChatMatchInfoChange?: (info: {
+    sessionId: string | null
+    count: number
+    index: number
+    isHighlighting: boolean
+  }) => void
 
   // Automation management
   /** Test an automation by ID — executes its actions and returns results */
@@ -176,9 +219,14 @@ export interface AppShellContextType {
   /** Delete an automation by ID — removes from automations config */
   onDeleteAutomation?: (automationId: string) => void
   /** Map of automationId → last test result */
-  automationTestResults?: Record<string, import('../components/automations/types').TestResult>
+  automationTestResults?: Record<
+    string,
+    import('../components/automations/types').TestResult
+  >
   /** Fetch execution history for an automation by ID */
-  getAutomationHistory?: (automationId: string) => Promise<import('../components/automations/types').ExecutionEntry[]>
+  getAutomationHistory?: (
+    automationId: string,
+  ) => Promise<import('../components/automations/types').ExecutionEntry[]>
   /** Replay (re-execute) webhook actions for a failed automation */
   onReplayAutomation?: (automationId: string, event: string) => void
 }
@@ -192,7 +240,11 @@ export function AppShellProvider({
   children: React.ReactNode
   value: AppShellContextType
 }) {
-  return <AppShellContext.Provider value={value}>{children}</AppShellContext.Provider>
+  return (
+    <AppShellContext.Provider value={value}>
+      {children}
+    </AppShellContext.Provider>
+  )
 }
 
 /** Returns context or null if outside provider (safe for optional consumers like playground) */
@@ -203,7 +255,9 @@ export function useOptionalAppShellContext(): AppShellContextType | null {
 export function useAppShellContext(): AppShellContextType {
   const context = useContext(AppShellContext)
   if (!context) {
-    throw new Error('useAppShellContext must be used within an AppShellProvider')
+    throw new Error(
+      'useAppShellContext must be used within an AppShellProvider',
+    )
   }
   return context
 }
@@ -230,7 +284,9 @@ export function useActiveWorkspace(): Workspace | null {
 /**
  * Get pending permission for a session (first in queue)
  */
-export function usePendingPermission(sessionId: string): PermissionRequest | undefined {
+export function usePendingPermission(
+  sessionId: string,
+): PermissionRequest | undefined {
   const { pendingPermissions } = useAppShellContext()
   return pendingPermissions.get(sessionId)?.[0]
 }
@@ -238,7 +294,9 @@ export function usePendingPermission(sessionId: string): PermissionRequest | und
 /**
  * Get pending credential request for a session (first in queue)
  */
-export function usePendingCredential(sessionId: string): CredentialRequest | undefined {
+export function usePendingCredential(
+  sessionId: string,
+): CredentialRequest | undefined {
   const { pendingCredentials } = useAppShellContext()
   return pendingCredentials.get(sessionId)?.[0]
 }
@@ -253,12 +311,16 @@ export function usePendingCredential(sessionId: string): CredentialRequest | und
  */
 export function useSessionOptionsFor(sessionId: string): {
   options: SessionOptions
-  setOption: <K extends keyof SessionOptions>(key: K, value: SessionOptions[K]) => void
+  setOption: <K extends keyof SessionOptions>(
+    key: K,
+    value: SessionOptions[K],
+  ) => void
   setOptions: (updates: SessionOptionUpdates) => void
   setPermissionMode: (mode: PermissionMode) => void
   isSafeModeActive: () => boolean
 } {
-  const { sessionOptions, globalPermissionMode, onSessionOptionsChange } = useAppShellContext()
+  const { sessionOptions, globalPermissionMode, onSessionOptionsChange } =
+    useAppShellContext()
 
   const options = {
     ...defaultSessionOptions,
@@ -266,20 +328,26 @@ export function useSessionOptionsFor(sessionId: string): {
     permissionMode: globalPermissionMode,
   }
 
-  const setOption = useCallback(<K extends keyof SessionOptions>(
-    key: K,
-    value: SessionOptions[K]
-  ) => {
-    onSessionOptionsChange(sessionId, { [key]: value })
-  }, [sessionId, onSessionOptionsChange])
+  const setOption = useCallback(
+    <K extends keyof SessionOptions>(key: K, value: SessionOptions[K]) => {
+      onSessionOptionsChange(sessionId, { [key]: value })
+    },
+    [sessionId, onSessionOptionsChange],
+  )
 
-  const setOptions = useCallback((updates: SessionOptionUpdates) => {
-    onSessionOptionsChange(sessionId, updates)
-  }, [sessionId, onSessionOptionsChange])
+  const setOptions = useCallback(
+    (updates: SessionOptionUpdates) => {
+      onSessionOptionsChange(sessionId, updates)
+    },
+    [sessionId, onSessionOptionsChange],
+  )
 
-  const setPermissionMode = useCallback((mode: PermissionMode) => {
-    setOption('permissionMode', mode)
-  }, [setOption])
+  const setPermissionMode = useCallback(
+    (mode: PermissionMode) => {
+      setOption('permissionMode', mode)
+    },
+    [setOption],
+  )
 
   const isSafeModeActive = useCallback(() => {
     return options.permissionMode === 'safe'

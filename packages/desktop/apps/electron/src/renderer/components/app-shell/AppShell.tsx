@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { useTranslation, Trans } from 'react-i18next'
 import { useRef, useState, useEffect, useCallback, useMemo } from 'react'
-import { useAtomValue, useStore } from 'jotai'
+import { atom, useAtomValue, useStore } from 'jotai'
 import { motion, AnimatePresence } from 'motion/react'
 import {
   Archive,
@@ -74,7 +74,10 @@ import type { ChatDisplayHandle } from './ChatDisplay'
 import { LeftSidebar } from './LeftSidebar'
 import { WorkspaceProjectTree } from './WorkspaceProjectTree'
 import { useSession } from '@/hooks/useSession'
-import { ensureSessionMessagesLoadedAtom } from '@/atoms/sessions'
+import {
+  ensureSessionMessagesLoadedAtom,
+  sessionAtomFamily,
+} from '@/atoms/sessions'
 import {
   AppShellProvider,
   type AppShellContextType,
@@ -156,6 +159,13 @@ import { toast } from 'sonner'
 import { navigate, routes } from '@/lib/navigate'
 import { loadProjectWorkspaceSessionSnapshot } from '@/lib/project-session-snapshots'
 import { shouldLoadWorkspaceSkills } from '@/lib/skills-loading'
+import {
+  getQwenCapabilityCacheKey,
+  getWorkspaceSkillsCacheKey,
+  providerSkillsFromQwenCapabilities,
+  qwenCapabilitiesFromSkills,
+  type QwenCapabilitySnapshot,
+} from '@/lib/qwen-capability-cache'
 import {
   useNavigation,
   useNavigationState,
@@ -259,6 +269,7 @@ type WorkspaceSkillsState = {
 }
 
 const EMPTY_SKILLS: LoadedSkill[] = []
+const EMPTY_SESSION_ATOM = atom<Session | null>(null)
 
 function SidebarSessionSearch({
   workspaces,
@@ -1332,14 +1343,43 @@ function AppShellContent({
     setSourcesAtom(sources)
   }, [sources, setSourcesAtom])
 
-  // Skills state is bucketed by workspace so slow loads from a previous
-  // workspace cannot overwrite the currently visible workspace.
-  const [skillsByWorkspaceId, setSkillsByWorkspaceId] = React.useState<
+  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId)
+  const remoteWorkspaceId = activeWorkspace?.remoteServer?.remoteWorkspaceId
+
+  // Use session metadata from Jotai atom (lightweight, no messages)
+  // This prevents closures from retaining full message arrays
+  const sessionMetaMap = useAtomValue(sessionMetaMapAtom)
+  const activeSessionMeta = session.selected
+    ? sessionMetaMap.get(session.selected)
+    : undefined
+  const activeSessionBelongsToActiveWorkspace = Boolean(
+    activeSessionMeta &&
+      activeWorkspaceId &&
+      (activeSessionMeta.workspaceId === activeWorkspaceId ||
+        (remoteWorkspaceId &&
+          activeSessionMeta.workspaceId === remoteWorkspaceId)),
+  )
+  const scopedActiveSessionMeta = activeSessionBelongsToActiveWorkspace
+    ? activeSessionMeta
+    : undefined
+  const activeSessionWorkingDirectory =
+    scopedActiveSessionMeta?.workingDirectory
+
+  // Skills state is bucketed by workspace + working directory so project-level
+  // skills from one session do not overwrite another session in the same workspace.
+  const [skillsByScopeKey, setSkillsByScopeKey] = React.useState<
     Record<string, WorkspaceSkillsState>
   >({})
+  const [qwenCapabilityCache, setQwenCapabilityCache] = React.useState<
+    Record<string, QwenCapabilitySnapshot>
+  >({})
   const skillsRequestIdRef = React.useRef(0)
-  const activeSkillsState = activeWorkspaceId
-    ? skillsByWorkspaceId[activeWorkspaceId]
+  const activeSkillsScopeKey = getWorkspaceSkillsCacheKey(
+    activeWorkspaceId,
+    activeSessionWorkingDirectory,
+  )
+  const activeSkillsState = activeSkillsScopeKey
+    ? skillsByScopeKey[activeSkillsScopeKey]
     : undefined
   const skills = activeSkillsState?.skills ?? EMPTY_SKILLS
   // Sync skills to atom for NavigationContext auto-selection
@@ -1348,9 +1388,6 @@ function AppShellContent({
     setSkillsAtom(skills)
   }, [skills, setSkillsAtom])
   // Automations — state, handlers, loading, subscriptions
-  const activeWorkspace = workspaces.find((w) => w.id === activeWorkspaceId)
-  const remoteWorkspaceId = activeWorkspace?.remoteServer?.remoteWorkspaceId
-
   // Send to Workspace dialog state (driven by sendToWorkspaceAtom set from SessionMenu/BatchSessionMenu)
   const sendToWorkspaceIds = useAtomValue(sendToWorkspaceAtom)
   const setSendToWorkspaceIds = useSetAtom(sendToWorkspaceAtom)
@@ -1913,9 +1950,6 @@ function AppShellContent({
     damping: 49,
   }
 
-  // Use session metadata from Jotai atom (lightweight, no messages)
-  // This prevents closures from retaining full message arrays
-  const sessionMetaMap = useAtomValue(sessionMetaMapAtom)
   const workspaceSessions = useAtomValue(workspaceSessionsAtom)
   const workspaceSessionMetaCache = useAtomValue(workspaceSessionMetaCacheAtom)
   const setWorkspaceSessionMetaCache = useSetAtom(workspaceSessionMetaCacheAtom)
@@ -1937,23 +1971,6 @@ function AppShellContent({
     Record<string, boolean>
   >({})
 
-  // Reload skills when active session's workingDirectory changes (for project-level skills)
-  // Skills are loaded from: global (~/.agents/skills/), workspace, and project ({workingDirectory}/.agents/skills/)
-  const activeSessionMeta = session.selected
-    ? sessionMetaMap.get(session.selected)
-    : undefined
-  const activeSessionBelongsToActiveWorkspace = Boolean(
-    activeSessionMeta &&
-      activeWorkspaceId &&
-      (activeSessionMeta.workspaceId === activeWorkspaceId ||
-        (remoteWorkspaceId &&
-          activeSessionMeta.workspaceId === remoteWorkspaceId)),
-  )
-  const scopedActiveSessionMeta = activeSessionBelongsToActiveWorkspace
-    ? activeSessionMeta
-    : undefined
-  const activeSessionWorkingDirectory =
-    scopedActiveSessionMeta?.workingDirectory
   const activeEffectiveConnectionSlug = React.useMemo(
     () =>
       resolveEffectiveConnectionSlug(
@@ -1982,6 +1999,37 @@ function AppShellContent({
     shouldUseQwenAcpSkills && activeSessionBelongsToActiveWorkspace
       ? session.selected
       : null
+  const activeQwenCapabilityCacheKey = getQwenCapabilityCacheKey(
+    activeWorkspaceId,
+    activeSessionWorkingDirectory,
+    activeEffectiveConnectionSlug,
+  )
+  const activeQwenCapabilitySnapshot = activeQwenCapabilityCacheKey
+    ? qwenCapabilityCache[activeQwenCapabilityCacheKey]
+    : undefined
+  const selectedSessionAtom = React.useMemo(
+    () =>
+      session.selected
+        ? sessionAtomFamily(session.selected)
+        : EMPTY_SESSION_ATOM,
+    [session.selected],
+  )
+  const selectedSession = useAtomValue(selectedSessionAtom)
+  const getQwenCapabilitySnapshot = React.useCallback(
+    (
+      workspaceId?: string | null,
+      workingDirectory?: string | null,
+      connectionSlug?: string | null,
+    ) => {
+      const key = getQwenCapabilityCacheKey(
+        workspaceId,
+        workingDirectory,
+        connectionSlug,
+      )
+      return key ? qwenCapabilityCache[key] : undefined
+    },
+    [qwenCapabilityCache],
+  )
   const shouldLoadSkills = shouldLoadWorkspaceSkills({
     isSkillsNavigation:
       isSkillsNavigation(navState) || isSkillMarketplaceNavigation(navState),
@@ -1993,89 +2041,215 @@ function AppShellContent({
     (!activeSkillsState ||
       (activeSkillsState.status === 'loading' && skills.length === 0))
 
+  React.useEffect(() => {
+    if (
+      !shouldUseQwenAcpSkills ||
+      !activeQwenCapabilityCacheKey ||
+      !selectedSession
+    )
+      return
+
+    const availableCommands = selectedSession.availableCommands ?? []
+    const availableSkills = selectedSession.availableSkills
+    const availableSkillDetails = selectedSession.availableSkillDetails
+    if (
+      availableCommands.length === 0 &&
+      !availableSkills?.length &&
+      !availableSkillDetails?.length
+    )
+      return
+
+    setQwenCapabilityCache((prev) => {
+      const current = prev[activeQwenCapabilityCacheKey]
+      if (
+        current?.availableCommands === availableCommands &&
+        current.availableSkills === availableSkills &&
+        current.availableSkillDetails === availableSkillDetails
+      ) {
+        return prev
+      }
+
+      const nextBase = {
+        availableCommands,
+        ...(availableSkills ? { availableSkills } : {}),
+        ...(availableSkillDetails ? { availableSkillDetails } : {}),
+      }
+      const nextSkills =
+        availableSkills?.length || availableSkillDetails?.length
+          ? providerSkillsFromQwenCapabilities(nextBase)
+          : (current?.skills ?? [])
+
+      return {
+        ...prev,
+        [activeQwenCapabilityCacheKey]: {
+          ...nextBase,
+          skills: nextSkills,
+        },
+      }
+    })
+  }, [activeQwenCapabilityCacheKey, selectedSession, shouldUseQwenAcpSkills])
+
   // Subscribe to live skill updates (when skills are added/removed dynamically)
   React.useEffect(() => {
     const cleanup = window.electronAPI.onSkillsChanged(
       (workspaceId, updatedSkills) => {
-        if (
-          workspaceId !== activeWorkspaceId ||
-          !shouldLoadSkills ||
-          shouldUseQwenAcpSkills
-        )
+        const isActiveWorkspace = workspaceId === activeWorkspaceId
+        setQwenCapabilityCache((prev) => {
+          if (
+            !shouldUseQwenAcpSkills ||
+            !isActiveWorkspace ||
+            !activeQwenCapabilityCacheKey
+          ) {
+            return Object.keys(prev).length === 0 ? prev : {}
+          }
+
+          const safeSkills = updatedSkills || []
+          const current = prev[activeQwenCapabilityCacheKey]
+          return {
+            [activeQwenCapabilityCacheKey]: {
+              ...qwenCapabilitiesFromSkills(safeSkills),
+              availableCommands: current?.availableCommands ?? [],
+            },
+          }
+        })
+
+        if (shouldUseQwenAcpSkills) {
+          const safeSkills = updatedSkills || []
+          if (!isActiveWorkspace || !shouldLoadSkills || !activeSkillsScopeKey)
+            return
+
+          setSkillsByScopeKey((prev) => ({
+            ...prev,
+            [activeSkillsScopeKey]: {
+              skills: safeSkills,
+              status: 'ready',
+              requestId: prev[activeSkillsScopeKey]?.requestId ?? 0,
+            },
+          }))
           return
-        setSkillsByWorkspaceId((prev) => ({
+        }
+
+        if (!isActiveWorkspace || !shouldLoadSkills || !activeSkillsScopeKey)
+          return
+        setSkillsByScopeKey((prev) => ({
           ...prev,
-          [workspaceId]: {
+          [activeSkillsScopeKey]: {
             skills: updatedSkills || [],
             status: 'ready',
-            requestId: prev[workspaceId]?.requestId ?? 0,
+            requestId: prev[activeSkillsScopeKey]?.requestId ?? 0,
           },
         }))
       },
     )
     return cleanup
-  }, [activeWorkspaceId, shouldLoadSkills, shouldUseQwenAcpSkills])
+  }, [
+    activeQwenCapabilityCacheKey,
+    activeSkillsScopeKey,
+    activeWorkspaceId,
+    shouldLoadSkills,
+    shouldUseQwenAcpSkills,
+  ])
 
-  const reloadSkills = React.useCallback(async () => {
-    const workspaceId = activeWorkspaceId
-    if (!workspaceId) return
-    const requestId = ++skillsRequestIdRef.current
-    if (!shouldLoadSkills) {
-      setSkillsByWorkspaceId((prev) => ({
-        ...prev,
-        [workspaceId]: {
-          skills: [],
-          status: 'ready',
-          requestId,
-        },
-      }))
-      return
-    }
-    setSkillsByWorkspaceId((prev) => ({
-      ...prev,
-      [workspaceId]: {
-        skills: prev[workspaceId]?.skills ?? [],
-        status: 'loading',
-        requestId,
-      },
-    }))
-    try {
-      const loaded = await window.electronAPI.getSkills(
-        workspaceId,
-        activeSessionWorkingDirectory,
-        activeQwenSessionId ?? undefined,
-      )
-      setSkillsByWorkspaceId((prev) => {
-        if (prev[workspaceId]?.requestId !== requestId) return prev
-        return {
+  const reloadSkills = React.useCallback(
+    async (options?: { force?: boolean }) => {
+      const workspaceId = activeWorkspaceId
+      const scopeKey = activeSkillsScopeKey
+      if (!workspaceId || !scopeKey) return
+      const requestId = ++skillsRequestIdRef.current
+      if (!shouldLoadSkills) {
+        setSkillsByScopeKey((prev) => ({
           ...prev,
-          [workspaceId]: {
-            skills: loaded || [],
+          [scopeKey]: {
+            skills: [],
             status: 'ready',
             requestId,
           },
-        }
-      })
-    } catch (err) {
-      console.error('[Chat] Failed to load skills:', err)
-      setSkillsByWorkspaceId((prev) => {
-        if (prev[workspaceId]?.requestId !== requestId) return prev
-        return {
+        }))
+        return
+      }
+
+      if (
+        shouldUseQwenAcpSkills &&
+        !options?.force &&
+        activeQwenCapabilitySnapshot
+      ) {
+        setSkillsByScopeKey((prev) => ({
           ...prev,
-          [workspaceId]: {
-            skills: prev[workspaceId]?.skills ?? [],
-            status: 'error',
+          [scopeKey]: {
+            skills: activeQwenCapabilitySnapshot.skills,
+            status: 'ready',
             requestId,
           },
+        }))
+        return
+      }
+
+      setSkillsByScopeKey((prev) => ({
+        ...prev,
+        [scopeKey]: {
+          skills: prev[scopeKey]?.skills ?? [],
+          status: 'loading',
+          requestId,
+        },
+      }))
+      try {
+        const loaded = await window.electronAPI.getSkills(
+          workspaceId,
+          activeSessionWorkingDirectory,
+          activeQwenSessionId ?? undefined,
+        )
+        if (shouldUseQwenAcpSkills && activeQwenCapabilityCacheKey) {
+          setQwenCapabilityCache((prev) => {
+            const current = prev[activeQwenCapabilityCacheKey]
+            const skills = loaded || []
+            if (current?.skills === skills) return prev
+
+            return {
+              ...prev,
+              [activeQwenCapabilityCacheKey]: {
+                ...qwenCapabilitiesFromSkills(skills),
+                availableCommands: current?.availableCommands ?? [],
+              },
+            }
+          })
         }
-      })
-    }
-  }, [
-    activeWorkspaceId,
-    activeSessionWorkingDirectory,
-    activeQwenSessionId,
-    shouldLoadSkills,
-  ])
+        setSkillsByScopeKey((prev) => {
+          if (prev[scopeKey]?.requestId !== requestId) return prev
+          return {
+            ...prev,
+            [scopeKey]: {
+              skills: loaded || [],
+              status: 'ready',
+              requestId,
+            },
+          }
+        })
+      } catch (err) {
+        console.error('[Chat] Failed to load skills:', err)
+        setSkillsByScopeKey((prev) => {
+          if (prev[scopeKey]?.requestId !== requestId) return prev
+          return {
+            ...prev,
+            [scopeKey]: {
+              skills: prev[scopeKey]?.skills ?? [],
+              status: 'error',
+              requestId,
+            },
+          }
+        })
+      }
+    },
+    [
+      activeQwenCapabilityCacheKey,
+      activeQwenCapabilitySnapshot,
+      activeSkillsScopeKey,
+      activeWorkspaceId,
+      activeSessionWorkingDirectory,
+      activeQwenSessionId,
+      shouldLoadSkills,
+      shouldUseQwenAcpSkills,
+    ],
+  )
 
   React.useEffect(() => {
     void reloadSkills()
@@ -2115,10 +2289,8 @@ function AppShellContent({
     workspaceSessionSnapshotLoadingIds,
     setWorkspaceSessionSnapshotLoadingIds,
   ] = useState<Set<string>>(new Set())
-  const [
-    sessionListRefreshWorkspaceIds,
-    setSessionListRefreshWorkspaceIds,
-  ] = useState<Set<string>>(new Set())
+  const [sessionListRefreshWorkspaceIds, setSessionListRefreshWorkspaceIds] =
+    useState<Set<string>>(new Set())
   const workspaceSessionSnapshotRetryAttemptsRef = useRef<Map<string, number>>(
     new Map(),
   )
@@ -2639,7 +2811,11 @@ function AppShellContent({
   // Wrap delete handler to clear selection when deleting the currently selected session
   // This prevents stale state during re-renders that could cause crashes
   const handleDeleteSession = useCallback(
-    async (sessionId: string, skipConfirmation?: boolean, displayTitle?: string): Promise<boolean> => {
+    async (
+      sessionId: string,
+      skipConfirmation?: boolean,
+      displayTitle?: string,
+    ): Promise<boolean> => {
       // Clear selection first if this is the selected session
       if (session.selected === sessionId) {
         setSession({ selected: null })
@@ -2659,6 +2835,7 @@ function AppShellContent({
       enabledSources: sources,
       skills,
       reloadSkills,
+      getQwenCapabilitySnapshot,
       activeSessionWorkingDirectory,
       labels: displayLabelConfigs,
       onSessionLabelsChange: handleSessionLabelsChange,
@@ -2688,6 +2865,7 @@ function AppShellContent({
       sources,
       skills,
       reloadSkills,
+      getQwenCapabilitySnapshot,
       activeSessionWorkingDirectory,
       displayLabelConfigs,
       handleSessionLabelsChange,
@@ -3103,7 +3281,7 @@ function AppShellContent({
           activeSessionWorkingDirectory,
           activeQwenSessionId ?? undefined,
         )
-        await reloadSkills()
+        await reloadSkills({ force: true })
         toast.success(t('toast.deletedSkill', { slug: skillSlug }))
       } catch (error) {
         console.error('[Chat] Failed to delete skill:', error)
@@ -3130,7 +3308,7 @@ function AppShellContent({
           activeSessionWorkingDirectory,
           activeQwenSessionId ?? undefined,
         )
-        await reloadSkills()
+        await reloadSkills({ force: true })
       } catch (error) {
         console.error('[Chat] Failed to update skill:', error)
         toast.error(t('toast.failedToUpdateSkill', 'Failed to update skill'))

@@ -21,7 +21,7 @@ export interface SkillMarketplacePanelProps {
   activeSessionId?: string | null
   selectedSkillId?: string | null
   onSkillSelect?: (skillId: string) => void
-  onInstalled?: () => Promise<void> | void
+  onInstalled?: (options?: { force?: boolean }) => Promise<void> | void
   className?: string
 }
 
@@ -113,7 +113,7 @@ export function SkillMarketplacePanel({
             item.id === skill.id ? { ...item, installed: true } : item,
           ),
         )
-        await onInstalled?.()
+        await onInstalled?.({ force: true })
         await loadSkills()
         toast.success(
           t('skillMarketplace.installedToast', {
