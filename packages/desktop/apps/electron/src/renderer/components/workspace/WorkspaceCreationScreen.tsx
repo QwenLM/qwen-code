@@ -1,30 +1,33 @@
-import { useState, useEffect, useCallback, useMemo } from "react"
-import { useTranslation } from "react-i18next"
-import { X } from "lucide-react"
-import { motion } from "motion/react"
-import { Dithering } from "@paper-design/shaders-react"
-import { FullscreenOverlayBase } from "@craft-agent/ui"
-import { cn } from "@/lib/utils"
-import { overlayTransitionIn } from "@/lib/animations"
-import { AddWorkspaceStep_Choice } from "./AddWorkspaceStep_Choice"
-import { AddWorkspaceStep_CreateNew } from "./AddWorkspaceStep_CreateNew"
-import { AddWorkspaceStep_OpenFolder } from "./AddWorkspaceStep_OpenFolder"
-import { AddWorkspaceStep_ConnectRemote } from "./AddWorkspaceStep_ConnectRemote"
-import type { Workspace } from "../../../shared/types"
-import { toast } from "sonner"
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+import { X } from 'lucide-react';
+import { motion } from 'framer-motion';
+import { Dithering } from '@paper-design/shaders-react';
+import { FullscreenOverlayBase } from '@craft-agent/ui';
+import { cn } from '@/lib/utils';
+import { overlayTransitionIn } from '@/lib/animations';
+import { AddWorkspaceStep_Choice } from './AddWorkspaceStep_Choice';
+import { AddWorkspaceStep_CreateNew } from './AddWorkspaceStep_CreateNew';
+import { AddWorkspaceStep_OpenFolder } from './AddWorkspaceStep_OpenFolder';
+import { AddWorkspaceStep_ConnectRemote } from './AddWorkspaceStep_ConnectRemote';
+import type { Workspace } from '../../../shared/types';
+import { toast } from 'sonner';
 
-type CreationStep = 'choice' | 'create' | 'open' | 'remote'
+type CreationStep = 'choice' | 'create' | 'open' | 'remote';
 
 interface WorkspaceCreationScreenProps {
   /** Callback when a workspace is created successfully */
-  onWorkspaceCreated: (workspace: Workspace) => void
+  onWorkspaceCreated: (workspace: Workspace) => void;
   /** Callback when the screen is dismissed */
-  onClose: () => void
-  className?: string
+  onClose: () => void;
+  className?: string;
   /** When set, skip choice step and open ConnectRemote in reconnect mode */
-  reconnectWorkspace?: Workspace
+  reconnectWorkspace?: Workspace;
   /** Reconnect an existing remote workspace and resolve only on real success. */
-  onReconnectWorkspace?: (workspaceId: string, remoteServer: { url: string; token: string; remoteWorkspaceId: string }) => Promise<void>
+  onReconnectWorkspace?: (
+    workspaceId: string,
+    remoteServer: { url: string; token: string; remoteWorkspaceId: string },
+  ) => Promise<void>;
 }
 
 /**
@@ -42,57 +45,77 @@ export function WorkspaceCreationScreen({
   reconnectWorkspace,
   onReconnectWorkspace,
 }: WorkspaceCreationScreenProps) {
-  const { t } = useTranslation()
+  const { t } = useTranslation();
   // Start at 'remote' step directly when reconnecting
-  const [step, setStep] = useState<CreationStep>(reconnectWorkspace ? 'remote' : 'choice')
-  const [isCreating, setIsCreating] = useState(false)
-  const [dimensions, setDimensions] = useState({ width: 1920, height: 1080 })
+  const [step, setStep] = useState<CreationStep>(
+    reconnectWorkspace ? 'remote' : 'choice',
+  );
+  const [isCreating, setIsCreating] = useState(false);
+  const [dimensions, setDimensions] = useState({ width: 1920, height: 1080 });
 
   // Track window dimensions for shader
   useEffect(() => {
     const updateDimensions = () => {
-      setDimensions({ width: window.innerWidth, height: window.innerHeight })
-    }
-    updateDimensions()
-    window.addEventListener('resize', updateDimensions)
-    return () => window.removeEventListener('resize', updateDimensions)
-  }, [])
+      setDimensions({ width: window.innerWidth, height: window.innerHeight });
+    };
+    updateDimensions();
+    window.addEventListener('resize', updateDimensions);
+    return () => window.removeEventListener('resize', updateDimensions);
+  }, []);
 
   // Wrap onClose to prevent closing during creation
   // FullscreenOverlayBase handles ESC key, this wrapper prevents closing when busy
   const handleClose = useCallback(() => {
     if (!isCreating) {
-      onClose()
+      onClose();
     }
-  }, [isCreating, onClose])
+  }, [isCreating, onClose]);
 
-  const handleCreateWorkspace = useCallback(async (folderPath: string, name: string, remoteServer?: { url: string; token: string; remoteWorkspaceId: string }) => {
-    setIsCreating(true)
-    try {
-      const workspace = await window.electronAPI.createWorkspace(folderPath, name, remoteServer)
-      onWorkspaceCreated(workspace)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error'
-      toast.error(t('toast.failedToCreateWorkspace'), {
-        description: message,
-      })
-    } finally {
-      setIsCreating(false)
-    }
-  }, [onWorkspaceCreated])
+  const handleCreateWorkspace = useCallback(
+    async (
+      folderPath: string,
+      name: string,
+      remoteServer?: { url: string; token: string; remoteWorkspaceId: string },
+    ) => {
+      setIsCreating(true);
+      try {
+        const workspace = await window.electronAPI.createWorkspace(
+          folderPath,
+          name,
+          remoteServer,
+        );
+        onWorkspaceCreated(workspace);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Unknown error';
+        toast.error(t('toast.failedToCreateWorkspace'), {
+          description: message,
+        });
+      } finally {
+        setIsCreating(false);
+      }
+    },
+    [onWorkspaceCreated, t],
+  );
 
-  const handleReconnectWorkspace = useCallback(async (workspaceId: string, remoteServer: { url: string; token: string; remoteWorkspaceId: string }) => {
-    if (!onReconnectWorkspace) {
-      throw new Error('Reconnect handler not configured')
-    }
+  const handleReconnectWorkspace = useCallback(
+    async (
+      workspaceId: string,
+      remoteServer: { url: string; token: string; remoteWorkspaceId: string },
+    ) => {
+      if (!onReconnectWorkspace) {
+        throw new Error('Reconnect handler not configured');
+      }
 
-    setIsCreating(true)
-    try {
-      await onReconnectWorkspace(workspaceId, remoteServer)
-    } finally {
-      setIsCreating(false)
-    }
-  }, [onReconnectWorkspace])
+      setIsCreating(true);
+      try {
+        await onReconnectWorkspace(workspaceId, remoteServer);
+      } finally {
+        setIsCreating(false);
+      }
+    },
+    [onReconnectWorkspace],
+  );
 
   const renderStep = () => {
     switch (step) {
@@ -101,9 +124,8 @@ export function WorkspaceCreationScreen({
           <AddWorkspaceStep_Choice
             onCreateNew={() => setStep('create')}
             onOpenFolder={() => setStep('open')}
-            onConnectRemote={() => setStep('remote')}
           />
-        )
+        );
 
       case 'create':
         return (
@@ -112,7 +134,7 @@ export function WorkspaceCreationScreen({
             onCreate={handleCreateWorkspace}
             isCreating={isCreating}
           />
-        )
+        );
 
       case 'open':
         return (
@@ -121,7 +143,7 @@ export function WorkspaceCreationScreen({
             onCreate={handleCreateWorkspace}
             isCreating={isCreating}
           />
-        )
+        );
 
       case 'remote':
         return (
@@ -131,37 +153,43 @@ export function WorkspaceCreationScreen({
             isCreating={isCreating}
             initialUrl={reconnectWorkspace?.remoteServer?.url}
             initialToken={reconnectWorkspace?.remoteServer?.token}
-            reconnectWorkspace={reconnectWorkspace?.remoteServer ? {
-              id: reconnectWorkspace.id,
-              name: reconnectWorkspace.name,
-              remoteWorkspaceId: reconnectWorkspace.remoteServer.remoteWorkspaceId,
-            } : undefined}
+            reconnectWorkspace={
+              reconnectWorkspace?.remoteServer
+                ? {
+                    id: reconnectWorkspace.id,
+                    name: reconnectWorkspace.name,
+                    remoteWorkspaceId:
+                      reconnectWorkspace.remoteServer.remoteWorkspaceId,
+                  }
+                : undefined
+            }
             onUpdate={handleReconnectWorkspace}
           />
-        )
+        );
 
       default:
-        return null
+        return null;
     }
-  }
+  };
 
   // Get theme colors from CSS variables for the shader
   const shaderColors = useMemo(() => {
-    if (typeof window === 'undefined') return { back: '#00000000', front: '#684e85' }
-    const root = document.documentElement
-    const isDark = root.classList.contains('dark')
+    if (typeof window === 'undefined')
+      return { back: '#00000000', front: '#684e85' };
+    const root = document.documentElement;
+    const isDark = root.classList.contains('dark');
     // Transparent back, accent-tinted front
     return isDark
-      ? { back: '#00000000', front: '#9b7bb8' }  // lighter accent for dark mode
-      : { back: '#00000000', front: '#684e85' }  // accent color
-  }, [])
+      ? { back: '#00000000', front: '#9b7bb8' } // lighter accent for dark mode
+      : { back: '#00000000', front: '#684e85' }; // accent color
+  }, []);
 
   // FullscreenOverlayBase handles portal, traffic lights, and ESC key
   return (
     <FullscreenOverlayBase
       isOpen={true}
       onClose={handleClose}
-      className={cn("z-splash flex flex-col bg-background", className)}
+      className={cn('z-splash flex flex-col bg-background', className)}
     >
       <motion.div
         initial={{ opacity: 0 }}
@@ -198,17 +226,17 @@ export function WorkspaceCreationScreen({
             animate={{ opacity: 1 }}
             transition={overlayTransitionIn}
             onClick={(e) => {
-              e.stopPropagation()
-              handleClose()
+              e.stopPropagation();
+              handleClose();
             }}
             disabled={isCreating}
             className={cn(
-              "titlebar-no-drag flex items-center justify-center p-2 rounded-[6px]",
-              "bg-background shadow-minimal hover:bg-foreground-5",
-              "text-muted-foreground hover:text-foreground",
-              "transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-              "mr-[-8px] mt-2",
-              isCreating && "opacity-50 cursor-not-allowed"
+              'titlebar-no-drag flex items-center justify-center p-2 rounded-[6px]',
+              'bg-background shadow-minimal hover:bg-foreground-5',
+              'text-muted-foreground hover:text-foreground',
+              'transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              'mr-[-8px] mt-2',
+              isCreating && 'opacity-50 cursor-not-allowed',
             )}
             aria-label="Close"
           >
@@ -227,5 +255,5 @@ export function WorkspaceCreationScreen({
         </motion.main>
       </motion.div>
     </FullscreenOverlayBase>
-  )
+  );
 }
