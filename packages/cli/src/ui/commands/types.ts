@@ -292,6 +292,8 @@ export interface CommandCompletionItem {
   value: string;
   label?: string;
   description?: string;
+  /** Whether the completion represents a directory path. When true, handleAutocomplete should NOT append a trailing space so the user can continue tab-completing deeper into the directory tree. */
+  isDirectory?: boolean;
 }
 
 // The standardized contract for any command in the system.

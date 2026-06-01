@@ -8,7 +8,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { computeInitialTurnFromHistory, Session } from './Session.js';
+import {
+  computeInitialTurnFromHistory,
+  fireSessionPermissionDeniedForAutoMode,
+  Session,
+} from './Session.js';
 import type { Content } from '@google/genai';
 import type { ChatRecord, Config, GeminiChat } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, AuthType } from '@qwen-code/qwen-code-core';
@@ -902,6 +906,36 @@ describe('Session', () => {
               type: 'text',
               text:
                 'IMPORTANT: This conversation approached the input token limit for qwen3-code-plus. ' +
+                'A compressed context will be sent for future messages (compressed from: 1200 to 450 tokens).',
+            },
+          },
+        });
+      });
+
+      it('labels the notice as screenshot-triggered when triggerReason is image_overflow', async () => {
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 1200,
+          newTokenCount: 450,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+          triggerReason: 'image_overflow',
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'IMPORTANT: This conversation accumulated enough tool screenshots to trigger compaction for qwen3-code-plus. ' +
                 'A compressed context will be sent for future messages (compressed from: 1200 to 450 tokens).',
             },
           },
@@ -2170,6 +2204,129 @@ describe('Session', () => {
     });
 
     describe('hooks', () => {
+      describe('PermissionDenied hook', () => {
+        it('fires PermissionDenied hooks for AUTO classifier blocks', async () => {
+          const hookSystem = {
+            firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+          };
+          mockConfig.getHookSystem = vi.fn().mockReturnValue(hookSystem);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          const signal = new AbortController().signal;
+
+          await fireSessionPermissionDeniedForAutoMode(
+            mockConfig,
+            {
+              via: 'classifier',
+              shouldBlock: true,
+              reason: 'dangerous shell command',
+              unavailable: false,
+              stage: 'fast',
+              durationMs: 20,
+            },
+            { kind: 'blocked', errorMessage: 'blocked' },
+            core.ToolNames.SHELL,
+            { command: 'rm -rf /tmp/example' },
+            'auto-denied-acp',
+            signal,
+          );
+
+          expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalledWith(
+            core.ToolNames.SHELL,
+            { command: 'rm -rf /tmp/example' },
+            'auto-denied-acp',
+            'classifier_blocked',
+            signal,
+          );
+        });
+
+        it('forwards classifier_unavailable reasons to PermissionDenied hooks', async () => {
+          const hookSystem = {
+            firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+          };
+          mockConfig.getHookSystem = vi.fn().mockReturnValue(hookSystem);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+
+          await fireSessionPermissionDeniedForAutoMode(
+            mockConfig,
+            {
+              via: 'classifier',
+              shouldBlock: true,
+              reason: 'classifier timeout',
+              unavailable: true,
+              stage: 'fast',
+              durationMs: 3000,
+            },
+            { kind: 'blocked', errorMessage: 'blocked' },
+            core.ToolNames.SHELL,
+            { command: 'rm -rf /tmp/example' },
+            'auto-denied-acp',
+            new AbortController().signal,
+          );
+
+          expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalledWith(
+            core.ToolNames.SHELL,
+            { command: 'rm -rf /tmp/example' },
+            'auto-denied-acp',
+            'classifier_unavailable',
+            expect.any(AbortSignal),
+          );
+        });
+
+        it('skips PermissionDenied hooks when hooks are disabled', async () => {
+          const hookSystem = {
+            firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+          };
+          mockConfig.getHookSystem = vi.fn().mockReturnValue(hookSystem);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+
+          await fireSessionPermissionDeniedForAutoMode(
+            mockConfig,
+            {
+              via: 'classifier',
+              shouldBlock: true,
+              reason: 'dangerous shell command',
+              unavailable: false,
+              stage: 'fast',
+              durationMs: 20,
+            },
+            { kind: 'blocked', errorMessage: 'blocked' },
+            core.ToolNames.SHELL,
+            { command: 'rm -rf /tmp/example' },
+            'auto-denied-acp',
+            new AbortController().signal,
+          );
+
+          expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+        });
+
+        it('skips PermissionDenied hooks when AUTO outcome is not blocked', async () => {
+          const hookSystem = {
+            firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+          };
+          mockConfig.getHookSystem = vi.fn().mockReturnValue(hookSystem);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+
+          await fireSessionPermissionDeniedForAutoMode(
+            mockConfig,
+            {
+              via: 'classifier',
+              shouldBlock: true,
+              reason: 'dangerous shell command',
+              unavailable: false,
+              stage: 'fast',
+              durationMs: 20,
+            },
+            { kind: 'fallback' },
+            core.ToolNames.SHELL,
+            { command: 'rm -rf /tmp/example' },
+            'auto-denied-acp',
+            new AbortController().signal,
+          );
+
+          expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+        });
+      });
+
       describe('UserPromptSubmit hook', () => {
         it('fires UserPromptSubmit hook before sending prompt', async () => {
           const messageBus = {

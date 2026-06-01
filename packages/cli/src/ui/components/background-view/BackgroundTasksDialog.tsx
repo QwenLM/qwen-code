@@ -870,6 +870,8 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
 }) => {
   const { entries, selectedIndex, dialogOpen, dialogMode } =
     useBackgroundTaskViewState();
+  const isDetailMode =
+    dialogMode === 'detail' || dialogMode === 'detail-from-panel';
   const {
     moveSelectionUp,
     moveSelectionDown,
@@ -949,7 +951,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const selectedAgentIdForActivity =
     selectedEntry?.kind === 'agent' ? selectedEntry.agentId : undefined;
   useEffect(() => {
-    if (!dialogOpen || dialogMode !== 'detail' || !selectedAgentIdForActivity)
+    if (!dialogOpen || !isDetailMode || !selectedAgentIdForActivity)
       return;
     const registry = config.getBackgroundTaskRegistry();
     const onActivity = (entry: AgentTask) => {
@@ -958,7 +960,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     };
     registry.setActivityChangeCallback(onActivity);
     return () => registry.setActivityChangeCallback(undefined);
-  }, [dialogOpen, dialogMode, config, selectedAgentIdForActivity]);
+  }, [dialogOpen, dialogMode, isDetailMode, config, selectedAgentIdForActivity]);
 
   // Wall-clock tick for the running agent's duration. Activity callbacks
   // fire when tools run, but duration needs to advance even when the agent
@@ -967,14 +969,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   useEffect(() => {
     if (
       !dialogOpen ||
-      dialogMode !== 'detail' ||
+      !isDetailMode ||
       !selectedEntryId ||
       selectedStatus !== 'running'
     )
       return;
     const id = setInterval(() => setActivityTick((n) => n + 1), 1000);
     return () => clearInterval(id);
-  }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus]);
+  }, [dialogOpen, dialogMode, isDetailMode, selectedEntryId, selectedStatus]);
 
   // Auto-fallback to the list view when the selected agent reaches a
   // terminal state while the user is watching it live. We only exit on
@@ -987,7 +989,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     status: EntryStatus;
   } | null>(null);
   useEffect(() => {
-    if (!dialogOpen || dialogMode !== 'detail') {
+    if (!dialogOpen || !isDetailMode) {
       initialDetailStatusRef.current = null;
       return;
     }
@@ -1019,7 +1021,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     ) {
       exitDetail();
     }
-  }, [dialogOpen, dialogMode, selectedEntryId, selectedStatus, exitDetail]);
+  }, [dialogOpen, dialogMode, isDetailMode, selectedEntryId, selectedStatus, exitDetail]);
 
   // Encapsulates the cancel flow with the foreground confirm-step.
   // Foreground entries: first `x` arms; second `x` confirms. Background
@@ -1154,7 +1156,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     }
     hints.push('\u2190/Esc close');
   } else {
-    hints.push('\u2190 go back', 'Esc/Enter/Space close');
+    hints.push('\u2190 back', 'Esc close');
     if (selectedEntry?.status === 'running') hints.push('x stop');
     if (selectedEntryAllowsResume) hints.push('r resume');
     if (selectedEntry?.kind === 'agent' && selectedEntry.status === 'paused') {

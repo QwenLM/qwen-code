@@ -137,6 +137,10 @@ export * from './providers/index.js';
 // Services
 // ============================================================================
 
+export {
+  computeThresholds,
+  type CompactionThresholds,
+} from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';
@@ -384,7 +388,11 @@ export * from './test-utils/index.js';
 // ============================================================================
 
 export * from './hooks/types.js';
-export { HookSystem, HookRegistry } from './hooks/index.js';
+export {
+  HookSystem,
+  HookRegistry,
+  hookEventSupportsMatcher,
+} from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export {
   DEFAULT_STOP_HOOK_BLOCK_CAP,

@@ -33,6 +33,7 @@ export function getHookMatcherTarget(
     case HookEventName.PostToolUse:
     case HookEventName.PostToolUseFailure:
     case HookEventName.PermissionRequest:
+    case HookEventName.PermissionDenied:
       return { kind: 'toolName', target: context?.toolName ?? '' };
 
     case HookEventName.SubagentStart:
@@ -68,6 +69,11 @@ export function getHookMatcherTarget(
       return exhaustive;
     }
   }
+}
+
+export function hookEventSupportsMatcher(eventName: HookEventName): boolean {
+  const target = getHookMatcherTarget(eventName);
+  return typeof target === 'object' && target !== null;
 }
 
 /**
