@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
 import { StreamingState } from '../types.js';
+import type { StatusLinePresetReasoning } from '../statusLinePresets.js';
 
 const debugLogMock = vi.hoisted(() => ({
   log: vi.fn(),
@@ -49,11 +50,20 @@ vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: () => mockUIState,
 }));
 
+type MockContentGeneratorConfig = {
+  contextWindowSize: number;
+  reasoning?: StatusLinePresetReasoning;
+};
+
+const getMockContentGeneratorConfig = (): MockContentGeneratorConfig => ({
+  contextWindowSize: 131072,
+});
+
 const mockConfig = {
   getTargetDir: vi.fn(() => '/test/dir'),
   getModel: vi.fn(() => 'test-model'),
   getCliVersion: vi.fn(() => '1.0.0'),
-  getContentGeneratorConfig: vi.fn(() => ({ contextWindowSize: 131072 })),
+  getContentGeneratorConfig: vi.fn(getMockContentGeneratorConfig),
 };
 vi.mock('../contexts/ConfigContext.js', () => ({
   useConfig: () => mockConfig,
@@ -149,6 +159,9 @@ describe('useStatusLine', () => {
     mockUIState.sessionStats.metrics.files.totalLinesRemoved = 0;
     mockVimMode.vimEnabled = false;
     mockVimMode.vimMode = 'INSERT';
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      contextWindowSize: 131072,
+    });
 
     // Dynamic import to get fresh module after mocks
     const mod = await import('./useStatusLine.js');
@@ -234,6 +247,21 @@ describe('useStatusLine', () => {
 
       expect(child_process.exec).not.toHaveBeenCalled();
       expect(result.current.lines).toEqual(['test-model']);
+    });
+
+    it('renders model-with-reasoning and model-only together', () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'model-with-reasoning'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual(['test-model high | test-model']);
     });
 
     it('refreshes when status line settings are saved in the same process', async () => {

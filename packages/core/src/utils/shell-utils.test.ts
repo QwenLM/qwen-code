@@ -6,8 +6,10 @@
 
 import { expect, describe, it, beforeEach, vi, afterEach } from 'vitest';
 import {
+  buildShellExecWarnings,
   checkArgumentSafety,
   checkCommandPermissions,
+  COMMAND_SUBSTITUTION_WARNING,
   escapeShellArg,
   getCommandRoots,
   getShellConfiguration,
@@ -1096,5 +1098,56 @@ describe('checkArgumentSafety', () => {
       expect(result.dangerousPatterns).toContain('& background operator');
       expect(result.dangerousPatterns).toHaveLength(3);
     });
+  });
+});
+
+// Regression coverage for PR #4386 R4 (cid 3293078758): the dual-check
+// branch of `buildShellExecWarnings` — where the stripped form has no
+// substitution but the raw command does (e.g. env-prefix wrapped in
+// `bash -c`) — was untested. Without coverage, removing the
+// `|| detectCommandSubstitution(rawCommand)` clause would not regress
+// any test in this file.
+describe('buildShellExecWarnings', () => {
+  it('returns undefined when neither stripped nor raw command has substitution', () => {
+    expect(
+      buildShellExecWarnings('npm install', 'npm install'),
+    ).toBeUndefined();
+  });
+
+  it('returns the substitution warning when the stripped command has $()', () => {
+    const result = buildShellExecWarnings(
+      'echo $(cat secret)',
+      'echo $(cat secret)',
+    );
+    expect(result).toEqual([COMMAND_SUBSTITUTION_WARNING]);
+  });
+
+  it('returns the substitution warning when the raw command has substitution but the stripped form does not (env-prefix wrapper case)', () => {
+    // `stripShellWrapper("FOO=$(cat secret) bash -c 'echo ok'")` yields
+    // `echo ok` — no substitution — so the `|| rawCommand` branch is the
+    // only thing that fires the warning here.
+    const raw = `FOO=$(cat secret) bash -c 'echo ok'`;
+    const stripped = stripShellWrapper(raw);
+    // Sanity-check the precondition before asserting on the helper.
+    expect(stripped).not.toContain('$(');
+
+    expect(buildShellExecWarnings(stripped, raw)).toEqual([
+      COMMAND_SUBSTITUTION_WARNING,
+    ]);
+  });
+
+  it('returns the warning for backtick substitution in either input', () => {
+    expect(buildShellExecWarnings('echo `whoami`', 'echo `whoami`')).toEqual([
+      COMMAND_SUBSTITUTION_WARNING,
+    ]);
+  });
+
+  it('returns the warning for process substitution <(...)', () => {
+    expect(
+      buildShellExecWarnings(
+        'diff <(ls /a) <(ls /b)',
+        'diff <(ls /a) <(ls /b)',
+      ),
+    ).toEqual([COMMAND_SUBSTITUTION_WARNING]);
   });
 });

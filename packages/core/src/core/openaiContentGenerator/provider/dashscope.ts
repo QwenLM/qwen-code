@@ -112,10 +112,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     }
 
     return (
-      isDashscopeOrigin ||
-      isTokenPlanOrigin ||
-      isInternalOrigin ||
-      isProxyMatch
+      isDashscopeOrigin || isTokenPlanOrigin || isInternalOrigin || isProxyMatch
     );
   }
 

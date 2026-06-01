@@ -229,7 +229,10 @@ export function useCommandCompletion(
       const lineCodePoints = toCodePoints(buffer.lines[cursorRow] || '');
       const charAfterCompletion = lineCodePoints[end];
       const isDirectory = suggestions[indexToUse].isDirectory;
-      if (charAfterCompletion !== ' ' && !(isDirectory && !charAfterCompletion)) {
+      if (
+        charAfterCompletion !== ' ' &&
+        !(isDirectory && !charAfterCompletion)
+      ) {
         suggestionText += ' ';
       }
 

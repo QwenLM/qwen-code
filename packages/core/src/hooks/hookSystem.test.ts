@@ -25,6 +25,7 @@ import {
   NotificationType,
   type PermissionSuggestion,
   HookPhase,
+  createHookOutput,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import type { AggregatedHookResult } from './hookAggregator.js';
@@ -95,6 +96,7 @@ describe('HookSystem', () => {
       firePreCompactEvent: vi.fn(),
       fireNotificationEvent: vi.fn(),
       firePermissionRequestEvent: vi.fn(),
+      firePermissionDeniedEvent: vi.fn(),
       fireSubagentStartEvent: vi.fn(),
       fireSubagentStopEvent: vi.fn(),
       fireTodoCreatedEvent: vi.fn(),
@@ -1421,6 +1423,60 @@ describe('HookSystem', () => {
       );
 
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe('firePermissionDeniedEvent', () => {
+    it('should delegate to hookEventHandler.firePermissionDeniedEvent', async () => {
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).mockResolvedValue(mockAggregated);
+
+      const result = await hookSystem.firePermissionDeniedEvent(
+        'Bash',
+        { command: 'rm -rf /tmp/project' },
+        'toolu-denied-1',
+        'classifier_blocked',
+      );
+
+      expect(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).toHaveBeenCalledWith(
+        'Bash',
+        { command: 'rm -rf /tmp/project' },
+        'toolu-denied-1',
+        'classifier_blocked',
+        undefined,
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it('should return PermissionDenied hook output when present', async () => {
+      const mockAggregated = createMockAggregatedResult(true);
+      mockAggregated.finalOutput = {
+        hookSpecificOutput: {
+          hookEventName: 'PermissionDenied',
+          permissionDecision: 'deny',
+          permissionDecisionReason: 'policy denied',
+        },
+      };
+
+      vi.mocked(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).mockResolvedValue(mockAggregated);
+
+      const result = await hookSystem.firePermissionDeniedEvent(
+        'Bash',
+        { command: 'rm -rf /tmp/project' },
+        'toolu-denied-1',
+        'classifier_blocked',
+      );
+
+      expect(result).toEqual(
+        createHookOutput('PermissionDenied', mockAggregated.finalOutput),
+      );
     });
   });
 

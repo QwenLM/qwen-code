@@ -861,6 +861,7 @@ export default {
   'Auto-memory: {{status}}': 'Memòria automàtica: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Auto-dream: {{status}} · {{lastDream}} · /dream per executar',
+  'Auto-skill: {{status}}': 'Habilitat automàtica: {{status}}',
   never: 'mai',
   on: 'activada',
   off: 'desactivada',
