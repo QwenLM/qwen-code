@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
 import type { Config } from '../config/config.js';
 
@@ -65,7 +66,9 @@ describe('MemoryDiagnosticsDumper', () => {
 
     expect(result).toBeDefined();
     expect(result!.trigger).toBe('hard');
-    expect(result!.filePath).toContain('/tmp/test-project/diagnostics/');
+    expect(result!.filePath).toContain(
+      path.join('/tmp/test-project', 'diagnostics') + path.sep,
+    );
     expect(result!.filePath).toContain('memory-test-ses');
     expect(fs.mkdirSync).toHaveBeenCalledWith(
       expect.stringContaining('diagnostics'),
