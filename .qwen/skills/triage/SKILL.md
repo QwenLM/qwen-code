@@ -202,23 +202,27 @@ For feature requests:
 
 ### Stage 1: Template Gate
 
-Before reviewing direction or code, check the PR body for these required
-headings exactly:
+The PR template — `.github/pull_request_template.md`
+(https://github.com/QwenLM/qwen-code/blob/main/.github/pull_request_template.md)
+— is the source of truth. Before reviewing direction or code, check the PR body
+against it. These are the essential headings to require:
 
 - `## What this PR does`
 - `## Why it's needed`
 - `## Reviewer Test Plan`
 - `### Evidence (Before & After)`
 
-If any required heading is missing, request changes, mention the author, and
-stop all later stages:
+If any is missing, request changes, mention the author, and stop all later
+stages:
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-gate-template.md
 ```
 
-The blocking review must say which headings are missing and ask the author to
-update the PR template.
+The blocking review must name which headings are missing, **link the template
+above so the author knows exactly what to copy**, and ask them to update the PR
+body to match it. Linking the source makes the request verifiable, not just the
+skill's opinion.
 
 If the template passes, post a Stage 1 comment and continue.
 
