@@ -10,6 +10,9 @@ import { createDebugLogger } from './debugLogger.js';
 
 const logger = createDebugLogger('btw');
 
+/** Maximum input length (chars) accepted by btw routes and slash command. */
+export const BTW_MAX_INPUT_LENGTH = 4096;
+
 export function buildBtwPrompt(question: string): string {
   return [
     '<system-reminder>',
@@ -36,7 +39,7 @@ export function buildBtwCacheSafeParams(
     const generationConfig = chat.getGenerationConfig();
     if (!generationConfig) return null;
     const maxHistoryEntries = 40;
-    const history = geminiClient.getHistoryTail(maxHistoryEntries, true);
+    const history = geminiClient.getHistoryTail(maxHistoryEntries, false);
     return {
       generationConfig: structuredClone(generationConfig),
       history,

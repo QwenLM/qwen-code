@@ -304,17 +304,25 @@ function resolveDaemonTelemetryRoute(
     sessionPermission?.[2] &&
     req.method === 'POST'
   ) {
+    const rawRequestId = sessionPermission[2];
     return {
       route: 'POST /session/:id/permission/:requestId',
       sessionId: sessionPermission[1],
-      permissionRequestId: sessionPermission[2],
+      ...(rawRequestId.length <= MAX_CLIENT_ID_LENGTH &&
+      CLIENT_ID_RE.test(rawRequestId)
+        ? { permissionRequestId: rawRequestId }
+        : {}),
     };
   }
   const globalPermission = req.path.match(/^\/permission\/([^/]+)$/);
   if (globalPermission?.[1] && req.method === 'POST') {
+    const rawRequestId = globalPermission[1];
     return {
       route: 'POST /permission/:requestId',
-      permissionRequestId: globalPermission[1],
+      ...(rawRequestId.length <= MAX_CLIENT_ID_LENGTH &&
+      CLIENT_ID_RE.test(rawRequestId)
+        ? { permissionRequestId: rawRequestId }
+        : {}),
     };
   }
   const deleteSession = req.path.match(/^\/session\/([^/]+)$/);
@@ -1435,10 +1443,13 @@ export function createServeApp(
       }
       if (!res.writable) {
         if (daemonLog) {
-          daemonLog.warn('session reaped (client disconnected before response)', {
-            sessionId: session.sessionId,
-            attached: session.attached,
-          });
+          daemonLog.warn(
+            'session reaped (client disconnected before response)',
+            {
+              sessionId: session.sessionId,
+              attached: session.attached,
+            },
+          );
         }
         if (!session.attached) {
           // `requireZeroAttaches: true` closes the BQ9tV race: if
