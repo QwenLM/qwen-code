@@ -278,18 +278,26 @@ high-confidence blocking issues. For inline comments, use GitHub's create review
 API with a `comments` array so all line comments are grouped in one review.
 Uncertain concerns belong in the summary comment, not inline.
 
-### Stage 4: AI Testing
+### Stage 4: Real-Scenario Testing
 
-If Stages 1-3 pass, run AI testing when safe.
+If Stages 1-3 pass, prove the change works the way a user hits it — by driving
+the real product in a tmux TUI session, not by writing unit tests. Build the
+scenario from the PR's core behavior: what does a user actually do to exercise
+what this PR adds or fixes?
 
-- Prefer the project `tmux-real-user-testing` skill for user-visible or TUI
-  changes.
-- For non-UI changes, run the smallest focused test that proves the behavior.
+- Use the project `tmux-real-user-testing` skill: launch Qwen Code in a real
+  tmux session and walk the user's path end to end (the slash command, dialog,
+  flag, or workflow the PR touches), taking a `tmux capture-pane -p` snapshot
+  after each meaningful state change.
+- The readable tmux log is the evidence. Post it to the PR as proof — the key
+  rendered frames inline, plus the full `tmux-readable-full.log` artifact path —
+  so the result is verifiable, not just asserted.
 - Never run untrusted fork code with write tokens or secrets. If the PR is from
-  an untrusted fork or the environment is unsafe, skip execution and post why.
+  an untrusted fork or the environment is unsafe, skip execution and post why
+  instead.
 
-Post a Stage 4 testing report with commands, result, key evidence, and artifact
-paths or tmux excerpts.
+Post a Stage 4 testing report: the scenario, the exact steps a user took,
+PASS/FAIL, and the tmux log that backs it.
 
 ### Stage 5: Final Decision
 
