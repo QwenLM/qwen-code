@@ -676,7 +676,8 @@ describe('workspace agents routes', () => {
     expect(res.body.code).toBe('invalid_agent_type');
   });
 
-  it('returns 500 agent_delete_partial when one level unlink silently fails', async () => {
+  // chmod 0o555 does not block root — skip in CI Docker containers running as root
+  it.skipIf(process.getuid?.() === 0)('returns 500 agent_delete_partial when one level unlink silently fails', async () => {
     // Windows ignores Unix-style permission bits passed to
     // `fs.chmod` — the user-agents directory stays writable, the
     // unlink succeeds, and the partial-delete path this test
