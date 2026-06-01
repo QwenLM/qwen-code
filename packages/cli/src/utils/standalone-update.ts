@@ -212,6 +212,7 @@ async function extractArchive(
     await tar.extract({
       file: archivePath,
       cwd: destDir,
+      preservePaths: false,
       filter: (p) => !p.startsWith('/') && !p.includes('..'),
     });
   }
@@ -234,7 +235,10 @@ function spawnAndCapture(
       (err, out) => {
         if (settled) return;
         settled = true;
-        if (err && 'killed' in err && err.killed) {
+        if (
+          err &&
+          (('killed' in err && err.killed) || ('signal' in err && err.signal))
+        ) {
           reject(new Error('Smoke test timed out'));
           return;
         }
@@ -539,6 +543,7 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
  * Mirrors the logic in install-qwen-standalone.sh maybe_update_shell_path.
  */
 export function ensurePathInShellRc(binDir: string): void {
+  assertSafeForShellEmbed('binDir', binDir);
   const shell = process.env['SHELL'] || '';
   let rcFile: string | null = null;
   const home = process.env['HOME'] || os.homedir();
