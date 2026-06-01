@@ -164,6 +164,19 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     );
   });
 
+  it('ignores custom bodyTimeout when proxy is set (proxy hardcodes bodyTimeout: 0)', () => {
+    const result = buildRuntimeFetchOptions('openai', 'http://proxy.local', {
+      bodyTimeout: 60000,
+    });
+    const dispatcher = (
+      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
+    ).fetchOptions?.dispatcher;
+    expect(dispatcher?.options).toMatchObject({
+      uri: 'http://proxy.local',
+      bodyTimeout: 0,
+    });
+  });
+
   it('respects custom bodyTimeout option in no-proxy path', () => {
     const result = buildRuntimeFetchOptions('openai', undefined, {
       bodyTimeout: 60000,
@@ -198,16 +211,21 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
   });
 
   it.each([
-    { input: -1, expected: 0, label: 'negative' },
-    { input: 3.14, expected: 0, label: 'float' },
-    { input: NaN, expected: 0, label: 'NaN' },
-    { input: Infinity, expected: 0, label: 'Infinity' },
-    { input: undefined, expected: 0, label: 'undefined' },
-    { input: 0, expected: 0, label: 'zero' },
-    { input: 60000, expected: 60000, label: 'positive integer' },
+    { input: -1, expected: 0, label: 'negative', shouldWarn: true },
+    { input: 3.14, expected: 0, label: 'float', shouldWarn: true },
+    { input: NaN, expected: 0, label: 'NaN', shouldWarn: true },
+    { input: Infinity, expected: 0, label: 'Infinity', shouldWarn: true },
+    { input: undefined, expected: 0, label: 'undefined', shouldWarn: false },
+    { input: 0, expected: 0, label: 'zero', shouldWarn: false },
+    {
+      input: 60000,
+      expected: 60000,
+      label: 'positive integer',
+      shouldWarn: false,
+    },
   ])(
     'sanitizes invalid bodyTimeout ($label → $expected)',
-    ({ input, expected }) => {
+    ({ input, expected, shouldWarn }) => {
       const result = buildRuntimeFetchOptions('openai', undefined, {
         bodyTimeout: input as number,
       });
@@ -220,6 +238,15 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
         bodyTimeout: expected,
         headersTimeout: 0,
       });
+      if (shouldWarn) {
+        expect(mockWarn).toHaveBeenCalledWith(
+          expect.stringContaining('Invalid bodyTimeout'),
+        );
+      } else {
+        expect(mockWarn).not.toHaveBeenCalledWith(
+          expect.stringContaining('Invalid bodyTimeout'),
+        );
+      }
     },
   );
 

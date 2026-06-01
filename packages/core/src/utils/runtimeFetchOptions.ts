@@ -109,6 +109,11 @@ export function buildRuntimeFetchOptions(
 
   switch (runtime) {
     case 'bun': {
+      if (options?.bodyTimeout && options.bodyTimeout > 0) {
+        debugLogger.warn(
+          `bodyTimeout setting (${options.bodyTimeout}ms) is not supported on Bun runtime (all timeouts are disabled via timeout: false).`,
+        );
+      }
       if (sdkType === 'openai') {
         // Bun: Disable built-in 300s timeout to let OpenAI SDK timeout control
         // This ensures user-configured timeout works as expected without interference
