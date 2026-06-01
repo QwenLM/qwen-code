@@ -233,9 +233,11 @@ not rule on it yourself.
   maintainer will weigh in. Never auto-reject on direction — `--request-changes`
   on direction is a maintainer's call, not yours.
 
-Call direction "aligned" and continue only for plainly in-scope work (a bug fix,
-docs, tests, an obvious reliability win) that touches no core contract above —
-and even then, write the Stage 2 comment as your reading, not a ruling.
+Call direction "aligned" and continue to Stage 3 only for plainly in-scope work
+(a bug fix, docs, tests, an obvious reliability win) that touches no core
+contract above — and even then, write the Stage 2 comment as your reading, not a
+ruling. Otherwise you have escalated: stop here. Do not run code review, testing,
+or approval — those happen only after a maintainer confirms the direction.
 
 ### Stage 3: KISS-Focused Code Review
 
