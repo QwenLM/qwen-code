@@ -1275,6 +1275,21 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
 
           default: {
+            // ── Enter to submit ──
+            if (
+              normalizedKey.name === 'return' &&
+              !normalizedKey.ctrl &&
+              !normalizedKey.meta
+            ) {
+              if (buffer.text.trim() && onSubmit) {
+                const submittedValue = buffer.text;
+                buffer.setText('');
+                onSubmit(submittedValue);
+              }
+              dispatch({ type: 'CLEAR_COUNT' });
+              return true;
+            }
+
             // ── Arrow keys ──
             if (normalizedKey.name === 'left') {
               if (state.pendingOperator === 'c')
@@ -1334,6 +1349,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       executeCommand,
       updateMode,
       executeFind,
+      onSubmit,
     ],
   );
 

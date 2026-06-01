@@ -2055,5 +2055,47 @@ describe('useVim hook', () => {
         // Should insert yanked text before cursor
       });
     });
+
+    describe('Enter (submit in NORMAL mode)', () => {
+      it('should submit text when Enter is pressed in NORMAL mode', () => {
+        const buffer = createMockBuffer('hello world');
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() =>
+          result.current.handleInput({ sequence: '\r', name: 'return' }),
+        );
+
+        expect(mockHandleFinalSubmit).toHaveBeenCalledWith('hello world');
+        expect(buffer.setText).toHaveBeenCalledWith('');
+      });
+
+      it('should not submit empty text', () => {
+        const buffer = createMockBuffer('');
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() =>
+          result.current.handleInput({ sequence: '\r', name: 'return' }),
+        );
+
+        expect(mockHandleFinalSubmit).not.toHaveBeenCalled();
+      });
+
+      it('should not submit whitespace-only text', () => {
+        const buffer = createMockBuffer('   ');
+        const { result } = renderHook(() =>
+          useVim(buffer as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() =>
+          result.current.handleInput({ sequence: '\r', name: 'return' }),
+        );
+
+        expect(mockHandleFinalSubmit).not.toHaveBeenCalled();
+      });
+    });
   });
 });
