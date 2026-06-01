@@ -17,13 +17,16 @@ import {
 import { defaultSessionOptions } from '@/hooks/useSessionOptions';
 import { resolveEffectiveConnectionSlug } from '@config/llm-connections';
 import { getWorkspaceDisplayName } from '@/utils/workspace';
+import { contentBadgesToTextElements } from '@craft-agent/core/utils';
 import type {
   CreateSessionOptions,
   FileAttachment,
+  Message,
   PermissionMode,
   Session,
   WorkspaceSettings,
 } from '../../shared/types';
+import { generateMessageId } from '../../shared/types';
 import type { ThinkingLevel } from '@craft-agent/shared/agent/thinking-levels';
 
 export default function DraftChatPage() {
@@ -148,6 +151,8 @@ export default function DraftChatPage() {
   const [sessionStatusTouched, setSessionStatusTouched] = React.useState(false);
   const [labelsTouched, setLabelsTouched] = React.useState(false);
   const [isCreating, setIsCreating] = React.useState(false);
+  const [optimisticMessage, setOptimisticMessage] =
+    React.useState<Message | null>(null);
   const appliedDraftResetKeyRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
@@ -185,6 +190,7 @@ export default function DraftChatPage() {
     setSourcesTouched(false);
     setSessionStatusTouched(false);
     setLabelsTouched(false);
+    setOptimisticMessage(null);
   }, [
     draft.nonce,
     draft.input,
@@ -263,8 +269,9 @@ export default function DraftChatPage() {
       id: NEW_SESSION_DRAFT_ID,
       workspaceId: activeWorkspaceId ?? '',
       workspaceName: activeWorkspaceName,
-      lastMessageAt: 0,
-      messages: [],
+      lastMessageAt: optimisticMessage?.timestamp ?? 0,
+      lastMessageRole: optimisticMessage ? 'user' : undefined,
+      messages: optimisticMessage ? [optimisticMessage] : [],
       isProcessing: isCreating,
       permissionMode,
       thinkingLevel,
@@ -278,6 +285,7 @@ export default function DraftChatPage() {
     [
       activeWorkspaceId,
       activeWorkspaceName,
+      optimisticMessage,
       isCreating,
       permissionMode,
       thinkingLevel,
@@ -298,6 +306,27 @@ export default function DraftChatPage() {
     ) => {
       if (!activeWorkspaceId || isCreating) return;
 
+      const textElements = draft.badges?.length
+        ? contentBadgesToTextElements(message, draft.badges)
+        : undefined;
+      setOptimisticMessage({
+        id: generateMessageId(),
+        role: 'user',
+        content: message,
+        timestamp: Date.now(),
+        ...(textElements ? { textElements } : {}),
+        isPending: true,
+      });
+      setInputValue('');
+      setAttachmentsValue([]);
+      setDraft((previous) =>
+        previous.input === ''
+          ? previous
+          : {
+              ...previous,
+              input: '',
+            },
+      );
       setIsCreating(true);
       try {
         const slugHint =
@@ -370,6 +399,7 @@ export default function DraftChatPage() {
           error,
         );
         toast.error(t('toast.unknownError'));
+        setOptimisticMessage(null);
         setInputValue(message);
         setDraft((previous) => ({
           ...previous,
