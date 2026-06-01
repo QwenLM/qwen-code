@@ -152,6 +152,10 @@ export interface DaemonSessionState {
 /** Returned from `POST /session/:id/load` and `POST /session/:id/resume`. */
 export interface DaemonRestoredSession extends DaemonSession {
   state: DaemonSessionState;
+  /** Event bus watermark at restore time — used as initial SSE cursor. */
+  lastEventId?: number;
+  /** Full replay log for client-side transcript seeding (skips SSE replay). */
+  replayEvents?: DaemonEvent[];
 }
 
 /** Sparse session record returned by `GET /workspace/:id/sessions`. */

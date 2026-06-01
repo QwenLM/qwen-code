@@ -42,6 +42,8 @@ export interface DaemonSessionClientOptions {
    * `Last-Event-ID` resume cursors.
    */
   lastEventId?: number;
+  /** Full replay log from the daemon restore response for transcript seeding. */
+  replayEvents?: DaemonEvent[];
 }
 
 export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
@@ -68,6 +70,8 @@ export class DaemonSessionClient {
   readonly client: DaemonClient;
   readonly session: DaemonSession;
   readonly state: DaemonSessionState;
+  /** Full replay log from the daemon for client-side transcript seeding. */
+  readonly replayEvents: DaemonEvent[];
   private lastSeenEventId: number | undefined;
   private subscriptionActive = false;
   private readonly _pendingPrompts = new Map<
@@ -82,6 +86,7 @@ export class DaemonSessionClient {
     this.client = opts.client;
     this.session = { ...opts.session };
     this.state = { ...(opts.state ?? {}) };
+    this.replayEvents = opts.replayEvents ?? [];
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
   }
 
@@ -126,9 +131,11 @@ export class DaemonSessionClient {
   }
 
   /**
-   * Loads an existing daemon session and seeds the first event subscription
-   * from the start of the daemon replay ring so history replay frames emitted
-   * during `session/load` are visible to this client.
+   * Loads an existing daemon session. When the daemon returns a replay log
+   * (`replayEvents`) and watermark (`lastEventId`), the client seeds its SSE
+   * cursor from the watermark so subsequent event subscriptions only receive
+   * incremental events. Callers use `replayEvents` to reconstruct the
+   * transcript without relying on SSE replay from the bounded ring.
    */
   static async load(
     client: DaemonClient,
@@ -136,27 +143,26 @@ export class DaemonSessionClient {
     req: RestoreSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const { state, ...session } = await client.loadSession(
-      sessionId,
-      req,
-      clientId,
-    );
+    const {
+      state,
+      lastEventId: serverLastEventId,
+      replayEvents,
+      ...session
+    } = await client.loadSession(sessionId, req, clientId);
     return new DaemonSessionClient({
       client,
       session,
       state,
-      lastEventId: 0,
+      lastEventId: serverLastEventId ?? 0,
+      replayEvents,
     });
   }
 
   /**
    * Resumes an existing daemon session without requesting history replay.
-   * Seeds the first event subscription from the start of the daemon
-   * replay ring (`lastEventId: 0`) symmetric with `load()` — the agent's
-   * `unstable_resumeSession` schedules an `available_commands_update`
-   * via `setTimeout(0)`, which can publish to the daemon bus between
-   * the HTTP response and the consumer's first `events()` call. Seeding
-   * ensures that frame is observed instead of dropped.
+   * When the daemon returns a watermark (`lastEventId`), uses it as the
+   * initial SSE cursor. Falls back to 0 for older daemons so
+   * post-resume events (e.g. `available_commands_update`) are captured.
    */
   static async resume(
     client: DaemonClient,
@@ -164,16 +170,17 @@ export class DaemonSessionClient {
     req: RestoreSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const { state, ...session } = await client.resumeSession(
-      sessionId,
-      req,
-      clientId,
-    );
+    const {
+      state,
+      lastEventId: serverLastEventId,
+      replayEvents: _discarded,
+      ...session
+    } = await client.resumeSession(sessionId, req, clientId);
     return new DaemonSessionClient({
       client,
       session,
       state,
-      lastEventId: 0,
+      lastEventId: serverLastEventId ?? 0,
     });
   }
 

@@ -818,6 +818,8 @@ describe('createHttpAcpBridge', () => {
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
       state: { configOptions: [] },
+      lastEventId: expect.any(Number),
+      replayEvents: expect.any(Array),
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
       { sessionId: 'persisted-1', cwd: WS_A, mcpServers: [] },
@@ -919,7 +921,9 @@ describe('createHttpAcpBridge', () => {
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
       state: { modes: null },
+      lastEventId: expect.any(Number),
     });
+    expect(resumed).not.toHaveProperty('replayEvents');
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toEqual([
       { sessionId: 'persisted-2', cwd: WS_A, mcpServers: [] },
@@ -962,10 +966,112 @@ describe('createHttpAcpBridge', () => {
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
       state: { _meta: { tag: 'restored-foo' } },
+      lastEventId: expect.any(Number),
     });
+    expect(attached).not.toHaveProperty('replayEvents');
     expect(attached.clientId).not.toBe(loaded.clientId);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(1);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+
+    await bridge.shutdown();
+  });
+
+  it('returns current replay events when loading an already live spawned session', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.sendPrompt(
+      session.sessionId,
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'hello after spawn' }],
+      },
+      undefined,
+      { clientId: session.clientId },
+    );
+
+    const loaded = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+    });
+    const replayUpdates = (loaded.replayEvents ?? [])
+      .filter((event): event is BridgeEvent & { type: 'session_update' } => event.type === 'session_update')
+      .map(
+        (event) =>
+          event.data as {
+            update?: {
+              sessionUpdate?: string;
+              content?: { type?: string; text?: string };
+            };
+          },
+      );
+
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(loaded.lastEventId ?? 0).toBeGreaterThan(0);
+    expect(replayUpdates).toContainEqual(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello after spawn' },
+        }),
+      }),
+    );
+
+    await bridge.shutdown();
+  });
+
+  it('returns full replay events even after the SSE ring evicts older frames', async () => {
+    const factory: ChannelFactory = async () =>
+      makeChannel({ promptImpl: () => ({ stopReason: 'end_turn' }) }).channel;
+    const bridge = makeBridge({ channelFactory: factory, eventRingSize: 2 });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    for (let i = 0; i < 5; i++) {
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: `message-${i}` }],
+        },
+        undefined,
+        { clientId: session.clientId },
+      );
+    }
+
+    const loaded = await bridge.loadSession({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+    });
+    const replayTexts = (loaded.replayEvents ?? [])
+      .filter((event): event is BridgeEvent & { type: 'session_update' } => event.type === 'session_update')
+      .map(
+        (event) =>
+          event.data as {
+            update?: {
+              sessionUpdate?: string;
+              content?: { type?: string; text?: string };
+            };
+          },
+      )
+      .filter((data) => data.update?.sessionUpdate === 'user_message_chunk')
+      .map((data) => data.update?.content?.text);
+
+    expect(loaded.lastEventId ?? 0).toBeGreaterThan(2);
+    expect(replayTexts).toEqual([
+      'message-0',
+      'message-1',
+      'message-2',
+      'message-3',
+      'message-4',
+    ]);
 
     await bridge.shutdown();
   });

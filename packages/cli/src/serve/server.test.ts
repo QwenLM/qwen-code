@@ -446,6 +446,7 @@ interface FakeBridge extends HttpAcpBridge {
     sessionId: string;
     context?: BridgeClientRequestContext;
   }>;
+  deleteReplayCacheCalls: string[];
   updateMetadataCalls: Array<{
     sessionId: string;
     metadata: SessionMetadataUpdate;
@@ -485,6 +486,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionTasksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
+  const deleteReplayCacheCalls: string[] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
   const heartbeatStateCalls: string[] = [];
@@ -754,6 +756,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     addRuntimeMcpServerCalls,
     removeRuntimeMcpServerCalls,
     closeCalls,
+    deleteReplayCacheCalls,
     updateMetadataCalls,
     heartbeatCalls,
     heartbeatStateCalls,
@@ -954,6 +957,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
       return closeImpl(sessionId, context);
+    },
+    deleteSessionReplayCache(sessionId) {
+      deleteReplayCacheCalls.push(sessionId);
     },
     updateSessionMetadata(sessionId, metadata, context) {
       updateMetadataCalls.push({
@@ -4414,6 +4420,7 @@ describe('createServeApp', () => {
       expect(res.body.removed).toEqual([sid]);
       expect(res.body.notFound).toEqual([]);
       expect(res.body.errors).toEqual([]);
+      expect(bridge.deleteReplayCacheCalls).toEqual([sid]);
       const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
       const filePath = path.join(chatsDir, `${sid}.jsonl`);
       await expect(fsp.access(filePath)).rejects.toThrow();
@@ -4438,6 +4445,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body.removed).toEqual([sid]);
       expect(res.body.errors).toEqual([]);
+      expect(bridge.deleteReplayCacheCalls).toEqual([sid]);
       const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
       const filePath = path.join(chatsDir, `${sid}.jsonl`);
       await expect(fsp.access(filePath)).rejects.toThrow();
@@ -4479,6 +4487,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body.removed).toEqual([]);
       expect(res.body.notFound).toEqual(['nonexistent']);
+      expect(bridge.deleteReplayCacheCalls).toEqual(['nonexistent']);
     });
 
     it('errors array contains string messages, not Error objects', async () => {
@@ -4530,6 +4539,9 @@ describe('createServeApp', () => {
       expect(res.body.errors).toHaveLength(1);
       expect(res.body.errors[0].sessionId).toBe(sidFail);
       expect(res.body.errors[0].error).toBe('agent busy');
+      expect(bridge.deleteReplayCacheCalls.sort()).toEqual(
+        [sidNotFound, sidOk].sort(),
+      );
       const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
       await expect(
         fsp.access(path.join(chatsDir, `${sidOk}.jsonl`)),
@@ -4607,6 +4619,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body.removed).toEqual([]);
       expect(res.body.errors).toHaveLength(1);
+      expect(bridge.deleteReplayCacheCalls).toEqual([]);
       const chatsDir = path.join(new Storage(wsDir).getProjectDir(), 'chats');
       await expect(
         fsp.access(path.join(chatsDir, `${sid}.jsonl`)),

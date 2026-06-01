@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs, constants as fsConstants } from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   ClientSideConnection,
@@ -29,6 +30,7 @@ import {
 import type { ShellCommandResult } from './bridgeTypes.js';
 import type { AcpChannel } from './channel.js';
 import { EventBus, DEFAULT_RING_SIZE, type BridgeEvent } from './eventBus.js';
+import { FileReplayStore, deleteFileReplayStore } from './replayStore.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
@@ -611,6 +613,11 @@ const DEFAULT_MAX_SESSIONS = 20;
  * operator-controlled), just typo defense.
  */
 const MAX_EVENT_RING_SIZE = 1_000_000;
+
+function workspacePathHash(workspacePath: string): string {
+  return createHash('sha256').update(workspacePath).digest('hex').slice(0, 16);
+}
+
 // Bd1yh: per-permission-request wall clock. Without this, an agent
 // calling `requestPermission` while no SSE subscriber is connected
 // would hang the per-session FIFO promptQueue forever (the prompt
@@ -685,6 +692,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         `Must be a positive integer in [1, ${MAX_EVENT_RING_SIZE}].`,
     );
   }
+  const ownsReplayStoreRoot = opts.replayStoreDir === undefined;
+  const replayStoreRoot =
+    opts.replayStoreDir ??
+    path.join(
+      os.tmpdir(),
+      'qwen-code-daemon-replay',
+      workspacePathHash(opts.boundWorkspace),
+      `${process.pid}-${randomUUID()}`,
+    );
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
   // PR 14 fix (review #4247 wenshao R5 runQwenServe.ts:216): close over
   // a per-handle env-override snapshot. Calls to `channelFactory` at
@@ -1669,11 +1685,22 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     }
   };
 
+  const createSessionEventBus = (sessionId: string): EventBus =>
+    new EventBus(
+      eventRingSize,
+      undefined,
+      new FileReplayStore({
+        dir: replayStoreRoot,
+        sessionId,
+        deleteOnClose: true,
+      }),
+    );
+
   const createSessionEntry = (
     ci: ChannelInfo,
     sessionId: string,
     workspaceCwd: string,
-    events = new EventBus(eventRingSize),
+    events = createSessionEventBus(sessionId),
   ): SessionEntry => {
     const entry: SessionEntry = {
       sessionId,
@@ -1741,6 +1768,18 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
 
+    const replayFieldsFor = async (
+      entry: SessionEntry,
+    ): Promise<Pick<BridgeRestoredSession, 'lastEventId' | 'replayEvents'>> => {
+      const lastEventId = entry.events.lastEventId;
+      return {
+        lastEventId,
+        ...(action === 'load'
+          ? { replayEvents: await entry.events.snapshotReplayLog() }
+          : {}),
+      };
+    };
+
     const existing = byId.get(req.sessionId);
     if (existing) {
       existing.attachCount++;
@@ -1754,6 +1793,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
+        ...(await replayFieldsFor(existing)),
       };
     }
 
@@ -1820,7 +1860,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       throw new SessionLimitExceededError(maxSessions);
     }
 
-    const restoreEvents = new EventBus(eventRingSize);
+    const restoreEvents = createSessionEventBus(req.sessionId);
     let registeredEntry: SessionEntry | undefined;
     let ci: ChannelInfo | undefined;
     // Live counter shared with coalesced waiters (see InFlightRestore
@@ -1937,6 +1977,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           clientId,
           createdAt: racedEntry.createdAt,
           state: racedEntry.restoreState ?? {},
+          ...(await replayFieldsFor(racedEntry)),
         };
       }
 
@@ -1970,6 +2011,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         clientId,
         createdAt: entry.createdAt,
         state,
+        ...(await replayFieldsFor(entry)),
       };
     })().finally(() => {
       ci?.pendingRestoreIds.delete(req.sessionId);
@@ -2762,6 +2804,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           );
         });
       }
+    },
+
+    deleteSessionReplayCache(sessionId) {
+      deleteFileReplayStore(replayStoreRoot, sessionId);
     },
 
     updateSessionMetadata(sessionId, metadata, context) {
@@ -4482,6 +4528,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         ...inFlightRestoreAwaits,
         inFlightChannelAwait,
       ]);
+      if (ownsReplayStoreRoot) {
+        await fs.rm(replayStoreRoot, { recursive: true, force: true });
+      }
     },
   };
 }

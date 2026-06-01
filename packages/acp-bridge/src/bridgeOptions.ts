@@ -158,6 +158,15 @@ export interface BridgeOptions {
    */
   eventRingSize?: number;
   /**
+   * Optional directory for per-session daemon replay logs. When omitted,
+   * the bridge creates a process-scoped directory under the OS temp dir.
+   *
+   * These files store daemon UI events, not model chat history. They are
+   * used only while a session is live so `/load` can reconstruct a complete
+   * transcript without retaining an unbounded in-memory event array.
+   */
+  replayStoreDir?: string;
+  /**
    * Per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as
    * cancelled — the per-session FIFO can drain instead of poisoning
