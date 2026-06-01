@@ -2469,6 +2469,108 @@ describe('CoreToolScheduler request queueing', () => {
     ]);
     expect(sources).toEqual(['auto', 'auto', 'cli']);
   });
+
+  it('runs AUTO classifier for pending L4 allow that writes protected paths', async () => {
+    const cwd = '/repo';
+    let denialState = {
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    };
+    const generateJson = vi.fn().mockResolvedValue({ shouldBlock: false });
+    const setAutoModeDenialState = vi.fn((next: typeof denialState) => {
+      denialState = next;
+    });
+    const permissionManager = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('allow'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+      findMatchingDenyRule: vi.fn(),
+    };
+    const toolRegistry = {
+      getTool: vi.fn().mockReturnValue(undefined),
+    } as unknown as ToolRegistry;
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.AUTO,
+      getTargetDir: () => cwd,
+      getCwd: () => cwd,
+      getPermissionManager: () => permissionManager,
+      getAutoModeDenialState: () => denialState,
+      setAutoModeDenialState,
+      getGeminiClient: () => ({ getHistoryTail: () => [] }),
+      getToolRegistry: () => toolRegistry,
+      getAutoModeSettings: () => ({}),
+      getBaseLlmClient: () => ({ generateJson }),
+      getModel: () => 'test-model',
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    const command = "echo '{}' > .qwen/settings.json";
+    const request = {
+      callId: 'pending-protected-write',
+      name: ToolNames.SHELL,
+      args: { command },
+      isClientInitiated: false,
+      prompt_id: 'prompt-pending-protected-write',
+    };
+    const invocation = {
+      params: request.args,
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+    } as unknown as ToolInvocation<Record<string, unknown>, ToolResult>;
+
+    (
+      scheduler as unknown as {
+        toolCalls: WaitingToolCall[];
+      }
+    ).toolCalls = [
+      {
+        status: 'awaiting_approval',
+        request,
+        tool: {} as AnyDeclarativeTool,
+        invocation,
+        startTime: Date.now(),
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Confirm shell command',
+          command,
+          rootCommand: 'echo',
+          onConfirm: vi.fn(),
+        },
+      },
+    ];
+
+    await (
+      scheduler as unknown as {
+        autoApproveCompatiblePendingTools: (
+          signal: AbortSignal,
+          triggeringCallId: string,
+        ) => Promise<void>;
+      }
+    ).autoApproveCompatiblePendingTools(
+      new AbortController().signal,
+      'approved-sibling',
+    );
+
+    expect(permissionManager.evaluate).toHaveBeenCalled();
+    expect(generateJson).toHaveBeenCalled();
+    expect(setAutoModeDenialState).toHaveBeenCalledWith(denialState);
+    const latestCalls = onToolCallsUpdate.mock.calls.at(-1)?.[0] as ToolCall[];
+    expect(latestCalls[0]?.status).toBe('scheduled');
+  });
 });
 
 describe('CoreToolScheduler truncated output protection', () => {

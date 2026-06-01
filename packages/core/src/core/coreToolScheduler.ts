@@ -3268,13 +3268,92 @@ export class CoreToolScheduler {
           pendingTool.request.name,
           toolParams,
         );
-        const { finalPermission, pmCtx } = flowResult;
+        const { finalPermission, pmForcedAsk, pmCtx } = flowResult;
 
         const forceAutoReviewForAllow =
           this.config.getApprovalMode() === ApprovalMode.AUTO &&
           shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
 
-        if (finalPermission === 'allow' && !forceAutoReviewForAllow) {
+        if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+          debugLogger.info(
+            `Auto mode: pending L4 allow overridden by protected-write guard for ${pendingTool.request.name}`,
+          );
+          const denialState = this.config.getAutoModeDenialState();
+          const fallback = shouldFallback(denialState);
+          const messages =
+            this.config
+              .getGeminiClient?.()
+              ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+          const decision = await evaluateAutoMode({
+            ctx: pmCtx,
+            pmForcedAsk,
+            toolParams,
+            messages,
+            config: this.config,
+            signal,
+            skipClassifier: fallback.fallback,
+          });
+
+          const outcome = applyAutoModeDecision(
+            decision,
+            this.config,
+            denialState,
+          );
+          switch (outcome.kind) {
+            case 'approved':
+              this.setToolCallOutcome(
+                pendingTool.request.callId,
+                ToolConfirmationOutcome.ProceedAlways,
+              );
+              this.setStatusInternal(pendingTool.request.callId, 'scheduled');
+              this.finalizeBlockedSpan(
+                pendingTool.request.callId,
+                'auto_approved',
+                'auto',
+              );
+              break;
+            case 'blocked': {
+              this.setStatusInternal(
+                pendingTool.request.callId,
+                'error',
+                createErrorResponse(
+                  pendingTool.request,
+                  new Error(outcome.errorMessage),
+                  ToolErrorType.EXECUTION_DENIED,
+                ),
+              );
+              this.finalizeBlockedSpan(
+                pendingTool.request.callId,
+                'error',
+                'auto',
+              );
+              const toolSpan = this.toolSpans.get(pendingTool.request.callId);
+              if (toolSpan) {
+                setToolSpanFailure(
+                  toolSpan,
+                  TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                  TOOL_SPAN_STATUS_PERMISSION_DENIED,
+                );
+                this.finalizeToolSpan(pendingTool.request.callId);
+              }
+              break;
+            }
+            case 'fallback':
+              if (fallback.fallback) {
+                debugLogger.warn(
+                  `Auto mode fallback for pending tool (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                );
+              }
+              break;
+            default: {
+              const _exhaustive: never = outcome;
+              void _exhaustive;
+            }
+          }
+          continue;
+        }
+
+        if (finalPermission === 'allow') {
           this.setToolCallOutcome(
             pendingTool.request.callId,
             ToolConfirmationOutcome.ProceedAlways,
