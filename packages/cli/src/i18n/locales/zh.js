@@ -1723,6 +1723,17 @@ export default {
   'Show current process memory diagnostics': '显示当前进程的内存诊断。',
   'Record a CPU profile for Chrome DevTools analysis':
     '录制 CPU 性能分析文件，用于 Chrome DevTools 分析',
+  'Roll back a standalone update to the previous version':
+    '将独立安装回滚到上一个版本',
+  'Rollback is not available in ACP mode.': '回滚在 ACP 模式下不可用。',
+  'Rollback is only available for standalone installations.':
+    '回滚仅适用于独立安装。',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    '回滚成功。请重启终端以使用上一个版本。',
+  'Rollback failed: no previous version found (.old directory missing).':
+    '回滚失败：未找到上一个版本（.old 目录缺失）。',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    '在 Windows 上回滚需要手动操作。请将安装目录中的 qwen-code.old 重命名为 qwen-code。',
   'Save a durable memory to the memory system.':
     '将一条持久记忆保存到记忆系统。',
   'Show per-item context usage breakdown.': '显示按项目划分的上下文使用详情。',

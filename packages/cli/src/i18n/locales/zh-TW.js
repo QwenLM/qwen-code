@@ -1488,6 +1488,17 @@ export default {
   'Show current process memory diagnostics': '顯示目前程序的內存診斷。',
   'Record a CPU profile for Chrome DevTools analysis':
     '錄製 CPU 效能分析檔案，用於 Chrome DevTools 分析',
+  'Roll back a standalone update to the previous version':
+    '將獨立安裝回滾到上一個版本',
+  'Rollback is not available in ACP mode.': '回滾在 ACP 模式下不可用。',
+  'Rollback is only available for standalone installations.':
+    '回滾僅適用於獨立安裝。',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    '回滾成功。請重啟終端以使用上一個版本。',
+  'Rollback failed: no previous version found (.old directory missing).':
+    '回滾失敗：未找到上一個版本（.old 目錄缺失）。',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    '在 Windows 上回滾需要手動操作。請將安裝目錄中的 qwen-code.old 重新命名為 qwen-code。',
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
   'Ask a quick side question without affecting the main conversation':
     '在不影響主對話的情況下快速提問旁支問題',

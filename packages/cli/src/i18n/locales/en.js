@@ -1901,6 +1901,18 @@ export default {
     'Show current process memory diagnostics',
   'Record a CPU profile for Chrome DevTools analysis':
     'Record a CPU profile for Chrome DevTools analysis',
+  'Roll back a standalone update to the previous version':
+    'Roll back a standalone update to the previous version',
+  'Rollback is not available in ACP mode.':
+    'Rollback is not available in ACP mode.',
+  'Rollback is only available for standalone installations.':
+    'Rollback is only available for standalone installations.',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    'Rollback successful. Restart your terminal to use the previous version.',
+  'Rollback failed: no previous version found (.old directory missing).':
+    'Rollback failed: no previous version found (.old directory missing).',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.',
   'Save a durable memory to the memory system.':
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':
