@@ -15,6 +15,15 @@ vi.mock('node:fs', () => ({
   writeFileSync: vi.fn(),
 }));
 
+vi.mock('node:v8', () => ({
+  getHeapStatistics: vi.fn().mockReturnValue({
+    heap_size_limit: 4_096_000_000,
+    total_heap_size: 2_048_000_000,
+    used_heap_size: 1_800_000_000,
+    total_available_size: 2_000_000_000,
+  }),
+}));
+
 vi.mock('../utils/memoryDiagnostics.js', () => ({
   collectMemoryDiagnostics: vi.fn().mockResolvedValue({
     timestamp: '2026-05-31T00:00:00.000Z',
@@ -74,16 +83,27 @@ describe('MemoryDiagnosticsDumper', () => {
       expect.stringContaining('diagnostics'),
       { recursive: true },
     );
-    expect(fs.writeFileSync).toHaveBeenCalledOnce();
+    // Two-phase write: Phase 1 (minimal) + Phase 2 (full)
+    expect(fs.writeFileSync).toHaveBeenCalledTimes(2);
 
-    const writtenContent = JSON.parse(
+    const phase1Content = JSON.parse(
       vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
     );
-    expect(writtenContent.trigger).toBe('hard');
-    expect(writtenContent.dumpNumber).toBe(1);
-    expect(writtenContent.memoryUsage.rss).toBe(2_000_000_000);
-    expect(writtenContent.session.historyEntries).toBe(500);
-    expect(writtenContent.suggestion).toContain('/compact');
+    expect(phase1Content.trigger).toBe('hard');
+    expect(phase1Content.dumpNumber).toBe(1);
+    expect(phase1Content.collectionComplete).toBe(false);
+    expect(phase1Content.memoryUsage).toBeDefined();
+    expect(phase1Content.v8HeapStats).toBeDefined();
+
+    const phase2Content = JSON.parse(
+      vi.mocked(fs.writeFileSync).mock.calls[1][1] as string,
+    );
+    expect(phase2Content.trigger).toBe('hard');
+    expect(phase2Content.dumpNumber).toBe(1);
+    expect(phase2Content.collectionComplete).toBe(true);
+    expect(phase2Content.memoryUsage.rss).toBe(2_000_000_000);
+    expect(phase2Content.session.historyEntries).toBe(500);
+    expect(phase2Content.suggestion).toContain('/compact');
   });
 
   it('respects per-session cap of 3 dumps', async () => {
@@ -106,7 +126,8 @@ describe('MemoryDiagnosticsDumper', () => {
     expect(r2).toBeDefined();
     expect(r3).toBeDefined();
     expect(r4).toBeUndefined();
-    expect(fs.writeFileSync).toHaveBeenCalledTimes(3);
+    // 3 successful dumps × 2 writes each (Phase 1 + Phase 2)
+    expect(fs.writeFileSync).toHaveBeenCalledTimes(6);
   });
 
   it('respects cooldown between dumps', async () => {
@@ -121,7 +142,8 @@ describe('MemoryDiagnosticsDumper', () => {
 
     expect(r1).toBeDefined();
     expect(r2).toBeUndefined();
-    expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+    // 1 successful dump × 2 writes (Phase 1 + Phase 2)
+    expect(fs.writeFileSync).toHaveBeenCalledTimes(2);
   });
 
   it('resets state on new session', async () => {
@@ -156,10 +178,58 @@ describe('MemoryDiagnosticsDumper', () => {
 
     await dumper.dump('critical');
 
+    // Phase 2 (full payload) is the second write
     const writtenContent = JSON.parse(
-      vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
+      vi.mocked(fs.writeFileSync).mock.calls[1][1] as string,
     );
     expect(writtenContent.suggestion).toContain('critically high');
+    expect(writtenContent.collectionComplete).toBe(true);
+  });
+
+  it('writes Phase 1 synchronously before any await (survives crash during Phase 2)', async () => {
+    const config = createMockConfig();
+    const dumper = new MemoryDiagnosticsDumper(config);
+
+    // Fire dump() but do not await — Phase 1 must have already written to disk
+    // because async functions execute synchronously up to the first await.
+    const promise = dumper.dump('hard');
+
+    // At this point Phase 2 has not run yet (its await is pending), but Phase 1
+    // must have completed its writeFileSync call.
+    expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+    const phase1Content = JSON.parse(
+      vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
+    );
+    expect(phase1Content.collectionComplete).toBe(false);
+
+    await promise;
+    // Phase 2 has now overwritten the file
+    expect(fs.writeFileSync).toHaveBeenCalledTimes(2);
+  });
+
+  it('reserves slot synchronously to prevent concurrent dumps from bypassing cap', async () => {
+    const config = createMockConfig();
+    const dumper = new MemoryDiagnosticsDumper(config);
+
+    let mockNow = 1000000;
+    vi.spyOn(Date, 'now').mockImplementation(() => {
+      mockNow += 60_000;
+      return mockNow;
+    });
+
+    // Fire 4 concurrent dumps without awaiting between them. The synchronous
+    // slot reservation must enforce the cap of 3 even though all 4 calls happen
+    // before any of them complete their async Phase 2.
+    const results = await Promise.all([
+      dumper.dump('hard'),
+      dumper.dump('hard'),
+      dumper.dump('hard'),
+      dumper.dump('hard'),
+    ]);
+
+    const successful = results.filter((r) => r !== undefined);
+    expect(successful).toHaveLength(3);
+    expect(results[3]).toBeUndefined();
   });
 
   it('handles missing geminiClient gracefully', async () => {
@@ -171,8 +241,9 @@ describe('MemoryDiagnosticsDumper', () => {
     const result = await dumper.dump('hard');
 
     expect(result).toBeDefined();
+    // Phase 2 (full payload) is the second write
     const writtenContent = JSON.parse(
-      vi.mocked(fs.writeFileSync).mock.calls[0][1] as string,
+      vi.mocked(fs.writeFileSync).mock.calls[1][1] as string,
     );
     expect(writtenContent.session.available).toBe(false);
   });

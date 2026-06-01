@@ -200,8 +200,12 @@ export class MemoryPressureMonitor extends EventEmitter {
       return;
     }
 
-    // Write diagnostics to disk before cleanup — the JSON is cheap and survives
-    // even if a subsequent heap snapshot or cleanup triggers OOM.
+    // Write diagnostics to disk before cleanup. dump() uses a two-phase strategy:
+    // Phase 1 (synchronous, before the first await) writes a minimal JSON via
+    // writeFileSync — guaranteed to complete before executeCleanup starts because
+    // async functions run synchronously up to the first await. Phase 2 enriches
+    // the file asynchronously in the background; if it fails the minimal file
+    // still survives for debugging.
     if (pressure === 'hard' || pressure === 'critical') {
       void this.diagnosticsDumper.dump(pressure);
     }
