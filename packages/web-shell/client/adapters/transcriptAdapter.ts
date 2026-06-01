@@ -20,11 +20,16 @@ export function extractPendingPermission(
         : typeof toolCallRecord?.['id'] === 'string'
           ? toolCallRecord['id']
           : undefined;
+    const toolKind =
+      typeof toolCallRecord?.['kind'] === 'string'
+        ? toolCallRecord['kind']
+        : undefined;
     return {
       id: perm.requestId,
       sessionId: perm.sessionId,
       toolCallId,
       title: perm.title,
+      toolKind,
       content: [
         {
           type: 'text',

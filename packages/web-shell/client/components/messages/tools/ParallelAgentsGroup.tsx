@@ -1,7 +1,17 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { useI18n } from '../../../i18n';
-import { StatusIcon, truncateText } from './toolDisplay';
+import { formatElapsed, StatusIcon, truncateText } from './toolDisplay';
+import {
+  getTaskExecutionRecord,
+  getAgentType,
+  getAgentDescription,
+  getAgentCurrentToolHint,
+  formatTokenCount,
+  getAgentCancellationReason,
+  getAgentDisplayStatus,
+  toolContainsCallId,
+} from '../toolFormatting';
 import { SubAgentPanel } from './SubAgentPanel';
 import { ToolApproval } from '../ToolApproval';
 import styles from './ParallelAgentsGroup.module.css';
@@ -16,36 +26,44 @@ interface ParallelAgentsGroupProps {
   ) => void;
 }
 
-function getAgentDescription(agent: ACPToolCall): string {
-  if (agent.title) {
-    const colonIdx = agent.title.indexOf(': ');
-    return colonIdx > 0 ? agent.title.slice(colonIdx + 2) : agent.title;
-  }
-  const desc = agent.args?.description;
-  if (typeof desc === 'string' && desc.trim()) return desc.trim();
-  const prompt = agent.args?.prompt;
-  if (typeof prompt === 'string' && prompt.trim()) {
-    return prompt.trim().split('\n')[0] ?? '';
-  }
-  return agent.toolName;
+function formatDuration(ms: number): string {
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
 }
 
-function getCurrentToolHint(agent: ACPToolCall): string {
-  if (agent.status !== 'in_progress') return '';
-  const subs = agent.subTools;
-  if (!subs || subs.length === 0) return '';
-  const last = subs[subs.length - 1];
-  if (last.status !== 'in_progress' && last.status !== 'pending') return '';
-  let hint = last.toolName;
-  if (last.title) {
-    const colonIdx = last.title.indexOf(': ');
-    hint += ' ' + (colonIdx > 0 ? last.title.slice(colonIdx + 2) : last.title);
-  } else if (last.args?.command) {
-    hint += ' ' + (last.args.command as string);
-  } else if (last.args?.file_path) {
-    hint += ' ' + (last.args.file_path as string);
+function getAgentStats(agent: ACPToolCall, now: number): string {
+  const parts: string[] = [];
+  const taskExec = getTaskExecutionRecord(agent.rawOutput);
+  const stats = taskExec?.['executionSummary'] as
+    | Record<string, unknown>
+    | undefined;
+  const elapsed =
+    stats && typeof stats['totalDurationMs'] === 'number'
+      ? formatDuration(stats['totalDurationMs'])
+      : formatElapsed(
+          agent.startTime,
+          agent.endTime ?? (agent.status === 'in_progress' ? now : undefined),
+        );
+  if (elapsed) parts.push(elapsed);
+  const tokens =
+    taskExec &&
+    typeof taskExec['tokenCount'] === 'number' &&
+    taskExec['tokenCount'] > 0
+      ? (taskExec['tokenCount'] as number)
+      : stats &&
+          typeof stats['totalTokens'] === 'number' &&
+          stats['totalTokens'] > 0
+        ? (stats['totalTokens'] as number)
+        : 0;
+  if (tokens > 0) {
+    parts.push(formatTokenCount(tokens));
   }
-  return truncateText(hint, 50);
+  const reason = getAgentCancellationReason(agent);
+  if (reason) parts.push(truncateText(reason, 80));
+  return parts.join(' · ');
 }
 
 export function ParallelAgentsGroup({
@@ -55,6 +73,14 @@ export function ParallelAgentsGroup({
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  const hasRunning = agents.some((a) => a.status === 'in_progress');
+  useEffect(() => {
+    if (!hasRunning) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [hasRunning]);
 
   const doneCount = agents.filter(
     (a) => a.status === 'completed' || a.status === 'failed',
@@ -62,7 +88,7 @@ export function ParallelAgentsGroup({
   const total = agents.length;
 
   const approvalAgent = pendingApproval?.toolCallId
-    ? agents.find((a) => a.callId === pendingApproval.toolCallId)
+    ? agents.find((a) => toolContainsCallId(a, pendingApproval.toolCallId!))
     : undefined;
 
   return (
@@ -70,14 +96,19 @@ export function ParallelAgentsGroup({
       <div className={styles.header}>
         <span>{t('parallelAgents.title')}</span>
         <span className={styles.headerDot}>·</span>
+        <span className={styles.headerTotal}>{total}</span>
+        <span className={styles.headerDot}>·</span>
         <span className={styles.headerCount}>
           {t('parallelAgents.done', { done: doneCount, total })}
         </span>
       </div>
       <div className={styles.list}>
-        {agents.map((agent, i) => {
+        {agents.map((agent) => {
+          const agentType = getAgentType(agent);
           const desc = getAgentDescription(agent);
-          const toolHint = getCurrentToolHint(agent);
+          const toolHint = getAgentCurrentToolHint(agent);
+          const stats = getAgentStats(agent, now);
+          const status = getAgentDisplayStatus(agent);
           const isExpanded = expandedId === agent.callId;
           return (
             <div key={agent.callId}>
@@ -85,14 +116,18 @@ export function ParallelAgentsGroup({
                 className={styles.row}
                 onClick={() => setExpandedId(isExpanded ? null : agent.callId)}
               >
-                <StatusIcon status={agent.status} />
-                <span className={styles.rowIndex}>{i + 1}:</span>
-                <span className={styles.rowDesc}>{truncateText(desc, 40)}</span>
-                {toolHint && <span className={styles.rowTool}>{toolHint}</span>}
+                <StatusIcon status={status} />
+                <span className={styles.rowDesc}>
+                  {truncateText(desc || agentType, 50)}
+                  {toolHint && (
+                    <span className={styles.rowTool}>{` (${toolHint})`}</span>
+                  )}
+                </span>
+                {stats && <span className={styles.rowStats}>{stats}</span>}
               </div>
               {isExpanded && (
                 <div className={styles.detail}>
-                  <SubAgentPanel tool={agent} />
+                  <SubAgentPanel tool={agent} hideHeader />
                 </div>
               )}
             </div>

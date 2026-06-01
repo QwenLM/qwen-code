@@ -77,6 +77,11 @@
   color: var(--text-dimmed);
 }
 
+.terminalLabel {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .model {
   color: var(--text-secondary);
   min-width: 0;

@@ -19,12 +19,14 @@ interface MessageItemProps {
     selectedOption: string,
     answers?: Record<string, string>,
   ) => void;
+  workspaceCwd?: string;
 }
 
 export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onConfirm,
+  workspaceCwd,
 }: MessageItemProps) {
   switch (message.role) {
     case 'user':
@@ -42,6 +44,7 @@ export const MessageItem = memo(function MessageItem({
           tools={message.tools}
           pendingApproval={pendingApproval}
           onConfirm={onConfirm}
+          workspaceCwd={workspaceCwd}
         />
       );
     case 'plan':
@@ -61,10 +64,12 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onConfirm !== next.onConfirm) return false;
+  if (prev.workspaceCwd !== next.workspaceCwd) return false;
   return areMessagesEqual(prev.message, next.message);
 }
 
 function areMessagesEqual(prev: Message, next: Message): boolean {
+  if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
   switch (prev.role) {
     case 'user':
@@ -144,8 +149,21 @@ function areToolListsEqual(
   return prev.every((tool, index) => areToolCallsEqual(tool, next[index]));
 }
 
+const jsonCache = new WeakMap<object, string>();
+
 function stableJson(value: unknown): string {
   if (value === undefined) return '';
+  if (value !== null && typeof value === 'object') {
+    let cached = jsonCache.get(value);
+    if (cached !== undefined) return cached;
+    try {
+      cached = JSON.stringify(value);
+    } catch {
+      cached = String(value);
+    }
+    jsonCache.set(value, cached);
+    return cached;
+  }
   try {
     return JSON.stringify(value);
   } catch {

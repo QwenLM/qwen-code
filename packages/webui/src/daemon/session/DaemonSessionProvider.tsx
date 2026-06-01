@@ -107,6 +107,12 @@ const DaemonWorkspaceEventSignalsContext = createContext<
   DaemonWorkspaceEventSignals | undefined
 >(undefined);
 const TERMINAL_SESSION_HTTP_STATUSES = new Set([401, 403, 404, 410]);
+// Keep enough transcript history for large daemon replay streams so event order
+// and subagent grouping survive replay. Rendering is virtualized, but message
+// normalization still rebuilds from retained blocks today, so this high default
+// is a history-preservation tradeoff rather than a claim that large transcripts
+// are CPU-free. Callers can pass a smaller maxBlocks in constrained contexts.
+const DEFAULT_MAX_BLOCKS = 200_000;
 
 const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   memoryVersion: 0,
@@ -138,6 +144,7 @@ export function DaemonSessionProvider({
   clientId,
   createSessionRequest,
   maxQueued = 1024,
+  maxBlocks = DEFAULT_MAX_BLOCKS,
   suppressOwnUserEcho = true,
   includeRawEvent = false,
   autoConnect = true,
@@ -158,7 +165,10 @@ export function DaemonSessionProvider({
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
 
-  const store = useMemo(() => createDaemonTranscriptStore(), []);
+  const store = useMemo(
+    () => createDaemonTranscriptStore({ maxBlocks }),
+    [maxBlocks],
+  );
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());

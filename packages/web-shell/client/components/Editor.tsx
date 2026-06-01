@@ -12,6 +12,7 @@ import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import {
   acceptCompletion,
   autocompletion,
+  closeCompletion,
   completionStatus,
   startCompletion,
   type CompletionSource,
@@ -23,7 +24,10 @@ import {
   useOptionalWorkspace,
   type UseDaemonFollowupSuggestionReturn,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { slashCompletionSource } from '../completions/slashCompletion';
+import {
+  slashCompletionSource,
+  type SkillInfo,
+} from '../completions/slashCompletion';
 import { createAtCompletionSource } from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
 import { useI18n } from '../i18n';
@@ -42,7 +46,7 @@ interface EditorProps {
   disabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
-  skills?: string[];
+  skills?: SkillInfo[];
   queuedMessages?: string[];
   onPopQueuedMessages?: () => string | null;
   onClearQueuedMessages?: () => boolean;
@@ -60,6 +64,7 @@ export interface EditorHandle {
   blur(): void;
   focus(): void;
   insertText(text: string): void;
+  retryLast(): void;
 }
 
 const editableCompartment = new Compartment();
@@ -155,24 +160,30 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     push,
     navigateUp,
     navigateDown,
+    isNavigating,
     reset,
     getReverseMatches,
+    getLastEntry,
     resetSearch,
   } = promptHistory;
   const historyActionsRef = useRef({
     push,
     navigateUp,
     navigateDown,
+    isNavigating,
     reset,
     getReverseMatches,
+    getLastEntry,
     resetSearch,
   });
   historyActionsRef.current = {
     push,
     navigateUp,
     navigateDown,
+    isNavigating,
     reset,
     getReverseMatches,
+    getLastEntry,
     resetSearch,
   };
   const shellHistoryActionsRef = useRef(shellHistory);
@@ -237,7 +248,17 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
       {
         key: 'Shift-Enter',
-        run: () => false,
+        run: (view) => {
+          view.dispatch(view.state.replaceSelection('\n'));
+          return true;
+        },
+      },
+      {
+        key: 'Ctrl-j',
+        run: (view) => {
+          view.dispatch(view.state.replaceSelection('\n'));
+          return true;
+        },
       },
       {
         key: 'Escape',
@@ -255,13 +276,30 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         run: () => true,
       },
       {
+        key: 'Ctrl-l',
+        run: () => true,
+      },
+      {
+        key: 'Ctrl-y',
+        run: () => true,
+      },
+      {
         key: 'ArrowUp',
         run: (view) => {
-          if (completionStatus(view.state) === 'active') return false;
+          const history = shellModeRef.current
+            ? shellHistoryActionsRef.current
+            : historyActionsRef.current;
+          const isBrowsingHistory = history.isNavigating();
+          if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
+            return false;
+          }
+          if (isBrowsingHistory) {
+            closeCompletion(view);
+          }
           if (view.state.doc.lines > 1) return false;
           if (shellModeRef.current) {
             const current = view.state.doc.toString();
-            const prev = shellHistoryActionsRef.current.navigateUp(current);
+            const prev = history.navigateUp(current);
             if (prev === null) return true;
             view.dispatch({
               changes: { from: 0, to: view.state.doc.length, insert: prev },
@@ -284,7 +322,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             }
           }
           const current = view.state.doc.toString();
-          const prev = historyActionsRef.current.navigateUp(current);
+          const prev = history.navigateUp(current);
           if (prev === null) return false;
           view.dispatch({
             changes: { from: 0, to: view.state.doc.length, insert: prev },
@@ -296,10 +334,19 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       {
         key: 'ArrowDown',
         run: (view) => {
-          if (completionStatus(view.state) === 'active') return false;
+          const history = shellModeRef.current
+            ? shellHistoryActionsRef.current
+            : historyActionsRef.current;
+          const isBrowsingHistory = history.isNavigating();
+          if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
+            return false;
+          }
+          if (isBrowsingHistory) {
+            closeCompletion(view);
+          }
           if (view.state.doc.lines > 1) return false;
           if (shellModeRef.current) {
-            const next = shellHistoryActionsRef.current.navigateDown();
+            const next = history.navigateDown();
             if (next === null) return true;
             view.dispatch({
               changes: { from: 0, to: view.state.doc.length, insert: next },
@@ -307,7 +354,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             });
             return true;
           }
-          const next = historyActionsRef.current.navigateDown();
+          const next = history.navigateDown();
           if (next === null) {
             return onFocusActiveAgentsRef.current?.() ?? false;
           }
@@ -379,7 +426,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     ]);
 
     const slashCompletionRestarter = EditorView.updateListener.of((update) => {
-      if (!update.docChanged || completionStatus(update.state) === 'active') {
+      if (!update.docChanged) {
         return;
       }
       const selection = update.state.selection.main;
@@ -418,6 +465,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           override: completionSources,
           activateOnTyping: true,
           icons: false,
+          optionClass: (completion) =>
+            completion.type === 'skill' ? 'cm-skill-completion' : '',
           aboveCursor: true,
           activateOnCompletion: (completion) =>
             typeof completion.apply === 'string' &&
@@ -553,6 +602,22 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           },
+          '.cm-tooltip-autocomplete ul li.cm-skill-completion': {
+            alignItems: 'flex-start',
+          },
+          '.cm-tooltip-autocomplete ul li.cm-skill-completion .cm-completionLabel':
+            {
+              alignSelf: 'center',
+            },
+          '.cm-tooltip-autocomplete ul li.cm-skill-completion .cm-completionDetail':
+            {
+              whiteSpace: 'normal',
+              display: '-webkit-box',
+              WebkitLineClamp: '2',
+              WebkitBoxOrient: 'vertical',
+              lineHeight: '1.35',
+              maxHeight: '2.7em',
+            },
         }),
       ],
     });
@@ -723,14 +788,25 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     }
   }, []);
 
+  const retryLast = useCallback(() => {
+    const last = historyActionsRef.current.getLastEntry(
+      (e) => !e.startsWith('/') && !e.startsWith('!'),
+    );
+    if (!last) return;
+    const accepted = onSubmitRef.current(last);
+    if (accepted === false) return;
+    setPastedImages([]);
+  }, []);
+
   useImperativeHandle(
     ref,
     () => ({
       blur,
       focus,
       insertText,
+      retryLast,
     }),
-    [blur, focus, insertText],
+    [blur, focus, insertText, retryLast],
   );
 
   const replaceEditorText = useCallback((text: string) => {

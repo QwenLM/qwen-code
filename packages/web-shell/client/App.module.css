@@ -13,7 +13,7 @@
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 14px;
-  line-height: 1.6;
+  line-height: 1.5;
   overflow: hidden;
 }
 
@@ -114,7 +114,7 @@
 }
 
 .contentHasMessages {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
 }
 
 .footer {

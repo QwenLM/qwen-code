@@ -11,6 +11,8 @@ function getModeIndicator(
       return { label: t('mode.plan'), className: styles.modePlan };
     case 'auto-edit':
       return { label: t('mode.auto-edit'), className: styles.modeAutoEdit };
+    case 'auto':
+      return { label: t('mode.auto'), className: styles.modeAuto };
     case 'yolo':
       return { label: t('mode.yolo'), className: styles.modeYolo };
     default:

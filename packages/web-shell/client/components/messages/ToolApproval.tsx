@@ -9,12 +9,22 @@ interface ToolApprovalProps {
   onConfirm: (id: string, selectedOption: string) => void;
 }
 
-function parseTitle(title?: string): { toolName: string; description: string } {
+export function parseTitle(title?: string): {
+  toolName: string;
+  description: string;
+} {
   if (!title) return { toolName: '', description: '' };
   const colonIdx = title.indexOf(': ');
   if (colonIdx > 0) {
+    const prefix = title.slice(0, colonIdx);
+    // Only split CLI-style titles such as "Bash: npm test". Descriptive
+    // permission titles may contain ordinary prose like "(format: auto)";
+    // treating those colons as separators corrupts the header into name/desc.
+    if (!/^[A-Za-z][\w.-]{0,40}$/.test(prefix)) {
+      return { toolName: title, description: '' };
+    }
     return {
-      toolName: title.slice(0, colonIdx),
+      toolName: prefix,
       description: title.slice(colonIdx + 2),
     };
   }
@@ -58,6 +68,21 @@ function getSafeDefaultIndex(options: PermissionRequest['options']): number {
     return saferIdx >= 0 ? saferIdx : 1;
   }
   return 0;
+}
+
+function getOptionI18nKey(
+  option: PermissionRequest['options'][number],
+): string | undefined {
+  if (option.kind === 'allow_once') return 'approval.option.allowOnce';
+  if (option.kind === 'reject_once') return 'approval.option.rejectOnce';
+  if (option.kind === 'allow_always') {
+    if (option.id === 'proceed_always_project')
+      return 'approval.option.allowAlwaysProject';
+    if (option.id === 'proceed_always_user')
+      return 'approval.option.allowAlwaysUser';
+    if (option.id === 'proceed_always') return 'approval.option.allowAllEdits';
+  }
+  return undefined;
 }
 
 export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
@@ -176,19 +201,17 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
       <div className={styles.options}>
         {request.options.map((option, i) => {
           const isSelected = i === selected;
+          const i18nKey = getOptionI18nKey(option);
+          const label = i18nKey ? t(i18nKey) : option.label;
           return (
             <div
               key={option.id}
               className={`${styles.option} ${isSelected ? styles.optionActive : ''}`}
               onClick={() => confirm(option.id)}
-              onMouseEnter={() => {
-                selectedRef.current = i;
-                setSelected(i);
-              }}
             >
               <span className={styles.pointer}>{isSelected ? '›' : ' '}</span>
               <span className={styles.num}>{i + 1}.</span>
-              <span className={styles.label}>{option.label}</span>
+              <span className={styles.label}>{label}</span>
             </div>
           );
         })}

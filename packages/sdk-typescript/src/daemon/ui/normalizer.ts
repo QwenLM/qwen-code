@@ -544,7 +544,7 @@ function normalizeToolUpdate(
 
 function normalizePlanUpdate(
   update: Record<string, unknown>,
-  base: Pick<DaemonUiEvent, 'eventId' | 'originatorClientId' | 'rawEvent'>,
+  base: NormalizedEventBase,
 ): DaemonUiEvent {
   const entries = Array.isArray(update['entries']) ? update['entries'] : [];
   const contentText = capDetails(formatPlanEntries(entries));
@@ -670,6 +670,7 @@ function normalizePermissionRequest(
     event.data['toolCall'] !== undefined
       ? redactSensitiveFields(event.data['toolCall'])
       : undefined;
+
   return [
     {
       ...base,

@@ -15,10 +15,9 @@ import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
-removeDaemonTokenFromUrl();
-
 const DAEMON_BASE_URL = getDaemonBaseUrl();
 const DAEMON_TOKEN = getDaemonToken();
+removeDaemonTokenFromUrl();
 
 const LANGUAGE_STORAGE_KEY = 'qwen-code-web-shell-language';
 const THEME_STORAGE_KEY = 'qwen-code-web-shell-theme';

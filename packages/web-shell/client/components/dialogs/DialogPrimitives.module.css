@@ -110,6 +110,14 @@
   background: var(--bg-tertiary);
 }
 
+.resume-picker-keyboard-only .resume-picker-item:hover {
+  background: transparent;
+}
+
+.resume-picker-keyboard-only .resume-picker-item.selected:hover {
+  background: var(--bg-tertiary);
+}
+
 .resume-picker-item.disabled {
   cursor: default;
   opacity: 0.55;
@@ -122,10 +130,11 @@
 }
 
 .resume-picker-item-prefix {
-  min-width: 12px;
+  min-width: 14px;
   flex-shrink: 0;
   color: var(--accent-color);
   font-weight: 700;
+  font-size: 15px;
   white-space: pre;
 }
 
@@ -135,6 +144,20 @@
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resume-picker-item-number {
+  min-width: 28px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: right;
+}
+
+.resume-picker-item-provider {
+  color: var(--accent-color);
+  font-size: 13px;
+  font-weight: 700;
   white-space: nowrap;
 }
 
@@ -184,6 +207,33 @@
   padding: 6px 12px;
   font-size: 12px;
   color: var(--text-dimmed);
+}
+
+.resume-picker-detail-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  padding-left: 32px;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.resume-picker-detail-row {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.resume-picker-detail-label {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.resume-picker-detail-value {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
 }
 
 .dialog-inline-button,
@@ -286,8 +336,18 @@
 }
 
 .dialog-detail-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   color: var(--text-primary);
   font-weight: 700;
+}
+
+.dialog-detail-shortcut {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--error-color);
+  opacity: 0.8;
 }
 
 .dialog-detail-meta {

@@ -39,8 +39,8 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
 
   const handleToggle = useCallback(
     (tool: DaemonWorkspaceToolStatus) => {
-      setBusyTool(tool.name);
       setMessage(null);
+      setBusyTool(tool.name);
       setEnabled(tool.name, !tool.enabled)
         .then(() => reload())
         .catch((err: unknown) => {
@@ -125,7 +125,7 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
         <button
           className={dp('resume-picker-close')}
           onClick={onClose}
-          title="Close"
+          title={t('common.close')}
         >
           ESC
         </button>
@@ -133,7 +133,7 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
 
       <div className={dp('resume-picker-search')}>
         <span className={dp('resume-picker-search-hint')}>
-          {message || (loading ? t('tools.loading') : `${tools.length} tools`)}
+          {message || (loading ? t('tools.loading') : summary)}
         </span>
       </div>
 
@@ -160,9 +160,11 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
                 {toolLabel(tool)}
               </span>
               <span className={dp('resume-picker-item-badge')}>
-                {tool.enabled
-                  ? t('tools.status.enabled')
-                  : t('tools.status.disabled')}
+                {busyTool === tool.name
+                  ? '...'
+                  : tool.enabled
+                    ? t('tools.status.enabled')
+                    : t('tools.status.disabled')}
               </span>
             </div>
             {tool.displayName && tool.displayName !== tool.name && (
@@ -173,31 +175,6 @@ export function ToolsDialog({ onClose }: ToolsDialogProps) {
                 <div className={dp('dialog-detail-body')}>
                   {tool.description}
                 </div>
-              </div>
-            )}
-            {i === selectedIdx && (
-              <div className={dp('dialog-inline-actions')}>
-                {tool.description && (
-                  <button
-                    className={dp('dialog-inline-button')}
-                    onClick={() => toggleDetails(tool)}
-                  >
-                    {expandedTools.has(tool.name)
-                      ? t('tools.details.hide')
-                      : t('tools.details.show')}
-                  </button>
-                )}
-                <button
-                  className={dp('dialog-inline-button')}
-                  disabled={busyTool === tool.name}
-                  onClick={() => handleToggle(tool)}
-                >
-                  {busyTool === tool.name
-                    ? t('tools.updating')
-                    : tool.enabled
-                      ? t('tools.update.disable')
-                      : t('tools.update.enable')}
-                </button>
               </div>
             )}
           </div>

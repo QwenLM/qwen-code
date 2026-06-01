@@ -5430,3 +5430,128 @@ describe('daemon assist push: followup_suggestion', () => {
     expect(text).toContain('Try running the tests');
   });
 });
+
+describe('permission_request normalization for Agent tools', () => {
+  it('keeps Agent toolCall metadata on permission.request without synthesizing tool.update', () => {
+    const events = normalizeDaemonEvent({
+      id: 100,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        toolCall: {
+          toolCallId: 'call_agent_1',
+          title: 'Query website',
+          status: 'pending',
+          rawInput: {
+            description: 'Query website',
+            prompt: 'fetch data from site',
+            subagent_type: 'Explore',
+          },
+          content: [],
+          kind: 'other',
+          locations: [],
+        },
+        options: [
+          { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'cancel', name: 'Reject', kind: 'reject_once' },
+        ],
+      },
+    } as never);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('permission.request');
+    const permissionEvent = events[0] as Extract<
+      DaemonUiEvent,
+      { type: 'permission.request' }
+    >;
+    expect(permissionEvent.toolCall).toMatchObject({
+      toolCallId: 'call_agent_1',
+      title: 'Query website',
+      rawInput: { subagent_type: 'Explore' },
+    });
+  });
+
+  it('emits only permission.request when toolCall has no subagent_type', () => {
+    const events = normalizeDaemonEvent({
+      id: 101,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-2',
+        toolCall: {
+          toolCallId: 'call_bash_1',
+          title: 'Bash: rm -rf build',
+          status: 'pending',
+          rawInput: { command: 'rm -rf build' },
+        },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      },
+    } as never);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe('permission.request');
+  });
+
+  it('does not create SDK tool blocks from Agent permission_request', () => {
+    let state = createDaemonTranscriptState({ now: 1000 });
+
+    const permEvents = normalizeDaemonEvent({
+      id: 200,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-agent',
+        sessionId: 'sess-1',
+        toolCall: {
+          toolCallId: 'call_agent_x',
+          title: 'Research task',
+          status: 'pending',
+          rawInput: { subagent_type: 'Explore', prompt: 'research' },
+          content: [],
+          kind: 'other',
+        },
+        options: [
+          { optionId: 'proceed_once', name: 'Allow', kind: 'allow_once' },
+        ],
+      },
+    } as never);
+
+    state = reduceDaemonTranscriptEvents(state, permEvents, { now: 1001 });
+
+    const toolBlocks = state.blocks.filter((b) => b.kind === 'tool');
+    expect(toolBlocks).toHaveLength(0);
+
+    const subToolEvents = normalizeDaemonEvent({
+      id: 201,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'call_subtool_1',
+          toolName: 'web_fetch',
+          title: 'Fetch page',
+          status: 'pending',
+          parentToolCallId: 'call_agent_x',
+          subagentType: 'Explore',
+          rawInput: { url: 'https://example.com' },
+        },
+      },
+    } as never);
+
+    state = reduceDaemonTranscriptEvents(state, subToolEvents, { now: 1002 });
+
+    const subToolBlocks = state.blocks.filter(
+      (b) => b.kind === 'tool' && b.toolCallId === 'call_subtool_1',
+    );
+    expect(subToolBlocks).toHaveLength(1);
+    expect(subToolBlocks[0]).toMatchObject({
+      parentToolCallId: 'call_agent_x',
+    });
+    expect((subToolBlocks[0] as { parentBlockId?: string }).parentBlockId).toBe(
+      undefined,
+    );
+  });
+});

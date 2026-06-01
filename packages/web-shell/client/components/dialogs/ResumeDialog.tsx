@@ -124,7 +124,7 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
   );
 
   return (
-    <div className={dp('resume-picker')}>
+    <div className={dp('resume-picker', 'resume-picker-keyboard-only')}>
       {/* Header */}
       <div className={dp('resume-picker-header')}>
         <span className={dp('resume-picker-title')}>{t('resume.title')}</span>
@@ -211,7 +211,6 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
                   onSelect(s.sessionId);
                   onClose();
                 }}
-                onMouseEnter={() => setSelectedIdx(i)}
               >
                 <div className={dp('resume-picker-item-row')}>
                   <span className={dp('resume-picker-item-prefix')}>

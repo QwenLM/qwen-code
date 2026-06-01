@@ -31,6 +31,10 @@
   color: var(--warning-color);
 }
 
+.modeAuto {
+  color: var(--warning-color);
+}
+
 .modeYolo {
   color: var(--error-color);
 }

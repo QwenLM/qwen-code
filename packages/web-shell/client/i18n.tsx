@@ -46,8 +46,14 @@ const EN: Messages = {
   'activeAgents.title': (v) =>
     `Active agents (${v?.visible ?? 0}/${v?.total ?? 0})`,
   'activeAgents.tools': (v) => `${v?.count ?? 0} tools`,
+  'request.cancelled': 'Request cancelled.',
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
+  'approval.option.allowOnce': 'Allow',
+  'approval.option.rejectOnce': 'Reject',
+  'approval.option.allowAllEdits': 'Allow All Edits',
+  'approval.option.allowAlwaysProject': 'Always Allow in project',
+  'approval.option.allowAlwaysUser': 'Always Allow for user',
   'common.back': 'back',
   'common.cancel': 'cancel',
   'common.close': 'close',
@@ -167,8 +173,10 @@ const EN: Messages = {
   'dialog.footer.navOpenMenu': '↑↓ to navigate · Enter to open · Esc to menu',
   'dialog.footer.back': 'Esc to go back',
   'dialog.footer.backClose': 'Esc to close',
-  'dialog.footer.saveClose': '⌘/Ctrl+Enter to save · Esc to close',
-  'dialog.footer.saveMenu': '⌘/Ctrl+Enter to save · Esc to menu',
+  'dialog.footer.saveClose':
+    '↑↓ switch fields · ⌘/Ctrl+Enter to save · Esc to close',
+  'dialog.footer.saveMenu':
+    '↑↓ switch fields · ⌘/Ctrl+Enter to save · Esc to menu',
   'dialog.footer.search': 'Type to search · Enter to commit · Esc to clear',
   'dialog.footer.select': 'Enter to select',
   'editor.noHistory': 'No matching history',
@@ -205,8 +213,14 @@ const EN: Messages = {
   'help.shortcut.pasteImages': 'Paste images',
   'help.shortcut.shell': 'Run shell commands',
   'help.shortcut.togglePanel': 'Toggle this panel',
+  'help.shortcut.retry': 'Retry last request',
+  'help.shortcut.compact': 'Toggle compact mode',
   'help.shortcut.approvals': 'Cycle approval modes',
   'help.shortcut.cancel': 'Close dialogs or cancel operation',
+  'clear.blocked': 'Cannot clear while streaming — cancel first (Esc).',
+  'compact.enabled': 'Compact mode enabled',
+  'compact.disabled': 'Compact mode disabled',
+  'compact.hint': 'Press Ctrl+O to show full tool output',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'commands',
   'help.tab.custom': 'custom-commands',
@@ -246,7 +260,7 @@ const EN: Messages = {
   'local.resume': 'Resume a previous session',
   'local.skills': 'View available skills',
   'local.theme': 'Change theme',
-  'local.tools': 'View tools and descriptions',
+  'local.tools': 'List available tools. Usage: /tools [desc]',
   'loadWarning.commands':
     'Failed to load command list; slash commands may be incomplete.',
   'loadWarning.context':
@@ -318,6 +332,12 @@ const EN: Messages = {
   'memory.write': 'Write memory content',
   'mode.auto': 'Auto mode',
   'mode.auto.desc': 'Automatically decide when approval is needed',
+  'mode.auto.notice':
+    'Auto mode enabled. An LLM classifier evaluates each tool call and auto-approves safe actions, blocks risky ones. To exit: Shift+Tab or /approval-mode default.',
+  'mode.autoApproved': ((v) =>
+    v?.tool
+      ? `Auto-approved: ${v.tool}`
+      : 'Pending tool call auto-approved by mode switch.') as MessageValue,
   'mode.auto-edit': 'Auto-accept edits',
   'mode.auto-edit.desc': 'Automatically approve file read/write operations',
   'mode.default': 'Default mode',
@@ -328,6 +348,8 @@ const EN: Messages = {
   'mode.yolo': 'YOLO mode',
   'mode.yolo.desc': 'Automatically approve all operations',
   'plan.title': 'Plan',
+  'model.contextWindow': 'Context Window',
+  'model.contextWindow.unknown': '(unknown)',
   'model.current': (v) => `current: ${v?.model ?? 'unknown'}`,
   'model.searchHint': 'Press / to search',
   'model.fastHint': 'for suggestions and side tasks',
@@ -346,6 +368,8 @@ const EN: Messages = {
   'resume.title': 'Resume Session',
   'parallelAgents.title': 'Parallel agents',
   'parallelAgents.done': (v) => `${v?.done ?? 0}/${v?.total ?? 0} done`,
+  'skills.available': 'Available skills:',
+  'skills.none': 'No skills are currently available.',
   'skills.empty': 'No skills available.',
   'skills.footer': (v) =>
     v?.name
@@ -372,6 +396,8 @@ const EN: Messages = {
   'todo.title': 'Current tasks',
   'tips.items':
     'Type / to see all available commands.|Use @ to reference file paths.|Press Esc to cancel an in-flight request.|Use Shift+Enter for a newline.|Press ↑↓ to browse message history.',
+  'tools.available': 'Available tools:',
+  'tools.none': 'No tools available.',
   'tools.empty': 'No built-in tools available. Open a session first.',
   'tools.footer': (v) =>
     v?.name
@@ -431,8 +457,14 @@ const ZH: Messages = {
   'activeAgents.title': (v) =>
     `活跃 agents (${v?.visible ?? 0}/${v?.total ?? 0})`,
   'activeAgents.tools': (v) => `${v?.count ?? 0} 个工具`,
+  'request.cancelled': '请求已取消。',
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '应用此更改？',
+  'approval.option.allowOnce': '允许',
+  'approval.option.rejectOnce': '拒绝',
+  'approval.option.allowAllEdits': '允许所有编辑',
+  'approval.option.allowAlwaysProject': '项目级始终允许',
+  'approval.option.allowAlwaysUser': '用户级始终允许',
   'common.back': '返回',
   'common.cancel': '取消',
   'common.close': '关闭',
@@ -541,8 +573,8 @@ const ZH: Messages = {
   'dialog.footer.navOpenMenu': '↑↓ 导航 · Enter 打开 · Esc 返回菜单',
   'dialog.footer.back': 'Esc 返回',
   'dialog.footer.backClose': 'Esc 关闭',
-  'dialog.footer.saveClose': '⌘/Ctrl+Enter 保存 · Esc 关闭',
-  'dialog.footer.saveMenu': '⌘/Ctrl+Enter 保存 · Esc 返回菜单',
+  'dialog.footer.saveClose': '↑↓ 切换输入框 · ⌘/Ctrl+Enter 保存 · Esc 关闭',
+  'dialog.footer.saveMenu': '↑↓ 切换输入框 · ⌘/Ctrl+Enter 保存 · Esc 返回菜单',
   'dialog.footer.search': '输入搜索 · Enter 确认 · Esc 清空',
   'dialog.footer.select': 'Enter 选择',
   'editor.noHistory': '没有匹配的历史记录',
@@ -578,8 +610,14 @@ const ZH: Messages = {
   'help.shortcut.pasteImages': '粘贴图片',
   'help.shortcut.shell': '运行 shell 命令',
   'help.shortcut.togglePanel': '切换此面板',
+  'help.shortcut.retry': '重试上次请求',
+  'help.shortcut.compact': '切换紧凑模式',
   'help.shortcut.approvals': '切换审批模式',
   'help.shortcut.cancel': '关闭弹窗或取消操作',
+  'clear.blocked': '流式输出中无法清屏 — 先按 Esc 取消。',
+  'compact.enabled': '紧凑模式已开启',
+  'compact.disabled': '紧凑模式已关闭',
+  'compact.hint': '按 Ctrl+O 显示完整工具输出',
   'help.subcommands': '子命令',
   'help.tab.commands': '命令',
   'help.tab.custom': '自定义命令',
@@ -619,7 +657,7 @@ const ZH: Messages = {
   'local.resume': '恢复历史会话',
   'local.skills': '查看可用 skills',
   'local.theme': '切换主题',
-  'local.tools': '查看工具及描述',
+  'local.tools': '列出可用工具。用法: /tools [desc]',
   'loadWarning.commands': '命令列表加载失败，斜杠命令可能不完整。',
   'loadWarning.context': '会话上下文加载失败，当前模式可能不准确。',
   'loadWarning.models': '模型列表加载失败，部分模型详情可能不可用。',
@@ -686,6 +724,12 @@ const ZH: Messages = {
   'memory.write': '写入 memory 内容',
   'mode.auto': 'Auto 模式',
   'mode.auto.desc': '自动判断是否需要请求批准',
+  'mode.auto.notice':
+    'Auto 模式已启用。LLM 分类器会评估每个工具调用，自动批准安全操作，拦截危险操作。退出方式：Shift+Tab 或 /approval-mode default。',
+  'mode.autoApproved': ((v) =>
+    v?.tool
+      ? `已自动批准：${v.tool}`
+      : '切换模式后自动批准了待处理的工具调用。') as MessageValue,
   'mode.auto-edit': '自动编辑',
   'mode.auto-edit.desc': '自动批准文件读写操作',
   'mode.default': '默认模式',
@@ -696,6 +740,8 @@ const ZH: Messages = {
   'mode.yolo': 'YOLO 模式',
   'mode.yolo.desc': '自动批准所有操作',
   'plan.title': '计划',
+  'model.contextWindow': '上下文窗口',
+  'model.contextWindow.unknown': '（未知）',
   'model.current': (v) => `当前：${v?.model ?? '未知'}`,
   'model.searchHint': '按 / 搜索',
   'model.fastHint': '用于建议和旁路任务',
@@ -714,6 +760,8 @@ const ZH: Messages = {
   'resume.title': '恢复会话',
   'parallelAgents.title': '并行 Agent',
   'parallelAgents.done': (v) => `${v?.done ?? 0}/${v?.total ?? 0} 完成`,
+  'skills.available': '可用 skills:',
+  'skills.none': '当前没有可用 skill。',
   'skills.empty': '没有可用 skill。',
   'skills.footer': (v) =>
     v?.name
@@ -740,6 +788,8 @@ const ZH: Messages = {
   'todo.title': '当前任务',
   'tips.items':
     '输入 / 查看所有可用命令。|使用 @ 引用文件路径。|按 Esc 取消正在进行的请求。|使用 Shift+Enter 换行。|按 ↑↓ 浏览历史消息。',
+  'tools.available': '可用工具:',
+  'tools.none': '没有可用工具。',
   'tools.empty': '没有可用的内置工具。请先打开一个会话。',
   'tools.footer': (v) =>
     v?.name

@@ -44,10 +44,13 @@ export function mapProviderStatus(
       seen.add(model.modelId);
       models.push({
         id: model.modelId,
+        baseModelId: model.baseModelId,
         label: model.name || model.modelId,
+        authType: provider.authType,
         ...(model.contextLimit !== undefined
           ? { contextWindow: model.contextLimit }
           : {}),
+        ...(model.isRuntime ? { isRuntime: true } : {}),
       });
     }
   }

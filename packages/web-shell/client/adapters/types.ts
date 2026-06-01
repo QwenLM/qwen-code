@@ -49,6 +49,7 @@ export interface PermissionRequest {
   sessionId?: string;
   toolCallId?: string;
   title?: string;
+  toolKind?: string;
   content: ContentBlock[];
   options: PermissionOption[];
   rawInput?: Record<string, unknown>;
@@ -64,5 +65,15 @@ export interface CommandInfo {
 
 export interface ModelInfo {
   id: string;
+  baseModelId?: string;
   label?: string;
+  authType?: string;
+  contextWindow?: number;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  isRuntime?: boolean;
 }

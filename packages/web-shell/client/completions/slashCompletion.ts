@@ -6,6 +6,11 @@ import type {
 import type { CommandInfo } from '../adapters/types';
 import type { WebShellLanguage } from '../i18n';
 
+export interface SkillInfo {
+  name: string;
+  description: string;
+}
+
 interface SubcommandNode {
   name: string;
   description: string;
@@ -109,12 +114,15 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
 function resolveSubcommands(
   cmdName: string,
   parts: string[],
-  dynamicSkills: string[] | undefined,
+  dynamicSkills: SkillInfo[] | undefined,
   language: WebShellLanguage,
 ): SubcommandNode[] | null {
   if (cmdName === 'skills' && parts.length === 0) {
     if (!dynamicSkills || dynamicSkills.length === 0) return null;
-    return dynamicSkills.map((s) => ({ name: s, description: '' }));
+    return dynamicSkills.map((s) => ({
+      name: s.name,
+      description: s.description,
+    }));
   }
 
   const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
@@ -140,7 +148,7 @@ function comparePrefixFirst(a: string, b: string, query: string): number {
 
 export function slashCompletionSource(
   getCommands: () => CommandInfo[],
-  getSkills: () => string[] = () => [],
+  getSkills: () => SkillInfo[] = () => [],
   getLanguage: () => WebShellLanguage = () => 'en',
 ) {
   return (context: CompletionContext): CompletionResult | null => {
@@ -174,19 +182,30 @@ export function slashCompletionSource(
 
       const lp = currentTyping.toLowerCase();
       const prefix = `/${cmdName} ${completedParts.length > 0 ? completedParts.join(' ') + ' ' : ''}`;
-      const options = nodes
+      const filteredNodes = nodes
         .filter((n) => !currentTyping || n.name.toLowerCase().includes(lp))
         .sort((a, b) =>
           currentTyping ? comparePrefixFirst(a.name, b.name, lp) : 0,
-        )
-        .map((n): Completion => {
-          const command = `${prefix}${n.name}`;
-          return {
-            label: n.name,
-            detail: n.description || undefined,
-            apply: `${command} `,
-          };
-        });
+        );
+      const isSkillList = cmdName === 'skills' && completedParts.length === 0;
+      const maxNameLength = isSkillList
+        ? Math.max(...filteredNodes.map((n) => n.name.length), 0)
+        : 0;
+      const options = filteredNodes.map((n): Completion => {
+        const command = `${prefix}${n.name}`;
+        const padLength = Math.max(maxNameLength - n.name.length, 0);
+        return {
+          label: n.name,
+          ...(isSkillList
+            ? {
+                displayLabel: `${n.name}${'\u00a0'.repeat(padLength)}`,
+                type: 'skill',
+              }
+            : {}),
+          detail: n.description || undefined,
+          apply: `${command} `,
+        };
+      });
 
       if (options.length === 0) return null;
 

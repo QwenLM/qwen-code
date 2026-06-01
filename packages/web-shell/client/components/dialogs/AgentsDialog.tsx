@@ -24,6 +24,7 @@ export type AgentsDialogInitialMode =
 
 interface AgentsDialogProps {
   initialMode?: AgentsDialogInitialMode;
+  onMessage?: (text: string, type?: 'status' | 'error') => void;
   onClose: () => void;
 }
 
@@ -55,6 +56,7 @@ function initialScope(mode: AgentsDialogInitialMode): 'workspace' | 'global' {
 
 export function AgentsDialog({
   initialMode = 'menu',
+  onMessage,
   onClose,
 }: AgentsDialogProps) {
   const { t } = useI18n();
@@ -81,6 +83,9 @@ export function AgentsDialog({
     initialScope(initialMode),
   );
   const listRef = useRef<HTMLDivElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const descriptionInputRef = useRef<HTMLInputElement>(null);
+  const systemPromptRef = useRef<HTMLTextAreaElement>(null);
   const directCreateMode =
     initialMode === 'create' ||
     initialMode === 'create-user' ||
@@ -142,6 +147,11 @@ export function AgentsDialog({
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
+  useEffect(() => {
+    if (mode !== 'create') return;
+    window.setTimeout(() => nameInputRef.current?.focus(), 0);
+  }, [mode]);
+
   const loadDetail = useCallback(
     (agent: DaemonWorkspaceAgentSummary) => {
       setDetail(null);
@@ -176,11 +186,13 @@ export function AgentsDialog({
       scope,
     })
       .then((result) => {
+        const msg = t('agent.created', { name: result.agent.name });
+        onMessage?.(msg);
         if (directCreateMode) {
           onClose();
           return;
         }
-        setMessage(t('agent.created', { name: result.agent.name }));
+        setMessage(msg);
         setName('');
         setDescription('');
         setSystemPrompt('');
@@ -197,6 +209,7 @@ export function AgentsDialog({
     directCreateMode,
     name,
     onClose,
+    onMessage,
     reload,
     scope,
     systemPrompt,
@@ -230,7 +243,37 @@ export function AgentsDialog({
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault();
         if (!busy) handleCreate();
+        return;
       }
+
+      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') {
+        return;
+      }
+
+      const target = e.target;
+      if (
+        !(target instanceof HTMLInputElement) &&
+        !(target instanceof HTMLTextAreaElement)
+      ) {
+        return;
+      }
+
+      const fields = [
+        nameInputRef.current,
+        descriptionInputRef.current,
+        systemPromptRef.current,
+      ].filter((field): field is HTMLInputElement | HTMLTextAreaElement =>
+        Boolean(field),
+      );
+      const index = fields.indexOf(target);
+      if (index < 0) return;
+
+      e.preventDefault();
+      const nextIndex =
+        e.key === 'ArrowDown'
+          ? Math.min(index + 1, fields.length - 1)
+          : Math.max(index - 1, 0);
+      fields[nextIndex]?.focus();
     },
     [busy, handleCreate],
   );
@@ -280,12 +323,21 @@ export function AgentsDialog({
         setScope(nextScope);
         setMode('create');
       }
+      if (e.key === 'd' && e.ctrlKey && mode === 'manage' && selected) {
+        e.preventDefault();
+        if (!busy && canDeleteAgent(selected)) {
+          handleDelete(selected);
+        }
+      }
     },
     [
       agents.length,
+      busy,
+      handleDelete,
       initialMode,
       menuItems,
       mode,
+      selected,
       onClose,
       scopeItems,
       selectedIdx,
@@ -382,11 +434,16 @@ export function AgentsDialog({
         <div className={dp('dialog-form')} onKeyDown={handleCreateKeyDown}>
           <label>
             {t('agent.create.name')}
-            <input value={name} onChange={(e) => setName(e.target.value)} />
+            <input
+              ref={nameInputRef}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
           </label>
           <label>
             {t('agent.create.description')}
             <input
+              ref={descriptionInputRef}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
@@ -394,6 +451,7 @@ export function AgentsDialog({
           <label>
             {t('agent.create.prompt')}
             <textarea
+              ref={systemPromptRef}
               className={dp('dialog-textarea')}
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
@@ -449,7 +507,12 @@ export function AgentsDialog({
           <div className={dp('dialog-detail')}>
             {detail ? (
               <>
-                <div className={dp('dialog-detail-title')}>{detail.name}</div>
+                <div className={dp('dialog-detail-title')}>
+                  {detail.name}
+                  {canDeleteAgent(detail) && (
+                    <span className={dp('dialog-detail-shortcut')}>Ctrl+D</span>
+                  )}
+                </div>
                 <div className={dp('dialog-detail-meta')}>
                   {detail.level}
                   {detail.model ? ` · ${detail.model}` : ''}
@@ -461,15 +524,6 @@ export function AgentsDialog({
                   <div className={dp('dialog-detail-meta')}>
                     {t('agent.tools')}: {detail.tools.join(', ')}
                   </div>
-                )}
-                {canDeleteAgent(detail) && (
-                  <button
-                    className={dp('dialog-danger-button')}
-                    disabled={busy}
-                    onClick={() => handleDelete(detail)}
-                  >
-                    {busy ? t('agent.delete.loading') : t('agent.delete')}
-                  </button>
                 )}
               </>
             ) : (
