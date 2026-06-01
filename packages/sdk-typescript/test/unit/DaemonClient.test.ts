@@ -1621,6 +1621,18 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('MCP restart timeout coupling (#4330)', () => {
+    it('SDK default timeout equals server deadline + client headroom', async () => {
+      const { MCP_RESTART_SERVER_DEADLINE_MS, MCP_RESTART_CLIENT_HEADROOM_MS } =
+        await import('@qwen-code/acp-bridge/mcpTimeouts');
+      const expected =
+        MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
+      expect(expected).toBe(330_000);
+      expect(MCP_RESTART_SERVER_DEADLINE_MS).toBe(300_000);
+      expect(MCP_RESTART_CLIENT_HEADROOM_MS).toBeGreaterThanOrEqual(10_000);
+    });
+  });
+
   describe('restartMcpServer (#4175 Wave 4 PR 17)', () => {
     it('POSTs an empty body and returns the typed result on success', async () => {
       const { fetch, calls } = recordingFetch(() =>
