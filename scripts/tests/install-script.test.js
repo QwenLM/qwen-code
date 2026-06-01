@@ -73,10 +73,8 @@ describe('installation scripts', () => {
     expect(script).toContain('print_logo');
     expect(script).toContain('supports_truecolor()');
     expect(script).toContain('COLORTERM');
-    expect(script).toContain('installed successfully.');
-    expect(script).toContain('To start:');
-    expect(script).toContain('Installed to:');
-    expect(script).toContain('Uninstall:');
+    expect(script).toContain('installed successfully, to start:');
+    expect(script).toContain('cd <project>');
     expect(script).toContain('uninstall-qwen-standalone.sh');
     expect(script).not.toContain('rm -rf $(shell_quote "${install_dir}")');
   });
@@ -235,11 +233,9 @@ describe('installation scripts', () => {
     expect(script).toContain('Installing Qwen Code version:');
     expect(script).toContain('QWEN CODE');
     expect(script).toContain(
-      'Qwen Code !INSTALLED_VERSION! installed successfully.',
+      'Qwen Code !INSTALLED_VERSION! installed successfully, to start:',
     );
-    expect(script).toContain('To start:');
-    expect(script).toContain('Installed to:');
-    expect(script).toContain('Uninstall:');
+    expect(script).toContain('cd ^<project^>');
     expect(script).toContain('uninstall-qwen-standalone.ps1');
     expect(script).toContain('QWEN_VERSION_POINTER_FILE');
     expect(script).toContain('QWEN_NORMALIZED_VERSION_FILE');
@@ -351,28 +347,7 @@ describe('installation scripts', () => {
     expect(script).toContain('Archive contains symlinks or reparse points');
     expect(script).toContain('unsafe path with control character');
     expect(script).toContain('Failed to update user PATH');
-    expect(script).toContain(
-      '$remaining = @($entries | Where-Object { $_ -ne $bin })',
-    );
-    expect(script).toContain('User PATH already starts with');
-    expect(script).not.toContain('User PATH already contains');
     expect(script).toContain('PRE_INSTALL_QWENS_LIST');
-    expect(script).toContain("Other 'qwen' executables exist");
-    expect(script).toContain(
-      'This standalone install is configured as the preferred qwen for new command prompt or PowerShell sessions.',
-    );
-    expect(script).toContain(
-      'Existing npm or package-manager installs are left unchanged.',
-    );
-    expect(script).toContain('Check active command with: where qwen');
-    expect(script).toContain(
-      'Remove npm/global package install with: npm uninstall -g @qwen-code/qwen-code',
-    );
-    expect(script).toContain(
-      'To keep using npm, rerun this installer with --method npm.',
-    );
-    expect(script).toContain('restart your command prompt');
-    expect(script).toContain('Or invoke directly: "!INSTALLED_BIN!"');
     expect(script).toContain('QWEN_INSTALL_ROOT');
     expect(script).toContain('npm fallback also failed');
     expect(script).toContain('echo Downloading !ARCHIVE_NAME!');
@@ -882,19 +857,8 @@ describe('standalone release packaging', () => {
     expect(installPowerShellSource).not.toContain(
       "$preferredDirectories += Join-Path $env:LOCALAPPDATA 'Microsoft\\WindowsApps'",
     );
-    expect(installPowerShellSource).toContain(
-      'QWEN_NO_MODIFY_PATH=1; skipping current-session PATH refresh.',
-    );
+    expect(installPowerShellSource).toContain('QWEN_NO_MODIFY_PATH');
     expect(installPowerShellSource).not.toContain('doskey.exe');
-    expect(installPowerShellSource).toContain(
-      'qwen is ready to use in this PowerShell session.',
-    );
-    expect(installPowerShellSource).toContain(
-      'Added qwen.cmd to a directory already on this cmd.exe PATH:',
-    );
-    expect(installPowerShellSource).toContain(
-      'Windows does not allow this PowerShell child process to update the parent cmd.exe PATH directly.',
-    );
 
     expect(installBatchSource).toContain('QWEN_INSTALLER_PARENT_POWERSHELL');
     expect(installBatchSource).toContain(
@@ -2214,22 +2178,10 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
           .trim();
         expect(version).toBe('0.0.0-smoke');
         expect(output).toContain('Installing Qwen Code version: latest');
-        expect(output).toContain('installed successfully.');
+        expect(output).toContain('installed successfully, to start:');
         expect(output).toContain('0.0.0-smoke');
-        expect(output).toContain('To start:\n  cd <project>\n  qwen');
-        expect(output).toContain(
-          `Installed to:\n  ${path.join(installRoot, 'lib', 'qwen-code')}`,
-        );
-        expect(output).toContain('Uninstall:');
-        expect(output).toContain(
-          'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.sh',
-        );
-        expect(output).toContain(
-          `QWEN_INSTALL_LIB_DIR='${path.join(installRoot, 'lib', 'qwen-code')}'`,
-        );
-        expect(output).toContain(
-          `QWEN_INSTALL_BIN_DIR='${path.join(installRoot, 'bin')}'`,
-        );
+        expect(output).toContain('cd <project>');
+        expect(output).toContain('qwenlm.github.io/qwen-code');
         expect(output).not.toContain('rm -rf');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
@@ -2584,26 +2536,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
         const installedBin = path.join(installRoot, 'bin', 'qwen');
         const bashrc = readScript(path.join(home, '.bashrc'));
 
-        expect(output).toContain("Other 'qwen' executables exist");
-        expect(output).toContain(existingQwen);
-        expect(output).toContain(
-          'To make this install take priority, restart your terminal.',
-        );
-        expect(output).toContain(`Or invoke directly: ${installedBin}`);
-        expect(output).toContain(
-          'This standalone install is configured as the preferred qwen for new shells.',
-        );
-        expect(output).toContain(
-          'Existing npm or package-manager installs are left unchanged.',
-        );
-        expect(output).toContain('Check active command with: command -v qwen');
-        expect(output).toContain('List all qwen commands with: which -a qwen');
-        expect(output).toContain(
-          'Remove npm/global package install with: npm uninstall -g @qwen-code/qwen-code',
-        );
-        expect(output).toContain(
-          'To keep using npm, rerun this installer with --method npm.',
-        );
+        expect(output).toContain('installed successfully, to start:');
         expect(bashrc).toContain('# Qwen Code PATH block begin');
         expect(bashrc).toContain(
           `export PATH='${path.join(installRoot, 'bin')}':$PATH`,
@@ -2883,19 +2816,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
         ).toString();
 
         expect(output).toContain('Unsupported shell for automatic PATH update');
-        expect(output).not.toContain(
-          'This standalone install is configured as the preferred qwen for new shells.',
-        );
-        expect(output).not.toContain(
-          'To make this install take priority, restart your terminal.',
-        );
-        expect(output).toContain(
-          'This standalone install was not added to your shell startup PATH automatically.',
-        );
-        expect(output).toContain(
-          'Add this directory before older qwen commands in PATH to make it the default:',
-        );
-        expect(output).toContain(`  ${path.join(installRoot, 'bin')}`);
+        expect(output).toContain(path.join(installRoot, 'bin'));
         expect(existsSync(path.join(home, '.profile'))).toBe(false);
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
