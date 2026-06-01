@@ -46,6 +46,7 @@ const mockBuildBtwPrompt = vi.hoisted(() =>
 );
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
+  BTW_MAX_INPUT_LENGTH: 4096,
   runForkedAgent: mockRunForkedAgent,
   getCacheSafeParams: mockGetCacheSafeParams,
   buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
@@ -101,6 +102,16 @@ describe('btwCommand', () => {
       type: 'message',
       messageType: 'error',
       content: 'Please provide a question. Usage: /btw <your question>',
+    });
+  });
+
+  it('should return error when question exceeds BTW_MAX_INPUT_LENGTH', async () => {
+    const result = await btwCommand.action!(mockContext, 'x'.repeat(4097));
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('too long'),
     });
   });
 
@@ -176,45 +187,31 @@ describe('btwCommand', () => {
       );
     });
 
-    it('should fall back to getCacheSafeParams when buildBtwCacheSafeParams returns null', async () => {
+    it('should error when buildBtwCacheSafeParams returns null (no cross-session fallback)', async () => {
       mockBuildBtwCacheSafeParams.mockReturnValue(null);
-      mockGetCacheSafeParams.mockReturnValue({
-        generationConfig: { systemInstruction: 'saved' },
-        history: [],
-        model: 'saved-model',
-        version: 1,
-      });
-      mockRunForkedAgent.mockResolvedValue({
-        text: 'answer',
-        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
-      });
 
       await btwCommand.action!(mockContext, 'how ?');
       await flushPromises();
 
       expect(mockBuildBtwCacheSafeParams).toHaveBeenCalled();
-      expect(mockGetCacheSafeParams).toHaveBeenCalled();
-      expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
+      expect(mockRunForkedAgent).not.toHaveBeenCalled();
+      // Interactive mode: error is pushed via addItem
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         expect.objectContaining({
-          cacheSafeParams: expect.objectContaining({
-            model: 'saved-model',
-          }),
+          type: MessageType.ERROR,
+          text: expect.stringContaining('No conversation context'),
         }),
+        expect.any(Number),
       );
     });
 
-    it('should prefer buildBtwCacheSafeParams result over getCacheSafeParams', async () => {
+    it('should use buildBtwCacheSafeParams only (no getCacheSafeParams fallback)', async () => {
       mockBuildBtwCacheSafeParams.mockReturnValue({
         generationConfig: { systemInstruction: 'live' },
         history: [{ role: 'user', parts: [{ text: 'live msg' }] }],
         model: 'live-model',
         version: 0,
-      });
-      mockGetCacheSafeParams.mockReturnValue({
-        generationConfig: { systemInstruction: 'stale' },
-        history: [],
-        model: 'stale-model',
-        version: 99,
       });
       mockRunForkedAgent.mockResolvedValue({
         text: 'answer',
@@ -466,7 +463,6 @@ describe('btwCommand', () => {
 
     it('should return error when no cache params available', async () => {
       mockBuildBtwCacheSafeParams.mockReturnValue(null);
-      mockGetCacheSafeParams.mockReturnValue(null);
 
       const acpContext = createMockCommandContext({
         executionMode: 'acp',
@@ -478,7 +474,8 @@ describe('btwCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Failed to answer btw question: No conversation context available for /btw',
+        content:
+          'Failed to answer btw question: No conversation context available for /btw',
       });
     });
 

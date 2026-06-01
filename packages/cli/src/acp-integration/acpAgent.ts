@@ -8,9 +8,9 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
+  BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
   buildBtwPrompt,
-  getCacheSafeParams,
   clearCachedCredentialFile,
   createDebugLogger,
   generateSessionRecap,
@@ -2564,31 +2564,33 @@ class QwenAgent implements Agent {
         if (
           typeof question !== 'string' ||
           !question.trim() ||
-          question.length > 4096
+          question.length > BTW_MAX_INPUT_LENGTH
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'Invalid or missing question (max 4096 chars)',
+            `Invalid or missing question (max ${BTW_MAX_INPUT_LENGTH} chars)`,
           );
         }
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
-        const cacheSafeParams =
-          buildBtwCacheSafeParams(config) ?? getCacheSafeParams();
+        const cacheSafeParams = buildBtwCacheSafeParams(config);
         if (!cacheSafeParams) {
+          debugLogger.debug(`btw: no cacheSafeParams for session=${sessionId}`);
           return { sessionId, answer: null };
         }
+        const childSignal = AbortSignal.timeout(BTW_CHILD_TIMEOUT_MS);
         let result;
         try {
           result = await runForkedAgent({
             config,
             userMessage: buildBtwPrompt(question.trim()),
             cacheSafeParams,
-            abortSignal: AbortSignal.timeout(BTW_CHILD_TIMEOUT_MS),
+            abortSignal: childSignal,
           });
         } catch (err) {
-          if (err instanceof DOMException && err.name === 'TimeoutError') {
+          if (childSignal.aborted) {
             throw RequestError.internalError(
+              undefined,
               'Side question timed out after 55s',
             );
           }

@@ -14,9 +14,9 @@ import { MessageType } from '../types.js';
 import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
 import {
+  BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
   buildBtwPrompt,
-  getCacheSafeParams,
   runForkedAgent,
 } from '@qwen-code/qwen-code-core';
 
@@ -30,10 +30,9 @@ function formatBtwError(error: unknown): string {
 function getBtwCacheSafeParams(context: CommandContext) {
   const { config } = context.services;
   if (config) {
-    const params = buildBtwCacheSafeParams(config);
-    if (params) return params;
+    return buildBtwCacheSafeParams(config);
   }
-  return getCacheSafeParams();
+  return null;
 }
 
 /**
@@ -86,6 +85,16 @@ export const btwCommand: SlashCommand = {
         type: 'message',
         messageType: 'error',
         content: t('Please provide a question. Usage: /btw <your question>'),
+      };
+    }
+
+    if (question.length > BTW_MAX_INPUT_LENGTH) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Question too long (max {{max}} chars)', {
+          max: String(BTW_MAX_INPUT_LENGTH),
+        }),
       };
     }
 

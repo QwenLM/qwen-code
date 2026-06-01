@@ -10,6 +10,9 @@ import { createDebugLogger } from './debugLogger.js';
 
 const logger = createDebugLogger('btw');
 
+/** Maximum input length (chars) accepted by btw routes and slash command. */
+export const BTW_MAX_INPUT_LENGTH = 4096;
+
 export function buildBtwPrompt(question: string): string {
   return [
     '<system-reminder>',
