@@ -36,6 +36,17 @@ function stripErrorTags(content: string | undefined): string | undefined {
     .trim()
 }
 
+const TERMINAL_MISSING_TOOL_RESULT = 'Tool result was not recorded.'
+
+function hasTerminalMissingToolResult(turn: AssistantTurn): boolean {
+  return turn.activities.some(activity =>
+    activity.type === 'tool' &&
+    activity.status === 'error' &&
+    (activity.content === TERMINAL_MISSING_TOOL_RESULT ||
+      activity.error === TERMINAL_MISSING_TOOL_RESULT)
+  )
+}
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -383,6 +394,11 @@ export function groupMessagesByTurn(messages: Message[]): Turn[] {
         currentTurn.isComplete = true
       }
 
+      if (!interrupted && hasTerminalMissingToolResult(currentTurn)) {
+        currentTurn.isStreaming = false
+        currentTurn.isComplete = true
+      }
+
       // If no response but we have intermediate text, promote the last one to response
       // Don't do this for interrupted turns - respect user interruptions
       // Don't do this for turns with plans - the plan is the final output
@@ -646,6 +662,125 @@ export function groupMessagesByTurn(messages: Message[]): Turn[] {
   flushCurrentTurn()
 
   return turns
+}
+
+function findSingleChangedMessageIndex(
+  previousMessages: Message[],
+  nextMessages: Message[]
+): number | undefined {
+  if (previousMessages.length !== nextMessages.length) return undefined
+
+  let changedIndex: number | undefined
+  for (let index = 0; index < previousMessages.length; index++) {
+    if (previousMessages[index] === nextMessages[index]) continue
+    if (changedIndex !== undefined) return undefined
+    changedIndex = index
+  }
+
+  return changedIndex
+}
+
+function hasOnlyContentChanged(previousMessage: Message, nextMessage: Message): boolean {
+  const previousRecord = previousMessage as unknown as Record<string, unknown>
+  const nextRecord = nextMessage as unknown as Record<string, unknown>
+  const keys = new Set([...Object.keys(previousRecord), ...Object.keys(nextRecord)])
+  keys.delete('content')
+
+  for (const key of keys) {
+    if (!Object.is(previousRecord[key], nextRecord[key])) return false
+  }
+
+  return !Object.is(previousMessage.content, nextMessage.content)
+}
+
+function isStreamingAssistantContentUpdate(
+  previousMessage: Message,
+  nextMessage: Message
+): boolean {
+  return previousMessage.role === 'assistant' &&
+    nextMessage.role === 'assistant' &&
+    nextMessage.isStreaming === true &&
+    typeof previousMessage.content === 'string' &&
+    typeof nextMessage.content === 'string' &&
+    hasOnlyContentChanged(previousMessage, nextMessage)
+}
+
+function patchAssistantTurnForStreamingMessage(
+  turn: AssistantTurn,
+  messageId: string,
+  nextContent: string
+): AssistantTurn | undefined {
+  if (turn.response?.messageId === messageId) {
+    return {
+      ...turn,
+      response: {
+        ...turn.response,
+        text: nextContent,
+        isStreaming: true,
+      },
+      isStreaming: true,
+      isComplete: false,
+    }
+  }
+
+  const activityIndex = turn.activities.findIndex(activity => activity.id === messageId)
+  if (activityIndex === -1) return undefined
+
+  const activities = [...turn.activities]
+  const activity = activities[activityIndex]
+  if (!activity) return undefined
+
+  activities[activityIndex] = {
+    ...activity,
+    content: nextContent,
+    status: 'running',
+  }
+
+  return {
+    ...turn,
+    activities,
+    isStreaming: true,
+    isComplete: false,
+  }
+}
+
+/**
+ * Reuses grouped turns for the common text_delta path.
+ *
+ * The renderer receives frequent updates where the only message change is the
+ * content of one streaming assistant message. Re-grouping the whole history for
+ * that case is unnecessary, so this patches the matching turn in place and lets
+ * callers fall back to groupMessagesByTurn for every other shape change.
+ */
+export function updateGroupedTurnsForStreamingMessage(
+  previousMessages: Message[],
+  nextMessages: Message[],
+  previousTurns: Turn[]
+): Turn[] | undefined {
+  const changedIndex = findSingleChangedMessageIndex(previousMessages, nextMessages)
+  if (changedIndex === undefined) return undefined
+
+  const previousMessage = previousMessages[changedIndex]
+  const nextMessage = nextMessages[changedIndex]
+  if (!previousMessage || !nextMessage) return undefined
+  if (!isStreamingAssistantContentUpdate(previousMessage, nextMessage)) return undefined
+
+  const messageId = nextMessage.id
+  const nextContent = nextMessage.content
+
+  for (let turnIndex = previousTurns.length - 1; turnIndex >= 0; turnIndex--) {
+    const turn = previousTurns[turnIndex]
+    if (turn?.type !== 'assistant') continue
+
+    const patchedTurn = patchAssistantTurnForStreamingMessage(turn, messageId, nextContent)
+    if (!patchedTurn) continue
+
+    const nextTurns = [...previousTurns]
+    nextTurns[turnIndex] = patchedTurn
+    return nextTurns
+  }
+
+  return undefined
 }
 
 /**

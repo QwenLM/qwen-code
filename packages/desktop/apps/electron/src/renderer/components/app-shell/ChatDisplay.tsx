@@ -48,6 +48,7 @@ import {
   TurnCard,
   UserMessageBubble,
   groupMessagesByTurn,
+  updateGroupedTurnsForStreamingMessage,
   formatTurnAsMarkdown,
   formatActivityAsMarkdown,
   getAssistantTurnUiKey,
@@ -126,6 +127,36 @@ function getTurnKey(turn: Turn): string {
   if (turn.type === 'system') return `system-${turn.message.id}`
   if (turn.type === 'auth-request') return `auth-${turn.message.id}`
   return `turn-${turn.turnId}-${turn.timestamp}`
+}
+
+const EMPTY_MESSAGES: Message[] = []
+
+function useGroupedTurns(messages?: Message[], cacheKey?: string): Turn[] {
+  const messagesForGrouping = messages ?? EMPTY_MESSAGES
+  const cacheRef = React.useRef<{
+    cacheKey?: string
+    messages: Message[]
+    turns: Turn[]
+  } | null>(null)
+
+  return React.useMemo(() => {
+    const previous = cacheRef.current
+    const turns = previous && previous.cacheKey === cacheKey
+      ? updateGroupedTurnsForStreamingMessage(
+          previous.messages,
+          messagesForGrouping,
+          previous.turns
+        ) ?? groupMessagesByTurn(messagesForGrouping)
+      : groupMessagesByTurn(messagesForGrouping)
+
+    cacheRef.current = {
+      cacheKey,
+      messages: messagesForGrouping,
+      turns,
+    }
+
+    return turns
+  }, [messagesForGrouping, cacheKey])
 }
 
 interface ParsedContextUsage {
@@ -696,17 +727,17 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     return count
   }, [])
 
+  const allTurns = useGroupedTurns(session?.messages, session?.id)
+
   // Find ALL individual match occurrences (not just turns)
   // Returns array with unique matchId for each occurrence
   const matchingOccurrences = useMemo(() => {
-    if (!searchQuery.trim() || !session?.messages) return []
-    const startTime = performance.now()
+    if (!searchQuery.trim()) return []
     const query = searchQuery.toLowerCase()
-    const turns = groupMessagesByTurn(session.messages)
     const matches: { matchId: string; turnId: string; turnIndex: number; matchIndexInTurn: number }[] = []
 
-    for (let turnIndex = 0; turnIndex < turns.length; turnIndex++) {
-      const turn = turns[turnIndex]
+    for (let turnIndex = 0; turnIndex < allTurns.length; turnIndex++) {
+      const turn = allTurns[turnIndex]
       let textContent = ''
       let turnId = ''
 
@@ -743,7 +774,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
       }
     }
     return matches
-  }, [searchQuery, session?.messages, countOccurrences])
+  }, [searchQuery, allTurns, countOccurrences])
 
   // Auto-expand pagination when search is active to show all matching turns
   // This ensures match count is stable and all matches are highlightable from the start
@@ -755,7 +786,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
       (min, m) => m.turnIndex < min ? m.turnIndex : min,
       matchingOccurrences[0]!.turnIndex
     )
-    const totalTurns = groupMessagesByTurn(session?.messages || []).length
+    const totalTurns = allTurns.length
 
     // Calculate how many turns we need to show to include all matches
     // totalTurns - visibleTurnCount = startIndex, so we need visibleTurnCount = totalTurns - earliestMatchTurnIndex + buffer
@@ -764,7 +795,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     if (requiredVisibleCount > visibleTurnCount) {
       setVisibleTurnCount(requiredVisibleCount)
     }
-  }, [isSearchActive, matchingOccurrences, session?.messages, visibleTurnCount])
+  }, [isSearchActive, matchingOccurrences, allTurns.length, visibleTurnCount])
 
   // Extract unique turn IDs that have matches (for highlighting)
   const matchingTurnIds = useMemo(() => {
@@ -1448,12 +1479,6 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     }
     return undefined
   }, [pendingPermission, pendingCredential])
-
-  // Memoize turn grouping - avoids O(n) iteration on every render/keystroke
-  const allTurns = React.useMemo(() => {
-    if (!session) return []
-    return groupMessagesByTurn(session.messages)
-  }, [session?.messages])
 
   const latestUserMessageId = React.useMemo(() => {
     if (!session) return undefined
