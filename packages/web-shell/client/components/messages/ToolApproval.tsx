@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { isEditableTarget } from '../../utils/dom';
@@ -70,6 +70,36 @@ function getSafeDefaultIndex(options: PermissionRequest['options']): number {
   return 0;
 }
 
+function getOptionRank(option: PermissionRequest['options'][number]): number {
+  if (option.kind === 'allow_once') return 0;
+  if (
+    option.kind === 'allow_always' &&
+    option.id === 'proceed_always_project'
+  ) {
+    return 1;
+  }
+  if (option.kind === 'allow_always' && option.id === 'proceed_always_user') {
+    return 2;
+  }
+  if (option.kind === 'allow_always') return 3;
+  if (option.kind === 'reject_once' || option.kind === 'reject_always') {
+    return 4;
+  }
+  return 5;
+}
+
+function orderPermissionOptions(
+  options: PermissionRequest['options'],
+): PermissionRequest['options'] {
+  return options
+    .map((option, index) => ({ option, index }))
+    .sort((a, b) => {
+      const rankDelta = getOptionRank(a.option) - getOptionRank(b.option);
+      return rankDelta === 0 ? a.index - b.index : rankDelta;
+    })
+    .map(({ option }) => option);
+}
+
 function getOptionI18nKey(
   option: PermissionRequest['options'][number],
 ): string | undefined {
@@ -87,8 +117,12 @@ function getOptionI18nKey(
 
 export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   const { t } = useI18n();
+  const displayOptions = useMemo(
+    () => orderPermissionOptions(request.options),
+    [request.options],
+  );
   const [selected, setSelected] = useState(() =>
-    getSafeDefaultIndex(request.options),
+    getSafeDefaultIndex(orderPermissionOptions(request.options)),
   );
   const requestRef = useRef(request);
   requestRef.current = request;
@@ -97,7 +131,9 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
   const interactedRef = useRef(false);
 
   useEffect(() => {
-    const safeDefaultIndex = getSafeDefaultIndex(requestRef.current.options);
+    const safeDefaultIndex = getSafeDefaultIndex(
+      orderPermissionOptions(requestRef.current.options),
+    );
     submittedRef.current = false;
     interactedRef.current = false;
     selectedRef.current = safeDefaultIndex;
@@ -120,7 +156,8 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
     (e: KeyboardEvent) => {
       if (e.defaultPrevented || isEditableTarget(e.target)) return;
       const currentRequest = requestRef.current;
-      const optCount = currentRequest.options.length;
+      const currentOptions = orderPermissionOptions(currentRequest.options);
+      const optCount = currentOptions.length;
       if (e.key === 'ArrowUp' || e.key === 'k') {
         e.preventDefault();
         interactedRef.current = true;
@@ -143,7 +180,7 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
           interactedRef.current = true;
           return;
         }
-        const option = currentRequest.options[selectedRef.current];
+        const option = currentOptions[selectedRef.current];
         if (option) confirm(option.id);
       } else if (e.key === 'Escape') {
         e.preventDefault();
@@ -156,7 +193,7 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
         if (idx < optCount) {
           e.preventDefault();
           interactedRef.current = true;
-          confirm(currentRequest.options[idx].id);
+          confirm(currentOptions[idx].id);
         }
       }
     },
@@ -188,7 +225,7 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
         <div className={styles.code}>
           <pre className={styles.codeBlock}>{command}</pre>
         </div>
-      ) : contentText ? (
+      ) : contentText && contentText !== request.title ? (
         <pre className={styles.content}>{contentText}</pre>
       ) : null}
 
@@ -199,7 +236,7 @@ export function ToolApproval({ request, onConfirm }: ToolApprovalProps) {
       </div>
 
       <div className={styles.options}>
-        {request.options.map((option, i) => {
+        {displayOptions.map((option, i) => {
           const isSelected = i === selected;
           const i18nKey = getOptionI18nKey(option);
           const label = i18nKey ? t(i18nKey) : option.label;

@@ -1,9 +1,10 @@
 .approval {
-  margin: 4px 14px;
-  padding: 8px 0 8px 12px;
+  margin: 4px 0px 4px 14px;
+  padding: 8px 8px 8px 12px;
   border: 1px solid var(--border-color);
   font-family: var(--font-mono, monospace);
   font-size: 13px;
+  border-radius: var(--radius);
 }
 
 .header {
@@ -11,20 +12,33 @@
   align-items: baseline;
   gap: 8px;
   margin-bottom: 6px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .icon {
   font-weight: 700;
   color: var(--warning-color);
+  flex-shrink: 0;
 }
 
 .name {
   font-weight: 700;
   color: var(--text-primary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .desc {
   color: var(--text-secondary);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .content {

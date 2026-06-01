@@ -62,13 +62,16 @@
   display: grid;
   grid-template-columns: minmax(92px, 140px) minmax(0, 1fr);
   gap: 8px;
-  align-items: baseline;
+  align-items: start;
   min-width: 0;
+  line-height: 1.35;
 }
 
 .shortcutKey {
   color: var(--accent-color);
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .shortcutDesc {
