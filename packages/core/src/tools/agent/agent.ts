@@ -1582,7 +1582,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             `[Agent] getCurrentBranch failed at ${projectRoot}: ${error}`,
           );
         }
-        const created = await wtService.createUserWorktree(slug, parentBranch);
+        const created = await wtService.createUserWorktree(slug, parentBranch, {
+          symlinkDirectories: this.config.getWorktreeSymlinkDirectories(),
+        });
         if (!created.success || !created.worktree) {
           return failWorktreeProvisioning(
             `Failed to create isolation worktree: ${created.error ?? 'unknown error'}`,

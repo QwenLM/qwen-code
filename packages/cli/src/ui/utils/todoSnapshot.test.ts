@@ -234,7 +234,7 @@ describe('getStickyTodos', () => {
 });
 
 describe('sticky todo layout helpers', () => {
-  it('keeps the layout key stable for status-only updates', () => {
+  it('changes the layout key for status-only updates', () => {
     const pendingTodos = [
       {
         id: 'todo-1',
@@ -250,11 +250,38 @@ describe('sticky todo layout helpers', () => {
       },
     ];
 
-    expect(getStickyTodosLayoutKey(pendingTodos, 64, 5)).toBe(
+    expect(getStickyTodosLayoutKey(pendingTodos, 64, 5)).not.toBe(
       getStickyTodosLayoutKey(inProgressTodos, 64, 5),
     );
     expect(getStickyTodosRenderKey(pendingTodos)).not.toBe(
       getStickyTodosRenderKey(inProgressTodos),
+    );
+  });
+
+  it('uses the rendered open todos for the layout key', () => {
+    const todos = [
+      {
+        id: 'todo-1',
+        content: 'Finished task',
+        status: 'completed' as const,
+      },
+      {
+        id: 'todo-2',
+        content: 'Active task',
+        status: 'in_progress' as const,
+      },
+      {
+        id: 'todo-3',
+        content: 'Pending task',
+        status: 'pending' as const,
+      },
+    ];
+
+    expect(getStickyTodosLayoutKey(todos, 64, 5)).toBe(
+      getStickyTodosLayoutKey(todos.slice(1), 64, 5),
+    );
+    expect(getStickyTodosLayoutKey(todos, 64, 1)).not.toBe(
+      getStickyTodosLayoutKey(todos, 64, 2),
     );
   });
 

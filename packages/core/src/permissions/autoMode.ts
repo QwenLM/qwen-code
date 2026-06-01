@@ -25,6 +25,7 @@ import {
   getAllGeminiMdFilenames,
   LOCAL_CONTEXT_FILENAME,
 } from '../memory/const.js';
+import type { PermissionDeniedReason } from '../hooks/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -402,6 +403,25 @@ export function applyAutoModeDecision(
       return { kind: 'fallback' };
     }
   }
+}
+
+export function shouldFirePermissionDeniedForAutoMode(
+  decision: AutoModeDecision,
+  outcome: AutoModeOutcome,
+): decision is Extract<AutoModeDecision, { via: 'classifier' }> {
+  // The type predicate narrows callers to classifier decisions so reason
+  // mapping can safely read classifier-only fields such as `unavailable`.
+  return (
+    decision.via === 'classifier' &&
+    decision.shouldBlock &&
+    outcome.kind === 'blocked'
+  );
+}
+
+export function getAutoModePermissionDeniedReason(
+  decision: Extract<AutoModeDecision, { via: 'classifier' }>,
+): PermissionDeniedReason {
+  return decision.unavailable ? 'classifier_unavailable' : 'classifier_blocked';
 }
 
 /**

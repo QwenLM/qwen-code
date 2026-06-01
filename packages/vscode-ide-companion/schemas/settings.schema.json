@@ -637,12 +637,12 @@
         "enableManagedAutoDream": {
           "description": "Enable automatic consolidation (dream) of collected memories.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "enableAutoSkill": {
           "description": "Enable background review for reusable project skills after tool-heavy sessions.",
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
@@ -849,6 +849,17 @@
           "description": "The number of lines to keep when truncating tool output.",
           "type": "number",
           "default": 1000
+        },
+        "computerUse": {
+          "description": "Cross-platform desktop automation via the upstream open-computer-use MCP server. Tools: list_apps, get_app_state, click, type_text, scroll, drag, press_key, perform_secondary_action, set_value. On first invocation, the upstream binary is fetched via npx and the user is walked through macOS Accessibility / Screen Recording permissions if needed.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "When enabled (default), the 9 computer_use__* tools are registered as deferred built-ins.",
+              "type": "boolean",
+              "default": true
+            }
+          }
         }
       }
     },
@@ -2272,6 +2283,19 @@
           "description": "Generate a short LLM-based label after each tool batch completes. In compact mode the label replaces the generic `Tool × N` header; in full mode it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.",
           "type": "boolean",
           "default": true
+        }
+      }
+    },
+    "worktree": {
+      "description": "Configuration for general-purpose git worktrees created by the CLI (the `enter_worktree` tool, the `agent isolation: \"worktree\"` parameter, and the startup `--worktree` flag). Does NOT affect Agent Arena worktrees — see `agents.arena.worktreeBaseDir` for those.",
+      "type": "object",
+      "properties": {
+        "symlinkDirectories": {
+          "description": "Directories under the main repository to symlink into every general-purpose worktree on creation. Useful for sharing large opt-in dirs like `node_modules` so the model can run tests / builds inside the worktree without a fresh install. Paths must be relative to the repo root; absolute paths, anything containing `..`, and any path inside `.git` or `.qwen` (the CLI-managed metadata tree, which contains the worktrees directory itself) are rejected. Missing source dirs and existing destination paths are silently skipped (no overwrite, no failure).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },

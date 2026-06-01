@@ -12,8 +12,10 @@ import {
   SAFE_TOOL_ALLOWLIST,
   evaluateAutoMode,
   formatClassifierBlockMessage,
+  getAutoModePermissionDeniedReason,
   isAutoModeProtectedWritePath,
   isInSafeToolAllowlist,
+  shouldFirePermissionDeniedForAutoMode,
   passesAcceptEditsFastPath,
   shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
@@ -817,6 +819,55 @@ describe('formatClassifierBlockMessage', () => {
     ).toBe(
       'Auto mode classifier unavailable; action blocked for safety\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
     );
+  });
+});
+
+// ─── PermissionDenied hook gating ────────────────────────────────────────
+
+describe('PermissionDenied hook gating', () => {
+  const classifierBlock = {
+    via: 'classifier' as const,
+    shouldBlock: true,
+    reason: 'Dangerous shell command',
+    unavailable: false,
+    stage: 'fast' as const,
+    durationMs: 20,
+  };
+
+  it('fires only for classifier blocks that produce a blocked outcome', () => {
+    expect(
+      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
+        kind: 'blocked',
+        errorMessage: 'blocked',
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(
+        { ...classifierBlock, shouldBlock: false },
+        { kind: 'approved' },
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(
+        { via: 'fallback' },
+        { kind: 'fallback' },
+      ),
+    ).toBe(false);
+  });
+
+  it('maps classifier blocks to stable PermissionDenied reasons', () => {
+    expect(getAutoModePermissionDeniedReason(classifierBlock)).toBe(
+      'classifier_blocked',
+    );
+
+    expect(
+      getAutoModePermissionDeniedReason({
+        ...classifierBlock,
+        unavailable: true,
+      }),
+    ).toBe('classifier_unavailable');
   });
 });
 

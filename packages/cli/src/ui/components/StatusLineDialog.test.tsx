@@ -49,7 +49,10 @@ const config = {
   getCliVersion: () => '1.2.3',
   getModel: () => 'qwen3-code-plus',
   getTargetDir: () => '/repo/project',
-  getContentGeneratorConfig: () => ({ contextWindowSize: 1000 }),
+  getContentGeneratorConfig: () => ({
+    contextWindowSize: 1000,
+    reasoning: { effort: 'high' },
+  }),
 } as Config;
 
 const uiState = {
@@ -84,8 +87,26 @@ describe('StatusLineDialog', () => {
 
     expect(lastFrame()).toContain('Configure Status Line');
     expect(lastFrame()).toContain('Type to search');
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('model-with-reasoning');
+    expect(frame).toContain('model-only');
+    expect(frame).toContain('git-branch');
+    expect(frame).toContain('context-remaining');
+    expect(frame).toContain('current-dir');
+    expect(frame.indexOf('model-with-reasoning')).toBeLessThan(
+      frame.indexOf('model-only'),
+    );
+    expect(frame.indexOf('model-only')).toBeLessThan(
+      frame.indexOf('git-branch'),
+    );
+    expect(frame.indexOf('git-branch')).toBeLessThan(
+      frame.indexOf('context-remaining'),
+    );
+    expect(frame.indexOf('context-remaining')).toBeLessThan(
+      frame.indexOf('current-dir'),
+    );
     expect(lastFrame()).toContain('Preview');
-    expect(lastFrame()).toContain('qwen3-code-plus');
+    expect(lastFrame()).toContain('qwen3-code-plus high');
   });
 
   it('persists selected presets on enter', async () => {
@@ -117,10 +138,10 @@ describe('StatusLineDialog', () => {
       useThemeColors: true,
       items: [
         'model-with-reasoning',
+        'git-branch',
         'context-remaining',
         'current-dir',
         'context-used',
-        'git-branch',
       ],
     });
     expect(
@@ -135,6 +156,53 @@ describe('StatusLineDialog', () => {
     );
     expect(onSaved).toHaveBeenCalledWith(settings.merged.ui?.statusLine);
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('keeps preset priority order after an item is toggled off and on', async () => {
+    const settings = createSettings();
+    const { stdin, lastFrame } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={settings}
+          config={config}
+          uiState={uiState}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          availableTerminalHeight={18}
+        />
+      </KeypressProvider>,
+    );
+
+    const press = async (input: string) => {
+      act(() => {
+        stdin.write(input);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+
+    await press('j');
+    await press('j');
+    await press('j');
+    await press(' ');
+    await press(' ');
+
+    expect(lastFrame()).toContain(
+      'qwen3-code-plus high | feature/pr-4087-statusline | Context 75% left',
+    );
+
+    await press('\r');
+
+    expect(settings.merged.ui?.statusLine).toEqual({
+      type: 'preset',
+      useThemeColors: true,
+      items: [
+        'model-with-reasoning',
+        'git-branch',
+        'context-remaining',
+        'current-dir',
+        'context-used',
+      ],
+    });
   });
 
   it('saves back to workspace settings when workspace config is effective', async () => {

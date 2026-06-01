@@ -22,6 +22,7 @@ import {
   buildStatusLinePresetLines,
   DEFAULT_STATUS_LINE_PRESET_CONFIG,
   normalizeStatusLinePresetConfig,
+  orderStatusLinePresetItems,
   STATUS_LINE_PRESET_ITEMS,
   type StatusLinePresetConfig,
   type StatusLinePresetItemId,
@@ -57,19 +58,11 @@ function buildInitialSelectedKeys(settings: LoadedSettings): string[] {
 
 function buildConfigFromKeys(keys: readonly string[]): StatusLinePresetConfig {
   const selected = new Set(keys);
-  const validItemIds = new Set(STATUS_LINE_PRESET_ITEMS.map((item) => item.id));
-  const items = [
-    ...new Set(
-      keys.filter((key): key is StatusLinePresetItemId =>
-        validItemIds.has(key as StatusLinePresetItemId),
-      ),
-    ),
-  ];
 
   return {
     type: 'preset',
     useThemeColors: selected.has(THEME_COLORS_KEY),
-    items,
+    items: orderStatusLinePresetItems(keys),
   };
 }
 
@@ -102,15 +95,16 @@ function getPreviewData(config: Config, uiState: UIState) {
   const stats = uiState.sessionStats;
   const metrics = stats.metrics;
   const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(metrics);
+  const contentGeneratorConfig = config.getContentGeneratorConfig();
 
   return buildStatusLinePresetData({
     sessionId: stats.sessionId,
     version: config.getCliVersion(),
     modelDisplayName: uiState.currentModel || config.getModel(),
+    reasoning: contentGeneratorConfig?.reasoning,
     currentDir: config.getTargetDir(),
     branch: uiState.branchName,
-    contextWindowSize:
-      config.getContentGeneratorConfig()?.contextWindowSize || 0,
+    contextWindowSize: contentGeneratorConfig?.contextWindowSize || 0,
     currentUsage: stats.lastPromptTokenCount,
     totalInputTokens,
     totalOutputTokens,
