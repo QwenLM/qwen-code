@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
-import { execSync, spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
@@ -51,7 +51,7 @@ function getLinuxClipboardTool(): 'wl-paste' | 'xclip' | null {
   }
 
   try {
-    execSync(`command -v ${toolName}`, { stdio: 'ignore' });
+    execFileSync('command', ['-v', toolName], { stdio: 'ignore' });
     linuxClipboardTool = toolName;
     return toolName;
   } catch {
@@ -198,7 +198,12 @@ async function checkClipboardForImage(
       });
       child.on('close', (code) => {
         clearTimeout(timer);
-        resolve(code === 0 && stdout.includes('image/'));
+        resolve(
+          code === 0 &&
+            stdout
+              .split('\n')
+              .some((line) => line === 'image/png' || line === 'image/bmp'),
+        );
       });
       child.on('error', () => {
         clearTimeout(timer);
@@ -267,7 +272,7 @@ async function getWlPasteImageTypes(): Promise<string[]> {
       } catch {
         /* ignore */
       }
-      cachedWlPasteImageTypes = [];
+      // Do NOT cache failed result (timeout)
       resolve([]);
     }, PROCESS_TIMEOUT_MS);
 
@@ -290,7 +295,7 @@ async function getWlPasteImageTypes(): Promise<string[]> {
     });
     child.on('error', () => {
       clearTimeout(timer);
-      cachedWlPasteImageTypes = [];
+      // Do NOT cache failed result (error)
       resolve([]);
     });
   });
@@ -365,8 +370,8 @@ async function saveFileWithWlPaste(
         }
         return tempFilePath;
       } catch (err) {
-        debugLogger.debug(
-          'Python PIL not available; BMP-to-PNG conversion failed:',
+        debugLogger.warn(
+          'BMP-to-PNG conversion failed (install python3-pyl for BMP support):',
           err,
         );
         // Return false to report clean failure — downstream expects .png
