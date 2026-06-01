@@ -293,6 +293,10 @@ jobs:
             node .fork/rewrite-package-identity.js
           fi
 
+          # Step 2.5: Regenerate package-lock.json to match rewritten names
+          echo "🔄 同步 package-lock.json ..."
+          npm install --package-lock-only --ignore-scripts 2>/dev/null || true
+
           # Step 3: Stage all changes
           git add -A
           echo "clean" > "$CONFLICT_STATUS_FILE"
