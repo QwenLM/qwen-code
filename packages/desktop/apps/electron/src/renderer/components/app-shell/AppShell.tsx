@@ -122,6 +122,7 @@ import {
   panelStackAtom,
   panelCountAtom,
   focusedPanelIdAtom,
+  focusedPanelRouteAtom,
   focusedSessionIdAtom,
   focusNextPanelAtom,
   focusPrevPanelAtom,
@@ -969,6 +970,7 @@ function AppShellContent({
   const store = useStore()
   const panelStack = useAtomValue(panelStackAtom)
   const panelCount = useAtomValue(panelCountAtom)
+  const focusedPanelRoute = useAtomValue(focusedPanelRouteAtom)
   const focusedSessionId = useAtomValue(focusedSessionIdAtom)
 
   // Navigate the focused panel to a session.
@@ -5151,6 +5153,7 @@ function AppShellContent({
 
         <BrowserDockPanel
           expandedLeft={browserDockExpandedLeft}
+          autoHideKey={focusedPanelRoute}
           isCompact={isAutoCompact}
         />
 

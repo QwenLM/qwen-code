@@ -23,11 +23,13 @@ type BrowserDockAction = 'expand' | 'close'
 
 interface BrowserDockPanelProps {
   expandedLeft: number
+  autoHideKey?: string | null
   isCompact?: boolean
 }
 
 export function BrowserDockPanel({
   expandedLeft,
+  autoHideKey = null,
   isCompact = false,
 }: BrowserDockPanelProps) {
   const browserInstances = useAtomValue(browserInstancesAtom)
@@ -46,6 +48,7 @@ export function BrowserDockPanel({
   const viewportRef = React.useRef<HTMLDivElement | null>(null)
   const lastBoundsKeyRef = React.useRef<string | null>(null)
   const lastBoundsInstanceIdRef = React.useRef<string | null>(null)
+  const autoHideKeyRef = React.useRef<string | null>(autoHideKey)
 
   const expanded = isCompact || !!dockedInstance?.dockExpanded
 
@@ -68,6 +71,18 @@ export function BrowserDockPanel({
         console.warn('[BrowserDockPanel] Failed to close browser dock:', error)
       })
   }, [dockedInstance])
+
+  React.useEffect(() => {
+    const previousKey = autoHideKeyRef.current
+    autoHideKeyRef.current = autoHideKey
+    if (previousKey === autoHideKey || !dockedInstance?.isVisible) return
+
+    void window.electronAPI?.browserPane
+      ?.hide(dockedInstance.id)
+      .catch((error) => {
+        console.warn('[BrowserDockPanel] Failed to auto-hide browser dock:', error)
+      })
+  }, [autoHideKey, dockedInstance?.id, dockedInstance?.isVisible])
 
   React.useEffect(() => {
     const browserPaneApi = window.electronAPI?.browserPane
