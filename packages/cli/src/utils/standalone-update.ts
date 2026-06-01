@@ -599,8 +599,16 @@ export async function performStandaloneUpdate(
 
   // Download to a temp dir in os.tmpdir(), then extract to a sibling dir
   // of standaloneDir to avoid EXDEV (cross-device rename).
+  // extractDir uses mkdtempSync (random suffix) to prevent symlink
+  // pre-creation attacks on predictable directory names.
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
-  const extractDir = path.join(parentDir, '.qwen-code-update-staging');
+  let extractDir: string;
+  try {
+    extractDir = fs.mkdtempSync(path.join(parentDir, '.qwen-code-update-'));
+  } catch (err) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    throw err;
+  }
 
   try {
     const archivePath = path.join(tempDir, filename);
@@ -611,9 +619,6 @@ export async function performStandaloneUpdate(
     await verifyChecksum(archivePath, filename, versionPath);
 
     debugLogger.info('Extracting archive...');
-    if (fs.existsSync(extractDir)) {
-      fs.rmSync(extractDir, { recursive: true, force: true });
-    }
     await extractArchive(archivePath, extractDir, target);
 
     const newInstallDir = path.join(extractDir, 'qwen-code');
@@ -677,8 +682,14 @@ export async function performStandaloneUpdate(
       releaseLock(lockPath);
     }
     fs.rmSync(tempDir, { recursive: true, force: true });
-    if (fs.existsSync(extractDir)) {
-      fs.rmSync(extractDir, { recursive: true, force: true });
+    // Only remove extractDir if it is a real directory (not a symlink)
+    try {
+      const stat = fs.lstatSync(extractDir);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) {
+        fs.rmSync(extractDir, { recursive: true, force: true });
+      }
+    } catch {
+      // Already removed or never created — nothing to clean
     }
   }
 }
