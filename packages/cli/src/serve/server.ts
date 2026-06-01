@@ -350,6 +350,19 @@ function resolveDaemonTelemetryRoute(
   if (mcpDelete?.[1] && req.method === 'DELETE') {
     return { route: 'DELETE /workspace/mcp/servers/:name' };
   }
+  if (req.method === 'POST' && path === '/workspace/auth/device-flow') {
+    return { route: 'POST /workspace/auth/device-flow' };
+  }
+  const deviceFlowDelete = path.match(
+    /^\/workspace\/auth\/device-flow\/([^/]+)$/,
+  );
+  if (deviceFlowDelete?.[1] && req.method === 'DELETE') {
+    return { route: 'DELETE /workspace/auth/device-flow/:id' };
+  }
+  const toolEnable = path.match(/^\/workspace\/tools\/([^/]+)\/enable$/);
+  if (toolEnable?.[1] && req.method === 'POST') {
+    return { route: 'POST /workspace/tools/:name/enable' };
+  }
   return undefined;
 }
 
