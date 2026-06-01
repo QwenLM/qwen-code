@@ -163,11 +163,18 @@ export async function stopCpuProfile(options?: {
   const rateLimitMs = options?.rateLimitMs ?? RATE_LIMIT_MS;
   const maxProfiles = options?.maxProfiles ?? MAX_PROFILES;
 
-  // Check rate limit BEFORE stopping the V8 profiler — if rate-limited,
-  // keep the profiler running so data isn't lost.
+  // Check rate limit BEFORE writing to avoid excessive output.
+  // If rate-limited, tear down the V8 profiler (data is discarded) and reset
+  // state to 'idle' so the user can start a fresh recording later.
   try {
     enforceRateLimit(outputDir, now, rateLimitMs);
   } catch (error) {
+    state = 'idle';
+    if (session) {
+      session.post('Profiler.stop').catch(() => {});
+      session.post('Profiler.disable').catch(() => {});
+    }
+    disconnectSession();
     return { ok: false, error: formatError(error) };
   }
 

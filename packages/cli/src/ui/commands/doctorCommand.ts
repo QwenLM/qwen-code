@@ -552,9 +552,14 @@ async function cpuProfileDoctorAction(
   if (!stopResult.ok) {
     const alreadyStopped = stopResult.error.includes('not recording');
     if (alreadyStopped) {
-      const infoMsg = t(
-        'CPU profile was stopped externally (e.g., via SIGUSR1). Check ~/.qwen/cpu-profiles/ for the output.',
-      );
+      const infoMsg =
+        process.platform === 'win32'
+          ? t(
+              'CPU profile was stopped externally. Check ~/.qwen/cpu-profiles/ for the output.',
+            )
+          : t(
+              'CPU profile was stopped externally (e.g., via SIGUSR1). Check ~/.qwen/cpu-profiles/ for the output.',
+            );
       if (executionMode === 'interactive') {
         context.ui.addItem({ type: 'info', text: infoMsg }, Date.now());
         return;

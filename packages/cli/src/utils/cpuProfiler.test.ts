@@ -215,6 +215,25 @@ describe('cpuProfiler', () => {
       });
       expect(result.ok).toBe(true);
     });
+
+    it('resets state to idle when rate-limited so user can retry', async () => {
+      const now = new Date('2026-05-29T10:00:00.000Z');
+
+      await startCpuProfile();
+      await stopCpuProfile({ outputDir: tmpDir, now });
+
+      // Start a new recording, then try to stop within rate limit window
+      await startCpuProfile();
+      const rateLimited = await stopCpuProfile({
+        outputDir: tmpDir,
+        now: new Date(now.getTime() + 5000),
+      });
+      expect(rateLimited.ok).toBe(false);
+
+      // State should be reset — a new startCpuProfile() must succeed
+      const restart = await startCpuProfile();
+      expect(restart.ok).toBe(true);
+    });
   });
 
   describe('old profile cleanup', () => {
