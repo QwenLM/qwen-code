@@ -1110,6 +1110,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               command: { type: CMD_TYPES.DELETE_CHAR, count: repeatCount },
             });
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
 
@@ -1287,6 +1288,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               command: { type: CMD_TYPES.DELETE_TO_EOL, count: 1 },
             });
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
           case 'C': {
@@ -1296,6 +1298,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               command: { type: CMD_TYPES.CHANGE_TO_EOL, count: 1 },
             });
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
           case 'Y': {
@@ -1307,6 +1310,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               command: { type: CMD_TYPES.YANK_LINE, count: c },
             });
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
 
@@ -1437,6 +1441,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               executeCommand(state.lastCommand.type, state.lastCommand.count);
             }
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
 
