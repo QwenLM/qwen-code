@@ -180,6 +180,37 @@ export interface CompressOptions {
    * (review #4168 R1.3 / R1.4)
    */
   precomputedEffectiveTokens?: number;
+  /**
+   * User-supplied focus directives passed to the compression side-query.
+   * Appended to the system prompt as an `Additional Instructions:` block.
+   * Sourced from `/compress <text>`. PreCompact hooks may further append
+   * `additionalContext` via `hookSpecificOutput`; user text always comes
+   * first, hook text last (matches claude-code mergeHookInstructions).
+   */
+  customInstructions?: string;
+}
+
+/**
+ * Compose the compression side-query system prompt: the base template,
+ * optionally followed by an `Additional Instructions:` block containing
+ * the user's `/compress <text>` directives and any `additionalContext`
+ * returned by PreCompact hooks. Order is user-first / hook-appended so an
+ * explicit user intent outranks a global hook policy when both speak.
+ */
+function buildCompressionSystemPrompt(
+  userInstructions: string | undefined,
+  hookInstructions: string,
+): string {
+  const base = getCompressionPrompt();
+  const parts: string[] = [];
+  if (userInstructions && userInstructions.trim().length > 0) {
+    parts.push(userInstructions.trim());
+  }
+  if (hookInstructions.length > 0) {
+    parts.push(hookInstructions);
+  }
+  if (parts.length === 0) return base;
+  return `${base}\n\nAdditional Instructions:\n${parts.join('\n\n')}`;
 }
 
 export class ChatCompressionService {
@@ -288,7 +319,11 @@ export class ChatCompressionService {
       };
     }
 
-    // Fire PreCompact hook before compression begins
+    // Fire PreCompact hook before compression begins. Pass any user-supplied
+    // `/compress` instructions so hook scripts can read / log / amend them
+    // via `hookSpecificOutput.additionalContext`. The aggregator concatenates
+    // additionalContext across all hooks with '\n' separators.
+    let hookExtraInstructions = '';
     const hookSystem = config.getHookSystem();
     if (hookSystem) {
       const preCompactTrigger =
@@ -296,7 +331,16 @@ export class ChatCompressionService {
           ? PreCompactTrigger.Manual
           : PreCompactTrigger.Auto;
       try {
-        await hookSystem.firePreCompactEvent(preCompactTrigger, '', signal);
+        const result = await hookSystem.firePreCompactEvent(
+          preCompactTrigger,
+          opts.customInstructions ?? '',
+          signal,
+        );
+        const merged =
+          result.finalOutput?.hookSpecificOutput?.['additionalContext'];
+        if (typeof merged === 'string' && merged.trim().length > 0) {
+          hookExtraInstructions = merged.trim();
+        }
       } catch (err) {
         config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
       }
@@ -339,7 +383,10 @@ export class ChatCompressionService {
       // Best-effort: failures fall back to NOOP and the next turn re-triggers
       // compression anyway, so don't burn 7 retries blocking the user mid-turn.
       maxAttempts: 1,
-      systemInstruction: getCompressionPrompt(),
+      systemInstruction: buildCompressionSystemPrompt(
+        opts.customInstructions,
+        hookExtraInstructions,
+      ),
       contents: [
         ...slim.slimmedHistory,
         {

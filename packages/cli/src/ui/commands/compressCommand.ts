@@ -10,6 +10,13 @@ import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 
+// Cap user-supplied compression instructions. The compression side-query has
+// no input-truncation retry today, so an unbounded instruction string would
+// inflate the side-query prompt and risk a PTL the compaction path can't
+// recover from. 2000 chars is generous for human-typed focus directives
+// without exposing that failure mode.
+const MAX_COMPRESS_INSTRUCTIONS_CHARS = 2000;
+
 export const compressCommand: SlashCommand = {
   name: 'compress',
   altNames: ['summarize'],
@@ -54,9 +61,19 @@ export const compressCommand: SlashCommand = {
       };
     }
 
+    const rawArgs = context.invocation?.args?.trim() ?? '';
+    const customInstructions = rawArgs
+      ? rawArgs.slice(0, MAX_COMPRESS_INSTRUCTIONS_CHARS)
+      : undefined;
+
     const doCompress = async () => {
       const promptId = `compress-${Date.now()}`;
-      return await geminiClient.tryCompressChat(promptId, true);
+      return await geminiClient.tryCompressChat(
+        promptId,
+        true,
+        abortSignal,
+        customInstructions,
+      );
     };
 
     if (executionMode === 'acp') {
