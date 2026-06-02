@@ -1049,6 +1049,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           case 'F':
           case 't':
           case 'T':
+            if (state.pendingOperator) {
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            }
             dispatch({
               type: 'SET_PENDING_CHAR_READ',
               value: normalizedKey.sequence,
