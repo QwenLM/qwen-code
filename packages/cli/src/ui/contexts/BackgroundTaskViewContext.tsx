@@ -29,7 +29,11 @@ const debugLogger = createDebugLogger('BG_TASK_VIEW');
 
 // ─── Types ──────────────────────────────────────────────────
 
-export type BackgroundDialogMode = 'closed' | 'list' | 'detail' | 'detail-from-panel';
+export type BackgroundDialogMode =
+  | 'closed'
+  | 'list'
+  | 'detail'
+  | 'detail-from-panel';
 
 export interface BackgroundTaskViewState {
   /**
@@ -288,7 +292,15 @@ export function BackgroundTaskViewProvider({
       livePanelFocused,
       livePanelSelectedIndex,
     }),
-    [entries, selectedIndex, dialogMode, dialogOpen, pillFocused, livePanelFocused, livePanelSelectedIndex],
+    [
+      entries,
+      selectedIndex,
+      dialogMode,
+      dialogOpen,
+      pillFocused,
+      livePanelFocused,
+      livePanelSelectedIndex,
+    ],
   );
 
   const actions: BackgroundTaskViewActions = useMemo(
