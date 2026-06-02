@@ -30,7 +30,7 @@ This is the most important stage — catch problems before anyone spends time re
 
 **1a. Template check:**
 
-PR body missing required headings from `.github/pull_request_template.md` → request changes, @mention author, link the template, stop.
+PR body missing required headings from `.github/pull_request_template.md` (read from worktree) → request changes, @mention author, link the template, stop.
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-gate-template.md
@@ -104,6 +104,8 @@ Save this comment's ID. If template fails or direction is escalated → stop her
 
 #### 2a. Code Review
 
+All local file reads (`read_file`, `grep_search`, `glob`) operate inside the worktree. The diff itself comes from `gh pr diff` (GitHub API, no worktree needed).
+
 **Step 1 — Independent proposal (before reading the diff):**
 
 Read only the PR title + "Why it's needed" section. Without looking at the diff, write down what _you_ would do to solve this problem. Be concrete — name the files, the approach, the tradeoffs. This is your independent baseline.
@@ -132,6 +134,8 @@ gh pr diff "$PR_NUMBER" --repo "$REPO"
 When posting findings, summarize in a few sentences like a human would — "the auth logic is duplicated in two places, worth extracting" not a line-by-line breakdown. Save inline comments for things that genuinely block the merge.
 
 #### 2b. Real-Scenario Testing
+
+**Runs in the main working tree, not the worktree** — tmux needs the local build environment.
 
 **Mandatory.** Unit tests don't substitute. Unrelated build failure ≠ excuse to skip.
 

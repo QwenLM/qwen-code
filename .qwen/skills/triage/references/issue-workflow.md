@@ -72,7 +72,7 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 
 ### For docs / usage issues:
 
-1. Search docs and source with `rg`.
+1. Search docs and source with `rg` (inside worktree — use `worktreePath` as the search root).
 2. Search similar issues (reduce title to safe keywords first):
 
    ```bash
@@ -85,15 +85,15 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 ### For bugs with clear reproduction:
 
 1. Check safety — no untrusted code with write tokens or secrets.
-2. Use `tmux-real-user-testing` skill if available; otherwise tmux manually.
-3. Inspect source for root cause and likely fix.
+2. Use `tmux-real-user-testing` skill if available; otherwise tmux manually (runs in main working tree, not worktree).
+3. Inspect source for root cause and likely fix (read files inside worktree).
 4. Append: reproduced (yes/no), affected area, fix direction.
 
 ### For bugs without clear reproduction:
 
 1. Add `welcome-pr` if it exists. Say community PRs are welcome.
 2. Add `status/need-retesting` if on a stale version.
-3. Inspect source and docs; state confidence: confirmed / plausible / no clear
+3. Inspect source and docs inside worktree; state confidence: confirmed / plausible / no clear
    direction.
 4. Append likely root cause or link similar historical issues.
 

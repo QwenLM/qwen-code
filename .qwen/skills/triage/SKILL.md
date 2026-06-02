@@ -10,6 +10,8 @@ allowedTools:
   - glob
   - write_file
   - task
+  - enter_worktree
+  - exit_worktree
 ---
 
 # PR / Issue Gatekeeper
@@ -47,6 +49,24 @@ Bilingual: English first, Chinese in `<details>`. @mention author when blocking.
 
 - **Issue**: one comment, Stage 2 updates it in place. Key-point bullet format.
 - **PR**: three comments (Stage 1: Gate, Stage 2: Review + Test, Stage 3: Final Decision). Key-point bullet format.
+
+## Worktree Isolation
+
+Before reading any local code, create an isolated worktree so the main working tree is never touched:
+
+```
+enter_worktree(name: "triage")
+```
+
+All subsequent local file operations (`read_file`, `grep_search`, `glob`, shell commands that read code) MUST operate inside the returned `worktreePath`. Shell commands that interact with GitHub (`gh issue view`, `gh pr view`, `gh pr diff`, `gh label list`, etc.) do NOT need the worktree — they talk to the API, not local files.
+
+The one exception: **tmux real-scenario testing** (PR workflow Stage 2b) runs in the main working tree, not the worktree — it needs the local build environment.
+
+When triage is complete, clean up:
+
+```
+exit_worktree(action: "remove")
+```
 
 ## Workflow
 
