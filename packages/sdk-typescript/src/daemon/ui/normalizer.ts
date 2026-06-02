@@ -408,11 +408,39 @@ function normalizeSessionUpdate(
     }
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
-      return text ? [{ ...base, type: 'assistant.text.delta', text }] : [];
+      if (!text) return [];
+      const chunkMeta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+      const parentToolCallId = chunkMeta
+        ? getString(chunkMeta, 'parentToolCallId')
+        : undefined;
+      return [
+        {
+          ...base,
+          type: 'assistant.text.delta' as const,
+          text,
+          ...(parentToolCallId ? { parentToolCallId } : {}),
+        },
+      ];
     }
     case 'agent_thought_chunk': {
       const text = getTextContent(update['content']);
-      return text ? [{ ...base, type: 'thought.text.delta', text }] : [];
+      if (!text) return [];
+      const thoughtMeta = isRecord(update['_meta'])
+        ? update['_meta']
+        : undefined;
+      const thoughtParentToolCallId = thoughtMeta
+        ? getString(thoughtMeta, 'parentToolCallId')
+        : undefined;
+      return [
+        {
+          ...base,
+          type: 'thought.text.delta' as const,
+          text,
+          ...(thoughtParentToolCallId
+            ? { parentToolCallId: thoughtParentToolCallId }
+            : {}),
+        },
+      ];
     }
     case 'tool_call':
     case 'tool_call_update':

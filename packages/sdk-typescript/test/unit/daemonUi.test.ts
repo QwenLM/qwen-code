@@ -5610,3 +5610,333 @@ describe('permission_request normalization for Agent tools', () => {
     );
   });
 });
+
+describe('parallel subAgent text interleaving — normalizer', () => {
+  it('extracts parentToolCallId from _meta on agent_message_chunk', () => {
+    const events = normalizeDaemonEvent({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'hello' },
+          _meta: { parentToolCallId: 'task-A', subagentType: 'reviewer' },
+        },
+      },
+    } as never);
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'assistant.text.delta',
+        text: 'hello',
+        parentToolCallId: 'task-A',
+      }),
+    ]);
+  });
+
+  it('extracts parentToolCallId from _meta on agent_thought_chunk', () => {
+    const events = normalizeDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_thought_chunk',
+          content: { type: 'text', text: 'thinking' },
+          _meta: { parentToolCallId: 'task-B' },
+        },
+      },
+    } as never);
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'thought.text.delta',
+        text: 'thinking',
+        parentToolCallId: 'task-B',
+      }),
+    ]);
+  });
+
+  it('omits parentToolCallId when _meta is absent', () => {
+    const events = normalizeDaemonEvent({
+      id: 3,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'no meta' },
+        },
+      },
+    } as never);
+    expect(events[0]).not.toHaveProperty('parentToolCallId');
+  });
+
+  it('drops non-string parentToolCallId from _meta', () => {
+    const events = normalizeDaemonEvent({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'bad meta' },
+          _meta: { parentToolCallId: 12345 },
+        },
+      },
+    } as never);
+    expect(events[0]).not.toHaveProperty('parentToolCallId');
+  });
+});
+
+describe('parallel subAgent text interleaving fix', () => {
+  it('T1: separates text chunks by parentToolCallId into independent blocks', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'tool.update',
+          toolCallId: 'agent-task-A',
+          title: 'Agent (code-reviewer)',
+          status: 'running',
+          subagentType: 'code-reviewer',
+        } as DaemonUiEvent,
+        {
+          type: 'tool.update',
+          toolCallId: 'agent-task-B',
+          title: 'Agent (pr-test-analyzer)',
+          status: 'running',
+          subagentType: 'pr-test-analyzer',
+        } as DaemonUiEvent,
+      ],
+      { now: 2 },
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'Agent A says: hello ',
+          parentToolCallId: 'agent-task-A',
+        },
+        {
+          type: 'assistant.text.delta',
+          text: 'Agent B says: world ',
+          parentToolCallId: 'agent-task-B',
+        },
+        {
+          type: 'assistant.text.delta',
+          text: 'from agent A',
+          parentToolCallId: 'agent-task-A',
+        },
+        {
+          type: 'assistant.text.delta',
+          text: 'from agent B',
+          parentToolCallId: 'agent-task-B',
+        },
+      ],
+      { now: 3 },
+    );
+
+    const assistantBlocks = state.blocks.filter(
+      (b) => b.kind === 'assistant',
+    ) as Array<{ text: string; parentToolCallId?: string }>;
+
+    expect(assistantBlocks).toHaveLength(2);
+    expect(assistantBlocks[0]!.text).toBe('Agent A says: hello from agent A');
+    expect(assistantBlocks[0]!.parentToolCallId).toBe('agent-task-A');
+    expect(assistantBlocks[1]!.text).toBe('Agent B says: world from agent B');
+    expect(assistantBlocks[1]!.parentToolCallId).toBe('agent-task-B');
+  });
+
+  it('T2: scoped clearActiveText — subAgent A tool does not interrupt subAgent B text', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'A text ',
+          parentToolCallId: 'task-A',
+        },
+        {
+          type: 'assistant.text.delta',
+          text: 'B text ',
+          parentToolCallId: 'task-B',
+        },
+        {
+          type: 'tool.update',
+          toolCallId: 'child-tool-1',
+          title: 'Bash',
+          status: 'running',
+          parentToolCallId: 'task-A',
+        } as DaemonUiEvent,
+        {
+          type: 'assistant.text.delta',
+          text: 'B continues',
+          parentToolCallId: 'task-B',
+        },
+      ],
+      { now: 2 },
+    );
+
+    const bBlocks = state.blocks.filter(
+      (b) =>
+        b.kind === 'assistant' &&
+        (b as { parentToolCallId?: string }).parentToolCallId === 'task-B',
+    ) as Array<{ text: string }>;
+    expect(bBlocks).toHaveLength(1);
+    expect(bBlocks[0]!.text).toBe('B text B continues');
+  });
+
+  it('T3: finishAssistant sets streaming=false on all keyed-map blocks', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'A streaming',
+          parentToolCallId: 'task-A',
+        },
+        {
+          type: 'assistant.text.delta',
+          text: 'B streaming',
+          parentToolCallId: 'task-B',
+        },
+      ],
+      { now: 2 },
+    );
+
+    const before = state.blocks.filter((b) => b.kind === 'assistant') as Array<{
+      streaming?: boolean;
+    }>;
+    expect(before[0]!.streaming).toBe(true);
+    expect(before[1]!.streaming).toBe(true);
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.done', reason: 'stop' }],
+      { now: 3 },
+    );
+
+    const after = state.blocks.filter((b) => b.kind === 'assistant') as Array<{
+      streaming?: boolean;
+    }>;
+    expect(after[0]!.streaming).toBe(false);
+    expect(after[1]!.streaming).toBe(false);
+  });
+
+  it('T4: regression — text without parentToolCallId uses scalar path', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        { type: 'assistant.text.delta', text: 'first ' },
+        { type: 'assistant.text.delta', text: 'second' },
+      ],
+      { now: 2 },
+    );
+
+    const blocks = state.blocks.filter((b) => b.kind === 'assistant');
+    expect(blocks).toHaveLength(1);
+    expect((blocks[0] as { text: string }).text).toBe('first second');
+  });
+
+  it('T5: keyed and scalar paths coexist without interference', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'subagent text',
+          parentToolCallId: 'task-X',
+        },
+        { type: 'assistant.text.delta', text: 'top-level text' },
+        {
+          type: 'assistant.text.delta',
+          text: ' more subagent',
+          parentToolCallId: 'task-X',
+        },
+      ],
+      { now: 2 },
+    );
+
+    const assistantBlocks = state.blocks.filter(
+      (b) => b.kind === 'assistant',
+    ) as Array<{ text: string; parentToolCallId?: string }>;
+
+    expect(assistantBlocks).toHaveLength(2);
+
+    const subagentBlock = assistantBlocks.find(
+      (b) => b.parentToolCallId === 'task-X',
+    );
+    const topLevelBlock = assistantBlocks.find(
+      (b) => b.parentToolCallId === undefined,
+    );
+    expect(subagentBlock!.text).toBe('subagent text more subagent');
+    expect(topLevelBlock!.text).toBe('top-level text');
+  });
+
+  it('T6: trimTranscriptState prunes stale entries from activeAssistantBlockByParent', () => {
+    let state = createDaemonTranscriptState({ now: 1, maxBlocks: 3 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'will be trimmed',
+          parentToolCallId: 'old-task',
+        },
+        {
+          type: 'tool.update',
+          toolCallId: 'tool-1',
+          title: 'Bash',
+          status: 'running',
+        } as DaemonUiEvent,
+        { type: 'user.text.delta', text: 'user msg' },
+        {
+          type: 'tool.update',
+          toolCallId: 'tool-2',
+          title: 'Read',
+          status: 'running',
+        } as DaemonUiEvent,
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks.length).toBeLessThanOrEqual(3);
+    expect(state.activeAssistantBlockByParent['old-task']).toBeUndefined();
+  });
+
+  it('T7: appendLocalUserTranscriptMessage clears active subAgent text maps', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'streaming...',
+          parentToolCallId: 'task-Y',
+        },
+      ],
+      { now: 2 },
+    );
+
+    expect(state.activeAssistantBlockByParent['task-Y']).toBeDefined();
+
+    state = appendLocalUserTranscriptMessage(state, 'user msg', { now: 3 });
+
+    expect(state.activeAssistantBlockByParent).toEqual({});
+    expect(state.activeThoughtBlockByParent).toEqual({});
+  });
+});

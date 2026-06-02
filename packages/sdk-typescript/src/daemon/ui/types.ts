@@ -82,6 +82,7 @@ export interface DaemonUiEventBase {
 export interface DaemonUiTextEvent extends DaemonUiEventBase {
   type: 'user.text.delta' | 'assistant.text.delta' | 'thought.text.delta';
   text: string;
+  parentToolCallId?: string;
 }
 
 export interface DaemonUiUserShellCommandEvent extends DaemonUiEventBase {
@@ -647,6 +648,7 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   streaming?: boolean;
   collapsed?: boolean;
+  parentToolCallId?: string;
 }
 
 export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
@@ -793,6 +795,8 @@ export interface DaemonTranscriptState
   activeUserBlockId?: string;
   activeAssistantBlockId?: string;
   activeThoughtBlockId?: string;
+  activeAssistantBlockByParent: Record<string, string>;
+  activeThoughtBlockByParent: Record<string, string>;
   blockIndexById: Record<string, number>;
   toolBlockByCallId: Record<string, string>;
   trimmedToolNotificationByCallId: Record<string, true>;

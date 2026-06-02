@@ -13,6 +13,7 @@ import type {
   DaemonTranscriptReducerOptions,
   DaemonTranscriptState,
   DaemonUiEvent,
+  DaemonUiTextEvent,
   DaemonUserShellTranscriptBlock,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
@@ -42,6 +43,8 @@ export function createDaemonTranscriptState(
     toolBlockByCallId: {},
     trimmedToolNotificationByCallId: {},
     permissionBlockByRequestId: {},
+    activeAssistantBlockByParent: {},
+    activeThoughtBlockByParent: {},
     // PR-E sidechannel: track current tool / approval mode / progress
     toolProgress: {},
     awaitingResync: false,
@@ -98,6 +101,8 @@ export function appendLocalUserTranscriptMessage(
   next.activeUserBlockId = block.id;
   next.activeAssistantBlockId = undefined;
   next.activeThoughtBlockId = undefined;
+  next.activeAssistantBlockByParent = {};
+  next.activeThoughtBlockByParent = {};
   return trimTranscriptState(next);
 }
 
@@ -374,7 +379,24 @@ function appendTextDelta(
   text: string,
   event: DaemonUiEvent,
 ): void {
-  const existing = getWritableBlockById(state, state[activeKey]);
+  const parentId =
+    'parentToolCallId' in event
+      ? (event as DaemonUiTextEvent).parentToolCallId
+      : undefined;
+
+  const parentMap =
+    parentId != null
+      ? kind === 'assistant'
+        ? state.activeAssistantBlockByParent
+        : kind === 'thought'
+          ? state.activeThoughtBlockByParent
+          : undefined
+      : undefined;
+
+  const effectiveId =
+    parentMap && parentId != null ? parentMap[parentId] : state[activeKey];
+
+  const existing = getWritableBlockById(state, effectiveId);
   if (existing && existing.kind === kind) {
     existing.text = appendBoundedText(existing.text, text);
     existing.updatedAt = state.now;
@@ -392,11 +414,29 @@ function appendTextDelta(
   );
   if (kind === 'assistant') block.streaming = true;
   if (kind === 'thought') block.collapsed = true;
+  if (parentId != null) {
+    (block as DaemonTextTranscriptBlock).parentToolCallId = parentId;
+  }
   appendBlock(state, block);
-  state[activeKey] = block.id;
-  if (kind !== 'user') state.activeUserBlockId = undefined;
-  if (kind !== 'assistant') state.activeAssistantBlockId = undefined;
-  if (kind !== 'thought') state.activeThoughtBlockId = undefined;
+
+  if (parentMap && parentId != null) {
+    parentMap[parentId] = block.id;
+  } else {
+    state[activeKey] = block.id;
+  }
+
+  if (parentId != null) {
+    if (kind === 'assistant') {
+      delete state.activeThoughtBlockByParent[parentId];
+    }
+    if (kind === 'thought') {
+      delete state.activeAssistantBlockByParent[parentId];
+    }
+  } else {
+    if (kind !== 'user') state.activeUserBlockId = undefined;
+    if (kind !== 'assistant') state.activeAssistantBlockId = undefined;
+    if (kind !== 'thought') state.activeThoughtBlockId = undefined;
+  }
 }
 
 function finishAssistant(state: DaemonTranscriptState): void {
@@ -406,6 +446,16 @@ function finishAssistant(state: DaemonTranscriptState): void {
     existing.updatedAt = state.now;
   }
   state.activeAssistantBlockId = undefined;
+
+  for (const blockId of Object.values(state.activeAssistantBlockByParent)) {
+    const block = getWritableBlockById(state, blockId);
+    if (block?.kind === 'assistant') {
+      block.streaming = false;
+      block.updatedAt = state.now;
+    }
+  }
+  state.activeAssistantBlockByParent = {};
+  state.activeThoughtBlockByParent = {};
 }
 
 function upsertToolBlock(
@@ -542,7 +592,7 @@ function upsertToolBlock(
   // never points at it. Effective-status keeps the pointer in sync
   // with what was actually written to the block.
   updateCurrentToolPointer(state, event.toolCallId, event.status ?? 'pending');
-  clearActiveText(state);
+  clearActiveText(state, event.parentToolCallId);
 }
 
 /**
@@ -842,6 +892,8 @@ function cloneTranscriptState(
     blocks: state.blocks,
     blockIndexById: state.blockIndexById,
     toolBlockByCallId: { ...state.toolBlockByCallId },
+    activeAssistantBlockByParent: { ...state.activeAssistantBlockByParent },
+    activeThoughtBlockByParent: { ...state.activeThoughtBlockByParent },
     trimmedToolNotificationByCallId: {
       ...state.trimmedToolNotificationByCallId,
     },
@@ -925,6 +977,20 @@ function trimTranscriptState(
   }
   if (!keptIds.has(state.activeThoughtBlockId ?? '')) {
     state.activeThoughtBlockId = undefined;
+  }
+  for (const [parentId, blockId] of Object.entries(
+    state.activeAssistantBlockByParent,
+  )) {
+    if (!keptIds.has(blockId)) {
+      delete state.activeAssistantBlockByParent[parentId];
+    }
+  }
+  for (const [parentId, blockId] of Object.entries(
+    state.activeThoughtBlockByParent,
+  )) {
+    if (!keptIds.has(blockId)) {
+      delete state.activeThoughtBlockByParent[parentId];
+    }
   }
   return state;
 }
@@ -1021,10 +1087,26 @@ function allocateBlockId(state: DaemonTranscriptState, prefix: string): string {
   return id;
 }
 
-function clearActiveText(state: DaemonTranscriptState): void {
-  finishAssistant(state);
-  state.activeUserBlockId = undefined;
-  state.activeThoughtBlockId = undefined;
+function clearActiveText(
+  state: DaemonTranscriptState,
+  parentToolCallId?: string,
+): void {
+  if (parentToolCallId) {
+    const assistId = state.activeAssistantBlockByParent[parentToolCallId];
+    if (assistId) {
+      const block = getWritableBlockById(state, assistId);
+      if (block?.kind === 'assistant') {
+        block.streaming = false;
+        block.updatedAt = state.now;
+      }
+      delete state.activeAssistantBlockByParent[parentToolCallId];
+    }
+    delete state.activeThoughtBlockByParent[parentToolCallId];
+  } else {
+    finishAssistant(state);
+    state.activeUserBlockId = undefined;
+    state.activeThoughtBlockId = undefined;
+  }
 }
 
 function appendBoundedText(existing: string, text: string): string {
