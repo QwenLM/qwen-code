@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentBackend } from '@craft-agent/shared/agent/backend';
@@ -40,7 +46,7 @@ setSessionPlatform({
 });
 
 async function waitUntil(condition: () => boolean): Promise<void> {
-  for (let i = 0; i < 20; i += 1) {
+  for (let i = 0; i < 100; i += 1) {
     if (condition()) return;
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
@@ -1055,6 +1061,492 @@ describe('Qwen native history loading', () => {
       '你好',
     ]);
     expect(loaded?.messageCount).toBeUndefined();
+  });
+
+  it('persists only local visual overlays for Qwen canonical sessions', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const sessionId = '260602-qwen-visual-overlay';
+    const timestamp = Date.parse('2026-06-02T06:06:21.236Z');
+    const attachment: NonNullable<Message['attachments']>[number] = {
+      id: 'attachment-1',
+      type: 'image',
+      name: 'rabbit.png',
+      mimeType: 'image/png',
+      size: 1024,
+      storedPath: join(
+        workspaceRoot,
+        'sessions',
+        sessionId,
+        'attachments',
+        'rabbit.png',
+      ),
+      thumbnailBase64: 'data:image/png;base64,thumb',
+    };
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        llmConnection: 'qwen-code',
+        lastMessageAt: timestamp + 2_000,
+        thinkingLevel: 'medium',
+      },
+      workspace,
+      {
+        messagesLoaded: true,
+        messages: [
+          {
+            id: 'qwen-user-text',
+            role: 'user',
+            content: '普通文字',
+            timestamp,
+          },
+          {
+            id: 'qwen-user-image',
+            role: 'user',
+            content: '这个呢',
+            timestamp: timestamp + 1_000,
+            attachments: [attachment],
+          },
+          {
+            id: 'qwen-assistant-image-preview',
+            role: 'assistant',
+            content:
+              '图1\n\n```image-preview\n{"src":"/tmp/generated.png"}\n```',
+            timestamp: timestamp + 2_000,
+          },
+        ],
+      },
+    );
+    const manager = new SessionManager();
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    (
+      manager as unknown as {
+        persistSession: (session: typeof managed) => void;
+      }
+    ).persistSession(managed);
+    await manager.flushSession(sessionId);
+
+    const persisted = loadSession(workspaceRoot, sessionId);
+    expect(persisted?.messages.map((message) => message.id)).toEqual([
+      'qwen-user-image',
+      'qwen-assistant-image-preview',
+    ]);
+    expect(persisted?.messages[0]?.attachments).toEqual([attachment]);
+    expect(persisted?.messages[1]?.content).toContain('```image-preview');
+
+    const header = JSON.parse(
+      readFileSync(
+        join(workspaceRoot, 'sessions', sessionId, 'session.jsonl'),
+        'utf8',
+      ).split('\n')[0],
+    ) as Record<string, unknown>;
+    expect(header).not.toHaveProperty('messageCount');
+  });
+
+  it('flushes local visual overlays when sending Qwen messages with attachments', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const sessionId = '260602-qwen-send-visual-overlay';
+    const timestamp = Date.now();
+    const attachment: NonNullable<Message['attachments']>[number] = {
+      id: 'attachment-1',
+      type: 'image',
+      name: 'subscription.jpg',
+      mimeType: 'image/jpeg',
+      size: 1024,
+      storedPath: join(
+        workspaceRoot,
+        'sessions',
+        sessionId,
+        'attachments',
+        'subscription.jpg',
+      ),
+      thumbnailBase64: 'data:image/jpeg;base64,thumb',
+    };
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        sdkCwd: workspaceRoot,
+        workingDirectory: workspaceRoot,
+        name: 'existing qwen title',
+        llmConnection: 'qwen-code',
+        lastMessageAt: timestamp,
+      },
+      workspace,
+      { messagesLoaded: true },
+    );
+    const manager = new SessionManager();
+    const fakeAgent = {
+      async *chat(): AsyncGenerator<AgentEvent> {
+        yield { type: 'complete' } as AgentEvent;
+      },
+      getModel: () => 'mimo-v2.5',
+      setAllSources: () => {},
+      getSessionId: () => sessionId,
+      destroy: () => {},
+      dispose: () => {},
+    } as unknown as AgentBackend;
+
+    const managerInternals = manager as unknown as {
+      sessions: Map<string, typeof managed>;
+      getOrCreateAgent: (session: typeof managed) => Promise<AgentBackend>;
+    };
+    managed.externalMessagesLoadedThroughAt = timestamp;
+    managerInternals.sessions.set(sessionId, managed);
+    managerInternals.getOrCreateAgent = async (session) => {
+      session.agent = fakeAgent;
+      return fakeAgent;
+    };
+
+    let sendError: unknown;
+    void manager
+      .sendMessage(sessionId, '这个是什么图片', undefined, [attachment])
+      .catch((error) => {
+        sendError = error;
+      });
+
+    await waitUntil(() => {
+      const persisted = loadSession(workspaceRoot, sessionId);
+      return persisted?.messages[0]?.attachments?.length === 1;
+    });
+
+    expect(sendError).toBeUndefined();
+    const persisted = loadSession(workspaceRoot, sessionId);
+    expect(persisted?.messages).toHaveLength(1);
+    expect(persisted?.messages[0]?.content).toBe('这个是什么图片');
+    expect(persisted?.messages[0]?.attachments).toEqual([attachment]);
+  });
+
+  it('flushes queued local visual overlays for Qwen sessions with attachments', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const sessionId = '260602-qwen-queued-visual-overlay';
+    const timestamp = Date.now();
+    const attachment: NonNullable<Message['attachments']>[number] = {
+      id: 'attachment-1',
+      type: 'image',
+      name: 'subscription.jpg',
+      mimeType: 'image/jpeg',
+      size: 1024,
+      storedPath: join(
+        workspaceRoot,
+        'sessions',
+        sessionId,
+        'attachments',
+        'subscription.jpg',
+      ),
+      thumbnailBase64: 'data:image/jpeg;base64,thumb',
+    };
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        sdkCwd: workspaceRoot,
+        workingDirectory: workspaceRoot,
+        name: 'existing qwen title',
+        llmConnection: 'qwen-code',
+        lastMessageAt: timestamp,
+      },
+      workspace,
+      { isProcessing: true, messagesLoaded: true },
+    );
+    const manager = new SessionManager();
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    await manager.sendMessage(sessionId, '这个是什么图片', undefined, [
+      attachment,
+    ]);
+
+    const persisted = loadSession(workspaceRoot, sessionId);
+    expect(persisted?.messages).toHaveLength(1);
+    expect(persisted?.messages[0]?.content).toBe('这个是什么图片');
+    expect(persisted?.messages[0]?.attachments).toEqual([attachment]);
+  });
+
+  it('merges local visual overlays into provider-loaded Qwen messages', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'));
+    tempRoots.push(workspaceRoot, projectRoot);
+
+    const sessionId = '260602-qwen-visual-restore';
+    const timestamp = Date.parse('2026-06-02T06:06:21.236Z');
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    const attachment: NonNullable<Message['attachments']>[number] = {
+      id: 'attachment-1',
+      type: 'image',
+      name: 'rabbit.png',
+      mimeType: 'image/png',
+      size: 1024,
+      storedPath: join(
+        workspaceRoot,
+        'sessions',
+        sessionId,
+        'attachments',
+        'rabbit.png',
+      ),
+      thumbnailBase64: 'data:image/png;base64,thumb',
+    };
+    await saveSession({
+      id: sessionId,
+      workspaceRootPath: workspaceRoot,
+      sdkSessionId: sessionId,
+      thinkingLevel: 'medium',
+      messages: [
+        {
+          id: 'local-user-image',
+          type: 'user',
+          content: '这个呢',
+          timestamp,
+          attachments: [attachment],
+        },
+        {
+          id: 'local-assistant-image-preview',
+          type: 'assistant',
+          content:
+            '生成完成\n\n```image-preview\n{"src":"/tmp/generated.png"}\n```',
+          timestamp: timestamp + 1_000,
+        },
+      ],
+    });
+
+    const nativeMessages: Message[] = [
+      {
+        id: 'qwen-user-1',
+        role: 'user',
+        content: '这个呢',
+        timestamp,
+      },
+      {
+        id: 'qwen-assistant-1',
+        role: 'assistant',
+        content: '生成完成',
+        timestamp: timestamp + 1_000,
+      },
+    ];
+    const manager = new SessionManager({
+      createExternalSessionAgent: () =>
+        ({
+          loadSessionMessages: async (
+            requestedSessionId: string,
+            options?: { cwd?: string },
+          ) => {
+            expect(requestedSessionId).toBe(sessionId);
+            expect(options?.cwd).toBe(projectRoot);
+            return nativeMessages;
+          },
+          destroy: () => {},
+          dispose: () => {},
+        }) as unknown as AgentBackend,
+    });
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        lastMessageAt: timestamp + 1_000,
+        llmConnection: 'qwen-code',
+        thinkingLevel: 'medium',
+      },
+      workspace,
+    );
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    const loaded = await manager.getSession(sessionId);
+
+    expect(loaded?.messages).toHaveLength(2);
+    expect(loaded?.messages[0]?.id).toBe('qwen-user-1');
+    expect(loaded?.messages[0]?.attachments).toEqual([attachment]);
+    expect(loaded?.messages[1]?.id).toBe('qwen-assistant-1');
+    expect(loaded?.messages[1]?.content).toContain('```image-preview');
+    expect(loaded?.messageCount).toBeUndefined();
+  });
+
+  it('repairs legacy Qwen sessions with orphaned image attachments', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'));
+    tempRoots.push(workspaceRoot, projectRoot);
+
+    const sessionId = '260602-qwen-legacy-orphaned-image';
+    const timestamp = Date.now();
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    await saveSession({
+      id: sessionId,
+      workspaceRootPath: workspaceRoot,
+      sdkSessionId: sessionId,
+      thinkingLevel: 'medium',
+      messages: [],
+    });
+
+    const attachmentsDir = join(
+      workspaceRoot,
+      'sessions',
+      sessionId,
+      'attachments',
+    );
+    mkdirSync(attachmentsDir, { recursive: true });
+    const attachmentId2 = '22222222-2222-4222-8222-222222222222';
+    const imagePath2 = join(
+      attachmentsDir,
+      `${attachmentId2}_screenshot-2.jpg`,
+    );
+    const thumbPath2 = join(attachmentsDir, `${attachmentId2}_thumb.png`);
+    writeFileSync(imagePath2, Buffer.from('image-2-bytes'));
+    writeFileSync(thumbPath2, Buffer.from('thumbnail-2-bytes'));
+
+    const attachmentId1 = '11111111-1111-4111-8111-111111111111';
+    const imagePath1 = join(
+      attachmentsDir,
+      `${attachmentId1}_screenshot-1.jpg`,
+    );
+    const thumbPath1 = join(attachmentsDir, `${attachmentId1}_thumb.png`);
+    writeFileSync(imagePath1, Buffer.from('image-1-bytes'));
+    writeFileSync(thumbPath1, Buffer.from('thumbnail-1-bytes'));
+
+    const nativeMessages: Message[] = [
+      {
+        id: 'qwen-user-1',
+        role: 'user',
+        content: '这个是什么图片',
+        timestamp,
+      },
+      {
+        id: 'qwen-assistant-1',
+        role: 'assistant',
+        content: '这是你的 Apple 账户订阅页面截图。',
+        timestamp: timestamp + 1_000,
+      },
+    ];
+    const manager = new SessionManager({
+      createExternalSessionAgent: () =>
+        ({
+          loadSessionMessages: async () => nativeMessages,
+          destroy: () => {},
+          dispose: () => {},
+        }) as unknown as AgentBackend,
+    });
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        lastMessageAt: timestamp + 1_000,
+        llmConnection: 'qwen-code',
+        thinkingLevel: 'medium',
+      },
+      workspace,
+    );
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    const loaded = await manager.getSession(sessionId);
+
+    expect(loaded?.messages).toHaveLength(2);
+    expect(loaded?.messages[0]?.attachments).toEqual([
+      {
+        id: attachmentId1,
+        type: 'image',
+        name: 'screenshot-1.jpg',
+        mimeType: 'image/jpeg',
+        size: Buffer.from('image-1-bytes').length,
+        storedPath: imagePath1,
+        thumbnailPath: thumbPath1,
+        thumbnailBase64: Buffer.from('thumbnail-1-bytes').toString('base64'),
+      },
+      {
+        id: attachmentId2,
+        type: 'image',
+        name: 'screenshot-2.jpg',
+        mimeType: 'image/jpeg',
+        size: Buffer.from('image-2-bytes').length,
+        storedPath: imagePath2,
+        thumbnailPath: thumbPath2,
+        thumbnailBase64: Buffer.from('thumbnail-2-bytes').toString('base64'),
+      },
+    ]);
+    expect(
+      loadSession(workspaceRoot, sessionId)?.messages[0]?.attachments,
+    ).toHaveLength(2);
   });
 
   it('removes existing empty placeholder mirrors from provider-native sync', async () => {

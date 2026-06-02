@@ -97,6 +97,8 @@ import {
 } from './working-directory-history';
 import { CompactPermissionModeSelector } from './CompactPermissionModeSelector';
 import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags';
+import { inferFileAttachmentMetadata } from './file-attachment-metadata';
+import { sortFilesForAttachmentInput } from './file-attachment-order';
 
 /**
  * Format token count for display (e.g., 1500 -> "1.5k", 200000 -> "200k")
@@ -1244,8 +1246,8 @@ export function FreeFormInput({
       )
         return;
 
-      const { files } = e.detail;
-      if (!files || files.length === 0) return;
+      const files = sortFilesForAttachmentInput(e.detail.files ?? []);
+      if (files.length === 0) return;
 
       setLoadingCount((prev) => prev + files.length);
 
@@ -1649,22 +1651,11 @@ export function FreeFormInput({
         }
         const base64 = btoa(binary);
 
-        let type: FileAttachment['type'] = 'unknown';
         const fileName = overrideName || file.name;
-        if (file.type.startsWith('image/')) type = 'image';
-        else if (file.type === 'application/pdf') type = 'pdf';
-        else if (
-          file.type.includes('text') ||
-          fileName.match(/\.(txt|md|json|js|ts|tsx|py|css|html)$/i)
-        )
-          type = 'text';
-        else if (
-          file.type.includes('officedocument') ||
-          fileName.match(/\.(docx?|xlsx?|pptx?)$/i)
-        )
-          type = 'office';
-
-        const mimeType = file.type || 'application/octet-stream';
+        const { type, mimeType } = inferFileAttachmentMetadata(
+          fileName,
+          file.type,
+        );
 
         // For text files, decode the ArrayBuffer as UTF-8 text
         let text: string | undefined;
@@ -1711,7 +1702,7 @@ export function FreeFormInput({
     // We have files to process - prevent default text paste behavior
     e.preventDefault();
 
-    const files = Array.from(clipboardItems);
+    const files = sortFilesForAttachmentInput(Array.from(clipboardItems));
     setLoadingCount((prev) => prev + files.length);
 
     // Pre-assign sequential names using ref to avoid race conditions

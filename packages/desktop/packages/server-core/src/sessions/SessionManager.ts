@@ -13,8 +13,8 @@ import {
   type PlatformServices,
   type Logger,
 } from '@craft-agent/server-core/runtime'
-import { basename, join } from 'path'
-import { existsSync } from 'fs'
+import { basename, extname, join } from 'path'
+import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
 import { mkdir, readFile, rename, writeFile } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import {
@@ -205,7 +205,10 @@ import {
   normalizeThinkingLevel,
 } from '@craft-agent/shared/agent/thinking-levels'
 import { evaluateAutoLabels } from '@craft-agent/shared/labels/auto'
-import { listLabels, loadLabelConfig } from '@craft-agent/shared/labels/storage'
+import {
+  listLabels,
+  loadLabelConfig,
+} from '@craft-agent/shared/labels/storage'
 import { resolveSessionLabels } from '@craft-agent/shared/labels'
 import { ensureLabelsExist } from '@craft-agent/shared/labels/crud'
 import { loadStatusConfig } from '@craft-agent/shared/statuses/storage'
@@ -879,6 +882,158 @@ function isQwenNativeHistoryMessageId(
   return !!sdkSessionId && messageId.startsWith(`qwen-${sdkSessionId}-`)
 }
 
+const IMAGE_PREVIEW_BLOCK_PATTERN = /```image-preview[\s\S]*?```/g
+const LEGACY_ATTACHMENT_MATCH_WINDOW_MS = 5 * 60 * 1000
+const LEGACY_ATTACHMENT_NAME_COLLATOR = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: 'base',
+})
+const LEGACY_IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
+  '.gif': 'image/gif',
+  '.heic': 'image/heic',
+  '.heif': 'image/heif',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+}
+
+function legacyStoredAttachmentName(fileName: string): string {
+  return fileName.replace(/^[0-9a-f-]{36}_/i, '')
+}
+
+function hasImagePreviewContent(message: Message): boolean {
+  return message.content.includes('```image-preview')
+}
+
+function stripImagePreviewBlocks(content: string): string {
+  return content.replace(IMAGE_PREVIEW_BLOCK_PATTERN, '')
+}
+
+function normalizeQwenVisualMatchContent(content: string): string {
+  return stripImagePreviewBlocks(content).replace(/\s+/g, ' ').trim()
+}
+
+function extractImagePreviewBlocks(content: string): string[] {
+  return content.match(IMAGE_PREVIEW_BLOCK_PATTERN) ?? []
+}
+
+function hasQwenCanonicalLocalVisualState(message: Message): boolean {
+  return (
+    (message.attachments?.length ?? 0) > 0 || hasImagePreviewContent(message)
+  )
+}
+
+function qwenCanonicalLocalVisualMessages(messages: Message[]): Message[] {
+  return messages.filter(
+    (message) =>
+      message.role !== 'status' && hasQwenCanonicalLocalVisualState(message),
+  )
+}
+
+function findQwenCanonicalVisualOverlayMatch(
+  message: Message,
+  overlays: Message[],
+  usedOverlayIndexes: Set<number>,
+): number {
+  let bestIndex = -1
+  let bestScore = 0
+  const normalized = normalizeQwenVisualMatchContent(message.content)
+
+  overlays.forEach((overlay, index) => {
+    if (usedOverlayIndexes.has(index) || overlay.role !== message.role) return
+
+    const overlayNormalized = normalizeQwenVisualMatchContent(overlay.content)
+    const timeDiff = Math.abs(overlay.timestamp - message.timestamp)
+    let score = 0
+
+    if (overlay.id === message.id) score += 1000
+    if (overlay.content === message.content) score += 500
+    if (overlayNormalized && overlayNormalized === normalized) score += 400
+    if (
+      overlayNormalized &&
+      normalized &&
+      Math.min(overlayNormalized.length, normalized.length) >= 16 &&
+      (overlayNormalized.includes(normalized) ||
+        normalized.includes(overlayNormalized))
+    ) {
+      score += 250
+    }
+    if (timeDiff <= 30_000) score += 100 - Math.floor(timeDiff / 1_000)
+
+    if (score > bestScore) {
+      bestScore = score
+      bestIndex = index
+    }
+  })
+
+  return bestScore > 0 ? bestIndex : -1
+}
+
+function mergeQwenCanonicalVisualOverlay(
+  message: Message,
+  overlay: Message,
+): Message {
+  const next: Message = { ...message }
+
+  if (overlay.attachments?.length) {
+    next.attachments = overlay.attachments
+  }
+  if (overlay.textElements?.length && !next.textElements?.length) {
+    next.textElements = overlay.textElements
+  }
+  if (overlay.annotations?.length && !next.annotations?.length) {
+    next.annotations = overlay.annotations
+  }
+
+  const overlayImageBlocks = extractImagePreviewBlocks(overlay.content)
+  if (overlayImageBlocks.length > 0 && !hasImagePreviewContent(next)) {
+    const normalized = normalizeQwenVisualMatchContent(next.content)
+    const overlayNormalized = normalizeQwenVisualMatchContent(overlay.content)
+    next.content =
+      !normalized ||
+      (overlayNormalized &&
+        (overlayNormalized.includes(normalized) ||
+          normalized.includes(overlayNormalized)))
+        ? overlay.content
+        : `${next.content.trimEnd()}\n\n${overlayImageBlocks.join('\n\n')}`
+  }
+
+  return next
+}
+
+function mergeQwenCanonicalLocalVisualMessages(
+  messages: Message[],
+  localMessages: Message[],
+): Message[] {
+  const overlays = qwenCanonicalLocalVisualMessages(localMessages)
+  if (overlays.length === 0) return messages
+
+  const usedOverlayIndexes = new Set<number>()
+  const merged = messages.map((message) => {
+    const overlayIndex = findQwenCanonicalVisualOverlayMatch(
+      message,
+      overlays,
+      usedOverlayIndexes,
+    )
+    if (overlayIndex === -1) return message
+
+    usedOverlayIndexes.add(overlayIndex)
+    return mergeQwenCanonicalVisualOverlay(message, overlays[overlayIndex]!)
+  })
+
+  overlays.forEach((overlay, index) => {
+    if (!usedOverlayIndexes.has(index)) {
+      merged.push(overlay)
+    }
+  })
+
+  return merged.sort((a, b) => a.timestamp - b.timestamp)
+}
+
 interface ManagedSession {
   id: string
   workspace: Workspace
@@ -1375,7 +1530,8 @@ export class SessionManager implements ISessionManager {
     loadConfigDefaults().workspaceDefaults.permissionMode
 
   constructor(options: SessionManagerOptions = {}) {
-    this.createExternalSessionAgentOverride = options.createExternalSessionAgent
+    this.createExternalSessionAgentOverride =
+      options.createExternalSessionAgent
   }
 
   /**
@@ -1415,7 +1571,8 @@ export class SessionManager implements ISessionManager {
    *  the previous value, increments by 1 to preserve event ordering. */
   private monotonic(): number {
     const now = Date.now()
-    this.lastTimestamp = now > this.lastTimestamp ? now : this.lastTimestamp + 1
+    this.lastTimestamp =
+      now > this.lastTimestamp ? now : this.lastTimestamp + 1
     return this.lastTimestamp
   }
 
@@ -1558,7 +1715,9 @@ export class SessionManager implements ISessionManager {
     // Qwen canonical mirrors intentionally omit provider titles from local
     // headers. Treat an absent local name as "unknown", not as a delete.
     if (
-      !(header.name === undefined && this.isQwenCanonicalMessageSession(managed)) &&
+      !(
+        header.name === undefined && this.isQwenCanonicalMessageSession(managed)
+      ) &&
       managed.name !== header.name
     ) {
       managed.name = header.name
@@ -2066,7 +2225,9 @@ export class SessionManager implements ISessionManager {
       // Get the connection to use (explicit parameter or default)
       const slug = connectionSlug || getDefaultLlmConnection()
       if (!slug) {
-        sessionLog.warn('No LLM connection slug available for reinitializeAuth')
+        sessionLog.warn(
+          'No LLM connection slug available for reinitializeAuth',
+        )
       }
       const connection = slug ? getLlmConnection(slug) : null
 
@@ -2192,7 +2353,8 @@ export class SessionManager implements ISessionManager {
           this.sessions.set(meta.id, managed)
 
           // Initialize session metadata in AutomationSystem for diffing
-          const automationSystem = this.automationSystems.get(workspaceRootPath)
+          const automationSystem =
+            this.automationSystems.get(workspaceRootPath)
           if (automationSystem) {
             automationSystem.setInitialSessionMetadata(meta.id, {
               permissionMode: meta.permissionMode,
@@ -2319,10 +2481,10 @@ export class SessionManager implements ISessionManager {
 
     const removedMissingSessions = reachedEnd
       ? await this.removeMissingExternalListedSessions(
-        workspace,
-        backendContext.connection.slug,
-        seenSdkSessionIds,
-      )
+          workspace,
+          backendContext.connection.slug,
+          seenSdkSessionIds,
+        )
       : false
 
     if (listedSessions.length > 0) {
@@ -2377,7 +2539,10 @@ export class SessionManager implements ISessionManager {
     const cached = this.externalSessionAgents.get(key)
     if (cached) return cached
 
-    const agent = this.createExternalSessionListAgent(workspace, backendContext)
+    const agent = this.createExternalSessionListAgent(
+      workspace,
+      backendContext,
+    )
     agent.onDebug = (msg: string) => sessionLog.debug(msg)
     this.externalSessionAgents.set(key, agent)
     return agent
@@ -2658,7 +2823,9 @@ export class SessionManager implements ISessionManager {
     // Prefer the Craft-owned session when it has already captured this provider
     // session ID. A provider-native mirror uses id === sdkSessionId and should not
     // win once the real local session is linked.
-    const localOwners = matches.filter((managed) => managed.id !== sdkSessionId)
+    const localOwners = matches.filter(
+      (managed) => managed.id !== sdkSessionId,
+    )
     if (localOwners.length > 0) {
       return localOwners.sort(byActivityDesc)[0]
     }
@@ -2747,7 +2914,9 @@ export class SessionManager implements ISessionManager {
   }
 
   private extractMessagePreview(messages: Message[]): string | undefined {
-    const firstUserMessage = messages.find((message) => message.role === 'user')
+    const firstUserMessage = messages.find(
+      (message) => message.role === 'user',
+    )
     if (!firstUserMessage?.content) return undefined
 
     const sanitized = firstUserMessage.content
@@ -2857,24 +3026,39 @@ export class SessionManager implements ISessionManager {
     )
   }
 
+  private applyTokenUsageFromMessagesResult(
+    managed: ManagedSession,
+    result: BackendSessionMessagesResult | undefined,
+  ): void {
+    if (!result?.tokenUsage) return
+    managed.tokenUsage = { ...result.tokenUsage }
+  }
+
   private applyLoadedExternalMessages(
     managed: ManagedSession,
     messages: Message[],
   ): void {
-    managed.messages = messages
-    if (this.isQwenCanonicalMessageSession(managed)) {
+    const usesQwenCanonicalMessages =
+      this.isQwenCanonicalMessageSession(managed)
+    managed.messages = usesQwenCanonicalMessages
+      ? mergeQwenCanonicalLocalVisualMessages(messages, [
+          ...managed.messages,
+          ...this.inferLegacyQwenCanonicalAttachmentOverlays(managed, messages),
+        ])
+      : messages
+    if (usesQwenCanonicalMessages) {
       delete managed.messageCount
     } else {
-      managed.messageCount = messages.length
+      managed.messageCount = managed.messages.length
     }
-    managed.preview = this.extractMessagePreview(messages)
+    managed.preview = this.extractMessagePreview(managed.messages)
 
-    const firstMessage = messages[0]
+    const firstMessage = managed.messages[0]
     if (firstMessage && this.isQwenCanonicalMessageSession(managed)) {
       managed.createdAt = firstMessage.timestamp
     }
 
-    const lastMessage = messages[messages.length - 1]
+    const lastMessage = managed.messages[managed.messages.length - 1]
     if (lastMessage) {
       managed.lastMessageAt = lastMessage.timestamp
       if (
@@ -2891,12 +3075,111 @@ export class SessionManager implements ISessionManager {
         : Math.max(managed.lastUsedAt ?? 0, lastMessage.timestamp)
     }
 
-    const lastFinalAssistant = [...messages]
+    const lastFinalAssistant = [...managed.messages]
       .reverse()
       .find(
         (message) => message.role === 'assistant' && !message.isIntermediate,
       )
     managed.lastFinalMessageId = lastFinalAssistant?.id
+  }
+
+  private inferLegacyQwenCanonicalAttachmentOverlays(
+    managed: ManagedSession,
+    messages: Message[],
+  ): Message[] {
+    if (qwenCanonicalLocalVisualMessages(managed.messages).length > 0) {
+      return []
+    }
+
+    const userMessages = messages.filter((message) => message.role === 'user')
+    if (userMessages.length === 0) return []
+
+    const attachmentsDir = join(
+      getSessionStoragePath(managed.workspace.rootPath, managed.id),
+      'attachments',
+    )
+    if (!existsSync(attachmentsDir)) return []
+
+    const attachmentsByMessageId = new Map<string, StoredAttachment[]>()
+    try {
+      const legacyAttachments = readdirSync(attachmentsDir)
+        .filter((fileName) => !fileName.includes('_thumb.'))
+        .map((fileName) => {
+          const extension = extname(fileName).toLowerCase()
+          const mimeType = LEGACY_IMAGE_MIME_BY_EXTENSION[extension]
+          if (!mimeType) return null
+
+          const storedPath = join(attachmentsDir, fileName)
+          return {
+            fileName,
+            mimeType,
+            name: legacyStoredAttachmentName(fileName),
+            stats: statSync(storedPath),
+            storedPath,
+          }
+        })
+        .filter((item) => item !== null)
+        .sort(
+          (a, b) =>
+            LEGACY_ATTACHMENT_NAME_COLLATOR.compare(a.name, b.name) ||
+            a.stats.mtimeMs - b.stats.mtimeMs ||
+            a.fileName.localeCompare(b.fileName),
+        )
+
+      for (const {
+        fileName,
+        mimeType,
+        name,
+        stats,
+        storedPath,
+      } of legacyAttachments) {
+        const matchedMessage = userMessages
+          .map((message) => ({
+            message,
+            delta: Math.abs(message.timestamp - stats.mtimeMs),
+          }))
+          .filter(({ delta }) => delta <= LEGACY_ATTACHMENT_MATCH_WINDOW_MS)
+          .sort((a, b) => a.delta - b.delta)[0]?.message
+        if (!matchedMessage) continue
+
+        const attachmentId =
+          fileName.match(/^([0-9a-f-]{36})_/i)?.[1] ?? randomUUID()
+        const thumbPath = join(attachmentsDir, `${attachmentId}_thumb.png`)
+        const thumbnailBase64 = existsSync(thumbPath)
+          ? readFileSync(thumbPath).toString('base64')
+          : undefined
+        const attachment: StoredAttachment = {
+          id: attachmentId,
+          type: 'image',
+          name,
+          mimeType,
+          size: stats.size,
+          storedPath,
+          ...(thumbnailBase64
+            ? { thumbnailPath: thumbPath, thumbnailBase64 }
+            : {}),
+        }
+
+        const existing = attachmentsByMessageId.get(matchedMessage.id) ?? []
+        existing.push(attachment)
+        attachmentsByMessageId.set(matchedMessage.id, existing)
+      }
+    } catch (error) {
+      sessionLog.warn(
+        `Failed to infer legacy Qwen attachments for session ${managed.id}:`,
+        error,
+      )
+      return []
+    }
+
+    const overlays: Message[] = []
+    for (const message of userMessages) {
+      const attachments = attachmentsByMessageId.get(message.id)
+      if (attachments?.length) {
+        overlays.push({ ...message, attachments })
+      }
+    }
+    return overlays
   }
 
   private async upsertExternalListedSession(args: {
@@ -3001,6 +3284,7 @@ export class SessionManager implements ISessionManager {
         inspectedResult,
         'provider-native session inspection',
       )
+      this.applyTokenUsageFromMessagesResult(managed, inspectedResult)
       const inspectedMessages = inspectedResult?.messages
       if (inspectedMessages?.length) {
         this.applyLoadedExternalMessages(managed, inspectedMessages)
@@ -3079,6 +3363,7 @@ export class SessionManager implements ISessionManager {
       imported.availableCommands = inspectedResult.availableCommands ?? []
       imported.availableSkills = inspectedResult.availableSkills
     }
+    this.applyTokenUsageFromMessagesResult(imported, inspectedResult)
     if (inspectedMessages?.length) {
       this.applyLoadedExternalMessages(imported, inspectedMessages)
       this.markExternalMessagesLoadedThrough(imported)
@@ -3112,7 +3397,8 @@ export class SessionManager implements ISessionManager {
       if (managed.workspace.id !== workspace.id) continue
       if (this.resolveExternalSessionConnectionSlug(managed) !== connectionSlug)
         continue
-      if (!managed.sdkSessionId || managed.id !== managed.sdkSessionId) continue
+      if (!managed.sdkSessionId || managed.id !== managed.sdkSessionId)
+        continue
       if (seenSdkSessionIds.has(managed.sdkSessionId)) continue
       if (managed.isProcessing) continue
 
@@ -3136,7 +3422,7 @@ export class SessionManager implements ISessionManager {
       // Filter out transient status messages (progress indicators like "Compacting...")
       // Error messages are now persisted with rich fields for diagnostics
       const persistableMessages = usesQwenCanonicalMessages
-        ? []
+        ? qwenCanonicalLocalVisualMessages(managed.messages)
         : managed.messages.filter((m) => m.role !== 'status')
       // If messages haven't been loaded yet (e.g., branched session not yet opened),
       // skip persistence to avoid overwriting JSONL messages with empty array
@@ -3213,7 +3499,11 @@ export class SessionManager implements ISessionManager {
       return
     }
 
-    await updateSessionMetadata(managed.workspace.rootPath, managed.id, updates)
+    await updateSessionMetadata(
+      managed.workspace.rootPath,
+      managed.id,
+      updates,
+    )
   }
 
   // Flush all pending sessions (call on app quit)
@@ -3727,7 +4017,9 @@ export class SessionManager implements ISessionManager {
       managed.id,
     )
     if (storedSession) {
-      const storedMessages = (storedSession.messages || []).map(storedToMessage)
+      const storedMessages = (storedSession.messages || []).map(
+        storedToMessage,
+      )
       managed.tokenUsage = storedSession.tokenUsage
       managed.lastReadMessageId = storedSession.lastReadMessageId
       managed.hasUnread = storedSession.hasUnread // Explicit unread flag for NEW badge state machine
@@ -3772,7 +4064,9 @@ export class SessionManager implements ISessionManager {
         storedSession.transferredSessionSummaryApplied
       const usesQwenCanonicalMessages =
         this.isQwenCanonicalMessageSession(managed)
-      managed.messages = usesQwenCanonicalMessages ? [] : storedMessages
+      managed.messages = usesQwenCanonicalMessages
+        ? qwenCanonicalLocalVisualMessages(storedMessages)
+        : storedMessages
       if (usesQwenCanonicalMessages) {
         delete managed.messageCount
       }
@@ -3809,7 +4103,8 @@ export class SessionManager implements ISessionManager {
       }
     }
     if (this.shouldAttemptExternalMessageLoad(managed)) {
-      const externalLoadResult = await this.loadExternalSessionMessages(managed)
+      const externalLoadResult =
+        await this.loadExternalSessionMessages(managed)
       loadedExternalMessages = externalLoadResult === 'loaded'
       managed.externalMessagesLoadAttempted =
         externalLoadResult !== 'unavailable'
@@ -3852,7 +4147,8 @@ export class SessionManager implements ISessionManager {
     if (!this.shouldAttemptExternalMessageLoad(managed)) return
 
     const externalLoadResult = await this.loadExternalSessionMessages(managed)
-    managed.externalMessagesLoadAttempted = externalLoadResult !== 'unavailable'
+    managed.externalMessagesLoadAttempted =
+      externalLoadResult !== 'unavailable'
     if (externalLoadResult === 'loaded' || externalLoadResult === 'empty') {
       this.markExternalMessagesLoadedThrough(managed)
     }
@@ -3926,6 +4222,7 @@ export class SessionManager implements ISessionManager {
         result,
         'provider-native message load',
       )
+      this.applyTokenUsageFromMessagesResult(managed, result)
 
       const messages = result.messages
       if (messages.length === 0) {
@@ -4282,7 +4579,8 @@ export class SessionManager implements ISessionManager {
         branchedStored.branchFromSessionPath =
           validatedBranch.branchFromSessionPath
         branchedStored.branchFromSdkCwd = validatedBranch.branchFromSdkCwd
-        branchedStored.branchFromSdkTurnId = validatedBranch.branchFromSdkTurnId
+        branchedStored.branchFromSdkTurnId =
+          validatedBranch.branchFromSdkTurnId
       } else {
         delete branchedStored.branchFromSdkSessionId
         delete branchedStored.branchFromSessionPath
@@ -4480,7 +4778,7 @@ export class SessionManager implements ISessionManager {
       }
 
       // Set session directory for tool metadata cross-process sharing.
-      // The SDK subprocess reads CRAFT_SESSION_DIR to write tool-metadata.json;
+      // The SDK subprocess reads CRAFT_SESSION_DIR to write tool-metadata.json
       // the main process reads it via toolMetadataStore.setSessionDir().
       const sessionDirForMetadata = getSessionStoragePath(
         managed.workspace.rootPath,
@@ -5020,7 +5318,8 @@ export class SessionManager implements ISessionManager {
               return bpm.typeText(instanceId, text)
             },
             select: (ref, value) => {
-              const instanceId = resolveSessionBrowserInstance('browser_select')
+              const instanceId =
+                resolveSessionBrowserInstance('browser_select')
               return bpm.selectOption(instanceId, ref, value)
             },
             setClipboard: (text) => {
@@ -5078,11 +5377,13 @@ export class SessionManager implements ISessionManager {
               return bpm.getDownloads(instanceId, options)
             },
             upload: (ref, filePaths) => {
-              const instanceId = resolveSessionBrowserInstance('browser_upload')
+              const instanceId =
+                resolveSessionBrowserInstance('browser_upload')
               return bpm.uploadFile(instanceId, ref, filePaths).then(() => {})
             },
             scroll: (direction, amount) => {
-              const instanceId = resolveSessionBrowserInstance('browser_scroll')
+              const instanceId =
+                resolveSessionBrowserInstance('browser_scroll')
               return bpm.scroll(instanceId, direction, amount)
             },
             goBack: () => {
@@ -5300,7 +5601,9 @@ export class SessionManager implements ISessionManager {
         rememberForMinutes?: number
         commandHash?: string
         approvalTtlSeconds?: number
-        questions?: Array<import('@craft-agent/core/types').AskUserQuestionItem>
+        questions?: Array<
+          import('@craft-agent/core/types').AskUserQuestionItem
+        >
         metadata?: {
           source?: string
         }
@@ -5396,7 +5699,10 @@ export class SessionManager implements ISessionManager {
 
       // Set up mode change handlers
       managed.agent.onPermissionModeChange = (mode) => {
-        if (managed.permissionMode === mode && this.currentGlobalPermissionMode === mode) {
+        if (
+          managed.permissionMode === mode &&
+          this.currentGlobalPermissionMode === mode
+        ) {
           return
         }
 
@@ -5810,7 +6116,8 @@ export class SessionManager implements ISessionManager {
           // auto_retry effect then resends the original user message with a
           // "[{slug} activated]" suffix — landing in a fresh turn with tools live.
           // Same machinery as the tool-call-error auto-retry path.
-          const userMessage = managed.agent?.getCurrentTurnUserMessage?.() ?? ''
+          const userMessage =
+            managed.agent?.getCurrentTurnUserMessage?.() ?? ''
           if (userMessage) {
             managed.agent?.setPendingSourceActivationRestart({
               sourceSlug,
@@ -5876,7 +6183,10 @@ export class SessionManager implements ISessionManager {
           managed.enabledSourceSlugs || [],
         )
         // Pass session path so large API responses can be saved to session folder
-        const sessionPath = getSessionStoragePath(workspaceRootPath, managed.id)
+        const sessionPath = getSessionStoragePath(
+          workspaceRootPath,
+          managed.id,
+        )
         const { mcpServers, apiServers, errors } =
           await buildServersFromSources(
             allEnabledSources,
@@ -5890,7 +6200,8 @@ export class SessionManager implements ISessionManager {
         }
 
         // Check if our target source was built successfully
-        const sourceBuilt = sourceSlug in mcpServers || sourceSlug in apiServers
+        const sourceBuilt =
+          sourceSlug in mcpServers || sourceSlug in apiServers
         if (!sourceBuilt) {
           sessionLog.warn(`Source ${sourceSlug} failed to build`)
           // Only remove if WE added it (not if it was already there)
@@ -6931,7 +7242,9 @@ export class SessionManager implements ISessionManager {
       // Check if we can also update sdkCwd (safe if no SDK interaction yet)
       // Conditions: no messages sent AND no agent created yet (no SDK session)
       const shouldUpdateSdkCwd =
-        managed.messages.length === 0 && !managed.sdkSessionId && !managed.agent
+        managed.messages.length === 0 &&
+        !managed.sdkSessionId &&
+        !managed.agent
 
       if (shouldUpdateSdkCwd) {
         managed.sdkCwd = path
@@ -7137,7 +7450,9 @@ export class SessionManager implements ISessionManager {
 
     const postInitResult = await agent.postInit()
     if (postInitResult.authWarning) {
-      sessionLog.warn(`Draft agent auth warning: ${postInitResult.authWarning}`)
+      sessionLog.warn(
+        `Draft agent auth warning: ${postInitResult.authWarning}`,
+      )
     }
 
     return agent
@@ -7273,7 +7588,10 @@ export class SessionManager implements ISessionManager {
       throw new Error('Cannot edit a message while the session is processing')
     }
 
-    const resolvedMessage = this.findMessageForContentUpdate(managed, messageId)
+    const resolvedMessage = this.findMessageForContentUpdate(
+      managed,
+      messageId,
+    )
     if (!resolvedMessage) {
       sessionLog.warn(
         `Cannot update message: message ${messageId} not found in session ${sessionId}`,
@@ -7737,7 +8055,10 @@ export class SessionManager implements ISessionManager {
     deleteStoredSession(workspaceRootPath, sessionId)
 
     // Notify all windows for this workspace that the session was deleted
-    this.sendEvent({ type: 'session_deleted', sessionId }, managed.workspace.id)
+    this.sendEvent(
+      { type: 'session_deleted', sessionId },
+      managed.workspace.id,
+    )
     this.emitUnreadSummaryChanged()
 
     // Clean up attachments directory (handled by deleteStoredSession for workspace-scoped storage)
@@ -7762,7 +8083,10 @@ export class SessionManager implements ISessionManager {
     // Clear any pending plan execution state when a new user message is sent.
     // This acts as a safety valve - if the user moves on, we don't want to
     // auto-execute an old plan later.
-    await clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
+    await clearStoredPendingPlanExecution(
+      managed.workspace.rootPath,
+      sessionId,
+    )
 
     // Ensure messages are loaded before we try to add new ones
     await this.ensureMessagesLoaded(managed)
@@ -7820,6 +8144,12 @@ export class SessionManager implements ISessionManager {
       })
 
       this.persistSession(managed)
+      if (
+        this.isQwenCanonicalMessageSession(managed) &&
+        hasQwenCanonicalLocalVisualState(userMessage)
+      ) {
+        await this.flushSession(managed.id)
+      }
       return
     }
 
@@ -7937,6 +8267,14 @@ export class SessionManager implements ISessionManager {
       }
     }
 
+    if (
+      this.isQwenCanonicalMessageSession(managed) &&
+      hasQwenCanonicalLocalVisualState(userMessage)
+    ) {
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+    }
+
     // Evaluate auto-label rules against the user message (common path for both
     // fresh and queued messages). Scans regex patterns configured on labels,
     // then merges any new matches into the session's label array.
@@ -8046,7 +8384,10 @@ export class SessionManager implements ISessionManager {
           const toEnable: string[] = []
           const skipped: string[] = []
           const candidateSlugs = Array.from(requiredSources)
-          const loadedSources = getSourcesBySlugs(workspaceRoot, candidateSlugs)
+          const loadedSources = getSourcesBySlugs(
+            workspaceRoot,
+            candidateSlugs,
+          )
           const usableSources = new Set(
             loadedSources
               .filter(isSourceUsable)
@@ -8211,7 +8552,10 @@ export class SessionManager implements ISessionManager {
 
       // Ensure main process reads tool metadata from the correct session directory.
       // This must be set before each chat() call since multiple sessions share the process.
-      const chatSessionDir = getSessionStoragePath(workspaceRootPath, sessionId)
+      const chatSessionDir = getSessionStoragePath(
+        workspaceRootPath,
+        sessionId,
+      )
       toolMetadataStore.setSessionDir(chatSessionDir)
 
       // Inject interruption context so the LLM knows the previous turn was cut short.
@@ -8729,7 +9073,10 @@ export class SessionManager implements ISessionManager {
     //    - If user is viewing: mark as read (they saw it complete)
     //    - If user is NOT viewing: mark as unread (they have new content)
     //    IMPORTANT: only apply this when the turn produced a NEW final assistant message.
-    const isViewing = this.isSessionBeingViewed(sessionId, managed.workspace.id)
+    const isViewing = this.isSessionBeingViewed(
+      sessionId,
+      managed.workspace.id,
+    )
     const currentFinalMessageId = this.getLastFinalAssistantMessageId(
       managed.messages,
     )
@@ -9511,7 +9858,10 @@ export class SessionManager implements ISessionManager {
         changedBy: 'restore',
       })
       if (managed.previousPermissionMode) {
-        hydratePreviousPermissionMode(sessionId, managed.previousPermissionMode)
+        hydratePreviousPermissionMode(
+          sessionId,
+          managed.previousPermissionMode,
+        )
       }
       diagnostics = getPermissionModeDiagnostics(sessionId)
     }
@@ -9587,8 +9937,7 @@ export class SessionManager implements ISessionManager {
       workspaceConfig?.defaults?.workingDirectory ??
       undefined
     const permissionMode =
-      options.permissionMode ??
-      this.currentGlobalPermissionMode
+      options.permissionMode ?? this.currentGlobalPermissionMode
     const thinkingLevel =
       normalizeThinkingLevel(options.thinkingLevel) ??
       normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ??
@@ -9720,8 +10069,7 @@ export class SessionManager implements ISessionManager {
       workspaceConfig?.defaults?.workingDirectory ??
       undefined
     const permissionMode =
-      options.permissionMode ??
-      this.currentGlobalPermissionMode
+      options.permissionMode ?? this.currentGlobalPermissionMode
     const thinkingLevel =
       normalizeThinkingLevel(options.thinkingLevel) ??
       normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ??
@@ -9777,7 +10125,8 @@ export class SessionManager implements ISessionManager {
         try {
           snapshot = await agent.refreshAvailableCommands()
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
+          const message =
+            error instanceof Error ? error.message : String(error)
           sessionLog.warn(
             `installQwenSkill: post-install command refresh failed: ${message}`,
           )
@@ -9845,8 +10194,7 @@ export class SessionManager implements ISessionManager {
       workspaceConfig?.defaults?.workingDirectory ??
       undefined
     const permissionMode =
-      options.permissionMode ??
-      this.currentGlobalPermissionMode
+      options.permissionMode ?? this.currentGlobalPermissionMode
     const thinkingLevel =
       normalizeThinkingLevel(options.thinkingLevel) ??
       normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ??
@@ -9952,8 +10300,7 @@ export class SessionManager implements ISessionManager {
       workspaceConfig?.defaults?.workingDirectory ??
       undefined
     const permissionMode =
-      options.permissionMode ??
-      this.currentGlobalPermissionMode
+      options.permissionMode ?? this.currentGlobalPermissionMode
     const thinkingLevel =
       normalizeThinkingLevel(options.thinkingLevel) ??
       normalizeThinkingLevel(workspaceConfig?.defaults?.thinkingLevel) ??
@@ -10112,7 +10459,11 @@ export class SessionManager implements ISessionManager {
         commandNames: snapshot.availableCommands.map((command) => command.name),
         skillNames: snapshot.availableSkills ?? [],
       })
-      this.applyAvailableCommandsSnapshot(managed, snapshot, 'explicit refresh')
+      this.applyAvailableCommandsSnapshot(
+        managed,
+        snapshot,
+        'explicit refresh',
+      )
 
       return { success: true, ...snapshot }
     } catch (error) {
@@ -10413,7 +10764,9 @@ export class SessionManager implements ISessionManager {
           { type: 'title_generated', sessionId: managed.id, title },
           managed.workspace.id,
         )
-        sessionLog.info(`Generated title for session ${managed.id}: "${title}"`)
+        sessionLog.info(
+          `Generated title for session ${managed.id}: "${title}"`,
+        )
       } else {
         sessionLog.warn(
           `Title generation returned null for session ${managed.id}`,
@@ -11642,7 +11995,9 @@ export class SessionManager implements ISessionManager {
 
     // Check for ID collision on move
     if (mode === 'move' && this.sessions.has(sessionId)) {
-      throw new Error(`Session ${sessionId} already exists in target workspace`)
+      throw new Error(
+        `Session ${sessionId} already exists in target workspace`,
+      )
     }
 
     // Create session directory with all subdirectories
@@ -11730,7 +12085,9 @@ export class SessionManager implements ISessionManager {
     // Check source compatibility (before writing JSONL so fixes are persisted)
     if (storedSession.enabledSourceSlugs?.length) {
       const availableSources = loadWorkspaceSources(workspaceRootPath)
-      const availableSlugs = new Set(availableSources.map((s) => s.config.slug))
+      const availableSlugs = new Set(
+        availableSources.map((s) => s.config.slug),
+      )
       const missingSources = storedSession.enabledSourceSlugs.filter(
         (s) => !availableSlugs.has(s),
       )
@@ -11768,7 +12125,9 @@ export class SessionManager implements ISessionManager {
         )
       }
     } else if (mode === 'move' && !storedSession.llmConnection) {
-      sessionLog.info('[import] No LLM connection in bundle — will use default')
+      sessionLog.info(
+        '[import] No LLM connection in bundle — will use default',
+      )
     }
 
     // Write JSONL file (after compatibility checks so remapped values are persisted)
