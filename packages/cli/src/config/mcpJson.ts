@@ -74,7 +74,7 @@ export function loadProjectMcpServers(
     };
   }
 
-  const servers: Record<string, MCPServerConfig> = {};
+  const servers: Record<string, MCPServerConfig> = Object.create(null);
   const errors: string[] = [];
   for (const [name, value] of Object.entries(
     mcpServers as Record<string, unknown>,

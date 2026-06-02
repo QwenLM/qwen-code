@@ -72,7 +72,20 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     );
     const record = onDisk[path.resolve(projectRoot)]['slack'];
     expect(record.status).toBe('approved');
-    expect(record.hash).toMatch(/^[0-9a-f]{16}$/);
+    expect(record.hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('recovers when a per-project approvals record is corrupted', () => {
+    const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
+    fs.writeFileSync(
+      filePath,
+      JSON.stringify({ [path.resolve(projectRoot)]: 'garbage' }),
+    );
+    const approvals = loadMcpApprovals();
+    expect(() =>
+      approvals.setState(projectRoot, 'slack', server, 'approved'),
+    ).not.toThrow();
+    expect(approvals.getState(projectRoot, 'slack', server)).toBe('approved');
   });
 
   describe('hash binding (the issue #4615 requirement)', () => {

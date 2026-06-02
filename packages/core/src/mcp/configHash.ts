@@ -31,9 +31,8 @@ const NON_BEHAVIORAL_FIELDS = new Set<string>([
  * key that happens to be named e.g. `description` inside `env`/`headers` is
  * still hashed.
  *
- * Ports the canonical-hash approach from the Claude Code reference
- * (`claude-code/src/services/mcp/utils.ts:hashMcpConfig`), but applied to
- * approval binding rather than plugin-reload detection.
+ * Claude Code truncates similar hashes for reload detection, where collisions
+ * are harmless. Approval binding is security-sensitive, so keep the full digest.
  */
 export function hashMcpServerConfig(config: MCPServerConfig): string {
   const behavioral: Record<string, unknown> = {};
@@ -55,5 +54,5 @@ export function hashMcpServerConfig(config: MCPServerConfig): string {
     return value;
   });
 
-  return crypto.createHash('sha256').update(stable).digest('hex').slice(0, 16);
+  return crypto.createHash('sha256').update(stable).digest('hex');
 }

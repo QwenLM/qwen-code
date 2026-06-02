@@ -85,7 +85,14 @@ export const useMcpApproval = (config: Config) => {
     (name: string) => {
       config.approveMcpServerForSession(name);
       const registry = config.getToolRegistry();
-      void registry?.discoverToolsForServer?.(name)?.catch?.(() => {});
+      void registry
+        ?.discoverToolsForServer?.(name)
+        ?.catch?.((error: unknown) => {
+          if (process.env['DEBUG']) {
+            // eslint-disable-next-line no-console
+            console.error(`MCP reconnect failed for ${name}:`, error);
+          }
+        });
     },
     [config],
   );
@@ -94,28 +101,27 @@ export const useMcpApproval = (config: Config) => {
     (choice: McpApprovalChoice) => {
       const approvals = loadMcpApprovals();
       const root = config.getWorkingDir();
-      setQueue((q) => {
-        const current = q[0];
-        if (!current) {
-          return q;
+      const current = queue[0];
+      if (!current) {
+        return;
+      }
+      if (choice === McpApprovalChoice.APPROVE_ALL) {
+        for (const server of queue) {
+          approvals.setState(root, server.name, server.config, 'approved');
+          reconnect(server.name);
         }
-        if (choice === McpApprovalChoice.APPROVE_ALL) {
-          for (const server of q) {
-            approvals.setState(root, server.name, server.config, 'approved');
-            reconnect(server.name);
-          }
-          return [];
-        }
-        if (choice === McpApprovalChoice.APPROVE) {
-          approvals.setState(root, current.name, current.config, 'approved');
-          reconnect(current.name);
-        } else {
-          approvals.setState(root, current.name, current.config, 'rejected');
-        }
-        return q.slice(1);
-      });
+        setQueue([]);
+        return;
+      }
+      if (choice === McpApprovalChoice.APPROVE) {
+        approvals.setState(root, current.name, current.config, 'approved');
+        reconnect(current.name);
+      } else {
+        approvals.setState(root, current.name, current.config, 'rejected');
+      }
+      setQueue((q) => q.slice(1));
     },
-    [config, reconnect],
+    [config, queue, reconnect],
   );
 
   return {

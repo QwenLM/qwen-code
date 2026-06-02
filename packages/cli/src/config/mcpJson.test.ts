@@ -69,6 +69,17 @@ describe('loadProjectMcpServers', () => {
     });
   });
 
+  it('keeps __proto__ server names visible to approval checks', () => {
+    write('{"mcpServers":{"__proto__":{"command":"node"}}}');
+    const { servers, errors } = loadProjectMcpServers(dir);
+    expect(errors).toEqual([]);
+    expect(Object.keys(servers)).toEqual(['__proto__']);
+    expect(servers['__proto__']).toMatchObject({
+      command: 'node',
+      scope: 'project',
+    });
+  });
+
   it('tolerates JSON comments (strip-json-comments)', () => {
     write(`{
       // a project server

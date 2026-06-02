@@ -6,6 +6,7 @@
 
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import { loadProjectMcpServers } from './mcpJson.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 /**
  * Assemble the effective MCP server map from every source in precedence order,
@@ -40,9 +41,14 @@ export function assembleMcpServers(
     }
   }
 
+  const projectResult = loadProjectMcpServers(cwd);
+  for (const error of projectResult.errors) {
+    writeStderrLine(`Warning: ${error}`);
+  }
+
   return {
     ...belowProject,
-    ...loadProjectMcpServers(cwd).servers,
+    ...projectResult.servers,
     ...aboveProject,
     ...(cliMcpServers ?? {}),
   };

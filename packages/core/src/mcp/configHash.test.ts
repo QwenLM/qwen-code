@@ -9,9 +9,9 @@ import type { MCPServerConfig } from '../config/config.js';
 import { hashMcpServerConfig } from './configHash.js';
 
 describe('hashMcpServerConfig', () => {
-  it('returns a stable 16-char hex digest', () => {
+  it('returns a stable full sha256 hex digest', () => {
     const hash = hashMcpServerConfig({ command: 'node', args: ['server.js'] });
-    expect(hash).toMatch(/^[0-9a-f]{16}$/);
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('is deterministic for identical configs', () => {

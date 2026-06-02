@@ -94,7 +94,11 @@ export class LoadedMcpApprovals {
     status: McpApprovalStatus,
   ): void {
     const root = normalizeProjectRoot(projectRoot);
-    const project = this.file.config[root] ?? {};
+    const existing = this.file.config[root];
+    const project: Record<string, McpApprovalRecord> =
+      existing && typeof existing === 'object' && !Array.isArray(existing)
+        ? existing
+        : {};
     project[serverName] = { hash: hashMcpServerConfig(config), status };
     this.file.config[root] = project;
     saveMcpApprovals(this.file);
