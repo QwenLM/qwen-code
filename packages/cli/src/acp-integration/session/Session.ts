@@ -178,15 +178,21 @@ export async function fireSessionPermissionDeniedForAutoMode(
     !config.getDisableAllHooks?.() &&
     shouldFirePermissionDeniedForAutoMode(decision, outcome)
   ) {
-    await config
-      .getHookSystem?.()
-      ?.firePermissionDeniedEvent(
-        toolName,
-        toolParams,
-        callId,
-        getAutoModePermissionDeniedReason(decision),
-        signal,
+    try {
+      await config
+        .getHookSystem?.()
+        ?.firePermissionDeniedEvent(
+          toolName,
+          toolParams,
+          callId,
+          getAutoModePermissionDeniedReason(decision),
+          signal,
+        );
+    } catch (hookError) {
+      debugLogger.warn(
+        `PermissionDenied hook failed for tool ${callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
       );
+    }
   }
 }
 

@@ -2585,6 +2585,35 @@ describe('Session', () => {
           );
         });
 
+        it('continues AUTO block handling when PermissionDenied hook fails', async () => {
+          const hookSystem = {
+            firePermissionDeniedEvent: vi
+              .fn()
+              .mockRejectedValueOnce(new Error('hook failed')),
+          };
+          mockConfig.getHookSystem = vi.fn().mockReturnValue(hookSystem);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+
+          await fireSessionPermissionDeniedForAutoMode(
+            mockConfig,
+            {
+              via: 'classifier',
+              shouldBlock: true,
+              reason: 'dangerous shell command',
+              unavailable: false,
+              stage: 'fast',
+              durationMs: 20,
+            },
+            { kind: 'blocked', errorMessage: 'blocked' },
+            core.ToolNames.SHELL,
+            { command: 'rm -rf /tmp/example' },
+            'auto-denied-acp',
+            new AbortController().signal,
+          );
+
+          expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalled();
+        });
+
         it('skips PermissionDenied hooks when hooks are disabled', async () => {
           const hookSystem = {
             firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),

@@ -783,6 +783,70 @@ describe('CoreToolScheduler', () => {
     expect(completedCalls[0].status).toBe('error');
   });
 
+  it('continues AUTO block handling when PermissionDenied hook fails', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({
+        shouldBlock: true,
+        reason: 'dangerous shell command',
+      });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'should not execute',
+      returnDisplay: 'should not execute',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+          execute,
+        }),
+      ],
+    ]);
+    const hookSystem = {
+      firePermissionDeniedEvent: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('hook failed')),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        hookSystem,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'auto-denied-hook-fails',
+          name: ToolNames.SHELL,
+          args: { command: 'rm -rf /tmp/example' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-auto-denied-hook-fails',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+    }
+  });
+
   it('fires PermissionDenied hooks for AUTO classifier unavailable blocks', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })
