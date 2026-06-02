@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
-import { getToolDescription, getToolResultSummary } from './toolFormatting';
+import {
+  formatToolDisplayName,
+  getToolDescription,
+  getToolResultSummary,
+} from './toolFormatting';
 
 function tool(overrides: Partial<ACPToolCall>): ACPToolCall {
   return {
@@ -12,6 +16,23 @@ function tool(overrides: Partial<ACPToolCall>): ACPToolCall {
 }
 
 describe('toolFormatting', () => {
+  it('matches CLI-style user shell command display names', () => {
+    expect(formatToolDisplayName('shell')).toBe('Shell Command');
+    expect(formatToolDisplayName('run_shell_command')).toBe('Shell');
+  });
+
+  it('does not show the cwd for user shell commands', () => {
+    expect(
+      getToolDescription(
+        tool({
+          toolName: 'shell',
+          args: { command: 'pwd', directory: '/workspace/project' },
+        }),
+        '/workspace/project',
+      ),
+    ).toBe('pwd');
+  });
+
   it('uses the daemon title description when present', () => {
     expect(
       getToolDescription(

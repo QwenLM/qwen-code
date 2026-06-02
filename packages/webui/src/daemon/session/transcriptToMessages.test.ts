@@ -4,6 +4,7 @@ import type {
   DaemonStatusTranscriptBlock,
   DaemonTextTranscriptBlock,
   DaemonToolTranscriptBlock,
+  DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
 
@@ -44,6 +45,7 @@ function shellBlock(
   id: string,
   text: string,
   createdAt: number,
+  overrides: Partial<DaemonShellTranscriptBlock> = {},
 ): DaemonShellTranscriptBlock {
   return {
     id,
@@ -52,6 +54,26 @@ function shellBlock(
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: createdAt,
+    ...overrides,
+  };
+}
+
+function userShellBlock(
+  id: string,
+  text: string,
+  command: string,
+  createdAt: number,
+  overrides: Partial<DaemonUserShellTranscriptBlock> = {},
+): DaemonUserShellTranscriptBlock {
+  return {
+    id,
+    kind: 'user_shell',
+    text,
+    command,
+    clientReceivedAt: createdAt,
+    createdAt,
+    updatedAt: createdAt,
+    ...overrides,
   };
 }
 
@@ -530,10 +552,10 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('creates standalone tool_group for shell output after user message', () => {
+  it('creates standalone user_shell message for user shell output', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('u1', 'user', '! ls', 1),
-      shellBlock('sh1', 'file1.ts\nfile2.ts\n', 2),
+      userShellBlock('sh1', 'file1.ts\nfile2.ts\n', 'ls', 2),
       statusBlock('st1', 'Shell command exited with code 0', 3),
     ]);
 
@@ -541,16 +563,9 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages[0]).toMatchObject({ role: 'user', content: '! ls' });
     expect(messages[1]).toMatchObject({
       id: 'sh1',
-      role: 'tool_group',
-      tools: [
-        {
-          callId: 'sh1',
-          toolName: 'shell',
-          status: 'completed',
-          kind: 'execute',
-          rawOutput: 'file1.ts\nfile2.ts\n',
-        },
-      ],
+      role: 'user_shell',
+      command: 'ls',
+      output: 'file1.ts\nfile2.ts\n',
     });
     expect(messages[2]).toMatchObject({
       role: 'system',
@@ -570,7 +585,12 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
       role: 'tool_group',
-      tools: [{ callId: 'tc1', rawOutput: 'output text' }],
+      tools: [
+        {
+          callId: 'tc1',
+          rawOutput: 'output text',
+        },
+      ],
     });
   });
 

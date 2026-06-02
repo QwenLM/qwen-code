@@ -96,6 +96,7 @@ export type {
 } from './ui/index.js';
 export type {
   DaemonShellTranscriptBlock,
+  DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextTranscriptBlock,
@@ -254,10 +255,14 @@ export type {
 export type {
   DaemonAgentLevel,
   DaemonAgentMutationResult,
+  DaemonGeneratedAgentContent,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
   DaemonInitWorkspaceResult,
+  DaemonMcpManageAction,
+  DaemonMcpManageResult,
   DaemonMcpRestartResult,
+  DaemonSessionBtwResult,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
@@ -303,6 +308,9 @@ export type {
   DaemonSessionTaskLifecycleStatus,
   DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionStatsStatus,
+  DaemonSessionStatsModelMetrics,
+  DaemonSessionStatsToolByName,
   DaemonSkillLevel,
   DaemonPreflightCell,
   DaemonPreflightKind,

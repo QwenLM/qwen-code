@@ -1,8 +1,9 @@
 .message {
   padding: 4px 10px;
-  font-size: 12px;
+  font-size: 14px;
   border-radius: 4px;
   margin-bottom: 8px;
+  margin-left: 14px;
 }
 
 .flushMessage {
@@ -27,6 +28,10 @@
   background: var(--info-bg);
   border: 1px solid var(--info-border);
   color: var(--accent-color);
+}
+
+.modelSwitch {
+  color: var(--text-primary);
 }
 
 .error {

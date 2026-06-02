@@ -242,6 +242,15 @@ export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
   mcpStatus?: DaemonMcpServerRuntimeStatus;
   transport: DaemonMcpTransport;
   disabled: boolean;
+  hasOAuthTokens?: boolean;
+  source?: 'user' | 'project' | 'extension';
+  config?: {
+    command?: string;
+    args?: string[];
+    httpUrl?: string;
+    url?: string;
+    cwd?: string;
+  };
   description?: string;
   extensionName?: string;
   /**
@@ -352,6 +361,8 @@ export interface DaemonWorkspaceSkillsStatus {
 export interface DaemonWorkspaceProviderCurrent {
   authType?: string;
   modelId?: string;
+  baseUrl?: string;
+  fastModelId?: string;
 }
 
 export interface DaemonWorkspaceProviderModel {
@@ -360,6 +371,14 @@ export interface DaemonWorkspaceProviderModel {
   name: string;
   description?: string | null;
   contextLimit?: number;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  baseUrl?: string;
+  envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
 }
@@ -612,6 +631,12 @@ export interface DaemonCreateAgentRequest {
   background?: boolean;
 }
 
+export interface DaemonGeneratedAgentContent {
+  name: string;
+  description: string;
+  systemPrompt: string;
+}
+
 /**
  * Body of `POST /workspace/agents/:agentType`. `name` / `level` /
  * `filePath` / `isBuiltin` are intentionally omitted — agent type
@@ -652,7 +677,8 @@ export type DaemonEnvKind =
   | 'platform'
   | 'sandbox'
   | 'proxy'
-  | 'env_var';
+  | 'env_var'
+  | 'memory';
 
 export interface DaemonEnvCell extends DaemonStatusCell {
   kind: DaemonEnvKind;
@@ -863,6 +889,56 @@ export interface DaemonSessionTasksStatus {
   tasks: DaemonSessionTaskStatus[];
 }
 
+export interface DaemonSessionStatsModelMetrics {
+  api: {
+    totalRequests: number;
+    totalErrors: number;
+    totalLatencyMs: number;
+  };
+  tokens: {
+    prompt: number;
+    candidates: number;
+    total: number;
+    cached: number;
+    thoughts: number;
+  };
+}
+
+export interface DaemonSessionStatsToolByName {
+  count: number;
+  success: number;
+  fail: number;
+  durationMs: number;
+  decisions: {
+    accept: number;
+    reject: number;
+    modify: number;
+    auto_accept: number;
+  };
+}
+
+/** Returned from `GET /session/:id/stats`. */
+export interface DaemonSessionStatsStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  sessionStartTimeMs: number;
+  durationMs: number;
+  promptCount: number;
+  models: Record<string, DaemonSessionStatsModelMetrics>;
+  tools: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    totalDurationMs: number;
+    byName: Record<string, DaemonSessionStatsToolByName>;
+  };
+  files: {
+    totalLinesAdded: number;
+    totalLinesRemoved: number;
+  };
+}
+
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;
@@ -956,6 +1032,11 @@ export interface DaemonSessionRecapResult {
   recap: string | null;
 }
 
+export interface DaemonSessionBtwResult {
+  sessionId: string;
+  answer: string | null;
+}
+
 export interface DaemonShellCommandResult {
   exitCode: number | null;
   output: string;
@@ -992,6 +1073,21 @@ export type DaemonMcpRestartResult =
       skipped: true;
       reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
     };
+
+export type DaemonMcpManageAction =
+  | 'enable'
+  | 'disable'
+  | 'authenticate'
+  | 'clear-auth';
+
+export interface DaemonMcpManageResult {
+  serverName: string;
+  action: DaemonMcpManageAction;
+  ok: true;
+  changed?: boolean;
+  messages?: string[];
+  authUrl?: string;
+}
 
 /**
  * T2.8 (#4514). Structural subset of core's `MCPServerConfig` exposed

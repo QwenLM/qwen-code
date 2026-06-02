@@ -15,12 +15,14 @@ import {
 } from './DaemonClient.js';
 import type {
   DaemonEvent,
+  DaemonSessionBtwResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonSessionState,
   DaemonSession,
+  DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTasksStatus,
   HeartbeatResult,
@@ -286,6 +288,16 @@ export class DaemonSessionClient {
     });
   }
 
+  async btw(
+    question: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonSessionBtwResult> {
+    return await this.client.btwSession(this.sessionId, question, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
   async shellCommand(
     command: string,
     signal?: AbortSignal,
@@ -319,6 +331,10 @@ export class DaemonSessionClient {
 
   async tasks(): Promise<DaemonSessionTasksStatus> {
     return await this.client.sessionTasks(this.sessionId, this.clientId);
+  }
+
+  async stats(): Promise<DaemonSessionStatsStatus> {
+    return await this.client.sessionStats(this.sessionId, this.clientId);
   }
 
   async respondToPermission(

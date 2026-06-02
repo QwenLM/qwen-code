@@ -1199,6 +1199,9 @@ export class ModelsConfig {
        */
       isVision: false,
       contextWindowSize: snapshot.generationConfig?.contextWindowSize,
+      modalities: snapshot.generationConfig?.modalities,
+      baseUrl: snapshot.baseUrl,
+      envKey: snapshot.apiKeyEnvKey,
       isRuntimeModel: true,
       runtimeSnapshotId: snapshot.id,
     };

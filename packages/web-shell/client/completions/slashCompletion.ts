@@ -20,30 +20,11 @@ interface SubcommandNode {
 const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
   agents: [
     { name: 'manage', description: '管理现有 subagents' },
-    {
-      name: 'create',
-      description: '创建新的 subagent',
-      children: [
-        { name: 'user', description: '创建 User subagent' },
-        { name: 'project', description: '创建 Project subagent' },
-      ],
-    },
+    { name: 'create', description: '创建新的 subagent' },
   ],
   theme: [
     { name: 'light', description: '切换到浅色主题' },
     { name: 'dark', description: '切换到深色主题' },
-  ],
-  memory: [
-    {
-      name: 'add',
-      description: '新增 memory',
-      children: [
-        { name: 'user', description: '写入 User memory' },
-        { name: 'project', description: '写入 Project memory' },
-      ],
-    },
-    { name: 'show', description: '查看 memory 文件' },
-    { name: 'refresh', description: '刷新 memory 文件列表' },
   ],
   export: [
     { name: 'md', description: '将会话导出为 Markdown 文件' },
@@ -67,30 +48,11 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
 const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
   agents: [
     { name: 'manage', description: 'Manage existing subagents' },
-    {
-      name: 'create',
-      description: 'Create a new subagent',
-      children: [
-        { name: 'user', description: 'Create a user subagent' },
-        { name: 'project', description: 'Create a project subagent' },
-      ],
-    },
+    { name: 'create', description: 'Create a new subagent' },
   ],
   theme: [
     { name: 'light', description: 'Switch to light theme' },
     { name: 'dark', description: 'Switch to dark theme' },
-  ],
-  memory: [
-    {
-      name: 'add',
-      description: 'Add memory',
-      children: [
-        { name: 'user', description: 'Write user memory' },
-        { name: 'project', description: 'Write project memory' },
-      ],
-    },
-    { name: 'show', description: 'Show memory files' },
-    { name: 'refresh', description: 'Refresh memory files' },
   ],
   export: [
     { name: 'md', description: 'Export as Markdown' },
@@ -111,6 +73,58 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
   ],
 };
 
+const IMPLICIT_SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
+  context: [{ name: 'detail', description: '显示详细上下文信息' }],
+  copy: [
+    { name: 'code', description: '复制代码块' },
+    { name: 'latex', description: '复制 LaTeX 公式' },
+    { name: 'inline-latex', description: '复制行内 LaTeX 公式' },
+  ],
+  tools: [{ name: 'desc', description: '显示工具详细描述' }],
+  stats: [
+    { name: 'model', description: '显示各模型使用统计' },
+    { name: 'tools', description: '显示工具使用统计' },
+  ],
+  mcp: [
+    { name: 'desc', description: '显示 MCP server 和工具描述' },
+    { name: 'nodesc', description: '隐藏 MCP 描述' },
+    { name: 'schema', description: '显示工具参数 schema' },
+    { name: 'auth', description: '认证 OAuth MCP server' },
+    { name: 'noauth', description: '隐藏 OAuth 认证状态' },
+  ],
+  memory: [
+    { name: 'show', description: '查看 memory 文件' },
+    { name: 'add', description: '新增 memory' },
+    { name: 'refresh', description: '刷新 memory 文件列表' },
+  ],
+};
+
+const IMPLICIT_SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
+  context: [{ name: 'detail', description: 'Show detailed context info' }],
+  copy: [
+    { name: 'code', description: 'Copy code blocks' },
+    { name: 'latex', description: 'Copy LaTeX formula' },
+    { name: 'inline-latex', description: 'Copy inline LaTeX formula' },
+  ],
+  tools: [{ name: 'desc', description: 'Show tool descriptions' }],
+  stats: [
+    { name: 'model', description: 'Show per-model usage statistics' },
+    { name: 'tools', description: 'Show tool usage statistics' },
+  ],
+  mcp: [
+    { name: 'desc', description: 'Show MCP server and tool descriptions' },
+    { name: 'nodesc', description: 'Hide MCP descriptions' },
+    { name: 'schema', description: 'Show tool parameter schemas' },
+    { name: 'auth', description: 'Authenticate OAuth MCP servers' },
+    { name: 'noauth', description: 'Hide OAuth authentication status' },
+  ],
+  memory: [
+    { name: 'show', description: 'Show memory files' },
+    { name: 'add', description: 'Add memory' },
+    { name: 'refresh', description: 'Refresh memory files' },
+  ],
+};
+
 function resolveSubcommands(
   cmdName: string,
   parts: string[],
@@ -127,6 +141,15 @@ function resolveSubcommands(
 
   const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
   let nodes = tree[cmdName];
+
+  if (!nodes) {
+    const implicitTree =
+      language === 'zh-CN'
+        ? IMPLICIT_SUBCOMMAND_TREE_ZH
+        : IMPLICIT_SUBCOMMAND_TREE_EN;
+    nodes = implicitTree[cmdName];
+  }
+
   if (!nodes) return null;
 
   for (const part of parts) {
@@ -144,6 +167,74 @@ function comparePrefixFirst(a: string, b: string, query: string): number {
   const bStarts = bLower.startsWith(query);
   if (aStarts !== bStarts) return aStarts ? -1 : 1;
   return a.localeCompare(b);
+}
+
+export function getForgottenSlashCompletion(
+  text: string,
+  commands: CommandInfo[],
+): string | null {
+  if (!text || text.includes(' ') || /^[/@!?]/.test(text)) return null;
+
+  const lp = text.toLowerCase();
+  const match = commands.find((c) => c.name.toLowerCase().startsWith(lp));
+  if (!match) return null;
+
+  return `/${match.name} `;
+}
+
+export function getImplicitTabCompletion(
+  text: string,
+  commands: CommandInfo[],
+  language: WebShellLanguage,
+): string | null {
+  const match = text.match(/^\/(\w[\w-]*)\s+$/);
+  if (!match) return null;
+
+  const cmdName = match[1];
+  const cmd = commands.find((c) => c.name === cmdName);
+  const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+  if (cmd?.subcommands?.length || tree[cmdName] || cmdName === 'skills') {
+    return null;
+  }
+
+  const implicitTree =
+    language === 'zh-CN'
+      ? IMPLICIT_SUBCOMMAND_TREE_ZH
+      : IMPLICIT_SUBCOMMAND_TREE_EN;
+  const nodes = implicitTree[cmdName];
+  if (!nodes || nodes.length === 0) return null;
+
+  return `/${cmdName} ${nodes[0].name} `;
+}
+
+export function getSlashCommandArgumentHint(
+  text: string,
+  commands: CommandInfo[],
+  language: WebShellLanguage,
+): string | null {
+  const match = text.match(/^\/(\w[\w-]*)(\s*)$/);
+  if (!match) return null;
+
+  const cmdName = match[1];
+  const cmd = commands.find((c) => c.name === cmdName);
+  if (!cmd) return null;
+
+  const argumentHint = cmd.argumentHint?.trim();
+  if (argumentHint) return argumentHint;
+
+  const tree = language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+  if (cmd.subcommands?.length || tree[cmdName] || cmdName === 'skills') {
+    return null;
+  }
+
+  const implicitTree =
+    language === 'zh-CN'
+      ? IMPLICIT_SUBCOMMAND_TREE_ZH
+      : IMPLICIT_SUBCOMMAND_TREE_EN;
+  const nodes = implicitTree[cmdName];
+  if (!nodes || nodes.length === 0) return null;
+
+  return `[${nodes.map((node) => node.name).join('|')}]`;
 }
 
 export function slashCompletionSource(
@@ -164,13 +255,29 @@ export function slashCompletionSource(
       const language = getLanguage();
       const tree =
         language === 'zh-CN' ? SUBCOMMAND_TREE_ZH : SUBCOMMAND_TREE_EN;
+      const implicitTree =
+        language === 'zh-CN'
+          ? IMPLICIT_SUBCOMMAND_TREE_ZH
+          : IMPLICIT_SUBCOMMAND_TREE_EN;
       const hasTree = !!tree[cmdName] || cmdName === 'skills';
-      if (!cmd?.subcommands?.length && !hasTree) return null;
+      const hasImplicitTree = !!implicitTree[cmdName];
+      if (!cmd?.subcommands?.length && !hasTree && !hasImplicitTree)
+        return null;
 
       // Split rest into completed parts and current typing
       const tokens = rest.split(/\s+/);
       const currentTyping = tokens.pop() || '';
       const completedParts = tokens;
+
+      // Implicit sub-commands: only show when user starts typing (not on space alone)
+      if (
+        !cmd?.subcommands?.length &&
+        !hasTree &&
+        hasImplicitTree &&
+        !currentTyping
+      ) {
+        return null;
+      }
 
       const nodes = resolveSubcommands(
         cmdName,
@@ -216,8 +323,10 @@ export function slashCompletionSource(
       };
     }
 
-    // Top-level command completion: "/" or "/ex"
-    const match = textBefore.match(/^\/(\w*)$/);
+    // Top-level command completion: "/" or "/ex".
+    // Use the whole line so moving the cursor before or inside the command
+    // still offers the same completions and replaces the full command token.
+    const match = line.text.match(/^\/(\w*)$/);
     if (!match) return null;
 
     const prefix = match[1];
@@ -243,6 +352,7 @@ export function slashCompletionSource(
 
     return {
       from: line.from,
+      to: line.to,
       options,
       filter: false,
     };

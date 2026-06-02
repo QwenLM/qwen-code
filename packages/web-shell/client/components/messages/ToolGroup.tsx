@@ -451,6 +451,7 @@ function areToolLinePropsEqual(
     a.endTime === b.endTime &&
     a.subContent === b.subContent &&
     a.rawOutput === b.rawOutput &&
+    a.args === b.args &&
     a.content === b.content &&
     a.title === b.title &&
     areSubToolsEqual(a.subTools, b.subTools)
@@ -489,6 +490,7 @@ const ToolLine = memo(function ToolLine({
   onConfirm,
   workspaceCwd,
 }: ToolLineProps) {
+  const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
   const [expanded, setExpanded] = useState(
     () => !compactMode && shouldAutoExpand(tool),
@@ -539,7 +541,7 @@ const ToolLine = memo(function ToolLine({
       <div className={styles.line}>
         <div className={styles.lineMain}>
           <StatusIcon status={tool.status} />
-          <span className={styles.lineName}>Agent</span>
+          <span className={styles.lineName}>{t('agent.label')}</span>
           {info.description && (
             <span className={styles.lineArg}>
               {truncateText(info.description, 60)}

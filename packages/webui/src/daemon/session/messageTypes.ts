@@ -93,9 +93,43 @@ export interface DaemonSystemMessage {
   variant: 'info' | 'error' | 'warning';
 }
 
+export interface DaemonUserShellMessage {
+  id: string;
+  role: 'user_shell';
+  command: string;
+  output: string;
+  cwd?: string;
+}
+
+export interface DaemonBtwMessage {
+  id: string;
+  role: 'btw';
+  question: string;
+  answer: string;
+  isPending: boolean;
+}
+
+export interface DaemonInsightProgressMessage {
+  id: string;
+  role: 'insight_progress';
+  stage: string;
+  progress: number;
+  detail?: string;
+}
+
+export interface DaemonInsightReadyMessage {
+  id: string;
+  role: 'insight_ready';
+  path: string;
+}
+
 export type DaemonMessage =
   | DaemonUserMessage
   | DaemonAssistantMessage
   | DaemonToolGroupMessage
   | DaemonPlanMessage
-  | DaemonSystemMessage;
+  | DaemonSystemMessage
+  | DaemonUserShellMessage
+  | DaemonBtwMessage
+  | DaemonInsightProgressMessage
+  | DaemonInsightReadyMessage;

@@ -285,6 +285,49 @@ export function mountWorkspaceAgentsRoutes(
     },
   );
 
+  app.post(
+    '/workspace/agents/generate',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const body = deps.safeBody(req);
+      const clientIdResult = resolveOriginatorClientId(deps, req, res);
+      if (clientIdResult === null) return;
+      const originatorClientId = clientIdResult;
+      const description = body['description'];
+      if (
+        typeof description !== 'string' ||
+        description.trim().length === 0 ||
+        Buffer.byteLength(description, 'utf8') > MAX_DESCRIPTION_BYTES
+      ) {
+        res.status(400).json({
+          error: '`description` must be a non-empty string',
+          code: 'invalid_description',
+        });
+        return;
+      }
+      try {
+        const generated = await deps.bridge.generateWorkspaceAgent(
+          description.trim(),
+          originatorClientId,
+        );
+        res.status(200).json(generated);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: POST /workspace/agents/generate failed: ${
+            err instanceof Error ? (err.stack ?? err.message) : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Failed to generate workspace agent',
+          code: 'agent_generate_failed',
+        });
+      }
+    },
+  );
+
   app.get('/workspace/agents/:agentType', async (req, res) => {
     const agentType = validateAgentType(req, res);
     if (agentType === null) return;

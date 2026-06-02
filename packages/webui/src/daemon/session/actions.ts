@@ -8,6 +8,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import type {
   DaemonSessionContextStatus,
   DaemonSessionClient,
+  DaemonSessionBtwResult,
   DaemonSessionRecapResult,
   DaemonTranscriptStore,
   PermissionResponse,
@@ -427,6 +428,28 @@ export function createDaemonSessionActions({
       }
     },
 
+    async btwSession(
+      question: string,
+      opts?: { signal?: AbortSignal },
+    ): Promise<DaemonSessionBtwResult> {
+      const session = requireSessionForAction(
+        store,
+        sessionRef.current,
+        'Side question failed',
+      );
+      try {
+        return await withActionTimeout(
+          session.btw(question, opts),
+          'Side question timed out',
+        );
+      } catch (error) {
+        if (opts?.signal?.aborted || isAbortError(error)) {
+          throw error;
+        }
+        throw dispatchActionError(store, 'Side question failed', error);
+      }
+    },
+
     async sendShellCommand(command: string) {
       const session = requireSessionForAction(
         store,
@@ -462,6 +485,15 @@ export function createDaemonSessionActions({
       } catch (error) {
         throw dispatchActionError(store, 'Get tasks failed', error);
       }
+    },
+
+    async getStats() {
+      const session = requireSessionForAction(
+        store,
+        sessionRef.current,
+        'Load stats failed',
+      );
+      return await withActionTimeout(session.stats(), 'Load stats timed out');
     },
 
     async respondToGlobalPermission(

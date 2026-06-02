@@ -29,7 +29,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   exit_worktree: 'ExitWorktree',
   web_search: 'WebSearch',
   bash: 'Shell',
-  shell: 'Shell',
+  shell: 'Shell Command',
   read: 'ReadFile',
   write: 'WriteFile',
   search: 'Grep',
@@ -163,7 +163,7 @@ function getDescriptionFromArgs(
 
   if (args.command) {
     let description = String(args.command);
-    if (args.directory) {
+    if (args.directory && name !== 'shell') {
       description += ` [in ${pathForDisplay(String(args.directory), workspaceCwd)}]`;
     }
     if (args.is_background) {

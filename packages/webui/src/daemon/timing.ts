@@ -34,6 +34,7 @@ export function getReconnectDelayMs(
 export async function withActionTimeout<T>(
   promise: Promise<T>,
   message: string,
+  timeoutMs: number = DEFAULT_ACTION_TIMEOUT_MS,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -41,8 +42,8 @@ export async function withActionTimeout<T>(
       promise,
       new Promise<T>((_resolve, reject) => {
         timer = setTimeout(() => {
-          reject(new Error(`${message} after ${DEFAULT_ACTION_TIMEOUT_MS}ms`));
-        }, DEFAULT_ACTION_TIMEOUT_MS);
+          reject(new Error(`${message} after ${timeoutMs}ms`));
+        }, timeoutMs);
       }),
     ]);
   } finally {

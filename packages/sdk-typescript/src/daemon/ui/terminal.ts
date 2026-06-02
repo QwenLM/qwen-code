@@ -26,6 +26,8 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
       );
     case 'shell.output':
       return terminalBlock('shell', event.text, '38;5;244');
+    case 'user.shell.output':
+      return terminalBlock('user-shell', event.text, '38;5;244');
     case 'permission.request': {
       const options = event.options.map((option) => option.label).join(' / ');
       return terminalLine(
@@ -163,6 +165,8 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `device-flow cancelled (${event.deviceFlowId})`,
         '2',
       );
+    case 'user.shell.command':
+      return '';
     default:
       return assertNever(event);
   }
@@ -186,6 +190,12 @@ export function transcriptBlockToTerminalText(
       );
     case 'shell':
       return terminalBlock('shell', block.text, '38;5;244');
+    case 'user_shell':
+      return terminalBlock(
+        `shell command ${block.command}`.trim(),
+        block.text,
+        '38;5;244',
+      );
     case 'permission': {
       const options = block.options.map((option) => option.label).join(' / ');
       const suffix = block.resolved ? ` resolved=${block.resolved}` : '';

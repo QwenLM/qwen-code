@@ -26,6 +26,8 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import {
   slashCompletionSource,
+  getImplicitTabCompletion,
+  getForgottenSlashCompletion,
   type SkillInfo,
 } from '../completions/slashCompletion';
 import { createAtCompletionSource } from '../completions/atCompletion';
@@ -63,6 +65,7 @@ interface EditorProps {
 export interface EditorHandle {
   blur(): void;
   focus(): void;
+  getText(): string;
   insertText(text: string): void;
   retryLast(): void;
 }
@@ -457,16 +460,44 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           if (completionStatus(view.state) === 'active') {
             return acceptCompletion(view);
           }
+          const text = view.state.doc.toString();
+          const implicitResult = getImplicitTabCompletion(
+            text,
+            commandsRef.current,
+            languageRef.current,
+          );
+          if (implicitResult) {
+            view.dispatch({
+              changes: {
+                from: 0,
+                to: view.state.doc.length,
+                insert: implicitResult,
+              },
+              selection: { anchor: implicitResult.length },
+            });
+            return true;
+          }
+          const forgottenSlash = getForgottenSlashCompletion(
+            text,
+            commandsRef.current,
+          );
+          if (forgottenSlash) {
+            view.dispatch({
+              changes: {
+                from: 0,
+                to: view.state.doc.length,
+                insert: forgottenSlash,
+              },
+              selection: { anchor: forgottenSlash.length },
+            });
+            return true;
+          }
           const followup = followupStateRef.current;
-          if (
-            view.state.doc.toString().length === 0 &&
-            followup?.isVisible &&
-            followup.suggestion
-          ) {
+          if (text.length === 0 && followup?.isVisible && followup.suggestion) {
             onAcceptFollowupRef.current?.('tab');
             return true;
           }
-          return acceptCompletion(view);
+          return true;
         },
       },
       {
@@ -495,10 +526,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     ]);
 
     const slashCompletionRestarter = EditorView.updateListener.of((update) => {
-      if (!update.docChanged) {
+      if (!update.docChanged && !update.selectionSet) {
         return;
       }
-      if (pendingPastesRef.current.size > 0) {
+      if (update.docChanged && pendingPastesRef.current.size > 0) {
         const nextPasteId = prunePendingPastes(
           pendingPastesRef.current,
           update.state.doc.toString(),
@@ -510,11 +541,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       const selection = update.state.selection.main;
       if (!selection.empty) return;
       const line = update.state.doc.lineAt(selection.head);
-      const textBefore = line.text.slice(0, selection.head - line.from);
-      const shouldCompleteSlash =
-        line.from === 0 &&
-        textBefore.startsWith('/') &&
-        !textBefore.includes('\n');
+      const shouldCompleteSlash = line.from === 0 && line.text.startsWith('/');
       if (!shouldCompleteSlash) return;
       window.setTimeout(() => {
         const view = viewRef.current;
@@ -522,11 +549,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         const nextSelection = view.state.selection.main;
         if (!nextSelection.empty) return;
         const nextLine = view.state.doc.lineAt(nextSelection.head);
-        const nextTextBefore = nextLine.text.slice(
-          0,
-          nextSelection.head - nextLine.from,
-        );
-        if (nextLine.from === 0 && nextTextBefore.startsWith('/')) {
+        if (nextLine.from === 0 && nextLine.text.startsWith('/')) {
           startCompletion(view);
         }
       }, 0);
@@ -553,7 +576,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         placeholderCompartment.of(placeholder('')),
         EditorView.lineWrapping,
         editableCompartment.of(EditorView.editable.of(true)),
-        inputHighlight,
+        inputHighlight(
+          () => commandsRef.current,
+          () => languageRef.current,
+        ),
         inputHighlightTheme,
         slashCompletionRestarter,
         EditorView.inputHandler.of((view, from, to, insert) => {
@@ -895,6 +921,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     }
   }, []);
 
+  const getText = useCallback(() => {
+    return viewRef.current?.state.doc.toString() ?? '';
+  }, []);
+
   const retryLast = useCallback(() => {
     const last = historyActionsRef.current.getLastEntry(
       (e) => !e.startsWith('/') && !e.startsWith('!'),
@@ -910,10 +940,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     () => ({
       blur,
       focus,
+      getText,
       insertText,
       retryLast,
     }),
-    [blur, focus, insertText, retryLast],
+    [blur, focus, getText, insertText, retryLast],
   );
 
   const replaceEditorText = useCallback((text: string) => {

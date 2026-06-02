@@ -12,6 +12,8 @@ import type {
   DaemonWorkspaceActions,
 } from './types.js';
 
+const AGENT_GENERATE_TIMEOUT_MS = 330_000;
+
 export interface CreateDaemonWorkspaceActionsArgs {
   getClient: () => DaemonClient | undefined;
   getWorkspaceCwd: () => string | undefined;
@@ -98,6 +100,14 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async manageMcpServer(serverName, action) {
+      const client = requireClient(getClient, 'Manage MCP server failed');
+      return withActionTimeout(
+        client.manageMcpServer(serverName, action),
+        'Manage MCP server timed out',
+      );
+    },
+
     async loadSkillsStatus() {
       const client = requireClient(getClient, 'Load skills failed');
       return withActionTimeout(
@@ -164,6 +174,15 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.createWorkspaceAgent(req),
         'Create agent timed out',
+      );
+    },
+
+    async generateAgent(description) {
+      const client = requireClient(getClient, 'Generate agent failed');
+      return withActionTimeout(
+        client.generateWorkspaceAgent(description),
+        'Generate agent timed out',
+        AGENT_GENERATE_TIMEOUT_MS,
       );
     },
 

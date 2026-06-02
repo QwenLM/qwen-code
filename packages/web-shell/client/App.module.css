@@ -129,6 +129,11 @@
   padding-bottom: 4px;
 }
 
+.btwPanel {
+  flex-shrink: 0;
+  padding: 4px 0;
+}
+
 .composer {
   flex-shrink: 0;
   padding: 0;

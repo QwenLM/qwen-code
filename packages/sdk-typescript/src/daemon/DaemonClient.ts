@@ -16,6 +16,7 @@ import type {
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
+  DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   DaemonEvent,
@@ -25,6 +26,7 @@ import type {
   DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionStatsStatus,
   DaemonSessionTasksStatus,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceFile,
@@ -55,6 +57,9 @@ import type {
   DaemonApprovalModeResult,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
+  DaemonMcpManageAction,
+  DaemonMcpManageResult,
+  DaemonSessionBtwResult,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
@@ -728,6 +733,27 @@ export class DaemonClient {
     );
   }
 
+  async generateWorkspaceAgent(
+    description: string,
+    clientId?: string,
+  ): Promise<DaemonGeneratedAgentContent> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/agents/generate`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ description }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/agents/generate');
+        }
+        return (await res.json()) as DaemonGeneratedAgentContent;
+      },
+      MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
   async getWorkspaceAgent(
     agentType: string,
   ): Promise<DaemonWorkspaceAgentDetail> {
@@ -1028,6 +1054,22 @@ export class DaemonClient {
     );
   }
 
+  async sessionStats(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionStatsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/stats`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/stats');
+        }
+        return (await res.json()) as DaemonSessionStatsStatus;
+      },
+    );
+  }
+
   /**
    * Shared transport for `loadSession` / `resumeSession`. Both routes
    * share an identical wire shape (POST /session/:id/{load|resume}
@@ -1145,6 +1187,27 @@ export class DaemonClient {
     return (await res.json()) as DaemonSessionRecapResult;
   }
 
+  async btwSession(
+    sessionId: string,
+    question: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonSessionBtwResult> {
+    const res = await this._fetch(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/btw`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ question }),
+        signal: opts?.signal,
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/btw');
+    return (await res.json()) as DaemonSessionBtwResult;
+  }
+
   async shellCommand(
     sessionId: string,
     command: string,
@@ -1248,6 +1311,34 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonMcpRestartResult;
+      },
+      opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  async manageMcpServer(
+    serverName: string,
+    action: DaemonMcpManageAction,
+    opts?: { clientId?: string; timeoutMs?: number },
+  ): Promise<DaemonMcpManageResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/${encodeURIComponent(action)}`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/mcp/:server/:action',
+          );
+        }
+        return (await res.json()) as DaemonMcpManageResult;
       },
       opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
     );

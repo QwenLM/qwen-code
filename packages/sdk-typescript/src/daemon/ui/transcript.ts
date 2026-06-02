@@ -13,6 +13,7 @@ import type {
   DaemonTranscriptReducerOptions,
   DaemonTranscriptState,
   DaemonUiEvent,
+  DaemonUserShellTranscriptBlock,
 } from './types.js';
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
 import { createDaemonToolPreview } from './toolPreview.js';
@@ -165,6 +166,12 @@ function applyDaemonTranscriptEvent(
   }
 
   switch (event.type) {
+    case 'user.shell.command':
+      next.pendingUserShellCommand = {
+        command: event.command,
+        ...(event.cwd ? { cwd: event.cwd } : {}),
+      };
+      break;
     case 'user.text.delta':
       if (!next.activeUserBlockId) {
         next.lastFollowupSuggestion = undefined;
@@ -213,6 +220,9 @@ function applyDaemonTranscriptEvent(
       break;
     case 'shell.output':
       appendShellBlock(next, event);
+      break;
+    case 'user.shell.output':
+      appendUserShellBlock(next, event);
       break;
     case 'permission.request':
       upsertPermissionBlock(next, event);
@@ -626,6 +636,50 @@ function appendShellBlock(
       : {}),
     ...(event.stream ? { stream: event.stream } : {}),
   };
+  appendBlock(state, block);
+  clearActiveText(state);
+}
+
+function appendUserShellBlock(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'user.shell.output' }>,
+): void {
+  if (!event.text) return;
+  const last = state.blocks[state.blocks.length - 1];
+  if (
+    last?.kind === 'user_shell' &&
+    last.stream === event.stream &&
+    !state.pendingUserShellCommand
+  ) {
+    const writable = getWritableBlockById(state, last.id);
+    if (writable?.kind === 'user_shell') {
+      writable.text = appendBoundedText(writable.text, event.text);
+      writable.updatedAt = state.now;
+      if (event.eventId !== undefined) writable.eventId = event.eventId;
+    }
+    return;
+  }
+
+  const pending = state.pendingUserShellCommand;
+  const previous = last?.kind === 'user_shell' ? last : undefined;
+  const block: DaemonUserShellTranscriptBlock = {
+    id: allocateBlockId(state, 'user-shell'),
+    kind: 'user_shell',
+    text: truncateText(event.text),
+    command: pending?.command ?? previous?.command ?? '',
+    ...(pending?.cwd || previous?.cwd
+      ? { cwd: pending?.cwd ?? previous?.cwd }
+      : {}),
+    clientReceivedAt: state.now,
+    createdAt: state.now,
+    updatedAt: state.now,
+    ...(event.eventId !== undefined ? { eventId: event.eventId } : {}),
+    ...(event.serverTimestamp !== undefined
+      ? { serverTimestamp: event.serverTimestamp }
+      : {}),
+    ...(event.stream ? { stream: event.stream } : {}),
+  };
+  state.pendingUserShellCommand = undefined;
   appendBlock(state, block);
   clearActiveText(state);
 }

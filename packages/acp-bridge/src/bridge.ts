@@ -42,6 +42,7 @@ import {
   createIdleWorkspaceSkillsStatus,
   mapDomainErrorToErrorKind,
   type ServePreflightCell,
+  type ServeSessionStatsStatus,
   type ServeSessionTasksStatus,
   type ServeStatusCell,
 } from './status.js';
@@ -3174,6 +3175,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       );
     },
 
+    async getSessionStatsStatus(sessionId) {
+      return requestSessionStatus<ServeSessionStatsStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionStats,
+      );
+    },
+
     async setSessionModel(sessionId, req, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -3821,6 +3829,63 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         });
       }
       return response;
+    },
+
+    async manageMcpServer(serverName, action, originatorClientId) {
+      const info = liveChannelInfo();
+      if (!info) {
+        throw new SessionNotFoundError(`mcp:${serverName}`);
+      }
+      const response = (await Promise.race([
+        withTimeout(
+          info.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+            { serverName, action, originatorClientId },
+          ),
+          MCP_RESTART_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+        ),
+        getChannelClosedReject(info),
+      ])) as {
+        serverName: string;
+        action: 'enable' | 'disable' | 'authenticate' | 'clear-auth';
+        ok: true;
+        changed?: boolean;
+        messages?: string[];
+        authUrl?: string;
+      };
+      broadcastWorkspaceEvent({
+        type: 'mcp_server_changed',
+        data: {
+          serverName: response.serverName,
+          action: response.action,
+          originatorClientId,
+        },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+      return response;
+    },
+
+    async generateWorkspaceAgent(description, _originatorClientId) {
+      const info = liveChannelInfo();
+      if (!info) {
+        throw new SessionNotFoundError('agents:generate');
+      }
+      return (await Promise.race([
+        withTimeout(
+          info.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceAgentGenerate,
+            { description },
+          ),
+          MCP_RESTART_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.workspaceAgentGenerate,
+        ),
+        getChannelClosedReject(info),
+      ])) as {
+        name: string;
+        description: string;
+        systemPrompt: string;
+      };
     },
 
     async addRuntimeMcpServer(name, config, originatorClientId) {

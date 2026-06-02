@@ -10,6 +10,7 @@ import type {
   DaemonToolTranscriptBlock,
   DaemonShellTranscriptBlock,
   DaemonStatusTranscriptBlock,
+  DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import { parseDaemonTodoItemsFromEntries } from './selectors.js';
 import type {
@@ -63,6 +64,7 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'assistant': {
         const textBlock = block as DaemonTextTranscriptBlock;
+
         const activeSubAgent = getFallbackActiveSubAgent(subAgentStack);
         if (activeSubAgent) {
           activeSubAgent.subContent =
@@ -72,6 +74,45 @@ export function transcriptBlocksToDaemonMessages(
         if (subAgentStack.length > 0) {
           break;
         }
+
+        const insightSegments = splitInsightSegments(textBlock.text);
+        if (insightSegments) {
+          let lastProgress: ParsedInsight | null = null;
+          let hasReady = false;
+          for (const seg of insightSegments) {
+            if (seg.kind === 'insight') {
+              if (seg.data.type === 'insight_progress') {
+                lastProgress = seg.data;
+              } else {
+                hasReady = true;
+                messages.push({
+                  id: `${block.id}-ir`,
+                  role: 'insight_ready',
+                  path: seg.data.path,
+                });
+              }
+            } else {
+              messages.push({
+                id: `${block.id}-t-${messages.length}`,
+                role: 'assistant',
+                content: seg.text,
+              });
+              currentAssistantIdx = messages.length - 1;
+            }
+          }
+          if (lastProgress && !hasReady) {
+            messages.push({
+              id: `${block.id}-ip`,
+              role: 'insight_progress',
+              stage: lastProgress.stage,
+              progress: lastProgress.progress,
+              detail: lastProgress.detail,
+            });
+          }
+          needsNewContentMessage = true;
+          break;
+        }
+
         const target =
           currentAssistantIdx !== null
             ? messages[currentAssistantIdx]
@@ -247,6 +288,19 @@ export function transcriptBlocksToDaemonMessages(
           });
           needsNewContentMessage = true;
         }
+        break;
+      }
+
+      case 'user_shell': {
+        const shellBlock = block as DaemonUserShellTranscriptBlock;
+        messages.push({
+          id: block.id,
+          role: 'user_shell',
+          command: shellBlock.command,
+          output: shellBlock.text,
+          ...(shellBlock.cwd ? { cwd: shellBlock.cwd } : {}),
+        });
+        needsNewContentMessage = true;
         break;
       }
 
@@ -682,6 +736,81 @@ function getToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
 
 function isCancelledStatus(status: string): boolean {
   return status === 'cancelled' || status === 'canceled';
+}
+
+type ParsedInsight =
+  | {
+      type: 'insight_progress';
+      stage: string;
+      progress: number;
+      detail?: string;
+    }
+  | { type: 'insight_ready'; path: string };
+
+type InsightSegment =
+  | { kind: 'text'; text: string }
+  | { kind: 'insight'; data: ParsedInsight };
+
+const INSIGHT_RE = /\{"insight_(?:progress|ready)":\{[^}]*\}\}/g;
+
+function parseInsightJson(json: string): ParsedInsight | null {
+  try {
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    const prog = getRecord(parsed['insight_progress']);
+    if (
+      prog &&
+      typeof prog['stage'] === 'string' &&
+      typeof prog['progress'] === 'number'
+    ) {
+      return {
+        type: 'insight_progress',
+        stage: prog['stage'] as string,
+        progress: prog['progress'] as number,
+        detail:
+          typeof prog['detail'] === 'string'
+            ? (prog['detail'] as string)
+            : undefined,
+      };
+    }
+    const ready = getRecord(parsed['insight_ready']);
+    if (ready && typeof ready['path'] === 'string') {
+      return { type: 'insight_ready', path: ready['path'] as string };
+    }
+  } catch {
+    // not valid JSON
+  }
+  return null;
+}
+
+function splitInsightSegments(text: string): InsightSegment[] | null {
+  INSIGHT_RE.lastIndex = 0;
+  let match = INSIGHT_RE.exec(text);
+  if (!match) return null;
+
+  const segments: InsightSegment[] = [];
+  let lastIndex = 0;
+
+  while (match) {
+    const insight = parseInsightJson(match[0]);
+    if (!insight) {
+      match = INSIGHT_RE.exec(text);
+      continue;
+    }
+    const before = text.slice(lastIndex, match.index).trim();
+    if (before) {
+      segments.push({ kind: 'text', text: before });
+    }
+    segments.push({ kind: 'insight', data: insight });
+    lastIndex = match.index + match[0].length;
+    match = INSIGHT_RE.exec(text);
+  }
+
+  const after = text.slice(lastIndex).trim();
+  if (after) {
+    segments.push({ kind: 'text', text: after });
+  }
+
+  return segments.length > 0 ? segments : null;
 }
 
 function inferToolKind(
