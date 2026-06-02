@@ -92,6 +92,12 @@ interface StatusLineCommandConfig {
   // clock) stays fresh even when no Agent state changes. Values < 1 are
   // rejected in getStatusLineConfig to avoid flooding the CLI with execs.
   refreshInterval?: number;
+  // When true, ANSI color codes in the command output are preserved as-is.
+  // The renderer will not apply dimColor or theme color overrides.
+  respectUserColors?: boolean;
+  // When true, the built-in context usage indicator in the footer right
+  // section is hidden. Useful when the statusline already shows context info.
+  hideContextIndicator?: boolean;
 }
 
 type StatusLineConfig = StatusLineCommandConfig | StatusLinePresetConfig;
@@ -130,6 +136,12 @@ function getStatusLineConfig(
       raw.refreshInterval >= 1
     ) {
       config.refreshInterval = raw.refreshInterval;
+    }
+    if (typeof raw.respectUserColors === 'boolean') {
+      config.respectUserColors = raw.respectUserColors;
+    }
+    if (typeof raw.hideContextIndicator === 'boolean') {
+      config.hideContextIndicator = raw.hideContextIndicator;
     }
     return config;
   }
@@ -179,6 +191,8 @@ function buildMetricsPayload(
 export function useStatusLine(): {
   lines: string[];
   useThemeColors: boolean;
+  respectUserColors: boolean;
+  hideContextIndicator: boolean;
 } {
   const settings = useSettings();
   const uiState = useUIState();
@@ -681,5 +695,9 @@ export function useStatusLine(): {
   return {
     lines: output,
     useThemeColors: statusLinePreset?.useThemeColors === true,
+    respectUserColors:
+      statusLineConfig?.type === 'command' &&
+      statusLineConfig.respectUserColors === true,
+    hideContextIndicator: statusLineConfig?.hideContextIndicator === true,
   };
 }

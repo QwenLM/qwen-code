@@ -60,11 +60,13 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 }
 ```
 
-| Field             | Type        | Required | Description                                                                                                                       |
-| ----------------- | ----------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `type`            | `"command"` | Yes      | Must be `"command"`                                                                                                               |
-| `command`         | string      | Yes      | Shell command to execute. Receives JSON via stdin, stdout is displayed (up to 2 lines).                                           |
-| `refreshInterval` | number      | No       | Re-run the command every N seconds (minimum 1). Useful for data that changes without an Agent state event (clock, quota, uptime). |
+| Field                  | Type        | Required | Description                                                                                                                       |
+| ---------------------- | ----------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `type`                 | `"command"` | Yes      | Must be `"command"`                                                                                                               |
+| `command`              | string      | Yes      | Shell command to execute. Receives JSON via stdin, stdout is displayed (up to 2 lines).                                           |
+| `refreshInterval`      | number      | No       | Re-run the command every N seconds (minimum 1). Useful for data that changes without an Agent state event (clock, quota, uptime). |
+| `respectUserColors`    | boolean     | No       | Preserve ANSI color codes in command output instead of applying dimmed footer styling. Defaults to `false`.                       |
+| `hideContextIndicator` | boolean     | No       | Hide the built-in context usage indicator in the footer right section. Defaults to `false`.                                       |
 
 ## JSON input
 

@@ -642,16 +642,19 @@ const SETTINGS_SCHEMA = {
                   type: 'command';
                   command: string;
                   refreshInterval?: number;
+                  respectUserColors?: boolean;
+                  hideContextIndicator?: boolean;
                 }
               | {
                   type: 'preset';
                   items: string[];
                   useThemeColors?: boolean;
+                  hideContextIndicator?: boolean;
                 }
             )
           | undefined,
         description:
-          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
+          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section.',
         showInDialog: false,
       },
       customThemes: {
