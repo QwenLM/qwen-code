@@ -223,7 +223,7 @@ In interactive mode, `/diff` opens a dialog with a **source picker** along the t
 
 The file list displays per-file stats (lines added/removed) with tags for special states (`new`, `deleted`, `untracked`, `binary`, `truncated`, `oversized`). Press Enter on a file to view its inline diff with syntax-highlighted hunks.
 
-Per-turn diffs require [file checkpointing](./checkpointing) to be enabled (on by default). When disabled, only the "Current" source is available.
+Per-turn diffs require [file checkpointing](./checkpointing) to be enabled (disabled by default). When checkpointing is off, only the "Current" source is available.
 
 **Keyboard shortcuts:**
 
