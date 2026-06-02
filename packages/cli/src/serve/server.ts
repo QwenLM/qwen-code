@@ -283,11 +283,15 @@ function resolveDaemonTelemetryRoute(
 ):
   | { route: string; sessionId?: string; permissionRequestId?: string }
   | undefined {
-  if (req.method === 'POST' && req.path === '/session') {
+  const path = req.path.replace(/\/$/, '') || '/';
+  if (req.method === 'POST' && path === '/session') {
     return { route: 'POST /session' };
   }
-  const sessionAction = req.path.match(
-    /^\/session\/([^/]+)\/(load|resume|prompt|cancel)$/,
+  if (req.method === 'POST' && path === '/sessions/delete') {
+    return { route: 'POST /sessions/delete' };
+  }
+  const sessionAction = path.match(
+    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|approval-mode)$/,
   );
   const sessionActionId = sessionAction?.[1];
   const sessionActionName = sessionAction?.[2];
@@ -297,7 +301,14 @@ function resolveDaemonTelemetryRoute(
       sessionId: sessionActionId,
     };
   }
-  const sessionPermission = req.path.match(
+  const sessionMetadata = path.match(/^\/session\/([^/]+)\/metadata$/);
+  if (sessionMetadata?.[1] && req.method === 'PATCH') {
+    return {
+      route: 'PATCH /session/:id/metadata',
+      sessionId: sessionMetadata[1],
+    };
+  }
+  const sessionPermission = path.match(
     /^\/session\/([^/]+)\/permission\/([^/]+)$/,
   );
   if (
@@ -315,7 +326,7 @@ function resolveDaemonTelemetryRoute(
         : {}),
     };
   }
-  const globalPermission = req.path.match(/^\/permission\/([^/]+)$/);
+  const globalPermission = path.match(/^\/permission\/([^/]+)$/);
   if (globalPermission?.[1] && req.method === 'POST') {
     const rawRequestId = globalPermission[1];
     return {
@@ -326,13 +337,40 @@ function resolveDaemonTelemetryRoute(
         : {}),
     };
   }
-  const deleteSession = req.path.match(/^\/session\/([^/]+)$/);
+  const deleteSession = path.match(/^\/session\/([^/]+)$/);
   const deleteSessionId = deleteSession?.[1];
   if (deleteSessionId && req.method === 'DELETE') {
     return { route: 'DELETE /session/:id', sessionId: deleteSessionId };
   }
-  if (req.method === 'GET' && /^\/workspace\/.+\/sessions$/.test(req.path)) {
+  if (req.method === 'GET' && /^\/workspace\/[^/]+\/sessions$/.test(path)) {
     return { route: 'GET /workspace/:id/sessions' };
+  }
+  if (req.method === 'POST' && path === '/workspace/init') {
+    return { route: 'POST /workspace/init' };
+  }
+  const mcpRestart = path.match(/^\/workspace\/mcp\/([^/]+)\/restart$/);
+  if (mcpRestart?.[1] && req.method === 'POST') {
+    return { route: 'POST /workspace/mcp/:server/restart' };
+  }
+  if (req.method === 'POST' && path === '/workspace/mcp/servers') {
+    return { route: 'POST /workspace/mcp/servers' };
+  }
+  const mcpDelete = path.match(/^\/workspace\/mcp\/servers\/([^/]+)$/);
+  if (mcpDelete?.[1] && req.method === 'DELETE') {
+    return { route: 'DELETE /workspace/mcp/servers/:name' };
+  }
+  if (req.method === 'POST' && path === '/workspace/auth/device-flow') {
+    return { route: 'POST /workspace/auth/device-flow' };
+  }
+  const deviceFlowDelete = path.match(
+    /^\/workspace\/auth\/device-flow\/([^/]+)$/,
+  );
+  if (deviceFlowDelete?.[1] && req.method === 'DELETE') {
+    return { route: 'DELETE /workspace/auth/device-flow/:id' };
+  }
+  const toolEnable = path.match(/^\/workspace\/tools\/([^/]+)\/enable$/);
+  if (toolEnable?.[1] && req.method === 'POST') {
+    return { route: 'POST /workspace/tools/:name/enable' };
   }
   return undefined;
 }
