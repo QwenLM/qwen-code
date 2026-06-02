@@ -11,6 +11,70 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
+type HookMatcherTargetKind =
+  | 'toolName'
+  | 'agentType'
+  | 'trigger'
+  | 'sessionTrigger'
+  | 'error'
+  | 'notificationType';
+
+interface HookMatcherTarget {
+  kind: HookMatcherTargetKind;
+  target: string;
+}
+
+export function getHookMatcherTarget(
+  eventName: HookEventName,
+  context?: HookEventContext,
+): HookMatcherTarget | undefined {
+  switch (eventName) {
+    case HookEventName.PreToolUse:
+    case HookEventName.PostToolUse:
+    case HookEventName.PostToolUseFailure:
+    case HookEventName.PermissionRequest:
+    case HookEventName.PermissionDenied:
+      return { kind: 'toolName', target: context?.toolName ?? '' };
+
+    case HookEventName.SubagentStart:
+    case HookEventName.SubagentStop:
+      return { kind: 'agentType', target: context?.agentType ?? '' };
+
+    case HookEventName.PreCompact:
+    case HookEventName.PostCompact:
+      return { kind: 'trigger', target: context?.trigger ?? '' };
+
+    case HookEventName.SessionStart:
+    case HookEventName.SessionEnd:
+      return { kind: 'sessionTrigger', target: context?.trigger ?? '' };
+
+    case HookEventName.StopFailure:
+      return { kind: 'error', target: context?.error ?? '' };
+
+    case HookEventName.Notification:
+      return {
+        kind: 'notificationType',
+        target: context?.notificationType ?? '',
+      };
+
+    case HookEventName.UserPromptSubmit:
+    case HookEventName.Stop:
+    case HookEventName.TodoCreated:
+    case HookEventName.TodoCompleted:
+      return undefined;
+
+    default: {
+      const exhaustive: never = eventName;
+      return exhaustive;
+    }
+  }
+}
+
+export function hookEventSupportsMatcher(eventName: HookEventName): boolean {
+  const target = getHookMatcherTarget(eventName);
+  return typeof target === 'object' && target !== null;
+}
+
 /**
  * Hook planner that selects matching hooks and creates execution plans
  */
@@ -84,64 +148,32 @@ export class HookPlanner {
       return true; // Empty string or wildcard matches all
     }
 
-    // Explicit dispatch by event name to avoid ambiguity
-    switch (eventName) {
-      // Tool events: match against tool name
-      case HookEventName.PreToolUse:
-      case HookEventName.PostToolUse:
-      case HookEventName.PostToolUseFailure:
-      case HookEventName.PermissionRequest:
-        return context.toolName
-          ? this.matchesToolName(matcher, context.toolName)
-          : true;
+    const matcherTarget = getHookMatcherTarget(eventName, context);
+    if (!matcherTarget || !matcherTarget.target) {
+      return true;
+    }
 
-      // Subagent events: match against agent type
-      case HookEventName.SubagentStart:
-      case HookEventName.SubagentStop:
-        return context.agentType
-          ? this.matchesAgentType(matcher, context.agentType)
-          : true;
+    switch (matcherTarget.kind) {
+      case 'toolName':
+        return this.matchesToolName(matcher, matcherTarget.target);
 
-      // PreCompact: match against trigger
-      case HookEventName.PreCompact:
-        return context.trigger
-          ? this.matchesTrigger(matcher, context.trigger)
-          : true;
+      case 'agentType':
+        return this.matchesAgentType(matcher, matcherTarget.target);
 
-      // PostCompact: match against trigger
-      case HookEventName.PostCompact:
-        return context.trigger
-          ? this.matchesTrigger(matcher, context.trigger)
-          : true;
+      case 'trigger':
+      case 'error':
+        return this.matchesTrigger(matcher, matcherTarget.target);
 
-      // StopFailure: match against error type (fieldToMatch: 'error')
-      case HookEventName.StopFailure:
-        return context.error
-          ? this.matchesTrigger(matcher, context.error)
-          : true;
+      case 'notificationType':
+        return this.matchesNotificationType(matcher, matcherTarget.target);
 
-      // Notification: match against notification type
-      case HookEventName.Notification:
-        return context.notificationType
-          ? this.matchesNotificationType(matcher, context.notificationType)
-          : true;
+      case 'sessionTrigger':
+        return this.matchesSessionTrigger(matcher, matcherTarget.target);
 
-      // SessionStart/SessionEnd: match against source/reason
-      case HookEventName.SessionStart:
-        return context.trigger
-          ? this.matchesSessionTrigger(matcher, context.trigger)
-          : true;
-
-      case HookEventName.SessionEnd:
-        return context.trigger
-          ? this.matchesSessionTrigger(matcher, context.trigger)
-          : true;
-
-      // Events that don't support matchers: always match
-      case HookEventName.UserPromptSubmit:
-      case HookEventName.Stop:
-      default:
-        return true;
+      default: {
+        const exhaustive: never = matcherTarget.kind;
+        return exhaustive;
+      }
     }
   }
 

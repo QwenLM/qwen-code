@@ -27,6 +27,7 @@ import type {
   HookAggregator,
   AggregatedHookResult,
   SessionHooksManager,
+  SessionHookEntry,
 } from './index.js';
 import type { HookConfig, HookOutput, PermissionSuggestion } from './types.js';
 import type { HookExecutionResult } from './types.js';
@@ -106,6 +107,21 @@ describe('HookEventHandler', () => {
     errors: [],
     totalDuration: 100,
     finalOutput,
+  });
+
+  const createSessionHookEntry = (
+    eventName: HookEventName,
+    matcher: string,
+    command: string = 'echo session-hook',
+  ): SessionHookEntry => ({
+    hookId: `session-${eventName}-${matcher}`,
+    eventName,
+    matcher,
+    config: {
+      type: HookType.Command,
+      command,
+      source: HooksConfigSource.Session,
+    },
   });
 
   describe('fireUserPromptSubmitEvent', () => {
@@ -424,6 +440,223 @@ describe('HookEventHandler', () => {
         };
         expect(input.reason).toBe(reason);
       }
+    });
+  });
+
+  describe('session hook matcher targets', () => {
+    it('matches SessionStart session hooks against the session source', async () => {
+      const sessionHook = createSessionHookEntry(
+        HookEventName.SessionStart,
+        SessionStartSource.Resume,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        sessionHook,
+      ]);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireSessionStartEvent(
+        SessionStartSource.Resume,
+        'test-model',
+      );
+
+      expect(mockSessionHooksManager.getMatchingHooks).toHaveBeenCalledWith(
+        'test-session-id',
+        HookEventName.SessionStart,
+        SessionStartSource.Resume,
+      );
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [sessionHook.config],
+        HookEventName.SessionStart,
+        expect.objectContaining({ source: SessionStartSource.Resume }),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('matches PreToolUse session hooks against the tool name', async () => {
+      const sessionHook = createSessionHookEntry(
+        HookEventName.PreToolUse,
+        'shell',
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        sessionHook,
+      ]);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePreToolUseEvent(
+        'shell',
+        { command: 'ls' },
+        'toolu_123',
+        PermissionMode.Default,
+      );
+
+      expect(mockSessionHooksManager.getMatchingHooks).toHaveBeenCalledWith(
+        'test-session-id',
+        HookEventName.PreToolUse,
+        'shell',
+      );
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [sessionHook.config],
+        HookEventName.PreToolUse,
+        expect.objectContaining({ tool_name: 'shell' }),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('matches SubagentStart session hooks against the agent type', async () => {
+      const sessionHook = createSessionHookEntry(
+        HookEventName.SubagentStart,
+        AgentType.Explorer,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        sessionHook,
+      ]);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireSubagentStartEvent(
+        'agent_123',
+        AgentType.Explorer,
+        PermissionMode.Default,
+      );
+
+      expect(mockSessionHooksManager.getMatchingHooks).toHaveBeenCalledWith(
+        'test-session-id',
+        HookEventName.SubagentStart,
+        AgentType.Explorer,
+      );
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [sessionHook.config],
+        HookEventName.SubagentStart,
+        expect.objectContaining({ agent_type: AgentType.Explorer }),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('matches StopFailure session hooks against the error type', async () => {
+      const sessionHook = createSessionHookEntry(
+        HookEventName.StopFailure,
+        'rate_limit',
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        sessionHook,
+      ]);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireStopFailureEvent('rate_limit');
+
+      expect(mockSessionHooksManager.getMatchingHooks).toHaveBeenCalledWith(
+        'test-session-id',
+        HookEventName.StopFailure,
+        'rate_limit',
+      );
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [sessionHook.config],
+        HookEventName.StopFailure,
+        expect.objectContaining({ error: 'rate_limit' }),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('matches Notification session hooks against the notification type', async () => {
+      const sessionHook = createSessionHookEntry(
+        HookEventName.Notification,
+        NotificationType.PermissionPrompt,
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        sessionHook,
+      ]);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireNotificationEvent(
+        'permission needed',
+        NotificationType.PermissionPrompt,
+      );
+
+      expect(mockSessionHooksManager.getMatchingHooks).toHaveBeenCalledWith(
+        'test-session-id',
+        HookEventName.Notification,
+        NotificationType.PermissionPrompt,
+      );
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [sessionHook.config],
+        HookEventName.Notification,
+        expect.objectContaining({
+          notification_type: NotificationType.PermissionPrompt,
+        }),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('does not matcher-filter session hooks for events without matcher semantics', async () => {
+      const sessionHook = createSessionHookEntry(
+        HookEventName.UserPromptSubmit,
+        'ignored-matcher',
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockSessionHooksManager.getHooksForEvent).mockReturnValue([
+        sessionHook,
+      ]);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptSubmitEvent('hello');
+
+      expect(mockSessionHooksManager.getHooksForEvent).toHaveBeenCalledWith(
+        'test-session-id',
+        HookEventName.UserPromptSubmit,
+      );
+      expect(mockSessionHooksManager.getMatchingHooks).not.toHaveBeenCalled();
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [sessionHook.config],
+        HookEventName.UserPromptSubmit,
+        expect.objectContaining({ prompt: 'hello' }),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
     });
   });
 
@@ -1998,6 +2231,71 @@ describe('HookEventHandler', () => {
         permission_mode: PermissionMode;
       };
       expect(input.permission_mode).toBe(PermissionMode.Yolo);
+    });
+  });
+
+  describe('firePermissionDeniedEvent', () => {
+    it('should execute hooks for PermissionDenied event', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePermissionDeniedEvent(
+        'Bash',
+        { command: 'rm -rf /tmp/project' },
+        'toolu-denied-1',
+        'classifier_blocked',
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PermissionDenied,
+        { toolName: 'Bash' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include the denied tool payload and reason in hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePermissionDeniedEvent(
+        'Write',
+        { file_path: '/test.txt', content: 'hello' },
+        'toolu-denied-2',
+        'classifier_unavailable',
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        tool_name: string;
+        tool_input: Record<string, unknown>;
+        tool_use_id: string;
+        reason: string;
+      };
+
+      expect(input.tool_name).toBe('Write');
+      expect(input.tool_input).toEqual({
+        file_path: '/test.txt',
+        content: 'hello',
+      });
+      expect(input.tool_use_id).toBe('toolu-denied-2');
+      expect(input.reason).toBe('classifier_unavailable');
     });
   });
 

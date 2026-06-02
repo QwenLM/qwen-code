@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { HooksConfigSource, HookEventName } from '@qwen-code/qwen-code-core';
+import {
+  HooksConfigSource,
+  HookEventName,
+  hookEventSupportsMatcher,
+} from '@qwen-code/qwen-code-core';
 import type { HookExitCode, HookEventDisplayInfo } from './types.js';
 import { t } from '../../../i18n/index.js';
 
@@ -90,8 +94,26 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
         description: t('show stderr to user only but continue with compaction'),
       },
     ],
+    [HookEventName.PostCompact]: [
+      { code: 0, description: t('stdout/stderr not shown') },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
+    [HookEventName.StopFailure]: [
+      {
+        code: 0,
+        description: t('fire-and-forget; exit status is ignored'),
+      },
+      {
+        code: 'Other',
+        description: t('fire-and-forget; exit status is ignored'),
+      },
+    ],
     [HookEventName.PermissionRequest]: [
       { code: 0, description: t('use hook decision if provided') },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
+    [HookEventName.PermissionDenied]: [
+      { code: 0, description: t('stdout/stderr not shown') },
       { code: 'Other', description: t('show stderr to user only') },
     ],
     [HookEventName.TodoCreated]: [
@@ -133,9 +155,16 @@ export function getHookShortDescription(eventName: string): string {
       'Right before a subagent concludes its response',
     ),
     [HookEventName.PreCompact]: t('Before conversation compaction'),
+    [HookEventName.PostCompact]: t('After conversation compaction'),
+    [HookEventName.StopFailure]: t(
+      'When the turn ends due to an API error (fires instead of Stop)',
+    ),
     [HookEventName.SessionEnd]: t('When a session is ending'),
     [HookEventName.PermissionRequest]: t(
       'When a permission dialog is displayed',
+    ),
+    [HookEventName.PermissionDenied]: t(
+      'When a tool call is denied before a permission dialog is displayed',
     ),
     [HookEventName.TodoCreated]: t('When a new todo item is created'),
     [HookEventName.TodoCompleted]: t('When a todo item is marked as completed'),
@@ -179,8 +208,17 @@ export function getHookDescription(eventName: string): string {
     [HookEventName.PreCompact]: t(
       'Input to command is JSON with compaction details.',
     ),
+    [HookEventName.PostCompact]: t(
+      'Input to command is JSON with trigger (manual/auto) and compact_summary. Output is ignored for control purposes.',
+    ),
+    [HookEventName.StopFailure]: t(
+      'Input to command is JSON with error (rate_limit, authentication_failed, billing_error, invalid_request, server_error, max_output_tokens, unknown) and optional error_details. Fire-and-forget: output and exit status are ignored.',
+    ),
     [HookEventName.PermissionRequest]: t(
       'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.',
+    ),
+    [HookEventName.PermissionDenied]: t(
+      'Input to command is JSON with tool_name, tool_input, tool_use_id, and reason.',
     ),
     [HookEventName.TodoCreated]: t(
       'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.',
@@ -208,19 +246,13 @@ export function getTranslatedSourceDisplayMap(): Record<
   };
 }
 
-/**
- * List of hook events to display in the UI
- * Automatically synced with HookEventName enum from core.
- * Note: Order follows the enum definition order. If UI presentation order
- * needs to be different (e.g., grouped by lifecycle phase), consider using
- * an explicit sorted array instead. Current enum order is acceptable for display.
- */
 export const DISPLAY_HOOK_EVENTS: HookEventName[] =
   Object.values(HookEventName);
 
-/**
- * Create empty hook event display info
- */
+export function supportsMatchers(eventName: HookEventName): boolean {
+  return hookEventSupportsMatcher(eventName);
+}
+
 export function createEmptyHookEventInfo(
   eventName: HookEventName,
 ): HookEventDisplayInfo {
@@ -229,6 +261,6 @@ export function createEmptyHookEventInfo(
     shortDescription: getHookShortDescription(eventName),
     description: getHookDescription(eventName),
     exitCodes: getHookExitCodes(eventName),
-    configs: [],
+    matcherGroups: [],
   };
 }

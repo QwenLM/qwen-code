@@ -24,7 +24,6 @@ import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { TrustDialog } from './TrustDialog.js';
 import { PermissionsDialog } from './PermissionsDialog.js';
 import { ModelDialog } from './ModelDialog.js';
-import { ManageModelsDialog } from './ManageModelsDialog.js';
 import { ArenaStartDialog } from './arena/ArenaStartDialog.js';
 import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
 import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
@@ -49,6 +48,7 @@ import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
+import { DiffDialog } from './DiffDialog.js';
 import { MemoryDialog } from './MemoryDialog.js';
 import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
@@ -231,14 +231,6 @@ export const DialogManager = ({
       <ModelDialog
         onClose={uiActions.closeModelDialog}
         isFastModelMode={uiState.isFastModelMode}
-      />
-    );
-  }
-  if (uiState.isManageModelsDialogOpen) {
-    return (
-      <ManageModelsDialog
-        config={config}
-        onClose={uiActions.closeManageModelsDialog}
       />
     );
   }
@@ -482,6 +474,18 @@ export const DialogManager = ({
         onCancel={uiActions.closeRewindSelector}
         fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
         fileHistoryService={config.getFileHistoryService()}
+      />
+    );
+  }
+
+  if (uiState.isDiffDialogOpen) {
+    return (
+      <DiffDialog
+        history={uiState.history}
+        cwd={config.getWorkingDir() || config.getProjectRoot()}
+        fileHistoryService={config.getFileHistoryService()}
+        fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
+        onClose={uiActions.closeDiffDialog}
       />
     );
   }

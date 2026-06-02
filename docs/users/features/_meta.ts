@@ -15,6 +15,8 @@ export default {
     display: 'hidden',
   },
   'approval-mode': 'Approval Mode',
+  'auto-mode': 'Auto Mode',
+  worktree: 'Worktrees',
   mcp: 'MCP',
   lsp: 'LSP (Language Server Protocol)',
   'token-caching': 'Token Caching',

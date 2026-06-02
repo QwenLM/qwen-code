@@ -276,6 +276,162 @@ describe('atomicWriteFile', () => {
       path.normalize('../otherDir/target.txt'),
     );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'should use atomic rename when ownership matches (inode changes)',
+    async () => {
+      const filePath = path.join(tmpDir, 'mine.txt');
+      await fs.writeFile(filePath, 'original');
+      const inoBefore = (await fs.stat(filePath)).ino;
+
+      await atomicWriteFile(filePath, 'updated');
+
+      const statAfter = await fs.stat(filePath);
+      // Atomic rename produces a new inode.
+      expect(statAfter.ino).not.toBe(inoBefore);
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('updated');
+    },
+  );
+
+  it.skipIf(
+    process.platform === 'win32' || typeof process.geteuid !== 'function',
+  )(
+    'should fall back to in-place write when atomic rename would change ownership',
+    async () => {
+      // Simulate a file owned by a different user by replacing process.geteuid
+      // so it reports a uid that doesn't match the file's real uid. The code
+      // should detect rename would strip ownership and fall back to in-place
+      // writeFile, which preserves the inode — our signal that fallback ran.
+      const filePath = path.join(tmpDir, 'shared.txt');
+      await fs.writeFile(filePath, 'original');
+      await fs.chmod(filePath, 0o664);
+
+      const realStat = await fs.stat(filePath);
+      const inoBefore = realStat.ino;
+      const realGeteuid = process.geteuid!;
+      process.geteuid = () => realStat.uid + 1;
+
+      try {
+        await atomicWriteFile(filePath, 'updated');
+      } finally {
+        process.geteuid = realGeteuid;
+      }
+
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('updated');
+
+      const statAfter = await fs.stat(filePath);
+      // In-place write preserves the inode — proves rename was skipped.
+      expect(statAfter.ino).toBe(inoBefore);
+      // Permissions preserved.
+      expect(statAfter.mode & 0o777).toBe(0o664);
+      // No leftover temp file.
+      expect(await fs.readdir(tmpDir)).toEqual(['shared.txt']);
+    },
+  );
+
+  it.skipIf(
+    process.platform === 'win32' || typeof process.geteuid !== 'function',
+  )(
+    'should skip in-place fallback for non-regular files and use atomic replace',
+    async () => {
+      // FIFO + ownership mismatch must NOT take the in-place fallback —
+      // open(O_WRONLY|O_TRUNC) against a FIFO would block forever
+      // waiting for a reader. The atomic rename path instead replaces
+      // the FIFO with a regular file, which is the only sane behavior
+      // for "write to this path" semantics on a special file.
+      const { execSync } = await import('node:child_process');
+      const fifoPath = path.join(tmpDir, 'pipe.fifo');
+      execSync(`mkfifo "${fifoPath}"`);
+
+      const realStat = await fs.stat(fifoPath);
+      expect(realStat.isFIFO()).toBe(true);
+
+      const realGeteuid = process.geteuid!;
+      process.geteuid = () => realStat.uid + 1;
+
+      try {
+        // If the in-place fallback were taken, this would hang
+        // indefinitely. Vitest's default timeout will catch that.
+        await atomicWriteFile(fifoPath, 'content');
+      } finally {
+        process.geteuid = realGeteuid;
+      }
+
+      // Atomic path replaced the FIFO with a regular file.
+      const statAfter = await fs.stat(fifoPath);
+      expect(statAfter.isFile()).toBe(true);
+      expect(await fs.readFile(fifoPath, 'utf-8')).toBe('content');
+    },
+  );
+
+  it.skipIf(
+    process.platform === 'win32' || typeof process.geteuid !== 'function',
+  )(
+    'should write via in-place fallback through a resolved symlink when ownership differs',
+    async () => {
+      // atomicWriteFile resolves the symlink via resolveSymlinkChain
+      // before stat, so the in-place write targets the real file.
+      // Verifies the symlink itself is preserved.
+      const realFile = path.join(tmpDir, 'real.txt');
+      const symlinkAt = path.join(tmpDir, 'attacker-symlink.txt');
+      await fs.writeFile(realFile, 'real-content');
+      await fs.symlink(realFile, symlinkAt);
+
+      const realGeteuid = process.geteuid!;
+      const realStat = await fs.stat(realFile);
+      const inoBefore = realStat.ino;
+      process.geteuid = () => realStat.uid + 1;
+
+      try {
+        await atomicWriteFile(symlinkAt, 'updated');
+      } finally {
+        process.geteuid = realGeteuid;
+      }
+
+      // The real file is updated; the symlink itself is preserved.
+      expect(await fs.readFile(realFile, 'utf-8')).toBe('updated');
+      expect((await fs.stat(realFile)).ino).toBe(inoBefore);
+      expect((await fs.lstat(symlinkAt)).isSymbolicLink()).toBe(true);
+    },
+  );
+
+  it.skipIf(
+    process.platform === 'win32' ||
+      typeof process.geteuid !== 'function' ||
+      // chmod 0o000 against the file's real owner still succeeds via
+      // POSIX rename in CI/sandbox setups where the user is effectively
+      // root; only assert real EACCES when we own and can be denied.
+      process.geteuid() === 0,
+  )(
+    'should surface EACCES when in-place fallback hits an unwritable file',
+    async () => {
+      // Atomic rename used to silently replace files the calling user
+      // has no write permission on (rename only needs parent-dir write).
+      // The in-place fallback respects the file's mode and surfaces
+      // EACCES — the correct behavior for "you don't own this, you
+      // shouldn't be replacing it" scenarios.
+      const filePath = path.join(tmpDir, 'readonly.txt');
+      await fs.writeFile(filePath, 'original');
+      await fs.chmod(filePath, 0o444);
+
+      const realStat = await fs.stat(filePath);
+      const realGeteuid = process.geteuid!;
+      process.geteuid = () => realStat.uid + 1;
+
+      try {
+        await expect(atomicWriteFile(filePath, 'updated')).rejects.toThrow(
+          /EACCES/,
+        );
+      } finally {
+        process.geteuid = realGeteuid;
+        // Restore mode so afterEach's rm can clean up.
+        await fs.chmod(filePath, 0o644);
+      }
+
+      // Original content untouched.
+      expect(await fs.readFile(filePath, 'utf-8')).toBe('original');
+    },
+  );
 });
 
 describe('atomicWriteFileSync', () => {

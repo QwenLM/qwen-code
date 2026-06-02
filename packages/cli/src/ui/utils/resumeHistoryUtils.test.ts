@@ -143,7 +143,11 @@ describe('resumeHistoryUtils', () => {
       20,
     );
 
-    expect(items).toContainEqual({ id: 21, type: 'user', text: 'save logs' });
+    expect(items).toContainEqual({
+      id: 21,
+      type: 'notification',
+      text: 'save logs',
+    });
   });
 
   it('marks tool results as error, captures thought text, and falls back when tool is missing', () => {
@@ -324,5 +328,111 @@ describe('resumeHistoryUtils', () => {
       },
       { id: 8, type: 'gemini', text: 'Follow-up' },
     ]);
+  });
+
+  it('preserves model-sent slash command metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/filecmd',
+            sentToModel: true,
+          },
+        },
+        {
+          type: 'assistant',
+          message: { parts: [{ text: 'Follow-up' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 20);
+
+    expect(items).toEqual([
+      { id: 21, type: 'user', text: '/filecmd', sentToModel: true },
+      { id: 22, type: 'gemini', text: 'Follow-up' },
+    ]);
+  });
+
+  it('preserves local-only slash command metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/about',
+            sentToModel: false,
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 30);
+
+    expect(items).toEqual([
+      { id: 31, type: 'user', text: '/about', sentToModel: false },
+    ]);
+  });
+
+  it('omits sentToModel for legacy slash command records', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/legacy',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 40);
+
+    expect(items).toEqual([{ id: 41, type: 'user', text: '/legacy' }]);
+    expect(items[0]).not.toHaveProperty('sentToModel');
+  });
+
+  it('omits corrupted non-boolean sentToModel metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/filecmd',
+            sentToModel: 'true',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 50);
+
+    expect(items).toEqual([{ id: 51, type: 'user', text: '/filecmd' }]);
+    expect(items[0]).not.toHaveProperty('sentToModel');
   });
 });

@@ -85,6 +85,7 @@ These commands invoke bundled skills that provide specialized workflows.
 | ------------ | ------------------------------------------------------------------- | ------------------------------------------------- |
 | `/review`    | Review code changes with 5 parallel agents + deterministic analysis | `/review`, `/review 123`, `/review 123 --comment` |
 | `/loop`      | Run a prompt on a recurring schedule                                | `/loop 5m check the build`                        |
+| `/simplify`  | Review recent changes and apply safe cleanup edits directly         | `/simplify`, `/simplify focus on duplication`     |
 | `/qc-helper` | Answer questions about Qwen Code usage and configuration            | `/qc-helper how do I configure MCP?`              |
 
 See [Code Review](./code-review.md) for full `/review` documentation.
@@ -212,16 +213,17 @@ this setting.
 
 Commands for obtaining information and performing system settings.
 
-| Command     | Description                                     | Usage Examples                   |
-| ----------- | ----------------------------------------------- | -------------------------------- |
-| `/help`     | Display help information for available commands | `/help` or `/?`                  |
-| `/about`    | Display version information                     | `/about`                         |
-| `/stats`    | Display detailed statistics for current session | `/stats`                         |
-| `/settings` | Open settings editor                            | `/settings`                      |
-| `/auth`     | Change authentication method                    | `/auth`                          |
-| `/bug`      | Submit issue about Qwen Code                    | `/bug Button click unresponsive` |
-| `/copy`     | Copy last output content to clipboard           | `/copy`                          |
-| `/quit`     | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
+| Command         | Description                                     | Usage Examples                   |
+| --------------- | ----------------------------------------------- | -------------------------------- |
+| `/help`         | Display help information for available commands | `/help` or `/?`                  |
+| `/status`       | Display version information                     | `/status` or `/about`            |
+| `/status paths` | Display current session file and log paths      | `/status paths`                  |
+| `/stats`        | Display detailed statistics for current session | `/stats`                         |
+| `/settings`     | Open settings editor                            | `/settings`                      |
+| `/auth`         | Change authentication method                    | `/auth`                          |
+| `/bug`          | Submit issue about Qwen Code                    | `/bug Button click unresponsive` |
+| `/copy`         | Copy last output content to clipboard           | `/copy`                          |
+| `/quit`         | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
 
 ### 1.9 Common Shortcuts
 

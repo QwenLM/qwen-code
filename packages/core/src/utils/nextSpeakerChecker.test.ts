@@ -88,6 +88,7 @@ describe('checkNextSpeaker', () => {
 
     // Spy on getHistory for chatInstance
     vi.spyOn(chatInstance, 'getHistory');
+    vi.spyOn(chatInstance, 'getHistoryTail');
     vi.spyOn(chatInstance, 'getLastHistoryEntry');
   });
 
@@ -97,6 +98,9 @@ describe('checkNextSpeaker', () => {
 
   function mockChatHistory(history: Content[]): void {
     vi.mocked(chatInstance.getHistory).mockReturnValue(history);
+    vi.mocked(chatInstance.getHistoryTail).mockReturnValue(
+      history.length > 0 ? [structuredClone(history[history.length - 1]!)] : [],
+    );
     vi.mocked(chatInstance.getLastHistoryEntry).mockReturnValue(
       history.length > 0
         ? structuredClone(history[history.length - 1]!)
@@ -279,8 +283,36 @@ describe('checkNextSpeaker', () => {
     expect(generateJsonCall[0].promptId).toBe(promptId);
   });
 
+  it('should send only the last curated model message to the side query', async () => {
+    const oldHistory: Content[] = [
+      { role: 'user', parts: [{ text: 'old user context'.repeat(1000) }] },
+      { role: 'model', parts: [{ text: 'old model context'.repeat(1000) }] },
+    ];
+    const lastModelMessage: Content = {
+      role: 'model',
+      parts: [{ text: 'Some model output.' }],
+    };
+    mockChatHistory([...oldHistory, lastModelMessage]);
+    (mockBaseLlmClient.generateJson as Mock).mockResolvedValue({
+      reasoning: 'Model made a statement, awaiting user input.',
+      next_speaker: 'user',
+    } satisfies NextSpeakerResponse);
+
+    await checkNextSpeaker(chatInstance, mockConfig, abortSignal, promptId);
+
+    const generateJsonCall = (mockBaseLlmClient.generateJson as Mock).mock
+      .calls[0];
+    expect(generateJsonCall[0].contents).toHaveLength(2);
+    expect(generateJsonCall[0].contents[0]).toEqual(lastModelMessage);
+    expect(generateJsonCall[0].contents[1]).toMatchObject({
+      role: 'user',
+    });
+    expect(chatInstance.getHistory).not.toHaveBeenCalled();
+    expect(chatInstance.getHistoryTail).toHaveBeenCalledWith(1, true);
+  });
+
   it('should use raw last history entry to detect function responses', async () => {
-    vi.mocked(chatInstance.getHistory).mockReturnValue([
+    vi.mocked(chatInstance.getHistoryTail).mockReturnValue([
       {
         role: 'model',
         parts: [{ functionCall: { name: 'read_file', args: {} } }],
@@ -310,7 +342,8 @@ describe('checkNextSpeaker', () => {
         'The last message was a function response, so the model should speak next.',
       next_speaker: 'model',
     });
-    expect(chatInstance.getHistory).toHaveBeenCalledWith(true);
+    expect(chatInstance.getHistory).not.toHaveBeenCalled();
+    expect(chatInstance.getHistoryTail).not.toHaveBeenCalled();
     expect(chatInstance.getLastHistoryEntry).toHaveBeenCalledTimes(1);
     expect(mockBaseLlmClient.generateJson).not.toHaveBeenCalled();
   });
@@ -327,8 +360,9 @@ describe('checkNextSpeaker', () => {
 
     await checkNextSpeaker(chatInstance, mockConfig, abortSignal, promptId);
 
-    expect(chatInstance.getHistory).toHaveBeenCalledTimes(1);
-    expect(chatInstance.getHistory).toHaveBeenCalledWith(true);
+    expect(chatInstance.getHistory).not.toHaveBeenCalled();
+    expect(chatInstance.getHistoryTail).toHaveBeenCalledTimes(1);
+    expect(chatInstance.getHistoryTail).toHaveBeenCalledWith(1, true);
     expect(chatInstance.getLastHistoryEntry).toHaveBeenCalledTimes(1);
   });
 });

@@ -83,6 +83,12 @@ describe('keyMatchers', () => {
       key.name === 'down' ||
       (key.name === 'j' && !key.ctrl) ||
       (key.ctrl && key.name === 'n'),
+    [Command.SCROLL_UP]: (key: Key) => key.shift && key.name === 'up',
+    [Command.SCROLL_DOWN]: (key: Key) => key.shift && key.name === 'down',
+    [Command.PAGE_UP]: (key: Key) => key.name === 'pageup',
+    [Command.PAGE_DOWN]: (key: Key) => key.name === 'pagedown',
+    [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
+    [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
   };
 
   // Test data for each command with positive and negative test cases
@@ -355,6 +361,38 @@ describe('keyMatchers', () => {
         createKey('b', { meta: true }),
         createKey('a', { ctrl: true }),
       ],
+    },
+
+    // Viewport scroll commands
+    {
+      command: Command.SCROLL_UP,
+      positive: [createKey('up', { shift: true })],
+      negative: [createKey('up'), createKey('up', { ctrl: true })],
+    },
+    {
+      command: Command.SCROLL_DOWN,
+      positive: [createKey('down', { shift: true })],
+      negative: [createKey('down'), createKey('down', { ctrl: true })],
+    },
+    {
+      command: Command.PAGE_UP,
+      positive: [createKey('pageup'), createKey('pageup', { ctrl: true })],
+      negative: [createKey('pagedown'), createKey('up')],
+    },
+    {
+      command: Command.PAGE_DOWN,
+      positive: [createKey('pagedown'), createKey('pagedown', { ctrl: true })],
+      negative: [createKey('pageup'), createKey('down')],
+    },
+    {
+      command: Command.SCROLL_HOME,
+      positive: [createKey('home', { ctrl: true })],
+      negative: [createKey('home'), createKey('home', { shift: true })],
+    },
+    {
+      command: Command.SCROLL_END,
+      positive: [createKey('end', { ctrl: true })],
+      negative: [createKey('end'), createKey('end', { shift: true })],
     },
   ];
 

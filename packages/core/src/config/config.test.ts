@@ -7,9 +7,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
-import { Config, ApprovalMode, MCPServerConfig } from './config.js';
+import {
+  Config,
+  ApprovalMode,
+  APPROVAL_MODES,
+  APPROVAL_MODE_INFO,
+  MCPServerConfig,
+} from './config.js';
 import { Storage } from './storage.js';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
 import {
@@ -282,6 +289,13 @@ vi.mock('../ide/ide-client.js', () => ({
 
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 
+const MEMORY_PRESSURE_ENV_KEYS = [
+  'QWEN_MEMORY_PRESSURE_SOFT',
+  'QWEN_MEMORY_PRESSURE_HARD',
+  'QWEN_MEMORY_PRESSURE_CRITICAL',
+  'QWEN_MEMORY_ENABLE_GC',
+];
+
 vi.mock('../core/baseLlmClient.js');
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
@@ -322,6 +336,9 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
+      delete process.env[envName];
+    }
     (fs.existsSync as Mock).mockReturnValue(true);
     (fs.readdirSync as Mock).mockReturnValue([]);
     (fs.statSync as Mock).mockReturnValue({
@@ -413,6 +430,192 @@ describe('Server Config (config.ts)', () => {
       // call — recorded entries would vanish between operations.
       const config = new Config(baseParams);
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('MemoryPressureMonitor isolation', () => {
+    it('returns a distinct monitor for child Configs created via Object.create', async () => {
+      const parent = new Config(baseParams);
+      await parent.initialize({ skipGeminiInitialization: true });
+      const child = Object.create(parent) as Config;
+
+      const parentMonitor = parent.getMemoryPressureMonitor();
+      const childMonitor = child.getMemoryPressureMonitor();
+
+      expect(parentMonitor).toBeDefined();
+      expect(childMonitor).toBeDefined();
+      expect(childMonitor).not.toBe(parentMonitor);
+      expect(child.getMemoryPressureMonitor()).toBe(childMonitor);
+    });
+
+    it('resets monitor cleanup state when starting a new session', async () => {
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      const monitor = config.getMemoryPressureMonitor();
+      expect(monitor).toBeDefined();
+      const resetSpy = vi.spyOn(monitor!, 'resetForNewSession');
+
+      config.startNewSession();
+
+      expect(resetSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('MemoryPressure configuration environment', () => {
+    const restorers: Array<() => void> = [];
+    const originalEnv = new Map<string, string | undefined>();
+
+    beforeEach(() => {
+      originalEnv.clear();
+      for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
+        originalEnv.set(envName, process.env[envName]);
+        delete process.env[envName];
+      }
+    });
+
+    afterEach(() => {
+      while (restorers.length > 0) {
+        restorers.pop()?.();
+      }
+      for (const [envName, value] of originalEnv) {
+        if (value === undefined) {
+          delete process.env[envName];
+        } else {
+          process.env[envName] = value;
+        }
+      }
+      originalEnv.clear();
+    });
+
+    function mockMemoryRatio(rssRatio: number, heapUsedBytes = 0): void {
+      const spy = vi.spyOn(process, 'memoryUsage').mockReturnValue({
+        rss: Math.ceil(os.totalmem() * rssRatio),
+        heapTotal: 512 * 1024 * 1024,
+        heapUsed: heapUsedBytes,
+        external: 0,
+        arrayBuffers: 0,
+      });
+      restorers.push(() => spy.mockRestore());
+    }
+
+    function mockStderrWrite(): Mock {
+      const spy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      restorers.push(() => spy.mockRestore());
+      return spy as unknown as Mock;
+    }
+
+    it('applies valid memory pressure env overrides', async () => {
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.35);
+
+      expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+        'soft',
+      );
+    });
+
+    it('falls back to defaults and warns on strict env parse failures', async () => {
+      const stderrSpy = mockStderrWrite();
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3extra';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.35);
+
+      expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+        'normal',
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Invalid memory pressure config'),
+      );
+    });
+
+    it('falls back to defaults and warns on invalid threshold ordering', async () => {
+      const stderrSpy = mockStderrWrite();
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.7';
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+
+      expect(config.getMemoryPressureMonitor()).toBeDefined();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'softPressureRatio must be < hardPressureRatio',
+        ),
+      );
+    });
+
+    it.each(['NaN', 'Infinity', '0'])(
+      'falls back to defaults for invalid soft threshold %s',
+      async (value) => {
+        const stderrSpy = mockStderrWrite();
+        process.env['QWEN_MEMORY_PRESSURE_SOFT'] = value;
+
+        const config = new Config(baseParams);
+        await config.initialize({ skipGeminiInitialization: true });
+        mockMemoryRatio(0.35);
+
+        expect(config.getMemoryPressureMonitor()?.getPressureLevel()).toBe(
+          'normal',
+        );
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Invalid memory pressure config'),
+        );
+      },
+    );
+
+    it('enables explicit GC when requested by env', async () => {
+      process.env['QWEN_MEMORY_ENABLE_GC'] = '1';
+      const globalWithGc = global as typeof global & { gc?: () => void };
+      const originalGc = globalWithGc.gc;
+      const gcSpy = vi.fn();
+      Object.defineProperty(globalWithGc, 'gc', {
+        value: gcSpy,
+        configurable: true,
+      });
+      restorers.push(() => {
+        if (originalGc) {
+          Object.defineProperty(globalWithGc, 'gc', {
+            value: originalGc,
+            configurable: true,
+          });
+        } else {
+          delete globalWithGc.gc;
+        }
+      });
+
+      const config = new Config(baseParams);
+      await config.initialize({ skipGeminiInitialization: true });
+      mockMemoryRatio(0.85);
+
+      config.getMemoryPressureMonitor()?.performCheck();
+      await Promise.resolve();
+
+      expect(gcSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('child Config monitors inherit the parent memory pressure config snapshot', async () => {
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.3';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.6';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.9';
+      const parent = new Config(baseParams);
+      await parent.initialize({ skipGeminiInitialization: true });
+
+      process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.9';
+      process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.95';
+      process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.97';
+      const child = Object.create(parent) as Config;
+      mockMemoryRatio(0.35);
+
+      expect(child.getMemoryPressureMonitor()?.getPressureLevel()).toBe('soft');
     });
   });
 
@@ -618,7 +821,12 @@ describe('Server Config (config.ts)', () => {
         (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
           (call) => call[0],
         ),
-      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
+        ToolNames.SHELL,
+      ]);
     });
 
     it('skips inline MCP discovery by default (progressive availability)', async () => {
@@ -1644,6 +1852,37 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('OutboundCorrelation Configuration', () => {
+    // Default-to-false is security-relevant — controls whether
+    // `traceparent` is written onto outbound LLM/fetch request streams.
+    it.each<{
+      label: string;
+      outboundCorrelation: ConfigParameters['outboundCorrelation'];
+      expected: boolean;
+    }>([
+      { label: 'omitted', outboundCorrelation: undefined, expected: false },
+      { label: 'empty object', outboundCorrelation: {}, expected: false },
+      {
+        label: 'explicit true',
+        outboundCorrelation: { propagateTraceContext: true },
+        expected: true,
+      },
+      {
+        label: 'explicit false',
+        outboundCorrelation: { propagateTraceContext: false },
+        expected: false,
+      },
+    ])(
+      'propagateTraceContext resolves to $expected when $label',
+      ({ outboundCorrelation, expected }) => {
+        const config = new Config({ ...baseParams, outboundCorrelation });
+        expect(config.getOutboundCorrelationPropagateTraceContext()).toBe(
+          expected,
+        );
+      },
+    );
+  });
+
   describe('UseRipgrep Configuration', () => {
     it('should default useRipgrep to true when not provided', () => {
       const config = new Config(baseParams);
@@ -1730,20 +1969,26 @@ describe('Server Config (config.ts)', () => {
       expect(config.getCoreTools()).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
       expect(
         (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
+        ToolNames.SHELL,
+      ]);
     });
 
     it('registers structured_output in bare mode when jsonSchema is set', async () => {
-      // Bare mode strips the toolset to READ_FILE/EDIT/SHELL, but the
+      // Bare mode strips the toolset to READ_FILE/EDIT/NOTEBOOK_EDIT/SHELL, but the
       // synthetic structured_output tool is the terminal contract for
       // --json-schema runs. Without it the model loops until
       // maxSessionTurns and exits via the "plain text" failure path —
       // expensive in tokens for what's almost always a CI use case. The
-      // synthetic tool must be registered alongside the bare three.
+      // synthetic tool must be registered alongside the bare toolset.
       const config = new Config({
         ...baseParams,
         bareMode: true,
@@ -1762,6 +2007,7 @@ describe('Server Config (config.ts)', () => {
       ).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
         ToolNames.STRUCTURED_OUTPUT,
       ]);
@@ -1790,8 +2036,8 @@ describe('Server Config (config.ts)', () => {
           ToolRegistry: { prototype: { registerFactory: Mock } };
         }
       ).ToolRegistry.prototype.registerFactory;
-      // Initial bare init registers READ_FILE / EDIT / SHELL /
-      // STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
+      // Initial bare init registers READ_FILE / EDIT / NOTEBOOK_EDIT /
+      // SHELL / STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
       // observe ONLY the forSubAgent rebuild's calls.
       (registerToolMock as Mock).mockClear();
 
@@ -1805,10 +2051,11 @@ describe('Server Config (config.ts)', () => {
         (call) => call[0],
       );
       expect(registeredNames).not.toContain(ToolNames.STRUCTURED_OUTPUT);
-      // The bare three still register so the subagent has its toolset.
+      // The bare tools still register so the subagent has its toolset.
       expect(registeredNames).toEqual([
         ToolNames.READ_FILE,
         ToolNames.EDIT,
+        ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
     });
@@ -2301,6 +2548,140 @@ describe('setApprovalMode with folder trust', () => {
       // Setting PLAN again should not overwrite prePlanMode
       config.setApprovalMode(ApprovalMode.PLAN);
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    });
+  });
+
+  describe('AUTO mode', () => {
+    it('should throw an error when setting AUTO mode in an untrusted folder', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).toThrow(
+        'Cannot enable privileged approval modes in an untrusted folder.',
+      );
+    });
+
+    it('should NOT throw when setting AUTO mode in a trusted folder', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).not.toThrow();
+    });
+
+    it('should persist AUTO as the active mode', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getApprovalMode()).toBe(ApprovalMode.AUTO);
+    });
+
+    it('setApprovalMode resets the denial-tracking counters', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      // Enter AUTO and simulate having accumulated denial counters.
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setAutoModeDenialState({
+        consecutiveBlock: 3,
+        consecutiveUnavailable: 2,
+        totalBlock: 5,
+        totalUnavailable: 2,
+      });
+
+      // Switch away and back; the counters must be wiped clean.
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getAutoModeDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+
+      // And entering AUTO again should also start fresh (no leftover state).
+      config.setAutoModeDenialState({
+        consecutiveBlock: 1,
+        consecutiveUnavailable: 0,
+        totalBlock: 1,
+        totalUnavailable: 0,
+      });
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getAutoModeDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+    });
+
+    it('setApprovalMode(sameMode) does NOT reset counters', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      const populated = {
+        consecutiveBlock: 2,
+        consecutiveUnavailable: 0,
+        totalBlock: 2,
+        totalUnavailable: 0,
+      };
+      config.setAutoModeDenialState(populated);
+
+      // No-op mode set — state should be preserved.
+      config.setApprovalMode(ApprovalMode.AUTO);
+      expect(config.getAutoModeDenialState()).toEqual(populated);
+    });
+
+    it('should track AUTO as prePlanMode when entering PLAN from AUTO', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.AUTO);
+    });
+
+    it('AUTO appears in APPROVAL_MODES between AUTO_EDIT and YOLO', () => {
+      const autoEditIdx = APPROVAL_MODES.indexOf(ApprovalMode.AUTO_EDIT);
+      const autoIdx = APPROVAL_MODES.indexOf(ApprovalMode.AUTO);
+      const yoloIdx = APPROVAL_MODES.indexOf(ApprovalMode.YOLO);
+      expect(autoIdx).toBeGreaterThan(autoEditIdx);
+      expect(autoIdx).toBeLessThan(yoloIdx);
+    });
+
+    it('APPROVAL_MODE_INFO has an entry for AUTO', () => {
+      expect(APPROVAL_MODE_INFO[ApprovalMode.AUTO]).toEqual({
+        id: ApprovalMode.AUTO,
+        name: 'Auto',
+        description: expect.stringContaining('classifier'),
+      });
+    });
+  });
+
+  describe('getAutoModeSettings', () => {
+    it('returns an empty object when no autoMode settings are provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getAutoModeSettings()).toEqual({});
+    });
+
+    it('returns the provided autoMode hints and environment', () => {
+      const config = new Config({
+        ...baseParams,
+        permissions: {
+          autoMode: {
+            hints: {
+              allow: ['Allow xyz commands'],
+              deny: ['Block intranet calls'],
+            },
+            environment: ['Open-source monorepo'],
+          },
+        },
+      });
+      expect(config.getAutoModeSettings()).toEqual({
+        hints: {
+          allow: ['Allow xyz commands'],
+          deny: ['Block intranet calls'],
+        },
+        environment: ['Open-source monorepo'],
+      });
     });
   });
 

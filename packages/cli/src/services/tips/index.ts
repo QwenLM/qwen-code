@@ -10,7 +10,6 @@ export { TipHistory } from './tipHistory.js';
 export { selectTip } from './tipScheduler.js';
 export {
   tipRegistry,
-  getContextUsagePercent,
   type ContextualTip,
   type TipContext,
   type TipTrigger,

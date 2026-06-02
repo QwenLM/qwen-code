@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.15.11",
+  "version": "0.17.0",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -35,6 +35,7 @@
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.203.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.203.0",
     "@opentelemetry/instrumentation-http": "^0.203.0",
+    "@opentelemetry/instrumentation-undici": "^0.14.0",
     "@opentelemetry/sdk-node": "^0.203.0",
     "@types/html-to-text": "^9.0.4",
     "@xterm/headless": "5.5.0",

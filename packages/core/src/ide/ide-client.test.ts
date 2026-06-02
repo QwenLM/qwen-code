@@ -14,6 +14,23 @@ import {
   type Mocked,
   type Mock,
 } from 'vitest';
+
+const { mockUndiciFetch, mockProxyAgent, mockEnvHttpProxyAgent } = vi.hoisted(
+  () => {
+    const proxyAgent = { kind: 'env-proxy-agent' };
+    return {
+      mockUndiciFetch: vi.fn(),
+      mockProxyAgent: proxyAgent,
+      mockEnvHttpProxyAgent: vi.fn(() => proxyAgent),
+    };
+  },
+);
+
+vi.mock('undici', () => ({
+  EnvHttpProxyAgent: mockEnvHttpProxyAgent,
+  fetch: mockUndiciFetch,
+}));
+
 import {
   IdeClient,
   IDEConnectionStatus,
@@ -112,6 +129,8 @@ describe('IdeClient', () => {
     vi.mocked(Client).mockReturnValue(mockClient);
     vi.mocked(StreamableHTTPClientTransport).mockReturnValue(mockHttpTransport);
     vi.mocked(StdioClientTransport).mockReturnValue(mockStdioTransport);
+    mockUndiciFetch.mockReset();
+    mockEnvHttpProxyAgent.mockClear();
 
     await IdeClient.getInstance();
   });
@@ -119,6 +138,41 @@ describe('IdeClient', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  describe('createProxyAwareFetch', () => {
+    it('uses undici fetch with the proxy-aware dispatcher', async () => {
+      mockUndiciFetch.mockResolvedValue(
+        new Response('ok', {
+          status: 201,
+          statusText: 'Created',
+          headers: { 'x-test': 'yes' },
+        }),
+      );
+      const ideClient = await IdeClient.getInstance();
+      const fetch = (
+        ideClient as unknown as {
+          createProxyAwareFetch: (
+            host: string,
+          ) => (url: string, init?: RequestInit) => Promise<Response>;
+        }
+      ).createProxyAwareFetch('127.0.0.1');
+
+      const response = await fetch('http://127.0.0.1:8080/mcp', {
+        method: 'POST',
+      });
+
+      expect(response.status).toBe(201);
+      expect(response.headers.get('x-test')).toBe('yes');
+      expect(mockEnvHttpProxyAgent).toHaveBeenCalled();
+      expect(mockUndiciFetch).toHaveBeenCalledWith(
+        'http://127.0.0.1:8080/mcp',
+        expect.objectContaining({
+          method: 'POST',
+          dispatcher: mockProxyAgent,
+        }),
+      );
+    });
   });
 
   describe('connect', () => {

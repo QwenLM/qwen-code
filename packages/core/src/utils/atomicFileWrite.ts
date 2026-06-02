@@ -6,6 +6,7 @@
 
 import * as crypto from 'node:crypto';
 import * as fsSync from 'node:fs';
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createDebugLogger } from './debugLogger.js';
@@ -124,19 +125,12 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
 }
 
 /**
- * Atomically write arbitrary content (string or Buffer) to a file.
+ * Atomically write content to a file (write-to-temp + rename).
  *
- * 1. Resolve symlinks (including broken ones) so the temp file lives
- *    next to the real target.
- * 2. Write to a temporary file with fsync (`flush: true` by default).
- * 3. Preserve the original file's permissions (or apply `options.mode`).
- * 4. Atomic rename (POSIX) with retry (Windows).
- * 5. On EXDEV (cross-device rename), fall back to direct write.
- *    **Note:** the EXDEV fallback is non-atomic — a crash mid-write
- *    can leave a partially-written file. EXDEV only occurs when the
- *    resolved target path is on a different filesystem than its parent
- *    directory, which is rare in practice.
- * 6. Always clean up the temp file on failure.
+ * Falls back to in-place write when the existing file's uid differs
+ * from the process's euid — POSIX rename would reset ownership.
+ * Also falls back on EXDEV (cross-device). Both fallbacks lose crash
+ * atomicity but preserve the existing inode's uid.
  *
  * The parent directory of `filePath` must already exist.
  */
@@ -180,23 +174,26 @@ export async function atomicWriteFile(
         throw annotateWriteError(err, filePath);
       });
 
-  const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  // Stat the target to preserve existing permissions and detect
+  // ownership-changing renames (see the ownership-preservation note in
+  // the function doc).
+  let existingStat: Stats | undefined;
+  try {
+    existingStat = await fs.stat(targetPath);
+  } catch (err) {
+    if (!isNodeError(err) || err.code !== 'ENOENT') {
+      throw err;
+    }
+  }
 
   // forceMode skips permission preservation only when an explicit mode is
   // supplied — otherwise we'd silently downgrade an existing file's perms
   // to the process umask. forceMode without mode falls back to preservation.
   let existingMode: number | undefined;
   if (!options?.forceMode || options?.mode === undefined) {
-    try {
-      const stat = await fs.stat(targetPath);
-      existingMode = stat.mode & 0o7777;
-    } catch (err) {
-      if (!isNodeError(err) || err.code !== 'ENOENT') {
-        throw err;
-      }
-    }
+    existingMode =
+      existingStat !== undefined ? existingStat.mode & 0o7777 : undefined;
   }
-
   const desiredMode = existingMode ?? options?.mode;
 
   const writeOptions: {
@@ -229,6 +226,33 @@ export async function atomicWriteFile(
       }
     }
   };
+
+  // Detect when atomic rename would silently change ownership. POSIX
+  // rename creates a new inode owned by the process's euid:egid; if the
+  // existing file has a different uid, fall back to in-place write which
+  // preserves the inode and therefore uid. Only uid is compared — gid
+  // is intentionally skipped because macOS inherits the parent
+  // directory's GID for new files, making egid !== file.gid a
+  // false positive on the most common dev platform.
+  const ownershipWouldChange = (): boolean => {
+    if (existingStat === undefined) return false;
+    if (process.platform === 'win32') return false;
+    const euid = process.geteuid?.();
+    if (euid === undefined) return false;
+    return existingStat.uid !== euid;
+  };
+
+  if (
+    existingStat !== undefined &&
+    existingStat.isFile() &&
+    ownershipWouldChange()
+  ) {
+    await fs.writeFile(targetPath, data, writeOptions);
+    await tryChmod(targetPath);
+    return;
+  }
+
+  const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
   try {
     await writeFileImpl(tmpPath, data, writeOptions);
@@ -342,49 +366,18 @@ export async function atomicWriteFile(
   }
 }
 
-/**
- * Prefix the error message with the logical target path so downstream
- * debug logs identify which file actually failed (the original syscall
- * error usually references the random `.tmp.<hex>` temp path, which is
- * unhelpful when a caller doesn't wrap the error). Mutates in place to
- * preserve every other property (`code`, `errno`, `syscall`, `stack`,
- * the prototype chain) so existing `err.code === 'ENOENT'` checks and
- * `instanceof` narrowing continue to work unchanged.
- *
- * `fnName` defaults to the async variant; sync callers pass
- * `'atomicWriteFileSync'` so incident-response logs identify which
- * code path actually failed.
- */
 function annotateWriteError(
   error: unknown,
   targetPath: string,
   fnName: string = 'atomicWriteFile',
 ): unknown {
-  // Idempotency guard: skip if we already annotated this error (the
-  // prefix is a literal `${fnName}(`). The earlier guard used
-  // `includes(targetPath)`, but real fs syscall errors embed the *tmp*
-  // path (e.g. `ENOSPC ... '/path/creds.json.a1b2c3.tmp'`) which
-  // *contains* the target path as a substring — so the annotation was
-  // silently skipped on every real failure. Check for our own prefix
-  // instead so the message gets annotated exactly once across the
-  // tmp-write → rename → EXDEV-fallback chain.
   if (error instanceof Error && !error.message.startsWith(`${fnName}(`)) {
     error.message = `${fnName}(${JSON.stringify(targetPath)}): ${error.message}`;
   }
   return error;
 }
 
-/**
- * Atomically write a JSON value to a file.
- *
- * Delegates to {@link atomicWriteFile} for the actual atomic
- * write-to-temp + rename flow.
- *
- * Note: if `filePath` is a symlink, the write resolves the chain
- * and updates the real target file — the symlink itself is preserved.
- *
- * The parent directory of `filePath` must already exist.
- */
+/** Atomically write a JSON value to a file. Delegates to {@link atomicWriteFile}. */
 export async function atomicWriteJSON(
   filePath: string,
   data: unknown,

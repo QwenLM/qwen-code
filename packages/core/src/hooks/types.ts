@@ -46,6 +46,8 @@ export enum HookEventName {
   SessionEnd = 'SessionEnd',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
+  // When a tool call is denied before a permission dialog is displayed
+  PermissionDenied = 'PermissionDenied',
   // StopFailure - When the turn ends due to an API error (instead of Stop)
   StopFailure = 'StopFailure',
   // TodoCreated - When a new todo item is added to the list (Qwen Code specific)
@@ -523,6 +525,22 @@ export interface PermissionRequestInput extends HookInput {
   permission_suggestions?: PermissionSuggestion[];
 }
 
+export type PermissionDeniedReason =
+  /** AUTO classifier evaluated the request and actively blocked it. */
+  | 'classifier_blocked'
+  /** AUTO classifier could not return a verdict, so AUTO mode denied it. */
+  | 'classifier_unavailable';
+
+/**
+ * Input for PermissionDenied hook events
+ */
+export interface PermissionDeniedInput extends HookInput {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  tool_use_id: string;
+  reason: PermissionDeniedReason;
+}
+
 /**
  * Decision object for PermissionRequest hooks
  */
@@ -744,6 +762,7 @@ export enum PermissionMode {
   Default = 'default',
   Plan = 'plan',
   AutoEdit = 'auto_edit',
+  Auto = 'auto',
   Yolo = 'yolo',
 }
 

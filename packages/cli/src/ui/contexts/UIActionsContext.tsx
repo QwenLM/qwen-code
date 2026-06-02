@@ -44,8 +44,6 @@ export interface UIActions {
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
-  openManageModelsDialog: () => void;
-  closeManageModelsDialog: () => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
@@ -107,6 +105,9 @@ export interface UIActions {
   openRewindSelector: () => void;
   closeRewindSelector: () => void;
   handleRewindConfirm: (userItem: HistoryItem, option: RestoreOption) => void;
+  // Diff dialog
+  openDiffDialog: () => void;
+  closeDiffDialog: () => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);
