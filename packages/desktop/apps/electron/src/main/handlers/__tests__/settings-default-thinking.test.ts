@@ -52,6 +52,8 @@ const getQwenMemoryPathsViaAcpMock = mock(async () => ({
   projectMemoryFile: '/tmp/project/AGENTS.md',
   autoMemoryDir: '/tmp/project/memory',
 }));
+const getQwenMemorySettingsViaAcpMock = mock(async () => ({}));
+const setQwenMemorySettingsViaAcpMock = mock(async () => ({}));
 
 mock.module('@craft-agent/shared/config', () => ({
   getPreferencesPath: () => '/tmp/preferences.json',
@@ -79,8 +81,8 @@ mock.module('@craft-agent/shared/agent', () => ({
   setQwenExtensionSettingViaAcp: mock(async () => ({})),
   getQwenPermissionSettingsViaAcp: mock(async () => ({})),
   setQwenPermissionRulesViaAcp: mock(async () => ({})),
-  getQwenMemorySettingsViaAcp: mock(async () => ({})),
-  setQwenMemorySettingsViaAcp: mock(async () => ({})),
+  getQwenMemorySettingsViaAcp: getQwenMemorySettingsViaAcpMock,
+  setQwenMemorySettingsViaAcp: setQwenMemorySettingsViaAcpMock,
   getQwenSettingsPathViaAcp: mock(async () => ''),
   getQwenMemoryPathsViaAcp: getQwenMemoryPathsViaAcpMock,
 }));
@@ -99,6 +101,8 @@ describe('settings default thinking RPC handlers', () => {
     getQwenCoreSettingsViaAcpMock.mockClear();
     setQwenCoreSettingViaAcpMock.mockClear();
     applyGlobalPermissionModeMock.mockClear();
+    getQwenMemorySettingsViaAcpMock.mockClear();
+    setQwenMemorySettingsViaAcpMock.mockClear();
     getQwenMemoryPathsViaAcpMock.mockClear();
 
     const server: RpcServer = {
@@ -247,5 +251,59 @@ describe('settings default thinking RPC handlers', () => {
       processCwd: '/Users/dragon/.craft-agent/workspaces/qwen-code',
       projectRoot: '/Users/dragon/Documents/qwen-code',
     });
+  });
+
+  it('loads memory settings through the workspace Qwen ACP process', async () => {
+    mockedWorkspace = {
+      id: 'ws-1',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: '/Users/dragon/.craft-agent/workspaces/qwen-code',
+    };
+    mockedWorkspaceConfig = {
+      defaults: {
+        workingDirectory: '/Users/dragon/Documents/qwen-code',
+      },
+    };
+
+    const getHandler = handlers.get(RPC_CHANNELS.memory.GET_SETTINGS);
+    expect(getHandler).toBeTruthy();
+
+    await getHandler!(requestContext, 'ws-1');
+
+    expect(getQwenMemorySettingsViaAcpMock).toHaveBeenCalledTimes(1);
+    expect(getQwenMemorySettingsViaAcpMock.mock.calls[0]?.[0]).toMatchObject({
+      cwd: '/Users/dragon/Documents/qwen-code',
+      processCwd: '/Users/dragon/.craft-agent/workspaces/qwen-code',
+      projectRoot: '/Users/dragon/Documents/qwen-code',
+    });
+  });
+
+  it('saves memory settings through the workspace Qwen ACP process', async () => {
+    mockedWorkspace = {
+      id: 'ws-1',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: '/Users/dragon/.craft-agent/workspaces/qwen-code',
+    };
+    mockedWorkspaceConfig = {
+      defaults: {
+        workingDirectory: '/Users/dragon/Documents/qwen-code',
+      },
+    };
+
+    const setHandler = handlers.get(RPC_CHANNELS.memory.SET_SETTINGS);
+    expect(setHandler).toBeTruthy();
+
+    const updates = { enableManagedAutoDream: true };
+    await setHandler!(requestContext, updates, 'ws-1');
+
+    expect(setQwenMemorySettingsViaAcpMock).toHaveBeenCalledTimes(1);
+    expect(setQwenMemorySettingsViaAcpMock.mock.calls[0]?.[0]).toMatchObject({
+      cwd: '/Users/dragon/Documents/qwen-code',
+      processCwd: '/Users/dragon/.craft-agent/workspaces/qwen-code',
+      projectRoot: '/Users/dragon/Documents/qwen-code',
+    });
+    expect(setQwenMemorySettingsViaAcpMock.mock.calls[0]?.[1]).toBe(updates);
   });
 });

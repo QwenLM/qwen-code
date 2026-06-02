@@ -883,6 +883,96 @@ describe('Qwen native history loading', () => {
     ).toBeUndefined();
   });
 
+  it('applies token usage returned with provider-loaded Qwen history', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'));
+    tempRoots.push(workspaceRoot, projectRoot);
+
+    const sessionId = '260602-qwen-token-usage';
+    const sdkSessionId = '0f3f06ba-df67-4a4c-8874-e2a9d4afed65';
+    const timestamp = Date.parse('2026-06-02T09:30:02.013Z');
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    const nativeMessages: Message[] = [
+      {
+        id: 'qwen-user-1',
+        role: 'user',
+        content: 'hello',
+        timestamp,
+      },
+      {
+        id: 'qwen-assistant-1',
+        role: 'assistant',
+        content: 'hi',
+        timestamp: timestamp + 1_000,
+      },
+    ];
+    const manager = new SessionManager({
+      createExternalSessionAgent: () =>
+        ({
+          loadSessionMessages: async () => ({
+            messages: nativeMessages,
+            tokenUsage: {
+              inputTokens: 240,
+              outputTokens: 40,
+              totalTokens: 240,
+              contextTokens: 240,
+              costUsd: 0,
+              contextWindow: 1_000_000,
+            },
+          }),
+          destroy: () => {},
+          dispose: () => {},
+        }) as unknown as AgentBackend,
+    });
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId,
+        name: '新聊天',
+        createdAt: timestamp,
+        lastUsedAt: timestamp,
+        lastMessageAt: timestamp,
+        messageCount: 0,
+        llmConnection: 'qwen-code',
+        thinkingLevel: 'medium',
+      },
+      workspace,
+    );
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    const loaded = await manager.getSession(sessionId);
+
+    expect(loaded?.tokenUsage).toMatchObject({
+      inputTokens: 240,
+      contextTokens: 240,
+      contextWindow: 1_000_000,
+    });
+  });
+
   it('does not repeatedly reload empty Qwen canonical history for the same external timestamp', async () => {
     const workspaceRoot = mkdtempSync(
       join(tmpdir(), 'craft-managed-workspace-'),
@@ -1358,6 +1448,13 @@ describe('Qwen native history loading', () => {
           timestamp: timestamp + 1_000,
         },
       ],
+      tokenUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        contextTokens: 0,
+        costUsd: 0,
+      },
     });
 
     const nativeMessages: Message[] = [
@@ -1448,6 +1545,13 @@ describe('Qwen native history loading', () => {
       sdkSessionId: sessionId,
       thinkingLevel: 'medium',
       messages: [],
+      tokenUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        contextTokens: 0,
+        costUsd: 0,
+      },
     });
 
     const attachmentsDir = join(

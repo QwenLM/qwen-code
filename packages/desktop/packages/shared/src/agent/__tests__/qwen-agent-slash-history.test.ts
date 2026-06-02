@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AgentEvent, Message } from '@craft-agent/core/types';
@@ -8,14 +14,26 @@ import { QwenAgent } from '../qwen-agent.ts';
 type QwenAgentConfig = ConstructorParameters<typeof QwenAgent>[0];
 
 type QwenHistoryInternals = {
-  mergeSlashCommandInvocationMessages: (sessionId: string, messages: Message[], cwd: string) => Message[];
-  buildHistoryMessages: (sessionId: string, updates: Record<string, unknown>[], cwd: string) => Message[];
+  mergeSlashCommandInvocationMessages: (
+    sessionId: string,
+    messages: Message[],
+    cwd: string,
+  ) => Message[];
+  buildHistoryMessages: (
+    sessionId: string,
+    updates: Array<Record<string, unknown>>,
+    cwd: string,
+  ) => Message[];
   persistQwenTranscriptTextElements: (
     sessionId: string,
     cwd: string,
     sourceElements?: NonNullable<Message['textElements']>,
   ) => void;
-  applyQwenTranscriptTextElements: (messages: Message[], sessionId: string, cwd: string) => Message[];
+  applyQwenTranscriptTextElements: (
+    messages: Message[],
+    sessionId: string,
+    cwd: string,
+  ) => Message[];
 };
 
 type QwenPromptBlock = {
@@ -58,7 +76,10 @@ type QwenAvailableCommandsInternals = {
   callAcp: <T>(
     method: string,
     execute: (connection: {
-      extMethod?: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>;
+      extMethod?: (
+        method: string,
+        params: Record<string, unknown>,
+      ) => Promise<Record<string, unknown>>;
       loadSession?: (params: unknown) => Promise<unknown>;
       newSession?: (params: unknown) => Promise<unknown>;
     }) => Promise<T>,
@@ -105,26 +126,43 @@ function createAgent(
   } as QwenAgentConfig);
 }
 
-function writeQwenTranscript(runtimeRoot: string, cwd: string, sessionId: string, records: unknown[]): void {
+function writeQwenTranscript(
+  runtimeRoot: string,
+  cwd: string,
+  sessionId: string,
+  records: unknown[],
+): void {
   const projectId = resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-');
   const transcriptDir = join(runtimeRoot, 'projects', projectId, 'chats');
   mkdirSync(transcriptDir, { recursive: true });
   writeFileSync(
     join(transcriptDir, `${sessionId}.jsonl`),
-    records.map(record => JSON.stringify(record)).join('\n') + '\n',
+    records.map((record) => JSON.stringify(record)).join('\n') + '\n',
   );
 }
 
-function readQwenTranscript(runtimeRoot: string, cwd: string, sessionId: string): Record<string, unknown>[] {
+function readQwenTranscript(
+  runtimeRoot: string,
+  cwd: string,
+  sessionId: string,
+): Array<Record<string, unknown>> {
   const projectId = resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-');
-  const transcriptPath = join(runtimeRoot, 'projects', projectId, 'chats', `${sessionId}.jsonl`);
+  const transcriptPath = join(
+    runtimeRoot,
+    'projects',
+    projectId,
+    'chats',
+    `${sessionId}.jsonl`,
+  );
   return readFileSync(transcriptPath, 'utf8')
     .trim()
     .split('\n')
-    .map(line => JSON.parse(line) as Record<string, unknown>);
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-async function readNextQueuedEvent(agent: QwenAgent): Promise<AgentEvent | undefined> {
+async function readNextQueuedEvent(
+  agent: QwenAgent,
+): Promise<AgentEvent | undefined> {
   const queue = (agent as unknown as QwenAvailableCommandsInternals).eventQueue;
   const iterator = queue.drain();
   const next = await iterator.next();
@@ -147,15 +185,17 @@ describe('QwenAgent slash command history', () => {
   });
 
   it('sends slash commands as raw ACP prompts', () => {
-    const blocks = (QwenAgent.prototype as unknown as QwenPromptInternals)
-      .buildPromptBlocks('  /context  ');
+    const blocks = (
+      QwenAgent.prototype as unknown as QwenPromptInternals
+    ).buildPromptBlocks('  /context  ');
 
     expect(blocks).toEqual([{ type: 'text', text: '/context' }]);
   });
 
   it('starts Qwen ACP with the desktop channel', () => {
-    const command = (QwenAgent.prototype as unknown as QwenSpawnInternals)
-      .buildSpawnCommand('/opt/qwen/dist/cli.js', '/usr/local/bin/node');
+    const command = (
+      QwenAgent.prototype as unknown as QwenSpawnInternals
+    ).buildSpawnCommand('/opt/qwen/dist/cli.js', '/usr/local/bin/node');
 
     expect(command).toEqual({
       command: '/usr/local/bin/node',
@@ -164,8 +204,9 @@ describe('QwenAgent slash command history', () => {
   });
 
   it('does not prepend Craft context to Qwen prompts while disabled', () => {
-    const blocks = (QwenAgent.prototype as unknown as QwenPromptInternals)
-      .buildPromptBlocks('hello');
+    const blocks = (
+      QwenAgent.prototype as unknown as QwenPromptInternals
+    ).buildPromptBlocks('hello');
 
     expect(blocks).toEqual([{ type: 'text', text: 'hello' }]);
   });
@@ -243,7 +284,11 @@ describe('QwenAgent slash command history', () => {
         timestamp: '2026-03-25T07:36:40.000Z',
         type: 'system',
         subtype: 'slash_command',
-        systemPayload: { phase: 'result', rawCommand: '/model', outputHistoryItems: [] },
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/model',
+          outputHistoryItems: [],
+        },
       },
       {
         uuid: 'insight-invocation',
@@ -264,27 +309,43 @@ describe('QwenAgent slash command history', () => {
           phase: 'result',
           rawCommand: '/insight',
           outputHistoryItems: [
-            { type: 'info', text: 'This may take a couple minutes. Sit tight!' },
+            {
+              type: 'info',
+              text: 'This may take a couple minutes. Sit tight!',
+            },
           ],
         },
       },
     ]);
 
     const agent = createAgent(cwd);
-    const acpMessages: Message[] = [{
-      id: 'qwen-existing-1',
-      role: 'assistant',
-      content: 'This may take a couple minutes. Sit tight!',
-      timestamp: Date.parse(insightResult),
-    }];
+    const acpMessages: Message[] = [
+      {
+        id: 'qwen-existing-1',
+        role: 'assistant',
+        content: 'This may take a couple minutes. Sit tight!',
+        timestamp: Date.parse(insightResult),
+      },
+    ];
 
-    const messages = (agent as unknown as QwenHistoryInternals)
-      .mergeSlashCommandInvocationMessages(sessionId, acpMessages, cwd);
+    const messages = (
+      agent as unknown as QwenHistoryInternals
+    ).mergeSlashCommandInvocationMessages(sessionId, acpMessages, cwd);
     agent.destroy();
 
-    expect(messages.map(message => [message.role, message.content, message.timestamp])).toEqual([
+    expect(
+      messages.map((message) => [
+        message.role,
+        message.content,
+        message.timestamp,
+      ]),
+    ).toEqual([
       ['user', '/insight', Date.parse(insightInvocation)],
-      ['assistant', 'This may take a couple minutes. Sit tight!', Date.parse(insightResult)],
+      [
+        'assistant',
+        'This may take a couple minutes. Sit tight!',
+        Date.parse(insightResult),
+      ],
     ]);
     expect(messages[0]?.textElements).toBeUndefined();
   });
@@ -294,16 +355,20 @@ describe('QwenAgent slash command history', () => {
     tempRoots.push(cwd);
 
     const agent = createAgent(cwd);
-    const messages = (agent as unknown as QwenHistoryInternals).buildHistoryMessages(
+    const messages = (
+      agent as unknown as QwenHistoryInternals
+    ).buildHistoryMessages(
       'session-with-files',
-      [{
-        sessionUpdate: 'user_message_chunk',
-        content: {
-          type: 'text',
-          text: 'please inspect @packages/shared/src/agent/qwen-agent.ts:42',
+      [
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: {
+            type: 'text',
+            text: 'please inspect @packages/shared/src/agent/qwen-agent.ts:42',
+          },
+          _meta: { timestamp: 1234 },
         },
-        _meta: { timestamp: 1234 },
-      }],
+      ],
       cwd,
     );
     agent.destroy();
@@ -316,12 +381,17 @@ describe('QwenAgent slash command history', () => {
     tempRoots.push(cwd);
 
     const agent = createAgent(cwd);
-    const messages = (agent as unknown as QwenHistoryInternals).buildHistoryMessages(
+    const messages = (
+      agent as unknown as QwenHistoryInternals
+    ).buildHistoryMessages(
       'session-with-commentary',
       [
         {
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'I will inspect the available commands.' },
+          content: {
+            type: 'text',
+            text: 'I will inspect the available commands.',
+          },
           _meta: { timestamp: 1_000 },
         },
         {
@@ -342,13 +412,20 @@ describe('QwenAgent slash command history', () => {
     );
     agent.destroy();
 
-    expect(messages.map(message => [
-      message.role,
-      message.content,
-      message.isIntermediate ?? false,
-      message.intermediateKind ?? '',
-    ])).toEqual([
-      ['assistant', 'I will inspect the available commands.', true, 'commentary'],
+    expect(
+      messages.map((message) => [
+        message.role,
+        message.content,
+        message.isIntermediate ?? false,
+        message.intermediateKind ?? '',
+      ]),
+    ).toEqual([
+      [
+        'assistant',
+        'I will inspect the available commands.',
+        true,
+        'commentary',
+      ],
       ['tool', 'Running List...', false, ''],
       ['assistant', 'Private reasoning stays internal.', true, 'thought'],
     ]);
@@ -361,40 +438,44 @@ describe('QwenAgent slash command history', () => {
     process.env.QWEN_RUNTIME_DIR = runtimeRoot;
 
     const sessionId = 'session-with-slash-metadata';
-    writeQwenTranscript(runtimeRoot, cwd, sessionId, [{
-      uuid: 'u1',
-      parentUuid: null,
-      sessionId,
-      timestamp: '2026-04-30T08:02:52.927Z',
-      type: 'user',
-      cwd,
-      version: 'test',
-      message: { role: 'user', parts: [{ text: '/qc-helper hello' }] },
-    }]);
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-30T08:02:52.927Z',
+        type: 'user',
+        cwd,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: '/qc-helper hello' }] },
+      },
+    ]);
 
     const agent = createAgent(cwd);
-    (agent as unknown as QwenHistoryInternals).persistQwenTranscriptTextElements(
-      sessionId,
-      cwd,
-      [{
+    (
+      agent as unknown as QwenHistoryInternals
+    ).persistQwenTranscriptTextElements(sessionId, cwd, [
+      {
         type: 'slash_command',
         byte_range: { start: 0, end: 10 },
         placeholder: '/qc-helper',
         label: 'qc-helper',
         target: 'qc-helper',
-      }],
-    );
+      },
+    ]);
 
     const records = readQwenTranscript(runtimeRoot, cwd, sessionId);
     agent.destroy();
 
-    expect(records[0]?.textElements).toEqual([{
-      type: 'slash_command',
-      byte_range: { start: 0, end: 10 },
-      placeholder: '/qc-helper',
-      label: 'qc-helper',
-      target: 'qc-helper',
-    }]);
+    expect(records[0]?.textElements).toEqual([
+      {
+        type: 'slash_command',
+        byte_range: { start: 0, end: 10 },
+        placeholder: '/qc-helper',
+        label: 'qc-helper',
+        target: 'qc-helper',
+      },
+    ]);
   });
 
   it('writes skill text elements into the Qwen transcript user record', () => {
@@ -404,40 +485,44 @@ describe('QwenAgent slash command history', () => {
     process.env.QWEN_RUNTIME_DIR = runtimeRoot;
 
     const sessionId = 'session-with-skill-metadata';
-    writeQwenTranscript(runtimeRoot, cwd, sessionId, [{
-      uuid: 'u1',
-      parentUuid: null,
-      sessionId,
-      timestamp: '2026-04-30T08:02:52.927Z',
-      type: 'user',
-      cwd,
-      version: 'test',
-      message: { role: 'user', parts: [{ text: '@qc-helper' }] },
-    }]);
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-30T08:02:52.927Z',
+        type: 'user',
+        cwd,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: '@qc-helper' }] },
+      },
+    ]);
 
     const agent = createAgent(cwd);
-    (agent as unknown as QwenHistoryInternals).persistQwenTranscriptTextElements(
-      sessionId,
-      cwd,
-      [{
+    (
+      agent as unknown as QwenHistoryInternals
+    ).persistQwenTranscriptTextElements(sessionId, cwd, [
+      {
         type: 'skill',
         byte_range: { start: 0, end: 17 },
         placeholder: '[skill:qc-helper]',
         label: 'qc-helper',
         target: 'qc-helper',
-      }],
-    );
+      },
+    ]);
 
     const records = readQwenTranscript(runtimeRoot, cwd, sessionId);
     agent.destroy();
 
-    expect(records[0]?.textElements).toEqual([{
-      type: 'skill',
-      byte_range: { start: 0, end: 10 },
-      placeholder: '@qc-helper',
-      label: 'qc-helper',
-      target: 'qc-helper',
-    }]);
+    expect(records[0]?.textElements).toEqual([
+      {
+        type: 'skill',
+        byte_range: { start: 0, end: 10 },
+        placeholder: '@qc-helper',
+        label: 'qc-helper',
+        target: 'qc-helper',
+      },
+    ]);
   });
 
   it('loads text elements back from the Qwen transcript', () => {
@@ -447,44 +532,54 @@ describe('QwenAgent slash command history', () => {
     process.env.QWEN_RUNTIME_DIR = runtimeRoot;
 
     const sessionId = 'session-with-persisted-text-elements';
-    writeQwenTranscript(runtimeRoot, cwd, sessionId, [{
-      uuid: 'u1',
-      parentUuid: null,
-      sessionId,
-      timestamp: '2026-04-30T08:02:52.927Z',
-      type: 'user',
-      cwd,
-      version: 'test',
-      message: { role: 'user', parts: [{ text: '@qc-helper' }] },
-      textElements: [{
-        type: 'skill',
-        byte_range: { start: 0, end: 10 },
-        placeholder: '@qc-helper',
-        label: 'qc-helper',
-        target: 'qc-helper',
-      }],
-    }]);
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-30T08:02:52.927Z',
+        type: 'user',
+        cwd,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: '@qc-helper' }] },
+        textElements: [
+          {
+            type: 'skill',
+            byte_range: { start: 0, end: 10 },
+            placeholder: '@qc-helper',
+            label: 'qc-helper',
+            target: 'qc-helper',
+          },
+        ],
+      },
+    ]);
 
     const agent = createAgent(cwd);
-    const messages = (agent as unknown as QwenHistoryInternals).applyQwenTranscriptTextElements(
-      [{
-        id: 'message-1',
-        role: 'user',
-        content: '@qc-helper',
-        timestamp: Date.parse('2026-04-30T08:02:52.927Z'),
-      }],
+    const messages = (
+      agent as unknown as QwenHistoryInternals
+    ).applyQwenTranscriptTextElements(
+      [
+        {
+          id: 'message-1',
+          role: 'user',
+          content: '@qc-helper',
+          timestamp: Date.parse('2026-04-30T08:02:52.927Z'),
+        },
+      ],
       sessionId,
       cwd,
     );
     agent.destroy();
 
-    expect(messages[0]?.textElements).toEqual([{
-      type: 'skill',
-      byte_range: { start: 0, end: 10 },
-      placeholder: '@qc-helper',
-      label: 'qc-helper',
-      target: 'qc-helper',
-    }]);
+    expect(messages[0]?.textElements).toEqual([
+      {
+        type: 'skill',
+        byte_range: { start: 0, end: 10 },
+        placeholder: '@qc-helper',
+        label: 'qc-helper',
+        target: 'qc-helper',
+      },
+    ]);
   });
 
   it('formats slash command JSON output as a markdown json block', () => {
@@ -516,17 +611,21 @@ describe('QwenAgent slash command history', () => {
           outputHistoryItems: [
             {
               type: 'assistant',
-              text: JSON.stringify({
-                checks: [
-                  {
-                    category: 'System',
-                    name: 'Node.js version',
-                    status: 'pass',
-                    message: 'v22.22.1',
-                  },
-                ],
-                summary: { pass: 1, warn: 0, fail: 0 },
-              }, null, 2),
+              text: JSON.stringify(
+                {
+                  checks: [
+                    {
+                      category: 'System',
+                      name: 'Node.js version',
+                      status: 'pass',
+                      message: 'v22.22.1',
+                    },
+                  ],
+                  summary: { pass: 1, warn: 0, fail: 0 },
+                },
+                null,
+                2,
+              ),
             },
           ],
         },
@@ -534,11 +633,12 @@ describe('QwenAgent slash command history', () => {
     ]);
 
     const agent = createAgent(cwd);
-    const messages = (agent as unknown as QwenHistoryInternals)
-      .mergeSlashCommandInvocationMessages(sessionId, [], cwd);
+    const messages = (
+      agent as unknown as QwenHistoryInternals
+    ).mergeSlashCommandInvocationMessages(sessionId, [], cwd);
     agent.destroy();
 
-    expect(messages.map(message => [message.role, message.content])).toEqual([
+    expect(messages.map((message) => [message.role, message.content])).toEqual([
       ['user', '/doctor'],
       [
         'assistant',
@@ -610,8 +710,9 @@ describe('QwenAgent slash command history', () => {
     ]);
 
     const agent = createAgent(cwd);
-    const messages = (agent as unknown as QwenHistoryInternals)
-      .mergeSlashCommandInvocationMessages(sessionId, [], cwd);
+    const messages = (
+      agent as unknown as QwenHistoryInternals
+    ).mergeSlashCommandInvocationMessages(sessionId, [], cwd);
     agent.destroy();
 
     expect(messages[1]?.role).toBe('assistant');
@@ -624,14 +725,16 @@ describe('QwenAgent slash command history', () => {
     tempRoots.push(cwd);
 
     const agent = createAgent(cwd);
-    const blocks = (agent as unknown as QwenPromptInternals).buildPromptBlocks('Fix session names');
+    const blocks = (agent as unknown as QwenPromptInternals).buildPromptBlocks(
+      'Fix session names',
+    );
     agent.destroy();
 
-    const textBlock = blocks.find(block => block.type === 'text');
+    const textBlock = blocks.find((block) => block.type === 'text');
     expect(textBlock?.text?.trim()).toBe('Fix session names');
     expect(textBlock?.text).not.toContain('<craft_agent_context>');
 
-    const resourceBlock = blocks.find(block => block.type === 'resource');
+    const resourceBlock = blocks.find((block) => block.type === 'resource');
     expect(resourceBlock).toBeUndefined();
   });
 
@@ -707,7 +810,9 @@ describe('QwenAgent slash command history', () => {
       sessionId: 'qwen-session',
       update: {
         sessionUpdate: 'available_commands_update',
-        availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+        availableCommands: [
+          { name: 'project:fix', description: 'Run project fix' },
+        ],
       },
     });
 
@@ -721,7 +826,9 @@ describe('QwenAgent slash command history', () => {
 
     expect(event).toEqual({
       type: 'available_commands_update',
-      availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+      availableCommands: [
+        { name: 'project:fix', description: 'Run project fix' },
+      ],
       availableSkills: undefined,
     });
   });
@@ -845,7 +952,9 @@ describe('QwenAgent slash command history', () => {
           sessionId: 'qwen-session',
           update: {
             sessionUpdate: 'available_commands_update',
-            availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+            availableCommands: [
+              { name: 'project:fix', description: 'Run project fix' },
+            ],
           },
         });
       }
@@ -928,7 +1037,9 @@ describe('QwenAgent slash command history', () => {
     tempRoots.push(cwd);
 
     const capturedSessionIds: string[] = [];
-    const agent = createAgent(cwd, sessionId => capturedSessionIds.push(sessionId));
+    const agent = createAgent(cwd, (sessionId) =>
+      capturedSessionIds.push(sessionId),
+    );
     const internals = agent as unknown as QwenAvailableCommandsInternals;
     let newSessionCalls = 0;
     internals.ensureProcess = async () => {};
@@ -940,11 +1051,17 @@ describe('QwenAgent slash command history', () => {
           sessionId: 'qwen-session',
           update: {
             sessionUpdate: 'available_commands_update',
-            availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+            availableCommands: [
+              { name: 'project:fix', description: 'Run project fix' },
+            ],
           },
         });
         return execute({
-          newSession: async () => ({ sessionId: 'qwen-session', models: {}, modes: {} }),
+          newSession: async () => ({
+            sessionId: 'qwen-session',
+            models: {},
+            modes: {},
+          }),
         });
       }
       throw new Error(`Unexpected ACP method ${method}`);
@@ -978,7 +1095,9 @@ describe('QwenAgent slash command history', () => {
         sessionId: 'qwen-session',
         update: {
           sessionUpdate: 'available_commands_update',
-          availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
+          availableCommands: [
+            { name: 'project:fix', description: 'Run project fix' },
+          ],
           _meta: { availableSkills: ['commit'] },
         },
       });
@@ -1002,9 +1121,9 @@ describe('QwenAgent slash command history', () => {
       { name: 'project:fix', description: 'Run project fix' },
     ]);
     expect(result.availableSkills).toEqual(['commit']);
-    expect(result.messages.map(message => [message.role, message.content])).toEqual([
-      ['user', 'hello'],
-    ]);
+    expect(
+      result.messages.map((message) => [message.role, message.content]),
+    ).toEqual([['user', 'hello']]);
   });
 
   it('loads Qwen history updates through ACP extension before session/load fallback', async () => {
@@ -1046,11 +1165,278 @@ describe('QwenAgent slash command history', () => {
     agent.destroy();
 
     expect(calledMethods).toEqual(['ext/qwen/session/loadUpdates']);
-    expect(result.messages.map(message => [message.role, message.content])).toEqual([
+    expect(
+      result.messages.map((message) => [message.role, message.content]),
+    ).toEqual([
       ['user', 'from extension'],
       ['assistant', 'loaded'],
     ]);
-    expect(result.messages.map(message => message.timestamp)).toEqual([1_000, 2_000]);
+    expect(result.messages.map((message) => message.timestamp)).toEqual([
+      1_000, 2_000,
+    ]);
+  });
+
+  it('restores Qwen transcript API aborts as interrupted info', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    tempRoots.push(cwd, runtimeRoot);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'qwen-session';
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'user-1',
+        sessionId,
+        timestamp: '2026-05-31T02:22:59.803Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hi' }] },
+      },
+      {
+        uuid: 'abort-1',
+        sessionId,
+        timestamp: '2026-05-31T02:23:01.005Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_error',
+            error_message: 'Request was aborted.',
+            error_type: 'APIUserAbortError',
+          },
+        },
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.ensureProcess = async () => {};
+    internals.callAcp = async (_method, execute) =>
+      execute({
+        extMethod: async () => ({ updates: [] }),
+        loadSession: async () => ({ models: {}, modes: {} }),
+      });
+
+    const result = await agent.loadSessionMessages(sessionId, { cwd });
+    agent.destroy();
+
+    expect(
+      result.messages.map((message) => [message.role, message.content]),
+    ).toEqual([
+      ['user', 'hi'],
+      ['info', 'Response interrupted'],
+    ]);
+  });
+
+  it('restores cancelled Qwen transcript tool results as interrupted tools', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    tempRoots.push(cwd, runtimeRoot);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'qwen-session';
+    const commandArgs = {
+      command: 'curl -s --max-time 10 https://api.github.com 2>&1',
+      description: 'Test GitHub API connectivity',
+      timeout: 15000,
+    };
+
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'user-1',
+        sessionId,
+        timestamp: '2026-05-31T02:11:24.862Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Open PRs?' }] },
+      },
+      {
+        uuid: 'assistant-1',
+        sessionId,
+        timestamp: '2026-05-31T02:15:02.868Z',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'Let me try a different approach.', thought: true },
+            {
+              functionCall: {
+                id: 'call-curl',
+                name: 'run_shell_command',
+                args: commandArgs,
+              },
+            },
+          ],
+        },
+      },
+      {
+        uuid: 'tool-telemetry-1',
+        sessionId,
+        timestamp: '2026-05-31T02:15:06.203Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.tool_call',
+            function_name: 'run_shell_command',
+            function_args: commandArgs,
+            status: 'success',
+            success: true,
+          },
+        },
+      },
+      {
+        uuid: 'tool-result-1',
+        sessionId,
+        timestamp: '2026-05-31T02:15:06.267Z',
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-curl',
+                name: 'run_shell_command',
+                response: {
+                  output:
+                    'Command was cancelled by user before it could complete. There was no output before it was cancelled.',
+                },
+              },
+            },
+          ],
+        },
+        toolCallResult: {
+          callId: 'call-curl',
+          status: 'success',
+          resultDisplay: 'Command cancelled by user.',
+        },
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.ensureProcess = async () => {};
+    internals.callAcp = async (_method, execute) =>
+      execute({
+        extMethod: async () => ({
+          updates: [
+            {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'call-curl',
+              kind: 'execute',
+              title: 'run_shell_command',
+              rawInput: commandArgs,
+              _meta: {
+                toolName: 'run_shell_command',
+                timestamp: Date.parse('2026-05-31T02:15:02.868Z'),
+              },
+            },
+          ],
+        }),
+        loadSession: async () => ({ models: {}, modes: {} }),
+      });
+
+    const result = await agent.loadSessionMessages(sessionId, { cwd });
+    agent.destroy();
+
+    const toolMessages = result.messages.filter(
+      (message) => message.role === 'tool',
+    );
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]).toMatchObject({
+      role: 'tool',
+      toolUseId: 'call-curl',
+      toolName: 'Bash',
+      toolStatus: 'error',
+      toolResult: 'Interrupted',
+      isError: true,
+    });
+    expect(result.messages.at(-1)).toMatchObject({
+      role: 'info',
+      content: 'Response interrupted',
+    });
+  });
+
+  it('closes dangling Qwen transcript tool calls as terminal errors', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    tempRoots.push(cwd, runtimeRoot);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'qwen-session';
+    const commandArgs = {
+      command: 'cd /repo && gh pr list',
+      description: 'List open PRs',
+    };
+
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'user-1',
+        sessionId,
+        timestamp: '2026-05-31T02:50:53.210Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Open PRs?' }] },
+      },
+      {
+        uuid: 'assistant-1',
+        sessionId,
+        timestamp: '2026-05-31T02:51:06.736Z',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'Let me check.', thought: true },
+            {
+              functionCall: {
+                id: 'call-gh',
+                name: 'run_shell_command',
+                args: commandArgs,
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.ensureProcess = async () => {};
+    internals.callAcp = async (_method, execute) =>
+      execute({
+        extMethod: async () => ({
+          updates: [
+            {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'call-gh',
+              kind: 'execute',
+              title: 'run_shell_command',
+              rawInput: commandArgs,
+              _meta: {
+                toolName: 'run_shell_command',
+                timestamp: Date.parse('2026-05-31T02:51:06.736Z'),
+              },
+            },
+          ],
+        }),
+        loadSession: async () => ({ models: {}, modes: {} }),
+      });
+
+    const result = await agent.loadSessionMessages(sessionId, { cwd });
+    agent.destroy();
+
+    const toolMessages = result.messages.filter(
+      (message) => message.role === 'tool',
+    );
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]).toMatchObject({
+      role: 'tool',
+      toolUseId: 'call-gh',
+      toolName: 'Bash',
+      toolStatus: 'error',
+      toolResult: 'Tool result was not recorded.',
+      isError: true,
+    });
+    expect(result.messages.some((message) => message.role === 'info')).toBe(
+      false,
+    );
   });
 
   it('supplements Qwen history with transcript subagent telemetry', async () => {

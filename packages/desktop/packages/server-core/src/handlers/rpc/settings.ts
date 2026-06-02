@@ -750,19 +750,19 @@ export function registerSettingsHandlers(
   // Memory Settings
   // ============================================================
 
-  server.handle(RPC_CHANNELS.memory.GET_SETTINGS, async () =>
-    getQwenMemorySettingsViaAcp({
-      hostRuntime: buildBackendHostRuntimeContext(deps.platform),
-    }),
+  server.handle(
+    RPC_CHANNELS.memory.GET_SETTINGS,
+    async (ctx, workspaceId?: string) =>
+      getQwenMemorySettingsViaAcp(
+        await getQwenWorkspaceAcpOptions(deps, ctx, workspaceId),
+      ),
   );
 
   server.handle(
     RPC_CHANNELS.memory.SET_SETTINGS,
-    async (_ctx, updates: Partial<QwenMemorySettings>) =>
+    async (ctx, updates: Partial<QwenMemorySettings>, workspaceId?: string) =>
       setQwenMemorySettingsViaAcp(
-        {
-          hostRuntime: buildBackendHostRuntimeContext(deps.platform),
-        },
+        await getQwenWorkspaceAcpOptions(deps, ctx, workspaceId),
         updates,
       ),
   );

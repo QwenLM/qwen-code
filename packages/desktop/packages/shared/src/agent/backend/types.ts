@@ -1,3 +1,4 @@
+/* eslint-disable import/no-internal-modules */
 /**
  * Backend Abstraction Types
  *
@@ -19,33 +20,34 @@ import type {
   AvailableSkillDetail,
   Message,
   MessageTextElement,
-} from '@craft-agent/core/types'
-import type { FileAttachment } from '../../utils/files.ts'
-import type { ThinkingLevel } from '../thinking-levels.ts'
-import type { PermissionMode } from '../mode-manager.ts'
-import type { LoadedSource } from '../../sources/types.ts'
-import type { AuthRequest } from '../session-scoped-tools.ts'
-import type { McpClientPool } from '../../mcp/mcp-pool.ts'
-import type { Workspace } from '../../config/storage.ts'
-import type { SessionConfig as Session } from '../../sessions/storage.ts'
-import type { SourceManager } from '../core/source-manager.ts'
+} from '@craft-agent/core/types';
+import type { FileAttachment } from '../../utils/files.ts';
+import type { ThinkingLevel } from '../thinking-levels.ts';
+import type { PermissionMode } from '../mode-manager.ts';
+import type { LoadedSource } from '../../sources/types.ts';
+import type { AuthRequest } from '../session-scoped-tools.ts';
+import type { McpClientPool } from '../../mcp/mcp-pool.ts';
+import type { Workspace } from '../../config/storage.ts';
+import type { SessionConfig as Session } from '../../sessions/storage.ts';
+import type { SourceManager } from '../core/source-manager.ts';
 
 // Import AbortReason and RecoveryMessage from core module (single source of truth)
-import { AbortReason, type RecoveryMessage } from '../core/index.ts'
-export { AbortReason, type RecoveryMessage }
+import { AbortReason, type RecoveryMessage } from '../core/index.ts';
+export { AbortReason, type RecoveryMessage };
 
-import type { ModelDefinition, ModelProvider } from '../../config/models.ts'
+import type { ModelDefinition, ModelProvider } from '../../config/models.ts';
+import type { SessionTokenUsage } from '../../sessions/types.ts';
 
 // Import LLM connection types for auth
 import type {
   LlmAuthType,
   LlmProviderType,
-} from '../../config/llm-connections.ts'
+} from '../../config/llm-connections.ts';
 export type {
   LlmAuthType,
   LlmProviderType,
-} from '../../config/llm-connections.ts'
-import type { AutomationSystem } from '../../automations/index.ts'
+} from '../../config/llm-connections.ts';
+import type { AutomationSystem } from '../../automations/index.ts';
 import type {
   PermissionResponseOptions,
   QwenSkillDeleteRequest,
@@ -54,13 +56,13 @@ import type {
   QwenSkillInstallResult,
   QwenSkillSetEnabledRequest,
   QwenSkillSetEnabledResult,
-} from '../../protocol/dto.ts'
+} from '../../protocol/dto.ts';
 
 /**
  * Provider identifier for AI backends.
  * @deprecated Use ModelProvider from config/models.ts instead
  */
-export type AgentProvider = ModelProvider
+export type AgentProvider = ModelProvider;
 
 // ============================================================
 // Callback Types
@@ -75,42 +77,42 @@ export type PermissionRequestType =
   | 'mcp_mutation'
   | 'api_mutation'
   | 'admin_approval'
-  | 'ask_user_question'
+  | 'ask_user_question';
 
 /**
  * Permission request callback signature.
  * Called when a tool requires user permission before execution.
  */
 export type PermissionCallback = (request: {
-  requestId: string
-  toolName: string
-  command?: string
-  description: string
-  type?: PermissionRequestType
-  appName?: string
-  reason?: string
-  impact?: string
-  requiresSystemPrompt?: boolean
-  rememberForMinutes?: number
-  commandHash?: string
-  approvalTtlSeconds?: number
-  questions?: AskUserQuestionItem[]
+  requestId: string;
+  toolName: string;
+  command?: string;
+  description: string;
+  type?: PermissionRequestType;
+  appName?: string;
+  reason?: string;
+  impact?: string;
+  requiresSystemPrompt?: boolean;
+  rememberForMinutes?: number;
+  commandHash?: string;
+  approvalTtlSeconds?: number;
+  questions?: AskUserQuestionItem[];
   metadata?: {
-    source?: string
-  }
-}) => void
+    source?: string;
+  };
+}) => void;
 
 /**
  * Plan submission callback signature.
  * Called when agent submits a plan for user review.
  */
-export type PlanCallback = (planPath: string) => void
+export type PlanCallback = (planPath: string) => void;
 
 /**
  * Auth request callback signature.
  * Called when a source requires authentication.
  */
-export type AuthCallback = (request: AuthRequest) => void
+export type AuthCallback = (request: AuthRequest) => void;
 
 /**
  * Source change callback signature.
@@ -119,13 +121,13 @@ export type AuthCallback = (request: AuthRequest) => void
 export type SourceChangeCallback = (
   slug: string,
   source: LoadedSource | null,
-) => void
+) => void;
 
 /**
  * Source activation request callback.
  * Returns true if source was successfully activated.
  */
-export type SourceActivationCallback = (sourceSlug: string) => Promise<boolean>
+export type SourceActivationCallback = (sourceSlug: string) => Promise<boolean>;
 
 // ============================================================
 // Lifecycle Types
@@ -137,28 +139,29 @@ export type SourceActivationCallback = (sourceSlug: string) => Promise<boolean>
  */
 export interface PostInitResult {
   /** Whether auth credentials were successfully injected */
-  authInjected: boolean
+  authInjected: boolean;
   /** Optional warning message to surface in UI */
-  authWarning?: string
+  authWarning?: string;
   /** Severity level for the warning */
-  authWarningLevel?: 'error' | 'warning' | 'info'
+  authWarningLevel?: 'error' | 'warning' | 'info';
 }
 
 export interface AvailableCommandsSnapshot {
-  availableCommands: AvailableSlashCommand[]
-  availableSkills?: string[]
-  availableSkillDetails?: AvailableSkillDetail[]
+  availableCommands: AvailableSlashCommand[];
+  availableSkills?: string[];
+  availableSkillDetails?: AvailableSkillDetail[];
 }
 
 export interface BackendSessionMessagesResult
   extends Partial<AvailableCommandsSnapshot> {
-  messages: Message[]
+  messages: Message[];
+  tokenUsage?: SessionTokenUsage;
 }
 
 export interface BackendRewindResult {
-  historyBeforeRewind?: unknown[]
-  targetTurnIndex?: number
-  apiTruncateIndex?: number
+  historyBeforeRewind?: unknown[];
+  targetTurnIndex?: number;
+  apiTruncateIndex?: number;
 }
 
 /**
@@ -167,19 +170,19 @@ export interface BackendRewindResult {
  */
 export interface BridgeUpdateContext {
   /** Path to the session folder */
-  sessionPath: string
+  sessionPath: string;
   /** Currently enabled sources */
-  enabledSources: LoadedSource[]
+  enabledSources: LoadedSource[];
   /** Pre-built MCP server configs */
-  mcpServers: Record<string, SdkMcpServerConfig>
+  mcpServers: Record<string, SdkMcpServerConfig>;
   /** Session ID */
-  sessionId: string
+  sessionId: string;
   /** Workspace root path */
-  workspaceRootPath: string
+  workspaceRootPath: string;
   /** Descriptive context for logging (e.g., 'token refresh', 'source enable') */
-  context: string
+  context: string;
   /** URL of the McpPoolServer HTTP endpoint */
-  poolServerUrl?: string
+  poolServerUrl?: string;
 }
 
 /**
@@ -189,15 +192,15 @@ export interface BridgeUpdateContext {
  */
 export interface BackendHostRuntimeContext {
   /** App root path (packaged app path or repository root in development) */
-  appRootPath: string
+  appRootPath: string;
   /** Optional resources path (needed for packaged Windows runtime resolution) */
-  resourcesPath?: string
+  resourcesPath?: string;
   /** Whether the host app is running as a packaged build */
-  isPackaged: boolean
+  isPackaged: boolean;
   /** Optional runtime override for Node/Bun executable */
-  nodeRuntimePath?: string
+  nodeRuntimePath?: string;
   /** Optional interceptor bundle override (CJS bundle loaded via --require) */
-  interceptorBundlePath?: string
+  interceptorBundlePath?: string;
 }
 
 /**
@@ -206,76 +209,76 @@ export interface BackendHostRuntimeContext {
  */
 export interface CoreBackendConfig {
   /** Workspace configuration */
-  workspace: Workspace
+  workspace: Workspace;
 
   /** Session configuration (for resume) */
-  session?: Session
+  session?: Session;
 
   /** Initial model ID */
-  model?: string
+  model?: string;
 
   /** Mini/utility model for summarization/title generation/mini-completions */
-  miniModel?: string
+  miniModel?: string;
 
   /** Initial thinking level */
-  thinkingLevel?: ThinkingLevel
+  thinkingLevel?: ThinkingLevel;
 
   /** Headless mode flag (disables interactive tools) */
-  isHeadless?: boolean
+  isHeadless?: boolean;
 
   /** Skip agent-level config file watching (server already owns a workspace-level watcher) */
-  skipConfigWatcher?: boolean
+  skipConfigWatcher?: boolean;
 
   /** Debug mode configuration */
   debugMode?: {
-    enabled: boolean
-    logFilePath?: string
-  }
+    enabled: boolean;
+    logFilePath?: string;
+  };
 
   /** System prompt preset ('default' | 'mini' | custom string) */
-  systemPromptPreset?: 'default' | 'mini' | string
+  systemPromptPreset?: 'default' | 'mini' | string;
 
   /** Workspace-level automation system for user-defined automations (automations.json) */
-  automationSystem?: AutomationSystem
+  automationSystem?: AutomationSystem;
 
   /**
    * Per-session environment variable overrides for the SDK subprocess.
    * Spread after process.env in backend-specific option builders.
    */
-  envOverrides?: Record<string, string>
+  envOverrides?: Record<string, string>;
 
   /**
    * Centralized MCP client pool for source tool execution.
    * Owns all MCP source connections in the main process.
    */
-  mcpPool?: McpClientPool
+  mcpPool?: McpClientPool;
 
   /**
    * URL of the McpPoolServer HTTP endpoint for this session.
    * External SDK subprocesses connect here to access pool-managed MCP tools.
    */
-  poolServerUrl?: string
+  poolServerUrl?: string;
 
   /** Callback when SDK session ID is captured/updated */
-  onSdkSessionIdUpdate?: (sdkSessionId: string) => void
+  onSdkSessionIdUpdate?: (sdkSessionId: string) => void;
 
   /** Callback when SDK session ID is cleared (e.g., after failed resume) */
-  onSdkSessionIdCleared?: () => void
+  onSdkSessionIdCleared?: () => void;
 
   /**
    * Callback when ACP has consumed queued mid-turn user messages.
    * Hosts can use this as an acknowledgement to remove replay fallbacks.
    */
-  onMidTurnMessagesDrained?: (messages: string[]) => void
+  onMidTurnMessagesDrained?: (messages: string[]) => void;
 
   /** Callback when a backend reports its live model list for the session. */
   onAvailableModelsUpdate?: (
     models: ModelDefinition[],
     currentModelId?: string,
-  ) => void
+  ) => void;
 
   /** Callback to get recent messages for recovery context */
-  getRecoveryMessages?: () => RecoveryMessage[]
+  getRecoveryMessages?: () => RecoveryMessage[];
 
   /**
    * Get ALL parent messages for branch fork fallback (not limited to 6).
@@ -283,22 +286,22 @@ export interface CoreBackendConfig {
    * the parent conversation for context injection via mini completion.
    * Returns empty array for non-branched sessions.
    */
-  getBranchFallbackMessages?: () => RecoveryMessage[]
+  getBranchFallbackMessages?: () => RecoveryMessage[];
 
   /**
    * Callback to get branch seed messages (up to branch cutoff) for first turn in seeded branch mode.
    * When provided and non-empty, BaseAgent injects a hidden context block before the first user turn.
    */
-  getBranchSeedMessages?: () => RecoveryMessage[]
+  getBranchSeedMessages?: () => RecoveryMessage[];
 
   /** Callback invoked after branch seed context has been injected. */
-  markBranchSeedApplied?: () => void
+  markBranchSeedApplied?: () => void;
 
   /** One-shot hidden summary to inject on the first turn of a transferred session. */
-  getTransferredSessionSummary?: () => string | null
+  getTransferredSessionSummary?: () => string | null;
 
   /** Callback invoked after transferred session summary has been injected. */
-  markTransferredSessionSummaryApplied?: () => void
+  markTransferredSessionSummaryApplied?: () => void;
 
   /**
    * Optional callback to resize an oversized image for API compatibility.
@@ -309,21 +312,21 @@ export interface CoreBackendConfig {
   onImageResize?: (
     filePath: string,
     maxSizeBytes: number,
-  ) => Promise<string | null>
+  ) => Promise<string | null>;
 
   /** Enable 1M context window for Opus 4.7. Default: true. Set false to use 200K and conserve usage limits. */
-  enable1MContext?: boolean
+  enable1MContext?: boolean;
 
   /**
    * Pre-computed source configurations for initial setup.
    * Passed at construction so backends can set up sources in postInit().
    */
   initialSources?: {
-    enabledSources: LoadedSource[]
-    mcpServers: Record<string, SdkMcpServerConfig>
-    apiServers: Record<string, unknown>
-    enabledSlugs: string[]
-  }
+    enabledSources: LoadedSource[];
+    mcpServers: Record<string, SdkMcpServerConfig>;
+    apiServers: Record<string, unknown>;
+    enabledSlugs: string[];
+  };
 }
 
 // ============================================================
@@ -335,35 +338,35 @@ export interface CoreBackendConfig {
  */
 export interface ChatOptions {
   /** Retry flag (internal use for session recovery) */
-  isRetry?: boolean
+  isRetry?: boolean;
   /** Override thinking level for this message only */
-  thinkingOverride?: ThinkingLevel
+  thinkingOverride?: ThinkingLevel;
   /** Semantic annotations for the user-authored text. */
-  textElements?: MessageTextElement[]
+  textElements?: MessageTextElement[];
 }
 
 export interface BackendSessionInfo {
-  sessionId: string
-  cwd: string
-  title?: string | null
-  createdAt?: string | null
-  updatedAt?: string | null
-  startTime?: string | null
-  preview?: string | null
-  messageCount?: number | null
-  gitBranch?: string | null
-  titleSource?: 'manual' | 'auto' | null
+  sessionId: string;
+  cwd: string;
+  title?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+  startTime?: string | null;
+  preview?: string | null;
+  messageCount?: number | null;
+  gitBranch?: string | null;
+  titleSource?: 'manual' | 'auto' | null;
 }
 
 export interface BackendSessionListOptions {
-  cwd?: string
-  cursor?: string | null
-  size?: number
+  cwd?: string;
+  cursor?: string | null;
+  size?: number;
 }
 
 export interface BackendSessionListResult {
-  sessions: BackendSessionInfo[]
-  nextCursor?: string | null
+  sessions: BackendSessionInfo[];
+  nextCursor?: string | null;
 }
 
 /**
@@ -372,23 +375,23 @@ export interface BackendSessionListResult {
  */
 export type SdkMcpServerConfig =
   | {
-      type: 'http' | 'sse'
-      url: string
-      headers?: Record<string, string>
+      type: 'http' | 'sse';
+      url: string;
+      headers?: Record<string, string>;
       /** Environment variable name containing bearer token (Codex-specific) */
-      bearerTokenEnvVar?: string
+      bearerTokenEnvVar?: string;
     }
   | {
-      type: 'stdio'
-      command: string
-      args?: string[]
+      type: 'stdio';
+      command: string;
+      args?: string[];
       /** Environment variables to set (literal values) */
-      env?: Record<string, string>
+      env?: Record<string, string>;
       /** Environment variable names to forward from parent process (Codex-specific) */
-      envVars?: string[]
+      envVars?: string[];
       /** Working directory for the server process (Codex-specific) */
-      cwd?: string
-    }
+      cwd?: string;
+    };
 
 /**
  * Core backend interface - all AI providers must implement this.
@@ -417,14 +420,14 @@ export interface AgentBackend {
     message: string,
     attachments?: FileAttachment[],
     options?: ChatOptions,
-  ): AsyncGenerator<AgentEvent>
+  ): AsyncGenerator<AgentEvent>;
 
   /**
    * Abort current query (user stop or internal abort).
    *
    * @param reason - Optional reason for abort (for logging/debugging)
    */
-  abort(reason?: string): Promise<void>
+  abort(reason?: string): Promise<void>;
 
   /**
    * Force abort with specific reason.
@@ -432,7 +435,7 @@ export interface AgentBackend {
    *
    * @param reason - AbortReason enum value
    */
-  forceAbort(reason: AbortReason): void
+  forceAbort(reason: AbortReason): void;
 
   /**
    * Interrupt the current turn because control is being handed to the UI.
@@ -443,7 +446,7 @@ export interface AgentBackend {
    *
    * @param reason - AbortReason enum value for the handoff boundary
    */
-  interruptForHandoff(reason: AbortReason): void
+  interruptForHandoff(reason: AbortReason): void;
 
   /**
    * Redirect the agent mid-stream with a new user message.
@@ -460,7 +463,7 @@ export interface AgentBackend {
    * @returns true if steered (events flow through existing stream),
    *          false if aborted (session layer must queue + re-send)
    */
-  redirect(message: string): boolean
+  redirect(message: string): boolean;
 
   /**
    * Queue a user message for injection at the next safe tool-result boundary
@@ -470,13 +473,13 @@ export interface AgentBackend {
    * the message was drained, so backends can accept candidates before knowing
    * whether this turn will actually produce a tool boundary.
    */
-  enqueueMidTurnMessage?(message: string): boolean
+  enqueueMidTurnMessage?(message: string): boolean;
 
   /**
    * Run a simple text completion using the backend's auth infrastructure.
    * Used for connection testing, title generation, and summarization.
    */
-  runMiniCompletion(prompt: string): Promise<string | null>
+  runMiniCompletion(prompt: string): Promise<string | null>;
 
   /**
    * List provider-native sessions when supported by the backend.
@@ -486,69 +489,69 @@ export interface AgentBackend {
    */
   listSessions?(
     options?: BackendSessionListOptions,
-  ): Promise<BackendSessionListResult>
+  ): Promise<BackendSessionListResult>;
 
   /** Delete a provider-native session when supported. */
   deleteBackendSession?(
     sessionId: string,
     options?: { cwd?: string },
-  ): Promise<boolean>
+  ): Promise<boolean>;
 
   /** Rename a provider-native session when supported. */
   renameBackendSession?(
     sessionId: string,
     title: string,
     options?: { cwd?: string },
-  ): Promise<boolean>
+  ): Promise<boolean>;
 
   /** Load provider-native transcript messages when supported. */
   loadSessionMessages?(
     sessionId: string,
     options?: { cwd?: string },
-  ): Promise<Message[] | BackendSessionMessagesResult>
+  ): Promise<Message[] | BackendSessionMessagesResult>;
 
   /** Refresh provider-advertised slash commands when supported. */
-  refreshAvailableCommands?(): Promise<AvailableCommandsSnapshot | null>
+  refreshAvailableCommands?(): Promise<AvailableCommandsSnapshot | null>;
 
   /** Install a provider-native skill when supported. */
   installSkill?(
     request: QwenSkillInstallRequest,
-  ): Promise<QwenSkillInstallResult>
+  ): Promise<QwenSkillInstallResult>;
 
   /** Delete a provider-native skill when supported. */
-  deleteSkill?(request: QwenSkillDeleteRequest): Promise<QwenSkillDeleteResult>
+  deleteSkill?(request: QwenSkillDeleteRequest): Promise<QwenSkillDeleteResult>;
 
   /** Enable or disable a provider-native skill when supported. */
   setSkillEnabled?(
     request: QwenSkillSetEnabledRequest,
-  ): Promise<QwenSkillSetEnabledResult>
+  ): Promise<QwenSkillSetEnabledResult>;
 
   /** Rewind provider-native history to before a zero-based user turn. */
-  rewindToUserTurn?(targetTurnIndex: number): Promise<BackendRewindResult>
+  rewindToUserTurn?(targetTurnIndex: number): Promise<BackendRewindResult>;
 
   /**
    * Clean up resources (MCP connections, watchers, etc.)
    */
-  destroy(): void
+  destroy(): void;
 
   /**
    * Alias for destroy() for consistency.
    */
-  dispose(): void
+  dispose(): void;
 
   /**
    * Post-construction initialization.
    * Handles auth injection, initial config generation, etc.
    * Called after construction and callback wiring, before first chat().
    */
-  postInit(): Promise<PostInitResult>
+  postInit(): Promise<PostInitResult>;
 
   /**
    * Apply bridge/config updates mid-session.
    * Called when sources change, tokens refresh, or auth completes.
    * Each backend implements its own strategy.
    */
-  applyBridgeUpdates(context: BridgeUpdateContext): Promise<void>
+  applyBridgeUpdates(context: BridgeUpdateContext): Promise<void>;
 
   /**
    * Ensure branch sessions are backend-ready before first user message.
@@ -557,51 +560,51 @@ export interface AgentBackend {
    *
    * Default behavior can be a no-op for providers that don't need preflight.
    */
-  ensureBranchReady(): Promise<void>
+  ensureBranchReady(): Promise<void>;
 
   /**
    * Check if currently processing a query.
    */
-  isProcessing(): boolean
+  isProcessing(): boolean;
 
   // ============================================================
   // Model & Thinking Configuration
   // ============================================================
 
   /** Get current model ID */
-  getModel(): string
+  getModel(): string;
 
   /** Set model (should validate against capabilities) */
-  setModel(model: string): void
+  setModel(model: string): void;
 
   /** Get current thinking level */
-  getThinkingLevel(): ThinkingLevel
+  getThinkingLevel(): ThinkingLevel;
 
   /** Set thinking level */
-  setThinkingLevel(level: ThinkingLevel): void
+  setThinkingLevel(level: ThinkingLevel): void;
 
   // ============================================================
   // Permission Mode
   // ============================================================
 
   /** Get current permission mode */
-  getPermissionMode(): PermissionMode
+  getPermissionMode(): PermissionMode;
 
   /** Set permission mode */
-  setPermissionMode(mode: PermissionMode): void
+  setPermissionMode(mode: PermissionMode): void;
 
   /** Cycle to next permission mode */
-  cyclePermissionMode(): PermissionMode
+  cyclePermissionMode(): PermissionMode;
 
   // ============================================================
   // State
   // ============================================================
 
   /** Get SDK session ID (for resume, null if no session) */
-  getSessionId(): string | null
+  getSessionId(): string | null;
 
   /** Whether this backend supports session branching */
-  readonly supportsBranching: boolean
+  readonly supportsBranching: boolean;
 
   // ============================================================
   // Source Management
@@ -619,19 +622,19 @@ export interface AgentBackend {
     mcpServers: Record<string, SdkMcpServerConfig>,
     apiServers: Record<string, unknown>,
     intendedSlugs?: string[],
-  ): void | Promise<void>
+  ): void | Promise<void>;
 
   /**
    * Get currently active source slugs.
    */
-  getActiveSourceSlugs(): string[]
+  getActiveSourceSlugs(): string[];
 
   /**
    * Get the raw user message for the current turn (cleared between turns).
    * Used by SessionManager.activateSourceInSessionFn to capture the message
    * that should be re-sent after a source_test-triggered auto-restart.
    */
-  getCurrentTurnUserMessage(): string | null
+  getCurrentTurnUserMessage(): string | null;
 
   /**
    * Schedule a source-activation auto-restart. Consumed by the backend's
@@ -641,61 +644,61 @@ export interface AgentBackend {
    * activation (source_test auto-enable).
    */
   setPendingSourceActivationRestart(pending: {
-    sourceSlug: string
-    userMessage: string
-  }): void
+    sourceSlug: string;
+    userMessage: string;
+  }): void;
 
   /**
    * Get all sources (for context injection).
    */
-  getAllSources(): LoadedSource[]
+  getAllSources(): LoadedSource[];
 
   /**
    * Set all sources (for context injection).
    */
-  setAllSources(sources: LoadedSource[]): void
+  setAllSources(sources: LoadedSource[]): void;
 
   /**
    * Mark a source as unseen (will show introduction text again).
    */
-  markSourceUnseen(sourceSlug: string): void
+  markSourceUnseen(sourceSlug: string): void;
 
   /**
    * Get a bound summarize callback for passing to API tool builders.
    */
-  getSummarizeCallback(): (prompt: string) => Promise<string | null>
+  getSummarizeCallback(): (prompt: string) => Promise<string | null>;
 
   // ============================================================
   // Session & Workspace State
   // ============================================================
 
   /** Update the working directory */
-  updateWorkingDirectory(path: string): void
+  updateWorkingDirectory(path: string): void;
 
   /** Update the SDK cwd (transcript storage location) */
-  updateSdkCwd(path: string): void
+  updateSdkCwd(path: string): void;
 
   /** Set workspace configuration */
-  setWorkspace(workspace: Workspace): void
+  setWorkspace(workspace: Workspace): void;
 
   /** Set session ID */
-  setSessionId(sessionId: string | null): void
+  setSessionId(sessionId: string | null): void;
 
   /** Get SourceManager for advanced queries */
-  getSourceManager(): SourceManager
+  getSourceManager(): SourceManager;
 
   /** Generate a session title from user message */
   generateTitle(
     message: string,
     options?: { language?: string },
-  ): Promise<string | null>
+  ): Promise<string | null>;
 
   /** Regenerate a session title from recent conversation */
   regenerateTitle(
     recentUserMessages: string[],
     lastAssistantResponse: string,
     options?: { language?: string },
-  ): Promise<string | null>
+  ): Promise<string | null>;
 
   // ============================================================
   // Permission Resolution
@@ -713,46 +716,46 @@ export interface AgentBackend {
     allowed: boolean,
     alwaysAllow?: boolean,
     options?: PermissionResponseOptions,
-  ): void
+  ): void;
 
   // ============================================================
   // Callbacks (set by facade after construction)
   // ============================================================
 
   /** Called when a tool requires permission */
-  onPermissionRequest: PermissionCallback | null
+  onPermissionRequest: PermissionCallback | null;
 
   /** Called when agent submits a plan */
-  onPlanSubmitted: PlanCallback | null
+  onPlanSubmitted: PlanCallback | null;
 
   /** Called when a source requires authentication */
-  onAuthRequest: AuthCallback | null
+  onAuthRequest: AuthCallback | null;
 
   /** Called when a source config changes */
-  onSourceChange: SourceChangeCallback | null
+  onSourceChange: SourceChangeCallback | null;
 
   /** Called when permission mode changes */
-  onPermissionModeChange: ((mode: PermissionMode) => void) | null
+  onPermissionModeChange: ((mode: PermissionMode) => void) | null;
 
   /** Called with debug messages */
-  onDebug: ((message: string) => void) | null
+  onDebug: ((message: string) => void) | null;
 
   /** Called when a source tool is used but source isn't active */
-  onSourceActivationRequest: SourceActivationCallback | null
+  onSourceActivationRequest: SourceActivationCallback | null;
 
   /**
    * Called when backend-specific authentication is required.
    * Replaces per-backend auth callbacks.
    * The session layer wires this to surface auth warnings in the UI.
    */
-  onBackendAuthRequired: ((reason: string) => void) | null
+  onBackendAuthRequired: ((reason: string) => void) | null;
 
   /** Called when agent requests spawning a new session */
   onSpawnSession:
     | ((
         request: import('../base-agent.ts').SpawnSessionRequest,
       ) => Promise<import('../base-agent.ts').SpawnSessionResult>)
-    | null
+    | null;
 }
 
 /**
@@ -763,42 +766,42 @@ export interface BackendConfig extends CoreBackendConfig {
    * Provider/runtime to use for this backend.
    * Qwen-only builds instantiate QwenAgent.
    */
-  provider: AgentProvider
+  provider: AgentProvider;
 
   /**
    * Full provider type from LLM connection.
    * Includes compat variants and cloud providers.
    * Used for routing validation, credential lookup, etc.
    */
-  providerType?: LlmProviderType
+  providerType?: LlmProviderType;
 
   /**
    * Authentication mechanism from LLM connection.
    * Determines how credentials are retrieved and passed to the backend.
    */
-  authType?: LlmAuthType
+  authType?: LlmAuthType;
 
   /**
    * @deprecated Use authType instead. Kept for backwards compatibility.
    */
-  legacyAuthType?: 'api_key' | 'oauth_token'
+  legacyAuthType?: 'api_key' | 'oauth_token';
 
   /** MCP token override (for testing) */
-  mcpToken?: string
+  mcpToken?: string;
 
   /**
    * Connection slug for credential routing.
    * Set by factory when creating from a connection.
    * Used to read/write credentials under the correct key.
    */
-  connectionSlug?: string
+  connectionSlug?: string;
 
   /** Workspace-level automation system for user-defined SDK hooks (automations.json) */
-  automationSystem?: AutomationSystem
+  automationSystem?: AutomationSystem;
 
   /**
    * Opaque runtime payload resolved by backend drivers.
    * This keeps provider-specific runtime details out of the public config surface.
    */
-  runtime?: Record<string, unknown>
+  runtime?: Record<string, unknown>;
 }

@@ -100,6 +100,9 @@ import { normalizeQwenMemorySettings } from '../config/qwen-settings.ts';
 
 type JsonRecord = Record<string, unknown>;
 
+const QWEN_RESPONSE_INTERRUPTED_MESSAGE = 'Response interrupted';
+const QWEN_TOOL_RESULT_MISSING_MESSAGE = 'Tool result was not recorded.';
+
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -161,6 +164,8 @@ type ExtractedUsage = {
   inputTokens: number;
   contextTokens: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
 };
 
 type HistoryCollector = {
@@ -1008,6 +1013,14 @@ function firstBoolean(...values: unknown[]): boolean | undefined {
   return undefined;
 }
 
+function firstRecord(...values: unknown[]): JsonRecord {
+  for (const value of values) {
+    const record = toRecord(value);
+    if (Object.keys(record).length > 0) return record;
+  }
+  return {};
+}
+
 function toQwenModelDefinition(value: unknown): ModelDefinition | null {
   const model = toRecord(value as ModelInfo);
   const id = asString(model.modelId);
@@ -1366,6 +1379,48 @@ function jsonStringify(value: unknown): string {
   }
 }
 
+function isQwenUserInterruptText(value: string | undefined): boolean {
+  if (!value) return false;
+  const text = value.toLowerCase();
+  return (
+    text.includes('request was aborted') ||
+    text.includes('apiuseraborterror') ||
+    text.includes('cancelled by user') ||
+    text.includes('canceled by user') ||
+    text.includes('user abort')
+  );
+}
+
+function isQwenUserInterruptStatus(value: string | undefined): boolean {
+  return (
+    value === 'cancelled' ||
+    value === 'canceled' ||
+    isQwenUserInterruptText(value)
+  );
+}
+
+function isQwenToolFailureStatus(status: string | undefined): boolean {
+  return status === 'failed' || status === 'error';
+}
+
+function firstStringValue(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string' && value) return value;
+  }
+  return undefined;
+}
+
+function qwenFunctionResponseText(response: JsonRecord): string | undefined {
+  const direct = firstStringValue(
+    response.output,
+    response.content,
+    response.error,
+    response.result,
+  );
+  if (direct) return direct;
+  return Object.keys(response).length > 0 ? jsonStringify(response) : undefined;
+}
+
 function parseJsonText(value: string): unknown | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
@@ -1611,6 +1666,8 @@ export class QwenAgent extends BaseAgent {
   private currentAssistantParentToolUseId: string | undefined;
   private currentThoughtParentToolUseId: string | undefined;
   private currentIsSlashCommand = false;
+  private capturedUsageInCurrentTurn = false;
+  private usageWaiters: Array<() => void> = [];
   private toolNames = new Map<string, string>();
   private toolInputs = new Map<string, Record<string, unknown>>();
   private activeParentToolUseIds = new Set<string>();
@@ -1733,6 +1790,7 @@ export class QwenAgent extends BaseAgent {
     this.currentAssistantParentToolUseId = undefined;
     this.currentThoughtParentToolUseId = undefined;
     this.currentIsSlashCommand = isSlashCommandPrompt(message, attachments);
+    this.capturedUsageInCurrentTurn = false;
     this.currentTurnId = `qwen-turn-${promptRunId}`;
     this.toolNames.clear();
     this.toolInputs.clear();
@@ -1788,9 +1846,11 @@ export class QwenAgent extends BaseAgent {
       );
 
       promptPromise
-        .then((result) => {
+        .then(async (result) => {
           if (this.activePromptRunId !== promptRunId) return;
           const stopReason = asString(toRecord(result).stopReason);
+          await this.waitForCurrentTurnUsage();
+          if (this.activePromptRunId !== promptRunId) return;
           persistTranscriptTextElements();
           this.flushThoughtText();
           this.flushAssistantText();
@@ -1842,12 +1902,39 @@ export class QwenAgent extends BaseAgent {
       this.currentAssistantText = '';
       this.currentThoughtText = '';
       this.currentIsSlashCommand = false;
+      this.resolveUsageWaiters();
       this.midTurnMessageQueue = [];
     }
   }
 
   isProcessing(): boolean {
     return this._isProcessing;
+  }
+
+  private waitForCurrentTurnUsage(timeoutMs = 50): Promise<void> {
+    if (this.capturedUsageInCurrentTurn) return Promise.resolve();
+
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timeout);
+        this.usageWaiters = this.usageWaiters.filter(
+          (waiter) => waiter !== finish,
+        );
+        resolve();
+      };
+      const timeout = setTimeout(finish, timeoutMs);
+      this.usageWaiters.push(finish);
+    });
+  }
+
+  private resolveUsageWaiters(): void {
+    const waiters = this.usageWaiters.splice(0);
+    for (const resolve of waiters) {
+      resolve();
+    }
   }
 
   enqueueMidTurnMessage(message: string): boolean {
@@ -2410,6 +2497,7 @@ export class QwenAgent extends BaseAgent {
       const messages = this.buildHistoryMessages(sessionId, updates, cwd);
       const availableCommandsSnapshot =
         this.extractAvailableCommandsSnapshot(updates);
+      const tokenUsage = this.extractLatestTokenUsage(updates);
       const mergedMessages = this.mergeSlashCommandInvocationMessages(
         sessionId,
         messages,
@@ -2429,6 +2517,7 @@ export class QwenAgent extends BaseAgent {
       return {
         messages: messagesWithTextElements,
         ...(availableCommandsSnapshot ?? {}),
+        ...(tokenUsage ? { tokenUsage } : {}),
       };
     };
 
@@ -3544,6 +3633,7 @@ export class QwenAgent extends BaseAgent {
     const activeParentToolUseIds = new Set<string>();
     let idCounter = 0;
     let fallbackTimestamp = Date.now();
+    let interruptionMessageAdded = false;
 
     const nextId = () => `qwen-${sessionId}-${++idCounter}`;
     const timestampFor = (update: JsonRecord): number => {
@@ -3592,6 +3682,17 @@ export class QwenAgent extends BaseAgent {
         isIntermediate,
         intermediateKind,
         parentToolUseId,
+      });
+    };
+
+    const appendInterruptionMessage = (timestamp: number) => {
+      if (interruptionMessageAdded) return;
+      interruptionMessageAdded = true;
+      messages.push({
+        id: nextId(),
+        role: 'info',
+        content: QWEN_RESPONSE_INTERRUPTED_MESSAGE,
+        timestamp,
       });
     };
 
@@ -3697,11 +3798,16 @@ export class QwenAgent extends BaseAgent {
             activeParentToolUseIds,
           });
           const result = this.formatToolResult(update);
-          const isError = update.status === 'failed';
+          const status = asString(update.status);
+          const isInterrupted =
+            isQwenUserInterruptText(result) ||
+            isQwenUserInterruptStatus(status);
+          const isError = isQwenToolFailureStatus(status) || isInterrupted;
+          const toolResult = isInterrupted ? 'Interrupted' : result;
 
           if (existing) {
             existing.toolName = existing.toolName || toolName;
-            existing.toolResult = result;
+            existing.toolResult = toolResult;
             existing.toolStatus = isError ? 'error' : 'completed';
             existing.isError = isError;
             existing.parentToolUseId =
@@ -3714,7 +3820,7 @@ export class QwenAgent extends BaseAgent {
               timestamp,
               toolName,
               toolUseId,
-              toolResult: result,
+              toolResult,
               toolStatus: isError ? 'error' : 'completed',
               isError,
               parentToolUseId: toolParentUseId,
@@ -3724,6 +3830,9 @@ export class QwenAgent extends BaseAgent {
           }
           if (isParentTaskTool(toolName)) {
             activeParentToolUseIds.delete(toolUseId);
+          }
+          if (isInterrupted) {
+            appendInterruptionMessage(timestamp);
           }
           break;
         }
@@ -3773,14 +3882,28 @@ export class QwenAgent extends BaseAgent {
     );
     if (transcriptMessages.length === 0) return messages;
 
-    const seenToolUseIds = new Set(
+    const messagesByToolUseId = new Map(
       messages
-        .map((message) => message.toolUseId)
-        .filter((toolUseId): toolUseId is string => !!toolUseId),
+        .filter(
+          (message): message is Message & { toolUseId: string } =>
+            !!message.toolUseId,
+        )
+        .map((message) => [message.toolUseId, message]),
     );
 
     const additions = transcriptMessages.filter((candidate) => {
-      if (candidate.toolUseId && seenToolUseIds.has(candidate.toolUseId)) {
+      const existingTool = candidate.toolUseId
+        ? messagesByToolUseId.get(candidate.toolUseId)
+        : undefined;
+      if (existingTool) {
+        existingTool.toolName = candidate.toolName || existingTool.toolName;
+        existingTool.toolResult =
+          candidate.toolResult ?? existingTool.toolResult;
+        existingTool.toolStatus =
+          candidate.toolStatus ?? existingTool.toolStatus;
+        existingTool.isError = candidate.isError ?? existingTool.isError;
+        existingTool.toolDisplayName =
+          candidate.toolDisplayName || existingTool.toolDisplayName;
         return false;
       }
       if (
@@ -3825,17 +3948,40 @@ export class QwenAgent extends BaseAgent {
     }
 
     const messages: Message[] = [];
+    const toolMessages = new Map<string, Message>();
     const parentToolUseIdsBySubagent = new Map<string, string>();
     const parentToolMessages = new Map<string, Message>();
     let fallbackParentToolUseId: string | undefined;
     let idCounter = 0;
+    let interruptionMessageAdded = false;
 
     const nextId = () => `qwen-${sessionId}-transcript-${++idCounter}`;
+    const appendInterruptionMessage = (timestamp: number) => {
+      if (interruptionMessageAdded) return;
+      interruptionMessageAdded = true;
+      messages.push({
+        id: nextId(),
+        role: 'info',
+        content: QWEN_RESPONSE_INTERRUPTED_MESSAGE,
+        timestamp,
+      });
+    };
     const completeOpenParentTools = () => {
       for (const parent of parentToolMessages.values()) {
         if (parent.toolStatus !== 'executing') continue;
         parent.toolStatus = 'completed';
         parent.toolResult = parent.toolResult ?? 'Completed';
+      }
+    };
+    const failOpenNonParentTools = () => {
+      for (const toolMessage of toolMessages.values()) {
+        if (toolMessage.toolStatus !== 'executing') continue;
+        if (toolMessage.toolName && isParentTaskTool(toolMessage.toolName)) {
+          continue;
+        }
+        toolMessage.toolStatus = 'error';
+        toolMessage.toolResult = QWEN_TOOL_RESULT_MISSING_MESSAGE;
+        toolMessage.isError = true;
       }
     };
 
@@ -3910,6 +4056,7 @@ export class QwenAgent extends BaseAgent {
             toolDisplayName: displayNameForTool(toolName),
           };
           messages.push(toolMessage);
+          toolMessages.set(toolUseId, toolMessage);
 
           if (isParentTaskTool(toolName)) {
             fallbackParentToolUseId = toolUseId;
@@ -3923,6 +4070,59 @@ export class QwenAgent extends BaseAgent {
         continue;
       }
 
+      if (record.type === 'tool_result') {
+        const result = this.extractQwenTranscriptToolResult(record);
+        if (!result) continue;
+
+        const existing = result.callId
+          ? toolMessages.get(result.callId)
+          : undefined;
+        const toolResult = result.isInterrupted
+          ? 'Interrupted'
+          : result.text || (result.isError ? 'Tool failed' : 'Tool completed');
+
+        if (existing) {
+          existing.toolResult = toolResult;
+          existing.toolStatus = result.isError ? 'error' : 'completed';
+          existing.isError = result.isError;
+        } else if (result.callId || result.toolName) {
+          const toolUseId =
+            result.callId || `qwen-transcript-tool-${++idCounter}`;
+          const toolMessage: Message = {
+            id: nextId(),
+            role: 'tool',
+            content: '',
+            timestamp,
+            toolName: result.toolName || 'tool',
+            toolUseId,
+            toolResult,
+            toolStatus: result.isError ? 'error' : 'completed',
+            toolDisplayName: displayNameForTool(result.toolName || 'tool'),
+            ...(result.isError ? { isError: true } : {}),
+          };
+          messages.push(toolMessage);
+          toolMessages.set(toolUseId, toolMessage);
+        }
+
+        if (result.isInterrupted) {
+          appendInterruptionMessage(timestamp);
+        }
+        continue;
+      }
+
+      if (record.type === 'system' && record.subtype === 'ui_telemetry') {
+        const payload = toRecord(record.systemPayload);
+        const uiEvent = toRecord(payload.uiEvent);
+        if (
+          uiEvent['event.name'] === 'qwen-code.api_error' &&
+          (isQwenUserInterruptText(asString(uiEvent.error_message)) ||
+            isQwenUserInterruptText(asString(uiEvent.error_type)))
+        ) {
+          appendInterruptionMessage(timestamp);
+          continue;
+        }
+      }
+
       const telemetryMessage = this.buildQwenTranscriptTelemetryMessage({
         record,
         timestamp,
@@ -3930,14 +4130,81 @@ export class QwenAgent extends BaseAgent {
         parentToolUseIdsBySubagent,
         fallbackParentToolUseId,
       });
-      if (telemetryMessage) messages.push(telemetryMessage);
+      if (telemetryMessage) {
+        const matchingTool = messages.findLast(
+          (message) =>
+            message.role === 'tool' &&
+            message.toolStatus === 'executing' &&
+            message.toolName === telemetryMessage.toolName &&
+            jsonStringify(message.toolInput ?? {}) ===
+              jsonStringify(telemetryMessage.toolInput ?? {}),
+        );
+
+        if (matchingTool) {
+          matchingTool.toolResult = telemetryMessage.toolResult;
+          matchingTool.toolStatus = telemetryMessage.toolStatus;
+          matchingTool.isError = telemetryMessage.isError;
+        } else {
+          messages.push(telemetryMessage);
+          if (telemetryMessage.toolUseId) {
+            toolMessages.set(telemetryMessage.toolUseId, telemetryMessage);
+          }
+        }
+      }
     }
 
     if (!(this._isProcessing && sessionId === this.qwenSessionId)) {
       completeOpenParentTools();
+      failOpenNonParentTools();
     }
 
     return messages;
+  }
+
+  private extractQwenTranscriptToolResult(record: JsonRecord):
+    | {
+        callId?: string;
+        toolName?: string;
+        text?: string;
+        isError: boolean;
+        isInterrupted: boolean;
+      }
+    | undefined {
+    const result = toRecord(record.toolCallResult);
+    const message = toRecord(record.message);
+    const parts = Array.isArray(message.parts)
+      ? message.parts.filter(isRecord)
+      : [];
+
+    for (const part of parts) {
+      const functionResponse = toRecord(part.functionResponse);
+      if (Object.keys(functionResponse).length === 0) continue;
+
+      const response = toRecord(functionResponse.response);
+      const text =
+        asString(result.resultDisplay) || qwenFunctionResponseText(response);
+      const status = asString(result.status);
+      const responseError = asString(response.error);
+      const isInterrupted =
+        isQwenUserInterruptText(text) ||
+        isQwenUserInterruptStatus(status) ||
+        isQwenUserInterruptText(responseError);
+      const isError =
+        isInterrupted ||
+        isQwenToolFailureStatus(status) ||
+        responseError !== undefined;
+
+      const callId = asString(functionResponse.id) || asString(result.callId);
+      return {
+        ...(callId ? { callId } : {}),
+        toolName: normalizeToolName(asString(functionResponse.name)),
+        ...(text ? { text } : {}),
+        isError,
+        isInterrupted,
+      };
+    }
+
+    return undefined;
   }
 
   private buildQwenTranscriptTelemetryMessage(args: {
@@ -4397,6 +4664,39 @@ export class QwenAgent extends BaseAgent {
     return latest;
   }
 
+  private extractLatestTokenUsage(
+    updates: JsonRecord[],
+  ): BackendSessionMessagesResult['tokenUsage'] {
+    let latest: ExtractedUsage | null = null;
+    for (const update of updates) {
+      const usage = this.extractUsage(update);
+      if (usage) latest = usage;
+    }
+    if (!latest) return undefined;
+
+    const outputTokens = latest.outputTokens ?? 0;
+    const totalTokens = Math.max(
+      latest.contextTokens,
+      latest.inputTokens + outputTokens,
+    );
+    const contextWindow = this.getCurrentModelContextWindow();
+
+    return {
+      inputTokens: latest.contextTokens,
+      outputTokens,
+      totalTokens,
+      contextTokens: latest.contextTokens,
+      costUsd: 0,
+      ...(latest.cacheReadTokens !== undefined
+        ? { cacheReadTokens: latest.cacheReadTokens }
+        : {}),
+      ...(latest.cacheCreationTokens !== undefined
+        ? { cacheCreationTokens: latest.cacheCreationTokens }
+        : {}),
+      ...(contextWindow ? { contextWindow } : {}),
+    };
+  }
+
   private handleAvailableCommandsUpdate(update: JsonRecord): void {
     const snapshot = this.parseAvailableCommandsUpdate(update);
 
@@ -4536,6 +4836,8 @@ export class QwenAgent extends BaseAgent {
     const usage = this.extractUsage(update);
     if (!usage) return;
     const contextWindow = this.getCurrentModelContextWindow();
+    this.capturedUsageInCurrentTurn = true;
+    this.resolveUsageWaiters();
     this.eventQueue.enqueue({
       type: 'usage_update',
       usage: {
@@ -4554,24 +4856,42 @@ export class QwenAgent extends BaseAgent {
 
   private extractUsage(update: JsonRecord): ExtractedUsage | null {
     const meta = toRecord(update._meta);
-    const usage = toRecord(meta.usage);
+    const usage = firstRecord(
+      meta.usage,
+      meta.usageMetadata,
+      update.usage,
+      update.usageMetadata,
+    );
     if (Object.keys(usage).length === 0) return null;
 
     const inputTokens =
       asNumber(usage.inputTokens) ??
       asNumber(usage.promptTokens) ??
-      asNumber(usage.promptTokenCount) ??
-      0;
+      asNumber(usage.promptTokenCount);
     const outputTokens =
       asNumber(usage.outputTokens) ??
       asNumber(usage.completionTokens) ??
       asNumber(usage.candidatesTokenCount);
     const totalTokens =
       asNumber(usage.totalTokens) ?? asNumber(usage.totalTokenCount);
-    const contextTokens =
-      totalTokens !== undefined && totalTokens > 0 ? totalTokens : inputTokens;
+    const contextTokens = totalTokens ?? inputTokens;
 
-    return { inputTokens, contextTokens, outputTokens };
+    if (contextTokens === undefined) return null;
+    const cacheReadTokens =
+      asNumber(usage.cacheReadTokens) ??
+      asNumber(usage.cachedReadTokens) ??
+      asNumber(usage.cachedContentTokenCount);
+    const cacheCreationTokens =
+      asNumber(usage.cacheCreationTokens) ??
+      asNumber(usage.cachedCreationTokens);
+
+    return {
+      inputTokens: inputTokens ?? contextTokens,
+      contextTokens,
+      outputTokens,
+      ...(cacheReadTokens !== undefined ? { cacheReadTokens } : {}),
+      ...(cacheCreationTokens !== undefined ? { cacheCreationTokens } : {}),
+    };
   }
 
   // ============================================================

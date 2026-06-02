@@ -42,7 +42,17 @@ type QwenModelInternals = {
     inputTokens: number;
     contextTokens: number;
     outputTokens?: number;
+    cacheReadTokens?: number;
   } | null;
+  extractLatestTokenUsage: (updates: Array<Record<string, unknown>>) =>
+    | {
+        inputTokens: number;
+        outputTokens: number;
+        totalTokens: number;
+        contextTokens: number;
+        costUsd: number;
+      }
+    | undefined;
 };
 
 function createAgent(
@@ -195,6 +205,7 @@ describe('QwenAgent model metadata', () => {
       inputTokens: 100,
       contextTokens: 150,
       outputTokens: 50,
+      cacheReadTokens: 20,
     });
   });
 
@@ -263,6 +274,62 @@ describe('QwenAgent model metadata', () => {
       inputTokens: 100,
       contextTokens: 100,
       outputTokens: undefined,
+      cacheReadTokens: 20,
+    });
+  });
+
+  it('ignores empty ACP usage instead of resetting context usage to zero', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    const agent = createAgent(cwd, () => {});
+
+    const usage = (agent as unknown as QwenModelInternals).extractUsage({
+      _meta: {
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+        },
+      },
+    });
+
+    expect(usage).toBeNull();
+  });
+
+  it('extracts latest replay usage for loaded Qwen native history', () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    const agent = createAgent(cwd, () => {});
+
+    const tokenUsage = (
+      agent as unknown as QwenModelInternals
+    ).extractLatestTokenUsage([
+      {
+        sessionUpdate: 'agent_message_chunk',
+        _meta: {
+          usage: {
+            inputTokens: 100,
+            outputTokens: 50,
+            totalTokens: 150,
+          },
+        },
+      },
+      {
+        sessionUpdate: 'agent_message_chunk',
+        _meta: {
+          usageMetadata: {
+            promptTokenCount: 200,
+            candidatesTokenCount: 40,
+            totalTokenCount: 240,
+          },
+        },
+      },
+    ]);
+
+    expect(tokenUsage).toEqual({
+      inputTokens: 240,
+      outputTokens: 40,
+      totalTokens: 240,
+      contextTokens: 240,
+      costUsd: 0,
     });
   });
 

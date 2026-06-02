@@ -849,11 +849,12 @@ export interface ElectronAPI {
   setEnable1MContext(enabled: boolean): Promise<void>;
 
   // Memory settings
-  getQwenMemorySettings(): Promise<
-    import('@craft-agent/shared/config').QwenMemorySettings
-  >;
+  getQwenMemorySettings(
+    workspaceId?: string,
+  ): Promise<import('@craft-agent/shared/config').QwenMemorySettings>;
   setQwenMemorySettings(
     settings: Partial<import('@craft-agent/shared/config').QwenMemorySettings>,
+    workspaceId?: string,
   ): Promise<import('@craft-agent/shared/config').QwenMemorySettings>;
   getQwenMemorySettingsPath(): Promise<string>;
   getQwenMemoryPaths(
