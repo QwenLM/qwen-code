@@ -20,6 +20,7 @@ describe('copyCommand', () => {
   let mockCopyToClipboard: Mock;
   let mockGetChat: Mock;
   let mockGetHistory: Mock;
+  let mockGetHistoryShallow: Mock;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -27,6 +28,7 @@ describe('copyCommand', () => {
     mockCopyToClipboard = vi.mocked(copyToClipboard);
     mockGetChat = vi.fn();
     mockGetHistory = vi.fn();
+    mockGetHistoryShallow = vi.fn();
 
     mockContext = createMockCommandContext({
       services: {
@@ -46,6 +48,7 @@ describe('copyCommand', () => {
 
     mockGetChat.mockReturnValue({
       getHistory: mockGetHistory,
+      getHistoryShallow: mockGetHistoryShallow,
     });
   });
 
@@ -68,7 +71,7 @@ describe('copyCommand', () => {
   it('should return info message when history is empty', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([]);
+    mockGetHistoryShallow.mockReturnValue([]);
 
     const result = await copyCommand.action(mockContext, '');
 
@@ -91,7 +94,7 @@ describe('copyCommand', () => {
       },
     ];
 
-    mockGetHistory.mockReturnValue(historyWithUserOnly);
+    mockGetHistoryShallow.mockReturnValue(historyWithUserOnly);
 
     const result = await copyCommand.action(mockContext, '');
 
@@ -118,7 +121,7 @@ describe('copyCommand', () => {
       },
     ];
 
-    mockGetHistory.mockReturnValue(historyWithAiMessage);
+    mockGetHistoryShallow.mockReturnValue(historyWithAiMessage);
     mockCopyToClipboard.mockResolvedValue(undefined);
 
     const result = await copyCommand.action(mockContext, '');
@@ -144,7 +147,7 @@ describe('copyCommand', () => {
       },
     ];
 
-    mockGetHistory.mockReturnValue(historyWithMultipleParts);
+    mockGetHistoryShallow.mockReturnValue(historyWithMultipleParts);
     mockCopyToClipboard.mockResolvedValue(undefined);
 
     const result = await copyCommand.action(mockContext, '');
@@ -171,7 +174,7 @@ describe('copyCommand', () => {
       },
     ];
 
-    mockGetHistory.mockReturnValue(historyWithMixedParts);
+    mockGetHistoryShallow.mockReturnValue(historyWithMixedParts);
     mockCopyToClipboard.mockResolvedValue(undefined);
 
     const result = await copyCommand.action(mockContext, '');
@@ -202,7 +205,7 @@ describe('copyCommand', () => {
       },
     ];
 
-    mockGetHistory.mockReturnValue(historyWithMultipleAiMessages);
+    mockGetHistoryShallow.mockReturnValue(historyWithMultipleAiMessages);
     mockCopyToClipboard.mockResolvedValue(undefined);
 
     const result = await copyCommand.action(mockContext, '');
@@ -218,7 +221,7 @@ describe('copyCommand', () => {
   it('should copy the last fenced code block with /copy code', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [
@@ -252,7 +255,7 @@ describe('copyCommand', () => {
   it('should copy a numbered fenced code block with /copy code 2', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [
@@ -284,7 +287,7 @@ describe('copyCommand', () => {
   it('should copy the last matching language code block with /copy code mermaid', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [
@@ -320,7 +323,7 @@ describe('copyCommand', () => {
   it('should copy a numbered matching language block with /copy code mermaid 1', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [
@@ -354,7 +357,7 @@ describe('copyCommand', () => {
   it('should copy a numbered matching language block with /copy mermaid 1', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [
@@ -387,7 +390,7 @@ describe('copyCommand', () => {
   it('should copy the last LaTeX block with /copy latex', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [
@@ -419,7 +422,7 @@ describe('copyCommand', () => {
   it('should copy a numbered LaTeX block with /copy latex 1', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [
@@ -451,7 +454,7 @@ describe('copyCommand', () => {
   it('should not copy LaTeX blocks from fenced code blocks', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [
@@ -485,7 +488,7 @@ describe('copyCommand', () => {
   it('should copy the last inline LaTeX expression with /copy latex inline', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [
@@ -515,7 +518,7 @@ describe('copyCommand', () => {
   it('should copy a numbered inline LaTeX expression with /copy latex inline 1', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [
@@ -545,7 +548,7 @@ describe('copyCommand', () => {
   it('should copy inline LaTeX with the /copy inline-latex alias', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [{ text: 'Inline math: $\\alpha + \\beta$' }],
@@ -566,7 +569,7 @@ describe('copyCommand', () => {
   it('should not copy inline LaTeX from code fences or display math blocks', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [
@@ -598,7 +601,7 @@ describe('copyCommand', () => {
   it('should report when /copy latex has no matching LaTeX block', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [{ text: 'No math block here.' }],
@@ -618,7 +621,7 @@ describe('copyCommand', () => {
   it('should report when /copy code has no matching code block', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
-    mockGetHistory.mockReturnValue([
+    mockGetHistoryShallow.mockReturnValue([
       {
         role: 'model',
         parts: [{ text: 'No code here.' }],
@@ -645,7 +648,7 @@ describe('copyCommand', () => {
       },
     ];
 
-    mockGetHistory.mockReturnValue(historyWithAiMessage);
+    mockGetHistoryShallow.mockReturnValue(historyWithAiMessage);
     const clipboardError = new Error('Clipboard access denied');
     mockCopyToClipboard.mockRejectedValue(clipboardError);
 
@@ -668,7 +671,7 @@ describe('copyCommand', () => {
       },
     ];
 
-    mockGetHistory.mockReturnValue(historyWithAiMessage);
+    mockGetHistoryShallow.mockReturnValue(historyWithAiMessage);
     const rejectedValue = 'String error';
     mockCopyToClipboard.mockRejectedValue(rejectedValue);
 
@@ -691,7 +694,7 @@ describe('copyCommand', () => {
       },
     ];
 
-    mockGetHistory.mockReturnValue(historyWithEmptyParts);
+    mockGetHistoryShallow.mockReturnValue(historyWithEmptyParts);
 
     const result = await copyCommand.action(mockContext, '');
 
