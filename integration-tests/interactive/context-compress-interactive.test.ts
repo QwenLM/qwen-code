@@ -34,7 +34,7 @@ describe('Interactive Mode', () => {
       const { ptyProcess } = rig.runInteractive();
 
       let fullOutput = '';
-      ptyProcess.onData((data) => (fullOutput += data));
+      ptyProcess.onData((data: string) => (fullOutput += data));
 
       // Wait for the app to be ready
       const isReady = await rig.waitForText('Type your message', 15000);
@@ -80,7 +80,7 @@ describe('Interactive Mode', () => {
     const { ptyProcess } = rig.runInteractive();
 
     let fullOutput = '';
-    ptyProcess.onData((data) => (fullOutput += data));
+    ptyProcess.onData((data: string) => (fullOutput += data));
 
     // Wait for the app to be ready
     const isReady = await rig.waitForText('Type your message', 25000);
@@ -122,7 +122,7 @@ describe('Interactive Mode', () => {
       const { ptyProcess } = rig.runInteractive();
 
       let fullOutput = '';
-      ptyProcess.onData((data) => (fullOutput += data));
+      ptyProcess.onData((data: string) => (fullOutput += data));
 
       const isReady = await rig.waitForText('Type your message', 15000);
       expect(

@@ -62,8 +62,17 @@ export const compressCommand: SlashCommand = {
     }
 
     const rawArgs = context.invocation?.args?.trim() ?? '';
+    const wasTruncated = rawArgs.length > MAX_COMPRESS_INSTRUCTIONS_CHARS;
     const customInstructions = rawArgs
       ? rawArgs.slice(0, MAX_COMPRESS_INSTRUCTIONS_CHARS)
+      : undefined;
+    // Surface the silent cap so a user pasting an over-long focus directive
+    // knows their instructions were clipped mid-text rather than silently
+    // changing the summary's behaviour.
+    const truncationNotice = wasTruncated
+      ? t('Compression instructions were truncated to {{max}} characters.', {
+          max: String(MAX_COMPRESS_INSTRUCTIONS_CHARS),
+        })
       : undefined;
 
     const doCompress = async () => {
@@ -79,6 +88,12 @@ export const compressCommand: SlashCommand = {
     if (executionMode === 'acp') {
       const messages = async function* () {
         try {
+          if (truncationNotice) {
+            yield {
+              messageType: 'info' as const,
+              content: truncationNotice,
+            };
+          }
           yield {
             messageType: 'info' as const,
             content: 'Compressing context...',
@@ -110,6 +125,12 @@ export const compressCommand: SlashCommand = {
 
     try {
       if (executionMode === 'interactive') {
+        if (truncationNotice) {
+          ui.addItem(
+            { type: MessageType.INFO, text: truncationNotice },
+            Date.now(),
+          );
+        }
         ui.setPendingItem(pendingMessage);
       }
 
@@ -157,7 +178,7 @@ export const compressCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: `Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).`,
+        content: `${truncationNotice ? `${truncationNotice} ` : ''}Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).`,
       };
     } catch (e) {
       // If cancelled via ESC, don't show error — cancelSlashCommand already handled UI
