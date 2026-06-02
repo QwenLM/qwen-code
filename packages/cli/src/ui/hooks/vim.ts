@@ -597,9 +597,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           const [row, col] = buffer.cursor;
           const line = buffer.lines[row] ?? '';
           const count = state.count || 1;
-          const endCol = Math.min(col + count, line.length);
+          if (col + count > line.length) {
+            dispatch({ type: 'CLEAR_COUNT' });
+            return true;
+          }
           if (col < line.length) {
-            buffer.replaceRange(row, col, row, endCol, char.repeat(count));
+            buffer.replaceRange(row, col, row, col + count, char.repeat(count));
           }
           dispatch({ type: 'CLEAR_COUNT' });
           return true;
