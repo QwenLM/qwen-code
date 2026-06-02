@@ -201,13 +201,13 @@ function writeClipboard(text: string): void {
       /* ignore errors — clipboard is best-effort */
     };
     if (platform === 'darwin') {
-      const child = execFile('pbcopy', [], cb);
+      const child = execFile('pbcopy', [], { timeout: 500 }, cb);
       child.stdin?.end(text);
       child.unref();
       return;
     }
     if (platform === 'win32') {
-      const child = execFile('clip', [], cb);
+      const child = execFile('clip', [], { timeout: 500 }, cb);
       child.stdin?.end(text);
       child.unref();
       return;
