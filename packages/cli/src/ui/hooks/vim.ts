@@ -745,10 +745,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           // ── Movement ──
           case 'h': {
             if (state.pendingOperator === 'c') return handleChangeMovement('h');
-            if (state.pendingOperator === 'd') {
-              buffer.vimDeleteChar(0); // no-op, but ddh = delete left
-              // Actually, dh = delete char at cursor (vim deletes the char h moves to)
-              // For simplicity, just move
+            if (state.pendingOperator) {
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveLeft(repeatCount);
             dispatch({ type: 'CLEAR_COUNT' });
@@ -756,18 +754,27 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           case 'j': {
             if (state.pendingOperator === 'c') return handleChangeMovement('j');
+            if (state.pendingOperator) {
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            }
             buffer.vimMoveDown(repeatCount);
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
           }
           case 'k': {
             if (state.pendingOperator === 'c') return handleChangeMovement('k');
+            if (state.pendingOperator) {
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            }
             buffer.vimMoveUp(repeatCount);
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
           }
           case 'l': {
             if (state.pendingOperator === 'c') return handleChangeMovement('l');
+            if (state.pendingOperator) {
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            }
             buffer.vimMoveRight(repeatCount);
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
@@ -1061,19 +1068,24 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           // ── Line navigation ──
           case '0': {
             if (state.pendingOperator) {
-              // d0 = delete to start of line, c0 = change to start, y0 = yank to start
-              // For now, just move
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveToLineStart();
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
           }
           case '$': {
+            if (state.pendingOperator) {
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            }
             buffer.vimMoveToLineEnd();
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
           }
           case '^': {
+            if (state.pendingOperator) {
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            }
             buffer.vimMoveToFirstNonWhitespace();
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
@@ -1089,6 +1101,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case 'G': {
+            if (state.pendingOperator) {
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            }
             if (state.count > 0) {
               buffer.vimMoveToLine(state.count);
             } else {
