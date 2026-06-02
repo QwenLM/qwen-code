@@ -276,11 +276,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       if (startRow === endRow) {
         text = lines[startRow]?.slice(startCol, endCol) ?? '';
       } else {
+        const middleLines = lines.slice(startRow + 1, endRow);
         text =
           (lines[startRow]?.slice(startCol) ?? '') +
           '\n' +
-          lines.slice(startRow + 1, endRow + 1).join('\n') +
-          '\n' +
+          (middleLines.length > 0 ? middleLines.join('\n') + '\n' : '') +
           (lines[endRow]?.slice(0, endCol) ?? '');
       }
       dispatch({ type: 'SET_YANK_REGISTER', text, linewise });
@@ -315,16 +315,36 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           buffer.vimChangeWordEnd(count);
           updateMode('INSERT');
           break;
-        case CMD_TYPES.DELETE_CHAR:
+        case CMD_TYPES.DELETE_CHAR: {
+          const [row, col] = bufferRef.current.cursor;
+          const lines = bufferRef.current.lines;
+          const line = lines[row] ?? '';
+          const text = line.slice(col, col + count);
+          dispatch({ type: 'SET_YANK_REGISTER', text, linewise: false });
+          writeClipboard(text);
           buffer.vimDeleteChar(count);
           break;
-        case CMD_TYPES.DELETE_LINE:
+        }
+        case CMD_TYPES.DELETE_LINE: {
+          const lines = bufferRef.current.lines;
+          const [row] = bufferRef.current.cursor;
+          const endRow = Math.min(row + count - 1, lines.length - 1);
+          const text = lines.slice(row, endRow + 1).join('\n');
+          dispatch({ type: 'SET_YANK_REGISTER', text, linewise: true });
+          writeClipboard(text);
           buffer.vimDeleteLine(count);
           break;
-        case CMD_TYPES.CHANGE_LINE:
+        }
+        case CMD_TYPES.CHANGE_LINE: {
+          const lines = bufferRef.current.lines;
+          const [row] = bufferRef.current.cursor;
+          const text = lines[row] ?? '';
+          dispatch({ type: 'SET_YANK_REGISTER', text, linewise: true });
+          writeClipboard(text);
           buffer.vimChangeLine(count);
           updateMode('INSERT');
           break;
+        }
         case CMD_TYPES.CHANGE_MOVEMENT.LEFT:
         case CMD_TYPES.CHANGE_MOVEMENT.DOWN:
         case CMD_TYPES.CHANGE_MOVEMENT.UP:
@@ -342,13 +362,27 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           break;
         }
-        case CMD_TYPES.DELETE_TO_EOL:
+        case CMD_TYPES.DELETE_TO_EOL: {
+          const [row, col] = bufferRef.current.cursor;
+          const lines = bufferRef.current.lines;
+          const line = lines[row] ?? '';
+          const text = line.slice(col);
+          dispatch({ type: 'SET_YANK_REGISTER', text, linewise: false });
+          writeClipboard(text);
           buffer.vimDeleteToEndOfLine();
           break;
-        case CMD_TYPES.CHANGE_TO_EOL:
+        }
+        case CMD_TYPES.CHANGE_TO_EOL: {
+          const [row, col] = bufferRef.current.cursor;
+          const lines = bufferRef.current.lines;
+          const line = lines[row] ?? '';
+          const text = line.slice(col);
+          dispatch({ type: 'SET_YANK_REGISTER', text, linewise: false });
+          writeClipboard(text);
           buffer.vimChangeToEndOfLine();
           updateMode('INSERT');
           break;
+        }
         case CMD_TYPES.YANK_LINE: {
           const lines = bufferRef.current.lines;
           const [row] = bufferRef.current.cursor;
