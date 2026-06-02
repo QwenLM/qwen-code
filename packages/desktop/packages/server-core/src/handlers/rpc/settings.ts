@@ -136,14 +136,14 @@ async function getQwenWorkspaceAcpOptions(
   const workspaceConfig = workspace
     ? loadWorkspaceConfig(workspace.rootPath)
     : null;
-  const projectRoot = workspace?.rootPath;
-  const cwd = workspaceConfig?.defaults?.workingDirectory || projectRoot;
+  const workspaceRoot = workspace?.rootPath;
+  const cwd = workspaceConfig?.defaults?.workingDirectory || workspaceRoot;
 
   return {
     hostRuntime: buildBackendHostRuntimeContext(deps.platform),
     ...(cwd ? { cwd } : {}),
-    ...(projectRoot ? { processCwd: projectRoot } : {}),
-    ...(projectRoot ? { projectRoot } : {}),
+    ...(workspaceRoot ? { processCwd: workspaceRoot } : {}),
+    ...(cwd ? { projectRoot: cwd } : {}),
   };
 }
 
