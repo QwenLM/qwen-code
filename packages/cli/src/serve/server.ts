@@ -46,6 +46,7 @@ import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
 import { createBridgeFileSystemAdapter } from './bridgeFileSystemAdapter.js';
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isServeDebugMode } from './debugMode.js';
+import { SUPPORTED_LANGUAGES } from '../i18n/index.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import { mountAcpHttp } from './acpHttp/index.js';
 import {
@@ -2292,18 +2293,7 @@ export function createServeApp(
     },
   );
 
-  const LANGUAGE_CODES = [
-    'zh',
-    'zh-TW',
-    'en',
-    'ja',
-    'ru',
-    'de',
-    'fr',
-    'pt',
-    'ca',
-    'auto',
-  ] as const;
+  const LANGUAGE_CODES = [...SUPPORTED_LANGUAGES.map((l) => l.code), 'auto'];
 
   app.post('/session/:id/language', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
@@ -2311,10 +2301,7 @@ export function createServeApp(
     const language = body['language'];
     const syncOutputLanguage = body['syncOutputLanguage'];
 
-    if (
-      typeof language !== 'string' ||
-      !(LANGUAGE_CODES as readonly string[]).includes(language)
-    ) {
+    if (typeof language !== 'string' || !LANGUAGE_CODES.includes(language)) {
       res.status(400).json({
         error:
           '`language` is required and must be one of: ' +

@@ -2549,8 +2549,8 @@ class QwenAgent implements Agent {
             'general.language',
             language,
           );
-        } catch {
-          // non-fatal: in-process switch already took effect
+        } catch (err) {
+          debugLogger.warn('Failed to persist UI language setting:', err);
         }
 
         let outputLanguage: string | null = null;
@@ -2570,8 +2570,8 @@ class QwenAgent implements Agent {
               'general.outputLanguage',
               settingValue,
             );
-          } catch {
-            // non-fatal
+          } catch (err) {
+            debugLogger.warn('Failed to persist output language setting:', err);
           }
 
           const allSessions = [...this.sessions.values()];
