@@ -119,6 +119,11 @@ export class HookEventHandler {
     );
   }
 
+  /**
+   * Fire an InstructionsLoaded event.
+   * Called when instruction/context files are loaded during session startup or
+   * import resolution.
+   */
   async fireInstructionsLoadedEvent(
     filePath: string,
     memoryType: InstructionMemoryType,
