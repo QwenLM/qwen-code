@@ -105,7 +105,11 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
-import { HookSystem, createHookOutput } from '../hooks/index.js';
+import {
+  HookSystem,
+  createHookOutput,
+  createInstructionsLoadedCallback,
+} from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
@@ -1866,18 +1870,9 @@ export class Config {
         this.contextRuleExcludes,
         {
           explicitOnly: this.getBareMode(),
-          onInstructionsLoaded: async (notification) => {
-            await this.hookSystem?.fireInstructionsLoadedEvent(
-              notification.filePath,
-              notification.memoryType,
-              notification.loadReason,
-              {
-                globs: notification.globs,
-                triggerFilePath: notification.triggerFilePath,
-                parentFilePath: notification.parentFilePath,
-              },
-            );
-          },
+          onInstructionsLoaded: createInstructionsLoadedCallback(
+            () => this.hookSystem,
+          ),
         },
       );
     if (this.getManagedAutoMemoryEnabled()) {

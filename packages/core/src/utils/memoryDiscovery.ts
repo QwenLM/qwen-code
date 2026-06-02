@@ -35,7 +35,6 @@ export interface InstructionsLoadedNotification {
   filePath: string;
   memoryType: InstructionMemoryType;
   loadReason: InstructionLoadReason;
-  globs?: string[];
   triggerFilePath?: string;
   parentFilePath?: string;
 }
@@ -241,6 +240,11 @@ async function readGeminiMdFiles(
       async (filePath): Promise<GeminiFileContent> => {
         try {
           const content = await fs.readFile(filePath, 'utf-8');
+          await notifyInstructionsLoaded({
+            filePath,
+            memoryType: getMemoryType(filePath),
+            loadReason: 'session_start',
+          });
 
           // Process imports in the content
           const processedResult = await processImports(
@@ -260,7 +264,7 @@ async function readGeminiMdFiles(
                   filePath: notification.filePath,
                   memoryType: getMemoryType(notification.filePath),
                   loadReason: 'include',
-                  triggerFilePath: notification.parentFilePath,
+                  triggerFilePath: filePath,
                   parentFilePath: notification.parentFilePath,
                 });
               },
@@ -269,11 +273,6 @@ async function readGeminiMdFiles(
           logger.debug(
             `Successfully read and processed imports: ${filePath} (Length: ${processedResult.content.length})`,
           );
-          await notifyInstructionsLoaded({
-            filePath,
-            memoryType: getMemoryType(filePath),
-            loadReason: 'session_start',
-          });
 
           return { filePath, content: processedResult.content };
         } catch (error: unknown) {

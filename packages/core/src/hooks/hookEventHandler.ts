@@ -124,7 +124,6 @@ export class HookEventHandler {
     memoryType: InstructionMemoryType,
     loadReason: InstructionLoadReason,
     options: {
-      globs?: string[];
       triggerFilePath?: string;
       parentFilePath?: string;
     } = {},
@@ -135,7 +134,6 @@ export class HookEventHandler {
       file_path: filePath,
       memory_type: memoryType,
       load_reason: loadReason,
-      globs: options.globs,
       trigger_file_path: options.triggerFilePath,
       parent_file_path: options.parentFilePath,
     };

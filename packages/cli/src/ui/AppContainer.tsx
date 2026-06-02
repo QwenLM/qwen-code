@@ -43,6 +43,7 @@ import {
   getAllGeminiMdFilenames,
   ShellExecutionService,
   Storage,
+  createInstructionsLoadedCallback,
   SessionEndReason,
   generatePromptSuggestion,
   logPromptSuggestion,
@@ -1325,20 +1326,9 @@ export const AppContainer = (props: AppContainerProps) => {
           settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
           config.getContextRuleExcludes(),
           {
-            onInstructionsLoaded: async (notification) => {
-              await config
-                .getHookSystem()
-                ?.fireInstructionsLoadedEvent(
-                  notification.filePath,
-                  notification.memoryType,
-                  notification.loadReason,
-                  {
-                    globs: notification.globs,
-                    triggerFilePath: notification.triggerFilePath,
-                    parentFilePath: notification.parentFilePath,
-                  },
-                );
-            },
+            onInstructionsLoaded: createInstructionsLoadedCallback(() =>
+              config.getHookSystem(),
+            ),
           },
         );
 

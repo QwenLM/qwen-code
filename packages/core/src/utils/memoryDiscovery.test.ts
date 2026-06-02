@@ -521,12 +521,23 @@ describe('loadServerHierarchicalMemory', () => {
     expect(notifications).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
+          filePath: projectFile,
+          memoryType: 'project',
+          loadReason: 'session_start',
+        }),
+        expect.objectContaining({
           filePath: importedFile,
           memoryType: 'project',
           loadReason: 'include',
+          triggerFilePath: projectFile,
           parentFilePath: projectFile,
         }),
       ]),
+    );
+    expect(
+      notifications.findIndex((item) => item.filePath === projectFile),
+    ).toBeLessThan(
+      notifications.findIndex((item) => item.filePath === importedFile),
     );
   });
 
@@ -563,6 +574,7 @@ describe('loadServerHierarchicalMemory', () => {
           filePath: importedFile,
           memoryType: 'extension',
           loadReason: 'include',
+          triggerFilePath: extensionFile,
           parentFilePath: extensionFile,
         }),
       ]),

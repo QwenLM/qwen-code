@@ -159,7 +159,6 @@ export class HookSystem {
     memoryType: InstructionMemoryType,
     loadReason: InstructionLoadReason,
     options: {
-      globs?: string[];
       triggerFilePath?: string;
       parentFilePath?: string;
     } = {},

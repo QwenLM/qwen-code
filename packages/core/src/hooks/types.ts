@@ -266,7 +266,6 @@ export interface InstructionsLoadedInput extends HookInput {
   file_path: string;
   memory_type: InstructionMemoryType;
   load_reason: InstructionLoadReason;
-  globs?: string[];
   trigger_file_path?: string;
   parent_file_path?: string;
 }

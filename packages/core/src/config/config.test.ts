@@ -152,6 +152,29 @@ vi.mock('../hooks/index.js', () => {
   return {
     HookSystem: HookSystemMock,
     createHookOutput: vi.fn(),
+    createInstructionsLoadedCallback:
+      (
+        getHookSystem: () => {
+          fireInstructionsLoadedEvent?: (...args: unknown[]) => unknown;
+        },
+      ) =>
+      async (notification: {
+        filePath: string;
+        memoryType: string;
+        loadReason: string;
+        triggerFilePath?: string;
+        parentFilePath?: string;
+      }) => {
+        await getHookSystem()?.fireInstructionsLoadedEvent?.(
+          notification.filePath,
+          notification.memoryType,
+          notification.loadReason,
+          {
+            triggerFilePath: notification.triggerFilePath,
+            parentFilePath: notification.parentFilePath,
+          },
+        );
+      },
   };
 });
 
@@ -1499,7 +1522,6 @@ describe('Server Config (config.ts)', () => {
       filePath: '/tmp/project/QWEN.md',
       memoryType: 'project',
       loadReason: 'include',
-      globs: ['**/*.ts'],
       triggerFilePath: '/tmp/project/AGENTS.md',
       parentFilePath: '/tmp/project/AGENTS.md',
     });
@@ -1509,7 +1531,6 @@ describe('Server Config (config.ts)', () => {
       'project',
       'include',
       {
-        globs: ['**/*.ts'],
         triggerFilePath: '/tmp/project/AGENTS.md',
         parentFilePath: '/tmp/project/AGENTS.md',
       },

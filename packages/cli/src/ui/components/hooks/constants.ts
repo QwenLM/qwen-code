@@ -196,7 +196,7 @@ export function getHookDescription(eventName: string): string {
       'Input to command is JSON with notification message and type.',
     ),
     [HookEventName.InstructionsLoaded]: t(
-      'Input to command is JSON with file_path, memory_type, load_reason, and optional globs, trigger_file_path, and parent_file_path.',
+      'Input to command is JSON with file_path, memory_type, load_reason, and optional trigger_file_path and parent_file_path.',
     ),
     [HookEventName.UserPromptSubmit]: t(
       'Input to command is JSON with original user prompt text.',

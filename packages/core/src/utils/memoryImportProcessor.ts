@@ -280,10 +280,6 @@ export async function processImports(
         try {
           await fs.access(fullPath);
           const importedContent = await fs.readFile(fullPath, 'utf-8');
-          await options.onFileImported?.({
-            filePath: normalizedFullPath,
-            parentFilePath: normalizedPath,
-          });
 
           // Process the imported file
           await processFlat(
@@ -292,6 +288,10 @@ export async function processImports(
             normalizedFullPath,
             depth + 1,
           );
+          await options.onFileImported?.({
+            filePath: normalizedFullPath,
+            parentFilePath: normalizedPath,
+          });
         } catch (error) {
           // If file doesn't exist, silently skip this import (it's not a real import)
           // Only log warnings for other types of errors
@@ -355,10 +355,6 @@ export async function processImports(
     try {
       await fs.access(fullPath);
       const fileContent = await fs.readFile(fullPath, 'utf-8');
-      await options.onFileImported?.({
-        filePath: fullPath,
-        parentFilePath: importState.currentFile ?? path.resolve(basePath),
-      });
       // Mark this file as processed for this import chain
       const newImportState: ImportState = {
         ...importState,
@@ -375,6 +371,10 @@ export async function processImports(
         importFormat,
         options,
       );
+      await options.onFileImported?.({
+        filePath: fullPath,
+        parentFilePath: importState.currentFile ?? path.resolve(basePath),
+      });
       result += `<!-- Imported from: ${importPath} -->\n${imported.content}\n<!-- End of import from: ${importPath} -->`;
       imports.push(imported.importTree);
     } catch (err: unknown) {
