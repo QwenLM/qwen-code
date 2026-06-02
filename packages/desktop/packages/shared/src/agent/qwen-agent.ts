@@ -2243,7 +2243,7 @@ export class QwenAgent extends BaseAgent {
             scope: request.scope ?? 'global',
           },
         }),
-      30_000,
+      120_000,
     );
     const record = toRecord(result);
     const installedSkill = toRecord(record.skill);

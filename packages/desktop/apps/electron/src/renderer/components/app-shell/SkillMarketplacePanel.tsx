@@ -5,7 +5,6 @@ import {
   Download,
   ExternalLink,
   Loader2,
-  Presentation,
   RefreshCw,
   Store,
 } from 'lucide-react'
@@ -13,6 +12,7 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { cn } from '@/lib/utils'
+import { MarketplaceSkillIcon } from './MarketplaceSkillIcon'
 import type { SkillMarketplaceItem } from '../../../shared/types'
 
 export interface SkillMarketplacePanelProps {
@@ -22,6 +22,9 @@ export interface SkillMarketplacePanelProps {
   selectedSkillId?: string | null
   onSkillSelect?: (skillId: string) => void
   onInstalled?: (options?: { force?: boolean }) => Promise<void> | void
+  installingSkillIds?: ReadonlySet<string>
+  onInstallStart?: (skillId: string) => void
+  onInstallFinish?: (skillId: string) => void
   className?: string
 }
 
@@ -33,20 +36,6 @@ function sourceHost(sourceUrl: string): string {
   }
 }
 
-function MarketplaceSkillIcon({ className }: { className?: string }) {
-  return (
-    <div
-      className={cn(
-        'flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px]',
-        'border border-amber-300/20 bg-[radial-gradient(circle_at_30%_20%,rgba(255,230,151,0.9),rgba(245,158,11,0.84)_48%,rgba(120,53,15,0.75))] shadow-sm',
-        className,
-      )}
-    >
-      <Presentation className="h-4 w-4 text-white drop-shadow" />
-    </div>
-  )
-}
-
 export function SkillMarketplacePanel({
   workspaceId,
   workingDirectory,
@@ -54,16 +43,15 @@ export function SkillMarketplacePanel({
   selectedSkillId,
   onSkillSelect,
   onInstalled,
+  installingSkillIds,
+  onInstallStart,
+  onInstallFinish,
   className,
 }: SkillMarketplacePanelProps) {
   const { t } = useTranslation()
   const [skills, setSkills] = React.useState<SkillMarketplaceItem[]>([])
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
-  const [installingSkillId, setInstallingSkillId] = React.useState<
-    string | null
-  >(null)
-
   const loadSkills = React.useCallback(async () => {
     if (!workspaceId) {
       setSkills([])
@@ -96,11 +84,22 @@ export function SkillMarketplacePanel({
     void loadSkills()
   }, [loadSkills])
 
+  React.useEffect(() => {
+    if (!workspaceId) return
+    const cleanup = window.electronAPI.onSkillsChanged((changedWorkspaceId) => {
+      if (changedWorkspaceId === workspaceId) {
+        void loadSkills()
+      }
+    })
+    return cleanup
+  }, [loadSkills, workspaceId])
+
   const handleInstall = React.useCallback(
     async (skill: SkillMarketplaceItem) => {
       if (!workspaceId) return
+      if (installingSkillIds?.has(skill.id)) return
 
-      setInstallingSkillId(skill.id)
+      onInstallStart?.(skill.id)
       try {
         await window.electronAPI.installSkillFromMarketplace(
           workspaceId,
@@ -133,13 +132,16 @@ export function SkillMarketplacePanel({
           }),
         )
       } finally {
-        setInstallingSkillId(null)
+        onInstallFinish?.(skill.id)
       }
     },
     [
       activeSessionId,
+      installingSkillIds,
       loadSkills,
       onInstalled,
+      onInstallFinish,
+      onInstallStart,
       t,
       workingDirectory,
       workspaceId,
@@ -192,7 +194,7 @@ export function SkillMarketplacePanel({
 
         {!error &&
           skills.map((skill) => {
-            const isInstalling = installingSkillId === skill.id
+            const isInstalling = installingSkillIds?.has(skill.id) ?? false
             const isSelected = selectedSkillId === skill.id
             return (
               <div
@@ -213,7 +215,7 @@ export function SkillMarketplacePanel({
                   }
                 }}
               >
-                <MarketplaceSkillIcon />
+                <MarketplaceSkillIcon iconKey={skill.iconKey} />
 
                 <div className="min-w-0 flex-1">
                   <div className="flex min-w-0 items-center gap-2">
@@ -246,7 +248,7 @@ export function SkillMarketplacePanel({
                   size="sm"
                   className="w-[104px] shrink-0"
                   variant={skill.installed ? 'secondary' : 'default'}
-                  disabled={skill.installed || Boolean(installingSkillId)}
+                  disabled={skill.installed || isInstalling}
                   onClick={(event) => {
                     event.stopPropagation()
                     void handleInstall(skill)

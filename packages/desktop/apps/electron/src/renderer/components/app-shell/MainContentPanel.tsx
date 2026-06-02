@@ -97,6 +97,9 @@ export function MainContentPanel({
     getAutomationHistory,
     activeSessionWorkingDirectory,
     reloadSkills,
+    installingMarketplaceSkillIds,
+    onMarketplaceSkillInstallStart,
+    onMarketplaceSkillInstallFinish,
   } = useAppShellContext()
 
   // Session multi-select state
@@ -375,6 +378,9 @@ export function MainContentPanel({
               : null
           }
           onInstalled={reloadSkills}
+          installingSkillIds={installingMarketplaceSkillIds}
+          onInstallStart={onMarketplaceSkillInstallStart}
+          onInstallFinish={onMarketplaceSkillInstallFinish}
         />
       </Panel>,
     )

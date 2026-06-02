@@ -17,7 +17,6 @@ import {
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { gzipSync } from 'node:zlib';
 
 // Mock cleanup module before importing anything else
 const { mockRunExitCleanup } = vi.hoisted(() => ({
@@ -1918,7 +1917,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('qwen/skills/install installs a global skill through ACP', async () => {
+  it('qwen/skills/install installs a GitHub directory skill through ACP', async () => {
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
     vi.mocked(Storage.getGlobalQwenDir).mockReturnValue(tempHome);
 
@@ -1949,37 +1948,49 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         buffer.byteOffset,
         buffer.byteOffset + buffer.byteLength,
       ) as ArrayBuffer;
-    const writeTarEntry = (filePath: string, content: string): Buffer => {
-      const data = Buffer.from(content);
-      const header = Buffer.alloc(512);
-      header.write(filePath, 0, 100, 'utf8');
-      header.write('0000644\0', 100, 8, 'ascii');
-      header.write('0000000\0', 108, 8, 'ascii');
-      header.write('0000000\0', 116, 8, 'ascii');
-      header.write(data.length.toString(8).padStart(11, '0') + '\0', 124, 12);
-      header.write('00000000000\0', 136, 12, 'ascii');
-      header.write('        ', 148, 8, 'ascii');
-      header[156] = '0'.charCodeAt(0);
-      header.write('ustar\0', 257, 6, 'ascii');
-      header.write('00', 263, 2, 'ascii');
-      const padding = Buffer.alloc((512 - (data.length % 512)) % 512);
-      return Buffer.concat([header, data, padding]);
-    };
-    const skillArchive = gzipSync(
-      Buffer.concat([
-        writeTarEntry('skills-main/skills/pptx/SKILL.md', skillContent),
-        writeTarEntry('skills-main/skills/pptx/editing.md', editingContent),
-        Buffer.alloc(1024),
-      ]),
-    );
-    const archiveUrl =
-      'https://codeload.github.com/anthropics/skills/tar.gz/main';
+    const directoryUrl =
+      'https://api.github.com/repos/anthropics/skills/contents/skills/pptx?ref=main';
+    const skillUrl =
+      'https://raw.githubusercontent.com/anthropics/skills/main/skills/pptx/SKILL.md';
+    const editingUrl =
+      'https://raw.githubusercontent.com/anthropics/skills/main/skills/pptx/editing.md';
     const fetchMock = vi.fn(async (url: string) => {
-      if (url === archiveUrl) {
+      if (url === directoryUrl) {
         return {
           ok: true,
           status: 200,
-          arrayBuffer: vi.fn().mockResolvedValue(toArrayBuffer(skillArchive)),
+          json: vi.fn().mockResolvedValue([
+            {
+              name: 'SKILL.md',
+              path: 'skills/pptx/SKILL.md',
+              type: 'file',
+              download_url: skillUrl,
+            },
+            {
+              name: 'editing.md',
+              path: 'skills/pptx/editing.md',
+              type: 'file',
+              download_url: editingUrl,
+            },
+          ]),
+        };
+      }
+      if (url === skillUrl) {
+        return {
+          ok: true,
+          status: 200,
+          arrayBuffer: vi
+            .fn()
+            .mockResolvedValue(toArrayBuffer(Buffer.from(skillContent))),
+        };
+      }
+      if (url === editingUrl) {
+        return {
+          ok: true,
+          status: 200,
+          arrayBuffer: vi
+            .fn()
+            .mockResolvedValue(toArrayBuffer(Buffer.from(editingContent))),
         };
       }
       return {
@@ -2021,13 +2032,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       });
 
       expect(fetchMock).toHaveBeenCalledWith(
-        archiveUrl,
+        directoryUrl,
         expect.objectContaining({
           headers: expect.objectContaining({
+            Accept: 'application/vnd.github+json',
             'User-Agent': 'qwen-code',
           }),
         }),
       );
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes('codeload.github.com'),
+        ),
+      ).toBe(false);
       expect(parseSkillContent).toHaveBeenCalledWith(
         expect.stringContaining('name: pptx'),
         installedPath,

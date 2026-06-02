@@ -73,6 +73,12 @@ export interface AppShellContextType {
   skills?: LoadedSkill[]
   /** Reload skills for the active workspace after install/delete/update operations. */
   reloadSkills?: (options?: { force?: boolean }) => Promise<void> | void
+  /** Marketplace skills currently being installed by ID. */
+  installingMarketplaceSkillIds?: ReadonlySet<string>
+  /** Mark a marketplace skill install as started. */
+  onMarketplaceSkillInstallStart?: (skillId: string) => void
+  /** Mark a marketplace skill install as finished. */
+  onMarketplaceSkillInstallFinish?: (skillId: string) => void
   /** Provider-advertised Qwen commands/skills cached by workspace and working directory. */
   getQwenCapabilitySnapshot?: (
     workspaceId?: string | null,

@@ -790,19 +790,11 @@ async function fetchGitHubDirectoryItems(
   return data;
 }
 
-async function downloadGitHubSkillDirectory(
+async function downloadGitHubSkillDirectoryFromApi(
   githubUrl: GitHubBlobSkillUrl,
   directoryPath: string,
   relativeRoot = '',
 ): Promise<DownloadedSkillFile[]> {
-  if (!relativeRoot) {
-    const archiveFiles = await downloadGitHubSkillDirectoryFromArchive(
-      githubUrl,
-      directoryPath,
-    ).catch(() => null);
-    if (archiveFiles?.length) return archiveFiles;
-  }
-
   const items = await fetchGitHubDirectoryItems(githubUrl, directoryPath);
   const files: DownloadedSkillFile[] = [];
 
@@ -817,7 +809,7 @@ async function downloadGitHubSkillDirectory(
 
     if (type === 'dir') {
       files.push(
-        ...(await downloadGitHubSkillDirectory(
+        ...(await downloadGitHubSkillDirectoryFromApi(
           githubUrl,
           itemPath,
           relativePath,
@@ -838,6 +830,19 @@ async function downloadGitHubSkillDirectory(
   }
 
   return files;
+}
+
+async function downloadGitHubSkillDirectory(
+  githubUrl: GitHubBlobSkillUrl,
+  directoryPath: string,
+): Promise<DownloadedSkillFile[]> {
+  const apiFiles = await downloadGitHubSkillDirectoryFromApi(
+    githubUrl,
+    directoryPath,
+  ).catch(() => null);
+  if (apiFiles) return apiFiles;
+
+  return downloadGitHubSkillDirectoryFromArchive(githubUrl, directoryPath);
 }
 
 async function downloadSkill(sourceUrl: string): Promise<DownloadedSkill> {

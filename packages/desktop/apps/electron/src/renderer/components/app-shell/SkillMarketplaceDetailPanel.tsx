@@ -1,13 +1,6 @@
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import {
-  Check,
-  Download,
-  ExternalLink,
-  Loader2,
-  Presentation,
-  Store,
-} from 'lucide-react';
+import { Check, Download, ExternalLink, Loader2, Store } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -16,6 +9,7 @@ import { cn } from '@/lib/utils';
 import { useNavigation, routes } from '@/contexts/NavigationContext';
 import { dispatchFocusInputEvent } from './input/focus-input-events';
 import skillMarketHero from '@/assets/skill-market-hero.webp';
+import { MarketplaceSkillIcon } from './MarketplaceSkillIcon';
 import type {
   SkillMarketplaceExample,
   SkillMarketplaceItem,
@@ -27,6 +21,9 @@ export interface SkillMarketplaceDetailPanelProps {
   activeSessionId?: string | null;
   selectedSkillId?: string | null;
   onInstalled?: (options?: { force?: boolean }) => Promise<void> | void;
+  installingSkillIds?: ReadonlySet<string>;
+  onInstallStart?: (skillId: string) => void;
+  onInstallFinish?: (skillId: string) => void;
   className?: string;
 }
 
@@ -36,28 +33,6 @@ function sourceHost(sourceUrl: string): string {
   } catch {
     return sourceUrl;
   }
-}
-
-function MarketplaceSkillIcon({
-  className,
-  iconClassName,
-}: {
-  className?: string;
-  iconClassName?: string;
-}) {
-  return (
-    <div
-      className={cn(
-        'flex shrink-0 items-center justify-center rounded-[8px]',
-        'border border-amber-300/25 bg-[radial-gradient(circle_at_30%_20%,rgba(255,230,151,0.95),rgba(245,158,11,0.86)_48%,rgba(120,53,15,0.78))] shadow-sm',
-        className,
-      )}
-    >
-      <Presentation
-        className={cn('text-white drop-shadow-sm', iconClassName)}
-      />
-    </div>
-  );
 }
 
 function buildExamplePrompt(
@@ -73,6 +48,9 @@ export function SkillMarketplaceDetailPanel({
   activeSessionId,
   selectedSkillId,
   onInstalled,
+  installingSkillIds,
+  onInstallStart,
+  onInstallFinish,
   className,
 }: SkillMarketplaceDetailPanelProps) {
   const { t } = useTranslation();
@@ -80,10 +58,6 @@ export function SkillMarketplaceDetailPanel({
   const [skills, setSkills] = React.useState<SkillMarketplaceItem[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
-  const [installingSkillId, setInstallingSkillId] = React.useState<
-    string | null
-  >(null);
-
   const loadSkills = React.useCallback(async () => {
     if (!workspaceId) {
       setSkills([]);
@@ -133,8 +107,9 @@ export function SkillMarketplaceDetailPanel({
   const handleInstall = React.useCallback(
     async (skill: SkillMarketplaceItem) => {
       if (!workspaceId) return;
+      if (installingSkillIds?.has(skill.id)) return;
 
-      setInstallingSkillId(skill.id);
+      onInstallStart?.(skill.id);
       try {
         await window.electronAPI.installSkillFromMarketplace(
           workspaceId,
@@ -167,13 +142,16 @@ export function SkillMarketplaceDetailPanel({
           }),
         );
       } finally {
-        setInstallingSkillId(null);
+        onInstallFinish?.(skill.id);
       }
     },
     [
       activeSessionId,
+      installingSkillIds,
       loadSkills,
       onInstalled,
+      onInstallFinish,
+      onInstallStart,
       t,
       workingDirectory,
       workspaceId,
@@ -231,7 +209,7 @@ export function SkillMarketplaceDetailPanel({
   }
 
   const heroImage = selectedSkill.heroImage ?? skillMarketHero;
-  const isInstalling = installingSkillId === selectedSkill.id;
+  const isInstalling = installingSkillIds?.has(selectedSkill.id) ?? false;
 
   return (
     <ScrollArea className={cn('h-full', className)}>
@@ -239,8 +217,8 @@ export function SkillMarketplaceDetailPanel({
         <div className="flex items-start justify-between gap-5">
           <div className="flex min-w-0 items-start gap-4">
             <MarketplaceSkillIcon
+              iconKey={selectedSkill.iconKey}
               className="h-16 w-16"
-              iconClassName="h-7 w-7"
             />
             <div className="min-w-0 pt-1">
               <h1 className="truncate text-3xl font-semibold tracking-normal">
@@ -272,7 +250,7 @@ export function SkillMarketplaceDetailPanel({
               size="sm"
               className="min-w-[108px]"
               variant={selectedSkill.installed ? 'secondary' : 'default'}
-              disabled={selectedSkill.installed || Boolean(installingSkillId)}
+              disabled={selectedSkill.installed || isInstalling}
               onClick={() => void handleInstall(selectedSkill)}
             >
               {isInstalling ? (
@@ -290,7 +268,7 @@ export function SkillMarketplaceDetailPanel({
         </div>
 
         <div
-          className="relative mt-10 min-h-[260px] overflow-hidden rounded-[8px] border border-white/10 bg-cover bg-center px-6 py-10 shadow-[0_18px_60px_rgba(0,0,0,0.22)]"
+          className="relative mt-10 min-h-[260px] overflow-hidden rounded-[8px] border border-white/10 bg-cover bg-center px-6 py-10 shadow-strong"
           style={{
             backgroundImage: `linear-gradient(90deg, rgba(5,10,18,0.42), rgba(5,10,18,0.16)), url(${heroImage})`,
           }}
@@ -303,7 +281,7 @@ export function SkillMarketplaceDetailPanel({
                 type="button"
                 aria-disabled={!selectedSkill.installed}
                 className={cn(
-                  'flex max-w-full items-center gap-2 rounded-[8px] border border-white/14 bg-black/46 px-4 py-2.5 text-left text-white shadow-[0_10px_24px_rgba(0,0,0,0.28)] backdrop-blur-md transition',
+                  'flex max-w-full items-center gap-2 rounded-[8px] border border-white/14 bg-black/46 px-4 py-2.5 text-left text-white shadow-middle backdrop-blur-md transition',
                   selectedSkill.installed
                     ? 'hover:-translate-y-0.5 hover:bg-black/56'
                     : 'cursor-default opacity-55',
@@ -314,8 +292,8 @@ export function SkillMarketplaceDetailPanel({
                 onClick={() => handleUseExample(selectedSkill, example)}
               >
                 <MarketplaceSkillIcon
+                  iconKey={selectedSkill.iconKey}
                   className="h-5 w-5 rounded-[6px]"
-                  iconClassName="h-3 w-3"
                 />
                 <span className="shrink-0 text-sm font-medium text-white/55">
                   {selectedSkill.name}

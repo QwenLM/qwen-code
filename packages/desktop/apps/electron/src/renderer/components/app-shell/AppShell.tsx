@@ -1381,6 +1381,8 @@ function AppShellContent({
   const [qwenCapabilityCache, setQwenCapabilityCache] = React.useState<
     Record<string, QwenCapabilitySnapshot>
   >({})
+  const [installingMarketplaceSkillIds, setInstallingMarketplaceSkillIds] =
+    React.useState<Set<string>>(() => new Set())
   const skillsRequestIdRef = React.useRef(0)
   const activeSkillsScopeKey = getWorkspaceSkillsCacheKey(
     activeWorkspaceId,
@@ -2342,6 +2344,24 @@ function AppShellContent({
     ],
   )
 
+  const handleMarketplaceSkillInstallStart = React.useCallback(
+    (skillId: string) => {
+      setInstallingMarketplaceSkillIds((ids) => new Set(ids).add(skillId))
+    },
+    [],
+  )
+
+  const handleMarketplaceSkillInstallFinish = React.useCallback(
+    (skillId: string) => {
+      setInstallingMarketplaceSkillIds((ids) => {
+        const next = new Set(ids)
+        next.delete(skillId)
+        return next
+      })
+    },
+    [],
+  )
+
   React.useEffect(() => {
     void reloadSkills()
   }, [reloadSkills])
@@ -2926,6 +2946,9 @@ function AppShellContent({
       enabledSources: sources,
       skills,
       reloadSkills,
+      installingMarketplaceSkillIds,
+      onMarketplaceSkillInstallStart: handleMarketplaceSkillInstallStart,
+      onMarketplaceSkillInstallFinish: handleMarketplaceSkillInstallFinish,
       getQwenCapabilitySnapshot,
       activeSessionWorkingDirectory: activeSkillsWorkingDirectory,
       labels: displayLabelConfigs,
@@ -2956,6 +2979,9 @@ function AppShellContent({
       sources,
       skills,
       reloadSkills,
+      installingMarketplaceSkillIds,
+      handleMarketplaceSkillInstallStart,
+      handleMarketplaceSkillInstallFinish,
       getQwenCapabilitySnapshot,
       activeSkillsWorkingDirectory,
       displayLabelConfigs,
@@ -5028,6 +5054,9 @@ function AppShellContent({
                       }
                       onSkillSelect={handleMarketplaceSkillSelect}
                       onInstalled={reloadSkills}
+                      installingSkillIds={installingMarketplaceSkillIds}
+                      onInstallStart={handleMarketplaceSkillInstallStart}
+                      onInstallFinish={handleMarketplaceSkillInstallFinish}
                     />
                   )}
                 {isAutomationsNavigation(navState) && (
