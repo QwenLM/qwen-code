@@ -2342,6 +2342,51 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     expect(passed.systemInstruction).toContain('focus on the auth bug');
   });
 
+  it('does NOT fire PreCompact hook when curatedHistory.length < 2 (NOOP path)', async () => {
+    // Contract: hooks with side effects (transcript dumps, external
+    // notifications) should only fire when there is actually something to
+    // compress. A history of [user-only] or [model-only] short-circuits to
+    // NOOP — the hook must not be triggered for those.
+    const firePreCompactEvent = vi.fn().mockResolvedValue(undefined);
+    const firePostCompactEvent = vi.fn().mockResolvedValue(undefined);
+    const oneMessageHistory: Content[] = [
+      { role: 'user', parts: [{ text: 'just one' }] },
+    ];
+    const getHistoryMock = vi.fn().mockReturnValue(oneMessageHistory);
+    const mockChat = {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi
+        .fn()
+        .mockReturnValue({ firePreCompactEvent, firePostCompactEvent }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 1_000,
+      customInstructions: 'should not reach the hook',
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+    expect(firePreCompactEvent).not.toHaveBeenCalled();
+    expect(firePostCompactEvent).not.toHaveBeenCalled();
+  });
+
   it('forwards customInstructions verbatim to firePreCompactEvent', async () => {
     vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>s</state_snapshot>',

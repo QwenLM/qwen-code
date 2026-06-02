@@ -660,12 +660,17 @@ function safeRealpath(p: string): string {
   }
 }
 
+// Tool names listed verbatim from tool-names.ts so a future rename / removal
+// surfaces during a global grep instead of leaving stale guidance in this
+// reminder. Keep the list small (the most common modification tools) — an
+// exhaustive enumeration would drift faster than it helps.
 const PLAN_MODE_REMINDER_TEXT =
   '<plan-mode-active>\n' +
   'You are currently in PLAN mode. You may research, read files, and ' +
   'propose plans, but you may not execute modification tools (write_file, ' +
-  'edit, shell mutations, etc.) until the user exits plan mode. The summary ' +
-  'above may not reflect this constraint — honor plan mode regardless.\n' +
+  'edit, run_shell_command, etc.) until the user exits plan mode. The ' +
+  'summary above may not reflect this constraint — honor plan mode ' +
+  'regardless.\n' +
   '</plan-mode-active>';
 
 /** Cap per-task description text in the snapshot block. Prevents a

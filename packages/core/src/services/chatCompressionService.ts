@@ -350,6 +350,27 @@ export class ChatCompressionService {
       };
     }
 
+    // CLAUDE-CODE-STYLE FULL-HISTORY COMPRESSION: the entire curated
+    // history is sent to the summary side-query (no split, no tail
+    // preservation), and the post-compact history is assembled by
+    // composePostCompactHistory below (summary + model ack + recent
+    // file restores + recent image restore).
+
+    // Guard: need at least a user+model pair for a meaningful summary.
+    // This runs BEFORE the PreCompact hook fires — a hook with side effects
+    // (transcript dump, external notification) shouldn't be triggered for
+    // a session we're about to NOOP on anyway.
+    if (curatedHistory.length < 2) {
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      };
+    }
+
     // Fire PreCompact hook before compression begins. Pass any user-supplied
     // `/compress` instructions so hook scripts can read / log / amend them
     // via `hookSpecificOutput.additionalContext`. The aggregator concatenates
@@ -378,24 +399,6 @@ export class ChatCompressionService {
       } catch (err) {
         config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
       }
-    }
-
-    // CLAUDE-CODE-STYLE FULL-HISTORY COMPRESSION: the entire curated
-    // history is sent to the summary side-query (no split, no tail
-    // preservation), and the post-compact history is assembled by
-    // composePostCompactHistory below (summary + model ack + recent
-    // file restores + recent image restore).
-
-    // Guard: need at least a user+model pair for a meaningful summary.
-    if (curatedHistory.length < 2) {
-      return {
-        newHistory: null,
-        info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
-          compressionStatus: CompressionStatus.NOOP,
-        },
-      };
     }
 
     // Slim the side-query input: replace inlineData with placeholders.
