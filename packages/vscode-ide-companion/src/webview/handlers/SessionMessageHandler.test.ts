@@ -118,6 +118,7 @@ describe('SessionMessageHandler', () => {
       createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
       getConversation: vi.fn().mockResolvedValue(null),
       addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
     };
     const sendToWebView = vi.fn();
 
@@ -181,6 +182,7 @@ describe('SessionMessageHandler', () => {
       createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
       getConversation: vi.fn().mockResolvedValue(null),
       addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
     };
     const sendToWebView = vi.fn();
 
@@ -220,6 +222,215 @@ describe('SessionMessageHandler', () => {
         uri: 'file:///tmp/clipboard/clipboard-123.png',
       },
     ]);
+  });
+
+  it('keeps the conversation store aligned with the ACP session id before editing', async () => {
+    mockProcessImageAttachments.mockImplementation(
+      async (promptText: string) => ({
+        formattedText: promptText,
+        displayText: promptText,
+        savedImageCount: 0,
+        promptImages: [],
+      }),
+    );
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn().mockResolvedValue({
+        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+      }),
+      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    let conversation = {
+      id: 'conversation-1',
+      title: 'Conversation',
+      messages: [] as Array<{
+        role: 'user' | 'assistant' | 'thinking';
+        content: string;
+        timestamp: number;
+      }>,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue(conversation),
+      getConversation: vi.fn(async (id: string) =>
+        conversation.id === id ? conversation : null,
+      ),
+      addMessage: vi.fn(async (id: string, message) => {
+        if (conversation.id === id) {
+          conversation.messages.push(message);
+        }
+      }),
+      renameConversationId: vi.fn(async (fromId: string, toId: string) => {
+        if (conversation.id !== fromId) {
+          return false;
+        }
+        conversation = { ...conversation, id: toId };
+        return true;
+      }),
+      replaceMessages: vi.fn().mockResolvedValue(true),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'first prompt' },
+    });
+
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 0,
+      },
+    });
+
+    expect(conversationStore.renameConversationId).toHaveBeenCalledWith(
+      'conversation-1',
+      'session-1',
+    );
+    expect(conversationStore.getConversation).toHaveBeenCalledWith('session-1');
+    expect(conversationStore.truncateFromUserTurn).toHaveBeenCalledWith(
+      'session-1',
+      0,
+    );
+    expect(agentManager.rewindSession).toHaveBeenCalledWith(0);
+    expect(sendToWebView).not.toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: 'Failed to capture conversation state before editing.' },
+    });
+  });
+
+  it('does not switch to a colliding ACP session id when rename fails', async () => {
+    mockProcessImageAttachments.mockImplementation(
+      async (promptText: string) => ({
+        formattedText: promptText,
+        displayText: promptText,
+        savedImageCount: 0,
+        promptImages: [],
+      }),
+    );
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversation = {
+      id: 'conversation-1',
+      title: 'Conversation',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue(conversation),
+      getConversation: vi.fn().mockResolvedValue(conversation),
+      addMessage: vi.fn().mockResolvedValue(undefined),
+      renameConversationId: vi.fn().mockResolvedValue(false),
+    };
+    const sendToWebView = vi.fn();
+    const handlerRef: { current: SessionMessageHandler | null } = {
+      current: null,
+    };
+    const syncCurrentConversationId = vi.fn((id: string | null) => {
+      handlerRef.current?.setCurrentConversationId(id);
+    });
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+      syncCurrentConversationId,
+    );
+    handlerRef.current = handler;
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'first prompt' },
+    });
+
+    expect(conversationStore.renameConversationId).toHaveBeenCalledWith(
+      'conversation-1',
+      'session-1',
+    );
+    expect(syncCurrentConversationId).toHaveBeenCalledWith('conversation-1');
+    expect(syncCurrentConversationId).not.toHaveBeenCalledWith('session-1');
+    expect(handler.getCurrentConversationId()).toBe('conversation-1');
+    expect(sendToWebView).not.toHaveBeenCalledWith({
+      type: 'sessionTitleUpdated',
+      data: {
+        sessionId: 'session-1',
+        title: 'first prompt',
+      },
+    });
+  });
+
+  it('syncs ACP session id alignment through the owning router setter', async () => {
+    mockProcessImageAttachments.mockImplementation(
+      async (promptText: string) => ({
+        formattedText: promptText,
+        displayText: promptText,
+        savedImageCount: 0,
+        promptImages: [],
+      }),
+    );
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversation = {
+      id: 'conversation-1',
+      title: 'Conversation',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue(conversation),
+      getConversation: vi.fn().mockResolvedValue(conversation),
+      addMessage: vi.fn().mockResolvedValue(undefined),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+    const handlerRef: { current: SessionMessageHandler | null } = {
+      current: null,
+    };
+    const syncCurrentConversationId = vi.fn((id: string | null) => {
+      handlerRef.current?.setCurrentConversationId(id);
+    });
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+      syncCurrentConversationId,
+    );
+    handlerRef.current = handler;
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'first prompt' },
+    });
+
+    expect(syncCurrentConversationId).toHaveBeenCalledWith('conversation-1');
+    expect(syncCurrentConversationId).toHaveBeenCalledWith('session-1');
+    expect(handler.getCurrentConversationId()).toBe('session-1');
   });
 
   it('rewinds the active ACP session before sending an edited message', async () => {
@@ -363,7 +574,7 @@ describe('SessionMessageHandler', () => {
     });
   });
 
-  it('aborts edits when the restore snapshot cannot be captured', async () => {
+  it('continues edits with ACP-only rewind when no local snapshot exists', async () => {
     mockProcessImageAttachments.mockResolvedValue({
       formattedText: 'edited prompt',
       displayText: 'edited prompt',
@@ -374,9 +585,12 @@ describe('SessionMessageHandler', () => {
     const agentManager = {
       isConnected: true,
       currentSessionId: 'session-1',
-      rewindSession: vi.fn(),
+      rewindSession: vi.fn().mockResolvedValue({
+        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+      }),
       restoreSessionHistory: vi.fn(),
-      sendMessage: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+      getSessionMessages: vi.fn().mockResolvedValue([]),
     };
     const conversationStore = {
       createConversation: vi.fn(),
@@ -384,6 +598,7 @@ describe('SessionMessageHandler', () => {
       addMessage: vi.fn(),
       replaceMessages: vi.fn(),
       truncateFromUserTurn: vi.fn(),
+      upsertConversation: vi.fn(),
     };
     const sendToWebView = vi.fn();
 
@@ -403,9 +618,94 @@ describe('SessionMessageHandler', () => {
     });
 
     expect(conversationStore.truncateFromUserTurn).not.toHaveBeenCalled();
-    expect(agentManager.rewindSession).not.toHaveBeenCalled();
-    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(agentManager.rewindSession).toHaveBeenCalledWith(1);
     expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationRewound',
+      data: { targetTurnIndex: 1 },
+    });
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      { type: 'text', text: 'edited prompt' },
+    ]);
+    expect(sendToWebView).not.toHaveBeenCalledWith({
+      type: 'sessionTitleUpdated',
+      data: {
+        sessionId: 'session-1',
+        title: 'edited prompt',
+      },
+    });
+    expect(sendToWebView).not.toHaveBeenCalledWith({
+      type: 'error',
+      data: expect.objectContaining({
+        message: 'Failed to capture conversation state before editing.',
+      }),
+    });
+  });
+
+  it('recovers a missing edit snapshot from persisted session messages', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'edited prompt',
+      displayText: 'edited prompt',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const persistedMessages = [
+      { role: 'user' as const, content: 'first', timestamp: 1 },
+      { role: 'assistant' as const, content: 'first reply', timestamp: 2 },
+      { role: 'user' as const, content: 'second', timestamp: 3 },
+    ];
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      rewindSession: vi.fn().mockResolvedValue({
+        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+      }),
+      restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+      getSessionMessages: vi.fn().mockResolvedValue(persistedMessages),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      replaceMessages: vi.fn(),
+      truncateFromUserTurn: vi.fn().mockResolvedValue(true),
+      upsertConversation: vi.fn().mockResolvedValue(undefined),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'editMessage',
+      data: {
+        text: 'edited prompt',
+        targetTurnIndex: 1,
+      },
+    });
+
+    expect(agentManager.getSessionMessages).toHaveBeenCalledWith('session-1');
+    expect(conversationStore.upsertConversation).toHaveBeenCalledWith({
+      id: 'session-1',
+      title: 'first',
+      messages: persistedMessages,
+      createdAt: 1,
+      updatedAt: 3,
+    });
+    expect(conversationStore.truncateFromUserTurn).toHaveBeenCalledWith(
+      'session-1',
+      1,
+    );
+    expect(agentManager.rewindSession).toHaveBeenCalledWith(1);
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      { type: 'text', text: 'edited prompt' },
+    ]);
+    expect(sendToWebView).not.toHaveBeenCalledWith({
       type: 'error',
       data: { message: 'Failed to capture conversation state before editing.' },
     });

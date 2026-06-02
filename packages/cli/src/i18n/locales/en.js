@@ -84,6 +84,8 @@ export default {
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
   'for help on Qwen Code': 'for help on Qwen Code',
   'show version info': 'show version info',
+  'show paths for current session files and logs':
+    'show paths for current session files and logs',
   'submit a bug report': 'submit a bug report',
   Status: 'Status',
 
@@ -132,6 +134,45 @@ export default {
     'Rename the current conversation. --auto lets the fast model pick a title.',
   'Rewind conversation to a previous turn':
     'Rewind conversation to a previous turn',
+  'Rewind Conversation': 'Rewind Conversation',
+  'No user turns to rewind to.': 'No user turns to rewind to.',
+  'Rewind to: ': 'Rewind to: ',
+  'Restore code and conversation': 'Restore code and conversation',
+  'Restore conversation only': 'Restore conversation only',
+  'Restore code only': 'Restore code only',
+  'Never mind': 'Never mind',
+  'Computing file changes...': 'Computing file changes...',
+  'Restoring...': 'Restoring...',
+  'Restored {{count}} file(s).': 'Restored {{count}} file(s).',
+  'Failed to restore files: {{error}}': 'Failed to restore files: {{error}}',
+  'Rewind failed: {{error}}': 'Rewind failed: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Cannot rewind conversation: no active model client.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Code restored, but conversation could not be rewound (no active client).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Conversation rewound. Edit your prompt and press Enter to continue.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'Rewinding does not affect files edited manually or via shell commands.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} in {{count}} file)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} in {{count}} files)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Failed to restore {{count}} file(s): {{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'Cannot restore files: this turn was created before file checkpointing was enabled.',
+  'No files needed to be restored.': 'No files needed to be restored.',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ to navigate · Enter to select · Esc to go back',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ to navigate · Enter to select · Esc to cancel',
+  'Enter/Y to confirm · Esc/N to go back':
+    'Enter/Y to confirm · Esc/N to go back',
   'change the theme': 'change the theme',
   'Select Theme': 'Select Theme',
   Preview: 'Preview',
@@ -151,8 +192,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
-  'Configure authentication information for login':
-    'Configure authentication information for login',
+  'Connect an LLM provider': 'Connect an LLM provider',
   'Copy the last result or code snippet to clipboard':
     'Copy the last result or code snippet to clipboard',
   'Show working-tree change stats versus HEAD':
@@ -713,6 +753,9 @@ export default {
   'When a session is ending': 'When a session is ending',
   'When a permission dialog is displayed':
     'When a permission dialog is displayed',
+  'When a new todo item is created': 'When a new todo item is created',
+  'When a todo item is marked as completed':
+    'When a todo item is marked as completed',
   // Hooks - Event Descriptions (detailed)
   'Input to command is JSON of tool call arguments.':
     'Input to command is JSON of tool call arguments.',
@@ -736,6 +779,10 @@ export default {
     'Input to command is JSON with compaction details.',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr not shown',
   'show stderr to model and continue conversation':
@@ -761,6 +808,12 @@ export default {
   'show stderr to user only but continue with compaction':
     'show stderr to user only but continue with compaction',
   'use hook decision if provided': 'use hook decision if provided',
+  'allow todo creation': 'allow todo creation',
+  'block todo creation and show reason to model':
+    'block todo creation and show reason to model',
+  'allow todo completion': 'allow todo completion',
+  'block todo completion and show reason to model':
+    'block todo completion and show reason to model',
   // Hooks - Messages
   'Config not loaded.': 'Config not loaded.',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
@@ -812,25 +865,6 @@ export default {
   'Set LLM output language': 'Set LLM output language',
   'Usage: /language ui [{{options}}]': 'Usage: /language ui [{{options}}]',
   'Usage: /language output <language>': 'Usage: /language output <language>',
-  'Manage dynamic translation cache': 'Manage dynamic translation cache',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    'Re-translate currently loaded dynamic slash descriptions for the current UI language',
-  'Clear cached translations for the current UI language':
-    'Clear cached translations for the current UI language',
-  'Manage AI translation for dynamic slash command descriptions':
-    'Manage AI translation for dynamic slash command descriptions',
-  'Enable AI translation for dynamic slash command descriptions':
-    'Enable AI translation for dynamic slash command descriptions',
-  'Disable AI translation for dynamic slash command descriptions':
-    'Disable AI translation for dynamic slash command descriptions',
-  'Show AI translation status for dynamic slash command descriptions':
-    'Show AI translation status for dynamic slash command descriptions',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    'AI translation for dynamic slash command descriptions is {{status}}.',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    'AI translation for dynamic slash command descriptions is now enabled.',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    'AI translation for dynamic slash command descriptions is now disabled.',
   'Example: /language output 中文': 'Example: /language output 中文',
   'Example: /language output English': 'Example: /language output English',
   'Example: /language output 日本語': 'Example: /language output 日本語',
@@ -867,6 +901,7 @@ export default {
   'Auto-memory: {{status}}': 'Auto-memory: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Auto-dream: {{status}} · {{lastDream}} · /dream to run',
+  'Auto-skill: {{status}}': 'Auto-skill: {{status}}',
   never: 'never',
   on: 'on',
   off: 'off',
@@ -1122,9 +1157,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Welcome back! (Last updated: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Overall Goal:',
-  'Select Authentication Method': 'Select Authentication Method',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+  'Connect a Provider': 'Connect a Provider',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'You must connect a provider to proceed. Press Ctrl+C again to exit.',
   'Terms of Services and Privacy Notice':
     'Terms of Services and Privacy Notice',
   'Qwen OAuth': 'Qwen OAuth',
@@ -1863,6 +1898,8 @@ export default {
     'Press Ctrl+O to show full tool output',
   'Switch to plan mode or exit plan mode':
     'Switch to plan mode or exit plan mode',
+  'Set a goal — keep working until the condition is met':
+    'Set a goal — keep working until the condition is met',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1875,6 +1912,8 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': 'Open the memory manager.',
+  'Show current process memory diagnostics':
+    'Show current process memory diagnostics',
   'Save a durable memory to the memory system.':
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':

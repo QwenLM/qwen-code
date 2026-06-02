@@ -43,7 +43,6 @@ import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
-import { dynamicCommandLocalizationService } from '../../services/DynamicCommandLocalizationService.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
@@ -63,7 +62,7 @@ type SerializableHistoryItem = Record<string, unknown>;
 const debugLogger = createDebugLogger('SLASH_COMMAND_PROCESSOR');
 
 function serializeHistoryItemForRecording(
-  item: Omit<HistoryItem, 'id'>,
+  item: HistoryItemWithoutId,
 ): SerializableHistoryItem {
   const clone: SerializableHistoryItem = { ...item };
   if ('timestamp' in clone && clone['timestamp'] instanceof Date) {
@@ -91,8 +90,8 @@ export interface SlashCommandProcessorActions {
   openEditorDialog: () => void;
   openMemoryDialog: () => void;
   openSettingsDialog: () => void;
+  openStatusLineDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
-  openManageModelsDialog: () => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
@@ -110,6 +109,7 @@ export interface SlashCommandProcessorActions {
   openMcpDialog: () => void;
   openHooksDialog: () => void;
   openRewindSelector: () => void;
+  openDiffDialog: () => void;
   openHelpDialog: () => void;
 }
 
@@ -132,6 +132,7 @@ export const useSlashCommandProcessor = (
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
   isConfigInitialized: boolean,
   logger: Logger | null,
+  updateItem: UseHistoryManagerReturn['updateItem'],
   setSessionName?: (name: string | null) => void,
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
@@ -434,14 +435,6 @@ export const useSlashCommandProcessor = (
           controller.signal,
           disabled.length > 0 ? new Set(disabled) : undefined,
         );
-        const localizedCommandService = CommandService.fromCommands(
-          await dynamicCommandLocalizationService.localizeCommands(
-            config,
-            commandService.getCommands(),
-            controller.signal,
-            settings.merged?.general?.dynamicCommandTranslation === true,
-          ),
-        );
         // Avoid overwriting newer results from a subsequent effect run
         if (controller.signal.aborted) {
           return;
@@ -450,7 +443,7 @@ export const useSlashCommandProcessor = (
         // bundled skills, file commands, and MCP prompts in its description.
         if (config) {
           config.setModelInvocableCommandsProvider(() =>
-            localizedCommandService.getModelInvocableCommands().map((cmd) => ({
+            commandService.getModelInvocableCommands().map((cmd) => ({
               name: cmd.name,
               description: cmd.modelDescription ?? cmd.description,
             })),
@@ -459,8 +452,7 @@ export const useSlashCommandProcessor = (
           // commands (e.g. MCP prompts) that are not file-based skills.
           config.setModelInvocableCommandsExecutor(
             async (name: string, args: string = '') => {
-              const commands =
-                localizedCommandService.getModelInvocableCommands();
+              const commands = commandService.getModelInvocableCommands();
               const cmd = commands.find((c) => c.name === name);
               if (!cmd?.action) return null;
               // Build a minimal context; submit_prompt actions only need
@@ -491,7 +483,7 @@ export const useSlashCommandProcessor = (
             },
           );
         }
-        setCommands(localizedCommandService.getCommandsForMode('interactive'));
+        setCommands(commandService.getCommandsForMode('interactive'));
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);
       } finally {
@@ -520,6 +512,7 @@ export const useSlashCommandProcessor = (
       rawQuery: PartListUnion,
       oneTimeShellAllowlist?: Set<string>,
       overwriteConfirmed?: boolean,
+      existingInvocationItemId?: number,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {
         return false;
@@ -533,8 +526,8 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
-      const recordedItems: Array<Omit<HistoryItem, 'id'>> = [];
-      const recordItem = (item: Omit<HistoryItem, 'id'>) => {
+      const recordedItems: HistoryItemWithoutId[] = [];
+      const recordItem = (item: HistoryItemWithoutId) => {
         recordedItems.push(item);
       };
       const addItemWithRecording: UseHistoryManagerReturn['addItem'] = (
@@ -552,14 +545,17 @@ export const useSlashCommandProcessor = (
       abortControllerRef.current = abortController;
 
       const userMessageTimestamp = Date.now();
-      if (!isBtwCommand(trimmed)) {
-        addItemWithRecording(
-          { type: MessageType.USER, text: trimmed },
+      let invocationItemId = existingInvocationItemId;
+      let invocationSentToModel = false;
+      if (!isBtwCommand(trimmed) && invocationItemId === undefined) {
+        invocationItemId = addItemWithRecording(
+          { type: MessageType.USER, text: trimmed, sentToModel: false },
           userMessageTimestamp,
         );
       }
 
       let hasError = false;
+      let delegatedToRecursiveInvocation = false;
       const {
         commandToExecute,
         args,
@@ -649,6 +645,12 @@ export const useSlashCommandProcessor = (
                       content: result.content,
                       timestamp: new Date(),
                     });
+                  } else if (result.messageType === 'warning') {
+                    addMessage({
+                      type: MessageType.WARNING,
+                      content: result.content,
+                      timestamp: new Date(),
+                    });
                   } else {
                     addMessage({
                       type: MessageType.ERROR,
@@ -683,6 +685,9 @@ export const useSlashCommandProcessor = (
                     case 'settings':
                       actions.openSettingsDialog();
                       return { type: 'handled' };
+                    case 'statusline':
+                      actions.openStatusLineDialog();
+                      return { type: 'handled' };
                     case 'memory':
                       actions.openMemoryDialog();
                       return { type: 'handled' };
@@ -691,9 +696,6 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'fast-model':
                       actions.openModelDialog({ fastModelMode: true });
-                      return { type: 'handled' };
-                    case 'manage-models':
-                      actions.openManageModelsDialog();
                       return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();
@@ -741,6 +743,9 @@ export const useSlashCommandProcessor = (
                     case 'rewind':
                       actions.openRewindSelector();
                       return { type: 'handled' };
+                    case 'diff':
+                      actions.openDiffDialog();
+                      return { type: 'handled' };
                     case 'help':
                       actions.openHelpDialog();
                       return { type: 'handled' };
@@ -765,6 +770,18 @@ export const useSlashCommandProcessor = (
                   return { type: 'handled' };
 
                 case 'submit_prompt':
+                  if (invocationItemId !== undefined) {
+                    invocationSentToModel = true;
+                    debugLogger.debug(
+                      `Marked slash command invocation as model-sent: /${resolvedCommandPath.join(
+                        ' ',
+                      )}`,
+                    );
+                    // React applies this update asynchronously. No same-turn
+                    // logic reads the UI history classification; rewind/resume
+                    // consumers observe it after state has rendered.
+                    updateItem(invocationItemId, { sentToModel: true });
+                  }
                   return {
                     type: 'submit_prompt',
                     content: result.content,
@@ -804,10 +821,13 @@ export const useSlashCommandProcessor = (
                     );
                   }
 
+                  delegatedToRecursiveInvocation = true;
                   return await handleSlashCommand(
                     result.originalInvocation.raw,
                     // Pass the approved commands as a one-time grant for this execution.
                     new Set(approvedCommands),
+                    undefined,
+                    invocationItemId,
                   );
                 }
                 case 'confirm_action': {
@@ -834,10 +854,12 @@ export const useSlashCommandProcessor = (
                     return { type: 'handled' };
                   }
 
+                  delegatedToRecursiveInvocation = true;
                   return await handleSlashCommand(
                     result.originalInvocation.raw,
                     undefined,
                     true,
+                    invocationItemId,
                   );
                 }
                 case 'stream_messages': {
@@ -904,15 +926,17 @@ export const useSlashCommandProcessor = (
           const chatRecorder = config.getChatRecordingService();
           const primaryCommand =
             resolvedCommandPath[0] ||
-            trimmed.replace(/^[/?]/, '').split(/\s+/)[0] ||
+            trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
             trimmed;
           const shouldRecord =
+            !delegatedToRecursiveInvocation &&
             !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
           try {
             if (shouldRecord) {
               chatRecorder?.recordSlashCommand({
                 phase: 'invocation',
                 rawCommand: trimmed,
+                sentToModel: invocationSentToModel,
               });
               const outputItems = recordedItems
                 .filter((item) => item.type !== 'user')
@@ -930,7 +954,12 @@ export const useSlashCommandProcessor = (
             );
           }
         }
-        if (config && resolvedCommandPath[0] && !hasError) {
+        if (
+          config &&
+          resolvedCommandPath[0] &&
+          !hasError &&
+          !delegatedToRecursiveInvocation
+        ) {
           const event = makeSlashCommandEvent({
             command: resolvedCommandPath[0],
             subcommand,
@@ -952,6 +981,7 @@ export const useSlashCommandProcessor = (
       setSessionShellAllowlist,
       setIsProcessing,
       setConfirmationRequest,
+      updateItem,
     ],
   );
 

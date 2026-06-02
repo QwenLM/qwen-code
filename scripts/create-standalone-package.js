@@ -36,9 +36,15 @@ const TARGETS = new Map([
   ['win-x64', { outputExtension: 'zip', nodeExecutable: ['node.exe'] }],
 ]);
 
-const DIST_REQUIRED_PATHS = ['cli.js', 'vendor', 'bundled/qc-helper/docs'];
+const DIST_REQUIRED_PATHS = [
+  'cli.js',
+  'chunks',
+  'vendor',
+  'bundled/qc-helper/docs',
+];
 const DIST_ALLOWED_ENTRIES = new Set([
   'cli.js',
+  'chunks',
   'vendor',
   'bundled',
   'package.json',

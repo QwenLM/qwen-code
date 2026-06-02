@@ -439,8 +439,17 @@ export function useSessionPicker({
         return;
       }
 
-      if (name === 'up' || name === 'down') {
-        const delta = name === 'up' ? -1 : +1;
+      // Arrow keys are mode-aware (cross between search and list).
+      // Hoist Ctrl+P/Ctrl+N alongside as their readline-style equivalents so
+      // they escape the search input the same way arrows do. Bare `k`/`j`
+      // remain list-only further below (they would otherwise seed the search
+      // query with the letter and the design intent — see the comment near
+      // the `name === 'k'` branch — is that vim-style keys do not cross
+      // modes).
+      const isNavUp = name === 'up' || (ctrl && name === 'p');
+      const isNavDown = name === 'down' || (ctrl && name === 'n');
+      if (isNavUp || isNavDown) {
+        const delta = isNavUp ? -1 : +1;
         const inSearch = viewMode === 'search';
         if (inSearch) {
           if (filteredSessions.length === 0) return;

@@ -19,7 +19,11 @@ import type { ContentGenerator } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { resolveModelId, type ResolvedModelId } from '../utils/modelId.js';
+import {
+  buildModelIdContext,
+  resolveModelId,
+  type ResolvedModelId,
+} from '../utils/modelId.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
@@ -87,6 +91,35 @@ export interface GenerateTextResult {
 }
 
 /**
+ * Best-effort JSON-object extraction from a model's text response. Used as a
+ * fallback when the model emits plain-text JSON instead of calling the
+ * registered tool. Strips a leading ```json / ``` fence, then takes the
+ * substring from the first `{` to the matching last `}` and JSON-parses it.
+ * Returns the parsed object on success, or `null` if nothing usable is found.
+ */
+function parseLooseJsonObject(text: string): Record<string, unknown> | null {
+  let s = text.trim();
+  if (s.startsWith('```')) {
+    s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+  }
+  const firstStructuredChar = s.search(/[[{]/);
+  if (firstStructuredChar !== -1 && s[firstStructuredChar] === '[') {
+    return null;
+  }
+  const first = s.indexOf('{');
+  const last = s.lastIndexOf('}');
+  if (first === -1 || last === -1 || last <= first) return null;
+  try {
+    const parsed = JSON.parse(s.slice(first, last + 1));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Options for the generateJson utility function.
  */
 export interface GenerateJsonOptions {
@@ -142,6 +175,10 @@ export class BaseLlmClient {
     private readonly contentGenerator: ContentGenerator,
     private readonly config: Config,
   ) {}
+
+  private getCurrentContentGenerator(): ContentGenerator {
+    return this.config.getContentGenerator?.() ?? this.contentGenerator;
+  }
 
   async generateJson(
     options: GenerateJsonOptions,
@@ -215,6 +252,12 @@ export class BaseLlmClient {
         if (functionCall && functionCall.args) {
           return functionCall.args as Record<string, unknown>;
         }
+      }
+
+      const text = getResponseText(result);
+      if (text) {
+        const parsed = parseLooseJsonObject(text);
+        if (parsed) return parsed;
       }
       return {};
     } catch (error) {
@@ -381,7 +424,7 @@ export class BaseLlmClient {
       (!selector?.authType || selector.authType === mainAuthType)
     ) {
       return {
-        contentGenerator: this.contentGenerator,
+        contentGenerator: this.getCurrentContentGenerator(),
         retryAuthType: mainAuthType,
         model: requestModel,
       };
@@ -461,17 +504,21 @@ export class BaseLlmClient {
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
 
+    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
+
+    if (!resolvedModel) {
+      debugLogger.warn(
+        `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
+      );
+      // Do not cache the fallback: getCurrentContentGenerator() reads the
+      // runtime view from AsyncLocalStorage, which can differ between calls
+      // (e.g. inside a subagent vs. on the main session). Caching here would
+      // pin the first-call view's generator under this selector key.
+      return this.getCurrentContentGenerator();
+    }
+
     const generatorPromise = (async () => {
       try {
-        const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
-
-        if (!resolvedModel) {
-          debugLogger.warn(
-            `Model "${model}" not found in registry across all authTypes, falling back to main generator.`,
-          );
-          return this.contentGenerator;
-        }
-
         const targetModel = resolvedModel.id ?? selector?.modelId ?? model;
         const targetConfig = buildAgentContentGeneratorConfig(
           this.config,
@@ -492,7 +539,7 @@ export class BaseLlmClient {
           err instanceof Error ? err.message : String(err),
         );
         this.perModelGeneratorCache.delete(cacheKey);
-        return this.contentGenerator;
+        return this.getCurrentContentGenerator();
       }
     })();
 
@@ -501,12 +548,6 @@ export class BaseLlmClient {
   }
 
   private resolveModelSelector(model: string): ResolvedModelId | undefined {
-    return resolveModelId(model, {
-      currentModel: this.config.getModel(),
-      currentAuthType: this.config.getContentGeneratorConfig()?.authType,
-      fastModel:
-        this.config.getFastModelForSideQuery?.() ??
-        this.config.getFastModel?.(),
-    });
+    return resolveModelId(model, buildModelIdContext(this.config));
   }
 }

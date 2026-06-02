@@ -64,6 +64,8 @@ function renderPanel(
     dialogMode: options.dialogOpen ? ('list' as const) : ('closed' as const),
     dialogOpen: Boolean(options.dialogOpen),
     pillFocused: false,
+    livePanelFocused: false,
+    livePanelSelectedIndex: 0,
   };
   // Wrap render() in act() so the panel's mount-time effect (the
   // 1s wall-clock interval) is flushed inside React's scheduler boundary
@@ -146,9 +148,7 @@ describe('<LiveAgentPanel />', () => {
       ],
     });
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('Active agents');
-    // Running and total tally both 1.
-    expect(frame).toContain('(1/1)');
+    expect(frame).toContain('main');
     expect(frame).toContain('researcher');
     expect(frame).toContain('scan repo for TODO markers');
     // Latest activity is rendered next to the row, with elapsed time.
@@ -277,12 +277,7 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toContain('2.4k tokens');
   });
 
-  it('counts paused agents as active in the header tally', () => {
-    // The header read "Active agents (running/total)" but the
-    // panel ALSO renders paused agents as active rows (warning
-    // color, ⏸ glyph). With only paused entries the tally would
-    // read "(0/1)" — visually contradicting the row that's clearly
-    // present. Numerator now includes paused.
+  it('renders paused agents with the paused glyph', () => {
     const { lastFrame } = renderPanel({
       entries: [
         agentEntry({
@@ -294,7 +289,7 @@ describe('<LiveAgentPanel />', () => {
       ],
     });
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('(1/1)');
+    expect(frame).toContain('main');
     expect(frame).toContain('⏸');
   });
 
@@ -352,7 +347,7 @@ describe('<LiveAgentPanel />', () => {
           agentId: 'fg-1',
           subagentType: 'editor',
           description: 'editor: tighten import order',
-          flavor: 'foreground',
+          isBackgrounded: false,
         }),
       ],
     });
@@ -368,21 +363,28 @@ describe('<LiveAgentPanel />', () => {
   });
 
   it('windows from the tail when entries exceed maxRows', () => {
+    // Entries arrive newest-first from `useBackgroundTaskView`. The
+    // panel reverses internally so it can window from the tail in
+    // launch order, with the newest row sitting closest to the
+    // composer.
     const entries = [
       agentEntry({
-        agentId: 'a-1',
-        subagentType: 'old-agent',
-        description: 'old work',
+        agentId: 'a-3',
+        subagentType: 'fresh-agent',
+        description: 'fresh work',
+        startTime: 300,
       }),
       agentEntry({
         agentId: 'a-2',
         subagentType: 'mid-agent',
         description: 'mid work',
+        startTime: 200,
       }),
       agentEntry({
-        agentId: 'a-3',
-        subagentType: 'fresh-agent',
-        description: 'fresh work',
+        agentId: 'a-1',
+        subagentType: 'old-agent',
+        description: 'old work',
+        startTime: 100,
       }),
     ];
     const { lastFrame } = renderPanel({ entries, maxRows: 2 });
@@ -397,9 +399,8 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toContain('fresh-agent');
     // Oldest row falls outside the window.
     expect(frame).not.toContain('old-agent');
-    // Total tally still reflects every agent — windowing is a render
-    // concern, not a counting one.
-    expect(frame).toContain('(3/3)');
+    // "main" header is always present.
+    expect(frame).toContain('main');
   });
 
   it('re-pulls recentActivities from the live registry on each tick', () => {
@@ -456,7 +457,6 @@ describe('<LiveAgentPanel />', () => {
     // Within the visibility window the row is still on screen but the
     // running tally drops to 0/1.
     expect(lastFrame() ?? '').toContain('finisher');
-    expect(lastFrame() ?? '').toContain('(0/1)');
 
     act(() => {
       vi.advanceTimersByTime(9000);
@@ -497,7 +497,6 @@ describe('<LiveAgentPanel />', () => {
     // The synthesis sets status='completed' for the visibility-window
     // logic but flags `synthesized: true` so the row renders the
     // neutral `·` glyph instead of the success `✔`.
-    expect(frame).toContain('(0/1)');
     expect(frame).not.toContain('✔');
     expect(frame).toContain('·');
     // After the visibility window the row evicts and the panel hides.

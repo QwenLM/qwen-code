@@ -72,17 +72,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
-vi.mock('../../services/DynamicCommandLocalizationService.js', () => ({
-  dynamicCommandLocalizationService: {
-    requestRefreshForLanguage: vi.fn(),
-    clearCacheForLanguage: vi.fn().mockResolvedValue(0),
-  },
-}));
-
 // Import modules after mocking
 import * as i18n from '../../i18n/index.js';
 import { SUPPORTED_LANGUAGES } from '../../i18n/languages.js';
-import { dynamicCommandLocalizationService } from '../../services/DynamicCommandLocalizationService.js';
 import { languageCommand } from './languageCommand.js';
 import { initializeLlmOutputLanguage } from '../../utils/languageUtils.js';
 
@@ -141,23 +133,13 @@ describe('languageCommand', () => {
 
     it('should have subcommands', () => {
       expect(languageCommand.subCommands).toBeDefined();
-      expect(languageCommand.subCommands?.length).toBe(3);
+      expect(languageCommand.subCommands?.length).toBe(2);
     });
 
-    it('should have ui, output, and translate subcommands', () => {
+    it('should have ui and output subcommands', () => {
       const subCommandNames = languageCommand.subCommands?.map((c) => c.name);
       expect(subCommandNames).toContain('ui');
       expect(subCommandNames).toContain('output');
-      expect(subCommandNames).toContain('translate');
-      expect(subCommandNames).not.toContain('cache');
-    });
-
-    it('should have translate on, off, status, and cache subcommands', () => {
-      const translateSubcommand = languageCommand.subCommands?.find(
-        (c) => c.name === 'translate',
-      );
-      const nestedNames = translateSubcommand?.subCommands?.map((c) => c.name);
-      expect(nestedNames).toEqual(['on', 'off', 'status', 'cache']);
     });
   });
 
@@ -192,16 +174,6 @@ describe('languageCommand', () => {
         type: 'message',
         messageType: 'info',
         content: expect.stringContaining('/language output'),
-      });
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining('/language translate'),
-      });
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.not.stringContaining('/language cache'),
       });
     });
 
@@ -276,22 +248,6 @@ describe('languageCommand', () => {
         type: 'message',
         messageType: 'info',
         content: expect.stringContaining('Chinese'),
-      });
-    });
-
-    it('should show dynamic command translation as disabled by default', async () => {
-      if (!languageCommand.action) {
-        throw new Error('The language command must have an action.');
-      }
-
-      const result = await languageCommand.action(mockContext, '');
-
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining(
-          'AI translation for dynamic slash command descriptions is disabled.',
-        ),
       });
     });
   });
@@ -620,214 +576,6 @@ describe('languageCommand', () => {
       });
     });
   });
-
-  describe('/language translate cache subcommand', () => {
-    it('should show help when no action is provided', async () => {
-      if (!languageCommand.action) {
-        throw new Error('The language command must have an action.');
-      }
-
-      const result = await languageCommand.action(
-        mockContext,
-        'translate cache',
-      );
-
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining('/language translate cache refresh'),
-      });
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining('/language translate cache clear'),
-      });
-    });
-
-    it('should not route the old top-level cache command', async () => {
-      if (!languageCommand.action) {
-        throw new Error('The language command must have an action.');
-      }
-
-      const result = await languageCommand.action(mockContext, 'cache');
-
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: expect.stringContaining('Invalid command'),
-      });
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'error',
-        content: expect.not.stringContaining('/language cache refresh'),
-      });
-    });
-
-    it('should request a refresh and reload commands', async () => {
-      if (!languageCommand.action) {
-        throw new Error('The language command must have an action.');
-      }
-
-      const result = await languageCommand.action(
-        mockContext,
-        'translate cache refresh',
-      );
-
-      expect(
-        dynamicCommandLocalizationService.requestRefreshForLanguage,
-      ).toHaveBeenCalledWith('en');
-      expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining(
-          'Re-translate currently loaded dynamic slash descriptions',
-        ),
-      });
-    });
-
-    it('should clear current-language cache entries', async () => {
-      if (!languageCommand.action) {
-        throw new Error('The language command must have an action.');
-      }
-
-      const result = await languageCommand.action(
-        mockContext,
-        'translate cache clear',
-      );
-
-      expect(
-        dynamicCommandLocalizationService.clearCacheForLanguage,
-      ).toHaveBeenCalledWith('en');
-      expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining(
-          'Clear cached translations for the current UI language',
-        ),
-      });
-    });
-  });
-
-  describe('/language translate subcommand', () => {
-    it('should show help and current disabled status when no action is provided', async () => {
-      if (!languageCommand.action) {
-        throw new Error('The language command must have an action.');
-      }
-
-      const result = await languageCommand.action(mockContext, 'translate');
-
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining('/language translate on'),
-      });
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining('/language translate cache'),
-      });
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining(
-          'AI translation for dynamic slash command descriptions is disabled.',
-        ),
-      });
-    });
-
-    it('should enable dynamic command translation and reload commands', async () => {
-      if (!languageCommand.action) {
-        throw new Error('The language command must have an action.');
-      }
-
-      const result = await languageCommand.action(mockContext, 'translate on');
-
-      expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
-        expect.anything(),
-        'general.dynamicCommandTranslation',
-        true,
-      );
-      expect(
-        dynamicCommandLocalizationService.requestRefreshForLanguage,
-      ).toHaveBeenCalledWith('en');
-      expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining('is now enabled'),
-      });
-    });
-
-    it('should not wait for dynamic command reload to finish when enabling', async () => {
-      if (!languageCommand.action) {
-        throw new Error('The language command must have an action.');
-      }
-
-      mockContext.ui.reloadCommands = vi.fn(() => new Promise<void>(() => {}));
-
-      const result = await Promise.race([
-        languageCommand.action(mockContext, 'translate on'),
-        new Promise<'timeout'>((resolve) =>
-          setTimeout(() => resolve('timeout'), 10),
-        ),
-      ]);
-
-      expect(result).not.toBe('timeout');
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining('is now enabled'),
-      });
-    });
-
-    it('should disable dynamic command translation and reload commands', async () => {
-      if (!languageCommand.action) {
-        throw new Error('The language command must have an action.');
-      }
-
-      const result = await languageCommand.action(mockContext, 'translate off');
-
-      expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
-        expect.anything(),
-        'general.dynamicCommandTranslation',
-        false,
-      );
-      expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining('is now disabled'),
-      });
-    });
-
-    it('should show enabled status when setting is true', async () => {
-      mockContext.services.settings = {
-        ...mockContext.services.settings,
-        merged: { general: { dynamicCommandTranslation: true } },
-        setValue: vi.fn(),
-      } as unknown as LoadedSettings;
-
-      if (!languageCommand.action) {
-        throw new Error('The language command must have an action.');
-      }
-
-      const result = await languageCommand.action(
-        mockContext,
-        'translate status',
-      );
-
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining(
-          'AI translation for dynamic slash command descriptions is enabled.',
-        ),
-      });
-    });
-  });
-
   describe('backward compatibility - direct language arguments', () => {
     it('should set Chinese with direct "zh" argument', async () => {
       if (!languageCommand.action) {

@@ -182,6 +182,15 @@ export class SessionService {
   }
 
   /**
+   * Returns the absolute path to the sidecar JSON file that stores
+   * worktree session state for the given session id. The file may not
+   * exist yet — consumers must handle ENOENT as "no active worktree".
+   */
+  getWorktreeSessionPath(sessionId: string): string {
+    return path.join(this.getChatsDir(), `${sessionId}.worktree.json`);
+  }
+
+  /**
    * Reads the session title from a JSONL file.
    *
    * Delegates to {@link readLastJsonStringFieldSync}, which scans the tail
@@ -1182,6 +1191,49 @@ function stripThoughtsFromContent(content: Content): Content | null {
   };
 }
 
+function copyContentForApiHistory(content: Content): Content {
+  return {
+    ...content,
+    parts: content.parts?.map((part) => {
+      if ('functionCall' in part && part.functionCall) {
+        return {
+          ...part,
+          functionCall: {
+            ...part.functionCall,
+            args: part.functionCall.args
+              ? { ...part.functionCall.args }
+              : part.functionCall.args,
+          },
+        };
+      }
+      if ('functionResponse' in part && part.functionResponse) {
+        return {
+          ...part,
+          functionResponse: {
+            ...part.functionResponse,
+          },
+        };
+      }
+      return { ...part };
+    }),
+  };
+}
+
+function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
+  if (!record.message) return;
+
+  const message = copyContentForApiHistory(record.message as Content);
+  if (record.subtype === 'mid_turn_user_message') {
+    const previous = history.at(-1);
+    if (previous?.role === 'user') {
+      previous.parts = [...(previous.parts ?? []), ...(message.parts ?? [])];
+      return;
+    }
+  }
+
+  history.push(message);
+}
+
 /**
  * Builds the model-facing chat history (Content[]) from a reconstructed
  * conversation. This keeps UI history intact while applying chat compression
@@ -1216,15 +1268,15 @@ export function buildApiHistoryFromConversation(
   });
 
   if (compressedHistory && lastCompressionIndex >= 0) {
-    const baseHistory: Content[] = structuredClone(compressedHistory);
+    const baseHistory: Content[] = compressedHistory.map(
+      copyContentForApiHistory,
+    );
 
     // Append everything after the compression record (newer turns)
     for (let i = lastCompressionIndex + 1; i < messages.length; i++) {
       const record = messages[i];
       if (record.type === 'system') continue;
-      if (record.message) {
-        baseHistory.push(structuredClone(record.message as Content));
-      }
+      appendApiHistoryRecord(baseHistory, record);
     }
 
     if (stripThoughtsFromHistory) {
@@ -1236,10 +1288,10 @@ export function buildApiHistoryFromConversation(
   }
 
   // Fallback: return linear messages as Content[]
-  const result = messages
-    .map((record) => record.message)
-    .filter((message): message is Content => message !== undefined)
-    .map((message) => structuredClone(message));
+  const result: Content[] = [];
+  for (const record of messages) {
+    appendApiHistoryRecord(result, record);
+  }
 
   if (stripThoughtsFromHistory) {
     return result

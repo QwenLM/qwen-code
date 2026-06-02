@@ -87,7 +87,22 @@ export interface InputPromptProps {
   onEscapePromptChange?: (showPrompt: boolean) => void;
   onToggleShortcuts?: () => void;
   showShortcuts?: boolean;
+  /**
+   * Reports autocomplete-dropdown visibility specifically. Composer uses
+   * this to hide the Footer / KeyboardShortcuts when the dropdown would
+   * overlap their vertical space. Must stay narrow — followup suggestions
+   * and mid-input ghost text don't take Footer's space and shouldn't hide
+   * it. See #4171 / #4308 review.
+   */
   onSuggestionsVisibilityChange?: (visible: boolean) => void;
+  /**
+   * Reports whether any input-area handler will consume a Tab keystroke
+   * (autocomplete dropdown, followup prompt suggestion, or mid-input ghost
+   * text). AppContainer feeds this into useAutoAcceptIndicator's
+   * `shouldBlockTab` to suppress the Windows-only "bare Tab cycles approval
+   * mode" fallback. See #4171.
+   */
+  onTabConsumerChange?: (active: boolean) => void;
   vimHandleInput?: (key: Key) => boolean;
   isEmbeddedShellFocused?: boolean;
   /** Prompt suggestion text to display after response completes */
@@ -122,6 +137,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   onToggleShortcuts,
   showShortcuts,
   onSuggestionsVisibilityChange,
+  onTabConsumerChange,
   vimHandleInput,
   isEmbeddedShellFocused,
   promptSuggestion,
@@ -137,12 +153,33 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     entries: bgEntries,
     dialogOpen: bgDialogOpen,
     pillFocused: bgPillFocused,
+    livePanelFocused,
+    livePanelSelectedIndex,
   } = useBackgroundTaskViewState();
-  const { setPillFocused: setBgPillFocused } = useBackgroundTaskViewActions();
+  const {
+    setLivePanelFocused,
+    setLivePanelSelectedIndex,
+    enterDetailFromPanel: enterBgDetailFromPanel,
+    setSelectedIndex: setBgSelectedIndex,
+  } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
   // Includes terminal entries — the pill stays open so users can reopen
   // the dialog to inspect final state after the last agent finishes.
   const hasBgAgents = bgEntries.length > 0;
+  const bgAgentCount = useMemo(
+    () => bgEntries.filter((e) => e.kind === 'agent').length,
+    [bgEntries],
+  );
+  const hasActiveToolConfirmation = useMemo(
+    () =>
+      Boolean(uiState.confirmationRequest) ||
+      (uiState.pendingGeminiHistoryItems ?? []).some(
+        (item) =>
+          item.type === 'tool_group' &&
+          item.tools.some((tool) => tool.confirmationDetails),
+      ),
+    [uiState.confirmationRequest, uiState.pendingGeminiHistoryItems],
+  );
   const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
   const [escPressCount, setEscPressCount] = useState(0);
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
@@ -472,6 +509,49 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // Printable characters fall through to BaseTextInput's default
       // handler so the first keystroke appears in the input immediately
       // (each surface's own handler releases focus on the same event).
+      // LiveAgentPanel keyboard navigation: ↓/↑ move selection,
+      // Enter opens dialog for selected agent, Esc/↑-at-top returns
+      // focus to composer. Printable chars type through (auto-unfocus).
+      if (livePanelFocused) {
+        if (key.name === 'down' || (key.ctrl && key.name === 'n')) {
+          const maxIdx = bgAgentCount; // 0=main, 1..N=agents
+          if (livePanelSelectedIndex < maxIdx) {
+            setLivePanelSelectedIndex(livePanelSelectedIndex + 1);
+          }
+          return true;
+        }
+        if (key.name === 'up' || (key.ctrl && key.name === 'p')) {
+          if (livePanelSelectedIndex <= 0) {
+            setLivePanelFocused(false);
+          } else {
+            setLivePanelSelectedIndex(livePanelSelectedIndex - 1);
+          }
+          return true;
+        }
+        if (key.name === 'return') {
+          if (livePanelSelectedIndex === 0) {
+            setLivePanelFocused(false);
+          } else {
+            const agentIdx = livePanelSelectedIndex - 1;
+            if (agentIdx < bgAgentCount) {
+              setBgSelectedIndex(agentIdx);
+              enterBgDetailFromPanel();
+            }
+            setLivePanelFocused(false);
+          }
+          return true;
+        }
+        if (key.name === 'escape') {
+          setLivePanelFocused(false);
+          return true;
+        }
+        if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
+          setLivePanelFocused(false);
+          return false;
+        }
+        return true;
+      }
+
       if (agentTabBarFocused || bgPillFocused) {
         if (
           key.sequence &&
@@ -784,7 +864,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Prevent up/down from falling through to regular history navigation
         if (
           keyMatchers[Command.NAVIGATION_UP](key) ||
-          keyMatchers[Command.NAVIGATION_DOWN](key)
+          keyMatchers[Command.NAVIGATION_DOWN](key) ||
+          keyMatchers[Command.HISTORY_UP](key) ||
+          keyMatchers[Command.HISTORY_DOWN](key)
         ) {
           return true;
         }
@@ -955,6 +1037,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
+        if (
+          hasActiveToolConfirmation &&
+          (keyMatchers[Command.HISTORY_UP](key) ||
+            keyMatchers[Command.HISTORY_DOWN](key) ||
+            keyMatchers[Command.NAVIGATION_UP](key) ||
+            keyMatchers[Command.NAVIGATION_DOWN](key))
+        ) {
+          return true;
+        }
+
         // Pop all queued messages into input when pressing Up arrow at top of input
         if (
           !isAttachmentMode &&
@@ -968,11 +1060,52 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         if (keyMatchers[Command.HISTORY_UP](key)) {
-          inputHistory.navigateUp();
+          // Two-step edge transition (matches Claude Code):
+          // 1. If not on first visual row → move cursor up one row
+          // 2. Else if cursor not at col 0 → snap to col 0 (no history change)
+          // 3. Else → navigate to older history; cursor lands at offset 0
+          const onFirstRow =
+            buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0;
+          if (!onFirstRow) {
+            buffer.move('up');
+            return true;
+          }
+          if (buffer.visualCursor[1] > 0) {
+            buffer.move('home');
+            return true;
+          }
+          if (inputHistory.navigateUp()) {
+            buffer.moveToOffset(0);
+          }
           return true;
         }
         if (keyMatchers[Command.HISTORY_DOWN](key)) {
-          inputHistory.navigateDown();
+          // Two-step edge transition (matches Claude Code):
+          // 1. If not on last visual row → move cursor down one row
+          // 2. Else if cursor not at end of line → snap to end (no history change)
+          // 3. Else → navigate to newer history; cursor lands at end (setText default)
+          const lastRowIdx = buffer.allVisualLines.length - 1;
+          const onLastRow = buffer.visualCursor[0] === lastRowIdx;
+          if (!onLastRow) {
+            buffer.move('down');
+            return true;
+          }
+          const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
+          if (buffer.visualCursor[1] < lastRowLen) {
+            buffer.move('end');
+            return true;
+          }
+          if (inputHistory.navigateDown()) {
+            return true;
+          }
+          if (hasAgents) {
+            setAgentTabBarFocused(true);
+            return true;
+          }
+          if (hasBgAgents) {
+            setLivePanelFocused(true);
+            return true;
+          }
           return true;
         }
         // Handle arrow-up/down for history on single-line or at edges
@@ -981,7 +1114,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
         ) {
-          inputHistory.navigateUp();
+          // Two-step edge transition: snap cursor to col 0 before triggering history
+          if (buffer.visualCursor[1] > 0) {
+            buffer.move('home');
+            return true;
+          }
+          if (inputHistory.navigateUp()) {
+            buffer.moveToOffset(0);
+          }
           return true;
         }
         if (
@@ -989,21 +1129,25 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             buffer.visualCursor[0] === buffer.allVisualLines.length - 1)
         ) {
+          // Two-step edge transition: snap cursor to end of line before triggering history
+          const lastRowIdx = buffer.allVisualLines.length - 1;
+          const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
+          if (buffer.visualCursor[1] < lastRowLen) {
+            buffer.move('end');
+            return true;
+          }
           if (inputHistory.navigateDown()) {
             return true;
           }
           // Focus order on Down from an empty composer:
-          // team tab bar (if any Arena agents) → Background tasks pill
-          // (if any bg agents) → otherwise stay put. The pill itself
-          // opens the dialog on Enter; the tab bar re-routes Down into
-          // the pill once it has focus, so both surfaces remain reachable
-          // in sequence.
+          // team tab bar (if any Arena agents) → Background tasks
+          // dialog (if any bg agents) → otherwise stay put.
           if (hasAgents) {
             setAgentTabBarFocused(true);
             return true;
           }
           if (hasBgAgents) {
-            setBgPillFocused(true);
+            setLivePanelFocused(true);
             return true;
           }
           return true;
@@ -1198,8 +1342,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       bgPillFocused,
       hasAgents,
       hasBgAgents,
+      hasActiveToolConfirmation,
       setAgentTabBarFocused,
-      setBgPillFocused,
+      setLivePanelFocused,
+      setLivePanelSelectedIndex,
+      livePanelFocused,
+      livePanelSelectedIndex,
+      bgAgentCount,
+      enterBgDetailFromPanel,
+      setBgSelectedIndex,
       followup,
       onPromptSuggestionDismiss,
       exportCompletion,
@@ -1340,12 +1491,37 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     (shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
     activeCompletion.showSuggestions;
 
-  // Notify parent about suggestions visibility changes
+  // Whether any input-side handler would consume a Tab keystroke. AppContainer
+  // feeds this into useAutoAcceptIndicator's `shouldBlockTab` so the
+  // Windows-only "bare Tab cycles approval mode" fallback doesn't double-fire
+  // alongside an input-area Tab handler. See issue #4171.
+  //
+  // Note on reverse/command-search: when those overlays have matches, their
+  // `showSuggestions` flag flows into `shouldShowSuggestions` above and Tab IS
+  // consumed (ACCEPT_SUGGESTION_REVERSE_SEARCH). When they are active with no
+  // matches, Tab is not consumed — so the bare `reverseSearchActive` /
+  // `commandSearchActive` flags are intentionally NOT included here.
+  const hasTabConsumer =
+    shouldShowSuggestions ||
+    (followup.state.isVisible && Boolean(followup.state.suggestion)) ||
+    Boolean(completion.midInputGhostText?.acceptText);
+
+  // Narrow signal — autocomplete dropdown only. Composer hides Footer /
+  // KeyboardShortcuts when this is true because the dropdown competes for
+  // the same vertical space. Followup / ghost text are inline within the
+  // input box and must NOT hide the Footer (#4308 review).
   useEffect(() => {
-    if (onSuggestionsVisibilityChange) {
-      onSuggestionsVisibilityChange(shouldShowSuggestions);
-    }
+    onSuggestionsVisibilityChange?.(shouldShowSuggestions);
   }, [shouldShowSuggestions, onSuggestionsVisibilityChange]);
+
+  // Broad signal — any Tab consumer. Reset to false on unmount (e.g. when
+  // InputPrompt unmounts during streaming) so AppContainer's stale
+  // `hasTabConsumer` doesn't keep blocking Windows Tab approval-mode cycling
+  // while there is no input area to consume the keystroke.
+  useEffect(() => {
+    onTabConsumerChange?.(hasTabConsumer);
+    return () => onTabConsumerChange?.(false);
+  }, [hasTabConsumer, onTabConsumerChange]);
 
   // Trigger prompt suggestion when prop changes
   useEffect(() => {

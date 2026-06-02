@@ -194,10 +194,10 @@ export default tseslint.config(
     files: [
       './scripts/**/*.js',
       './scripts/**/*.mjs',
-      './.aoneci/scripts/**/*.js',
-      './.fork/**/*.js',
       'esbuild.config.js',
       'packages/*/scripts/**/*.js',
+      // Verification reproducer scripts under docs/ also run with `node`.
+      'docs/**/*.mjs',
     ],
     languageOptions: {
       globals: {

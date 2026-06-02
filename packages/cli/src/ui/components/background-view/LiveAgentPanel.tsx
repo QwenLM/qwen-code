@@ -59,7 +59,7 @@ interface LiveAgentPanelProps {
   width?: number;
 }
 
-const DEFAULT_MAX_ROWS = 5;
+const DEFAULT_MAX_ROWS = 12;
 // Keep terminal entries on the panel briefly so the user gets visual
 // feedback ("✓ done · 12s") when a subagent finishes, then they fall off
 // and the user goes to BackgroundTasksDialog for a deeper look. Mirrors
@@ -179,7 +179,8 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   maxRows = DEFAULT_MAX_ROWS,
   width,
 }) => {
-  const { entries, dialogOpen } = useBackgroundTaskViewState();
+  const { entries, dialogOpen, livePanelFocused, livePanelSelectedIndex } =
+    useBackgroundTaskViewState();
   // Reach for Config via the raw context (NOT useConfig) so the panel
   // can degrade to snapshot-only when no provider is mounted — e.g.
   // unit tests that render the component in isolation. useConfig
@@ -195,10 +196,12 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   //   - live agents (running / paused) — always need elapsed updates.
   //   - terminal agents still inside the 8s visibility window — need
   //     ticks to drive their eviction.
-  // `BackgroundTaskRegistry.getAll()` retains terminal entries
-  // indefinitely, so a naive `entries.some(isAgentEntry)` gate would
-  // keep ticking forever after the last entry's window closed; the
-  // `dialogOpen` arm closes the corresponding gap on the dialog side.
+  // `BackgroundTaskRegistry.getAll()` retains terminal entries up to
+  // its cap (MAX_RETAINED_TERMINAL_AGENTS), so a naive
+  // `entries.some(isAgentEntry)` gate would keep ticking until those
+  // older entries finally evict — far longer than the panel actually
+  // needs to render them. The `dialogOpen` arm closes the
+  // corresponding gap on the dialog side.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (dialogOpen) return;
@@ -367,6 +370,8 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
       now={now}
       maxRows={maxRows}
       width={width}
+      focused={livePanelFocused}
+      selectedIndex={livePanelSelectedIndex}
     />
   );
 };
@@ -376,7 +381,9 @@ const LiveAgentPanelBody: React.FC<{
   now: number;
   maxRows: number;
   width: number | undefined;
-}> = ({ snapshots, now, maxRows, width }) => {
+  focused: boolean;
+  selectedIndex: number;
+}> = ({ snapshots, now, maxRows, width, focused, selectedIndex }) => {
   const visibleAgents: LivePanelEntry[] = snapshots
     .map((entry) => ({
       ...entry,
@@ -390,64 +397,55 @@ const LiveAgentPanelBody: React.FC<{
 
   if (visibleAgents.length === 0) return null;
 
-  // Window from the tail (newest launches) when the list outgrows the
-  // budget. Older live agents are still surfaced in the pill count and
-  // the dialog — the panel is a glance surface, not a full roster.
-  const overflow = Math.max(0, visibleAgents.length - maxRows);
-  const visible = overflow > 0 ? visibleAgents.slice(-maxRows) : visibleAgents;
+  const visibleAgentsAsc = [...visibleAgents].reverse();
+  const overflow = Math.max(0, visibleAgentsAsc.length - maxRows);
+  const visible =
+    overflow > 0 ? visibleAgentsAsc.slice(-maxRows) : visibleAgentsAsc;
 
-  // Include paused entries in the "active" tally — they appear in
-  // the panel as active rows (same warning color, ⏸ glyph) and the
-  // header read "Active agents (0/1)" with one paused agent visible
-  // is misleading. The tally now matches what the user sees: the
-  // numerator counts every row that's NOT in a terminal/synthesized
-  // resting state.
-  const activeCount = visibleAgents.filter(
-    (e) => e.status === 'running' || e.status === 'paused',
-  ).length;
+  const totalItems = 1 + visible.length;
+  const clampedIndex = Math.min(selectedIndex, totalItems - 1);
 
-  // Borderless layout, mirroring Claude Code's CoordinatorTaskPanel
-  // ("Renders below the prompt input footer whenever local_agent tasks
-  // exist" — plain rows under a single marginTop). The bordered look
-  // belongs to BackgroundTasksDialog (a real overlay); the always-on
-  // roster is a glance surface that should sit lightly above the
-  // composer rather than fight it for vertical space + border cells.
   return (
     <Box flexDirection="column" marginTop={1} width={width} paddingX={2}>
       <Box>
-        <Text bold color={theme.text.accent}>
-          Active agents
+        <Text color={focused ? theme.text.accent : theme.text.secondary}>
+          {focused && clampedIndex === 0 ? '▸ ' : '  '}
         </Text>
-        <Text
-          color={theme.text.secondary}
-        >{` (${activeCount}/${visibleAgents.length})`}</Text>
+        <Text bold color={theme.text.accent}>
+          main
+        </Text>
       </Box>
       {overflow > 0 && (
         <Box>
-          {/*
-            The panel is read-only (no keyboard focus — that would
-            steal input from the composer), so when the roster
-            overflows the row budget we point users at the dialog
-            that DOES support selection / scroll / cancel / resume.
-            Same keystroke the footer pill uses, kept in sync so
-            users only have to learn one thing.
-          */}
           <Text
             color={theme.text.secondary}
-          >{`  ^ ${overflow} more above (↓ to view all)`}</Text>
+          >{`    ^ ${overflow} more above (↓ to view all)`}</Text>
         </Box>
       )}
-      {visible.map((entry) => (
-        <AgentRow key={entry.agentId} entry={entry} now={now} />
+      {visible.map((entry, idx) => (
+        <AgentRow
+          key={entry.agentId}
+          entry={entry}
+          now={now}
+          selected={focused && clampedIndex === idx + 1}
+        />
       ))}
+      {focused && (
+        <Box>
+          <Text color={theme.text.secondary}>
+            {'  ↑↓ navigate · Enter detail · Esc back'}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 };
 
-const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
-  entry,
-  now,
-}) => {
+const AgentRow: React.FC<{
+  entry: AgentDialogEntry;
+  now: number;
+  selected?: boolean;
+}> = ({ entry, now, selected = false }) => {
   const { glyph, color } = statusIcon(entry);
   // ANSI sanitize every user-controlled string before it reaches Ink.
   // `subagentType` comes from subagent config (user-authored or model-
@@ -496,8 +494,14 @@ const AgentRow: React.FC<{ entry: AgentDialogEntry; now: number }> = ({
   //   falls off the row tail rather than opening a visual gap
   //   between the description and the right-pinned elapsed.
   const tail = ` ▶ ${elapsed}${tokenSuffix}`;
+  const prefix = selected ? '▸ ' : '  ';
   return (
     <Box flexDirection="row">
+      <Box flexShrink={0}>
+        <Text color={selected ? theme.text.accent : theme.text.secondary}>
+          {prefix}
+        </Text>
+      </Box>
       <Box flexShrink={1}>
         <Text wrap="truncate-end">
           <Text color={color}>{`${glyph} `}</Text>

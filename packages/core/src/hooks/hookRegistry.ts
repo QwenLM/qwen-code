@@ -120,9 +120,10 @@ export class HookRegistry {
   }
 
   /**
-   * Get hook name for identification and display purposes
+   * Get a stable unique identity for duplicate detection.
+   * Uses full values (not truncated) to ensure accurate duplicate detection.
    */
-  private getHookName(
+  private getHookIdentity(
     entry: HookRegistryEntry | { config: HookConfig },
   ): string {
     const config = entry.config;
@@ -133,7 +134,24 @@ export class HookRegistry {
       return (config as { url?: string }).url || 'unknown-url';
     if (config.type === 'function')
       return (config as { id?: string }).id || 'unknown-function';
+    if (config.type === 'prompt')
+      return (config as { prompt?: string }).prompt || 'prompt-hook';
     return 'unknown-hook';
+  }
+
+  /**
+   * Get hook name for display purposes (may be truncated for readability).
+   */
+  private getHookName(
+    entry: HookRegistryEntry | { config: HookConfig },
+  ): string {
+    const identity = this.getHookIdentity(entry);
+    // Truncate prompt identities for display
+    const config = entry.config;
+    if (!config.name && config.type === 'prompt') {
+      return identity.length > 30 ? identity.slice(0, 30) + '...' : identity;
+    }
+    return identity;
   }
 
   /**
@@ -226,14 +244,15 @@ export class HookRegistry {
         typeof hookConfig === 'object' &&
         this.validateHookConfig(hookConfig, eventName, source)
       ) {
+        const hookIdentity = this.getHookIdentity({ config: hookConfig });
         const hookName = this.getHookName({ config: hookConfig });
 
-        // Check for duplicate hooks (same name+command+source+eventName+matcher+sequential)
+        // Check for duplicate hooks (same identity+source+eventName+matcher+sequential)
         const isDuplicate = this.entries.some(
           (existing) =>
             existing.eventName === eventName &&
             existing.source === source &&
-            this.getHookName(existing) === hookName &&
+            this.getHookIdentity(existing) === hookIdentity &&
             existing.matcher === definition.matcher &&
             existing.sequential === definition.sequential,
         );
@@ -277,7 +296,7 @@ export class HookRegistry {
   ): boolean {
     if (
       !config.type ||
-      !['command', 'http', 'function'].includes(config.type)
+      !['command', 'http', 'function', 'prompt'].includes(config.type)
     ) {
       debugLogger.warn(
         `Invalid hook ${eventName} from ${source} type: ${config.type}`,
@@ -302,6 +321,13 @@ export class HookRegistry {
     if (config.type === 'function' && typeof config.callback !== 'function') {
       debugLogger.warn(
         `Function hook ${eventName} from ${source} missing or invalid callback`,
+      );
+      return false;
+    }
+
+    if (config.type === 'prompt' && !config.prompt) {
+      debugLogger.warn(
+        `Prompt hook ${eventName} from ${source} missing prompt field`,
       );
       return false;
     }

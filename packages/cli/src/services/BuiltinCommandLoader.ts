@@ -28,6 +28,7 @@ import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
+import { goalCommand } from '../ui/commands/goalCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
 import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
@@ -39,7 +40,6 @@ import { dreamCommand } from '../ui/commands/dreamCommand.js';
 import { forgetCommand } from '../ui/commands/forgetCommand.js';
 import { memoryCommand } from '../ui/commands/memoryCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
-import { manageModelsCommand } from '../ui/commands/manageModelsCommand.js';
 import { rememberCommand } from '../ui/commands/rememberCommand.js';
 import { planCommand } from '../ui/commands/planCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
@@ -61,6 +61,7 @@ import { vimCommand } from '../ui/commands/vimCommand.js';
 import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 import { insightCommand } from '../ui/commands/insightCommand.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
+import { lspCommand } from '../ui/commands/lspCommand.js';
 
 const builtinDebugLogger = createDebugLogger('BUILTIN_COMMAND_LOADER');
 
@@ -123,9 +124,9 @@ export class BuiltinCommandLoader implements ICommandLoader {
       ...(this.config?.getManagedAutoMemoryEnabled()
         ? [dreamCommand, forgetCommand]
         : []),
+      goalCommand,
       memoryCommand,
       modelCommand,
-      manageModelsCommand,
       rememberCommand,
       planCommand,
       permissionsCommand,
@@ -147,6 +148,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       terminalSetupCommand,
       insightCommand,
       statuslineCommand,
+      ...(this.config?.isLspEnabled() ? [lspCommand] : []),
     ];
 
     return allDefinitions

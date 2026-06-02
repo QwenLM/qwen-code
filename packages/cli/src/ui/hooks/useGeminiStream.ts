@@ -26,6 +26,7 @@ import type {
   ToolCallRequestInfo,
   GeminiErrorEventValue,
   StopFailureErrorType,
+  ActiveGoal,
 } from '@qwen-code/qwen-code-core';
 import {
   GeminiEventType as ServerGeminiEventType,
@@ -51,6 +52,10 @@ import {
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
   generateToolUseSummary,
+  getActiveGoal,
+  activeGoalEquals,
+  setActiveGoal,
+  clearActiveGoal,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -796,7 +801,11 @@ export const useGeminiStream = (
         // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
         if (submitType !== SendMessageType.Cron) {
           const insertedId = addItem(
-            { type: MessageType.USER, text: trimmedQuery },
+            {
+              type: MessageType.USER,
+              text: trimmedQuery,
+              promptId: prompt_id,
+            } as HistoryItemWithoutId,
             userMessageTimestamp,
           );
           // Capture id+text so the cancel handler can verify identity,
@@ -1189,11 +1198,15 @@ export const useGeminiStream = (
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      const reasonClause =
+        eventValue?.triggerReason === 'image_overflow'
+          ? `accumulated enough tool screenshots to trigger compaction for ${config.getModel()}`
+          : `approached the input token limit for ${config.getModel()}`;
       return addItem(
         {
           type: 'info',
           text:
-            `IMPORTANT: This conversation approached the input token limit for ${config.getModel()}. ` +
+            `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${eventValue?.originalTokenCount ?? 'unknown'} to ` +
             `${eventValue?.newTokenCount ?? 'unknown'} tokens).`,
@@ -1302,6 +1315,25 @@ export const useGeminiStream = (
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      // When the active loop is driven by `/goal`, replace the generic
+      // "Ran N stop hooks" chip with a goal-aware `goal_status`
+      // `kind:'checking'` item. A not-met judge is the expected outcome of a
+      // continuation, not a hook failure.
+      const activeGoal = getActiveGoal(config.getSessionId());
+      if (activeGoal && activeGoal.condition) {
+        addItem(
+          {
+            type: MessageType.GOAL_STATUS,
+            kind: 'checking',
+            condition: activeGoal.condition,
+            iterations: value.iterationCount,
+            lastReason:
+              activeGoal.lastReason ?? value.reasons[value.reasons.length - 1],
+          } as HistoryItemWithoutId,
+          userMessageTimestamp,
+        );
+        return;
+      }
       addItem(
         {
           type: 'stop_hook_loop',
@@ -1312,7 +1344,26 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, config, pendingHistoryItemRef, setPendingHistoryItem],
+  );
+
+  const handleActiveGoalEvent = useCallback(
+    (activeGoal: ActiveGoal | null) => {
+      const sessionId = config.getSessionId();
+      const currentActiveGoal = getActiveGoal(sessionId);
+      if (activeGoal) {
+        if (activeGoalEquals(currentActiveGoal, activeGoal)) {
+          return;
+        }
+        setActiveGoal(sessionId, activeGoal);
+        return;
+      }
+      if (!currentActiveGoal) {
+        return;
+      }
+      clearActiveGoal(sessionId);
+    },
+    [config],
   );
 
   const processGeminiStreamEvents = useCallback(
@@ -1427,8 +1478,7 @@ export const useGeminiStream = (
             case ServerGeminiEventType.ToolCallRequest:
               flushBufferedStreamEvents();
               toolCallRequests.push(event.value);
-              // Count tool call args JSON toward token estimation (matches
-              // Claude Code's input_json_delta handling).
+              // Count tool call args JSON toward token estimation.
               try {
                 const argsJson = JSON.stringify(event.value.args);
                 streamingResponseLengthRef.current += argsJson.length;
@@ -1466,6 +1516,20 @@ export const useGeminiStream = (
                 event as ServerGeminiFinishedEvent,
                 userMessageTimestamp,
               );
+              // Seal off this turn's UI state before the parent re-enters
+              // sendMessageStream for a continuation (Stop-hook block at
+              // client.ts:1378 or next-speaker auto-continue at 1444). Both
+              // paths yield* a fresh Turn through this same stream processor,
+              // so without this seal the next turn's first content/thought
+              // chunk appends to this turn's pending item — visible in the UI
+              // as "t" → "te" → "tes" cumulative rendering even though each
+              // turn is persisted as a clean, separate assistant message.
+              if (pendingHistoryItemRef.current) {
+                addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+                setPendingHistoryItem(null);
+              }
+              geminiMessageBuffer = '';
+              thoughtBuffer = '';
               break;
             case ServerGeminiEventType.Citation:
               flushBufferedStreamEvents();
@@ -1536,6 +1600,9 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
               break;
+            case ServerGeminiEventType.ActiveGoal:
+              handleActiveGoalEvent(event.value);
+              break;
             default: {
               // enforces exhaustive switch-case
               const unreachable: never = event;
@@ -1572,6 +1639,7 @@ export const useGeminiStream = (
       setPendingHistoryItem,
       handleUserPromptSubmitBlockedEvent,
       handleStopHookLoopEvent,
+      handleActiveGoalEvent,
       addItem,
       dualOutput,
     ],
@@ -1651,6 +1719,11 @@ export const useGeminiStream = (
           pendingRetryCountdownItemRef.current ||
           pendingRetryErrorItemRef.current
         ) {
+          const pendingError = pendingRetryErrorItemRef.current;
+          if (pendingError && pendingError.type === 'error') {
+            const { hint: _hint, ...errorWithoutHint } = pendingError;
+            addItem(errorWithoutHint, userMessageTimestamp);
+          }
           clearRetryCountdown();
         }
       }
@@ -1968,10 +2041,6 @@ export const useGeminiStream = (
 
   const handleCompletedTools = useCallback(
     async (completedToolCallsFromScheduler: TrackedToolCall[]) => {
-      if (isResponding) {
-        return;
-      }
-
       const completedAndReadyToSubmitTools =
         completedToolCallsFromScheduler.filter(
           (
@@ -1994,9 +2063,87 @@ export const useGeminiStream = (
           },
         );
 
+      // History-based dedup MUST run before the `isResponding` early-return.
+      // If a synthetic `functionResponse` for this callId is already in
+      // chat.history (planted on session-load by
+      // `client.repairOrphanedToolUseTurnsInHistory` or on every
+      // `chat.sendMessageStream` push by the inline repair pass), the
+      // in-flight scheduler result must be marked submitted NOW —
+      // `useReactToolScheduler.allToolCallsCompleteHandler` is single-shot
+      // per batch, so a later isResponding=true early-return would leave
+      // the tool stuck in `completed-but-not-submitted` forever (Race A
+      // surfaced in PR #4176 review). The real result is dropped on the
+      // wire — same trade-off upstream Claude Code makes when its
+      // `StreamingToolExecutor.discard()` follows a
+      // `yieldMissingToolResultBlocks` synthesis (`query.ts:733` + `:984`).
+      // Walk raw history WITHOUT cloning — `geminiClient.getHistory()`
+      // returns `structuredClone(this.history)`, which on long sessions
+      // (200+ entries with sizable tool outputs) costs several ms on
+      // the React UI thread and visibly stalls streaming when the
+      // dedup pass runs on every tool-completion batch.
+      // `getHistoryFunctionResponseIds` walks history in place and
+      // returns only the id Set this dispatcher needs. The
+      // GeminiClient implementation is mandatory — production and
+      // test mocks both expose it. Skip the dedup pass entirely if
+      // the client is missing (only happens in unit tests that
+      // construct a hook without a client).
+      const historyCallIdsWithResponse: Set<string> = geminiClient
+        ? geminiClient.getHistoryFunctionResponseIds()
+        : new Set<string>();
+      const dedupedTools = completedAndReadyToSubmitTools.filter((tc) =>
+        historyCallIdsWithResponse.has(tc.request.callId),
+      );
+      const dedupedCallIds = dedupedTools.map((tc) => tc.request.callId);
+      if (dedupedCallIds.length > 0) {
+        debugLogger.warn(
+          `[REPAIR] Dropping ${dedupedCallIds.length} late tool result(s) ` +
+            `whose callId already has a functionResponse in history: ` +
+            `${dedupedCallIds.join(', ')}`,
+        );
+        // Even though the wire-side submission is dropped, the tool DID
+        // run locally — `toolCallCount` and `skillsModifiedInSession`
+        // must reflect that. Without this, deduped skill-write tools
+        // (e.g. write_file under a project SKILLS path) would silently
+        // skip the `skillsModifiedInSession` flip that gates the
+        // skills-reload prompt at end-of-turn. Mirrors the
+        // `recordCompletedToolCall` loop below over `geminiTools` —
+        // filter to the same shape (non-client-initiated) so client
+        // tools (which the original loop also skipped) stay skipped.
+        //
+        // Cancelled tools are also skipped: `dedupedTools` includes
+        // anything in a terminal state (success | error | cancelled),
+        // but cancelled means the tool never actually ran end-to-end —
+        // the `allToolsCancelled` branch below would have surfaced
+        // them via `addHistory + reportCancelled` rather than the
+        // completed-call metric, and the metric should match. Without
+        // this filter, a deduped + cancelled tool would inflate
+        // `toolCallCount` for a call that never produced a result
+        // (and could also flip `skillsModifiedInSession` for a
+        // never-executed skill-write).
+        for (const tc of dedupedTools) {
+          if (tc.request.isClientInitiated) continue;
+          if (tc.status === 'cancelled') continue;
+          geminiClient?.recordCompletedToolCall(
+            tc.request.name,
+            tc.request.args as Record<string, unknown>,
+          );
+        }
+        markToolsAsSubmitted(dedupedCallIds);
+      }
+
+      if (isResponding) {
+        return;
+      }
+
       // Finalize any client-initiated tools as soon as they are done.
+      // Skip ones whose callId already lives in chat history with a
+      // matching `functionResponse` — the dedup block above already
+      // called `markToolsAsSubmitted` for those, and re-dispatching
+      // the same callIds here would queue an extra React render.
       const clientTools = completedAndReadyToSubmitTools.filter(
-        (t) => t.request.isClientInitiated,
+        (t) =>
+          t.request.isClientInitiated &&
+          !historyCallIdsWithResponse.has(t.request.callId),
       );
       if (clientTools.length > 0) {
         markToolsAsSubmitted(clientTools.map((t) => t.request.callId));
@@ -2020,7 +2167,9 @@ export const useGeminiStream = (
       }
 
       const geminiTools = completedAndReadyToSubmitTools.filter(
-        (t) => !t.request.isClientInitiated,
+        (t) =>
+          !t.request.isClientInitiated &&
+          !historyCallIdsWithResponse.has(t.request.callId),
       );
 
       for (const toolCall of geminiTools) {
@@ -2092,9 +2241,8 @@ export const useGeminiStream = (
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
       // Fire tool-use summary generation in parallel with the next API call.
-      // The fast-model Haiku-equivalent latency (~1s) is hidden behind the
-      // main-model streaming (5-30s). Mirrors Claude Code's query.ts:1411-1482
-      // behavior. Fire-and-forget: failures are silent and never block the turn.
+      // The fast-model latency is hidden behind the main-model streaming.
+      // Fire-and-forget: failures are silent and never block the turn.
       // Subagent exclusion is implicit — useGeminiStream only drives the
       // main session; subagents run through agents/runtime/ with their own loop.
       if (config.getEmitToolUseSummaries()) {
@@ -2196,11 +2344,14 @@ export const useGeminiStream = (
           : (midTurnDrainRef?.current?.() ?? []);
       if (drained.length > 0) {
         for (const msg of drained) {
-          responsesToSend.push({
+          const midTurnUserMessage = {
             text: `\n[User message received during tool execution]: ${msg}`,
-          });
-          // Record in UI history so the transcript stays complete.
-          addItem({ type: MessageType.USER, text: msg }, Date.now());
+          };
+          responsesToSend.push(midTurnUserMessage);
+          config
+            .getChatRecordingService()
+            ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
+          addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
         }
       }
 

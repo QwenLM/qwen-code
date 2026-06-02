@@ -310,25 +310,6 @@ describe('generateToolUseSummary', () => {
     expect(userText).not.toContain('A'.repeat(201));
   });
 
-  it('uses explicit model parameter over config fast model', async () => {
-    const generateContentFn = vi.fn().mockResolvedValue({
-      text: 'Done',
-      usage: undefined,
-    });
-    const config = makeMockConfig('qwen-fast', generateContentFn);
-
-    await generateToolUseSummary({
-      config,
-      tools: [{ name: 'Edit', input: {}, output: '' }],
-      signal: abortController().signal,
-      model: 'qwen-turbo-explicit',
-    });
-
-    expect(generateContentFn.mock.calls[0][0].model).toBe(
-      'qwen-turbo-explicit',
-    );
-  });
-
   it('returns null when model returns empty text', async () => {
     const generateContentFn = vi.fn().mockResolvedValue({
       text: '',

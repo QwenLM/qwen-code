@@ -13,7 +13,9 @@ import { type EditorType, type ApprovalMode } from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
 import type { AuthController } from '../auth/useAuth.js';
 import type { HistoryItem } from '../types.js';
+import type { RestoreOption } from '../components/RewindSelector.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 
 export type HelpTab = 'general' | 'commands' | 'custom-commands';
 
@@ -37,11 +39,11 @@ export interface UIActions {
   ) => void;
   exitEditorDialog: () => void;
   closeSettingsDialog: () => void;
+  closeStatusLineDialog: () => void;
+  notifyStatusLineSettingsChanged: (config: StatusLinePresetConfig) => void;
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
-  openManageModelsDialog: () => void;
-  closeManageModelsDialog: () => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
@@ -55,7 +57,7 @@ export interface UIActions {
   handleFolderTrustSelect: (choice: FolderTrustChoice) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
-  onSuggestionsVisibilityChange: (visible: boolean) => void;
+  onTabConsumerChange: (active: boolean) => void;
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;
   handleRetryLastPrompt: () => void;
@@ -64,6 +66,10 @@ export interface UIActions {
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;
+  // Worktree exit dialog
+  handleWorktreeExit: (
+    choice: 'keep' | 'remove' | 'cancel',
+  ) => void | Promise<void>;
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
@@ -98,7 +104,10 @@ export interface UIActions {
   // Rewind selector
   openRewindSelector: () => void;
   closeRewindSelector: () => void;
-  handleRewindConfirm: (userItem: HistoryItem) => void;
+  handleRewindConfirm: (userItem: HistoryItem, option: RestoreOption) => void;
+  // Diff dialog
+  openDiffDialog: () => void;
+  closeDiffDialog: () => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

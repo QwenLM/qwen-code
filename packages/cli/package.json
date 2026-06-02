@@ -1,6 +1,6 @@
 {
   "name": "@alife/dataworks-qwen-code",
-  "version": "0.15.11",
+  "version": "0.17.0",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -31,25 +31,25 @@
     "test": "vitest run",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
-    "check-i18n": "tsx ../../scripts/check-i18n.ts",
-    "prepublishOnly": "node ../../scripts/prepare-cli-for-publish.js"
+    "check-i18n": "tsx ../../scripts/check-i18n.ts"
   },
   "files": [
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.15.11"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.17.0"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
     "@google/genai": "1.30.0",
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.1",
+    "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/channel-base": "file:../channels/base",
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
+    "@qwen-code/channel-feishu": "file:../channels/feishu",
     "@qwen-code/channel-telegram": "file:../channels/telegram",
     "@qwen-code/channel-weixin": "file:../channels/weixin",
-    "@alife/dataworks-qwen-code-channel-feishu": "file:../channels/feishu",
     "@qwen-code/qwen-code-core": "file:../core",
     "@qwen-code/web-templates": "file:../web-templates",
     "@types/update-notifier": "^6.0.8",
@@ -62,7 +62,7 @@
     "fzf": "^0.5.2",
     "glob": "^10.5.0",
     "highlight.js": "^11.11.1",
-    "ink": "^6.2.3",
+    "ink": "^7.0.3",
     "ink-gradient": "^3.0.0",
     "ink-link": "^4.1.0",
     "ink-spinner": "^5.0.0",
@@ -70,7 +70,7 @@
     "open": "^10.1.2",
     "p-limit": "^7.3.0",
     "prompts": "^2.4.2",
-    "react": "^19.1.0",
+    "react": "^19.2.4",
     "read-package-up": "^11.0.0",
     "shell-quote": "^1.8.3",
     "simple-git": "^3.28.0",
@@ -91,7 +91,7 @@
     "@types/diff": "^7.0.2",
     "@types/dotenv": "^6.1.1",
     "@types/express": "^5.0.3",
-    "@types/node": "^20.11.24",
+    "@types/node": "^22.0.0",
     "@types/prompts": "^2.4.9",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

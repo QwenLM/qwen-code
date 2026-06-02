@@ -6,7 +6,6 @@
 
 import React from 'react';
 import { Text, Box } from 'ink';
-import { common, createLowlight } from 'lowlight';
 import type {
   Root,
   Element,
@@ -22,10 +21,24 @@ import {
 } from '../components/shared/MaxSizedBox.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  getLowlightInstance,
+  isLowlightCoolingDown,
+  loadLowlight,
+  type Lowlight,
+} from './lowlightLoader.js';
 
-// Configure theming and parsing utilities.
-const lowlight = createLowlight(common);
 const debugLogger = createDebugLogger('CODE_COLORIZER');
+
+// Lowlight is heavy (~1.5 MB bundled, ~36–60 ms V8 parse). It's loaded lazily
+// from `./lowlightLoader.js` via dynamic import so it lives in a separate
+// esbuild chunk that's only parsed once a code block actually needs
+// highlighting. To avoid leaving code blocks committed to ink's append-only
+// <Static> region as plain text for the rest of the session, AppContainer
+// fires `loadLowlight()` from a mount effect — in steady state the import
+// is already resolved by the time any colorize call lands. The fallback
+// below still handles the brief window before resolution and any
+// permanent-failure path (latched inside lowlightLoader).
 
 function renderHastNode(
   node: Root | Element | HastText | RootContent,
@@ -92,11 +105,39 @@ function renderHastNode(
   return null;
 }
 
+/**
+ * Fires the lazy `loadLowlight()` once if the instance isn't ready yet and
+ * we aren't inside the loader's failure cooldown. Returns the current
+ * instance (which may still be `null` if the load is in flight or cooling
+ * down). Centralising this here lets callers kick the load off-the-hot-path
+ * — `colorizeCode` fires once per block, not once per rendered line, which
+ * matters in the failure case: when the load is permanently broken, the
+ * loader rejects synchronously and a per-line trigger would emit hundreds
+ * of duplicate debug-log entries per code block.
+ */
+function ensureLowlightLoading(): Lowlight | null {
+  const ll = getLowlightInstance();
+  if (ll) return ll;
+  if (!isLowlightCoolingDown()) {
+    void loadLowlight().catch((err) => {
+      debugLogger.error('[CodeColorizer] failed to load lowlight:', err);
+    });
+  }
+  return null;
+}
+
 function highlightAndRenderLine(
   line: string,
   language: string | null,
   theme: Theme,
+  lowlight: Lowlight | null,
 ): React.ReactNode {
+  // Until lowlight resolves (or after a permanent failure), fall back to a
+  // plain-text rendering of the line. The next React render of the
+  // surrounding subtree will pick up the highlighted version on success.
+  if (!lowlight) {
+    return line;
+  }
   try {
     const getHighlightedLine = () =>
       !language || !lowlight.registered(language)
@@ -117,7 +158,12 @@ export function colorizeLine(
   theme?: Theme,
 ): React.ReactNode {
   const activeTheme = theme || themeManager.getActiveTheme();
-  return highlightAndRenderLine(line, language, activeTheme);
+  return highlightAndRenderLine(
+    line,
+    language,
+    activeTheme,
+    ensureLowlightLoading(),
+  );
 }
 
 /**
@@ -142,6 +188,11 @@ export function colorizeCode(
     .replace(/\t/g, ' '.repeat(tabWidth));
   const activeTheme = theme || themeManager.getActiveTheme();
   const showLineNumbers = settings?.merged.ui?.showLineNumbers ?? true;
+  // Resolve the loader state once per block, not once per line. Triggers the
+  // lazy import on first use; subsequent renders pick up the highlighted
+  // output once the chunk lands. Hoisting this out of the per-line render
+  // loop also collapses duplicate failure logs to one per block.
+  const lowlight = ensureLowlightLoading();
 
   try {
     // Render the HAST tree using the adapted theme
@@ -173,6 +224,7 @@ export function colorizeCode(
             line,
             language,
             activeTheme,
+            lowlight,
           );
 
           return (

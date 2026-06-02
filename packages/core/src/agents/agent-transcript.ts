@@ -39,7 +39,7 @@ import type { FunctionDeclaration, Content } from '@google/genai';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 
-function sanitizeFilenameComponent(value: string): string {
+export function sanitizeFilenameComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 

@@ -7,6 +7,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
+import { StreamingState } from '../types.js';
+import type { StatusLinePresetReasoning } from '../statusLinePresets.js';
+
+const debugLogMock = vi.hoisted(() => ({
+  log: vi.fn(),
+  error: vi.fn(),
+  warn: vi.fn(),
+}));
 
 // --- Mock child_process (auto-mock, then override exec in beforeEach) ---
 vi.mock('child_process');
@@ -32,16 +40,30 @@ const mockUIState = {
   },
   currentModel: 'test-model',
   branchName: 'main' as string | undefined,
+  streamingState: StreamingState.Idle,
+  statusLineSettingsVersion: 0,
+  statusLineConfigOverride: undefined as
+    | { type: 'preset'; items: string[]; useThemeColors?: boolean }
+    | undefined,
 };
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: () => mockUIState,
 }));
 
+type MockContentGeneratorConfig = {
+  contextWindowSize: number;
+  reasoning?: StatusLinePresetReasoning;
+};
+
+const getMockContentGeneratorConfig = (): MockContentGeneratorConfig => ({
+  contextWindowSize: 131072,
+});
+
 const mockConfig = {
   getTargetDir: vi.fn(() => '/test/dir'),
   getModel: vi.fn(() => 'test-model'),
   getCliVersion: vi.fn(() => '1.0.0'),
-  getContentGeneratorConfig: vi.fn(() => ({ contextWindowSize: 131072 })),
+  getContentGeneratorConfig: vi.fn(getMockContentGeneratorConfig),
 };
 vi.mock('../contexts/ConfigContext.js', () => ({
   useConfig: () => mockConfig,
@@ -60,10 +82,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...original,
-    createDebugLogger: () => ({
-      log: vi.fn(),
-      error: vi.fn(),
-    }),
+    createDebugLogger: () => debugLogMock,
   };
 });
 
@@ -84,6 +103,7 @@ let mockKill: ReturnType<typeof vi.fn>;
 function setStatusLineConfig(
   config:
     | { type: string; command: string; refreshInterval?: number }
+    | { type: 'preset'; items: string[]; useThemeColors?: boolean }
     | undefined,
 ) {
   mockSettings.merged = config ? { ui: { statusLine: config } } : {};
@@ -132,11 +152,16 @@ describe('useStatusLine', () => {
     mockUIState.sessionStats.lastPromptTokenCount = 100;
     mockUIState.currentModel = 'test-model';
     mockUIState.branchName = 'main';
+    mockUIState.statusLineSettingsVersion = 0;
+    mockUIState.statusLineConfigOverride = undefined;
     mockUIState.sessionStats.metrics.tools.totalCalls = 0;
     mockUIState.sessionStats.metrics.files.totalLinesAdded = 0;
     mockUIState.sessionStats.metrics.files.totalLinesRemoved = 0;
     mockVimMode.vimEnabled = false;
     mockVimMode.vimMode = 'INSERT';
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      contextWindowSize: 131072,
+    });
 
     // Dynamic import to get fresh module after mocks
     const mod = await import('./useStatusLine.js');
@@ -175,6 +200,161 @@ describe('useStatusLine', () => {
       const { result } = renderHook(() => useStatusLine());
       expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('preset status line', () => {
+    it('returns the preset theme color preference', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        useThemeColors: true,
+        items: ['model'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.useThemeColors).toBe(true);
+      expect(result.current.lines).toEqual(['test-model']);
+    });
+
+    it('looks up the current branch pull request number with gh', async () => {
+      mockUIState.branchName = 'dragon/feat-reproduce-skill';
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['pull-request-number'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+      expect(lastExecCommand).toBe('gh pr view --json number --jq .number');
+      expect(result.current.lines).toEqual([]);
+
+      await act(async () => {
+        execCallback(null, '4118\n', '');
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(result.current.lines).toEqual(['#4118']);
+    });
+
+    it('does not run gh when pull request number is not selected', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual(['test-model']);
+    });
+
+    it('renders model-with-reasoning and model-only together', () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'model-with-reasoning'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual(['test-model high | test-model']);
+    });
+
+    it('refreshes when status line settings are saved in the same process', async () => {
+      mockUIState.branchName = 'dragon/feat-reproduce-skill';
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning'],
+      });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual(['test-model']);
+
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning', 'pull-request-number'],
+      });
+      mockUIState.statusLineConfigOverride = {
+        type: 'preset',
+        items: ['model-with-reasoning', 'pull-request-number'],
+      };
+      mockUIState.statusLineSettingsVersion += 1;
+      rerender();
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+      expect(lastExecCommand).toBe('gh pr view --json number --jq .number');
+
+      await act(async () => {
+        execCallback(null, '4118\n', '');
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(result.current.lines).toEqual(['test-model | #4118']);
+    });
+
+    it('uses command settings when a stale preset override no longer matches the settings type', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo from-settings',
+      });
+      mockUIState.statusLineConfigOverride = {
+        type: 'preset',
+        items: ['model'],
+      };
+
+      renderHook(() => useStatusLine());
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+      expect(lastExecCommand).toBe('echo from-settings');
+    });
+
+    it('ignores a stale preset override when settings no longer have status line config', () => {
+      setStatusLineConfig(undefined);
+      mockUIState.statusLineConfigOverride = {
+        type: 'preset',
+        items: ['model'],
+      };
+
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([]);
+      expect(child_process.exec).not.toHaveBeenCalled();
+    });
+
+    it('logs and retries pull request lookup failures after state changes', async () => {
+      mockUIState.branchName = 'dragon/feat-reproduce-skill';
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['pull-request-number'],
+      });
+      const { rerender } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        execCallback(new Error('gh not authenticated'), '', '');
+      });
+
+      expect(debugLogMock.warn).toHaveBeenCalledWith(
+        'statusline: gh pr view failed:',
+        'gh not authenticated',
+      );
+
+      mockUIState.sessionStats.lastPromptTokenCount = 101;
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+      expect(lastExecCommand).toBe('gh pr view --json number --jq .number');
     });
   });
 

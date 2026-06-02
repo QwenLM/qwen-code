@@ -144,6 +144,96 @@ describe('NativeLspService', () => {
     expect(status).toBeDefined();
   });
 
+  test('should expose a detailed status snapshot for configured servers', () => {
+    const serverManager = {
+      getHandles: () =>
+        new Map([
+          [
+            'clangd',
+            {
+              config: {
+                name: 'clangd',
+                languages: ['c', 'cpp'],
+                command: 'clangd',
+                args: ['--background-index'],
+                transport: 'stdio',
+                rootUri: 'file:///test/workspace',
+                workspaceFolder: '/test/workspace',
+              },
+              status: 'READY',
+              process: { pid: 12345 },
+              warmedUp: true,
+              restartAttempts: 1,
+              processDiagnostics: {
+                stderrTail: 'clangd: unknown argument\n',
+                exitCode: 7,
+                exitSignal: null,
+              },
+            },
+          ],
+          [
+            'pyright',
+            {
+              config: {
+                name: 'pyright',
+                languages: ['python'],
+                command: 'pyright-langserver',
+                args: ['--stdio'],
+                transport: 'stdio',
+                rootUri: 'file:///test/workspace',
+                workspaceFolder: '/test/workspace',
+              },
+              status: 'FAILED',
+              error: new Error('startup failed'),
+            },
+          ],
+        ]),
+    };
+
+    (lspService as unknown as { serverManager: unknown }).serverManager =
+      serverManager;
+
+    const snapshot = lspService.getStatusSnapshot();
+
+    expect(snapshot).toEqual({
+      enabled: true,
+      configuredServers: 2,
+      readyServers: 1,
+      failedServers: 1,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [
+        {
+          name: 'clangd',
+          status: 'READY',
+          languages: ['c', 'cpp'],
+          transport: 'stdio',
+          command: 'clangd',
+          args: ['--background-index'],
+          rootUri: 'file:///test/workspace',
+          workspaceFolder: '/test/workspace',
+          pid: 12345,
+          warmedUp: true,
+          restartAttempts: 1,
+          stderrTail: 'clangd: unknown argument\n',
+          exitCode: 7,
+          exitSignal: null,
+        },
+        {
+          name: 'pyright',
+          status: 'FAILED',
+          languages: ['python'],
+          transport: 'stdio',
+          command: 'pyright-langserver',
+          args: ['--stdio'],
+          rootUri: 'file:///test/workspace',
+          workspaceFolder: '/test/workspace',
+          error: 'startup failed',
+        },
+      ],
+    });
+  });
+
   test('should open document before hover requests', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-test-'));
     const filePath = path.join(tempDir, 'main.cpp');

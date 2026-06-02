@@ -94,7 +94,9 @@ export function hostAllowlist(
 /**
  * Bearer token middleware. When `token` is undefined the gate is open — used
  * for the loopback-only developer default. `runQwenServe` enforces that any
- * non-loopback bind has a token.
+ * non-loopback bind has a token, and that `--require-auth` boots only with a
+ * token configured, so this no-token branch is reachable only on loopback
+ * developer setups that opted out of `--require-auth`.
  */
 export function bearerAuth(token: string | undefined): RequestHandler {
   if (!token) {
@@ -158,4 +160,135 @@ export function bearerAuth(token: string | undefined): RequestHandler {
     }
     next();
   };
+}
+
+/**
+ * Per-route mutation gate (issue #4175 PR 15).
+ *
+ * Wave 4 (PR 16-21) will add broadly state-changing routes — memory
+ * CRUD, agent CRUD, tool enable/disable, MCP restart, file write/edit,
+ * device-flow auth, etc. The roadmap calls for "a single mutation-gating
+ * helper rather than open-code auth checks per route" so all those
+ * routes share one choke point. This factory is that choke point;
+ * Wave 1-2 routes apply it as a centralization marker (no behavior
+ * change today), and Wave 4 routes opt into `strict: true` to enforce
+ * "token required even on loopback" without depending on the operator
+ * also passing `--require-auth`.
+ *
+ * Behavior matrix:
+ *
+ * | daemon config              | route opts        | result          |
+ * | -------------------------- | ----------------- | --------------- |
+ * | requireAuth=true           | any               | passthrough (1) |
+ * | token configured           | any               | passthrough (2) |
+ * | no token (loopback dev)    | strict=false      | passthrough     |
+ * | no token (loopback dev)    | strict=true       | 401 + code      |
+ *
+ * (1) `--require-auth` boots only with a token, so the global
+ *     `bearerAuth` middleware already 401'd unauthenticated requests
+ *     before they reached this gate.
+ * (2) Any token configuration makes the global `bearerAuth` enforce
+ *     bearer-required-everywhere; the gate is redundant but harmless.
+ *
+ * The 401 body uses `code: 'token_required'` (distinct from
+ * `bearerAuth`'s plain `Unauthorized` shape) so SDK clients can branch
+ * on it: surface a "this route needs the daemon to be configured with
+ * a token; restart with --require-auth or --token" hint rather than a
+ * generic auth failure. Pre-flight via `/capabilities.features.require_auth`
+ * still requires a successful unauthenticated `/capabilities` call,
+ * which is only possible when the daemon has not enforced auth — so
+ * the gate's own 401 is the discovery surface for routes that opt in
+ * to strict mode on otherwise-open daemons.
+ */
+export interface MutationGateOptions {
+  /**
+   * When true, this route refuses to serve unauthenticated callers
+   * even on loopback no-token defaults. Used by Wave 4 mutation routes
+   * (memory, file edit, tool enable, MCP restart, device-flow auth)
+   * that should never be reachable without explicit operator opt-in.
+   * Defaults to false so Wave 1-2 routes that already exist can adopt
+   * the helper without behavior change.
+   */
+  strict?: boolean;
+}
+
+export interface CreateMutationGateDeps {
+  /** Was the daemon configured with a bearer token? */
+  tokenConfigured: boolean;
+  /** Was `--require-auth` passed at boot? */
+  requireAuth: boolean;
+}
+
+/**
+ * Build a route-scoped mutation gate factory. Returns a function that
+ * — given `MutationGateOptions` — yields an Express `RequestHandler`.
+ *
+ * Callers cache the factory at app construction time and invoke it per
+ * route, e.g.:
+ *
+ *   const mutate = createMutationGate({ tokenConfigured, requireAuth });
+ *   app.post('/workspace/memory', mutate({ strict: true }), handler);
+ *   app.post('/session', mutate(), handler);
+ *
+ * The factory is hot-path-friendly: the strict-passthrough decision is
+ * made once at construction and the returned handler is a cheap closure.
+ */
+export function createMutationGate(
+  deps: CreateMutationGateDeps,
+): (opts?: MutationGateOptions) => RequestHandler {
+  // When the global gate is already enforcing bearer auth (token set
+  // via --token / env, OR --require-auth boot-checked a token), every
+  // request that reaches the route handler has already passed
+  // `bearerAuth`. The mutation gate becomes a passthrough — return a
+  // pre-built no-op so we don't allocate one closure per route call.
+  const passthrough: RequestHandler = (
+    _req: Request,
+    _res: Response,
+    next: NextFunction,
+  ) => next();
+  if (deps.requireAuth || deps.tokenConfigured) {
+    return () => passthrough;
+  }
+  // No token configured (loopback developer default). Non-strict
+  // routes preserve the legacy "open on loopback" behavior; strict
+  // routes refuse with a structured 401 the SDK can surface.
+  //
+  // Body-parser ordering (PR #4236 review #3254485915): the strict 401
+  // fires AFTER `express.json()` because the gate is per-route
+  // middleware, not app-level. On no-token loopback defaults a strict
+  // route therefore parses the request body before refusing it —
+  // bounded by `express.json({limit: '10mb'})` × `--max-connections`
+  // (256 default). Loopback-only attack surface, so the worst case is
+  // ~2.5 GB transient on a fully-saturated listener. The strict routes
+  // Wave 4 actually adds (memory writes / file edits / device-flow
+  // auth) carry small bodies in legitimate use, so the parsing-cost
+  // amplification isn't a production hot path. If a future strict
+  // route accepts large bodies, lift its gate to app-level (maintain a
+  // strict-path Set in `createServeApp` and check it before
+  // `express.json()`); tracked as a Wave 4 follow-up rather than
+  // re-architecting the helper here.
+  //
+  // Allocation symmetry (PR #4236 review #3254467193): cache the strict
+  // denier alongside `passthrough` so a route table with N strict
+  // routes doesn't allocate N identical closures. The auth.test.ts
+  // identity assertion anchors this — a future change that loses the
+  // cache is visible.
+  const strictDenier: RequestHandler = (_req: Request, res: Response) => {
+    // Only list remediations that work standalone. `--require-auth` is
+    // paired-required-with-a-token at boot (`runQwenServe.ts` refuses
+    // to start with the flag set but no token), so naming it as a
+    // third standalone option here would loop the operator into a
+    // different boot error. Configuring a token via `QWEN_SERVER_TOKEN`
+    // or `--token` IS the fix; the operator can decide separately
+    // whether to also harden loopback with `--require-auth`.
+    res.status(401).json({
+      error:
+        'This route requires the daemon to be configured with a bearer ' +
+        'token. Set QWEN_SERVER_TOKEN or pass --token to enable bearer ' +
+        'auth.',
+      code: 'token_required',
+    });
+  };
+  return (opts: MutationGateOptions = {}): RequestHandler =>
+    opts.strict ? strictDenier : passthrough;
 }

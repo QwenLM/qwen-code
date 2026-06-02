@@ -6,6 +6,9 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as childProcess from 'node:child_process';
+// Static import is safe because all exported functions read process.env /
+// process.platform at call time, not import time. If any module-level state
+// capture is added, revert to vi.resetModules() + dynamic import.
 import {
   detectFromColorFgBg,
   detectMacOSTheme,
@@ -22,7 +25,6 @@ describe('detectTerminalTheme', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    vi.resetModules();
     vi.restoreAllMocks();
     process.env = { ...originalEnv };
     delete process.env['COLORFGBG'];

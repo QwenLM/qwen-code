@@ -151,6 +151,24 @@ describe('HistoryReplayer', () => {
 
       expect(sendUpdateSpy).not.toHaveBeenCalled();
     });
+
+    it('should replay mid-turn user messages using display text', async () => {
+      const record: ChatRecord = {
+        ...createUserRecord(
+          '\n[User message received during tool execution]: save logs',
+        ),
+        subtype: 'mid_turn_user_message',
+        systemPayload: { displayText: 'save logs' },
+      };
+
+      await replayer.replay([record]);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'save logs' },
+        _meta: { timestamp: toEpochMs(record.timestamp) },
+      });
+    });
   });
 
   describe('assistant message replay', () => {

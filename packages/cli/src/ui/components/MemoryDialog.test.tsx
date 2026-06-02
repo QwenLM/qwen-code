@@ -43,6 +43,7 @@ describe('MemoryDialog', () => {
       getProjectRoot: vi.fn(() => '/tmp/project'),
       getManagedAutoMemoryEnabled: vi.fn(() => false),
       getManagedAutoDreamEnabled: vi.fn(() => false),
+      getAutoSkillEnabled: vi.fn(() => false),
     } as never);
 
     mockedUseSettings.mockReturnValue({ setValue: vi.fn() } as never);
@@ -65,5 +66,99 @@ describe('MemoryDialog', () => {
     });
 
     expect(lastFrame()).toContain('› 2. Project memory');
+  });
+
+  it('moves selection with Ctrl+N/P readline aliases', () => {
+    const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
+
+    expect(lastFrame()).toContain('› 1. User memory');
+
+    const pressKey = (key: { name: string; ctrl?: boolean }) => {
+      const keypressHandler =
+        mockedUseKeypress.mock.calls[
+          mockedUseKeypress.mock.calls.length - 1
+        ]![0];
+      act(() => {
+        keypressHandler(key as never);
+      });
+    };
+
+    pressKey({ name: 'n', ctrl: true });
+    expect(lastFrame()).toContain('› 2. Project memory');
+
+    pressKey({ name: 'p', ctrl: true });
+    expect(lastFrame()).toContain('› 1. User memory');
+  });
+
+  it('renders the Auto-skill row with the status from config', () => {
+    const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
+
+    // beforeEach mocks getAutoSkillEnabled => false
+    expect(lastFrame()).toContain('Auto-skill: off');
+  });
+
+  it('chains focus list ↑ autoSkill ↑ autoDream ↑ autoMemory and back down', () => {
+    const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
+
+    expect(lastFrame()).toContain('› 1. User memory');
+
+    const pressKey = (key: { name: string }) => {
+      const keypressHandler =
+        mockedUseKeypress.mock.calls[
+          mockedUseKeypress.mock.calls.length - 1
+        ]![0];
+      act(() => {
+        keypressHandler(key as never);
+      });
+    };
+
+    // list (index 0) ↑ → autoSkill
+    pressKey({ name: 'up' });
+    expect(lastFrame()).toContain('› Auto-skill: off');
+
+    // autoSkill ↑ → autoDream
+    pressKey({ name: 'up' });
+    expect(lastFrame()).toContain('› Auto-dream:');
+
+    // autoDream ↓ → autoSkill
+    pressKey({ name: 'down' });
+    expect(lastFrame()).toContain('› Auto-skill: off');
+
+    // autoSkill ↓ → list (index 0)
+    pressKey({ name: 'down' });
+    expect(lastFrame()).toContain('› 1. User memory');
+  });
+
+  it('toggles Auto-skill on Enter and persists to workspace settings', () => {
+    const setValue = vi.fn();
+    mockedUseSettings.mockReturnValue({ setValue } as never);
+
+    const { lastFrame } = render(<MemoryDialog onClose={vi.fn()} />);
+
+    const pressKey = (key: { name: string }) => {
+      const keypressHandler =
+        mockedUseKeypress.mock.calls[
+          mockedUseKeypress.mock.calls.length - 1
+        ]![0];
+      act(() => {
+        keypressHandler(key as never);
+      });
+    };
+
+    expect(lastFrame()).toContain('Auto-skill: off');
+
+    // navigate to the autoSkill row
+    pressKey({ name: 'up' });
+    expect(lastFrame()).toContain('› Auto-skill: off');
+
+    // Enter toggles
+    pressKey({ name: 'return' });
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'memory.enableAutoSkill',
+      true,
+    );
+    expect(lastFrame()).toContain('› Auto-skill: on');
   });
 });

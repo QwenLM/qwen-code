@@ -50,8 +50,9 @@ export interface SkillConfig {
   /**
    * Optional model override for this skill's execution.
    * Uses the same selector syntax as subagent model selectors:
-   * bare model ID (e.g., `qwen-coder-plus`), `authType:modelId`
-   * for cross-provider, or omitted/`inherit` to use the session model.
+   * `fast`, bare model ID (e.g., `qwen-coder-plus`),
+   * `authType:modelId` for cross-provider, or omitted/`inherit`
+   * to use the session model.
    */
   model?: string;
 
@@ -111,6 +112,13 @@ export interface SkillConfig {
    * root and matched via picomatch. Parsed from the `paths` frontmatter field.
    */
   paths?: string[];
+
+  /**
+   * Optional display priority for this skill. Higher values sort first in
+   * the skill listing. Parsed from the `priority` frontmatter field in
+   * SKILL.md. When omitted, treated as 0; ties fall back to alphabetical order.
+   */
+  priority?: number;
 }
 
 /**

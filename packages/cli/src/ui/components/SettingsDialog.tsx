@@ -33,6 +33,7 @@ import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
 import chalk from 'chalk';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
 import {
@@ -546,8 +547,8 @@ export function SettingsDialog({
           // Block other keys while editing
           return;
         }
-        if (name === 'up' || name === 'k') {
-          // If editing, commit first
+        if (keyMatchers[Command.SELECTION_UP](key)) {
+          // ↑/k/Ctrl+P all move selection up. If editing, commit first.
           if (editingKey) {
             commitEdit(editingKey);
           }
@@ -562,8 +563,8 @@ export function SettingsDialog({
           } else if (newIndex < scrollOffset) {
             setScrollOffset(newIndex);
           }
-        } else if (name === 'down' || name === 'j') {
-          // If editing, commit first
+        } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
+          // ↓/j/Ctrl+N all move selection down. If editing, commit first.
           if (editingKey) {
             commitEdit(editingKey);
           }
