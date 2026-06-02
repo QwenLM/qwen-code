@@ -1281,8 +1281,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               const [row, col] = buffer.cursor;
               const line = buffer.lines[row] ?? '';
               if (state.yankLinewise) {
-                // Paste below current line
-                buffer.replaceRange(row + 1, 0, row + 1, 0, text + '\n');
+                const textToPaste = text.endsWith('\n') ? text : text + '\n';
+                buffer.replaceRange(row + 1, 0, row + 1, 0, textToPaste);
                 buffer.vimMoveDown(1);
                 buffer.vimMoveToLineStart();
               } else {
@@ -1301,8 +1301,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             if (text) {
               const [row, col] = buffer.cursor;
               if (state.yankLinewise) {
-                // Paste above current line
-                buffer.replaceRange(row, 0, row, 0, text + '\n');
+                const textToPaste = text.endsWith('\n') ? text : text + '\n';
+                buffer.replaceRange(row, 0, row, 0, textToPaste);
                 buffer.vimMoveToLineStart();
               } else {
                 // Paste before cursor
