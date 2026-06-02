@@ -183,18 +183,21 @@ describe('memoryImportProcessor', () => {
       ]);
     });
 
-    it('notifies after importing a file in flat format', async () => {
+    it('notifies after importing files in flat mode', async () => {
       const content = 'Some content @./test.md more content';
       const basePath = testPath('test', 'path');
       const parentFile = path.resolve(basePath, 'QWEN.md');
       const importedFile = path.resolve(basePath, 'test.md');
+      const nestedFile = path.resolve(basePath, 'nested.md');
       const importedFiles: Array<{
         filePath: string;
         parentFilePath: string;
       }> = [];
 
       mockedFs.access.mockResolvedValue(undefined);
-      mockedFs.readFile.mockResolvedValue('# Imported Content');
+      mockedFs.readFile
+        .mockResolvedValueOnce('# Imported Content\n@./nested.md')
+        .mockResolvedValueOnce('# Nested Content');
 
       await processImports(
         content,
@@ -214,12 +217,19 @@ describe('memoryImportProcessor', () => {
         },
       );
 
-      expect(importedFiles).toEqual([
-        {
-          filePath: importedFile,
-          parentFilePath: parentFile,
-        },
-      ]);
+      expect(importedFiles).toEqual(
+        expect.arrayContaining([
+          {
+            filePath: importedFile,
+            parentFilePath: parentFile,
+          },
+          {
+            filePath: nestedFile,
+            parentFilePath: importedFile,
+          },
+        ]),
+      );
+      expect(importedFiles).toHaveLength(2);
     });
 
     it('should import non-md files just like md files', async () => {
