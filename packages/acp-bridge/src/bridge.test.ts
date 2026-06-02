@@ -818,6 +818,9 @@ describe('createHttpAcpBridge', () => {
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
       state: { configOptions: [] },
+      compactedReplay: [],
+      liveJournal: [],
+      lastEventId: 0,
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
       { sessionId: 'persisted-1', cwd: WS_A, mcpServers: [] },
@@ -919,6 +922,7 @@ describe('createHttpAcpBridge', () => {
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
       state: { modes: null },
+      lastEventId: 0,
     });
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toEqual([
@@ -962,6 +966,7 @@ describe('createHttpAcpBridge', () => {
       clientId: expect.stringMatching(/^client_/),
       createdAt: expect.any(String),
       state: { _meta: { tag: 'restored-foo' } },
+      lastEventId: expect.any(Number),
     });
     expect(attached.clientId).not.toBe(loaded.clientId);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(1);
