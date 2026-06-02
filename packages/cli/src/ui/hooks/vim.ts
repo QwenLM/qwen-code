@@ -12,7 +12,7 @@ import {
   useVimModeState,
   useVimModeActions,
 } from '../contexts/VimModeContext.js';
-import { execFileSync } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 
 export type VimMode = 'NORMAL' | 'INSERT';
 
@@ -193,24 +193,21 @@ function readClipboard(): string {
   }
 }
 
-/** Write to system clipboard */
+/** Write to system clipboard (fire-and-forget, non-blocking) */
 function writeClipboard(text: string): void {
   try {
     const platform = process.platform;
+    const cb = () => {
+      /* ignore errors — clipboard is best-effort */
+    };
     if (platform === 'darwin') {
-      execFileSync('pbcopy', [], {
-        input: text,
-        timeout: 200,
-        stdio: ['pipe', 'pipe', 'ignore'],
-      });
+      const child = execFile('pbcopy', [], cb);
+      child.stdin?.end(text);
       return;
     }
     if (platform === 'win32') {
-      execFileSync('clip', [], {
-        input: text,
-        timeout: 200,
-        stdio: ['pipe', 'pipe', 'ignore'],
-      });
+      const child = execFile('clip', [], cb);
+      child.stdin?.end(text);
       return;
     }
     // Linux: probe once, then use cached tool
@@ -223,11 +220,9 @@ function writeClipboard(text: string): void {
       linuxWriteCmd = null;
       for (const [bin, args] of candidates) {
         try {
-          execFileSync(bin, args, {
-            input: text,
-            timeout: 200,
-            stdio: ['pipe', 'pipe', 'ignore'],
-          });
+          const child = execFile(bin, args, cb);
+          child.stdin?.end(text);
+          child.unref();
           linuxWriteCmd = [bin, ...args];
           return;
         } catch {
@@ -237,11 +232,9 @@ function writeClipboard(text: string): void {
     }
     if (linuxWriteCmd) {
       const [bin, ...args] = linuxWriteCmd;
-      execFileSync(bin, args, {
-        input: text,
-        timeout: 200,
-        stdio: ['pipe', 'pipe', 'ignore'],
-      });
+      const child = execFile(bin, args, cb);
+      child.stdin?.end(text);
+      child.unref();
     }
   } catch {
     // Clipboard not available — silently ignore
