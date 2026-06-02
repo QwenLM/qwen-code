@@ -246,16 +246,9 @@ function writeClipboard(text: string): void {
 }
 
 /** Prepare paste text: normalize linewise newlines and apply repeat count */
-function preparePasteText(
-  text: string,
-  linewise: boolean,
-  count: number,
-): string {
-  if (linewise) {
-    const normalized = text.endsWith('\n') ? text : text + '\n';
-    return normalized.repeat(count);
-  }
-  return text.repeat(count);
+function preparePasteText(text: string, count: number): string {
+  const normalized = text.endsWith('\n') ? text : text + '\n';
+  return normalized.repeat(count);
 }
 
 /** Find char in line, starting from col (exclusive). Returns col or -1. */
@@ -1391,7 +1384,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               const [row, col] = buffer.cursor;
               const line = buffer.lines[row] ?? '';
               if (state.yankLinewise) {
-                const repeated = preparePasteText(text, true, repeatCount);
+                const repeated = preparePasteText(text, repeatCount);
                 buffer.replaceRange(row + 1, 0, row + 1, 0, repeated);
                 buffer.vimMoveDown(1);
                 buffer.vimMoveToLineStart();
@@ -1417,7 +1410,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             if (text) {
               const [row, col] = buffer.cursor;
               if (state.yankLinewise) {
-                const repeated = preparePasteText(text, true, repeatCount);
+                const repeated = preparePasteText(text, repeatCount);
                 buffer.replaceRange(row, 0, row, 0, repeated);
                 buffer.vimMoveToLineStart();
               } else {
