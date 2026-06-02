@@ -1506,6 +1506,26 @@ describe('HookSystem', () => {
       expect(result).toBeUndefined();
     });
 
+    it('should return DefaultHookOutput when finalOutput exists', async () => {
+      const mockResult = createMockAggregatedResult(true, {
+        decision: 'block' as HookDecision,
+        reason: 'Observed denial',
+      });
+      vi.mocked(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.firePermissionDeniedEvent(
+        'ReadFile',
+        { path: '/secret.txt' },
+        'tool-use-2',
+        'classifier_unavailable',
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.isBlockingDecision()).toBe(true);
+    });
+
     it('should return PermissionDenied hook output when present', async () => {
       const mockAggregated = createMockAggregatedResult(true);
       mockAggregated.finalOutput = {

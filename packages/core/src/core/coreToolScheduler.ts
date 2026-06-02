@@ -76,7 +76,9 @@ import {
 } from '../permissions/autoMode.js';
 import { MAX_TRANSCRIPT_MESSAGES } from '../permissions/classifier-transcript.js';
 import {
+  formatDenialStateLog,
   isApproveOutcome,
+  isDenialFallbackReason,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
@@ -929,6 +931,7 @@ export class CoreToolScheduler {
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private validationRetryCounts = new Map<string, number>();
+  private autoModeFallbackCallIds = new Set<string>();
   // Tool span lifecycle now spans validating → awaiting_approval → executing
   // → terminal, so we hold the span across method boundaries by callId.
   // Decoupling from ToolCall identity is intentional — setStatusInternal
@@ -1866,7 +1869,9 @@ export class CoreToolScheduler {
               messages,
               config: this.config,
               signal,
-              skipClassifier: fallback.fallback,
+              skipClassifierReason: fallback.fallback
+                ? fallback.reason
+                : undefined,
             });
 
             const outcome = applyAutoModeDecision(
@@ -1897,6 +1902,10 @@ export class CoreToolScheduler {
                 this.setStatusInternal(reqInfo.callId, 'scheduled');
                 continue;
               case 'blocked':
+                debugLogger.warn(
+                  `Auto mode blocked (${outcome.reason}): tool=${canonicalName}, ` +
+                    formatDenialStateLog(denialState),
+                );
                 this.setStatusInternal(
                   reqInfo.callId,
                   'error',
@@ -1913,9 +1922,11 @@ export class CoreToolScheduler {
                 // operators see the cause in the debug log (only when
                 // fallback was specifically armed by denialTracking —
                 // a pmForcedAsk fallback isn't an audit-worthy event).
-                if (fallback.fallback) {
+                if (isDenialFallbackReason(outcome.reason)) {
+                  this.autoModeFallbackCallIds.add(reqInfo.callId);
                   debugLogger.warn(
-                    `Auto mode fallback to manual approval (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                    `Auto mode fallback to manual approval (${outcome.reason}): ` +
+                      formatDenialStateLog(denialState),
                   );
                 }
                 break;
@@ -2047,6 +2058,10 @@ export class CoreToolScheduler {
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.ProceedOnce,
                   );
+                  this.recordAutoModeFallbackResolution(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
                   this.setToolCallOutcome(
                     reqInfo.callId,
                     ToolConfirmationOutcome.ProceedOnce,
@@ -2060,6 +2075,10 @@ export class CoreToolScheduler {
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.Cancel,
                     cancelPayload,
+                  );
+                  this.recordAutoModeFallbackResolution(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.Cancel,
                   );
                   this.setToolCallOutcome(
                     reqInfo.callId,
@@ -2377,22 +2396,7 @@ export class CoreToolScheduler {
 
     this.setToolCallOutcome(callId, outcome);
 
-    // AUTO-mode denialTracking recovery: when the user manually approves a
-    // call that fell back from AUTO (either by streak threshold or by an
-    // explicit ask rule), reset the consecutiveBlock counter so subsequent
-    // calls return to classifier flow. Without this, a session that hit
-    // the denial threshold once would stay in fallback for the rest of
-    // the session even after the user explicitly approves the next call.
-    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
-    // signal that the classifier was correct to block.
-    if (
-      this.config.getApprovalMode() === ApprovalMode.AUTO &&
-      isApproveOutcome(outcome)
-    ) {
-      this.config.setAutoModeDenialState(
-        recordFallbackApprove(this.config.getAutoModeDenialState()),
-      );
-    }
+    this.recordAutoModeFallbackResolution(callId, outcome);
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
       // Use custom cancel message from payload if provided, otherwise use default
@@ -2508,6 +2512,40 @@ export class CoreToolScheduler {
     // (handleConfirmationResponse, outside its catch) so a sister
     // tool's prelude throw can't be mis-attributed to this callId
     // (#4321 review-9 wenshao Critical).
+  }
+
+  private recordAutoModeFallbackResolution(
+    callId: string,
+    outcome: ToolConfirmationOutcome,
+  ): void {
+    const wasAutoModeFallback = this.autoModeFallbackCallIds.delete(callId);
+
+    // AUTO-mode denialTracking recovery: when the user manually approves a
+    // call that fell back because denialTracking was armed, clear the armed
+    // counters so subsequent calls return to classifier flow. Ordinary AUTO
+    // approvals for ask rules must not clear cumulative denial totals.
+    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
+    // signal that the classifier was correct to block.
+    if (
+      this.config.getApprovalMode() === ApprovalMode.AUTO &&
+      wasAutoModeFallback &&
+      isApproveOutcome(outcome)
+    ) {
+      const before = this.config.getAutoModeDenialState();
+      const after = recordFallbackApprove(before);
+      if (after === before) {
+        debugLogger.warn(
+          `Auto mode denial counters already clear after fallback approval: ` +
+            formatDenialStateLog(before),
+        );
+        return;
+      }
+      debugLogger.warn(
+        `Auto mode denial counters reset after fallback approval: ` +
+          `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
+      );
+      this.config.setAutoModeDenialState(after);
+    }
   }
 
   /**
