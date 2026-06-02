@@ -1,8 +1,17 @@
 .message {
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--warning-color);
   border-radius: 8px;
   color: var(--text-primary);
+  max-height: 50vh;
   padding: 10px 12px;
+}
+
+.content {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .question {

@@ -18,16 +18,18 @@ export const BtwMessage = memo(function BtwMessage({
 
   return (
     <div className={styles.message}>
-      <div className={styles.question}>
-        <span className={styles.prefix}>/btw </span>
-        <span>{question}</span>
-      </div>
-      <div className={styles.answer}>
-        {isPending ? (
-          <span className={styles.pending}>{t('btw.answering')}</span>
-        ) : (
-          <Markdown content={answer} />
-        )}
+      <div className={styles.content}>
+        <div className={styles.question}>
+          <span className={styles.prefix}>/btw </span>
+          <span>{question}</span>
+        </div>
+        <div className={styles.answer}>
+          {isPending ? (
+            <span className={styles.pending}>{t('btw.answering')}</span>
+          ) : (
+            <Markdown content={answer} />
+          )}
+        </div>
       </div>
       <div className={styles.shortcuts}>
         {isPending ? t('btw.shortcuts.pending') : t('btw.shortcuts.done')}
