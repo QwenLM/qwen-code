@@ -910,6 +910,25 @@ export async function main() {
       process.exit(0);
     }
 
+    // Background housekeeping: file-history cleanup and (future) other
+    // periodic disk maintenance. Interactive-only — serve/SDK/ACP modes
+    // don't create the file-history dirs this cleans, so they skip.
+    // Dynamic import keeps --help / one-shot --prompt paths from loading
+    // this code at all. Timers inside are .unref()'d so they never block
+    // process exit.
+    if (config.isInteractive()) {
+      // .catch() is intentional: a dynamic-import or module-init failure
+      // (theoretically near-impossible — the module has no top-level side
+      // effects — but defense in depth matches the runPass try/catch in
+      // scheduler.ts) becomes a swallowed log instead of an unhandled
+      // promise rejection that crashes the REPL.
+      void import('./utils/housekeeping/scheduler.js')
+        .then((m) => m.startBackgroundHousekeeping(config, settings))
+        .catch((err) => {
+          debugLogger.warn('failed to start background housekeeping:', err);
+        });
+    }
+
     let input = config.getQuestion();
     const startupWarnings = [
       ...new Set([
