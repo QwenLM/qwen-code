@@ -21,6 +21,8 @@ import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep as pathSep } from 'node:path';
 import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
+import { escapeXml } from '../utils/xml.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 
@@ -660,17 +662,17 @@ function safeRealpath(p: string): string {
   }
 }
 
-// Tool names listed verbatim from tool-names.ts so a future rename / removal
-// surfaces during a global grep instead of leaving stale guidance in this
-// reminder. Keep the list small (the most common modification tools) — an
-// exhaustive enumeration would drift faster than it helps.
+// Tool names are pulled from the `ToolNames` constant source rather than
+// retyped, so a future rename updates this reminder automatically instead of
+// leaving stale guidance. Keep the list small (the most common modification
+// tools) — an exhaustive enumeration would drift faster than it helps.
 const PLAN_MODE_REMINDER_TEXT =
   '<plan-mode-active>\n' +
   'You are currently in PLAN mode. You may research, read files, and ' +
-  'propose plans, but you may not execute modification tools (write_file, ' +
-  'edit, run_shell_command, etc.) until the user exits plan mode. The ' +
-  'summary above may not reflect this constraint — honor plan mode ' +
-  'regardless.\n' +
+  'propose plans, but you may not execute modification tools (' +
+  `${ToolNames.WRITE_FILE}, ${ToolNames.EDIT}, ${ToolNames.SHELL}, etc.) ` +
+  'until the user exits plan mode. The summary above may not reflect this ' +
+  'constraint — honor plan mode regardless.\n' +
   '</plan-mode-active>';
 
 /** Cap per-task description text in the snapshot block. Prevents a
@@ -689,19 +691,6 @@ const MAX_SUBAGENT_SNAPSHOT_COUNT = 30;
 
 function buildPlanModeReminderPart(): Part {
   return { text: PLAN_MODE_REMINDER_TEXT };
-}
-
-/**
- * Escape the three XML-significant characters in subagent descriptions
- * before splicing them inside our `<background-tasks>` wrapper. Without
- * this, a description containing `</background-tasks>` could close the
- * wrapper tag and inject arbitrary structure into the model's view.
- */
-function escapeForXmlText(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
 }
 
 /**
@@ -733,7 +722,12 @@ function buildSubagentSnapshotPart(snaps: SubagentSnapshot[]): Part | null {
       flattened.length > MAX_SUBAGENT_DESC_CHARS
         ? flattened.slice(0, MAX_SUBAGENT_DESC_CHARS) + '…'
         : flattened;
-    return `- [${s.status}] ${s.id}: ${escapeForXmlText(truncated)}`;
+    // Escape EVERY interpolated field (id and status as well as the
+    // description) with the shared 5-char escaper. Subagent ids derive from
+    // a user-configurable `subagentConfig.name`, so a `<`/`&` there could
+    // otherwise close the `<background-tasks>` wrapper or forge sibling
+    // markup the model would treat as trusted metadata.
+    return `- [${escapeXml(s.status)}] ${escapeXml(s.id)}: ${escapeXml(truncated)}`;
   });
   if (overflow > 0) {
     lines.push(
@@ -750,6 +744,29 @@ function buildSubagentSnapshotPart(snaps: SubagentSnapshot[]): Part | null {
       lines.join('\n') +
       '\n</background-tasks>',
   };
+}
+
+/**
+ * Build the mid-session state-reminder parts (plan-mode banner + background
+ * subagent snapshot) that lead the post-compact attachment. Extracted as a
+ * single source of truth so BOTH the normal `composePostCompactHistory`
+ * path AND its catch-fallback emit the same blocks — otherwise the fallback
+ * silently drops plan-mode enforcement and the subagent roster (the exact
+ * drift PR #4688 review caught). Pure: no I/O, safe to call from a catch.
+ */
+export function buildStateReminderParts(options: {
+  planModeActive?: boolean;
+  runningSubagents?: SubagentSnapshot[];
+}): Part[] {
+  const parts: Part[] = [];
+  if (options.planModeActive) {
+    parts.push(buildPlanModeReminderPart());
+  }
+  if (options.runningSubagents && options.runningSubagents.length > 0) {
+    const snap = buildSubagentSnapshotPart(options.runningSubagents);
+    if (snap) parts.push(snap);
+  }
+  return parts;
 }
 
 export async function composePostCompactHistory(
@@ -789,14 +806,9 @@ export async function composePostCompactHistory(
   // Reminder text comes first so a token-conservative model that skims the
   // attachment still sees the plan-mode constraint and task pointers before
   // it gets to file bodies.
-  const postAckParts: Part[] = [];
-  if (planModeActive) {
-    postAckParts.push(buildPlanModeReminderPart());
-  }
-  if (runningSubagents && runningSubagents.length > 0) {
-    const snap = buildSubagentSnapshotPart(runningSubagents);
-    if (snap) postAckParts.push(snap);
-  }
+  const postAckParts: Part[] = [
+    ...buildStateReminderParts({ planModeActive, runningSubagents }),
+  ];
   for (const block of fileBlocks) {
     for (const part of block.parts ?? []) postAckParts.push(part);
   }
