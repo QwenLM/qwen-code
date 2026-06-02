@@ -542,6 +542,20 @@ export function postProcessSummary(rawSummary: string): string {
   return `${body}\n\n${RESUME_TRAILER}`;
 }
 
+/**
+ * Minimal projection of a background subagent task carried into post-compact
+ * attachments. Decoupled from the registry's `AgentTask` so the attachment
+ * layer does not import the registry types and so tests can build cases
+ * inline.
+ */
+export interface SubagentSnapshot {
+  id: string;
+  description: string;
+  status: 'running' | 'paused';
+  /** ms epoch when the task was registered. Used for stable ordering. */
+  startTime: number;
+}
+
 export interface ComposePostCompactOptions {
   /**
    * Workspace root. When set, file paths from history that resolve
@@ -571,6 +585,24 @@ export interface ComposePostCompactOptions {
    * `QWEN_COMPACT_MAX_RECENT_IMAGES`).
    */
   maxImages?: number;
+  /**
+   * When `true`, prepend a `<plan-mode-active>` reminder block before the
+   * file/image attachments so the post-compact agent does not forget that
+   * destructive tools remain gated. Sourced from `config.getApprovalMode()
+   * === ApprovalMode.PLAN` at the call site. The summary itself may
+   * mention plan mode but cannot be trusted to — the reminder is a
+   * structural guarantee.
+   */
+  planModeActive?: boolean;
+  /**
+   * Snapshot of background subagent tasks (running or paused) at
+   * compaction time. Rendered as a `<background-tasks>` reminder block.
+   * Empty array or `undefined` renders no block. Terminal-state tasks
+   * (completed/failed/cancelled) should already be filtered out by the
+   * caller — they have already emitted their notification XML and need
+   * no reminder.
+   */
+  runningSubagents?: SubagentSnapshot[];
 }
 
 /**
@@ -628,6 +660,59 @@ function safeRealpath(p: string): string {
   }
 }
 
+const PLAN_MODE_REMINDER_TEXT =
+  '<plan-mode-active>\n' +
+  'You are currently in PLAN mode. You may research, read files, and ' +
+  'propose plans, but you may not execute modification tools (write_file, ' +
+  'edit, shell mutations, etc.) until the user exits plan mode. The summary ' +
+  'above may not reflect this constraint — honor plan mode regardless.\n' +
+  '</plan-mode-active>';
+
+/** Cap per-task description text in the snapshot block. Prevents a
+ *  pathologically long subagent description from inflating the post-compact
+ *  history. 200 chars keeps the snapshot useful as a pointer without making
+ *  it a full progress log. */
+const MAX_SUBAGENT_DESC_CHARS = 200;
+
+function buildPlanModeReminderPart(): Part {
+  return { text: PLAN_MODE_REMINDER_TEXT };
+}
+
+/**
+ * Escape the three XML-significant characters in subagent descriptions
+ * before splicing them inside our `<background-tasks>` wrapper. Without
+ * this, a description containing `</background-tasks>` could close the
+ * wrapper tag and inject arbitrary structure into the model's view.
+ */
+function escapeForXmlText(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function buildSubagentSnapshotPart(snaps: SubagentSnapshot[]): Part | null {
+  if (snaps.length === 0) return null;
+  const sorted = [...snaps].sort((a, b) => a.startTime - b.startTime);
+  const lines = sorted.map((s) => {
+    const truncated =
+      s.description.length > MAX_SUBAGENT_DESC_CHARS
+        ? s.description.slice(0, MAX_SUBAGENT_DESC_CHARS) + '…'
+        : s.description;
+    return `- [${s.status}] ${s.id}: ${escapeForXmlText(truncated)}`;
+  });
+  return {
+    text:
+      '<background-tasks>\n' +
+      'The following background subagent tasks were active at compaction. ' +
+      'The summary above does not include their per-task state. Use ' +
+      '`task_stop` / `send_message` to interact; do not assume they ' +
+      'completed.\n' +
+      lines.join('\n') +
+      '\n</background-tasks>',
+  };
+}
+
 export async function composePostCompactHistory(
   history: Content[],
   summary: string,
@@ -638,6 +723,8 @@ export async function composePostCompactHistory(
     signal,
     maxFiles = POST_COMPACT_MAX_FILES_TO_RESTORE,
     maxImages = POST_COMPACT_MAX_IMAGES_TO_RESTORE,
+    planModeActive,
+    runningSubagents,
   } = options;
 
   // Workspace-boundary filter on the extracted file paths (Finding 4).
@@ -654,7 +741,23 @@ export async function composePostCompactHistory(
   // Contents produces consecutive same-role entries, which
   // geminiChat.test.ts:6289 enforces against and which Gemini
   // providers reject as 400 "consecutive same-role content".
+  //
+  // Order within the merged user Content:
+  //   1. plan-mode reminder (if active)        — most behaviourally critical
+  //   2. background subagent snapshot          — informs next-turn dispatch
+  //   3. file restoration blocks               — model-readable file contents
+  //   4. image restoration block               — recent screenshots
+  // Reminder text comes first so a token-conservative model that skims the
+  // attachment still sees the plan-mode constraint and task pointers before
+  // it gets to file bodies.
   const postAckParts: Part[] = [];
+  if (planModeActive) {
+    postAckParts.push(buildPlanModeReminderPart());
+  }
+  if (runningSubagents && runningSubagents.length > 0) {
+    const snap = buildSubagentSnapshotPart(runningSubagents);
+    if (snap) postAckParts.push(snap);
+  }
   for (const block of fileBlocks) {
     for (const part of block.parts ?? []) postAckParts.push(part);
   }
