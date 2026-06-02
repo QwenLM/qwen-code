@@ -12,7 +12,7 @@ import {
   useVimModeState,
   useVimModeActions,
 } from '../contexts/VimModeContext.js';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 
 export type VimMode = 'NORMAL' | 'INSERT';
 
@@ -135,39 +135,57 @@ const vimReducer = (state: VimState, action: VimAction): VimState => {
 
 // ── Helpers ──
 
+// Cached Linux clipboard tool to avoid repeated probe on every call.
+let linuxReadCmd: string[] | null | undefined;
+let linuxWriteCmd: string[] | null | undefined;
+
 /** Read system clipboard */
 function readClipboard(): string {
   try {
     const platform = process.platform;
     if (platform === 'darwin') {
-      return execSync('pbpaste', {
+      return execFileSync('pbpaste', [], {
         encoding: 'utf-8',
-        timeout: 1000,
+        timeout: 200,
         stdio: ['pipe', 'pipe', 'ignore'],
       }).toString();
     }
     if (platform === 'win32') {
-      return execSync('powershell -c Get-Clipboard', {
+      return execFileSync('powershell', ['-c', 'Get-Clipboard'], {
         encoding: 'utf-8',
-        timeout: 1000,
+        timeout: 200,
         stdio: ['pipe', 'pipe', 'ignore'],
       }).toString();
     }
-    // Linux: try xclip → xsel → wl-paste
-    for (const cmd of [
-      'xclip -selection clipboard -o',
-      'xsel --clipboard --output',
-      'wl-paste',
-    ]) {
-      try {
-        return execSync(cmd, {
-          encoding: 'utf-8',
-          timeout: 1000,
-          stdio: ['pipe', 'pipe', 'ignore'],
-        }).toString();
-      } catch {
-        /* try next */
+    // Linux: probe once, then use cached tool
+    if (linuxReadCmd === undefined) {
+      const candidates: Array<[string, string[]]> = [
+        ['xclip', ['-selection', 'clipboard', '-o']],
+        ['xsel', ['--clipboard', '--output']],
+        ['wl-paste', []],
+      ];
+      linuxReadCmd = null;
+      for (const [bin, args] of candidates) {
+        try {
+          execFileSync(bin, args, {
+            encoding: 'utf-8',
+            timeout: 200,
+            stdio: ['pipe', 'pipe', 'ignore'],
+          });
+          linuxReadCmd = [bin, ...args];
+          break;
+        } catch {
+          /* try next */
+        }
       }
+    }
+    if (linuxReadCmd) {
+      const [bin, ...args] = linuxReadCmd;
+      return execFileSync(bin, args, {
+        encoding: 'utf-8',
+        timeout: 200,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      }).toString();
     }
     return '';
   } catch {
@@ -180,37 +198,50 @@ function writeClipboard(text: string): void {
   try {
     const platform = process.platform;
     if (platform === 'darwin') {
-      execSync('pbcopy', {
+      execFileSync('pbcopy', [], {
         input: text,
-        timeout: 1000,
+        timeout: 200,
         stdio: ['pipe', 'pipe', 'ignore'],
       });
       return;
     }
     if (platform === 'win32') {
-      execSync('clip', {
+      execFileSync('clip', [], {
         input: text,
-        timeout: 1000,
+        timeout: 200,
         stdio: ['pipe', 'pipe', 'ignore'],
       });
       return;
     }
-    // Linux: try xclip → xsel → wl-copy
-    for (const cmd of [
-      'xclip -selection clipboard',
-      'xsel --clipboard --input',
-      'wl-copy',
-    ]) {
-      try {
-        execSync(cmd, {
-          input: text,
-          timeout: 1000,
-          stdio: ['pipe', 'pipe', 'ignore'],
-        });
-        return;
-      } catch {
-        /* try next */
+    // Linux: probe once, then use cached tool
+    if (linuxWriteCmd === undefined) {
+      const candidates: Array<[string, string[]]> = [
+        ['xclip', ['-selection', 'clipboard']],
+        ['xsel', ['--clipboard', '--input']],
+        ['wl-copy', []],
+      ];
+      linuxWriteCmd = null;
+      for (const [bin, args] of candidates) {
+        try {
+          execFileSync(bin, args, {
+            input: text,
+            timeout: 200,
+            stdio: ['pipe', 'pipe', 'ignore'],
+          });
+          linuxWriteCmd = [bin, ...args];
+          return;
+        } catch {
+          /* try next */
+        }
       }
+    }
+    if (linuxWriteCmd) {
+      const [bin, ...args] = linuxWriteCmd;
+      execFileSync(bin, args, {
+        input: text,
+        timeout: 200,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      });
     }
   } catch {
     // Clipboard not available — silently ignore
