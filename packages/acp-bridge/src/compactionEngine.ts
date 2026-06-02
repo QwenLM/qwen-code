@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  BridgeEvent,
-  CompactionEngine,
-  SessionReplaySnapshot,
+import {
+  EVENT_SCHEMA_VERSION,
+  type BridgeEvent,
+  type CompactionEngine,
+  type SessionReplaySnapshot,
 } from './eventBus.js';
 
 export type { CompactionEngine, SessionReplaySnapshot };
@@ -252,7 +253,7 @@ function makeMergedSessionUpdateEvent(
 ): BridgeEvent {
   return {
     id: eventId || undefined,
-    v: 1,
+    v: EVENT_SCHEMA_VERSION,
     type: 'session_update',
     data: {
       update: {
@@ -298,7 +299,7 @@ function mergeToolCallEvent(
 
   return {
     id: incoming.id ?? existing.id,
-    v: 1,
+    v: EVENT_SCHEMA_VERSION,
     type: 'session_update',
     data: {
       ...existingData,
