@@ -17,9 +17,14 @@ import type { ReadableLogRecord } from '@opentelemetry/sdk-logs';
 import type { SpanExporter } from '@opentelemetry/sdk-trace-base';
 
 let mockCurrentSessionId: string | undefined = undefined;
+let mockIsInNativeSubagentSpan = false;
 
 vi.mock('./session-context.js', () => ({
   getCurrentSessionId: () => mockCurrentSessionId,
+}));
+
+vi.mock('./session-tracing.js', () => ({
+  isInNativeSubagentSpan: () => mockIsInNativeSubagentSpan,
 }));
 
 interface ExportedSpan {
@@ -753,7 +758,8 @@ describe('LogToSpanProcessor', () => {
   });
 
   describe('bridge skip-list (#3731 Phase 3)', () => {
-    it('skips qwen-code.subagent_execution events — no bridge span emitted', async () => {
+    it('skips qwen-code.subagent_execution when native subagent span is active', async () => {
+      mockIsInNativeSubagentSpan = true;
       const logRecord = {
         body: 'subagent started',
         hrTime: [2000, 0] as [number, number],
@@ -767,12 +773,27 @@ describe('LogToSpanProcessor', () => {
       processor.onEmit(logRecord);
       await processor.forceFlush();
 
-      // The LogRecord itself is unaffected — RUM + metrics consumers
-      // still see it via the regular LogRecord pipeline. But the
-      // log-to-span bridge does NOT emit a span for it (the native
-      // qwen-code.subagent span from agent.ts provides the trace
-      // hierarchy instead).
       expect(exportedSpans).toHaveLength(0);
+      mockIsInNativeSubagentSpan = false;
+    });
+
+    it('bridges subagent_execution when no native span is active (e.g. runForkedAgent)', async () => {
+      mockIsInNativeSubagentSpan = false;
+      const logRecord = {
+        body: 'forked agent started',
+        hrTime: [2500, 0] as [number, number],
+        attributes: {
+          'event.name': 'qwen-code.subagent_execution',
+          subagent_name: 'dreamAgent',
+          status: 'started',
+        },
+      } as unknown as ReadableLogRecord;
+
+      processor.onEmit(logRecord);
+      await processor.forceFlush();
+
+      expect(exportedSpans).toHaveLength(1);
+      expect(exportedSpans[0].name).toBe('qwen-code.subagent_execution');
     });
 
     it('still bridges other events normally (e.g. qwen-code.tool_call)', async () => {

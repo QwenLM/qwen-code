@@ -165,6 +165,10 @@ const toolContext = new AsyncLocalStorage<SpanContext | undefined>();
  */
 const subagentContext = new AsyncLocalStorage<SpanContext | undefined>();
 
+export function isInNativeSubagentSpan(): boolean {
+  return subagentContext.getStore() !== undefined;
+}
+
 const activeSpans = new Map<string, WeakRef<SpanContext>>();
 const strongSpans = new Map<string, SpanContext>();
 

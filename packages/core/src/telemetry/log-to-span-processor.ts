@@ -29,16 +29,14 @@ import {
   randomSpanId,
 } from './trace-id-utils.js';
 import { getCurrentSessionId } from './session-context.js';
+import { isInNativeSubagentSpan } from './session-tracing.js';
 
 /**
- * LogRecord event names that have native span coverage elsewhere and
- * should NOT be bridged to a duplicate `qwen-code.<event>` span. Today
- * subagent_execution is the only one — the native `qwen-code.subagent`
- * span (#3731 Phase 3) provides richer hierarchy via `runInSubagentSpanContext`,
- * so the bridge span here would duplicate without adding anything.
- *
- * The LogRecord itself still flows through to other consumers
- * (QwenLogger RUM, metrics counter) — only the span bridge is skipped.
+ * LogRecord event names that have native span coverage when emitted
+ * inside a `runInSubagentSpanContext` body. The bridge is only skipped
+ * when the ALS confirms a native subagent span is active — paths that
+ * emit the same event WITHOUT a native span (e.g. `runForkedAgent`)
+ * still get a bridge span so trace-tree observability is preserved.
  */
 const BRIDGE_SKIP_EVENT_NAMES = new Set<string>([EVENT_SUBAGENT_EXECUTION]);
 
@@ -150,13 +148,13 @@ export class LogToSpanProcessor implements LogRecordProcessor {
       return;
     }
 
-    // Short-circuit before any work for events with native span coverage
-    // (#3731 Phase 3 — see BRIDGE_SKIP_EVENT_NAMES). LogRecord still
-    // reaches other consumers via the normal LogRecord pipeline.
+    // Skip bridge only when a native subagent span is active in the ALS.
+    // Paths without native coverage (e.g. runForkedAgent) still get bridged.
     const eventName = logRecord.attributes?.['event.name'];
     if (
       typeof eventName === 'string' &&
-      BRIDGE_SKIP_EVENT_NAMES.has(eventName)
+      BRIDGE_SKIP_EVENT_NAMES.has(eventName) &&
+      isInNativeSubagentSpan()
     ) {
       return;
     }
