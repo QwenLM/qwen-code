@@ -1357,20 +1357,24 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             let text = state.yankRegister;
             if (!text) text = readClipboard();
             if (text) {
-              const repeated = text.repeat(repeatCount);
               const [row, col] = buffer.cursor;
               const line = buffer.lines[row] ?? '';
               if (state.yankLinewise) {
-                const textToPaste = repeated.endsWith('\n')
-                  ? repeated
-                  : repeated + '\n';
-                buffer.replaceRange(row + 1, 0, row + 1, 0, textToPaste);
+                const normalizedText = text.endsWith('\n') ? text : text + '\n';
+                const repeated = normalizedText.repeat(repeatCount);
+                buffer.replaceRange(row + 1, 0, row + 1, 0, repeated);
                 buffer.vimMoveDown(1);
                 buffer.vimMoveToLineStart();
               } else {
                 // Paste after cursor
                 const insertCol = Math.min(col + 1, line.length);
-                buffer.replaceRange(row, insertCol, row, insertCol, repeated);
+                buffer.replaceRange(
+                  row,
+                  insertCol,
+                  row,
+                  insertCol,
+                  text.repeat(repeatCount),
+                );
                 buffer.vimMoveRight(1);
               }
             }
@@ -1381,17 +1385,21 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             let text = state.yankRegister;
             if (!text) text = readClipboard();
             if (text) {
-              const repeated = text.repeat(repeatCount);
               const [row, col] = buffer.cursor;
               if (state.yankLinewise) {
-                const textToPaste = repeated.endsWith('\n')
-                  ? repeated
-                  : repeated + '\n';
-                buffer.replaceRange(row, 0, row, 0, textToPaste);
+                const normalizedText = text.endsWith('\n') ? text : text + '\n';
+                const repeated = normalizedText.repeat(repeatCount);
+                buffer.replaceRange(row, 0, row, 0, repeated);
                 buffer.vimMoveToLineStart();
               } else {
                 // Paste before cursor
-                buffer.replaceRange(row, col, row, col, repeated);
+                buffer.replaceRange(
+                  row,
+                  col,
+                  row,
+                  col,
+                  text.repeat(repeatCount),
+                );
               }
             }
             dispatch({ type: 'CLEAR_COUNT' });
