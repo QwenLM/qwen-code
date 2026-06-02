@@ -5939,4 +5939,83 @@ describe('parallel subAgent text interleaving fix', () => {
     expect(state.activeAssistantBlockByParent).toEqual({});
     expect(state.activeThoughtBlockByParent).toEqual({});
   });
+
+  it('T8: thought evicts assistant block and finalizes streaming for same parent', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'assistant.text.delta',
+          text: 'assistant streaming',
+          parentToolCallId: 'task-Z',
+        },
+      ],
+      { now: 2 },
+    );
+
+    const beforeBlocks = state.blocks.filter(
+      (b) => b.kind === 'assistant',
+    ) as Array<{ streaming?: boolean }>;
+    expect(beforeBlocks[0]!.streaming).toBe(true);
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'thought.text.delta',
+          text: 'now thinking',
+          parentToolCallId: 'task-Z',
+        },
+      ],
+      { now: 3 },
+    );
+
+    expect(state.activeAssistantBlockByParent['task-Z']).toBeUndefined();
+    const afterBlocks = state.blocks.filter(
+      (b) => b.kind === 'assistant',
+    ) as Array<{ streaming?: boolean }>;
+    expect(afterBlocks[0]!.streaming).toBe(false);
+
+    const thoughtBlocks = state.blocks.filter((b) => b.kind === 'thought');
+    expect(thoughtBlocks).toHaveLength(1);
+  });
+
+  it('T9: thought text cleared by scoped clearActiveText from tool.update', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'thought.text.delta',
+          text: 'thinking...',
+          parentToolCallId: 'task-W',
+        },
+        {
+          type: 'tool.update',
+          toolCallId: 'child-tool',
+          title: 'Bash',
+          status: 'running',
+          parentToolCallId: 'task-W',
+        } as DaemonUiEvent,
+        {
+          type: 'thought.text.delta',
+          text: 'new thought',
+          parentToolCallId: 'task-W',
+        },
+      ],
+      { now: 2 },
+    );
+
+    const thoughtBlocks = state.blocks.filter(
+      (b) =>
+        b.kind === 'thought' &&
+        (b as { parentToolCallId?: string }).parentToolCallId === 'task-W',
+    ) as Array<{ text: string }>;
+    expect(thoughtBlocks).toHaveLength(2);
+    expect(thoughtBlocks[0]!.text).toBe('thinking...');
+    expect(thoughtBlocks[1]!.text).toBe('new thought');
+  });
 });

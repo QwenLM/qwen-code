@@ -380,7 +380,7 @@ function appendTextDelta(
   event: DaemonUiEvent,
 ): void {
   const parentId =
-    'parentToolCallId' in event
+    kind !== 'user' && 'parentToolCallId' in event
       ? (event as DaemonUiTextEvent).parentToolCallId
       : undefined;
 
@@ -430,6 +430,14 @@ function appendTextDelta(
       delete state.activeThoughtBlockByParent[parentId];
     }
     if (kind === 'thought') {
+      const evictedAssistId = state.activeAssistantBlockByParent[parentId];
+      if (evictedAssistId) {
+        const evicted = getWritableBlockById(state, evictedAssistId);
+        if (evicted?.kind === 'assistant') {
+          evicted.streaming = false;
+          evicted.updatedAt = state.now;
+        }
+      }
       delete state.activeAssistantBlockByParent[parentId];
     }
   } else {
