@@ -121,6 +121,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionRecap: 'qwen/control/session/recap',
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
+  sessionLanguage: 'qwen/control/session/language',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   // T2.8 (#4514): runtime MCP server mutation ext-methods
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',

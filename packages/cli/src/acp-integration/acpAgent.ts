@@ -102,6 +102,13 @@ import {
 } from '../utils/acpModelUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
+import { setLanguageAsync } from '../i18n/index.js';
+import {
+  resolveOutputLanguage,
+  updateOutputLanguageFile,
+  isAutoLanguage,
+  OUTPUT_LANGUAGE_AUTO,
+} from '../utils/languageUtils.js';
 import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
@@ -2515,6 +2522,71 @@ class QwenAgent implements Agent {
         }
         const current = config.getApprovalMode();
         return { previous, current };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionLanguage: {
+        const sessionId = params['sessionId'];
+        const language = params['language'];
+        const syncOutputLanguage = params['syncOutputLanguage'] === true;
+
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (typeof language !== 'string' || !language) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing language',
+          );
+        }
+
+        await setLanguageAsync(language);
+
+        try {
+          this.settings.setValue(
+            SettingScope.User,
+            'general.language',
+            language,
+          );
+        } catch {
+          // non-fatal: in-process switch already took effect
+        }
+
+        let outputLanguage: string | null = null;
+        let refreshed = false;
+
+        if (syncOutputLanguage) {
+          const resolved = resolveOutputLanguage(language);
+          const settingValue = isAutoLanguage(language)
+            ? OUTPUT_LANGUAGE_AUTO
+            : resolved;
+
+          updateOutputLanguageFile(settingValue);
+
+          try {
+            this.settings.setValue(
+              SettingScope.User,
+              'general.outputLanguage',
+              settingValue,
+            );
+          } catch {
+            // non-fatal
+          }
+
+          const allSessions = [...this.sessions.values()];
+          await Promise.allSettled(
+            allSessions.map(async (s) => {
+              const cfg = s.getConfig();
+              await cfg.refreshHierarchicalMemory();
+              await cfg.getGeminiClient()?.refreshSystemInstruction();
+            }),
+          );
+          refreshed = true;
+          outputLanguage = resolved;
+        }
+
+        return { language, outputLanguage, refreshed };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionRecap: {
         // #4175 follow-up. Generate a one-sentence "where did I leave

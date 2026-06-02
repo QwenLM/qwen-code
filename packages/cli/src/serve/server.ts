@@ -2292,6 +2292,71 @@ export function createServeApp(
     },
   );
 
+  const LANGUAGE_CODES = [
+    'zh',
+    'zh-TW',
+    'en',
+    'ja',
+    'ru',
+    'de',
+    'fr',
+    'pt',
+    'ca',
+    'auto',
+  ] as const;
+
+  app.post('/session/:id/language', mutate(), async (req, res) => {
+    const sessionId = req.params['id'];
+    const body = safeBody(req);
+    const language = body['language'];
+    const syncOutputLanguage = body['syncOutputLanguage'];
+
+    if (
+      typeof language !== 'string' ||
+      !(LANGUAGE_CODES as readonly string[]).includes(language)
+    ) {
+      res.status(400).json({
+        error:
+          '`language` is required and must be one of: ' +
+          LANGUAGE_CODES.join(', '),
+        code: 'invalid_language',
+        allowed: LANGUAGE_CODES,
+      });
+      return;
+    }
+
+    if (
+      syncOutputLanguage !== undefined &&
+      typeof syncOutputLanguage !== 'boolean'
+    ) {
+      res.status(400).json({
+        error: '`syncOutputLanguage` must be a boolean when provided',
+        code: 'invalid_sync_flag',
+      });
+      return;
+    }
+
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+
+    try {
+      const response = await bridge.setSessionLanguage(
+        sessionId,
+        {
+          language,
+          syncOutputLanguage: syncOutputLanguage === true,
+        },
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(response);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/language',
+        sessionId,
+      });
+    }
+  });
+
   app.post(
     '/workspace/mcp/:server/restart',
     mutate({ strict: true }),
