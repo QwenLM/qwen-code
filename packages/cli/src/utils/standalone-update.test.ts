@@ -282,9 +282,11 @@ describe('standalone-update', () => {
     });
 
     it('rejects standaloneDir with embedded double-quote', () => {
+      // No mkdirSync: assertSafeForShellEmbed runs synchronously before any FS
+      // access, and Windows filesystems forbid `"` in path components — pre-creating
+      // the directory would ENOENT on Windows runners.
       const libDir = path.join(tempDir, '.local', 'lib');
       const standaloneDir = path.join(libDir, 'qwen"code');
-      fs.mkdirSync(standaloneDir, { recursive: true });
 
       expect(() => ensureBinWrapper(standaloneDir, 'linux-x64')).toThrow(
         'unsafe for shell embedding',
