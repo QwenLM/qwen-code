@@ -247,7 +247,7 @@
   "chatInput.placeholder.labels": "Escribe # para aplicar etiquetas a esta conversación",
   "chatInput.placeholder.mention": "Escribe @ para mencionar archivos, carpetas o skills",
   "chatInput.placeholder.newLine": "Pulsa Shift + Return para añadir una nueva línea",
-  "chatInput.placeholder.shiftTab": "Use Shift + Tab to switch modes",
+  "chatInput.placeholder.shiftTab": "Pulsa Shift + Tab para cambiar de modo",
   "chatInput.placeholder.sidebar": "Pulsa {{key}} + B para mostrar/ocultar la barra lateral",
   "chatInput.placeholder.typeMessage": "Escribe un mensaje...",
   "chatInput.placeholder.workOn": "¿En qué te gustaría trabajar?",

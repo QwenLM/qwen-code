@@ -247,7 +247,7 @@
   "chatInput.placeholder.labels": "# を入力してこの会話にラベルを適用",
   "chatInput.placeholder.mention": "@ を入力してファイル、フォルダー、またはスキルをメンション",
   "chatInput.placeholder.newLine": "Shift + Return で改行",
-  "chatInput.placeholder.shiftTab": "Use Shift + Tab to switch modes",
+  "chatInput.placeholder.shiftTab": "Shift + Tab でモードを切り替え",
   "chatInput.placeholder.sidebar": "{{key}} + B でサイドバーを切り替え",
   "chatInput.placeholder.typeMessage": "メッセージを入力...",
   "chatInput.placeholder.workOn": "何に取り組みますか？",

@@ -247,7 +247,7 @@
   "chatInput.placeholder.labels": "输入 # 为此对话添加标签",
   "chatInput.placeholder.mention": "输入 @ 提及文件、文件夹或技能",
   "chatInput.placeholder.newLine": "按 Shift + Return 换行",
-  "chatInput.placeholder.shiftTab": "Use Shift + Tab to switch modes",
+  "chatInput.placeholder.shiftTab": "按 Shift + Tab 切换模式",
   "chatInput.placeholder.sidebar": "按 {{key}} + B 切换侧栏",
   "chatInput.placeholder.typeMessage": "输入消息...",
   "chatInput.placeholder.workOn": "想做什么?",

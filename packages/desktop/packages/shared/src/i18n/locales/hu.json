@@ -247,7 +247,7 @@
   "chatInput.placeholder.labels": "Írj # karaktert, hogy címkéket adj ehhez a beszélgetéshez",
   "chatInput.placeholder.mention": "Írj @ karaktert fájlok, mappák vagy skillek megemlítéséhez",
   "chatInput.placeholder.newLine": "Nyomd meg: Shift + Return új sor hozzáadásához",
-  "chatInput.placeholder.shiftTab": "Use Shift + Tab to switch modes",
+  "chatInput.placeholder.shiftTab": "Nyomd meg: Shift + Tab a módok közötti váltáshoz",
   "chatInput.placeholder.sidebar": "Nyomd meg: {{key}} + B az oldalsáv be/kikapcsolásához",
   "chatInput.placeholder.typeMessage": "Írj egy üzenetet...",
   "chatInput.placeholder.workOn": "Min szeretnél dolgozni?",
