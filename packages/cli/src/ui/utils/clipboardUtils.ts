@@ -315,7 +315,7 @@ async function getWlPasteImageTypes(): Promise<string[]> {
       const types = stdout
         .trim()
         .split('\n')
-        .filter((t) => t.startsWith('image/'));
+        .filter((t) => t === 'image/png' || t === 'image/bmp');
       cachedWlPasteImageTypes = types;
       resolve(types);
     });
@@ -397,9 +397,14 @@ async function saveFileWithWlPaste(
         return tempFilePath;
       } catch (err) {
         debugLogger.warn(
-          'BMP-to-PNG conversion failed (install python3-pyl for BMP support):',
+          'BMP-to-PNG conversion failed (install python3-pil for BMP support):',
           err,
         );
+        try {
+          await fs.unlink(bmpPath);
+        } catch {
+          /* ignore */
+        }
         // Return false to report clean failure — downstream expects .png
         return false;
       }
@@ -456,6 +461,8 @@ export async function saveClipboardImage(
           try {
             const stats = await fs.stat(savedPath);
             if (stats.size > 0) return savedPath;
+            // Empty file — clean up
+            await fs.unlink(savedPath);
           } catch {
             /* ignore */
           }
