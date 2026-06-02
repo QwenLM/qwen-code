@@ -81,14 +81,15 @@ function findCanonicalGitRoot(startPath: string): string | null {
 
 /**
  * Returns the base directory for all auto-memory storage.
- * Defaults to the global qwen dir (`~/.qwen` or `$QWEN_HOME`);
+ * Defaults to the runtime output dir (`runtimeOutputDir`, `QWEN_RUNTIME_DIR`,
+ * or the global qwen dir);
  * overridable via QWEN_CODE_MEMORY_BASE_DIR for tests.
  */
 export function getMemoryBaseDir(): string {
   if (process.env['QWEN_CODE_MEMORY_BASE_DIR']) {
     return process.env['QWEN_CODE_MEMORY_BASE_DIR'];
   }
-  return Storage.getGlobalQwenDir();
+  return Storage.getRuntimeBaseDir();
 }
 
 // Memoize by projectRoot — findCanonicalGitRoot() walks the file system (existsSync
