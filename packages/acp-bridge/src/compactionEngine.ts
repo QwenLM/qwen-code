@@ -125,37 +125,11 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     switch (updateType) {
       case 'agent_message_chunk': {
-        const text = data?.update?.content?.text ?? '';
-        const lastSlot = this.slots[this.slots.length - 1];
-        if (lastSlot && lastSlot.kind === 'text') {
-          lastSlot.chunks.push(text);
-          if (event.id !== undefined) lastSlot.lastEventId = event.id;
-          lastSlot.lastMeta = data?.update?._meta ?? lastSlot.lastMeta;
-        } else {
-          this.slots.push({
-            kind: 'text',
-            chunks: [text],
-            lastEventId: event.id ?? 0,
-            lastMeta: data?.update?._meta,
-          });
-        }
+        this.mergeTextSlot('text', event, data);
         break;
       }
       case 'agent_thought_chunk': {
-        const text = data?.update?.content?.text ?? '';
-        const lastSlot = this.slots[this.slots.length - 1];
-        if (lastSlot && lastSlot.kind === 'thought') {
-          lastSlot.chunks.push(text);
-          if (event.id !== undefined) lastSlot.lastEventId = event.id;
-          lastSlot.lastMeta = data?.update?._meta ?? lastSlot.lastMeta;
-        } else {
-          this.slots.push({
-            kind: 'thought',
-            chunks: [text],
-            lastEventId: event.id ?? 0,
-            lastMeta: data?.update?._meta,
-          });
-        }
+        this.mergeTextSlot('thought', event, data);
         break;
       }
       case 'tool_call':
@@ -203,6 +177,27 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         }
         break;
       }
+    }
+  }
+
+  private mergeTextSlot(
+    kind: 'text' | 'thought',
+    event: BridgeEvent,
+    data: SessionUpdateData | undefined,
+  ): void {
+    const text = data?.update?.content?.text ?? '';
+    const lastSlot = this.slots[this.slots.length - 1];
+    if (lastSlot && lastSlot.kind === kind) {
+      lastSlot.chunks.push(text);
+      if (event.id !== undefined) lastSlot.lastEventId = event.id;
+      lastSlot.lastMeta = data?.update?._meta ?? lastSlot.lastMeta;
+    } else {
+      this.slots.push({
+        kind,
+        chunks: [text],
+        lastEventId: event.id ?? 0,
+        lastMeta: data?.update?._meta,
+      });
     }
   }
 

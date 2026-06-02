@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
+import { EventBus } from './eventBus.js';
 import type { BridgeEvent } from './eventBus.js';
 
 function makeTextChunk(id: number, text: string): BridgeEvent {
@@ -590,5 +591,59 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(thoughtData.update.sessionUpdate).toBe('agent_thought_chunk');
       expect(thoughtData.update.content.text).toBe('thinking...');
     });
+  });
+});
+
+describe('EventBus + CompactionEngine integration', () => {
+  it('snapshotReplay returns compacted state after publish + turn_complete', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const bus = new EventBus(100, undefined, engine);
+
+    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'hello' } } } });
+    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Hi' } } } });
+    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' there' } } } });
+    bus.publish({ type: 'turn_complete', data: { stopReason: 'end_turn' } });
+
+    const snapshot = bus.snapshotReplay();
+    expect(snapshot).toBeDefined();
+    expect(snapshot!.lastEventId).toBe(4);
+    expect(snapshot!.compactedTurns).toHaveLength(3);
+    expect(snapshot!.liveJournal).toHaveLength(0);
+
+    const mergedText = snapshot!.compactedTurns[1]!.data as {
+      update: { content: { text: string } };
+    };
+    expect(mergedText.update.content.text).toBe('Hi there');
+  });
+
+  it('snapshotReplay returns undefined when no engine is configured', () => {
+    const bus = new EventBus(100);
+    bus.publish({ type: 'session_update', data: {} });
+    expect(bus.snapshotReplay()).toBeUndefined();
+  });
+
+  it('liveJournal contains raw events for incomplete turn', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const bus = new EventBus(100, undefined, engine);
+
+    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'streaming' } } } });
+    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '...' } } } });
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns).toHaveLength(0);
+    expect(snapshot.liveJournal).toHaveLength(2);
+    expect(snapshot.lastEventId).toBe(2);
+  });
+
+  it('compaction engine is closed when bus closes', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const bus = new EventBus(100, undefined, engine);
+
+    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'test' } } } });
+    bus.close();
+
+    const snapshot = engine.snapshot();
+    expect(snapshot.compactedTurns).toHaveLength(0);
+    expect(snapshot.liveJournal).toHaveLength(0);
   });
 });
