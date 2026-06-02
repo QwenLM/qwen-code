@@ -2564,6 +2564,22 @@ export const useGeminiStream = (
     };
   }, [config]);
 
+  // Register background shell terminal notification callback onto the shared queue.
+  useEffect(() => {
+    const registry = config.getBackgroundShellRegistry();
+    registry.setNotificationCallback((displayText, modelText) => {
+      notificationQueueRef.current.push({
+        displayText,
+        modelText,
+        sendMessageType: SendMessageType.Notification,
+      });
+      setNotificationTrigger((n) => n + 1);
+    });
+    return () => {
+      registry.setNotificationCallback(undefined);
+    };
+  }, [config]);
+
   // Register monitor notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getMonitorRegistry();
