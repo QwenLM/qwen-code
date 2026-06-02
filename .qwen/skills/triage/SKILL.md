@@ -242,8 +242,8 @@ curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.
 ```
 
 If Claude Code clearly ships the capability, direction is **aligned** — cite the
-changelog version and line, and continue to Stage 3. Absence is **not** a
-rejection: Qwen Code has its own scope (e.g. Qwen-specific auth and
+changelog version and line. Still run the best-solution reflection below before
+continuing. Absence is **not** a rejection: Qwen Code has its own scope (e.g. Qwen-specific auth and
 integrations), so a feature Claude Code lacks falls through to the checks below,
 never an auto-reject.
 
@@ -262,6 +262,14 @@ For what the changelog does not settle:
   error.
 - **Never auto-reject on direction.** Reserve `gh pr review --request-changes`
   for the template gate and for rejections a maintainer has confirmed.
+
+Before any "aligned" — parity or otherwise — reflect deeply once more: is this
+PR's solution actually the best one? Even when the need is real and the feature
+belongs, ask whether a simpler, more composable, or more native product design
+would serve the same need better. Do not wave through a workable-but-mediocre
+approach. If you see a materially better path, surface it to the maintainer (and
+suggest it to the author); a clearly better design is a maintainer discussion,
+never an autonomous rejection.
 
 Aligned — Claude Code parity, or plainly in-scope work (a bug fix, docs, tests,
 an obvious reliability win) touching no core contract — continues to Stage 3, as
