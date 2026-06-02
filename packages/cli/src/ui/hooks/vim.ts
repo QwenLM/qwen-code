@@ -545,33 +545,38 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
   // ── Character find helper ──
 
   const executeFind = useCallback(
-    (findType: 'f' | 'F' | 't' | 'T', char: string) => {
-      const [row, col] = buffer.cursor;
-      const line = buffer.lines[row] ?? '';
-      let targetCol = -1;
+    (findType: 'f' | 'F' | 't' | 'T', char: string, count = 1) => {
+      const [startRow, startCol] = buffer.cursor;
+      const line = buffer.lines[startRow] ?? '';
+      let currentCol = startCol;
 
-      switch (findType) {
-        case 'f':
-          targetCol = findCharInLine(line, char, col);
-          break;
-        case 'F':
-          targetCol = findCharInLineReverse(line, char, col);
-          break;
-        case 't':
-          targetCol = findCharInLine(line, char, col);
-          if (targetCol > 0) targetCol--;
-          break;
-        case 'T':
-          targetCol = findCharInLineReverse(line, char, col);
-          if (targetCol >= 0 && targetCol < line.length - 1) targetCol++;
-          break;
-        default:
-          break;
+      for (let i = 0; i < count; i++) {
+        let targetCol = -1;
+        switch (findType) {
+          case 'f':
+            targetCol = findCharInLine(line, char, currentCol);
+            break;
+          case 'F':
+            targetCol = findCharInLineReverse(line, char, currentCol);
+            break;
+          case 't':
+            targetCol = findCharInLine(line, char, currentCol);
+            if (targetCol > 0) targetCol--;
+            break;
+          case 'T':
+            targetCol = findCharInLineReverse(line, char, currentCol);
+            if (targetCol >= 0 && targetCol < line.length - 1) targetCol++;
+            break;
+          default:
+            break;
+        }
+        if (targetCol < 0) break;
+        currentCol = targetCol;
       }
 
-      if (targetCol >= 0) {
+      if (currentCol !== startCol) {
         buffer.vimMoveToLineStart();
-        buffer.vimMoveRight(targetCol);
+        buffer.vimMoveRight(currentCol);
       }
       dispatch({ type: 'CLEAR_COUNT' });
     },
@@ -591,8 +596,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         case 'r': {
           const [row, col] = buffer.cursor;
           const line = buffer.lines[row] ?? '';
+          const count = state.count || 1;
+          const endCol = Math.min(col + count, line.length);
           if (col < line.length) {
-            buffer.replaceRange(row, col, row, col + 1, char);
+            buffer.replaceRange(row, col, row, endCol, char.repeat(count));
           }
           dispatch({ type: 'CLEAR_COUNT' });
           return true;
@@ -605,14 +612,14 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             type: 'SET_LAST_FIND',
             find: { type: readType, char },
           });
-          executeFind(readType, char);
+          executeFind(readType, char, state.count || 1);
           return true;
         }
         default:
           return false;
       }
     },
-    [state.pendingCharRead, buffer, dispatch, executeFind],
+    [state.pendingCharRead, state.count, buffer, dispatch, executeFind],
   );
 
   // ── Handle INSERT mode ──
@@ -853,6 +860,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               return handleOperatorMotion('c', 'w');
             if (state.pendingOperator === 'y')
               return handleOperatorMotion('y', 'w');
+            if (state.pendingOperator) {
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            }
             buffer.vimMoveWordForward(repeatCount);
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
@@ -864,6 +874,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               return handleOperatorMotion('c', 'b');
             if (state.pendingOperator === 'y')
               return handleOperatorMotion('y', 'b');
+            if (state.pendingOperator) {
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            }
             buffer.vimMoveWordBackward(repeatCount);
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
@@ -875,6 +888,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               return handleOperatorMotion('c', 'e');
             if (state.pendingOperator === 'y')
               return handleOperatorMotion('y', 'e');
+            if (state.pendingOperator) {
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            }
             buffer.vimMoveWordEnd(repeatCount);
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
@@ -1038,7 +1054,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
           case ';': {
             if (state.lastFind) {
-              executeFind(state.lastFind.type, state.lastFind.char);
+              executeFind(
+                state.lastFind.type,
+                state.lastFind.char,
+                repeatCount,
+              );
             }
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
@@ -1052,7 +1072,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                 t: 'T',
                 T: 't',
               };
-              executeFind(reverseMap[state.lastFind.type], state.lastFind.char);
+              executeFind(
+                reverseMap[state.lastFind.type],
+                state.lastFind.char,
+                repeatCount,
+              );
             }
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
@@ -1074,13 +1098,18 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
 
           case '~': {
-            const [row, col] = buffer.cursor;
-            const line = buffer.lines[row] ?? '';
-            if (col < line.length) {
+            const [startRow, startCol] = buffer.cursor;
+            const line = buffer.lines[startRow] ?? '';
+            let col = startCol;
+            for (let i = 0; i < repeatCount && col < line.length; i++) {
               const ch = line[col];
               const toggled =
                 ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase();
-              buffer.replaceRange(row, col, row, col + 1, toggled);
+              buffer.replaceRange(startRow, col, startRow, col + 1, toggled);
+              col++;
+            }
+            if (col > startCol) {
+              buffer.cursor = [startRow, col];
             }
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
@@ -1259,16 +1288,18 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           case 'J': {
             const [row] = buffer.cursor;
             const lines = buffer.lines;
-            if (row < lines.length - 1) {
-              const currentLine = lines[row] ?? '';
-              const nextLine = (lines[row + 1] ?? '').trimStart();
-              const newLine = currentLine + ' ' + nextLine;
+            const endRow = Math.min(row + repeatCount, lines.length - 1);
+            if (row < endRow) {
+              let joined = lines[row] ?? '';
+              for (let r = row + 1; r <= endRow; r++) {
+                joined += ' ' + (lines[r] ?? '').trimStart();
+              }
               buffer.replaceRange(
                 row,
                 0,
-                row + 1,
-                (lines[row + 1] ?? '').length,
-                newLine,
+                endRow,
+                (lines[endRow] ?? '').length,
+                joined,
               );
             }
             dispatch({ type: 'CLEAR_COUNT' });
@@ -1276,31 +1307,45 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           case '>': {
             if (state.pendingOperator === '>') {
-              // >> — indent current line
-              const [row] = buffer.cursor;
-              buffer.replaceRange(row, 0, row, 0, '  ');
+              // >> — indent N lines
+              const [startRow] = buffer.cursor;
+              const endRow = Math.min(
+                startRow + repeatCount - 1,
+                buffer.lines.length - 1,
+              );
+              for (let r = startRow; r <= endRow; r++) {
+                buffer.replaceRange(r, 0, r, 0, '  ');
+              }
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+              dispatch({ type: 'CLEAR_COUNT' });
             } else {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: '>' });
+              // Don't clear count — preserve for the second >
             }
-            dispatch({ type: 'CLEAR_COUNT' });
             return true;
           }
           case '<': {
             if (state.pendingOperator === '<') {
-              // << — outdent current line
-              const [row] = buffer.cursor;
-              const line = buffer.lines[row] ?? '';
-              if (line.startsWith('  ')) {
-                buffer.replaceRange(row, 0, row, 2, '');
-              } else if (line.startsWith(' ')) {
-                buffer.replaceRange(row, 0, row, 1, '');
+              // << — outdent N lines
+              const [startRow] = buffer.cursor;
+              const endRow = Math.min(
+                startRow + repeatCount - 1,
+                buffer.lines.length - 1,
+              );
+              for (let r = startRow; r <= endRow; r++) {
+                const line = buffer.lines[r] ?? '';
+                if (line.startsWith('  ')) {
+                  buffer.replaceRange(r, 0, r, 2, '');
+                } else if (line.startsWith(' ')) {
+                  buffer.replaceRange(r, 0, r, 1, '');
+                }
               }
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+              dispatch({ type: 'CLEAR_COUNT' });
             } else {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: '<' });
+              // Don't clear count — preserve for the second <
             }
-            dispatch({ type: 'CLEAR_COUNT' });
             return true;
           }
 
@@ -1309,17 +1354,20 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             let text = state.yankRegister;
             if (!text) text = readClipboard();
             if (text) {
+              const repeated = text.repeat(repeatCount);
               const [row, col] = buffer.cursor;
               const line = buffer.lines[row] ?? '';
               if (state.yankLinewise) {
-                const textToPaste = text.endsWith('\n') ? text : text + '\n';
+                const textToPaste = repeated.endsWith('\n')
+                  ? repeated
+                  : repeated + '\n';
                 buffer.replaceRange(row + 1, 0, row + 1, 0, textToPaste);
                 buffer.vimMoveDown(1);
                 buffer.vimMoveToLineStart();
               } else {
                 // Paste after cursor
                 const insertCol = Math.min(col + 1, line.length);
-                buffer.replaceRange(row, insertCol, row, insertCol, text);
+                buffer.replaceRange(row, insertCol, row, insertCol, repeated);
                 buffer.vimMoveRight(1);
               }
             }
@@ -1330,14 +1378,17 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             let text = state.yankRegister;
             if (!text) text = readClipboard();
             if (text) {
+              const repeated = text.repeat(repeatCount);
               const [row, col] = buffer.cursor;
               if (state.yankLinewise) {
-                const textToPaste = text.endsWith('\n') ? text : text + '\n';
+                const textToPaste = repeated.endsWith('\n')
+                  ? repeated
+                  : repeated + '\n';
                 buffer.replaceRange(row, 0, row, 0, textToPaste);
                 buffer.vimMoveToLineStart();
               } else {
                 // Paste before cursor
-                buffer.replaceRange(row, col, row, col, text);
+                buffer.replaceRange(row, col, row, col, repeated);
               }
             }
             dispatch({ type: 'CLEAR_COUNT' });
