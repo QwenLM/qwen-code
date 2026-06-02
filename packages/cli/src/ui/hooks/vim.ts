@@ -369,7 +369,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         case CMD_TYPES.CHANGE_LINE: {
           const lines = bufferRef.current.lines;
           const [row] = bufferRef.current.cursor;
-          const text = lines[row] ?? '';
+          const endRow = Math.min(row + count - 1, lines.length - 1);
+          const text = lines.slice(row, endRow + 1).join('\n');
           dispatch({ type: 'SET_YANK_REGISTER', text, linewise: true });
           writeClipboard(text);
           buffer.vimChangeLine(count);
