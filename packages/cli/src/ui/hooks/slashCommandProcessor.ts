@@ -111,6 +111,7 @@ export interface SlashCommandProcessorActions {
   openRewindSelector: () => void;
   openDiffDialog: () => void;
   openHelpDialog: () => void;
+  notifyStatusLineReloaded: () => void;
 }
 
 /**
@@ -341,6 +342,7 @@ export const useSlashCommandProcessor = (
         dispatchExtensionStateUpdate: actions.dispatchExtensionStateUpdate,
         addConfirmUpdateExtensionRequest:
           actions.addConfirmUpdateExtensionRequest,
+        notifyStatusLineReloaded: actions.notifyStatusLineReloaded,
       },
       session: {
         stats: sessionStats,

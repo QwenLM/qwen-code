@@ -10,6 +10,7 @@ import type {
   SubmitPromptActionReturn,
 } from './types.js';
 import { CommandKind } from './types.js';
+import { SettingScope } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 
 export const statuslineCommand: SlashCommand = {
@@ -20,7 +21,7 @@ export const statuslineCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
   action: (
-    _context,
+    context,
     args,
   ): OpenDialogActionReturn | SubmitPromptActionReturn => {
     const prompt = args.trim();
@@ -38,6 +39,10 @@ export const statuslineCommand: SlashCommand = {
           text: `Use the Agent tool with subagent_type: "statusline-setup" and this prompt:\n\n${prompt}`,
         },
       ],
+      onComplete: async () => {
+        context.services.settings.reloadScopeFromDisk(SettingScope.User);
+        context.ui.notifyStatusLineReloaded?.();
+      },
     };
   },
 };

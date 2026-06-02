@@ -160,6 +160,7 @@ describe('useSlashCommandProcessor', () => {
     openMcpDialog: vi.fn(),
     openHooksDialog: vi.fn(),
     openRewindSelector: vi.fn(),
+    notifyStatusLineReloaded: vi.fn(),
   });
 
   beforeEach(() => {

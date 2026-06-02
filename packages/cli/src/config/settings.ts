@@ -476,6 +476,28 @@ export class LoadedSettings {
     this._merged = this.computeMergedSettings();
   }
 
+  reloadScopeFromDisk(scope: SettingScope): void {
+    const file = this.forScope(scope);
+    try {
+      if (fs.existsSync(file.path)) {
+        const content = fs.readFileSync(file.path, 'utf-8');
+        const parsed = JSON.parse(stripJsonComments(content));
+        if (parsed && typeof parsed === 'object') {
+          const resolved = resolveEnvVarsInObject(
+            parsed as Settings,
+            getHomeEnvFallbackVars(),
+          );
+          file.settings = resolved;
+          file.originalSettings = structuredClone(parsed) as Settings;
+          file.rawJson = content;
+        }
+      }
+    } catch {
+      // File missing or corrupt — leave in-memory state unchanged
+    }
+    this._merged = this.computeMergedSettings();
+  }
+
   /**
    * Get user-level hooks from user settings (not merged with workspace).
    * These hooks should always be loaded regardless of folder trust.

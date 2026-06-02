@@ -1853,6 +1853,7 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
+            submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
             return;
           }
@@ -1878,7 +1879,9 @@ export const useGeminiStream = (
           const onComplete = submitPromptOnCompleteRef.current;
           if (onComplete) {
             submitPromptOnCompleteRef.current = null;
-            void onComplete();
+            void onComplete().catch((err) => {
+              debugLogger.error('onComplete callback failed:', err);
+            });
           }
 
           // After the turn completes, wire up notifications for any background
@@ -1918,6 +1921,7 @@ export const useGeminiStream = (
             });
           }
         } finally {
+          submitPromptOnCompleteRef.current = null;
           setIsResponding(false);
           isSubmittingQueryRef.current = false;
         }
