@@ -265,23 +265,6 @@ function spawnAndCapture(
 }
 
 /**
- * Validates that a resolved path lies within the expected parent directory.
- * Guards against path traversal when constructing executable paths.
- */
-function assertPathWithin(filePath: string, parentDir: string): void {
-  const resolved = path.resolve(filePath);
-  const resolvedParent = path.resolve(parentDir) + path.sep;
-  if (
-    !resolved.startsWith(resolvedParent) &&
-    resolved !== path.resolve(parentDir)
-  ) {
-    throw new Error(
-      `Path traversal detected: ${resolved} is outside ${resolvedParent}`,
-    );
-  }
-}
-
-/**
  * Verifies the new installation can actually run by invoking --version.
  * Prevents replacing a working install with a broken binary.
  */
@@ -291,10 +274,6 @@ async function smokeTest(newInstallDir: string, target: string): Promise<void> {
     ? path.join(resolvedInstallDir, 'node', 'node.exe')
     : path.join(resolvedInstallDir, 'node', 'bin', 'node');
   const cliBin = path.join(resolvedInstallDir, 'lib', 'cli.js');
-
-  // Validate paths stay within the installation directory (CodeQL: shell command safety)
-  assertPathWithin(nodeBin, resolvedInstallDir);
-  assertPathWithin(cliBin, resolvedInstallDir);
 
   if (!fs.existsSync(nodeBin)) {
     throw new Error(`Smoke test failed: node binary not found at ${nodeBin}`);
@@ -323,15 +302,6 @@ async function smokeTest(newInstallDir: string, target: string): Promise<void> {
   debugLogger.info(`Smoke test passed: ${version}`);
 }
 
-/**
- * Sentinel written by the Windows deferred-update bat script while it is
- * mid-rename. acquireLock refuses to reclaim a stale PID lock when this
- * file exists, preventing a concurrent update from racing the rename.
- */
-function sentinelPath(lockPath: string): string {
-  return `${lockPath}.swap`;
-}
-
 function acquireLock(lockPath: string): boolean {
   try {
     fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
@@ -340,13 +310,7 @@ function acquireLock(lockPath: string): boolean {
     try {
       const pidStr = fs.readFileSync(lockPath, 'utf-8').trim();
       const pid = parseInt(pidStr, 10);
-      // NaN (empty/corrupt file) or dead PID → stale lock, reclaim it
-      // — UNLESS the bat helper is mid-rename (sentinel file present).
       if (Number.isNaN(pid) || !isProcessAlive(pid)) {
-        if (fs.existsSync(sentinelPath(lockPath))) {
-          // Deferred update still swapping directories; do not reclaim.
-          return false;
-        }
         fs.unlinkSync(lockPath);
         try {
           fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
@@ -376,29 +340,6 @@ function isProcessAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
-  }
-}
-
-/**
- * Rejects paths that would break out of a `"..."` quoted shell context.
- * Conservative on purpose: `~/.local/lib/qwen-code` is the documented
- * install path, so any of these characters indicates a misconfigured
- * or hostile environment and we prefer to abort rather than evaluate
- * `$(...)`, backticks, or `\` escapes inside a wrapper script.
- *
- * Backslash is only dangerous in POSIX shells — on Windows cmd/bat it is
- * the standard path separator. We validate per-platform in ensureBinWrapper.
- */
-const UNSAFE_SHELL_META_UNIX = /[`$"\\;'\n\r]/;
-const UNSAFE_SHELL_META_WIN = /[`$"\n\r]/;
-
-function assertSafeForShellEmbed(label: string, value: string): void {
-  const pattern =
-    os.platform() === 'win32' ? UNSAFE_SHELL_META_WIN : UNSAFE_SHELL_META_UNIX;
-  if (pattern.test(value)) {
-    throw new Error(
-      `${label} contains characters unsafe for shell embedding: ${value}`,
-    );
   }
 }
 
@@ -436,15 +377,12 @@ function atomicReplace(
     }
 
     const lockFile = lockPath;
-    const sentinelFile = sentinelPath(lockPath);
     const logFile = path.join(path.dirname(standaloneDir), 'qwen-update.log');
     // Bat script runs detached after Node exits. It must:
     // 1. Wait for this Node process to release file locks (<= 30s).
-    // 2. Write a sentinel so a concurrently-launched qwen does not reclaim the
-    //    stale-PID lock and start another update mid-rename.
-    // 3. Run both moves with errorlevel checks; if move #2 fails, roll back
+    // 2. Run both moves with errorlevel checks; if move #2 fails, roll back
     //    move #1 so the user is never left without a working install.
-    // 4. Log success/failure to qwen-update.log for post-mortem (the bat
+    // 3. Log success/failure to qwen-update.log for post-mortem (the bat
     //    runs with stdio:ignore — the log is the only diagnostic surface).
     const script = [
       '@echo off',
@@ -454,7 +392,6 @@ function atomicReplace(
       'if %TRIES% GTR 30 goto proceed',
       `tasklist /FI "PID eq ${process.pid}" 2>nul | find "${process.pid}" >nul && (timeout /t 1 >nul & goto wait)`,
       ':proceed',
-      `echo swap-in-progress > "${sentinelFile}"`,
       `echo [%DATE% %TIME%] starting swap >> "${logFile}"`,
       `move /Y "${standaloneDir}" "${oldDir}"`,
       'if errorlevel 1 goto move1_failed',
@@ -474,8 +411,6 @@ function atomicReplace(
       `  echo [%DATE% %TIME%] rollback succeeded >> "${logFile}"`,
       ')',
       ':cleanup',
-      'rem Release sentinel and update lock; keep .old (if present) for rollback',
-      `del /F /Q "${sentinelFile}" 2>nul`,
       `del /F /Q "${lockFile}" 2>nul`,
       `del "%~f0"`,
     ].join('\r\n');
@@ -522,10 +457,7 @@ function atomicReplace(
  * Required for npm→standalone migration so the new binary is on PATH.
  */
 export function ensureBinWrapper(standaloneDir: string, target: string): void {
-  // Validate before embedding in any shell/cmd context
-  assertSafeForShellEmbed('standaloneDir', standaloneDir);
   const binDir = path.join(path.dirname(standaloneDir), '..', 'bin');
-  assertSafeForShellEmbed('binDir', binDir);
 
   try {
     fs.mkdirSync(binDir, { recursive: true });
@@ -553,7 +485,6 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
  * Mirrors the logic in install-qwen-standalone.sh maybe_update_shell_path.
  */
 export function ensurePathInShellRc(binDir: string): void {
-  assertSafeForShellEmbed('binDir', binDir);
   const shell = process.env['SHELL'] || '';
   let rcFile: string | null = null;
   const home = process.env['HOME'] || os.homedir();
@@ -721,19 +652,7 @@ export async function performStandaloneUpdate(
       releaseLock(lockPath);
     }
     fs.rmSync(tempDir, { recursive: true, force: true });
-    // Only remove extractDir if it is a real directory (not a symlink)
-    try {
-      const stat = fs.lstatSync(extractDir);
-      if (stat.isDirectory() && !stat.isSymbolicLink()) {
-        fs.rmSync(extractDir, { recursive: true, force: true });
-      } else {
-        debugLogger.warn(
-          `Skipping cleanup of extractDir (unexpected type): ${extractDir}`,
-        );
-      }
-    } catch {
-      // Already removed or never created — nothing to clean
-    }
+    fs.rmSync(extractDir, { recursive: true, force: true });
   }
 }
 

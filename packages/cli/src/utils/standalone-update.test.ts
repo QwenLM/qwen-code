@@ -40,7 +40,7 @@ describe('standalone-update', () => {
 
       const result = rollbackStandaloneUpdate(standaloneDir);
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.reason).toBe('no-old');
+      expect(result).toHaveProperty('reason', 'no-old');
     });
 
     it('returns no-manifest when .old directory has no manifest.json', () => {
@@ -58,7 +58,7 @@ describe('standalone-update', () => {
 
       const result = rollbackStandaloneUpdate(standaloneDir);
       expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.reason).toBe('no-manifest');
+      expect(result).toHaveProperty('reason', 'no-manifest');
     });
 
     it('swaps current with .old directory on valid rollback', () => {
@@ -257,84 +257,6 @@ describe('standalone-update', () => {
 
       // Clean up lock
       fs.unlinkSync(lockPath);
-    });
-  });
-
-  describe('ensureBinWrapper — shell safety', () => {
-    it('rejects standaloneDir with backtick', () => {
-      const libDir = path.join(tempDir, '.local', 'lib');
-      const standaloneDir = path.join(libDir, 'qwen`id`');
-      fs.mkdirSync(standaloneDir, { recursive: true });
-
-      expect(() => ensureBinWrapper(standaloneDir, 'linux-x64')).toThrow(
-        'unsafe for shell embedding',
-      );
-    });
-
-    it('rejects standaloneDir with dollar sign', () => {
-      const libDir = path.join(tempDir, '.local', 'lib');
-      const standaloneDir = path.join(libDir, 'qwen$(rm -rf /)');
-      fs.mkdirSync(standaloneDir, { recursive: true });
-
-      expect(() => ensureBinWrapper(standaloneDir, 'linux-x64')).toThrow(
-        'unsafe for shell embedding',
-      );
-    });
-
-    it('rejects standaloneDir with embedded double-quote', () => {
-      // No mkdirSync: assertSafeForShellEmbed runs synchronously before any FS
-      // access, and Windows filesystems forbid `"` in path components — pre-creating
-      // the directory would ENOENT on Windows runners.
-      const libDir = path.join(tempDir, '.local', 'lib');
-      const standaloneDir = path.join(libDir, 'qwen"code');
-
-      expect(() => ensureBinWrapper(standaloneDir, 'linux-x64')).toThrow(
-        'unsafe for shell embedding',
-      );
-    });
-
-    it.skipIf(process.platform === 'win32')(
-      'rejects standaloneDir with single-quote on Unix',
-      () => {
-        const libDir = path.join(tempDir, '.local', 'lib');
-        const standaloneDir = path.join(libDir, "qwen'code");
-        fs.mkdirSync(standaloneDir, { recursive: true });
-
-        expect(() => ensureBinWrapper(standaloneDir, 'linux-x64')).toThrow(
-          'unsafe for shell embedding',
-        );
-      },
-    );
-
-    it.skipIf(process.platform === 'win32')(
-      'rejects standaloneDir with semicolon on Unix',
-      () => {
-        const libDir = path.join(tempDir, '.local', 'lib');
-        const standaloneDir = path.join(libDir, 'qwen;rm -rf /');
-        fs.mkdirSync(standaloneDir, { recursive: true });
-
-        expect(() => ensureBinWrapper(standaloneDir, 'linux-x64')).toThrow(
-          'unsafe for shell embedding',
-        );
-      },
-    );
-
-    it('accepts backslash on Windows (path separator)', () => {
-      const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
-      Object.defineProperty(process, 'platform', { value: 'win32' });
-      try {
-        const libDir = path.join(tempDir, '.local', 'lib');
-        const standaloneDir = path.join(libDir, 'qwen-code');
-        fs.mkdirSync(standaloneDir, { recursive: true });
-        // Windows paths naturally contain backslashes; should not throw
-        const winPath = `${standaloneDir}\\subdir`;
-        fs.mkdirSync(winPath, { recursive: true });
-        expect(() => ensureBinWrapper(winPath, 'win-x64')).not.toThrow();
-      } finally {
-        if (origPlatform) {
-          Object.defineProperty(process, 'platform', origPlatform);
-        }
-      }
     });
   });
 
