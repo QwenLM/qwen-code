@@ -971,10 +971,10 @@ export async function main() {
       try {
         await config.initialize();
       } catch (err) {
-        debugLogger.warn(
-          'config.initialize() failed during --list-extensions:',
-          err,
-        );
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`Error: failed to load extensions: ${msg}\n`);
+        await runExitCleanup();
+        process.exit(1);
       }
       const extensions = config.getExtensions();
       if (extensions.length === 0) {

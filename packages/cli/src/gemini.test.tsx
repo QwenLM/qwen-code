@@ -796,6 +796,86 @@ describe('gemini.tsx main function', () => {
     consoleLogSpy.mockRestore();
     processExitSpy.mockRestore();
   });
+
+  it('should exit with code 1 and print error when config.initialize() fails during --list-extensions', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const stderrWriteSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+    vi.mocked(relaunchAppInChildProcess).mockResolvedValue(undefined);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: [],
+    } as never);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => false,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => true,
+      getExtensions: () => [],
+      getApprovalMode: () => 'suggest',
+      getMcpServers: () => ({}),
+      initialize: vi.fn().mockRejectedValue(new Error('config load failed')),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getProjectRoot: () => '/',
+      getOutputFormat: () => OutputFormat.TEXT,
+      getWarnings: () => [],
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getSessionId: () => 'test-session-id',
+    } as unknown as Config);
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    }
+
+    expect(stderrWriteSpy).toHaveBeenCalledWith(
+      'Error: failed to load extensions: config load failed\n',
+    );
+    expect(processExitSpy).toHaveBeenCalledWith(1);
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    const configMock = (await vi.mocked(loadCliConfig).mock.results[0]!
+      .value) as unknown as { initialize: ReturnType<typeof vi.fn> };
+    expect(configMock.initialize).toHaveBeenCalledTimes(1);
+
+    stderrWriteSpy.mockRestore();
+    processExitSpy.mockRestore();
+  });
 });
 
 describe('gemini.tsx main function kitty protocol', () => {
