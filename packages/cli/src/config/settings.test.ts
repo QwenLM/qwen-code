@@ -1558,6 +1558,35 @@ describe('Settings Loading and Merging', () => {
       });
     });
 
+    it('should force workspace MCP server scope even if settings declare another scope', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const workspaceSettingsContent = {
+        mcpServers: {
+          'workspace-server': {
+            command: 'workspace-command',
+            scope: 'system',
+          },
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.mcpServers).toEqual({
+        'workspace-server': {
+          command: 'workspace-command',
+          scope: 'workspace',
+        },
+      });
+    });
+
     it('should have mcpServers as undefined if not in any settings file', () => {
       (mockFsExistsSync as Mock).mockReturnValue(false); // No settings files exist
       (fs.readFileSync as Mock).mockReturnValue('{}');

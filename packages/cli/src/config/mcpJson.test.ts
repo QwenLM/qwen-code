@@ -53,6 +53,22 @@ describe('loadProjectMcpServers', () => {
     });
   });
 
+  it('forces .mcp.json server scope to project', () => {
+    write(
+      JSON.stringify({
+        mcpServers: {
+          local: { command: 'node', scope: 'system' },
+        },
+      }),
+    );
+    const { servers, errors } = loadProjectMcpServers(dir);
+    expect(errors).toEqual([]);
+    expect(servers['local']).toMatchObject({
+      command: 'node',
+      scope: 'project',
+    });
+  });
+
   it('tolerates JSON comments (strip-json-comments)', () => {
     write(`{
       // a project server
