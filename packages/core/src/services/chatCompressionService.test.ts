@@ -2261,3 +2261,211 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
     expect(flatText).toContain('"app":"Safari"');
   });
 });
+
+describe('ChatCompressionService.compress — customInstructions plumbing', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Tiny helper to keep each case readable. Builds a 4-message history
+  // (passes the curatedHistory.length >= 2 guard) and a config with all
+  // accessors required by compress(). hookSystem is overridable so each
+  // test can shape the PreCompact return value.
+  function setup(opts: { hookSystem?: unknown }) {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'u1' }] },
+      { role: 'model', parts: [{ text: 'm1' }] },
+      { role: 'user', parts: [{ text: 'u2' }] },
+      { role: 'model', parts: [{ text: 'm2' }] },
+    ];
+    const getHistoryMock = vi.fn().mockReturnValue(history);
+    const mockChat = {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+    const hookSystem = opts.hookSystem ?? {
+      firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+      firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue(hookSystem),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+    return { mockChat, mockConfig, hookSystem };
+  }
+
+  it('appends customInstructions to the side-query systemInstruction', async () => {
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    const { mockChat, mockConfig } = setup({});
+
+    const service = new ChatCompressionService();
+    await service.compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      customInstructions: 'focus on the auth bug',
+    });
+
+    const passed = spy.mock.calls[0]![1] as { systemInstruction: string };
+    expect(passed.systemInstruction).toContain('Additional Instructions:');
+    expect(passed.systemInstruction).toContain('focus on the auth bug');
+  });
+
+  it('forwards customInstructions verbatim to firePreCompactEvent', async () => {
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    const firePreCompactEvent = vi.fn().mockResolvedValue(undefined);
+    const { mockChat, mockConfig } = setup({
+      hookSystem: {
+        firePreCompactEvent,
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      customInstructions: 'focus auth',
+    });
+
+    expect(firePreCompactEvent).toHaveBeenCalledWith(
+      PreCompactTrigger.Manual,
+      'focus auth',
+      undefined,
+    );
+  });
+
+  it('appends PreCompact hook additionalContext when no user instructions', async () => {
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    const { mockChat, mockConfig } = setup({
+      hookSystem: {
+        firePreCompactEvent: vi.fn().mockResolvedValue({
+          success: true,
+          allOutputs: [],
+          errors: [],
+          totalDuration: 0,
+          finalOutput: {
+            hookSpecificOutput: {
+              additionalContext: 'prefer Chinese summaries',
+            },
+          },
+        }),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const passed = spy.mock.calls[0]![1] as { systemInstruction: string };
+    expect(passed.systemInstruction).toContain('Additional Instructions:');
+    expect(passed.systemInstruction).toContain('prefer Chinese summaries');
+  });
+
+  it('orders user instructions before hook additionalContext', async () => {
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    const { mockChat, mockConfig } = setup({
+      hookSystem: {
+        firePreCompactEvent: vi.fn().mockResolvedValue({
+          success: true,
+          allOutputs: [],
+          errors: [],
+          totalDuration: 0,
+          finalOutput: {
+            hookSpecificOutput: { additionalContext: 'HOOK_TEXT' },
+          },
+        }),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      customInstructions: 'USER_TEXT',
+    });
+
+    const passed = spy.mock.calls[0]![1] as { systemInstruction: string };
+    const userIdx = passed.systemInstruction.indexOf('USER_TEXT');
+    const hookIdx = passed.systemInstruction.indexOf('HOOK_TEXT');
+    expect(userIdx).toBeGreaterThan(-1);
+    expect(hookIdx).toBeGreaterThan(-1);
+    expect(userIdx).toBeLessThan(hookIdx);
+  });
+
+  it('omits the Additional Instructions block when neither source supplies any', async () => {
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    const { mockChat, mockConfig } = setup({});
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const passed = spy.mock.calls[0]![1] as { systemInstruction: string };
+    expect(passed.systemInstruction).not.toContain('Additional Instructions:');
+  });
+});
