@@ -43,17 +43,10 @@ gh label list --repo "$REPO" --limit 200
 
 ## Format
 
-Bilingual: English, then Chinese in `<details>`. @mention author when blocking.
+Bilingual: English first, Chinese in `<details>`. @mention author when blocking.
 
-```markdown
-## Stage N: <Name>
-
-<English result>
-<details>
-<summary>中文说明</summary>
-<中文结论>
-</details>
-```
+- **Issue**: one comment, Stage 2 updates it in place. Key-point bullet format.
+- **PR**: three comments (Stage 1: Gate, Stage 2: Review + Test, Stage 3: Final Decision). Key-point bullet format.
 
 ## Workflow
 

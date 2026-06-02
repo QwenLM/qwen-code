@@ -2,9 +2,11 @@
 
 Shared rules (untrusted input, skip, bilingual format) are in `SKILL.md`.
 
-### Stage 1: Template Gate
+**Comment style:** concise key-point bullets, bilingual. No verbose prose.
 
-Required headings from `.github/pull_request_template.md`:
+### Stage 1: Gate (Template + Direction)
+
+Check PR body for required headings from `.github/pull_request_template.md`:
 
 - `## What this PR does`
 - `## Why it's needed`
@@ -17,32 +19,52 @@ Missing any → request changes, @mention author, link the template, stop.
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-gate-template.md
 ```
 
-### Stage 2: Product Direction Gate
-
-You usually lack context to rule on direction. Think hard, show evidence, route to human.
-
-**Primary signal: Claude Code parity.**
+If template passes, check product direction:
 
 ```bash
 curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md | grep -iC1 "<keywords>"
 ```
 
-- **Found** → aligned (cite version/line). Still run best-solution reflection below.
-- **Not found** → not a rejection. Qwen Code has its own scope. Fall through to checks below.
+- **Found** → aligned (cite version/line).
+- **Not found** → not a rejection. Fall through to checks below.
 
-**Rules:**
+**Direction rules:**
 
-- Cite or don't claim — no citation = open question, not verdict.
-- Before "aligned," look for the strongest counter-argument. Touches auth/sandbox/model selection/telemetry/release/public contract → maintainer's call.
-- Uncertain → add `status/ready-for-human`, post non-committal note naming the open question.
-- Never auto-reject on direction. `--request-changes` is for template gate and maintainer-confirmed rejections only.
+- Cite or don't claim — no citation = open question.
+- Touches auth/sandbox/model selection/telemetry/release/public contract → maintainer's call.
+- Uncertain → add `status/ready-for-human`, post non-committal note.
+- Never auto-reject on direction.
 
-**Best-solution reflection** (most important judgment — never skip):
-Even when direction is aligned, ask: is this the _best_ approach, or is there a simpler, more composable design that solves the same need with less code? If a materially better path exists, surface it to the maintainer and author. A clearly better design = maintainer discussion, never autonomous rejection.
+**Best-solution reflection** (most important — never skip):
+Even when aligned, ask: is this the _best_ approach, or is there a simpler design? A materially better path = maintainer discussion, never autonomous rejection.
 
-Aligned (parity or plainly in-scope: bug fix, docs, tests) → continue to Stage 3. Otherwise escalated → stop.
+Post a single Stage 1 comment (bilingual, concise):
 
-### Stage 3: KISS-Focused Code Review
+```markdown
+## Stage 1: Gate
+
+- **Template**: ✓ passed
+- **Direction**: aligned (Claude Code CHANGELOG v1.0.42)
+- **Best solution**: current approach is reasonable / suggest <simpler path>
+- **Verdict**: continue to code review
+
+<details>
+<summary>中文说明</summary>
+
+- **模板**: ✓ 通过
+- **方向**: 对齐
+- **最优解**: 当前方案合理 / 建议 <更简路径>
+- **结论**: 进入代码审查
+</details>
+
+--- Qwen Code
+```
+
+If template fails or direction is escalated → stop here.
+
+### Stage 2: Review + Test
+
+#### 2a. Code Review
 
 Lighter than `/review`. Focus on:
 
@@ -55,9 +77,9 @@ Lighter than `/review`. Focus on:
 gh pr diff "$PR_NUMBER" --repo "$REPO"
 ```
 
-Summary comment for all concerns. Inline comments only for critical/high-confidence blockers.
+Inline comments only for critical/high-confidence blockers.
 
-### Stage 4: Real-Scenario Testing
+#### 2b. Real-Scenario Testing
 
 **Mandatory.** Unit tests don't substitute. Unrelated build failure ≠ excuse to skip.
 
@@ -77,22 +99,26 @@ tmux capture-pane -t "$S" -p -S -5000 > "tmp/$S/session.txt"; tmux kill-session 
 
 `qwen ...` = installed build, `npm run dev -- ...` = PR code. Same invocation, only the build differs.
 
-- Cannot run after exhausting workarounds → FAIL, not skip. Report what was tried.
-- Fork code: sandbox (strip write tokens/secrets). Token is for posting results only.
-- Post tmux logs inline as evidence.
+- Cannot run after exhausting workarounds → FAIL, not skip.
+- Fork code: sandbox (strip write tokens/secrets).
 
-### Stage 5: Final Decision
+Post a single Stage 2 comment: code review findings + testing result. Inline tmux logs as evidence.
 
-Before deciding, honestly answer:
+### Stage 3: Final Decision
 
-1. **Need real?** Solves an actual user problem, not change for its own sake.
-2. **Code simple?** Minimal, no over-engineering, no speculative flexibility.
-3. **Confident to merge?** Weigh blast radius and reversibility. Real doubt → maintainer decides.
+Weigh all stages holistically:
 
-Approve only if all pass: template ✓, direction aligned ✓, no critical issues ✓, real-scenario passed ✓, three questions clean ✓, blast radius acceptable ✓.
+1. **Need real?** Solves an actual user problem.
+2. **Code simple?** Minimal, no over-engineering.
+3. **Best approach?** After seeing the code and test results, is this implementation actually the best way to solve the problem, or is there a simpler / more native / lower-cost alternative? If a clearly better path exists, surface it.
+4. **Confident to merge?** Weigh blast radius and reversibility. Real doubt → maintainer decides.
+
+Approve only if all pass: template ✓, direction ✓, no critical issues ✓, real-scenario ✓, three questions clean ✓, blast radius acceptable ✓.
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body-file /tmp/pr-gate-approve.md
 ```
 
-Anything uncertain → final comment summarizing findings, ask maintainer. Use `$QWEN_MAINTAINER_HANDLE` if set.
+Anything uncertain → ask maintainer. Use `$QWEN_MAINTAINER_HANDLE` if set.
+
+Post a single Stage 3 comment: overall verdict and reasoning.

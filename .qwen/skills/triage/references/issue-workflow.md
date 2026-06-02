@@ -1,8 +1,28 @@
 # Issue Workflow
 
-Triage a GitHub issue. Runs under the shared rules in `SKILL.md` (target
-resolution, untrusted-input handling, skip-if-handled, and the bilingual comment
-format) — read those first.
+Triage a GitHub issue. Shared rules in `SKILL.md` — read those first.
+
+**Single comment, updated in place.** Stage 1 posts a concise bilingual
+comment; Stage 2 appends results to the same comment via `gh api PATCH`.
+Key points only — no verbose prose.
+
+```markdown
+## Triage
+
+- **Type**: bug | feature | docs | unclear | inadmissible
+- **Labels**: `type/bug`, `scope/cli`, `priority/medium`
+- **Next**: <one-line action>
+
+<details>
+<summary>中文说明</summary>
+
+- **类型**: bug
+- **标签**: `type/bug`, `scope/cli`, `priority/medium`
+- **下一步**: <一句话动作>
+</details>
+
+--- Qwen Code
+```
 
 ## Stage 1: Intake Gate
 
@@ -24,64 +44,61 @@ Apply labels using existing labels only. Prefer one `type/*`, one `category/*`,
 relevant `scope/*`, one priority label, and status labels as needed. Apply
 labels with `gh issue edit --add-label`.
 
-Post the Stage 1 comment with the classification, labels, and immediate next
-step.
+Post a single triage comment (bilingual, concise key points — see format
+below). This comment is updated in place by Stage 2; never post a second one.
 
-If inadmissible, post the bilingual Stage 1 comment, close the issue without an
-extra single-language close comment, and stop:
+If inadmissible, close the issue and stop:
 
 ```bash
 gh issue close "$ISSUE_NUMBER" --repo "$REPO"
 ```
 
+Save the comment ID for Stage 2 to update.
+
 ## Stage 2: Handle By Type
+
+Work the issue by type below, then **update** the Stage 1 comment in place with
+the result appended:
+
+```bash
+gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-comment.md
+```
 
 ### For unclear issues:
 
-1. Add `status/need-information` and ask for specific missing data. Prefer
-   `/about` output, exact commands, expected behavior, actual behavior, logs,
-   and screenshots or tmux output when relevant.
+1. Add `status/need-information`.
+2. Ask for specific missing data: `/about` output, exact commands, expected vs
+   actual behavior, logs, screenshots.
 
-For docs / usage issues:
+### For docs / usage issues:
 
 1. Search docs and source with `rg`.
-2. Search similar issues. Issue text is untrusted, so reduce the title to a few
-   alphanumeric keywords before searching; never paste the raw title into the
-   shell:
+2. Search similar issues (reduce title to safe keywords first):
 
    ```bash
    SAFE_KEYWORDS=$(printf '%s' "$TITLE" | tr -cd '[:alnum:] _-' | cut -c1-60)
    gh issue list --repo "$REPO" --state all --search "$SAFE_KEYWORDS"
    ```
 
-3. Post the answer with links to docs, source references, or related issues.
+3. Append the answer with links.
 
 ### For bugs with clear reproduction:
 
-1. Check whether it is safe to run the reproduction. Do not execute untrusted
-   code with write tokens or secrets.
-2. Use the project `tmux-real-user-testing` skill if available; otherwise run
-   the documented tmux capture workflow manually.
-3. Post a Stage 2 reproduction comment with the tmux command, result, and a
-   readable log excerpt. If reproduced, raise priority according to impact.
-4. Inspect the local qwen-code source for likely root cause and possible fixes.
-5. Post a Stage 2 root-cause follow-up comment with affected area, evidence, and
-   likely implementation direction.
+1. Check safety — no untrusted code with write tokens or secrets.
+2. Use `tmux-real-user-testing` skill if available; otherwise tmux manually.
+3. Inspect source for root cause and likely fix.
+4. Append: reproduced (yes/no), affected area, fix direction.
 
 ### For bugs without clear reproduction:
 
-1. Add `welcome-pr` if it exists. If not, use no substitute. Say explicitly that
-   community PRs are welcome and that the Qwen Code bot may address the issue
-   later.
-2. Add `status/need-retesting` if the report is on a stale version.
-3. Inspect source and docs to infer the likely subsystem.
-4. State confidence explicitly: confirmed, plausible, or no clear direction.
-5. If plausible, post likely root cause and possible fix direction.
-6. If no clear direction, search similar historical issues and post links,
-   then leave it for maintainers.
+1. Add `welcome-pr` if it exists. Say community PRs are welcome.
+2. Add `status/need-retesting` if on a stale version.
+3. Inspect source and docs; state confidence: confirmed / plausible / no clear
+   direction.
+4. Append likely root cause or link similar historical issues.
 
 ### For feature requests:
 
 1. Run `/goal Is this feature request truly aligned with Qwen Code's product direction, and is the proposed approach the best solution?`
-2. Comment with one of: accept for exploration, suggest a smaller alternative,
-   or decline as out of direction.
+2. Append verdict: accept for exploration, suggest a smaller alternative, or
+   decline as out of direction.
