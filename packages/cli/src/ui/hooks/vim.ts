@@ -1108,9 +1108,6 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               buffer.replaceRange(startRow, col, startRow, col + 1, toggled);
               col++;
             }
-            if (col > startCol) {
-              buffer.cursor = [startRow, col];
-            }
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
           }
