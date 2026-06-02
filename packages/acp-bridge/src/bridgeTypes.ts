@@ -79,6 +79,12 @@ export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
 export interface BridgeRestoredSession extends BridgeSession {
   /** ACP state returned by `session/load` / `session/resume`. */
   state: BridgeSessionState;
+  /** Compacted events for all completed turns (O(turns) size). */
+  compactedReplay?: BridgeEvent[];
+  /** Raw events since last turn boundary (current incomplete turn). */
+  liveJournal?: BridgeEvent[];
+  /** High-water mark event ID — client uses this as initial SSE cursor. */
+  lastEventId?: number;
 }
 
 /** Sparse summary used by `GET /workspace/:id/sessions`. */

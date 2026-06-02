@@ -19,6 +19,18 @@
  *     Aborting the supplied AbortSignal closes the iterator promptly.
  */
 
+export interface SessionReplaySnapshot {
+  compactedTurns: BridgeEvent[];
+  liveJournal: BridgeEvent[];
+  lastEventId: number;
+}
+
+export interface CompactionEngine {
+  ingest(event: BridgeEvent): void;
+  snapshot(): SessionReplaySnapshot;
+  close(): void;
+}
+
 export const EVENT_SCHEMA_VERSION = 1 as const;
 
 /** A single frame published on the bus. */
@@ -166,7 +178,12 @@ export class EventBus {
   constructor(
     private readonly ringSize: number = DEFAULT_RING_SIZE,
     private readonly maxSubscribers: number = DEFAULT_MAX_SUBSCRIBERS,
+    private readonly compactionEngine?: CompactionEngine,
   ) {}
+
+  snapshotReplay(): SessionReplaySnapshot | undefined {
+    return this.compactionEngine?.snapshot();
+  }
 
   /** Most recent id ever assigned by `publish`. 0 if no events published. */
   get lastEventId(): number {
@@ -211,6 +228,7 @@ export class EventBus {
       ...input,
     };
     this.ring.push(event);
+    this.compactionEngine?.ingest(event);
     // Eviction-by-shift is O(n) once the ring is full. At the current
     // default `ringSize=8000` (#3803 §02) the per-publish shift work
     // measures in low milliseconds on chatty sessions — still well
@@ -550,6 +568,7 @@ export class EventBus {
     this.closed = true;
     for (const sub of this.subs) sub.queue.close();
     this.subs.clear();
+    this.compactionEngine?.close();
   }
 }
 

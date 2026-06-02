@@ -24,6 +24,7 @@ export {
 } from './DaemonAuthFlow.js';
 export {
   DaemonSessionClient,
+  type DaemonReplaySnapshot,
   type DaemonSessionClientOptions,
   type DaemonSessionSubscribeOptions,
 } from './DaemonSessionClient.js';

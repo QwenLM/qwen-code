@@ -152,6 +152,12 @@ export interface DaemonSessionState {
 /** Returned from `POST /session/:id/load` and `POST /session/:id/resume`. */
 export interface DaemonRestoredSession extends DaemonSession {
   state: DaemonSessionState;
+  /** Compacted events for completed turns (load only). */
+  compactedReplay?: DaemonEvent[];
+  /** Raw events since last turn boundary — current incomplete turn (load only). */
+  liveJournal?: DaemonEvent[];
+  /** Event bus watermark — used as initial SSE cursor. */
+  lastEventId?: number;
 }
 
 /** Sparse session record returned by `GET /workspace/:id/sessions`. */

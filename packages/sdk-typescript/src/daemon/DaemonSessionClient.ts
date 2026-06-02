@@ -30,6 +30,12 @@ import type {
   SessionMetadataResult,
 } from './types.js';
 
+/** Compacted replay snapshot returned by the daemon on session load. */
+export interface DaemonReplaySnapshot {
+  compactedReplay: DaemonEvent[];
+  liveJournal: DaemonEvent[];
+}
+
 export interface DaemonSessionClientOptions {
   client: DaemonClient;
   session: DaemonSession;
@@ -42,6 +48,8 @@ export interface DaemonSessionClientOptions {
    * `Last-Event-ID` resume cursors.
    */
   lastEventId?: number;
+  /** Compacted replay snapshot from daemon load response. */
+  replaySnapshot?: DaemonReplaySnapshot;
 }
 
 export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
@@ -68,6 +76,7 @@ export class DaemonSessionClient {
   readonly client: DaemonClient;
   readonly session: DaemonSession;
   readonly state: DaemonSessionState;
+  readonly replaySnapshot: DaemonReplaySnapshot;
   private lastSeenEventId: number | undefined;
   private subscriptionActive = false;
   private readonly _pendingPrompts = new Map<
@@ -82,6 +91,10 @@ export class DaemonSessionClient {
     this.client = opts.client;
     this.session = { ...opts.session };
     this.state = { ...(opts.state ?? {}) };
+    this.replaySnapshot = opts.replaySnapshot ?? {
+      compactedReplay: [],
+      liveJournal: [],
+    };
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
   }
 
@@ -136,27 +149,30 @@ export class DaemonSessionClient {
     req: RestoreSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const { state, ...session } = await client.loadSession(
-      sessionId,
-      req,
-      clientId,
-    );
+    const {
+      state,
+      compactedReplay,
+      liveJournal,
+      lastEventId: serverLastEventId,
+      ...session
+    } = await client.loadSession(sessionId, req, clientId);
     return new DaemonSessionClient({
       client,
       session,
       state,
-      lastEventId: 0,
+      lastEventId: serverLastEventId ?? 0,
+      replaySnapshot: {
+        compactedReplay: compactedReplay ?? [],
+        liveJournal: liveJournal ?? [],
+      },
     });
   }
 
   /**
    * Resumes an existing daemon session without requesting history replay.
-   * Seeds the first event subscription from the start of the daemon
-   * replay ring (`lastEventId: 0`) symmetric with `load()` — the agent's
-   * `unstable_resumeSession` schedules an `available_commands_update`
-   * via `setTimeout(0)`, which can publish to the daemon bus between
-   * the HTTP response and the consumer's first `events()` call. Seeding
-   * ensures that frame is observed instead of dropped.
+   * When the daemon returns a watermark (`lastEventId`), uses it as the
+   * initial SSE cursor. Falls back to 0 for older daemons so
+   * post-resume events (e.g. `available_commands_update`) are captured.
    */
   static async resume(
     client: DaemonClient,
@@ -164,16 +180,16 @@ export class DaemonSessionClient {
     req: RestoreSessionRequest = {},
     clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const { state, ...session } = await client.resumeSession(
-      sessionId,
-      req,
-      clientId,
-    );
+    const {
+      state,
+      lastEventId: serverLastEventId,
+      ...session
+    } = await client.resumeSession(sessionId, req, clientId);
     return new DaemonSessionClient({
       client,
       session,
       state,
-      lastEventId: 0,
+      lastEventId: serverLastEventId ?? 0,
     });
   }
 
