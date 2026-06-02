@@ -1288,7 +1288,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           case 'J': {
             const [row] = buffer.cursor;
             const lines = buffer.lines;
-            const endRow = Math.min(row + repeatCount, lines.length - 1);
+            const endRow = Math.min(
+              row + Math.max(repeatCount - 1, 1),
+              lines.length - 1,
+            );
             if (row < endRow) {
               let joined = lines[row] ?? '';
               for (let r = row + 1; r <= endRow; r++) {
