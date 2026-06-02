@@ -279,7 +279,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         text =
           (lines[startRow]?.slice(startCol) ?? '') +
           '\n' +
-          lines.slice(startRow + 1, endRow).join('\n') +
+          lines.slice(startRow + 1, endRow + 1).join('\n') +
           '\n' +
           (lines[endRow]?.slice(0, endCol) ?? '');
       }
