@@ -1433,6 +1433,104 @@ describe('CoreToolScheduler', () => {
     ).toBe(0);
   });
 
+  it('includes failed tool responses in PostToolBatch payloads', async () => {
+    const executeA = vi.fn().mockResolvedValue({
+      llmContent: 'alpha output',
+      returnDisplay: 'alpha output',
+    });
+    const executeB = vi.fn().mockRejectedValue(new Error('beta failed'));
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'alpha',
+        new MockTool({
+          name: 'alpha',
+          kind: Kind.Read,
+          execute: executeA,
+        }),
+      ],
+      [
+        'beta',
+        new MockTool({
+          name: 'beta',
+          kind: Kind.Read,
+          execute: executeB,
+        }),
+      ],
+    ]);
+    const messageBus = {
+      request: vi.fn().mockImplementation(
+        async (request: {
+          eventName: string;
+        }): Promise<HookExecutionResponse> => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output: { decision: 'allow' },
+        }),
+      ),
+    };
+    const onAllToolCallsComplete = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      messageBus,
+      disableHooks: false,
+      onAllToolCallsComplete,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-alpha',
+          name: 'alpha',
+          args: { value: 'a' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-batch-failure',
+        },
+        {
+          callId: 'call-beta',
+          name: 'beta',
+          args: { value: 'b' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-batch-failure',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const batchRequest = messageBus.request.mock.calls.find(
+      ([request]) => request.eventName === 'PostToolBatch',
+    )?.[0];
+    expect(batchRequest).toEqual(
+      expect.objectContaining({
+        input: {
+          permission_mode: 'yolo',
+          tool_calls: [
+            expect.objectContaining({
+              tool_name: 'alpha',
+              status: 'success',
+              tool_response: expect.objectContaining({
+                error: undefined,
+                error_type: undefined,
+              }),
+            }),
+            expect.objectContaining({
+              tool_name: 'beta',
+              status: 'error',
+              tool_response: expect.objectContaining({
+                error: 'beta failed',
+                error_type: ToolErrorType.UNHANDLED_EXCEPTION,
+              }),
+            }),
+          ],
+        },
+      }),
+    );
+  });
+
   it('queues new tool calls while a PostToolBatch hook is still running', async () => {
     const executeA = vi.fn().mockResolvedValue({
       llmContent: 'alpha output',
