@@ -1049,6 +1049,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           case 'F':
           case 't':
           case 'T':
+            // TODO: support operator+find (e.g. dfa = delete to 'a').
+            // Currently clears operator to prevent stale state; operator+find
+            // should capture the operator, execute the find, then apply the
+            // operator over the range from original cursor to found char.
             if (state.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
