@@ -1,61 +1,61 @@
-import { useCallback, useEffect, useState } from 'react'
-import { useTranslation } from 'react-i18next'
-import { toast } from 'sonner'
+import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 
-import { PanelHeader } from '@/components/app-shell/PanelHeader'
-import { HeaderMenu } from '@/components/ui/HeaderMenu'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import { routes } from '@/lib/navigate'
-import type { DetailsPageMeta } from '@/lib/navigation-registry'
-import { useAppShellContext } from '@/context/AppShellContext'
+import { PanelHeader } from '@/components/app-shell/PanelHeader';
+import { HeaderMenu } from '@/components/ui/HeaderMenu';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { routes } from '@/lib/navigate';
+import type { DetailsPageMeta } from '@/lib/navigation-registry';
+import { useAppShellContext } from '@/context/AppShellContext';
 import type {
   QwenMemoryPathTarget,
   QwenMemoryPaths,
   QwenMemorySettings,
-} from '@craft-agent/shared/config'
+} from '@craft-agent/shared/config';
 import {
   SettingsCard,
   SettingsRow,
   SettingsSection,
   SettingsToggle,
-} from '@/components/settings'
+} from '@/components/settings';
 
 export const meta: DetailsPageMeta = {
   navigator: 'settings',
   slug: 'memory',
-}
+};
 
 const DEFAULT_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
   enableManagedAutoDream: false,
   enableAutoSkill: false,
-}
+};
 
 export default function MemorySettingsPage() {
-  const { t } = useTranslation()
-  const { activeWorkspaceId } = useAppShellContext()
+  const { t } = useTranslation();
+  const { activeWorkspaceId } = useAppShellContext();
   const [settings, setSettings] = useState<QwenMemorySettings>(
     DEFAULT_MEMORY_SETTINGS,
-  )
-  const [memoryPaths, setMemoryPaths] = useState<QwenMemoryPaths | null>(null)
+  );
+  const [memoryPaths, setMemoryPaths] = useState<QwenMemoryPaths | null>(null);
 
   useEffect(() => {
     const load = async () => {
-      if (!window.electronAPI) return
+      if (!window.electronAPI) return;
       try {
         const [loadedSettings, loadedPaths] = await Promise.all([
           window.electronAPI.getQwenMemorySettings(),
           window.electronAPI.getQwenMemoryPaths(activeWorkspaceId ?? undefined),
-        ])
-        setSettings(loadedSettings)
-        setMemoryPaths(loadedPaths)
+        ]);
+        setSettings(loadedSettings);
+        setMemoryPaths(loadedPaths);
       } catch {
-        toast.error(t('settings.memory.failedToLoad'))
+        toast.error(t('settings.memory.failedToLoad'));
       }
-    }
+    };
 
-    load()
-  }, [activeWorkspaceId, t])
+    load();
+  }, [activeWorkspaceId, t]);
 
   const openMemoryPath = useCallback(
     async (target: QwenMemoryPathTarget) => {
@@ -63,40 +63,40 @@ export default function MemorySettingsPage() {
         await window.electronAPI.openQwenMemoryPath(
           target,
           activeWorkspaceId ?? undefined,
-        )
+        );
       } catch (error) {
         const message =
-          error instanceof Error ? error.message : t('common.unknown')
+          error instanceof Error ? error.message : t('common.unknown');
         toast.error(t('settings.memory.failedToOpen'), {
           description: message,
-        })
+        });
       }
     },
     [activeWorkspaceId, t],
-  )
+  );
 
   const updateMemorySetting = useCallback(
     async <K extends keyof QwenMemorySettings>(
       key: K,
       value: QwenMemorySettings[K],
     ) => {
-      setSettings((prev) => ({ ...prev, [key]: value }))
+      setSettings((prev) => ({ ...prev, [key]: value }));
       try {
         const saved = await window.electronAPI.setQwenMemorySettings({
           [key]: value,
-        })
-        setSettings(saved)
+        });
+        setSettings(saved);
       } catch (error) {
-        setSettings((prev) => ({ ...prev, [key]: !value }))
+        setSettings((prev) => ({ ...prev, [key]: !value }));
         const message =
-          error instanceof Error ? error.message : t('common.unknown')
+          error instanceof Error ? error.message : t('common.unknown');
         toast.error(t('settings.memory.failedToSave'), {
           description: message,
-        })
+        });
       }
     },
     [t],
-  )
+  );
 
   return (
     <div className="h-full flex flex-col">
@@ -200,10 +200,6 @@ export default function MemorySettingsPage() {
                       </button>
                     }
                   />
-                  <SettingsRow
-                    label={t('settings.memory.commands')}
-                    description={t('settings.memory.commandsDesc')}
-                  />
                 </SettingsCard>
               </SettingsSection>
             </div>
@@ -211,5 +207,5 @@ export default function MemorySettingsPage() {
         </ScrollArea>
       </div>
     </div>
-  )
+  );
 }
