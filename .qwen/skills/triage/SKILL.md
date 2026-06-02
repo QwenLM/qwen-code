@@ -263,13 +263,17 @@ For what the changelog does not settle:
 - **Never auto-reject on direction.** Reserve `gh pr review --request-changes`
   for the template gate and for rejections a maintainer has confirmed.
 
-Before any "aligned" — parity or otherwise — reflect deeply once more: is this
-PR's solution actually the best one? Even when the need is real and the feature
-belongs, ask whether a simpler, more composable, or more native product design
-would serve the same need better. Do not wave through a workable-but-mediocre
-approach. If you see a materially better path, surface it to the maintainer (and
-suggest it to the author); a clearly better design is a maintainer discussion,
-never an autonomous rejection.
+**This is the single most important judgment in the gate — never skip it, never
+rush it, and weight it above every mechanical check.** Before any "aligned,"
+parity or otherwise, stop and reflect deeply: even when the need is real and the
+feature belongs, is this PR's approach actually the _best_ one — or is there a
+simpler, more composable, more native product design that solves the same need
+better, with less code and less surface? Direction alignment and a green
+checklist do not make a workable-but-mediocre solution the right answer. Push
+hard here; this is where most value is won or lost. If a materially better path
+exists, you must surface it — to the maintainer, and as a suggestion to the
+author. A clearly better design is a maintainer discussion, never an autonomous
+rejection.
 
 Aligned — Claude Code parity, or plainly in-scope work (a bug fix, docs, tests,
 an obvious reliability win) touching no core contract — continues to Stage 3, as
