@@ -288,6 +288,11 @@ export class LoggingContentGenerator implements ContentGenerator {
         outputTokens: response.usageMetadata?.candidatesTokenCount,
         cachedInputTokens: response.usageMetadata?.cachedContentTokenCount,
         durationMs: Date.now() - startTime,
+        responseId: response.responseId || undefined,
+        finishReason:
+          (response.candidates?.[0]?.finishReason as string) || undefined,
+        thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
+        subagentName: subagentNameContext.getStore() || undefined,
       });
       return response;
     } catch (error) {
@@ -304,6 +309,9 @@ export class LoggingContentGenerator implements ContentGenerator {
         error: aborted
           ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
           : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+        errorType: getErrorType(error),
+        errorStatusCode: getErrorStatus(error),
+        subagentName: subagentNameContext.getStore() || undefined,
       });
       await context.with(spanContext, async () => {
         this.safelyLogApiError('', durationMs, error, req.model, userPromptId);
@@ -383,6 +391,9 @@ export class LoggingContentGenerator implements ContentGenerator {
         error: aborted
           ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
           : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+        errorType: getErrorType(error),
+        errorStatusCode: getErrorStatus(error),
+        subagentName: subagentNameContext.getStore() || undefined,
       });
       try {
         await this.safelyLogOpenAIInteraction(
@@ -464,6 +475,9 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let errorOccurred = false;
+    let lastFinishReason: string | undefined;
+    let lastError: unknown;
+    const subagentName = subagentNameContext.getStore();
 
     // TTFT (time to first token): wall-clock from generateContentStream
     // dispatch to the first stream chunk containing user-visible content.
@@ -504,6 +518,8 @@ export class LoggingContentGenerator implements ContentGenerator {
               success: false,
               durationMs: Date.now() - startTime,
               error: 'Stream span timed out (idle)',
+              responseId: firstResponseId || undefined,
+              subagentName: subagentName || undefined,
             });
             spanEndedByTimeout = true;
           }, STREAM_IDLE_TIMEOUT_MS);
@@ -525,6 +541,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         }
         if (response.usageMetadata) {
           lastUsageMetadata = response.usageMetadata;
+        }
+        const candidate = response.candidates?.[0];
+        if (candidate?.finishReason) {
+          lastFinishReason = candidate.finishReason as string;
         }
         // Capture TTFT on the first stream chunk that contains user-visible
         // content. hasUserVisibleContent skips role-only / usageMetadata-only
@@ -578,6 +598,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
     } catch (error) {
       errorOccurred = true;
+      lastError = error;
       // Same gating as the success path above: if the idle timeout already
       // closed the span as failed, do not emit a parallel api_error log
       // (the span is the canonical signal). Otherwise we'd produce the
@@ -626,6 +647,12 @@ export class LoggingContentGenerator implements ContentGenerator {
               ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
               : API_CALL_FAILED_SPAN_STATUS_MESSAGE
             : undefined,
+          responseId: firstResponseId || undefined,
+          finishReason: lastFinishReason,
+          thoughtsTokenCount: lastUsageMetadata?.thoughtsTokenCount,
+          subagentName: subagentName || undefined,
+          errorType: lastError ? getErrorType(lastError) : undefined,
+          errorStatusCode: lastError ? getErrorStatus(lastError) : undefined,
         });
       }
     }

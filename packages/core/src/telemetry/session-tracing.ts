@@ -27,10 +27,7 @@ import {
 } from './constants.js';
 import { clearDetailedSpanState } from './detailed-span-attributes.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
-import {
-  getCurrentSessionId,
-  setSessionContext,
-} from './session-context.js';
+import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
@@ -92,6 +89,22 @@ export interface LLMRequestMetadata {
    * in Phase 4a.
    */
   retryTotalDelayMs?: number;
+  /** Provider response ID (e.g. DashScope request_id / OpenAI completion id). */
+  responseId?: string;
+  /** Model finish/stop reason (e.g. "STOP", "MAX_TOKENS"). */
+  finishReason?: string;
+  /**
+   * Reasoning/thinking token count. For OpenAI-compatible providers,
+   * this value is already INCLUDED in outputTokens (candidatesTokenCount).
+   * Do not sum with outputTokens to avoid double-counting.
+   */
+  thoughtsTokenCount?: number;
+  /** Subagent name that originated this request, or undefined for main. */
+  subagentName?: string;
+  /** Structured error type (e.g. "RateLimitError", "APIConnectionError:ECONNREFUSED"). */
+  errorType?: string;
+  /** HTTP status code from the provider error response. */
+  errorStatusCode?: number;
 }
 
 export interface ToolSpanMetadata {
@@ -565,6 +578,31 @@ export function endLLMRequestSpan(
       endAttributes['success'] = metadata.success;
       if (metadata.error !== undefined)
         endAttributes['error'] = truncateSpanError(metadata.error);
+      if (metadata.responseId !== undefined) {
+        endAttributes['response_id'] = metadata.responseId;
+        endAttributes['gen_ai.response.id'] = metadata.responseId;
+      }
+      if (metadata.finishReason !== undefined) {
+        endAttributes['finish_reason'] = metadata.finishReason;
+        endAttributes['gen_ai.response.finish_reasons'] = [
+          metadata.finishReason,
+        ];
+      }
+      if (metadata.thoughtsTokenCount !== undefined) {
+        endAttributes['thoughts_token_count'] = metadata.thoughtsTokenCount;
+        endAttributes['gen_ai.usage.reasoning_tokens'] =
+          metadata.thoughtsTokenCount;
+      }
+      if (metadata.subagentName !== undefined) {
+        endAttributes['subagent_name'] = metadata.subagentName;
+      }
+      if (metadata.errorType !== undefined) {
+        endAttributes['error_type'] = metadata.errorType;
+        endAttributes['error.type'] = metadata.errorType;
+      }
+      if (metadata.errorStatusCode !== undefined) {
+        endAttributes['error_status_code'] = metadata.errorStatusCode;
+      }
     }
 
     spanCtx.span.setAttributes(endAttributes);
