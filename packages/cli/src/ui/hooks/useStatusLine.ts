@@ -7,6 +7,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { exec, type ChildProcess } from 'child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { SettingScope } from '../../config/settings.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -614,6 +615,26 @@ export function useStatusLine(): {
     updatePullRequestNumber,
   ]);
 
+  // Reload settings from disk when the model turn finishes (streamingState →
+  // Idle). The statusline-setup agent edits settings.json via file tools, but
+  // the in-memory LoadedSettings object is never updated. A one-shot
+  // readFileSync at turn end keeps the two in sync so the status line picks
+  // up type changes (e.g. preset → command) without a CLI restart.
+  //
+  // The reload bumps `settingsReloadKey` so the component re-renders with
+  // fresh `settings.merged` data. The key is included in the command-change
+  // effect deps to ensure `doUpdate()` fires when the config type switches.
+  const [settingsReloadKey, setSettingsReloadKey] = useState(0);
+  const prevStreamingForReloadRef = useRef(streamingState);
+  useEffect(() => {
+    const prev = prevStreamingForReloadRef.current;
+    prevStreamingForReloadRef.current = streamingState;
+    if (prev !== streamingState && streamingState === 'idle') {
+      settings.reloadScopeFromDisk(SettingScope.User);
+      setSettingsReloadKey((k) => k + 1);
+    }
+  }, [streamingState, settings]);
+
   // Re-execute immediately when the command itself changes (hot reload).
   // Skip the first run — the mount effect below already handles it.
   useEffect(() => {
@@ -634,6 +655,7 @@ export function useStatusLine(): {
     statusLinePresetUseThemeColors,
     statusLinePresetItemsKey,
     statusLineSettingsVersion,
+    settingsReloadKey,
   ]);
 
   // Re-render preset output once the async GitHub PR lookup returns.
