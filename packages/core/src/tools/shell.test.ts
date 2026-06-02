@@ -5514,7 +5514,8 @@ describe('detectBlockedSleepPattern', () => {
 
   it('blocks sleep followed by a top-level shell comment', () => {
     // Shell ignores trailing comments, so these are equivalent to
-    // standalone foreground sleeps and must not bypass the guard.
+    // standalone foreground sleeps unless they use the explicit
+    // intentional-sleep escape hatch.
     expect(detectBlockedSleepPattern('sleep 5 # wait')).toBe(
       'standalone sleep 5',
     );
@@ -5525,6 +5526,50 @@ describe('detectBlockedSleepPattern', () => {
       'standalone sleep 2s',
     );
     expect(detectBlockedSleepPattern('sleep 5 && echo ok # trailing')).toBe(
+      'sleep 5 followed by: echo ok',
+    );
+  });
+
+  it('allows standalone sleep with an intentional sleep comment', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBeNull();
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 2s # intentional-sleep: deliberate rate limit backoff',
+      ),
+    ).toBeNull();
+  });
+
+  it('requires a meaningful intentional sleep reason', () => {
+    expect(detectBlockedSleepPattern('sleep 5 # intentional-sleep:')).toBe(
+      'standalone sleep 5',
+    );
+    expect(detectBlockedSleepPattern('sleep 5 # intentional-sleep: wait')).toBe(
+      'standalone sleep 5',
+    );
+  });
+
+  it('does not allow intentional sleep comments on leading sleep chains', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 && echo ok # intentional-sleep: wait for rate limit reset',
+      ),
+    ).toBe('sleep 5 followed by: echo ok');
+  });
+
+  it('does not allow intentional sleep comments to hide newline commands', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 5 # intentional-sleep: wait for rate limit reset\necho ok',
+      ),
+    ).toBe('sleep 5 followed by: echo ok');
+  });
+
+  it('preserves commands after a shell comment newline', () => {
+    expect(detectBlockedSleepPattern('sleep 5 # wait\necho ok')).toBe(
       'sleep 5 followed by: echo ok',
     );
   });
