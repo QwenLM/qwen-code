@@ -6157,4 +6157,68 @@ describe('parallel subAgent text interleaving fix', () => {
     ) as Array<{ streaming?: boolean }>;
     expect(bBlocks[0]!.streaming).toBe(true);
   });
+
+  it('T14: scoped clearActiveText preserves scalar activeAssistantBlockId', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        { type: 'assistant.text.delta', text: 'scalar text' },
+        {
+          type: 'assistant.text.delta',
+          text: 'keyed text',
+          parentToolCallId: 'task-K',
+        },
+        {
+          type: 'tool.update',
+          toolCallId: 'child-tool',
+          title: 'Bash',
+          status: 'running',
+          parentToolCallId: 'task-K',
+        } as DaemonUiEvent,
+      ],
+      { now: 2 },
+    );
+
+    const scalarBlock = state.blocks.find(
+      (b) =>
+        b.kind === 'assistant' &&
+        (b as { parentToolCallId?: string }).parentToolCallId === undefined,
+    ) as { streaming?: boolean } | undefined;
+    expect(scalarBlock?.streaming).toBe(true);
+    expect(state.activeAssistantBlockId).toBeDefined();
+  });
+
+  it('T15: finishAssistant finalizes both scalar and keyed blocks', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        { type: 'assistant.text.delta', text: 'scalar streaming' },
+        {
+          type: 'assistant.text.delta',
+          text: 'keyed streaming',
+          parentToolCallId: 'task-M',
+        },
+      ],
+      { now: 2 },
+    );
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.done', reason: 'stop' }],
+      { now: 3 },
+    );
+
+    const allAssistant = state.blocks.filter(
+      (b) => b.kind === 'assistant',
+    ) as Array<{ streaming?: boolean }>;
+    expect(allAssistant).toHaveLength(2);
+    expect(allAssistant[0]!.streaming).toBe(false);
+    expect(allAssistant[1]!.streaming).toBe(false);
+    expect(state.activeAssistantBlockId).toBeUndefined();
+    expect(state.activeAssistantBlockByParent).toEqual({});
+  });
 });
