@@ -1993,8 +1993,8 @@ describe('useVim hook', () => {
     });
 
     describe('y (yank)', () => {
-      it('should yank to system clipboard with yy', () => {
-        const buffer = createMockBuffer('hello world');
+      it('should yank line with yy for later paste', () => {
+        const buffer = createMockBuffer('hello world', [0, 5]);
         const { result } = renderHook(() =>
           useVim(buffer as TextBuffer, mockHandleFinalSubmit),
         );
@@ -2002,21 +2002,38 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput({ sequence: 'y' }));
         act(() => result.current.handleInput({ sequence: 'y' }));
 
-        // Should copy line to clipboard
-        // Note: writeClipboard is called internally
+        // Paste should insert the yanked line below current line
+        act(() => result.current.handleInput({ sequence: 'p' }));
+
+        expect(buffer.replaceRange).toHaveBeenCalledWith(
+          1,
+          0,
+          1,
+          0,
+          'hello world\n',
+        );
       });
     });
 
     describe('Y (yank line)', () => {
-      it('should yank entire line', () => {
-        const buffer = createMockBuffer('hello world');
+      it('should yank entire line for later paste', () => {
+        const buffer = createMockBuffer('hello world', [0, 5]);
         const { result } = renderHook(() =>
           useVim(buffer as TextBuffer, mockHandleFinalSubmit),
         );
 
         act(() => result.current.handleInput({ sequence: 'Y' }));
 
-        // Should copy entire line to clipboard
+        // Paste should insert the yanked line above current line
+        act(() => result.current.handleInput({ sequence: 'P' }));
+
+        expect(buffer.replaceRange).toHaveBeenCalledWith(
+          0,
+          0,
+          0,
+          0,
+          'hello world\n',
+        );
       });
     });
 
@@ -2034,7 +2051,8 @@ describe('useVim hook', () => {
         // Then paste
         act(() => result.current.handleInput({ sequence: 'p' }));
 
-        // Should insert yanked text after cursor
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 6, 0, 6, 'ello');
+        expect(buffer.vimMoveRight).toHaveBeenCalledWith(1);
       });
     });
 
@@ -2052,7 +2070,7 @@ describe('useVim hook', () => {
         // Then paste before
         act(() => result.current.handleInput({ sequence: 'P' }));
 
-        // Should insert yanked text before cursor
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 5, 0, 5, 'ello');
       });
     });
 
