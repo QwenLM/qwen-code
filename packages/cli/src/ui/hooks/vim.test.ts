@@ -2270,4 +2270,312 @@ describe('useVim hook', () => {
       });
     });
   });
+
+  describe('Pending operator clearing', () => {
+    it('should clear pending operator on Escape during char-read (r)', () => {
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Enter char-read mode with r
+      act(() => result.current.handleInput(makeKey('r')));
+
+      // Press Escape to cancel
+      act(() => result.current.handleInput(makeKey('\u001b', 'escape')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on Escape during char-read (f)', () => {
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Enter char-read mode with f
+      act(() => result.current.handleInput(makeKey('f')));
+
+      // Press Escape to cancel
+      act(() => result.current.handleInput(makeKey('\u001b', 'escape')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on Escape during char-read (t)', () => {
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Enter char-read mode with t
+      act(() => result.current.handleInput(makeKey('t')));
+
+      // Press Escape to cancel
+      act(() => result.current.handleInput(makeKey('\u001b', 'escape')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on ~ (toggle case)', () => {
+      const buffer = createMockBuffer('Hello', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press ~ to toggle case
+      act(() => result.current.handleInput(makeKey('~')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on u (undo)', () => {
+      const buffer = createMockBuffer('Hello', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press u to undo
+      act(() => result.current.handleInput(makeKey('u')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on J (join lines)', () => {
+      const buffer = createMockBuffer('hello\nworld', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press J to join lines
+      act(() => result.current.handleInput(makeKey('J')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on x (delete char)', () => {
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press x to delete char
+      act(() => result.current.handleInput(makeKey('x')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on D (delete to EOL)', () => {
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press D to delete to EOL
+      act(() => result.current.handleInput(makeKey('D')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on C (change to EOL)', () => {
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press C to change to EOL
+      act(() => result.current.handleInput(makeKey('C')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on Y (yank line)', () => {
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press Y to yank line
+      act(() => result.current.handleInput(makeKey('Y')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on . (dot repeat)', () => {
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press . to repeat
+      act(() => result.current.handleInput(makeKey('.')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on f (find char)', () => {
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press f to find char (without completing)
+      act(() => result.current.handleInput(makeKey('f')));
+
+      // Press Escape to cancel find
+      act(() => result.current.handleInput(makeKey('\u001b', 'escape')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on F (find char backward)', () => {
+      const buffer = createMockBuffer('hello world', [0, 5]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press F to find char backward (without completing)
+      act(() => result.current.handleInput(makeKey('F')));
+
+      // Press Escape to cancel find
+      act(() => result.current.handleInput(makeKey('\u001b', 'escape')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on t (find char before)', () => {
+      const buffer = createMockBuffer('hello world', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press t to find char before (without completing)
+      act(() => result.current.handleInput(makeKey('t')));
+
+      // Press Escape to cancel find
+      act(() => result.current.handleInput(makeKey('\u001b', 'escape')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+
+    it('should clear pending operator on T (find char before backward)', () => {
+      const buffer = createMockBuffer('hello world', [0, 5]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      // Set pending operator d
+      act(() => result.current.handleInput(makeKey('d')));
+
+      // Press T to find char before backward (without completing)
+      act(() => result.current.handleInput(makeKey('T')));
+
+      // Press Escape to cancel find
+      act(() => result.current.handleInput(makeKey('\u001b', 'escape')));
+
+      // Now w should just move cursor, not delete
+      act(() => result.current.handleInput(makeKey('w')));
+
+      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+  });
 });
