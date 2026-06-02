@@ -77,6 +77,7 @@ type ToolSpanRecord = {
     blockType?: string;
     hasAdditionalContext?: boolean;
     postBatchStop?: boolean;
+    postBatchStopReason?: string;
     error?: string;
   };
 };
@@ -1846,6 +1847,13 @@ describe('CoreToolScheduler', () => {
     expect(debugLoggerInfoSpy).toHaveBeenCalledWith(
       'PostToolBatch hook stopped batch (2 calls): halt',
     );
+    const batchHookSpan = toolSpanRecords.findLast(
+      (record) =>
+        record.name === 'hook' &&
+        record.attributes['hook_event'] === 'PostToolBatch',
+    );
+    expect(batchHookSpan?.hookMetadata?.postBatchStop).toBe(true);
+    expect(batchHookSpan?.hookMetadata?.postBatchStopReason).toBe('halt');
   });
 
   it('passes through completed calls when PostToolBatch returns hookError', async () => {
@@ -1912,6 +1920,12 @@ describe('CoreToolScheduler', () => {
     const completedCalls = completionCalls[0]?.[0];
     expect(completedCalls).toHaveLength(1);
     expect(completedCalls?.[0]?.status).toBe('success');
+    const batchHookSpan = toolSpanRecords.findLast(
+      (record) =>
+        record.name === 'hook' &&
+        record.attributes['hook_event'] === 'PostToolBatch',
+    );
+    expect(batchHookSpan?.hookMetadata?.postBatchStop).toBe(false);
     expect(
       (
         scheduler as unknown as {

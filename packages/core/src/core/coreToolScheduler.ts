@@ -824,7 +824,10 @@ function appendContextToToolResponse(
   return {
     ...response,
     responseParts,
-    contentLength: (response.contentLength ?? 0) + additionalContext.length + 2,
+    contentLength:
+      response.contentLength !== undefined
+        ? response.contentLength + additionalContext.length + 2
+        : undefined,
   };
 }
 
@@ -861,7 +864,7 @@ function withPostToolBatchStop(
   calls[calls.length - 1] = {
     status: 'error',
     request: lastCall.request,
-    tool: 'tool' in lastCall ? lastCall.tool : undefined,
+    tool: lastCall.tool,
     response: createErrorResponse(
       lastCall.request,
       new Error(stopReason),
@@ -1199,7 +1202,7 @@ export class CoreToolScheduler {
     this.notifyToolCallsUpdate();
     void this.checkAndNotifyCompletion().catch((error: unknown) => {
       debugLogger.warn(
-        `Tool completion notification failed: ${
+        `setStatusInternal completion notification failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -2287,7 +2290,7 @@ export class CoreToolScheduler {
       await this.attemptExecutionOfScheduledCalls(signal);
       void this.checkAndNotifyCompletion().catch((error: unknown) => {
         debugLogger.warn(
-          `Tool completion notification failed: ${
+          `_schedule completion notification failed: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
@@ -3464,6 +3467,7 @@ export class CoreToolScheduler {
                     success: false,
                     error: r.hookError,
                     shouldStop: false,
+                    postBatchStop: false,
                   }
                 : {
                     success: true,
@@ -3471,6 +3475,9 @@ export class CoreToolScheduler {
                     hasAdditionalContext: !!r.additionalContext,
                     blockType: r.shouldStop ? 'stop' : undefined,
                     postBatchStop: r.shouldStop,
+                    postBatchStopReason: r.shouldStop
+                      ? r.stopReason || 'no reason given'
+                      : undefined,
                   },
           );
 

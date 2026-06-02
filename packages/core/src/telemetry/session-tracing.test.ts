@@ -995,6 +995,7 @@ describe('session-tracing', () => {
         shouldStop: true,
         hasAdditionalContext: true,
         postBatchStop: true,
+        postBatchStopReason: 'policy halt',
       });
 
       const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
@@ -1002,6 +1003,9 @@ describe('session-tracing', () => {
       expect(hookRecord?.attributes['should_stop']).toBe(true);
       expect(hookRecord?.attributes['has_additional_context']).toBe(true);
       expect(hookRecord?.attributes['post_batch_stop']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop_reason']).toBe(
+        'policy halt',
+      );
       expect(hookRecord?.statuses).toHaveLength(0);
     });
 
