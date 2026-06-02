@@ -1036,8 +1036,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               if (r !== currentRow) {
                 if (r > currentRow) buffer.vimMoveDown(r - currentRow);
                 else buffer.vimMoveUp(currentRow - r);
-                buffer.vimMoveToLineStart();
               }
+              buffer.vimMoveToLineStart();
               buffer.vimMoveRight(c);
             }
             dispatch({ type: 'CLEAR_COUNT' });
