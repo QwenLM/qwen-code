@@ -35,6 +35,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   },
   ExtensionManager: vi.fn(),
   getErrorMessage: (e: unknown) => (e instanceof Error ? e.message : String(e)),
+  isGatedMcpScope: (scope: string | undefined) =>
+    scope === 'project' || scope === 'workspace',
 }));
 vi.mock('@modelcontextprotocol/sdk/client/index.js');
 

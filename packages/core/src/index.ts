@@ -266,6 +266,7 @@ export type {
   OAuthAuthorizationServerMetadata,
   OAuthProtectedResourceMetadata,
 } from './mcp/oauth-utils.js';
+export { hashMcpServerConfig } from './mcp/configHash.js';
 
 // ============================================================================
 // Telemetry

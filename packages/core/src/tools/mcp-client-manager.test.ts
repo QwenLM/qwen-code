@@ -806,6 +806,61 @@ describe('McpClientManager', () => {
     expect(mockedMcpClient.discover).not.toHaveBeenCalled();
   });
 
+  it('should not connect a project server that is pending approval (#4615)', async () => {
+    const mockedMcpClient = {
+      connect: vi.fn(),
+      discover: vi.fn(),
+      disconnect: vi.fn(),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ 'pending-server': { scope: 'project' } }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+      isMcpServerPendingApproval: (name: string) => name === 'pending-server',
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    await manager.discoverAllMcpTools(mockConfig);
+    // The gate runs before `new McpClient(...)` — no client is even constructed,
+    // so no stdio spawn / transport / health check can occur.
+    expect(McpClient).not.toHaveBeenCalled();
+    expect(mockedMcpClient.connect).not.toHaveBeenCalled();
+    expect(mockedMcpClient.discover).not.toHaveBeenCalled();
+  });
+
+  it('connects an approved project server (not pending)', async () => {
+    const mockedMcpClient = {
+      connect: vi.fn(),
+      discover: vi.fn(),
+      disconnect: vi.fn(),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ 'approved-server': { scope: 'project' } }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}),
+      getWorkspaceContext: () => ({}),
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+      isMcpServerPendingApproval: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    await manager.discoverAllMcpTools(mockConfig);
+    expect(mockedMcpClient.connect).toHaveBeenCalledOnce();
+    expect(mockedMcpClient.discover).toHaveBeenCalledOnce();
+  });
+
   it('should disconnect all clients when stop is called', async () => {
     // Track disconnect calls across all instances
     const disconnectCalls: string[] = [];

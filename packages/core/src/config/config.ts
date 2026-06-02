@@ -544,6 +544,33 @@ export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
  */
 export const DEFAULT_TOOL_OUTPUT_BATCH_BUDGET = 200_000;
 
+/**
+ * Provenance of an MCP server config. Two purposes (see issue #4615):
+ *
+ * - **Approval gating**: `'project'` (a workspace `.mcp.json`) and `'workspace'`
+ *   (a workspace `.qwen/settings.json`) are checked-in / shareable and therefore
+ *   untrusted — both are held behind the pending-approval gate. See
+ *   {@link isGatedMcpScope}.
+ * - **Precedence**: `'workspace'` and `'system'` rank ABOVE a `.mcp.json`
+ *   server, while user/default-scoped servers (left `scope` unset) rank below it
+ *   — so `.mcp.json` overrides user settings but never enterprise-enforced
+ *   `'system'` settings.
+ *
+ * Configs from user/default settings, extensions, and `--mcp-config` leave
+ * `scope` unset.
+ */
+export type McpServerScope = 'project' | 'workspace' | 'system';
+
+/**
+ * Scopes whose servers are checked-in / shareable and therefore untrusted: they
+ * must be approved before the discovery layer connects them. `'system'`
+ * (enterprise-enforced) and unset (user/default/CLI/extension) scopes are
+ * trusted and never gated. See issue #4615.
+ */
+export function isGatedMcpScope(scope: McpServerScope | undefined): boolean {
+  return scope === 'project' || scope === 'workspace';
+}
+
 export class MCPServerConfig {
   constructor(
     // For stdio transport
@@ -586,6 +613,15 @@ export class MCPServerConfig {
      * call sites.
      */
     readonly discoveryTimeoutMs?: number,
+    /**
+     * Provenance of this server config (see {@link McpServerScope}). Gated
+     * scopes (`'project'`, `'workspace'`) are held behind the pending-approval
+     * gate; `'system'` and unset scopes connect as before. Also drives
+     * precedence in `assembleMcpServers`. Appended at the end of the parameter
+     * list to avoid shifting positional arguments at the many
+     * `new MCPServerConfig(...)` call sites. See issue #4615.
+     */
+    readonly scope?: McpServerScope,
   ) {}
 }
 
@@ -778,6 +814,12 @@ export interface ConfigParameters {
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
   excludedMcpServers?: string[];
+  /**
+   * Names of project-scoped (`.mcp.json`) servers that are NOT yet approved
+   * (pending or rejected). These are loaded so they can be listed, but the
+   * discovery layer must not connect them. See issue #4615.
+   */
+  pendingMcpServers?: string[];
   noBrowser?: boolean;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
@@ -1131,6 +1173,7 @@ export class Config {
   private lspInitializationError?: string;
   private readonly allowedMcpServers?: string[];
   private excludedMcpServers?: string[];
+  private pendingMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
@@ -1311,6 +1354,7 @@ export class Config {
     this.lspClient = params.lspClient;
     this.allowedMcpServers = params.allowedMcpServers;
     this.excludedMcpServers = params.excludedMcpServers;
+    this.pendingMcpServers = params.pendingMcpServers;
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
@@ -2930,6 +2974,31 @@ export class Config {
 
   isMcpServerDisabled(serverName: string): boolean {
     return this.excludedMcpServers?.includes(serverName) ?? false;
+  }
+
+  /**
+   * True for a project-scoped (`.mcp.json`) server that the user has not
+   * approved (pending or rejected). The discovery layer skips these BEFORE any
+   * stdio spawn / transport / health check, so inspecting an untrusted
+   * `.mcp.json` has no side effects. See issue #4615.
+   */
+  isMcpServerPendingApproval(serverName: string): boolean {
+    return this.pendingMcpServers?.includes(serverName) ?? false;
+  }
+
+  /**
+   * Drop a project server from the pending-approval set after the user approves
+   * it mid-session (via the startup dialog), so a subsequent
+   * `discoverToolsForServer` connects it instead of skipping it. See issue
+   * #4615. No-op for servers that were never pending.
+   */
+  approveMcpServerForSession(serverName: string): void {
+    if (!this.pendingMcpServers) {
+      return;
+    }
+    this.pendingMcpServers = this.pendingMcpServers.filter(
+      (name) => name !== serverName,
+    );
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {

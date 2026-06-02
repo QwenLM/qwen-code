@@ -1484,14 +1484,17 @@ describe('Settings Loading and Merging', () => {
           args: ['--user-arg'],
           description: 'User MCP server',
         },
+        // Workspace-sourced servers are stamped with provenance scope (#4615).
         'workspace-server': {
           command: 'workspace-command',
           args: ['--workspace-arg'],
           description: 'Workspace MCP server',
+          scope: 'workspace',
         },
         'shared-server': {
           command: 'workspace-shared-command',
           description: 'Workspace shared server config',
+          scope: 'workspace',
         },
       });
     });
@@ -1550,6 +1553,7 @@ describe('Settings Loading and Merging', () => {
         'workspace-only-server': {
           command: 'workspace-only-command',
           description: 'Workspace only server',
+          scope: 'workspace',
         },
       });
     });
@@ -1617,13 +1621,18 @@ describe('Settings Loading and Merging', () => {
         },
         'workspace-server': {
           command: 'workspace-command',
+          scope: 'workspace',
         },
+        // system-sourced servers are stamped 'system' (ungated, highest
+        // precedence) (#4615).
         'system-only-server': {
           command: 'system-only-command',
+          scope: 'system',
         },
         'shared-server': {
           command: 'system-command',
           args: ['--system-arg'],
+          scope: 'system',
         },
       });
     });

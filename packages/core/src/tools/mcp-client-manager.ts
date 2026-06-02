@@ -1058,6 +1058,15 @@ export class McpClientManager {
             return;
           }
 
+          // Skip project-scoped (`.mcp.json`) servers the user has not
+          // approved (#4615). This MUST be before `tryReserveSlot` /
+          // `new McpClient` / `connect()` so an untrusted `.mcp.json` never
+          // spawns a process, opens a transport, or runs a health check.
+          if (cliConfig.isMcpServerPendingApproval?.(name)) {
+            debugLogger.debug(`Skipping MCP server pending approval: ${name}`);
+            return;
+          }
+
           // Budget gate : synchronous slot reservation BEFORE the
           // `await client.connect()` below. Refusal only happens under
           // `enforce` mode; `warn` mode reserves regardless so accounting
@@ -1232,6 +1241,14 @@ export class McpClientManager {
     // Production `Config` always defines the method.
     if (this.cliConfig.isMcpServerDisabled?.(serverName)) {
       debugLogger.debug(`Skipping disabled MCP server: ${serverName}`);
+      return;
+    }
+
+    // Pending-approval project servers (`.mcp.json`) are never connected on the
+    // single-server path either (#4615). Optional-chain matches the defensive
+    // style above for test fixtures that omit the method.
+    if (this.cliConfig.isMcpServerPendingApproval?.(serverName)) {
+      debugLogger.debug(`Skipping MCP server pending approval: ${serverName}`);
       return;
     }
 
@@ -2068,8 +2085,19 @@ export class McpClientManager {
         // see it reconnected by the incremental path. Without this, the
         // PR-A background path silently re-registers tools the user has
         // told us to ignore.
-        if (cliConfig.isMcpServerDisabled(name)) {
-          debugLogger.debug(`Skipping disabled MCP server: ${name}`);
+        // A project server (`.mcp.json`) that is pending approval — or that
+        // became pending mid-session because its config changed (#4615) — is
+        // treated exactly like a disabled server here: never reconnected, and
+        // torn down if a prior pass had connected it.
+        if (
+          cliConfig.isMcpServerDisabled(name) ||
+          cliConfig.isMcpServerPendingApproval?.(name)
+        ) {
+          debugLogger.debug(
+            cliConfig.isMcpServerDisabled(name)
+              ? `Skipping disabled MCP server: ${name}`
+              : `Skipping MCP server pending approval: ${name}`,
+          );
           // If the server was previously enabled and got connected, we now
           // need to tear it down — otherwise its client, registered tools
           // and health checks linger after an enabled→disabled mid-session
@@ -2468,6 +2496,12 @@ export class McpClientManager {
         throw new Error(`MCP server '${serverName}' is disabled.`);
       }
 
+      // A pending-approval project server (`.mcp.json`) must not be lazy-spawned
+      // by a resource read either (#4615).
+      if (this.cliConfig.isMcpServerPendingApproval?.(serverName)) {
+        throw new Error(`MCP server '${serverName}' is pending approval.`);
+      }
+
       // Budget gate : a lazy `readResource` against a server
       // that was refused at discovery time (or that the operator has
       // never connected) must NOT silently spawn a new MCP client past
@@ -2542,6 +2576,16 @@ export class McpClientManager {
     // until the next incremental discovery pass calls `removeServer`.
     // Re-check disabled state on every readResource, regardless of
     // whether the client was just lazy-spawned or pre-existing.
+    if (this.cliConfig.isMcpServerDisabled(serverName)) {
+      throw new Error(`MCP server '${serverName}' is disabled.`);
+    }
+
+    // Re-check pending approval on every readResource too (#4615): a server can
+    // flip to pending if its `.mcp.json` config changed since approval.
+    if (this.cliConfig.isMcpServerPendingApproval?.(serverName)) {
+      throw new Error(`MCP server '${serverName}' is pending approval.`);
+    }
+
     if (client.getStatus() !== MCPServerStatus.CONNECTED) {
       try {
         // wrap the

@@ -971,6 +971,40 @@ describe('loadCliConfig', () => {
     expect(config.getPreventSystemSleepEnabled()).toBe(false);
   });
 
+  it('places session-injected (ACP/IDE) MCP servers at the top precedence tier', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: {
+        shared: { command: 'settings-cmd' },
+        'settings-only': { command: 'settings-only-cmd' },
+      },
+    };
+    const sessionMcpServers = {
+      shared: new ServerConfig.MCPServerConfig('session-cmd'),
+      'ide-only': new ServerConfig.MCPServerConfig('ide-cmd'),
+    };
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      process.cwd(),
+      undefined,
+      undefined,
+      undefined,
+      sessionMcpServers,
+    );
+
+    const servers = config.getMcpServers() ?? {};
+    // Session source wins a name clash with settings.
+    expect(servers['shared'].command).toBe('session-cmd');
+    // Both session-only and settings-only servers survive.
+    expect(servers['ide-only'].command).toBe('ide-cmd');
+    expect(servers['settings-only'].command).toBe('settings-only-cmd');
+    // Session servers are never approval-gated.
+    expect(config.isMcpServerPendingApproval('ide-only')).toBe(false);
+  });
+
   it('should fork and load a new session when --resume is combined with --fork-session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const sourceData = {
