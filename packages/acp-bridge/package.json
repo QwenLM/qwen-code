@@ -1,5 +1,5 @@
 {
-  "name": "@qwen-code/acp-bridge",
+  "name": "@alife/dataworks-qwen-code-acp-bridge",
   "version": "0.17.0",
   "description": "Shared ACP bridge primitives (EventBus, AcpChannel, in-memory channel, PermissionMediator interface) used by qwen serve, channels, IDE, TUI, and remote-control adapters.",
   "repository": {
@@ -74,5 +74,8 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "publishConfig": {
+    "registry": "https://registry.anpm.alibaba-inc.com"
   }
 }

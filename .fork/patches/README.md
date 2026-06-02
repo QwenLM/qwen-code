@@ -83,18 +83,18 @@ bash .fork/sync-upstream.sh
 
 ## Patch 跟踪表
 
-| #    | Patch                         | 功能说明                                        | 负责人       | 关联 MR                                                                                                                                            |
-| ---- | ----------------------------- | ----------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0001 | branding-header               | DataWorks DataAgent CLI 品牌标识                | 继风         | [#1](https://code.alibaba-inc.com/alishu/qwen-code/codereview/26585259), [#4](https://code.alibaba-inc.com/alishu/qwen-code/codereview/26585660)   |
-| 0002 | branding-tips                 | DataWorks 启动提示和 beta 引导                  | 继风, 秦奇   | [#11](https://code.alibaba-inc.com/alishu/qwen-code/codereview/26668680), [#13](https://code.alibaba-inc.com/alishu/qwen-code/codereview/26675235) |
-| 0003 | i18n-dataworks                | DataWorks 专有 i18n 占位符和示例                | 今井         | [#50](https://code.alibaba-inc.com/alishu/qwen-code/codereview/26907000)                                                                           |
-| 0004 | dsw-oauth-redirect            | DSW 环境 MCP OAuth 重定向改写                   | 克竟         | [#100](https://code.alibaba-inc.com/alishu/qwen-code/codereview/27413710)                                                                          |
-| 0005 | osc8-internal                 | 内部终端 OSC8 超链接兼容                        | 克竟         | —                                                                                                                                                  |
-| 0006 | dingtalk-channel-enhancements | 钉钉 Channel 卡片/Markdown/路由增强             | 沅沅         | [#116](https://code.alibaba-inc.com/alishu/qwen-code/codereview/27639454)                                                                          |
-| 0007 | feishu-channel                | 飞书 Channel 集成                               | 沅沅         | [#107](https://code.alibaba-inc.com/alishu/qwen-code/codereview/27532149)                                                                          |
-| 0009 | claude-websearch-compat       | Claude WebSearch 转换兼容                       | 今井         | —                                                                                                                                                  |
-| 0010 | build-single-bundle           | 单文件 bundle 输出 + feishu 构建顺序            | 今井, 胡玮文 | —                                                                                                                                                  |
-| 0011 | test-fork-adaptations         | 测试适配（OAuth 菜单、Aone CI、Node v22 guard） | 今井         | —                                                                                                                                                  |
+| #    | Patch                         | 功能说明                                          | 负责人       | 关联 MR                                                                                                                                            |
+| ---- | ----------------------------- | ------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0001 | branding-header               | DataWorks DataAgent CLI 品牌标识                  | 继风         | [#1](https://code.alibaba-inc.com/alishu/qwen-code/codereview/26585259), [#4](https://code.alibaba-inc.com/alishu/qwen-code/codereview/26585660)   |
+| 0002 | branding-tips                 | DataWorks 启动提示和 beta 引导                    | 继风, 秦奇   | [#11](https://code.alibaba-inc.com/alishu/qwen-code/codereview/26668680), [#13](https://code.alibaba-inc.com/alishu/qwen-code/codereview/26675235) |
+| 0003 | i18n-dataworks                | DataWorks 专有 i18n 占位符和示例                  | 今井         | [#50](https://code.alibaba-inc.com/alishu/qwen-code/codereview/26907000)                                                                           |
+| 0004 | dsw-oauth-redirect            | DSW 环境 MCP OAuth 重定向改写                     | 克竟         | [#100](https://code.alibaba-inc.com/alishu/qwen-code/codereview/27413710)                                                                          |
+| 0005 | osc8-internal                 | 内部终端 OSC8 超链接兼容                          | 克竟         | —                                                                                                                                                  |
+| 0006 | dingtalk-channel-enhancements | 钉钉 Channel 卡片/Markdown/路由增强               | 沅沅         | [#116](https://code.alibaba-inc.com/alishu/qwen-code/codereview/27639454)                                                                          |
+| 0007 | feishu-channel                | 飞书 Channel CLI 注册表 import 改写为 fork 包名   | 沅沅         | [#107](https://code.alibaba-inc.com/alishu/qwen-code/codereview/27532149)                                                                          |
+| 0009 | claude-websearch-compat       | Claude WebSearch 转换兼容                         | 今井         | —                                                                                                                                                  |
+| 0010 | build-single-bundle           | 单文件 bundle 输出 + 移除 acp-bridge 显式构建步骤 | 今井, 胡玮文 | —                                                                                                                                                  |
+| 0011 | test-fork-adaptations         | 测试适配（OAuth 菜单、Aone CI、Node v22 guard）   | 今井         | —                                                                                                                                                  |
 
 ### 已退休 Patches
 

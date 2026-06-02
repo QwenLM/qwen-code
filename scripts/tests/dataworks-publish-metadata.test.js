@@ -22,6 +22,7 @@ describe('DataWorks npm publish metadata', () => {
       ['.', '@alife/dataworks-qwen-code'],
       ['packages/cli', '@alife/dataworks-qwen-code'],
       ['packages/core', '@alife/dataworks-qwen-code-core'],
+      ['packages/acp-bridge', '@alife/dataworks-qwen-code-acp-bridge'],
       ['packages/channels/base', '@alife/dataworks-qwen-code-channel-base'],
       [
         'packages/channels/telegram',
@@ -69,6 +70,7 @@ describe('DataWorks npm publish metadata', () => {
     const publishablePackagePaths = [
       'packages/cli',
       'packages/core',
+      'packages/acp-bridge',
       'packages/channels/base',
       'packages/channels/telegram',
       'packages/channels/weixin',

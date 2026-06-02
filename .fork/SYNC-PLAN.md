@@ -36,23 +36,25 @@ Patch-Apply 模式每次从全新 upstream 基础出发，不存在"两边都改
 
 ## 当前分支状态
 
-| 分支 | 基于 | 状态 | 说明 |
-|------|------|------|------|
-| `origin/main` (fork main) | — | 已合并到 `ab38e03e7` | Fork 主线，含 patch infrastructure |
-| `fix/ci-remove-lfs-prepush-hook` | fork main (`ab38e03e7`) | **活跃，已推送** | 本次修复分支，2 个新 commit |
-| `codex/fork-sync-guard` | fork main | 已推送 | CI sync 的额外防护（代码审查修复等） |
-| `origin/sync/upstream-20260529` | upstream/main | 失败的 sync 分支 | 旧 merge 模式产生的，可废弃 |
-| `resolve/upstream-sync-20260529` | fork main | 本地临时 | 同上，用于手动解冲突，可删除 |
-| `inspect/sync-conflicts` | upstream/main | 本地临时 | 调试用，可删除 |
+| 分支                             | 基于                    | 状态                 | 说明                                 |
+| -------------------------------- | ----------------------- | -------------------- | ------------------------------------ |
+| `origin/main` (fork main)        | —                       | 已合并到 `ab38e03e7` | Fork 主线，含 patch infrastructure   |
+| `fix/ci-remove-lfs-prepush-hook` | fork main (`ab38e03e7`) | **活跃，已推送**     | 本次修复分支，2 个新 commit          |
+| `codex/fork-sync-guard`          | fork main               | 已推送               | CI sync 的额外防护（代码审查修复等） |
+| `origin/sync/upstream-20260529`  | upstream/main           | 失败的 sync 分支     | 旧 merge 模式产生的，可废弃          |
+| `resolve/upstream-sync-20260529` | fork main               | 本地临时             | 同上，用于手动解冲突，可删除         |
+| `inspect/sync-conflicts`         | upstream/main           | 本地临时             | 调试用，可删除                       |
 
 ## fix/ci-remove-lfs-prepush-hook 分支改动
 
 ### Commit 1: `b9b6d69ad`
+
 **fix(ci): drop stale .git/hooks/pre-push before upstream sync push**
 
 解决 CI runner 上残留的 git-lfs pre-push hook 导致 push 失败。
 
 ### Commit 2: `a8af9472d`
+
 **fix(ci): rewrite upstream sync to patch-apply model and refresh patches**
 
 核心改动：
@@ -79,18 +81,18 @@ Patch-Apply 模式每次从全新 upstream 基础出发，不存在"两边都改
 
 ## Patch 清单（10 个）
 
-| # | 文件 | 行数 | 说明 |
-|---|------|------|------|
-| 0001 | branding-header.patch | 263 | DataWorks branding |
-| 0002 | branding-tips.patch | 124 | 启动提示 |
-| 0003 | i18n-dataworks.patch | 78 | i18n 占位符 |
-| 0004 | dsw-oauth-redirect.patch | 74 | DSW OAuth 代理 |
-| 0005 | osc8-internal.patch | 115 | 终端超链接适配 |
-| 0006 | dingtalk-channel-enhancements.patch | 649 | 钉钉 channel 增强 |
-| 0007 | feishu-channel.patch | 22 | 飞书 import path |
-| 0009 | claude-websearch-compat.patch | 155 | WebSearch 兼容 |
-| 0010 | build-single-bundle.patch | 96 | 单文件打包 |
-| 0011 | test-fork-adaptations.patch | 91 | 测试适配 |
+| #    | 文件                                | 行数 | 说明                                                                                          |
+| ---- | ----------------------------------- | ---- | --------------------------------------------------------------------------------------------- |
+| 0001 | branding-header.patch               | 263  | DataWorks branding                                                                            |
+| 0002 | branding-tips.patch                 | 124  | 启动提示                                                                                      |
+| 0003 | i18n-dataworks.patch                | 78   | i18n 占位符                                                                                   |
+| 0004 | dsw-oauth-redirect.patch            | 74   | DSW OAuth 代理                                                                                |
+| 0005 | osc8-internal.patch                 | 115  | 终端超链接适配                                                                                |
+| 0006 | dingtalk-channel-enhancements.patch | 649  | 钉钉 channel 增强                                                                             |
+| 0007 | feishu-channel.patch                | 22   | 飞书 import path                                                                              |
+| 0009 | claude-websearch-compat.patch       | 155  | WebSearch 兼容                                                                                |
+| 0010 | build-single-bundle.patch           | 96   | 单文件打包 + 移除 acp-bridge 显式构建步骤（fork 通过 tsconfig project references 传递性编译） |
+| 0011 | test-fork-adaptations.patch         | 91   | 测试适配                                                                                      |
 
 全部 10 个 patch 已验证可在 upstream/main (`c699738f9`) 上 clean apply。
 
