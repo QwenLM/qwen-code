@@ -9,8 +9,9 @@
  *   Stage 1 (fast):  shouldBlock-only output, max_tokens=32, thinking off.
  *                    Allow path returns immediately (~300ms).
  *   Stage 2 (review): full output { thinking, shouldBlock, reason },
- *                     max_tokens=4096, thinking on. Reviews stage-1 blocks
- *                     to reduce false positives.
+ *                     max_tokens=4096, thinking off. Reviews stage-1 blocks
+ *                     to reduce false positives. (`thinking` is a plain output
+ *                     field, not an allocated reasoning budget.)
  *
  * Fail-closed: any non-abort failure (API error, timeout, schema failure,
  * context overflow) returns shouldBlock=true with unavailable=true.
@@ -33,10 +34,14 @@ import { buildClassifierContents } from './classifier-transcript.js';
 // the underlying API / timeout / context-overflow error.
 const debugLogger = createDebugLogger('CLASSIFIER');
 
-/** Stage-1 timeout: fast model p99 is ~1.5s; 3s catches stuck cases. */
-export const STAGE1_TIMEOUT_MS = 3_000;
-/** Stage-2 timeout: thinking takes longer; 10s caps infrastructure failure. */
-export const STAGE2_TIMEOUT_MS = 10_000;
+// A timeout is fail-closed (action BLOCKED as "unavailable"), so too tight a
+// budget turns transient slowness into spurious blocks. The fast model's p99
+// is ~1.5s but the tail is long under load, so budgets are kept generous —
+// better to wait than fail closed on a healthy call.
+/** Stage-1 timeout: generous headroom over the fast model's p99 (~1.5s). */
+export const STAGE1_TIMEOUT_MS = 10_000;
+/** Stage-2 timeout: review stage runs a larger prompt; cap infra failure. */
+export const STAGE2_TIMEOUT_MS = 30_000;
 
 /** Token usage attributed to a single classifier call. */
 export interface ClassifierUsage {
@@ -219,7 +224,11 @@ export async function classifyAction(
       config: {
         temperature: 0,
         maxOutputTokens: 4096,
-        thinkingConfig: { includeThoughts: true },
+        // Thinking off: this gate is latency-sensitive (the user is waiting),
+        // and a reasoning budget would slow the review path and worsen the
+        // fail-closed timeout above. The `thinking` output field still carries
+        // the model's reasoning.
+        thinkingConfig: { includeThoughts: false },
       },
     })) as Stage2Response;
   } catch (err) {

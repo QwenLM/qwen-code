@@ -28,6 +28,11 @@ export const minimaxProvider: ProviderConfig = {
   ],
   envKey: 'MINIMAX_API_KEY',
   models: [
+    {
+      id: 'MiniMax-M3',
+      contextWindowSize: 1000000,
+      modalities: { image: true, video: true },
+    },
     { id: 'MiniMax-M2.7', contextWindowSize: 204800 },
     { id: 'MiniMax-M2.7-highspeed', contextWindowSize: 204800 },
     { id: 'MiniMax-M2.5', contextWindowSize: 196608 },

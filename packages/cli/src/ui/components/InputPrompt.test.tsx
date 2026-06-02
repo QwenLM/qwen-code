@@ -208,6 +208,8 @@ describe('InputPrompt', () => {
       dialogMode: 'closed',
       dialogOpen: false,
       pillFocused: false,
+      livePanelFocused: false,
+      livePanelSelectedIndex: 0,
     });
     mockedUseBackgroundTaskViewActions.mockReturnValue({
       setPillFocused: mockViewActions.setBgPillFocused,
@@ -364,20 +366,27 @@ describe('InputPrompt', () => {
     const SUGGESTION_VISIBLE_WAIT_MS = 700;
 
     it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
+      vi.useFakeTimers();
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(SUGGESTION_VISIBLE_WAIT_MS);
+      try {
+        await advanceTimers(SUGGESTION_VISIBLE_WAIT_MS);
 
-      stdin.write('\r');
-      await wait();
+        act(() => {
+          stdin.write('\r');
+        });
+        await flush();
 
-      expect(props.onSubmit).toHaveBeenCalledWith('commit this');
-      // Enter path must NOT call buffer.insert — it passes text directly to
-      // handleSubmitAndClear. Calling insert would re-fill the buffer after
-      // it was already cleared (the microtask race bug).
-      expect(mockBuffer.insert).not.toHaveBeenCalled();
-      unmount();
+        expect(props.onSubmit).toHaveBeenCalledWith('commit this');
+        // Enter path must NOT call buffer.insert — it passes text directly to
+        // handleSubmitAndClear. Calling insert would re-fill the buffer after
+        // it was already cleared (the microtask race bug).
+        expect(mockBuffer.insert).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+        unmount();
+      }
     });
 
     it('does not accept the prompt suggestion on shift+tab', async () => {

@@ -71,6 +71,13 @@ describe('hooks constants', () => {
       expect(exitCodes).toHaveLength(2);
     });
 
+    it('should return exit codes for PermissionDenied event', () => {
+      const exitCodes = getHookExitCodes(HookEventName.PermissionDenied);
+      expect(exitCodes).toHaveLength(2);
+      expect(exitCodes[0].code).toBe(0);
+      expect(exitCodes[1].code).toBe('Other');
+    });
+
     it('should return exit codes for SessionStart event', () => {
       const exitCodes = getHookExitCodes(HookEventName.SessionStart);
       expect(exitCodes).toHaveLength(2);
@@ -142,6 +149,13 @@ describe('hooks constants', () => {
       expect(desc).toContain('Stop');
     });
 
+    it('should return description for PermissionDenied', () => {
+      const desc = getHookShortDescription(HookEventName.PermissionDenied);
+      expect(desc).toBe(
+        'When a tool call is denied before a permission dialog is displayed',
+      );
+    });
+
     it('should return empty string for unknown event', () => {
       const desc = getHookShortDescription('unknown_event' as HookEventName);
       expect(desc).toBe('');
@@ -158,6 +172,12 @@ describe('hooks constants', () => {
       const desc = getHookDescription(HookEventName.PostToolUse);
       expect(desc).toContain('inputs');
       expect(desc).toContain('response');
+    });
+
+    it('should return description for PermissionDenied', () => {
+      const desc = getHookDescription(HookEventName.PermissionDenied);
+      expect(desc).toContain('tool_name');
+      expect(desc).toContain('reason');
     });
 
     it('should return empty string for Stop event', () => {
@@ -296,6 +316,18 @@ describe('hooks constants', () => {
       expect(info.shortDescription).toBe('');
       expect(info.description).toBe('');
       expect(info.exitCodes).toEqual([]);
+      expect(info.matcherGroups).toEqual([]);
+    });
+
+    it('should create empty info for PermissionDenied', () => {
+      const info = createEmptyHookEventInfo(HookEventName.PermissionDenied);
+
+      expect(info.event).toBe(HookEventName.PermissionDenied);
+      expect(info.shortDescription).toBe(
+        'When a tool call is denied before a permission dialog is displayed',
+      );
+      expect(info.description).toContain('tool_use_id');
+      expect(info.exitCodes).toHaveLength(2);
       expect(info.matcherGroups).toEqual([]);
     });
 
