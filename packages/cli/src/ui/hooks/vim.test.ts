@@ -1933,7 +1933,7 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('x')));
 
         // Should replace 'h' with 'x' using replaceRange
-        expect(buffer.replaceRange).toHaveBeenCalled();
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 0, 0, 1, 'x');
       });
     });
 
@@ -1947,7 +1947,7 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('~')));
 
         // Should replace 'H' with 'h' and move cursor right
-        expect(buffer.replaceRange).toHaveBeenCalled();
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 0, 0, 1, 'h');
       });
     });
 
@@ -1961,7 +1961,13 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('J')));
 
         // Should call replaceRange to join lines
-        expect(buffer.replaceRange).toHaveBeenCalled();
+        expect(buffer.replaceRange).toHaveBeenCalledWith(
+          0,
+          0,
+          1,
+          5,
+          'hello world',
+        );
       });
     });
 
@@ -1976,7 +1982,7 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('>')));
 
         // Should insert spaces at line start
-        expect(buffer.replaceRange).toHaveBeenCalled();
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 0, 0, 0, '  ');
       });
     });
 
@@ -1991,7 +1997,7 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('<')));
 
         // Should remove spaces from line start
-        expect(buffer.replaceRange).toHaveBeenCalled();
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 0, 0, 2, '');
       });
     });
 
@@ -2004,8 +2010,9 @@ describe('useVim hook', () => {
 
         act(() => result.current.handleInput(makeKey('W')));
 
-        // Should use vim movement methods to move to 'test'
+        // Should move to start of 'test' (col 12)
         expect(buffer.vimMoveToLineStart).toHaveBeenCalled();
+        expect(buffer.vimMoveRight).toHaveBeenCalledWith(12);
       });
     });
 
@@ -2018,8 +2025,9 @@ describe('useVim hook', () => {
 
         act(() => result.current.handleInput(makeKey('B')));
 
-        // Should use vim movement methods to move to 'hello'
+        // Should move to start of 'hello.world' (col 0)
         expect(buffer.vimMoveToLineStart).toHaveBeenCalled();
+        expect(buffer.vimMoveRight).toHaveBeenCalledWith(0);
       });
     });
 
@@ -2032,8 +2040,9 @@ describe('useVim hook', () => {
 
         act(() => result.current.handleInput(makeKey('E')));
 
-        // E uses vimMoveRight to move to end of word
-        expect(buffer.vimMoveRight).toHaveBeenCalled();
+        // Should move to end of 'hello.world' (col 10)
+        expect(buffer.vimMoveToLineStart).toHaveBeenCalled();
+        expect(buffer.vimMoveRight).toHaveBeenCalledWith(10);
       });
     });
 
