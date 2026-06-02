@@ -217,19 +217,16 @@ describe('memoryImportProcessor', () => {
         },
       );
 
-      expect(importedFiles).toEqual(
-        expect.arrayContaining([
-          {
-            filePath: importedFile,
-            parentFilePath: parentFile,
-          },
-          {
-            filePath: nestedFile,
-            parentFilePath: importedFile,
-          },
-        ]),
-      );
-      expect(importedFiles).toHaveLength(2);
+      expect(importedFiles).toEqual([
+        {
+          filePath: nestedFile,
+          parentFilePath: importedFile,
+        },
+        {
+          filePath: importedFile,
+          parentFilePath: parentFile,
+        },
+      ]);
     });
 
     it('should import non-md files just like md files', async () => {

@@ -541,6 +541,51 @@ describe('loadServerHierarchicalMemory', () => {
     );
   });
 
+  it('reports the root trigger and immediate parent for nested imports', async () => {
+    await createEmptyDir(path.join(projectRoot, '.git'));
+    const grandchildFile = await createTestFile(
+      path.join(projectRoot, 'grandchild.md'),
+      'grandchild content',
+    );
+    const childFile = await createTestFile(
+      path.join(projectRoot, 'child.md'),
+      'child content @./grandchild.md',
+    );
+    const projectFile = await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context @./child.md',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    // The grandchild is imported by child.md, but the chain was started by the
+    // top-level discovered QWEN.md, so trigger != parent at depth > 1.
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filePath: grandchildFile,
+          loadReason: 'include',
+          triggerFilePath: projectFile,
+          parentFilePath: childFile,
+        }),
+      ]),
+    );
+  });
+
   it('classifies extension-owned imports as extension memory', async () => {
     const extensionDir = path.join(testRootDir, 'extensions/ext1');
     const importedFile = await createTestFile(
