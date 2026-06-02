@@ -1198,8 +1198,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             if (state.pendingOperator === '>') {
               // >> — indent current line
               const [row] = buffer.cursor;
-              const line = buffer.lines[row] ?? '';
-              buffer.replaceRange(row, 0, row, 0, '  ' + line);
+              buffer.replaceRange(row, 0, row, 0, '  ');
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             } else {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: '>' });
@@ -1213,9 +1212,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               const [row] = buffer.cursor;
               const line = buffer.lines[row] ?? '';
               if (line.startsWith('  ')) {
-                buffer.replaceRange(row, 0, row, 2, line.slice(2));
+                buffer.replaceRange(row, 0, row, 2, '');
               } else if (line.startsWith(' ')) {
-                buffer.replaceRange(row, 0, row, 1, line.slice(1));
+                buffer.replaceRange(row, 0, row, 1, '');
               }
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             } else {
