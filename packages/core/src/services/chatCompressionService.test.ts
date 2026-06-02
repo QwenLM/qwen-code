@@ -2469,3 +2469,240 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     expect(passed.systemInstruction).not.toContain('Additional Instructions:');
   });
 });
+
+describe('ChatCompressionService.compress — plan-mode + subagent attachment wiring', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function setupWithAppState(opts: {
+    approvalMode?: string;
+    backgroundTasks?: Array<{
+      id: string;
+      kind: string;
+      description: string;
+      status: string;
+      startTime: number;
+    }>;
+  }) {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'u1' }] },
+      { role: 'model', parts: [{ text: 'm1' }] },
+      { role: 'user', parts: [{ text: 'u2' }] },
+      { role: 'model', parts: [{ text: 'm2' }] },
+    ];
+    const getHistoryMock = vi.fn().mockReturnValue(history);
+    const mockChat = {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => opts.approvalMode ?? 'default',
+      getBackgroundTaskRegistry: () => ({
+        getAll: () => opts.backgroundTasks ?? [],
+      }),
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+    return { mockChat, mockConfig };
+  }
+
+  function stubSideQuery() {
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+  }
+
+  it('passes planModeActive=true when getApprovalMode() returns "plan"', async () => {
+    stubSideQuery();
+    const composeSpy = vi
+      .spyOn(postCompactModule, 'composePostCompactHistory')
+      .mockResolvedValue([
+        { role: 'user', parts: [{ text: 's' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ]);
+    const { mockChat, mockConfig } = setupWithAppState({
+      approvalMode: 'plan',
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(composeSpy).toHaveBeenCalledOnce();
+    const opts = composeSpy.mock.calls[0]![2] as {
+      planModeActive?: boolean;
+    };
+    expect(opts.planModeActive).toBe(true);
+  });
+
+  it('passes planModeActive=false for non-plan approval modes', async () => {
+    stubSideQuery();
+    const composeSpy = vi
+      .spyOn(postCompactModule, 'composePostCompactHistory')
+      .mockResolvedValue([
+        { role: 'user', parts: [{ text: 's' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ]);
+    const { mockChat, mockConfig } = setupWithAppState({
+      approvalMode: 'auto-edit',
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const opts = composeSpy.mock.calls[0]![2] as {
+      planModeActive?: boolean;
+    };
+    expect(opts.planModeActive).toBe(false);
+  });
+
+  it('filters background tasks to running/paused agent tasks only', async () => {
+    stubSideQuery();
+    const composeSpy = vi
+      .spyOn(postCompactModule, 'composePostCompactHistory')
+      .mockResolvedValue([
+        { role: 'user', parts: [{ text: 's' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ]);
+    const { mockChat, mockConfig } = setupWithAppState({
+      backgroundTasks: [
+        {
+          id: 'r',
+          kind: 'agent',
+          description: 'd',
+          status: 'running',
+          startTime: 1,
+        },
+        {
+          id: 'p',
+          kind: 'agent',
+          description: 'd',
+          status: 'paused',
+          startTime: 2,
+        },
+        {
+          id: 'c',
+          kind: 'agent',
+          description: 'd',
+          status: 'completed',
+          startTime: 3,
+        },
+        {
+          id: 'f',
+          kind: 'agent',
+          description: 'd',
+          status: 'failed',
+          startTime: 4,
+        },
+        {
+          id: 'x',
+          kind: 'agent',
+          description: 'd',
+          status: 'cancelled',
+          startTime: 5,
+        },
+        // Non-agent kinds (shell, monitor) must also be excluded — they
+        // do not have a "task" the post-compact agent should send_message
+        // to, only the agent kind is interactive.
+        {
+          id: 's1',
+          kind: 'shell',
+          description: 'd',
+          status: 'running',
+          startTime: 6,
+        },
+      ],
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const opts = composeSpy.mock.calls[0]![2] as {
+      runningSubagents?: Array<{ id: string; status: string }>;
+    };
+    expect(opts.runningSubagents?.map((t) => t.id)).toEqual(['r', 'p']);
+  });
+
+  it('passes an empty runningSubagents array when the registry is missing', async () => {
+    stubSideQuery();
+    const composeSpy = vi
+      .spyOn(postCompactModule, 'composePostCompactHistory')
+      .mockResolvedValue([
+        { role: 'user', parts: [{ text: 's' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ]);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'u1' }] },
+      { role: 'model', parts: [{ text: 'm1' }] },
+    ];
+    const getHistoryMock = vi.fn().mockReturnValue(history);
+    const mockChat = {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      // getBackgroundTaskRegistry intentionally omitted to simulate older
+      // SDK consumers / test harnesses that haven't wired it.
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const opts = composeSpy.mock.calls[0]![2] as {
+      runningSubagents?: unknown[];
+    };
+    expect(opts.runningSubagents).toEqual([]);
+  });
+});

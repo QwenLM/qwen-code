@@ -6,6 +6,7 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/config.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import {
   type ChatCompressionInfo,
@@ -30,6 +31,7 @@ import {
   countToolResponseImages,
   postProcessSummary,
   stripAnalysisBlock,
+  type SubagentSnapshot,
 } from './postCompactAttachments.js';
 
 /**
@@ -188,6 +190,35 @@ export interface CompressOptions {
    * first, hook text last (matches claude-code mergeHookInstructions).
    */
   customInstructions?: string;
+}
+
+/**
+ * Project active background subagent tasks into the minimal shape
+ * `composePostCompactHistory` needs. `running` and `paused` are the only
+ * statuses the post-compact agent might need to act on; terminal states
+ * (completed / failed / cancelled) already emitted their notification XML
+ * and need no reminder. Only `agent` kinds are interactive (shell and
+ * monitor kinds are excluded — they don't have a send_message channel).
+ *
+ * Returns `[]` (not `undefined`) when the registry is absent so the
+ * downstream attachment builder takes the empty-array branch and emits
+ * no block, rather than treating `undefined` as a configuration error.
+ */
+function collectActiveSubagents(config: Config): SubagentSnapshot[] {
+  const registry = config.getBackgroundTaskRegistry?.();
+  if (!registry) return [];
+  return registry
+    .getAll()
+    .filter(
+      (t) =>
+        t.kind === 'agent' && (t.status === 'running' || t.status === 'paused'),
+    )
+    .map((t) => ({
+      id: t.id,
+      description: t.description,
+      status: t.status as 'running' | 'paused',
+      startTime: t.startTime,
+    }));
 }
 
 /**
@@ -508,6 +539,12 @@ export class ChatCompressionService {
             signal,
             maxFiles: tuning.maxRecentFiles,
             maxImages: tuning.maxRecentImages,
+            // Restore plan-mode reminder + running-subagent snapshot so the
+            // post-compact agent does not lose either piece of mid-session
+            // state. Both reduce to no-ops when the corresponding source is
+            // empty.
+            planModeActive: config.getApprovalMode?.() === ApprovalMode.PLAN,
+            runningSubagents: collectActiveSubagents(config),
           },
         );
       } catch (err) {
