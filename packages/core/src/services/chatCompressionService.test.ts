@@ -9,6 +9,7 @@ import {
   ChatCompressionService,
   computeThresholds,
   MAX_CONSECUTIVE_FAILURES,
+  MAX_HOOK_INSTRUCTIONS_CHARS,
 } from './chatCompressionService.js';
 import type { Content } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
@@ -2516,6 +2517,43 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     const passed = spy.mock.calls[0]![1] as { systemInstruction: string };
     expect(passed.systemInstruction).not.toContain('Additional Instructions:');
   });
+
+  it('caps hook additionalContext at MAX_HOOK_INSTRUCTIONS_CHARS', async () => {
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    // A pathological hook returns far more context than the cap. It must be
+    // clipped before entering the side-query prompt, mirroring the user-text
+    // cap — otherwise an unbounded payload could trigger an unrecoverable PTL.
+    const longCtx = 'H'.repeat(MAX_HOOK_INSTRUCTIONS_CHARS + 1500);
+    const { mockChat, mockConfig } = setup({
+      hookSystem: {
+        firePreCompactEvent: vi
+          .fn()
+          .mockResolvedValue(makeHookOutput({ additionalContext: longCtx })),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const passed = spy.mock.calls[0]![1] as { systemInstruction: string };
+    const hCount = (passed.systemInstruction.match(/H/g) ?? []).length;
+    expect(hCount).toBe(MAX_HOOK_INSTRUCTIONS_CHARS);
+    expect(hCount).toBeLessThan(longCtx.length);
+  });
 });
 
 describe('ChatCompressionService.compress — plan-mode + subagent attachment wiring', () => {
@@ -2534,6 +2572,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
       description: string;
       status: string;
       startTime: number;
+      isBackgrounded?: boolean;
     }>;
   }) {
     const history: Content[] = [
@@ -2634,7 +2673,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     expect(opts.planModeActive).toBe(false);
   });
 
-  it('filters background tasks to running/paused agent tasks only', async () => {
+  it('filters background tasks to backgrounded running/paused agent tasks only', async () => {
     stubSideQuery();
     const composeSpy = vi
       .spyOn(postCompactModule, 'composePostCompactHistory')
@@ -2650,6 +2689,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
           description: 'd',
           status: 'running',
           startTime: 1,
+          isBackgrounded: true,
         },
         {
           id: 'p',
@@ -2657,27 +2697,42 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
           description: 'd',
           status: 'paused',
           startTime: 2,
+          isBackgrounded: true,
+        },
+        // Foreground agent (isBackgrounded: false): the parent is
+        // synchronously awaiting it, so it does NOT belong in a
+        // <background-tasks> roster even though it is running.
+        {
+          id: 'fg',
+          kind: 'agent',
+          description: 'd',
+          status: 'running',
+          startTime: 3,
+          isBackgrounded: false,
         },
         {
           id: 'c',
           kind: 'agent',
           description: 'd',
           status: 'completed',
-          startTime: 3,
+          startTime: 4,
+          isBackgrounded: true,
         },
         {
           id: 'f',
           kind: 'agent',
           description: 'd',
           status: 'failed',
-          startTime: 4,
+          startTime: 5,
+          isBackgrounded: true,
         },
         {
           id: 'x',
           kind: 'agent',
           description: 'd',
           status: 'cancelled',
-          startTime: 5,
+          startTime: 6,
+          isBackgrounded: true,
         },
         // Non-agent kinds (shell, monitor) must also be excluded — they
         // do not have a "task" the post-compact agent should send_message
@@ -2687,7 +2742,8 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
           kind: 'shell',
           description: 'd',
           status: 'running',
-          startTime: 6,
+          startTime: 7,
+          isBackgrounded: true,
         },
       ],
     });
@@ -2704,6 +2760,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     const opts = composeSpy.mock.calls[0]![2] as {
       runningSubagents?: Array<{ id: string; status: string }>;
     };
+    // 'fg' is excluded by the isBackgrounded gate; c/f/x by status; s1 by kind.
     expect(opts.runningSubagents?.map((t) => t.id)).toEqual(['r', 'p']);
   });
 
@@ -2755,5 +2812,58 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
       runningSubagents?: unknown[];
     };
     expect(opts.runningSubagents).toEqual([]);
+  });
+
+  it('fallback path still injects plan-mode reminder + subagent snapshot when composePostCompactHistory throws', async () => {
+    // Regression guard: the catch-fallback used to rebuild extraHistory by
+    // hand with only summary+ack, silently dropping plan-mode enforcement and
+    // the subagent roster. Both reminder builders are pure (no I/O), so the
+    // failure that took out composePostCompactHistory must not take them out.
+    // Use a large input / small output so the token-math lands COMPRESSED
+    // (newToken = original - (input-1000) + output) rather than tripping the
+    // inflation guard — we want to assert the fallback's *content*, not status.
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 49_000,
+        candidatesTokenCount: 1_500,
+        totalTokenCount: 50_500,
+      },
+    } as never);
+    vi.spyOn(postCompactModule, 'composePostCompactHistory').mockRejectedValue(
+      new Error('EACCES: simulated restoration failure'),
+    );
+    const { mockChat, mockConfig } = setupWithAppState({
+      approvalMode: ApprovalMode.PLAN,
+      backgroundTasks: [
+        {
+          id: 'agent-bg',
+          kind: 'agent',
+          description: 'long-running background task',
+          status: 'running',
+          startTime: 1,
+          isBackgrounded: true,
+        },
+      ],
+    });
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100_000,
+    });
+
+    // Degraded success — not a failure (summary still reduces context).
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    const flat = (result.newHistory ?? [])
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+    expect(flat).toContain('<plan-mode-active>');
+    expect(flat).toContain('<background-tasks>');
+    expect(flat).toContain('agent-bg');
   });
 });

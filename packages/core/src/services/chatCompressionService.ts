@@ -27,6 +27,7 @@ import {
 } from './compactionInputSlimming.js';
 import { CHARS_PER_TOKEN, estimatePromptTokens } from './tokenEstimation.js';
 import {
+  buildStateReminderParts,
   composePostCompactHistory,
   countToolResponseImages,
   postProcessSummary,
@@ -89,6 +90,18 @@ export const HARD_BUFFER = 3_000;
  * tuning constants; the counter state itself lives on GeminiChat.
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
+
+/**
+ * Hard cap on the PreCompact hook's `additionalContext` once it is merged
+ * into the side-query system prompt. The user-supplied `/compress` text is
+ * already capped at `MAX_COMPRESS_INSTRUCTIONS_CHARS` (2000) in
+ * compressCommand.ts for exactly this reason — the side-query has no
+ * input-truncation retry, so an unbounded hook payload could inflate the
+ * prompt and trigger a PTL the compaction path can't recover from. Hooks
+ * may legitimately concatenate context across several scripts, so this cap
+ * is set higher than the user-text cap.
+ */
+export const MAX_HOOK_INSTRUCTIONS_CHARS = 4000;
 
 export interface CompactionThresholds {
   /** Token count at which UI warn tier triggers. */
@@ -211,7 +224,15 @@ function collectActiveSubagents(config: Config): SubagentSnapshot[] {
     .getAll()
     .filter(
       (t) =>
-        t.kind === 'agent' && (t.status === 'running' || t.status === 'paused'),
+        t.kind === 'agent' &&
+        // Only TRUE background subagents belong in a `<background-tasks>`
+        // block. Foreground entries (`isBackgrounded: false`) are the
+        // parent's synchronously-awaited tool call — their pending
+        // functionCall is still in history and resolves through the normal
+        // tool-result channel, so a reminder would mislabel them. Mirrors
+        // the `getRunningBackgroundCount` filter in background-tasks.ts.
+        t.isBackgrounded &&
+        (t.status === 'running' || t.status === 'paused'),
     )
     .map((t) => ({
       id: t.id,
@@ -394,7 +415,12 @@ export class ChatCompressionService {
         // client.ts) — keep it consistent.
         const merged = result?.getAdditionalContext();
         if (merged && merged.trim().length > 0) {
-          hookExtraInstructions = merged.trim();
+          // Cap like the user-text path: an unbounded hook payload would
+          // otherwise bypass MAX_COMPRESS_INSTRUCTIONS_CHARS and inflate the
+          // side-query prompt past a recoverable size.
+          hookExtraInstructions = merged
+            .trim()
+            .slice(0, MAX_HOOK_INSTRUCTIONS_CHARS);
         }
       } catch (err) {
         config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
@@ -574,8 +600,20 @@ export class ChatCompressionService {
           trailingFc?.role === 'model'
             ? (trailingFc.parts ?? []).filter((p) => !!p.functionCall)
             : [];
+        // Re-apply the SAME plan-mode + subagent reminders the normal path
+        // injects. These builders are pure (no disk I/O / history walking),
+        // so the failure that took out composePostCompactHistory can't take
+        // them out too — and dropping them here would silently lose plan-mode
+        // enforcement and the subagent roster on the degraded path.
+        const reminderParts = buildStateReminderParts({
+          planModeActive: config.getApprovalMode?.() === ApprovalMode.PLAN,
+          runningSubagents: collectActiveSubagents(config),
+        });
         extraHistory = [
-          { role: 'user', parts: [{ text: postProcessSummary(summary) }] },
+          {
+            role: 'user',
+            parts: [{ text: postProcessSummary(summary) }, ...reminderParts],
+          },
           {
             role: 'model',
             parts: [
