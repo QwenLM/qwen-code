@@ -174,6 +174,40 @@ describe('session message loading atoms', () => {
     expect(store.get(loadedSessionsAtom).has(sessionId)).toBe(true)
   })
 
+  it('does not let a shorter processing response replace existing history', async () => {
+    const store = createStore()
+    const sessionId = 'session-1'
+
+    globalThis.window = {
+      electronAPI: {
+        getSessionMessages: async (id: string) => makeSession({
+          id,
+          isProcessing: true,
+          messages: [
+            { ...msg('m3', 'assistant'), content: 'fresh:m3' },
+            msg('m4', 'assistant'),
+          ],
+        }),
+      },
+    } as unknown as typeof window
+
+    store.set(sessionAtomFamily(sessionId), makeSession({
+      id: sessionId,
+      isProcessing: true,
+      messages: [msg('m1'), msg('m2', 'assistant'), msg('m3', 'assistant')],
+    }))
+
+    const result = await store.set(ensureSessionMessagesLoadedAtom, sessionId)
+
+    expect(result?.messages.map((message) => [message.id, message.content])).toEqual([
+      ['m1', 'content:m1'],
+      ['m2', 'content:m2'],
+      ['m3', 'fresh:m3'],
+      ['m4', 'content:m4'],
+    ])
+    expect(store.get(loadedSessionsAtom).has(sessionId)).toBe(false)
+  })
+
   it('throws when the backend cannot provide messages for a non-empty session', async () => {
     const store = createStore()
     const sessionId = 'session-1'

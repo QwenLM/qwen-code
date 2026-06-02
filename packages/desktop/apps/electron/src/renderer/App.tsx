@@ -34,7 +34,11 @@ import { stripMarkdown } from './utils/text'
 import { getSessionTitle } from './utils/session'
 import { coerceInputText } from './lib/input-text'
 import { getSessionsToRefreshAfterStaleReconnect } from './lib/reconnect-recovery'
-import { formatSessionLoadFailure, shouldTreatSessionLoadFailureAsTransportFallback } from './lib/session-load'
+import {
+  formatSessionLoadFailure,
+  mergeSessionRefreshResult,
+  shouldTreatSessionLoadFailureAsTransportFallback,
+} from './lib/session-load'
 import { extractWorkspaceSlugFromPath } from '@craft-agent/shared/utils/workspace-slug'
 import { DEFAULT_THINKING_LEVEL } from '@craft-agent/shared/agent/thinking-levels'
 import { initRendererPerf } from './lib/perf'
@@ -506,16 +510,16 @@ export default function App() {
       if (!fresh) return 'failed'
 
       const prevSession = store.get(sessionAtomFamily(sessionId))
-      const preservedStaleMessages = !!prevSession && prevSession.messages.length > 0 && (!fresh.messages || fresh.messages.length === 0)
-      const nextSession = preservedStaleMessages
-        ? { ...fresh, messages: prevSession.messages }
-        : fresh
+      const {
+        session: nextSession,
+        preservedExistingMessages,
+      } = mergeSessionRefreshResult(prevSession, fresh)
 
       clearStreamingState(sessionId)
       updateSessionDirect(sessionId, () => nextSession)
       syncSessionOptionsFromSession(nextSession)
       void reconcilePermissionModeState(sessionId)
-      return preservedStaleMessages ? 'preserved_stale_messages' : 'refreshed'
+      return preservedExistingMessages ? 'preserved_stale_messages' : 'refreshed'
     } catch (err) {
       console.error(`[App] Failed to refresh session ${sessionId}:`, err)
       return 'failed'

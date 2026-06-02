@@ -12,7 +12,7 @@ import { atom } from 'jotai'
 import type { Getter, Setter } from 'jotai/vanilla'
 import { atomFamily } from 'jotai-family'
 import type { Session, Message } from '../../shared/types'
-import { hasSessionContentHint } from '../lib/session-load'
+import { hasSessionContentHint, mergeSessionRefreshResult } from '../lib/session-load'
 
 /**
  * Session metadata for list display (lightweight, no messages)
@@ -1112,27 +1112,10 @@ async function loadSessionMessages(
     // so they must be explicitly merged here to be available after app restart.
     const existingSession = get(sessionAtomFamily(sessionId))
     const existingTitle = existingSession?.name ?? existingMeta?.name
-    const preservedStaleMessages = !!existingSession
-      && existingSession.messages.length > 0
-      && (!loadedSession.messages || loadedSession.messages.length === 0)
-
-    const mergedSession = existingSession
+    const candidateSession = existingSession
       ? {
           ...existingSession,
-          // CRITICAL: Don't clobber messages if session is actively streaming
-          // AND already has messages in the atom. Streaming events update the atom
-          // directly and may contain messages the IPC response doesn't know about
-          // (race window between IPC request and response).
-          // The `messages.length > 0` guard ensures Cmd+R reload works: after reload,
-          // the atom starts with messages=[] from getSessions(), so IPC response
-          // (which has full history from main process memory) must be used.
-          // Also guard against sleep/wake edge case: the server may return
-          // empty messages if the session subprocess hasn't finished lazy-loading.
-          messages: preservedStaleMessages
-            ? existingSession.messages
-            : existingSession.isProcessing && existingSession.messages.length > 0
-              ? existingSession.messages
-              : loadedSession.messages,
+          messages: loadedSession.messages,
           availableCommands: loadedSession.availableCommands ?? existingSession.availableCommands,
           availableSkills: loadedSession.availableSkills ?? existingSession.availableSkills,
           availableSkillDetails: loadedSession.availableSkillDetails ?? existingSession.availableSkillDetails,
@@ -1143,6 +1126,10 @@ async function loadSessionMessages(
       : loadedSession.name || !existingTitle
         ? loadedSession
         : { ...loadedSession, name: existingTitle }
+    const {
+      session: mergedSession,
+      preservedExistingMessages,
+    } = mergeSessionRefreshResult(existingSession, candidateSession)
     set(sessionAtomFamily(sessionId), mergedSession)
 
     // Update only lastFinalMessageId in metadata (now computable from loaded messages).
@@ -1161,10 +1148,10 @@ async function loadSessionMessages(
       }
     }
 
-    // Mark as loaded only when we received a fresh payload.
-    // If we had to preserve stale in-memory messages because the backend returned
-    // an empty array during lazy-load recovery, keep the session reloadable.
-    if (!preservedStaleMessages) {
+    // Mark as loaded only when we received a fresh full payload. If we had to
+    // preserve existing messages because the backend returned an empty or short
+    // processing snapshot, keep the session reloadable.
+    if (!preservedExistingMessages) {
       markSessionMessagesLoaded(get, set, sessionId)
     }
 

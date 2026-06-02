@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'bun:test'
-import type { TransportConnectionState } from '../../../shared/types'
+import type { Message, Session, TransportConnectionState } from '../../../shared/types'
 import {
   formatSessionLoadFailure,
   hasSessionContentHint,
+  mergeSessionRefreshResult,
   shouldShowMissingSessionState,
   shouldShowForegroundMessageLoading,
   shouldTreatSessionLoadFailureAsTransportFallback,
@@ -17,6 +18,27 @@ function createState(overrides?: Partial<TransportConnectionState>): TransportCo
     updatedAt: Date.now(),
     ...overrides,
   }
+}
+
+function message(id: string, content = id): Message {
+  return {
+    id,
+    role: 'assistant',
+    content,
+    timestamp: Date.now(),
+  }
+}
+
+function session(overrides: Partial<Session>): Session {
+  return {
+    id: 'session-1',
+    workspaceId: 'workspace-1',
+    workspaceName: 'Workspace',
+    messages: [],
+    isProcessing: false,
+    lastMessageAt: Date.now(),
+    ...overrides,
+  } as Session
 }
 
 describe('shouldTreatSessionLoadFailureAsTransportFallback', () => {
@@ -132,5 +154,86 @@ describe('hasSessionContentHint', () => {
 
   it('returns false for metadata-confirmed empty sessions without content hints', () => {
     expect(hasSessionContentHint({ messageCount: 0 })).toBe(false)
+  })
+})
+
+describe('mergeSessionRefreshResult', () => {
+  it('keeps existing history when a processing refresh returns an empty message list', () => {
+    const existing = session({
+      messages: [message('m1'), message('m2')],
+      isProcessing: true,
+    })
+    const fresh = session({
+      messages: [],
+      isProcessing: true,
+    })
+
+    const result = mergeSessionRefreshResult(existing, fresh)
+
+    expect(result.preservedExistingMessages).toBe(true)
+    expect(result.session.messages.map(m => m.id)).toEqual(['m1', 'm2'])
+  })
+
+  it('merges a shorter processing snapshot into existing history', () => {
+    const existing = session({
+      messages: [message('m1'), message('m2', 'old'), message('m3')],
+      isProcessing: true,
+    })
+    const fresh = session({
+      messages: [message('m2', 'fresh'), message('m4')],
+      isProcessing: true,
+    })
+
+    const result = mergeSessionRefreshResult(existing, fresh)
+
+    expect(result.preservedExistingMessages).toBe(true)
+    expect(result.session.messages.map(m => [m.id, m.content])).toEqual([
+      ['m1', 'm1'],
+      ['m2', 'fresh'],
+      ['m3', 'm3'],
+      ['m4', 'm4'],
+    ])
+  })
+
+  it('does not replace longer streaming text with a shorter processing snapshot', () => {
+    const existing = session({
+      messages: [
+        {
+          ...message('m1', 'hello from renderer'),
+          isStreaming: true,
+        },
+      ],
+      isProcessing: true,
+    })
+    const fresh = session({
+      messages: [
+        {
+          ...message('m1', 'hello'),
+          isStreaming: true,
+        },
+      ],
+      isProcessing: true,
+    })
+
+    const result = mergeSessionRefreshResult(existing, fresh)
+
+    expect(result.preservedExistingMessages).toBe(true)
+    expect(result.session.messages[0]?.content).toBe('hello from renderer')
+  })
+
+  it('trusts shorter completed refreshes as authoritative', () => {
+    const existing = session({
+      messages: [message('m1'), message('m2'), message('m3')],
+      isProcessing: false,
+    })
+    const fresh = session({
+      messages: [message('m1')],
+      isProcessing: false,
+    })
+
+    const result = mergeSessionRefreshResult(existing, fresh)
+
+    expect(result.preservedExistingMessages).toBe(false)
+    expect(result.session.messages.map(m => m.id)).toEqual(['m1'])
   })
 })

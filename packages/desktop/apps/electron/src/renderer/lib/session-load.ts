@@ -1,4 +1,4 @@
-import type { TransportConnectionState } from '../../shared/types'
+import type { Message, Session, TransportConnectionState } from '../../shared/types'
 
 export interface SessionContentHint {
   name?: string
@@ -63,4 +63,69 @@ export function formatSessionLoadFailure(error: unknown): string {
   if (error instanceof Error && error.message.trim()) return error.message
   if (typeof error === 'string' && error.trim()) return error
   return 'Unknown error'
+}
+
+function mergeMessageById(existingMessage: Message, freshMessage: Message): Message {
+  if (
+    existingMessage.role === 'assistant'
+    && freshMessage.role === 'assistant'
+    && existingMessage.isStreaming
+    && freshMessage.isStreaming
+    && typeof existingMessage.content === 'string'
+    && typeof freshMessage.content === 'string'
+    && freshMessage.content.length < existingMessage.content.length
+  ) {
+    return existingMessage
+  }
+
+  return freshMessage
+}
+
+function mergeMessagesById(existingMessages: Message[], freshMessages: Message[]): Message[] {
+  const freshById = new Map(freshMessages.map(message => [message.id, message]))
+  const seen = new Set<string>()
+  const merged = existingMessages.map(message => {
+    seen.add(message.id)
+    const freshMessage = freshById.get(message.id)
+    return freshMessage ? mergeMessageById(message, freshMessage) : message
+  })
+
+  for (const message of freshMessages) {
+    if (!seen.has(message.id)) merged.push(message)
+  }
+
+  return merged
+}
+
+export function mergeSessionRefreshResult(
+  existingSession: Session | null | undefined,
+  freshSession: Session,
+): { session: Session; preservedExistingMessages: boolean } {
+  if (!existingSession || existingSession.messages.length === 0) {
+    return { session: freshSession, preservedExistingMessages: false }
+  }
+
+  const freshMessages = freshSession.messages ?? []
+  if (freshMessages.length === 0) {
+    return {
+      session: { ...freshSession, messages: existingSession.messages },
+      preservedExistingMessages: true,
+    }
+  }
+
+  const shouldMergeProcessingSnapshot =
+    freshMessages.length <= existingSession.messages.length
+    && (freshSession.isProcessing || existingSession.isProcessing)
+
+  if (!shouldMergeProcessingSnapshot) {
+    return { session: freshSession, preservedExistingMessages: false }
+  }
+
+  return {
+    session: {
+      ...freshSession,
+      messages: mergeMessagesById(existingSession.messages, freshMessages),
+    },
+    preservedExistingMessages: true,
+  }
 }
