@@ -23,6 +23,9 @@ import {
   parseLineTolerant,
   read,
   readLines,
+  write,
+  writeLine,
+  writeLineSync,
 } from './jsonl-utils.js';
 
 let tmpRoot: string;
@@ -257,5 +260,77 @@ describe('reader resource cleanup', () => {
     const result = await withCapturedReadStream(() => countLines(file));
 
     expect(result).toBe(2);
+  });
+});
+
+// PR #4333 review fold-in: smoke tests for the three write paths. Downstream
+// callers (chatRecordingService, sessionService) mock these entirely, so a
+// regression in flush:true or atomicWriteFileSync wiring would otherwise go
+// undetected. Tests use real fs and assert roundtrip integrity.
+describe('writeLine / writeLineSync / write', () => {
+  it('writeLine round-trips through read() with flush:true appended records', async () => {
+    const file = path.join(
+      tmpRoot,
+      `wl-${Math.random().toString(36).slice(2)}.jsonl`,
+    );
+    await writeLine(file, { kind: 'a', n: 1 });
+    await writeLine(file, { kind: 'b', n: 2 });
+    await writeLine(file, { kind: 'c', n: 3 });
+
+    const records = await read(file);
+    expect(records).toEqual([
+      { kind: 'a', n: 1 },
+      { kind: 'b', n: 2 },
+      { kind: 'c', n: 3 },
+    ]);
+    // No `}{` glue: each line is its own well-formed record.
+    const raw = fs.readFileSync(file, 'utf8');
+    expect(raw).toBe(
+      '{"kind":"a","n":1}\n{"kind":"b","n":2}\n{"kind":"c","n":3}\n',
+    );
+  });
+
+  it('writeLineSync appends well-formed records with trailing newlines', () => {
+    const file = path.join(
+      tmpRoot,
+      `wls-${Math.random().toString(36).slice(2)}.jsonl`,
+    );
+    writeLineSync(file, { sync: true, i: 0 });
+    writeLineSync(file, { sync: true, i: 1 });
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(
+      '{"sync":true,"i":0}\n{"sync":true,"i":1}\n',
+    );
+  });
+
+  it('write() full-file replaces existing content via atomic write', async () => {
+    const file = path.join(
+      tmpRoot,
+      `wf-${Math.random().toString(36).slice(2)}.jsonl`,
+    );
+    await writeLine(file, { v: 1 });
+    await writeLine(file, { v: 2 });
+    expect((await read(file)).length).toBe(2);
+
+    // Replace the entire file via the sync write() helper.
+    write(file, [{ v: 10 }, { v: 20 }, { v: 30 }]);
+
+    expect(await read(file)).toEqual([{ v: 10 }, { v: 20 }, { v: 30 }]);
+    // No tmp residue from atomicWriteFileSync.
+    const dirEntries = fs
+      .readdirSync(tmpRoot)
+      .filter((f) => f.startsWith(path.basename(file)));
+    expect(dirEntries).toEqual([path.basename(file)]);
+  });
+
+  // The other write() test targets a path inside the pre-created tmpRoot,
+  // so the `if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })`
+  // branch is never exercised. A regression that dropped that branch would
+  // make write() fail with ENOENT only when callers target a brand-new
+  // subdirectory.
+  it('write() creates parent dirs when missing', () => {
+    const nested = path.join(tmpRoot, 'a', 'b', 'c', 'file.jsonl');
+    write(nested, [{ x: 1 }]);
+    expect(fs.readFileSync(nested, 'utf-8')).toBe('{"x":1}\n');
   });
 });
