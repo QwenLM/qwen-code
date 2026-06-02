@@ -648,6 +648,7 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   text: string;
   streaming?: boolean;
   collapsed?: boolean;
+  /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
   parentToolCallId?: string;
 }
 

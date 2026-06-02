@@ -71,19 +71,14 @@ export class MessageEmitter extends BaseEmitter {
     timestamp?: string | number,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
-    const epochMs = BaseEmitter.toEpochMs(timestamp);
-    const meta: Record<string, unknown> = {};
-    if (subagentMeta?.parentToolCallId) {
-      meta['parentToolCallId'] = subagentMeta.parentToolCallId;
-    }
-    if (subagentMeta?.subagentType) {
-      meta['subagentType'] = subagentMeta.subagentType;
-    }
-    if (epochMs != null) meta['timestamp'] = epochMs;
+    const _meta = this.buildChunkMeta(
+      BaseEmitter.toEpochMs(timestamp),
+      subagentMeta,
+    );
     await this.sendUpdate({
       sessionUpdate: 'agent_thought_chunk',
       content: { type: 'text', text },
-      ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
+      ...(_meta ? { _meta } : {}),
     });
   }
 
@@ -98,19 +93,14 @@ export class MessageEmitter extends BaseEmitter {
     timestamp?: string | number,
     subagentMeta?: SubagentMeta,
   ): Promise<void> {
-    const epochMs = BaseEmitter.toEpochMs(timestamp);
-    const meta: Record<string, unknown> = {};
-    if (subagentMeta?.parentToolCallId) {
-      meta['parentToolCallId'] = subagentMeta.parentToolCallId;
-    }
-    if (subagentMeta?.subagentType) {
-      meta['subagentType'] = subagentMeta.subagentType;
-    }
-    if (epochMs != null) meta['timestamp'] = epochMs;
+    const _meta = this.buildChunkMeta(
+      BaseEmitter.toEpochMs(timestamp),
+      subagentMeta,
+    );
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
-      ...(Object.keys(meta).length > 0 ? { _meta: meta } : {}),
+      ...(_meta ? { _meta } : {}),
     });
   }
 
@@ -165,5 +155,20 @@ export class MessageEmitter extends BaseEmitter {
     return isThought
       ? this.emitAgentThought(text, timestamp, subagentMeta)
       : this.emitAgentMessage(text, timestamp, subagentMeta);
+  }
+
+  private buildChunkMeta(
+    epochMs: number | undefined,
+    subagentMeta?: SubagentMeta,
+  ): Record<string, unknown> | undefined {
+    const meta: Record<string, unknown> = {};
+    if (subagentMeta?.parentToolCallId) {
+      meta['parentToolCallId'] = subagentMeta.parentToolCallId;
+    }
+    if (subagentMeta?.subagentType) {
+      meta['subagentType'] = subagentMeta.subagentType;
+    }
+    if (epochMs != null) meta['timestamp'] = epochMs;
+    return Object.keys(meta).length > 0 ? meta : undefined;
   }
 }

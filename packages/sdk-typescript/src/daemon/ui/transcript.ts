@@ -369,6 +369,10 @@ export function selectPendingPermissionBlocks(
   );
 }
 
+// Keyed (parentToolCallId) and scalar (activeAssistantBlockId) paths are
+// fully independent. Neither clears nor finalizes the other's blocks.
+// Only finishAssistant() or clearActiveText() with matching parentToolCallId
+// can finalize keyed-path blocks.
 function appendTextDelta(
   state: DaemonTranscriptState,
   kind: 'user' | 'assistant' | 'thought',
