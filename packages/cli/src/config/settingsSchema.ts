@@ -844,6 +844,16 @@ const SETTINGS_SCHEMA = {
           'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
         showInDialog: true,
       },
+      useTerminalBuffer: {
+        type: 'boolean',
+        label: 'Virtualized History (reduces flicker on long sessions)',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.',
+        showInDialog: true,
+      },
       shellOutputMaxLines: {
         type: 'number',
         label: 'Shell Output Max Lines',
