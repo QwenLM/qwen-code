@@ -13,6 +13,10 @@ import type { Key } from './useKeypress.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import { textBufferReducer } from '../components/shared/text-buffer.js';
 
+// Prevent real system clipboard commands (clip, pbpaste, xclip, etc.) from
+// spawning during tests — they hang or fail in headless CI environments.
+vi.mock('child_process');
+
 const makeKey = (sequence: string, name = ''): Key => ({
   sequence,
   name,
