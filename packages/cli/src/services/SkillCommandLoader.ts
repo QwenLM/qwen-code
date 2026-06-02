@@ -9,6 +9,7 @@ import {
   createDebugLogger,
   appendToLastTextPart,
   buildSkillLlmContent,
+  applySkillAllowedTools,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
@@ -96,6 +97,12 @@ export class SkillCommandLoader implements ICommandLoader {
           argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
+            // Auto-approve the skill's declared allowedTools before its body is submitted.
+            applySkillAllowedTools(
+              this.config?.getPermissionManager(),
+              skill.allowedTools,
+            );
+
             const body = buildSkillLlmContent(
               dirname(skill.filePath),
               skill.body,

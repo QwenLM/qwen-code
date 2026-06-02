@@ -49,6 +49,7 @@ describe('SkillTool', () => {
   let skillTool: SkillTool;
   let mockSkillManager: SkillManager;
   let changeListeners: Array<() => void>;
+  let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
 
   const mockSkills: SkillConfig[] = [
     {
@@ -72,6 +73,8 @@ describe('SkillTool', () => {
     // Setup fake timers
     vi.useFakeTimers();
 
+    mockAddSessionAllowRule = vi.fn();
+
     // Create mock config
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
@@ -80,6 +83,9 @@ describe('SkillTool', () => {
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
       getModelInvocableCommandsExecutor: vi.fn().mockReturnValue(null),
+      getPermissionManager: vi
+        .fn()
+        .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
     } as unknown as Config;
 
     changeListeners = [];
@@ -519,6 +525,36 @@ describe('SkillTool', () => {
       expect(llmText).toContain('Help write comprehensive tests.');
 
       expect(result.returnDisplay).toBe('Skill for writing and running tests');
+    });
+
+    it('grants allowedTools as session allow rules on invocation', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue({
+        ...mockSkills[1],
+        allowedTools: ['Bash(git *)', 'Edit'],
+      });
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'testing' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+    });
+
+    it('does not add allow rules when the skill declares no allowedTools', async () => {
+      // code-review (mockSkills[0]) has no allowedTools field.
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        mockSkills[0],
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await invocation.execute();
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
     });
 
     it('should handle skill not found error', async () => {

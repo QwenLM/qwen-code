@@ -33,16 +33,21 @@ describe('BundledSkillLoader', () => {
   let mockSkillManager: {
     listSkills: ReturnType<typeof vi.fn>;
   };
+  let mockAddSessionAllowRule: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
+    mockAddSessionAllowRule = vi.fn();
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue(undefined),
+      getPermissionManager: vi
+        .fn()
+        .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
     } as unknown as Config;
   });
 
@@ -152,6 +157,38 @@ describe('BundledSkillLoader', () => {
           text: `${makeSkillPrompt('You are an expert code reviewer.')}\n\n/review 123`,
         },
       ],
+    });
+  });
+
+  describe('allowedTools grant', () => {
+    it('grants allowedTools as session allow rules when the command runs', async () => {
+      const skill = makeSkill({ allowedTools: ['Bash(git *)', 'Edit'] });
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      );
+
+      expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+    });
+
+    it('does not grant when the bundled skill declares no allowedTools', async () => {
+      const skill = makeSkill(); // no allowedTools
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      await commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      );
+
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
     });
   });
 
