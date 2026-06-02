@@ -1328,6 +1328,43 @@ describe('composePostCompactHistory — subagent snapshot', () => {
     expect(flat).not.toMatch(/x{300}/);
   });
 
+  it('flattens newlines/tabs in descriptions so each task stays on one bullet line', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'u' }] },
+      { role: 'model', parts: [{ text: 'm' }] },
+    ];
+    const result = await composePostCompactHistory(history, 'SUMMARY', {
+      runningSubagents: [
+        {
+          id: 'agent-a',
+          description: 'first line\nsecond line\r\nthird\twith\ttabs',
+          status: 'running',
+          startTime: 1,
+        },
+        {
+          id: 'agent-b',
+          description: 'next task',
+          status: 'paused',
+          startTime: 2,
+        },
+      ],
+    });
+    const flat = result
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+
+    // The agent-a bullet must stay on a single line — splitting it across
+    // newlines would let "second line" read as a sibling list item or
+    // worse, get parsed as a stray paragraph between two `- [..]` rows.
+    expect(flat).toMatch(
+      /- \[running] agent-a: first line second line third with tabs/,
+    );
+    // agent-b should still appear directly after — not orphaned by an
+    // unintended newline in agent-a's payload.
+    expect(flat).toMatch(/agent-a:[^\n]*\n- \[paused] agent-b: next task/);
+  });
+
   it('escapes XML-sensitive characters in descriptions to prevent injection', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'u' }] },

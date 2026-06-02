@@ -699,6 +699,19 @@ function escapeForXmlText(text: string): string {
     .replace(/>/g, '&gt;');
 }
 
+/**
+ * Collapse interior whitespace (newlines, tabs, carriage returns) to single
+ * spaces before the description goes into a single bullet line. A raw `\n`
+ * inside `s.description` would otherwise split the bullet across multiple
+ * lines, producing "- [running] id: line1\nline2\n- [running] next: …"
+ * which the model reads as a malformed list (and could even read `line2`
+ * as a sibling row). Mirrors `sanitizePathForDisplay` further up in this
+ * file.
+ */
+function flattenWhitespaceForBullet(text: string): string {
+  return text.replace(/[\r\n\t]+/g, ' ');
+}
+
 function buildSubagentSnapshotPart(snaps: SubagentSnapshot[]): Part | null {
   if (snaps.length === 0) return null;
   const sorted = [...snaps].sort((a, b) => a.startTime - b.startTime);
@@ -708,10 +721,13 @@ function buildSubagentSnapshotPart(snaps: SubagentSnapshot[]): Part | null {
   const overflow = Math.max(0, sorted.length - MAX_SUBAGENT_SNAPSHOT_COUNT);
   const shown = overflow > 0 ? sorted.slice(overflow) : sorted;
   const lines = shown.map((s) => {
+    // Order: flatten whitespace FIRST, then truncate. Otherwise a 200-char
+    // slice that lands inside a `\n` keeps the newline in the bullet.
+    const flattened = flattenWhitespaceForBullet(s.description);
     const truncated =
-      s.description.length > MAX_SUBAGENT_DESC_CHARS
-        ? s.description.slice(0, MAX_SUBAGENT_DESC_CHARS) + '…'
-        : s.description;
+      flattened.length > MAX_SUBAGENT_DESC_CHARS
+        ? flattened.slice(0, MAX_SUBAGENT_DESC_CHARS) + '…'
+        : flattened;
     return `- [${s.status}] ${s.id}: ${escapeForXmlText(truncated)}`;
   });
   if (overflow > 0) {

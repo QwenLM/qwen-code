@@ -16,6 +16,7 @@ import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
@@ -2478,7 +2479,10 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
   });
 
   function setupWithAppState(opts: {
-    approvalMode?: string;
+    // Typed as ApprovalMode (not string) so a future enum rename / value
+    // change breaks the test at compile time instead of silently passing
+    // because the literal happens to match the old value.
+    approvalMode?: ApprovalMode;
     backgroundTasks?: Array<{
       id: string;
       kind: string;
@@ -2509,7 +2513,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       }),
       getModel: () => 'test-model',
-      getApprovalMode: () => opts.approvalMode ?? 'default',
+      getApprovalMode: () => opts.approvalMode ?? ApprovalMode.DEFAULT,
       getBackgroundTaskRegistry: () => ({
         getAll: () => opts.backgroundTasks ?? [],
       }),
@@ -2530,7 +2534,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     } as never);
   }
 
-  it('passes planModeActive=true when getApprovalMode() returns "plan"', async () => {
+  it('passes planModeActive=true when getApprovalMode() returns PLAN', async () => {
     stubSideQuery();
     const composeSpy = vi
       .spyOn(postCompactModule, 'composePostCompactHistory')
@@ -2539,7 +2543,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
         { role: 'model', parts: [{ text: 'ack' }] },
       ]);
     const { mockChat, mockConfig } = setupWithAppState({
-      approvalMode: 'plan',
+      approvalMode: ApprovalMode.PLAN,
     });
 
     await new ChatCompressionService().compress(mockChat, {
@@ -2567,7 +2571,7 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
         { role: 'model', parts: [{ text: 'ack' }] },
       ]);
     const { mockChat, mockConfig } = setupWithAppState({
-      approvalMode: 'auto-edit',
+      approvalMode: ApprovalMode.AUTO_EDIT,
     });
 
     await new ChatCompressionService().compress(mockChat, {
