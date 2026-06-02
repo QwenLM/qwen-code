@@ -775,8 +775,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       // ── Pending char read (r, f, F, t, T) ──
       if (state.pendingCharRead && state.mode === 'NORMAL') {
         if (normalizedKey.name === 'escape') {
-          dispatch({ type: 'SET_PENDING_CHAR_READ', value: null });
-          dispatch({ type: 'CLEAR_COUNT' });
+          dispatch({ type: 'CLEAR_PENDING_STATES' });
           return true;
         }
         if (normalizedKey.sequence) {
