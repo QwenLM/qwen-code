@@ -1090,7 +1090,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
           // ── Edit commands ──
           case 'x': {
-            buffer.vimDeleteChar(repeatCount);
+            executeCommand(CMD_TYPES.DELETE_CHAR, repeatCount);
             dispatch({
               type: 'SET_LAST_COMMAND',
               command: { type: CMD_TYPES.DELETE_CHAR, count: repeatCount },
