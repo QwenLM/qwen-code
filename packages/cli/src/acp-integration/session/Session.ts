@@ -402,7 +402,7 @@ export class Session implements SessionContext {
     }
 
     const chat = this.config.getGeminiClient()!.getChat();
-    const apiHistory = chat.getHistory();
+    const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
       targetTurnIndex,
@@ -895,16 +895,10 @@ export class Session implements SessionContext {
         return { stopReason: 'end_turn' };
       }
 
-      // Get response text from the chat history
-      const history = this.#getCurrentChat().getHistory();
-      const lastModelMessage = history
-        .filter((msg: Content) => msg.role === 'model')
-        .pop();
+      // Extract last model text without cloning the full history.
       const responseText =
-        lastModelMessage?.parts
-          ?.filter((p: Part): p is { text: string } & Part => 'text' in p)
-          .map((p: { text: string }) => p.text)
-          .join('') || '[no response text]';
+        this.#getCurrentChat().getLastModelMessageText?.() ||
+        '[no response text]';
 
       const response = await messageBus.request<
         HookExecutionRequest,

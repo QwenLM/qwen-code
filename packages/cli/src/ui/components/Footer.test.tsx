@@ -113,7 +113,12 @@ const renderWithWidth = (width: number, uiState: UIState) => {
 
 describe('<Footer />', () => {
   beforeEach(() => {
-    useStatusLineMock.mockReturnValue({ lines: [] });
+    useStatusLineMock.mockReturnValue({
+      lines: [],
+      useThemeColors: false,
+      respectUserColors: false,
+      hideContextIndicator: false,
+    });
   });
 
   it('renders the component', () => {
@@ -140,6 +145,9 @@ describe('<Footer />', () => {
     it('renders multi-line status line output', () => {
       useStatusLineMock.mockReturnValue({
         lines: ['model-name (main) ctx:34%', '████░░░░ 34% context'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
       });
       const { lastFrame } = renderWithWidth(120, createMockUIState());
       const frame = lastFrame()!;
@@ -148,9 +156,37 @@ describe('<Footer />', () => {
     });
 
     it('suppresses hint when status line is active', () => {
-      useStatusLineMock.mockReturnValue({ lines: ['status info'] });
+      useStatusLineMock.mockReturnValue({
+        lines: ['status info'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
       const { lastFrame } = renderWithWidth(120, createMockUIState());
       expect(lastFrame()).not.toContain('? for shortcuts');
+    });
+
+    it('renders status line with respectUserColors enabled', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: ['\x1b[38;2;99;102;241m🤖 qwen\x1b[0m'],
+        useThemeColors: false,
+        respectUserColors: true,
+        hideContextIndicator: false,
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('🤖 qwen');
+    });
+
+    it('hides context indicator when hideContextIndicator is true', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: [],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: true,
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      expect(lastFrame()).not.toMatch(/\d+(\.\d+)?% context used/);
     });
   });
 
@@ -180,7 +216,12 @@ describe('<Footer />', () => {
     // by one line once init completes. Still strictly better than the
     // original bug (a 2-row residual above the input in the default case).
     it('shows init status even when a custom status line is active', () => {
-      useStatusLineMock.mockReturnValue({ lines: ['model-name ctx:34%'] });
+      useStatusLineMock.mockReturnValue({
+        lines: ['model-name ctx:34%'],
+        useThemeColors: false,
+        respectUserColors: false,
+        hideContextIndicator: false,
+      });
       const { lastFrame } = renderWithWidth(
         120,
         createMockUIState({ isConfigInitialized: false }),

@@ -5,6 +5,7 @@
  */
 
 import * as crypto from 'node:crypto';
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { isNodeError } from './errors.js';
@@ -94,19 +95,12 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
 }
 
 /**
- * Atomically write arbitrary content (string or Buffer) to a file.
+ * Atomically write content to a file (write-to-temp + rename).
  *
- * 1. Resolve symlinks (including broken ones) so the temp file lives
- *    next to the real target.
- * 2. Write to a temporary file with fsync (`flush: true` by default).
- * 3. Preserve the original file's permissions (or apply `options.mode`).
- * 4. Atomic rename (POSIX) with retry (Windows).
- * 5. On EXDEV (cross-device rename), fall back to direct write.
- *    **Note:** the EXDEV fallback is non-atomic — a crash mid-write
- *    can leave a partially-written file. EXDEV only occurs when the
- *    resolved target path is on a different filesystem than its parent
- *    directory, which is rare in practice.
- * 6. Always clean up the temp file on failure.
+ * Falls back to in-place write when the existing file's uid differs
+ * from the process's euid — POSIX rename would reset ownership.
+ * Also falls back on EXDEV (cross-device). Both fallbacks lose crash
+ * atomicity but preserve the existing inode's uid.
  *
  * The parent directory of `filePath` must already exist.
  */
@@ -122,19 +116,20 @@ export async function atomicWriteFile(
 
   const targetPath = await resolveSymlinkChain(filePath);
 
-  const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-
-  // Stat the target to preserve existing permissions (mask out file-type bits).
-  let existingMode: number | undefined;
+  // Stat the target to preserve existing permissions and detect
+  // ownership-changing renames (see the ownership-preservation note in
+  // the function doc).
+  let existingStat: Stats | undefined;
   try {
-    const stat = await fs.stat(targetPath);
-    existingMode = stat.mode & 0o7777;
+    existingStat = await fs.stat(targetPath);
   } catch (err) {
     if (!isNodeError(err) || err.code !== 'ENOENT') {
       throw err;
     }
   }
 
+  const existingMode =
+    existingStat !== undefined ? existingStat.mode & 0o7777 : undefined;
   const desiredMode = existingMode ?? options?.mode;
 
   const writeOptions: {
@@ -155,6 +150,33 @@ export async function atomicWriteFile(
       // Ignore — not all filesystems support chmod.
     }
   };
+
+  // Detect when atomic rename would silently change ownership. POSIX
+  // rename creates a new inode owned by the process's euid:egid; if the
+  // existing file has a different uid, fall back to in-place write which
+  // preserves the inode and therefore uid. Only uid is compared — gid
+  // is intentionally skipped because macOS inherits the parent
+  // directory's GID for new files, making egid !== file.gid a
+  // false positive on the most common dev platform.
+  const ownershipWouldChange = (): boolean => {
+    if (existingStat === undefined) return false;
+    if (process.platform === 'win32') return false;
+    const euid = process.geteuid?.();
+    if (euid === undefined) return false;
+    return existingStat.uid !== euid;
+  };
+
+  if (
+    existingStat !== undefined &&
+    existingStat.isFile() &&
+    ownershipWouldChange()
+  ) {
+    await fs.writeFile(targetPath, data, writeOptions);
+    await tryChmod(targetPath);
+    return;
+  }
+
+  const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
   try {
     await fs.writeFile(tmpPath, data, writeOptions);
@@ -179,17 +201,7 @@ export async function atomicWriteFile(
   }
 }
 
-/**
- * Atomically write a JSON value to a file.
- *
- * Delegates to {@link atomicWriteFile} for the actual atomic
- * write-to-temp + rename flow.
- *
- * Note: if `filePath` is a symlink, the write resolves the chain
- * and updates the real target file — the symlink itself is preserved.
- *
- * The parent directory of `filePath` must already exist.
- */
+/** Atomically write a JSON value to a file. Delegates to {@link atomicWriteFile}. */
 export async function atomicWriteJSON(
   filePath: string,
   data: unknown,
