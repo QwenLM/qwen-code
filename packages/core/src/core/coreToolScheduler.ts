@@ -744,6 +744,9 @@ function appendContextToResponsePart(
   additionalContext: string,
 ): Part {
   if (!part.functionResponse) {
+    debugLogger.warn(
+      'appendContextToResponsePart: no functionResponse on part, additionalContext dropped',
+    );
     return part;
   }
 
@@ -784,14 +787,19 @@ function appendContextToToolResponse(
 
   const responseParts = [...response.responseParts];
   const lastIndex = responseParts.length - 1;
-  responseParts[lastIndex] = appendContextToResponsePart(
+  const appendedPart = appendContextToResponsePart(
     responseParts[lastIndex],
     additionalContext,
   );
+  if (appendedPart === responseParts[lastIndex]) {
+    return response;
+  }
+  responseParts[lastIndex] = appendedPart;
 
   return {
     ...response,
     responseParts,
+    contentLength: (response.contentLength ?? 0) + additionalContext.length + 2,
   };
 }
 
@@ -835,7 +843,7 @@ function withPostToolBatchStop(
       ToolErrorType.EXECUTION_DENIED,
     ),
     durationMs: lastCall.durationMs,
-    outcome: lastCall.outcome,
+    outcome: undefined,
   } as ErroredToolCall;
   return calls;
 }
@@ -3437,12 +3445,18 @@ export class CoreToolScheduler {
                     shouldStop: r.shouldStop,
                     hasAdditionalContext: !!r.additionalContext,
                     blockType: r.shouldStop ? 'stop' : undefined,
+                    postBatchStop: r.shouldStop,
                   },
           );
 
           // Order matters: stop replaces the last response, so append
           // additionalContext only after the stop decision is applied.
           if (batchHookResult.shouldStop) {
+            debugLogger.info(
+              `PostToolBatch hook stopped batch (${completedCalls.length} calls): ${
+                batchHookResult.stopReason || 'no reason given'
+              }`,
+            );
             completedCalls = withPostToolBatchStop(
               completedCalls,
               batchHookResult.stopReason ||

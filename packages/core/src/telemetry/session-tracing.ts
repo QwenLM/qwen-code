@@ -844,6 +844,8 @@ export interface HookSpanMetadata {
   /** Discriminator for blocking decision when applicable. */
   blockType?: 'denied' | 'ask' | 'stop';
   hasAdditionalContext?: boolean;
+  /** PostToolBatch only: true when the batch hook stopped before the next turn. */
+  postBatchStop?: boolean;
   /** Hook threw — span ends as ERROR with this message. */
   error?: string;
 }
@@ -919,6 +921,8 @@ export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
         endAttributes['block_type'] = metadata.blockType;
       if (metadata.hasAdditionalContext !== undefined)
         endAttributes['has_additional_context'] = metadata.hasAdditionalContext;
+      if (metadata.postBatchStop !== undefined)
+        endAttributes['post_batch_stop'] = metadata.postBatchStop;
       if (metadata.error !== undefined)
         endAttributes['error'] = truncateSpanError(metadata.error);
     }

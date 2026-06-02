@@ -76,6 +76,7 @@ type ToolSpanRecord = {
     shouldStop?: boolean;
     blockType?: string;
     hasAdditionalContext?: boolean;
+    postBatchStop?: boolean;
     error?: string;
   };
 };
@@ -84,6 +85,7 @@ const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
 const shouldThrowToolSpanSetAttribute = vi.hoisted(() => ({ value: false }));
 const shouldThrowToolSpanSetStatus = vi.hoisted(() => ({ value: false }));
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const debugLoggerInfoSpy = vi.hoisted(() => vi.fn());
 const runSideQueryMock = vi.hoisted(() => vi.fn());
 
 vi.mock('../utils/debugLogger.js', async (importOriginal) => {
@@ -93,7 +95,7 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => {
     ...actual,
     createDebugLogger: () => ({
       debug: vi.fn(),
-      info: vi.fn(),
+      info: debugLoggerInfoSpy,
       warn: debugLoggerWarnSpy,
       error: vi.fn(),
     }),
@@ -500,6 +502,7 @@ async function waitForStatus(
 
 describe('CoreToolScheduler', () => {
   beforeEach(() => {
+    debugLoggerInfoSpy.mockClear();
     runSideQueryMock.mockReset();
   });
 
@@ -1714,7 +1717,14 @@ describe('CoreToolScheduler', () => {
           ?.response;
       expect(lastResponse?.['error']).toContain('halt');
       expect(lastResponse?.['error']).toContain('batch context');
+      expect(lastCompletedCall.response.contentLength).toBe(
+        'halt'.length + 'batch context'.length + 2,
+      );
+      expect(lastCompletedCall.outcome).toBeUndefined();
     }
+    expect(debugLoggerInfoSpy).toHaveBeenCalledWith(
+      'PostToolBatch hook stopped batch (2 calls): halt',
+    );
   });
 
   it('passes through completed calls when PostToolBatch returns hookError', async () => {

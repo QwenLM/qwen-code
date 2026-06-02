@@ -994,12 +994,14 @@ describe('session-tracing', () => {
         success: true,
         shouldStop: true,
         hasAdditionalContext: true,
+        postBatchStop: true,
       });
 
       const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
       expect(hookRecord?.attributes['hook_event']).toBe('PostToolBatch');
       expect(hookRecord?.attributes['should_stop']).toBe(true);
       expect(hookRecord?.attributes['has_additional_context']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop']).toBe(true);
       expect(hookRecord?.statuses).toHaveLength(0);
     });
 

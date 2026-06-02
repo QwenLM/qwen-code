@@ -19,6 +19,22 @@ import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { NotificationType } from '../hooks/types.js';
 import { MessageBusType } from '../confirmation-bus/types.js';
 
+const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: debugLoggerWarnSpy,
+      error: vi.fn(),
+    }),
+  };
+});
+
 // Mock the MessageBus
 const createMockMessageBus = () =>
   ({
@@ -511,6 +527,9 @@ describe('toolHookTriggers', () => {
 
       expect(result.shouldStop).toBe(false);
       expect(result.hookError).toMatch(/success: false/);
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('PostToolBatch hook returned failure'),
+      );
     });
 
     it('should return hookError when hook returns success without output', async () => {

@@ -414,6 +414,7 @@ export async function firePostToolBatchHook(
       const message =
         response.error?.message ||
         `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
+      debugLogger.warn(`PostToolBatch hook returned failure: ${message}`);
       return { shouldStop: false, hookError: message };
     }
 
