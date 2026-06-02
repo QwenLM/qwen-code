@@ -334,6 +334,16 @@ function releaseLock(lockPath: string): void {
   }
 }
 
+// Remove an empty standaloneDir left behind by a failed first-time migration
+// (no manifest.json means it was just mkdir'd, never populated). Prevents
+// permanently blocking future updates with "exists but is not a standalone install".
+function cleanupEmptyStandaloneDir(standaloneDir: string): void {
+  const manifestPath = path.join(standaloneDir, 'manifest.json');
+  if (fs.existsSync(standaloneDir) && !fs.existsSync(manifestPath)) {
+    fs.rmSync(standaloneDir, { recursive: true, force: true });
+  }
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -564,6 +574,7 @@ export async function performStandaloneUpdate(
   // Use a lockfile to prevent concurrent updates
   const lockPath = path.join(parentDir, '.qwen-update.lock');
   if (!acquireLock(lockPath)) {
+    cleanupEmptyStandaloneDir(standaloneDir);
     throw new Error('Another update is already in progress');
   }
 
@@ -573,6 +584,7 @@ export async function performStandaloneUpdate(
   // pre-creation attacks on predictable directory names.
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
   let extractDir: string;
+  let updateResult: 'done' | 'deferred' | undefined;
   try {
     extractDir = fs.mkdtempSync(path.join(parentDir, '.qwen-code-update-'));
   } catch (err) {
@@ -602,7 +614,7 @@ export async function performStandaloneUpdate(
     await smokeTest(newInstallDir, target);
 
     debugLogger.info('Replacing installation...');
-    const result = atomicReplace(standaloneDir, newInstallDir, lockPath);
+    updateResult = atomicReplace(standaloneDir, newInstallDir, lockPath);
 
     // Write rollback metadata so /doctor rollback knows what version is preserved
     const oldDir = `${standaloneDir}.old`;
@@ -636,23 +648,30 @@ export async function performStandaloneUpdate(
     ensureBinWrapper(standaloneDir, target);
 
     debugLogger.info('Standalone update complete.');
-    return result;
+    return updateResult;
   } catch (err) {
-    // On error: clean orphaned pendingDir (only safe when NOT a successful deferred update)
     const pendingDir = `${standaloneDir}.new`;
     if (fs.existsSync(pendingDir)) {
       fs.rmSync(pendingDir, { recursive: true, force: true });
     }
+    cleanupEmptyStandaloneDir(standaloneDir);
     throw err;
   } finally {
-    // On Windows deferred updates, keep the lock alive until the bat script
-    // finishes the swap — it will be cleaned up by the next successful update.
-    // On Unix (immediate), release the lock now.
-    if (os.platform() !== 'win32') {
+    // Only keep the lock alive when the bat script was spawned (deferred).
+    // On failure or on Unix, release immediately.
+    if (updateResult !== 'deferred') {
       releaseLock(lockPath);
     }
-    fs.rmSync(tempDir, { recursive: true, force: true });
-    fs.rmSync(extractDir, { recursive: true, force: true });
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup
+    }
+    try {
+      fs.rmSync(extractDir, { recursive: true, force: true });
+    } catch {
+      // Best-effort cleanup
+    }
   }
 }
 
@@ -693,8 +712,12 @@ export function rollbackStandaloneUpdate(
     }
     fs.renameSync(standaloneDir, failedDir);
     fs.renameSync(oldDir, standaloneDir);
-    fs.rmSync(failedDir, { recursive: true, force: true });
     debugLogger.info('Rollback successful.');
+    try {
+      fs.rmSync(failedDir, { recursive: true, force: true });
+    } catch {
+      debugLogger.debug(`Leftover .failed dir at ${failedDir}, safe to delete`);
+    }
     return { ok: true };
   } catch (err) {
     debugLogger.error('Rollback failed:', err);
