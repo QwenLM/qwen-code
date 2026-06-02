@@ -23,7 +23,7 @@ export const UserShellMessage = memo(function UserShellMessage({
     >
       <div className={styles.header}>
         <span className={styles.status}>✓</span>
-        <span className={styles.name}>Shell Command</span>
+        <span className={styles.name}>{t('shell.command')}</span>
         {command && <span className={styles.command}>{command}</span>}
       </div>
       {compactMode ? (

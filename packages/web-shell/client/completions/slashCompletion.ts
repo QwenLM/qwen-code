@@ -169,7 +169,7 @@ function comparePrefixFirst(a: string, b: string, query: string): number {
   return a.localeCompare(b);
 }
 
-export function getForgottenSlashCompletion(
+export function getMissingSlashPrefixCompletion(
   text: string,
   commands: CommandInfo[],
 ): string | null {

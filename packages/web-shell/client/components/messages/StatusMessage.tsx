@@ -1,7 +1,6 @@
 import { useI18n } from '../../i18n';
+import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import styles from './StatusMessage.module.css';
-
-const SENTINEL = 'web-shell:status:v1:';
 
 export interface StatusInfo {
   cliVersion: string;
@@ -17,20 +16,10 @@ export interface StatusInfo {
   memoryUsage: string;
 }
 
-export function serializeStatusMessage(info: StatusInfo): string {
-  return `${SENTINEL}${JSON.stringify(info)}`;
-}
+const { serialize: serializeStatusMessage, parse: parseStatusMessage } =
+  createSentinelSerializer<StatusInfo>('web-shell:status:v1:');
 
-export function parseStatusMessage(content: string): StatusInfo | null {
-  if (!content.startsWith(SENTINEL)) return null;
-  try {
-    const parsed = JSON.parse(content.slice(SENTINEL.length));
-    if (!parsed || typeof parsed !== 'object') return null;
-    return parsed as StatusInfo;
-  } catch {
-    return null;
-  }
-}
+export { serializeStatusMessage, parseStatusMessage };
 
 function Row({
   label,
@@ -69,14 +58,16 @@ export function StatusMessage({ info }: { info: StatusInfo }) {
       )}
       {info.baseUrl && <Row label={t('about.baseUrl')}>{info.baseUrl}</Row>}
       {info.model && <Row label={t('about.model')}>{info.model}</Row>}
-      {info.fastModel && (
+      {info.fastModel && info.fastModel !== info.model && (
         <Row label={t('about.fastModel')}>{info.fastModel}</Row>
       )}
       {info.sessionId && (
         <Row label={t('about.sessionId')}>{info.sessionId}</Row>
       )}
-      {info.sandbox && <Row label={t('about.sandbox')}>{info.sandbox}</Row>}
-      {info.proxy && <Row label={t('about.proxy')}>{info.proxy}</Row>}
+      <Row label={t('about.sandbox')}>
+        {info.sandbox || t('about.noSandbox')}
+      </Row>
+      <Row label={t('about.proxy')}>{info.proxy || t('about.noProxy')}</Row>
       {info.memoryUsage && (
         <Row label={t('about.memoryUsage')}>{info.memoryUsage}</Row>
       )}

@@ -44,10 +44,11 @@ function fileForScope(
 
 function describeFile(
   file: DaemonWorkspaceMemoryFile | undefined,
-  fallback: string,
+  fallbackPath: string,
+  t: ReturnType<typeof useI18n>['t'],
 ): string {
-  if (!file) return fallback;
-  return fallback;
+  const path = file?.path ?? fallbackPath;
+  return t('memory.savedIn', { path });
 }
 
 function isDisabledMemoryItem(item: MemoryItem | undefined): boolean {
@@ -137,19 +138,13 @@ export function MemoryMessage({
       {
         label: t('memory.global'),
         value: 'global',
-        description: describeFile(
-          globalFile,
-          t('memory.savedIn', { path: '~/.qwen/QWEN.md' }),
-        ),
+        description: describeFile(globalFile, '~/.qwen/QWEN.md', t),
         file: globalFile,
       },
       {
         label: t('memory.project'),
         value: 'workspace',
-        description: describeFile(
-          workspaceFile,
-          t('memory.savedIn', { path: 'QWEN.md' }),
-        ),
+        description: describeFile(workspaceFile, 'QWEN.md', t),
         file: workspaceFile,
       },
       {
@@ -186,15 +181,11 @@ export function MemoryMessage({
       readFile(file.path)
         .then((result) => {
           setDetailContent(result.content);
-          setMessage(
-            result.truncated ? t('memory.fileTruncated') : t('memory.fileOpen'),
-          );
         })
         .catch((readError: unknown) => {
           const text =
             readError instanceof Error ? readError.message : String(readError);
           setDetailContent(text);
-          setMessage(text);
         })
         .finally(() => setDetailLoading(false));
     },

@@ -27,7 +27,7 @@ import {
 import {
   slashCompletionSource,
   getImplicitTabCompletion,
-  getForgottenSlashCompletion,
+  getMissingSlashPrefixCompletion,
   type SkillInfo,
 } from '../completions/slashCompletion';
 import { createAtCompletionSource } from '../completions/atCompletion';
@@ -456,6 +456,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
       },
       {
         key: 'Tab',
+        // Priority: active menu > implicit subcommand > missing "/" prefix > followup suggestion
         run: (view) => {
           if (completionStatus(view.state) === 'active') {
             return acceptCompletion(view);
@@ -477,18 +478,18 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             });
             return true;
           }
-          const forgottenSlash = getForgottenSlashCompletion(
+          const missingSlash = getMissingSlashPrefixCompletion(
             text,
             commandsRef.current,
           );
-          if (forgottenSlash) {
+          if (missingSlash) {
             view.dispatch({
               changes: {
                 from: 0,
                 to: view.state.doc.length,
-                insert: forgottenSlash,
+                insert: missingSlash,
               },
-              selection: { anchor: forgottenSlash.length },
+              selection: { anchor: missingSlash.length },
             });
             return true;
           }

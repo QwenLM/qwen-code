@@ -7,9 +7,8 @@ import type {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useMcp } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import styles from './McpStatusMessage.module.css';
-
-const SENTINEL = 'web-shell:mcp-status:v1:';
 const ACTIVE_EVENT = 'web-shell:mcp-panel-active';
 const VISIBLE_TOOLS_COUNT = 10;
 
@@ -41,24 +40,22 @@ interface SerializedMcpStatusMessage {
   showTips: boolean;
 }
 
-export function serializeMcpStatusMessage(
-  message: SerializedMcpStatusMessage,
-): string {
-  return `${SENTINEL}${JSON.stringify(message)}`;
-}
+const {
+  serialize: serializeMcpStatusMessage,
+  parse: parseRawMcpStatusMessage,
+} = createSentinelSerializer<SerializedMcpStatusMessage>(
+  'web-shell:mcp-status:v1:',
+);
 
-export function parseMcpStatusMessage(
+function parseMcpStatusMessage(
   content: string,
 ): SerializedMcpStatusMessage | null {
-  if (!content.startsWith(SENTINEL)) return null;
-  try {
-    const parsed = JSON.parse(content.slice(SENTINEL.length));
-    if (!parsed || typeof parsed !== 'object' || !parsed.status) return null;
-    return parsed as SerializedMcpStatusMessage;
-  } catch {
-    return null;
-  }
+  const parsed = parseRawMcpStatusMessage(content);
+  if (!parsed || !parsed.status) return null;
+  return parsed;
 }
+
+export { serializeMcpStatusMessage, parseMcpStatusMessage };
 
 function statusDisplay(
   server: DaemonWorkspaceMcpServerStatus,
@@ -440,10 +437,8 @@ export function McpStatusMessage({
   );
 
   useEffect(() => {
-    if (!isOpen) return;
     const id = panelIdRef.current;
-    dispatchActive(id, true);
-    return () => dispatchActive(id, false);
+    dispatchActive(id, isOpen);
   }, [isOpen]);
 
   useEffect(() => {
@@ -618,6 +613,12 @@ export function McpStatusMessage({
                           ? `${styles.row} ${styles.selected}`
                           : styles.row
                       }
+                      onClick={() => {
+                        setSelectedServerIndex(globalIndex);
+                        setStep('server');
+                        setSelectedServerActionIndex(0);
+                      }}
+                      onMouseEnter={() => setSelectedServerIndex(globalIndex)}
                     >
                       <span className={styles.pointer}>
                         {selected ? '❯' : ''}
@@ -750,6 +751,11 @@ export function McpStatusMessage({
                   className={
                     selected ? `${styles.row} ${styles.selected}` : styles.row
                   }
+                  onClick={() => {
+                    setSelectedToolIndex(actualIndex);
+                    setStep('tool');
+                  }}
+                  onMouseEnter={() => setSelectedToolIndex(actualIndex)}
                 >
                   <span className={styles.pointer}>{selected ? '❯' : ''}</span>
                   <span

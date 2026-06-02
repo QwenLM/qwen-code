@@ -54,6 +54,7 @@ import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog'
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
+import { usePanelActive } from './hooks/usePanelActive';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
@@ -67,6 +68,7 @@ import {
   COPY_MESSAGES,
 } from './utils/copyCommand';
 import type { SkillInfo } from './completions/slashCompletion';
+import { collectSystemInfo } from './utils/systemInfo';
 import { handleTasksSlashCommand } from './utils/tasksCommand';
 import {
   DAEMON_APPROVAL_MODES,
@@ -83,6 +85,7 @@ import {
 } from './components/messages/StatusMessage';
 import {
   MCP_STATUS_ACTIVE_EVENT,
+  parseMcpStatusMessage,
   serializeMcpStatusMessage,
 } from './components/messages/McpStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
@@ -254,6 +257,15 @@ function filterDuplicateModelSwitchMessages(
     const statusModel = parseModelSwitchStatusModel(message.content);
     return !statusModel || !summarizedModels.has(statusModel);
   });
+}
+
+function hasMcpStatusPanel(messages: readonly Message[]): boolean {
+  return messages.some(
+    (message) =>
+      message.role === 'system' &&
+      message.variant === 'info' &&
+      parseMcpStatusMessage(message.content) !== null,
+  );
 }
 
 function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
@@ -477,6 +489,18 @@ export function App({
     }
     return filterDuplicateModelSwitchMessages(result);
   }, [messages, recapMessage]);
+  const hasMcpPanelMessage = useMemo(
+    () => hasMcpStatusPanel(displayMessages),
+    [displayMessages],
+  );
+  useEffect(() => {
+    if (hasMcpPanelMessage) return;
+    window.dispatchEvent(
+      new CustomEvent(MCP_STATUS_ACTIVE_EVENT, {
+        detail: { active: false },
+      }),
+    );
+  }, [hasMcpPanelMessage]);
   const messageBlocks = useAnimationFrameValue(blocks);
   const rawPendingApproval = useMemo(
     () => extractPendingPermission(messageBlocks),
@@ -563,13 +587,17 @@ export function App({
   const [memoryPortalHost, setMemoryPortalHost] =
     useState<HTMLDivElement | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [mcpPanelActive, setMcpPanelActive] = useState(false);
-  const [agentsPanelActive, setAgentsPanelActive] = useState(false);
-  const [memoryPanelActive, setMemoryPanelActive] = useState(false);
-  const [modelPanelActive, setModelPanelActive] = useState(false);
+  const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
+  const agentsPanelActive = usePanelActive(AGENTS_ACTIVE_EVENT);
+  const memoryPanelActive = usePanelActive(MEMORY_ACTIVE_EVENT);
+  const modelPanelActive = usePanelActive(MODEL_ACTIVE_EVENT);
   const [selectedTheme, setSelectedTheme] =
     useState<WebShellTheme>(providedTheme);
   const [currentModel, setCurrentModel] = useState('');
+  const currentModelRef = useRef(currentModel);
+  currentModelRef.current = currentModel;
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
   const [currentMode, setCurrentMode] = useState('default');
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
@@ -589,82 +617,6 @@ export function App({
     agentsPanelActive ||
     memoryPanelActive ||
     modelPanelActive;
-
-  useEffect(() => {
-    const activePanels = new Set<string>();
-    const onMcpPanelActive = (event: Event) => {
-      const detail = (event as CustomEvent<{ id?: string; active?: boolean }>)
-        .detail;
-      if (!detail?.id) return;
-      if (detail.active) {
-        activePanels.add(detail.id);
-      } else {
-        activePanels.delete(detail.id);
-      }
-      setMcpPanelActive(activePanels.size > 0);
-    };
-    window.addEventListener(MCP_STATUS_ACTIVE_EVENT, onMcpPanelActive);
-    return () => {
-      window.removeEventListener(MCP_STATUS_ACTIVE_EVENT, onMcpPanelActive);
-    };
-  }, []);
-
-  useEffect(() => {
-    const activePanels = new Set<string>();
-    const onAgentsPanelActive = (event: Event) => {
-      const detail = (event as CustomEvent<{ id?: string; active?: boolean }>)
-        .detail;
-      if (!detail?.id) return;
-      if (detail.active) {
-        activePanels.add(detail.id);
-      } else {
-        activePanels.delete(detail.id);
-      }
-      setAgentsPanelActive(activePanels.size > 0);
-    };
-    window.addEventListener(AGENTS_ACTIVE_EVENT, onAgentsPanelActive);
-    return () => {
-      window.removeEventListener(AGENTS_ACTIVE_EVENT, onAgentsPanelActive);
-    };
-  }, []);
-
-  useEffect(() => {
-    const activePanels = new Set<string>();
-    const onMemoryPanelActive = (event: Event) => {
-      const detail = (event as CustomEvent<{ id?: string; active?: boolean }>)
-        .detail;
-      if (!detail?.id) return;
-      if (detail.active) {
-        activePanels.add(detail.id);
-      } else {
-        activePanels.delete(detail.id);
-      }
-      setMemoryPanelActive(activePanels.size > 0);
-    };
-    window.addEventListener(MEMORY_ACTIVE_EVENT, onMemoryPanelActive);
-    return () => {
-      window.removeEventListener(MEMORY_ACTIVE_EVENT, onMemoryPanelActive);
-    };
-  }, []);
-
-  useEffect(() => {
-    const activePanels = new Set<string>();
-    const onModelPanelActive = (event: Event) => {
-      const detail = (event as CustomEvent<{ id?: string; active?: boolean }>)
-        .detail;
-      if (!detail?.id) return;
-      if (detail.active) {
-        activePanels.add(detail.id);
-      } else {
-        activePanels.delete(detail.id);
-      }
-      setModelPanelActive(activePanels.size > 0);
-    };
-    window.addEventListener(MODEL_ACTIVE_EVENT, onModelPanelActive);
-    return () => {
-      window.removeEventListener(MODEL_ACTIVE_EVENT, onModelPanelActive);
-    };
-  }, []);
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -1517,56 +1469,17 @@ export function App({
               workspaceActions.loadProviders().catch(() => null),
               workspaceActions.loadEnv().catch(() => null),
             ]).then(([preflight, providers, env]) => {
-              let nodeVersion = '';
-              let npmVersion = '';
-              let authSource = '';
+              const sys = collectSystemInfo(preflight, env);
 
-              if (preflight) {
-                for (const cell of preflight.cells) {
-                  const d = cell.detail as Record<string, string> | undefined;
-                  if (cell.kind === 'node_version' && d?.version) {
-                    nodeVersion = d.version;
-                  } else if (cell.kind === 'npm' && d?.version) {
-                    npmVersion = String(d.version).replace(/^npm\s*/i, '');
-                  } else if (cell.kind === 'auth' && d?.source) {
-                    authSource = d.source;
-                  }
-                }
-              }
-
+              let authSource = sys.authSource;
               if (!authSource && providers?.current?.authType) {
                 authSource = providers.current.authType;
               }
 
-              let platformStr = '';
-              let sandboxStr = 'no sandbox';
-              let proxyStr = 'no proxy';
-              let memoryUsage = '';
-
-              if (env) {
-                for (const cell of env.cells) {
-                  if (cell.kind === 'platform') {
-                    platformStr = `${cell.name} ${cell.value ?? ''}`.trim();
-                  } else if (
-                    cell.kind === 'sandbox' &&
-                    cell.name === 'SANDBOX'
-                  ) {
-                    sandboxStr = cell.value || 'no sandbox';
-                  } else if (
-                    cell.kind === 'proxy' &&
-                    cell.present &&
-                    cell.value
-                  ) {
-                    proxyStr = `${cell.name}: ${cell.value}`;
-                  } else if (cell.kind === 'memory' && cell.value) {
-                    memoryUsage = cell.value;
-                  }
-                }
-              }
-
               const runtimeParts: string[] = [];
-              if (nodeVersion) runtimeParts.push(`Node.js v${nodeVersion}`);
-              if (npmVersion) runtimeParts.push(`npm ${npmVersion}`);
+              if (sys.nodeVersion)
+                runtimeParts.push(`Node.js v${sys.nodeVersion}`);
+              if (sys.npmVersion) runtimeParts.push(`npm ${sys.npmVersion}`);
 
               let formattedAuth = '';
               if (authSource) {
@@ -1580,6 +1493,9 @@ export function App({
                 }
               }
 
+              const platformStr = `${sys.platform} ${sys.arch}`.trim();
+              const curModel = currentModelRef.current;
+              const conn = connectionRef.current;
               const info: StatusInfo = {
                 cliVersion: WEB_SHELL_VERSION,
                 runtime: runtimeParts.join(' / '),
@@ -1587,20 +1503,20 @@ export function App({
                 auth: formattedAuth,
                 baseUrl: providers?.current?.baseUrl || '',
                 model:
-                  currentModel ||
-                  connection.currentModel ||
+                  curModel ||
+                  conn.currentModel ||
                   providers?.current?.modelId ||
                   '',
                 fastModel:
                   providers?.current?.fastModelId ||
-                  currentModel ||
-                  connection.currentModel ||
+                  curModel ||
+                  conn.currentModel ||
                   providers?.current?.modelId ||
                   '',
-                sessionId: connection.sessionId || '',
-                sandbox: sandboxStr,
-                proxy: proxyStr,
-                memoryUsage,
+                sessionId: conn.sessionId || '',
+                sandbox: sys.sandbox,
+                proxy: sys.proxy,
+                memoryUsage: sys.memoryUsage,
               };
 
               store.dispatch([
@@ -1616,37 +1532,16 @@ export function App({
               workspaceActions.loadEnv().catch(() => null),
             ])
               .then(([preflight, env]) => {
+                const sys = collectSystemInfo(preflight, env);
                 const sysInfo: Record<string, string> = {
                   cliVersion: WEB_SHELL_VERSION,
                 };
-                if (preflight) {
-                  for (const cell of preflight.cells) {
-                    const d = cell.detail as Record<string, string> | undefined;
-                    if (cell.kind === 'node_version' && d?.version) {
-                      sysInfo.nodeVersion = d.version;
-                    } else if (cell.kind === 'npm' && d?.version) {
-                      sysInfo.npmVersion = String(d.version).replace(
-                        /^npm\s*/i,
-                        '',
-                      );
-                    }
-                  }
-                }
-                if (env) {
-                  for (const cell of env.cells) {
-                    if (cell.kind === 'platform') {
-                      sysInfo.platform = cell.name;
-                      if (cell.value) sysInfo.arch = cell.value;
-                    } else if (
-                      cell.kind === 'sandbox' &&
-                      cell.name === 'SANDBOX'
-                    ) {
-                      sysInfo.sandbox = cell.value || 'none';
-                    } else if (cell.kind === 'memory' && cell.value) {
-                      sysInfo.memoryUsage = cell.value;
-                    }
-                  }
-                }
+                if (sys.nodeVersion) sysInfo.nodeVersion = sys.nodeVersion;
+                if (sys.npmVersion) sysInfo.npmVersion = sys.npmVersion;
+                if (sys.platform) sysInfo.platform = sys.platform;
+                if (sys.arch) sysInfo.arch = sys.arch;
+                if (sys.sandbox) sysInfo.sandbox = sys.sandbox;
+                if (sys.memoryUsage) sysInfo.memoryUsage = sys.memoryUsage;
                 if (onBugReportRef.current) {
                   onBugReportRef.current({
                     title: bugTitle,
@@ -1707,9 +1602,6 @@ export function App({
       selectedLanguage,
       t,
       workspaceActions,
-      connection.currentModel,
-      connection.sessionId,
-      currentModel,
     ],
   );
 
@@ -2083,8 +1975,11 @@ export function App({
           </CompactModeContext.Provider>
 
           <div
-            className={styles.footer}
-            style={bottomHidden ? { visibility: 'hidden' } : undefined}
+            className={
+              bottomHidden
+                ? `${styles.footer} ${styles.footerHidden}`
+                : styles.footer
+            }
           >
             {floatingTodos.length > 0 && (
               <div className={styles.bottomPanels}>

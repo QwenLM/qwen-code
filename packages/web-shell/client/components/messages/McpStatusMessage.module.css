@@ -43,6 +43,7 @@
   gap: 6px;
   align-items: baseline;
   min-height: 18px;
+  cursor: pointer;
 }
 
 .selected {

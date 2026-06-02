@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import {
   useAgents,
   useTools,
@@ -414,10 +415,9 @@ export function AgentsMessage({
   const createColorStep = createMethod === 'manual' ? 7 : 5;
 
   // ── Keyboard handler ──
-  useEffect(() => {
-    if (closed || inputFocused) return;
-
-    const handler = (e: KeyboardEvent) => {
+  useDelayedGlobalKeyDown(
+    (e: KeyboardEvent) => {
+      if (closed || inputFocused) return;
       if (e.defaultPrevented) return;
 
       const claim = () => {
@@ -708,40 +708,38 @@ export function AgentsMessage({
           return;
         }
       }
-    };
-
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [
-    closed,
-    inputFocused,
-    topMode,
-    mode,
-    menuIdx,
-    manageStack,
-    manageStep,
-    flatAgents,
-    selectedAgentIdx,
-    manageSelIdx,
-    busy,
-    createGenerating,
-    createStep,
-    createSelIdx,
-    createMethod,
-    createScope,
-    createTotalSteps,
-    createToolsStep,
-    createColorStep,
-    toolCategories,
-    handleClose,
-    managePush,
-    managePop,
-    handleDelete,
-    handleUpdateColor,
-    handleUpdateTools,
-    handleCreateSave,
-    selectedAgent?.tools,
-  ]);
+    },
+    [
+      closed,
+      inputFocused,
+      topMode,
+      mode,
+      menuIdx,
+      manageStack,
+      manageStep,
+      flatAgents,
+      selectedAgentIdx,
+      manageSelIdx,
+      busy,
+      createGenerating,
+      createStep,
+      createSelIdx,
+      createMethod,
+      createScope,
+      createTotalSteps,
+      createToolsStep,
+      createColorStep,
+      toolCategories,
+      handleClose,
+      managePush,
+      managePop,
+      handleDelete,
+      handleUpdateColor,
+      handleUpdateTools,
+      handleCreateSave,
+      selectedAgent?.tools,
+    ],
+  );
 
   // ── Text input key handler ──
   const handleGenerateAgent = useCallback(async () => {

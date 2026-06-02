@@ -122,6 +122,10 @@
   flex-shrink: 0;
 }
 
+.footerHidden {
+  display: none;
+}
+
 .bottomPanels {
   display: flex;
   flex-direction: column;

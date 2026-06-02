@@ -1122,7 +1122,6 @@ class QwenAgent implements Agent {
     try {
       const workspaceCwd = this.workspaceCwd(config);
       const settings = loadSettings(config.getTargetDir());
-      const userSettings = settings.forScope(SettingScope.User).settings;
       const workspaceSettings = settings.forScope(
         SettingScope.Workspace,
       ).settings;
@@ -1213,6 +1212,8 @@ class QwenAgent implements Agent {
         }
       }
 
+      const sharedTokenStorage = new MCPOAuthTokenStorage();
+
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd,
@@ -1223,8 +1224,7 @@ class QwenAgent implements Agent {
             const disabled = config.isMcpServerDisabled(name);
             let hasOAuthTokens = false;
             try {
-              const tokenStorage = new MCPOAuthTokenStorage();
-              const credentials = await tokenStorage.getCredentials(name);
+              const credentials = await sharedTokenStorage.getCredentials(name);
               hasOAuthTokens = credentials !== null;
             } catch {
               // Match CLI: token lookup errors should not break /mcp status.
@@ -1282,9 +1282,7 @@ class QwenAgent implements Agent {
               ? 'extension'
               : workspaceSettings.mcpServers?.[name]
                 ? 'project'
-                : userSettings.mcpServers?.[name]
-                  ? 'user'
-                  : 'user';
+                : 'user';
             if (server && typeof server === 'object') {
               const candidate = server as {
                 command?: unknown;
@@ -2785,10 +2783,15 @@ class QwenAgent implements Agent {
             'Invalid or missing description (max 4096 chars)',
           );
         }
+        // No end-to-end AbortSignal from the bridge ext-method yet.
+        // The bridge may time out via Promise.race, but that only
+        // rejects the caller — this generator keeps running until it
+        // finishes naturally. A real fix requires wiring an abort
+        // signal through the ext-method protocol.
         return (await subagentGenerator(
           description.trim(),
           this.config,
-          new AbortController().signal,
+          AbortSignal.timeout(5 * 60_000),
         )) as unknown as Record<string, unknown>;
       }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {

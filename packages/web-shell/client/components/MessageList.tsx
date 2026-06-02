@@ -267,6 +267,7 @@ export function MessageList({
   const shouldFollow = useRef(true);
   const lastScrollTop = useRef(0);
   const scrollCooldown = useRef(false);
+  const scrollCooldownCount = useRef(0);
   const prevLastUserMsgId = useRef<string | null>(null);
   const prevCatchingUp: MutableRefObject<boolean | undefined> =
     useRef(catchingUp);
@@ -289,11 +290,15 @@ export function MessageList({
     const el = containerRef.current;
     if (!el) return;
     if (el.scrollHeight <= el.clientHeight) return;
+    scrollCooldownCount.current += 1;
+    const gen = scrollCooldownCount.current;
     scrollCooldown.current = true;
     el.scrollTop = el.scrollHeight;
     lastScrollTop.current = el.scrollTop;
     requestAnimationFrame(() => {
-      scrollCooldown.current = false;
+      if (scrollCooldownCount.current === gen) {
+        scrollCooldown.current = false;
+      }
     });
   }, []);
 
@@ -317,7 +322,7 @@ export function MessageList({
       if (hasTailContent && index === tailContentIndex) return ESTIMATE_TAIL;
       return ESTIMATE_MESSAGE;
     },
-    overscan: 5,
+    overscan: 20,
     useAnimationFrameWithResizeObserver: true,
   });
 
