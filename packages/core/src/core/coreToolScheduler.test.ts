@@ -2925,6 +2925,39 @@ describe('CoreToolScheduler request queueing', () => {
     expect(statuses).toContain('error');
   });
 
+  it('continues pending AUTO block handling when PermissionDenied hook fails', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({
+        shouldBlock: true,
+        reason: 'protected write',
+        thinking: 'confirmed',
+      });
+    const { scheduler, onToolCallsUpdate, hookSystem } =
+      createPendingProtectedWriteHarness({ disableHooks: false });
+    hookSystem.firePermissionDeniedEvent.mockRejectedValueOnce(
+      new Error('hook failed'),
+    );
+
+    await (
+      scheduler as unknown as {
+        autoApproveCompatiblePendingTools: (
+          signal: AbortSignal,
+          triggeringCallId: string,
+        ) => Promise<void>;
+      }
+    ).autoApproveCompatiblePendingTools(
+      new AbortController().signal,
+      'approved-sibling',
+    );
+
+    expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalled();
+    const statuses = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0] as ToolCall[])
+      .map((call) => call.status);
+    expect(statuses).toContain('error');
+  });
+
   it('leaves pending protected writes awaiting approval during AUTO fallback', async () => {
     runSideQueryMock.mockReset();
     const { scheduler, onToolCallsUpdate, hookSystem } =

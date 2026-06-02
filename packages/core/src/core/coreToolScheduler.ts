@@ -3348,15 +3348,21 @@ export class CoreToolScheduler {
             !this.config.getDisableAllHooks() &&
             shouldFirePermissionDeniedForAutoMode(decision, outcome)
           ) {
-            await this.config
-              .getHookSystem?.()
-              ?.firePermissionDeniedEvent(
-                pendingTool.request.name,
-                toolParams,
-                pendingTool.request.callId,
-                getAutoModePermissionDeniedReason(decision),
-                signal,
+            try {
+              await this.config
+                .getHookSystem?.()
+                ?.firePermissionDeniedEvent(
+                  pendingTool.request.name,
+                  toolParams,
+                  pendingTool.request.callId,
+                  getAutoModePermissionDeniedReason(decision),
+                  signal,
+                );
+            } catch (hookError) {
+              debugLogger.warn(
+                `PermissionDenied hook failed for pending tool ${pendingTool.request.callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
               );
+            }
           }
           switch (outcome.kind) {
             case 'approved':
