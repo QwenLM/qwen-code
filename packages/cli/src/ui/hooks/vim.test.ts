@@ -2039,38 +2039,38 @@ describe('useVim hook', () => {
 
     describe('p (paste after)', () => {
       it('should paste after cursor', () => {
-        const buffer = createMockBuffer('hello world', [0, 5]);
+        const buffer = createMockBuffer('hello world', [0, 0]);
         const { result } = renderHook(() =>
           useVim(buffer as TextBuffer, mockHandleFinalSubmit),
         );
 
-        // First yank something
+        // yw from col 0 yanks 'hello ' (word + trailing space)
         act(() => result.current.handleInput({ sequence: 'y' }));
         act(() => result.current.handleInput({ sequence: 'w' }));
 
-        // Then paste
+        // Paste after cursor at col 1 (col + 1)
         act(() => result.current.handleInput({ sequence: 'p' }));
 
-        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 6, 0, 6, 'ello');
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 1, 0, 1, 'hello ');
         expect(buffer.vimMoveRight).toHaveBeenCalledWith(1);
       });
     });
 
     describe('P (paste before)', () => {
       it('should paste before cursor', () => {
-        const buffer = createMockBuffer('hello world', [0, 5]);
+        const buffer = createMockBuffer('hello world', [0, 0]);
         const { result } = renderHook(() =>
           useVim(buffer as TextBuffer, mockHandleFinalSubmit),
         );
 
-        // First yank something
+        // yw from col 0 yanks 'hello '
         act(() => result.current.handleInput({ sequence: 'y' }));
         act(() => result.current.handleInput({ sequence: 'w' }));
 
-        // Then paste before
+        // Paste before cursor at col 0
         act(() => result.current.handleInput({ sequence: 'P' }));
 
-        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 5, 0, 5, 'ello');
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 0, 0, 0, 'hello ');
       });
     });
 
