@@ -409,10 +409,7 @@ function normalizeSessionUpdate(
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
       if (!text) return [];
-      const chunkMeta = isRecord(update['_meta']) ? update['_meta'] : undefined;
-      const parentToolCallId = chunkMeta
-        ? getString(chunkMeta, 'parentToolCallId')
-        : undefined;
+      const parentToolCallId = extractParentToolCallId(update);
       return [
         {
           ...base,
@@ -425,20 +422,13 @@ function normalizeSessionUpdate(
     case 'agent_thought_chunk': {
       const text = getTextContent(update['content']);
       if (!text) return [];
-      const thoughtMeta = isRecord(update['_meta'])
-        ? update['_meta']
-        : undefined;
-      const thoughtParentToolCallId = thoughtMeta
-        ? getString(thoughtMeta, 'parentToolCallId')
-        : undefined;
+      const parentToolCallId = extractParentToolCallId(update);
       return [
         {
           ...base,
           type: 'thought.text.delta' as const,
           text,
-          ...(thoughtParentToolCallId
-            ? { parentToolCallId: thoughtParentToolCallId }
-            : {}),
+          ...(parentToolCallId ? { parentToolCallId } : {}),
         },
       ];
     }
@@ -491,6 +481,13 @@ function normalizeSessionUpdate(
         },
       ];
   }
+}
+
+function extractParentToolCallId(
+  update: Record<string, unknown>,
+): string | undefined {
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  return meta ? getString(meta, 'parentToolCallId') : undefined;
 }
 
 function normalizeToolUpdate(
