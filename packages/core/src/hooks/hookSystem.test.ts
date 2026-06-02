@@ -869,6 +869,7 @@ describe('HookSystem', () => {
           tool_name: 'read_file',
           tool_input: { path: 'README.md' },
           tool_use_id: 'call-1',
+          status: 'success' as const,
           tool_response: { output: 'contents' },
         },
       ];

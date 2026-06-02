@@ -720,11 +720,35 @@ function serializeToolResponse(
   // Keep this payload aligned with the persisted ToolCallResponseInfo fields
   // hook authors need for batch-level auditing.
   return {
-    response_parts: response.responseParts,
+    response_parts: response.responseParts.map(summarizeBatchResponsePart),
     result_display: response.resultDisplay,
     error: response.error?.message,
     error_type: response.errorType,
     content_length: response.contentLength,
+  };
+}
+
+function summarizeBatchResponsePart(part: Part): Part {
+  const summarized = part.inlineData
+    ? {
+        ...part,
+        inlineData: {
+          mimeType: part.inlineData.mimeType,
+          data: '<binary omitted>',
+        },
+      }
+    : part;
+
+  if (!summarized.functionResponse?.parts) {
+    return summarized;
+  }
+
+  return {
+    ...summarized,
+    functionResponse: {
+      ...summarized.functionResponse,
+      parts: summarized.functionResponse.parts.map(summarizeBatchResponsePart),
+    },
   };
 }
 
@@ -735,6 +759,7 @@ function toPostToolBatchToolCall(
     tool_name: call.request.name,
     tool_input: call.request.args,
     tool_use_id: call.request.callId,
+    status: call.status,
     tool_response: serializeToolResponse(call.response),
   };
 }

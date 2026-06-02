@@ -448,6 +448,7 @@ describe('toolHookTriggers', () => {
             tool_name: 'read_file',
             tool_input: { path: 'README.md' },
             tool_use_id: 'call-1',
+            status: 'success',
             tool_response: { output: 'contents' },
           },
         ],
@@ -465,6 +466,7 @@ describe('toolHookTriggers', () => {
                 tool_name: 'read_file',
                 tool_input: { path: 'README.md' },
                 tool_use_id: 'call-1',
+                status: 'success',
                 tool_response: { output: 'contents' },
               },
             ],
@@ -472,6 +474,8 @@ describe('toolHookTriggers', () => {
           signal: undefined,
         },
         MessageBusType.HOOK_EXECUTION_RESPONSE,
+        15_000,
+        undefined,
       );
       expect(result).toEqual({
         shouldStop: false,

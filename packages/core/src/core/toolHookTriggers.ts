@@ -24,6 +24,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import type { Part, PartListUnion } from '@google/genai';
 
 const debugLogger = createDebugLogger('TOOL_HOOKS');
+const POST_TOOL_BATCH_HOOK_TIMEOUT_MS = 15_000;
 
 /**
  * Generate a unique tool_use_id for tracking tool executions
@@ -408,6 +409,8 @@ export async function firePostToolBatchHook(
         signal,
       },
       MessageBusType.HOOK_EXECUTION_RESPONSE,
+      POST_TOOL_BATCH_HOOK_TIMEOUT_MS,
+      signal,
     );
 
     if (!response.success || !response.output) {

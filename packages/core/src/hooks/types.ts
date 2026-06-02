@@ -706,6 +706,7 @@ export interface PostToolBatchToolCall {
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_use_id: string;
+  status: 'success' | 'error' | 'cancelled';
   /**
    * Serialized ToolCallResponseInfo fields for the resolved call:
    * response_parts, result_display, error, error_type, and content_length.

@@ -1269,7 +1269,14 @@ describe('CoreToolScheduler', () => {
 
   it('fires PostToolBatch once after a resolved tool batch before completion callback', async () => {
     const executeA = vi.fn().mockResolvedValue({
-      llmContent: 'alpha output',
+      llmContent: [
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'raw-binary-payload',
+          },
+        },
+      ],
       returnDisplay: 'alpha output',
     });
     const executeB = vi.fn().mockResolvedValue({
@@ -1370,14 +1377,30 @@ describe('CoreToolScheduler', () => {
               tool_name: 'alpha',
               tool_input: { value: 'a' },
               tool_use_id: 'call-alpha',
+              status: 'success',
               tool_response: expect.objectContaining({
                 error: undefined,
+                response_parts: [
+                  expect.objectContaining({
+                    functionResponse: expect.objectContaining({
+                      parts: [
+                        {
+                          inlineData: {
+                            mimeType: 'image/png',
+                            data: '<binary omitted>',
+                          },
+                        },
+                      ],
+                    }),
+                  }),
+                ],
               }),
             }),
             expect.objectContaining({
               tool_name: 'beta',
               tool_input: { value: 'b' },
               tool_use_id: 'call-beta',
+              status: 'success',
               tool_response: expect.objectContaining({
                 error: undefined,
               }),

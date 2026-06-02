@@ -789,6 +789,7 @@ describe('HookEventHandler', () => {
           tool_name: 'read_file',
           tool_input: { path: 'README.md' },
           tool_use_id: 'call-1',
+          status: 'success',
           tool_response: { output: 'contents' },
         },
       ]);
@@ -819,6 +820,7 @@ describe('HookEventHandler', () => {
           tool_name: 'shell',
           tool_input: { command: 'pwd' },
           tool_use_id: 'call-2',
+          status: 'success',
           tool_response: { output: '/tmp/project' },
         },
       ]);
@@ -843,6 +845,7 @@ describe('HookEventHandler', () => {
           tool_name: 'shell',
           tool_input: { command: 'pwd' },
           tool_use_id: 'call-2',
+          status: 'success',
           tool_response: { output: '/tmp/project' },
         },
       ]);
