@@ -104,6 +104,20 @@ Save this comment's ID. If template fails or direction is escalated → stop her
 
 #### 2a. Code Review
 
+**Step 1 — Independent proposal (before reading the diff):**
+
+Read only the PR title + "Why it's needed" section. Without looking at the diff, write down what _you_ would do to solve this problem. Be concrete — name the files, the approach, the tradeoffs. This is your independent baseline.
+
+> Why: seeing the diff first anchors your judgment. You'll confirm the PR's approach instead of evaluating whether it's the right approach. Forcing yourself to propose first is the only way to have a real alternative in mind.
+
+**Step 2 — Compare with the diff:**
+
+Now read the diff. Compare the PR's approach against your independent proposal:
+
+- Does the PR's solution match or exceed yours? Or did you find a simpler path it missed?
+- Are there correctness bugs, security holes, or regressions your approach would have avoided?
+- Does the implementation follow the project's conventions, or does it over-abstract / duplicate code / put logic in the wrong package?
+
 Keep it tight — only flag two kinds of issues:
 
 - **Critical blockers** — correctness bugs, security holes, regressions.
@@ -150,15 +164,16 @@ Post a single Stage 2 comment: code review findings + testing result. **Inline t
 
 Don't rush to approve. This is the moment to actually think.
 
-Step back and look at the whole picture — the motivation, the implementation, the test results, the direction signal. Ask yourself:
+Step back and look at the whole picture — the motivation, the implementation, the test results, the direction signal. Go back to the independent proposal you wrote in Stage 2a Step 1, and ask yourself:
 
+- Does the PR's approach match or exceed my independent proposal? Or did I find a simpler path it missed?
 - Does this solve something users actually care about?
 - Is the code straightforward, or does it feel like it's trying too hard?
 - After seeing it run, do the results match what the PR promised?
 - If I had to maintain this in six months, would I curse the author or thank them?
 - Am I approving this because it's genuinely good, or because I ran out of reasons to say no?
 
-If there's a simpler way to solve the same problem — even if it wasn't the contributor's idea — mention it. Not as a blocker, but as an honest question.
+If your independent proposal was materially simpler — say so. Not as a blocker, but as an honest question the contributor should think about.
 
 **Step 1: Post the reflection comment.** Write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
 
