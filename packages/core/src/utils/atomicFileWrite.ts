@@ -139,14 +139,17 @@ export async function atomicWriteFile(
   data: string | Buffer,
   options?: AtomicWriteFileOptions,
   /**
-   * Internal test seam — defaults to real `fs.rename` / `fs.writeFile`.
-   * Tests inject overrides to exercise EXDEV fallback and rename-retry
-   * paths that vitest cannot spy on (ESM exports of `node:fs` are
-   * non-configurable). Production callers never pass this.
+   * Internal test seam — defaults to real `fs.rename` / `fs.writeFile` /
+   * `fs.open`. Tests inject overrides to exercise EXDEV fallback and
+   * rename-retry paths that vitest cannot spy on (ESM exports of `node:fs`
+   * are non-configurable). The `open` seam additionally lets tests assert
+   * the O_EXCL no-clobber create flag on the noFollow EXDEV path.
+   * Production callers never pass this.
    */
   _testFs?: {
     rename?: (s: string, d: string) => Promise<void>;
     writeFile?: typeof fs.writeFile;
+    open?: typeof fs.open;
     chmod?: typeof fs.chmod;
     fchmod?: (fh: fs.FileHandle, mode: number) => Promise<void>;
     unlink?: typeof fs.unlink;
@@ -158,6 +161,7 @@ export async function atomicWriteFile(
   const encoding = options?.encoding ?? 'utf-8';
   const renameImpl = _testFs?.rename ?? fs.rename;
   const writeFileImpl = _testFs?.writeFile ?? fs.writeFile;
+  const openImpl = _testFs?.open ?? fs.open;
   const chmodImpl = _testFs?.chmod ?? fs.chmod;
   const fchmodImpl =
     _testFs?.fchmod ?? ((fh: fs.FileHandle, mode: number) => fh.chmod(mode));
@@ -290,7 +294,7 @@ export async function atomicWriteFile(
               throw unlinkErr;
             }
           }
-          const fd = await fs.open(
+          const fd = await openImpl(
             targetPath,
             fsSync.constants.O_WRONLY |
               fsSync.constants.O_CREAT |
@@ -483,6 +487,7 @@ export function atomicWriteFileSync(
   _testFs?: {
     rename?: (s: string, d: string) => void;
     writeFile?: typeof fsSync.writeFileSync;
+    open?: typeof fsSync.openSync;
     chmod?: typeof fsSync.chmodSync;
     fchmod?: (fd: number, mode: number) => void;
     unlink?: typeof fsSync.unlinkSync;
@@ -494,6 +499,7 @@ export function atomicWriteFileSync(
   const encoding = options?.encoding ?? 'utf-8';
   const renameImpl = _testFs?.rename ?? fsSync.renameSync;
   const writeFileImpl = _testFs?.writeFile ?? fsSync.writeFileSync;
+  const openImpl = _testFs?.open ?? fsSync.openSync;
   const chmodImpl = _testFs?.chmod ?? fsSync.chmodSync;
   const fchmodImpl = _testFs?.fchmod ?? fsSync.fchmodSync;
   const unlinkImpl = _testFs?.unlink ?? fsSync.unlinkSync;
@@ -577,7 +583,7 @@ export function atomicWriteFileSync(
               throw unlinkErr;
             }
           }
-          const fd = fsSync.openSync(
+          const fd = openImpl(
             targetPath,
             fsSync.constants.O_WRONLY |
               fsSync.constants.O_CREAT |

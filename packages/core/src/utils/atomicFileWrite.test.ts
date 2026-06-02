@@ -1564,4 +1564,62 @@ describe('noFollow option — symlink protection', () => {
     expect(orphanCleanupCalls.length).toBeGreaterThanOrEqual(2);
     expect(fsSync.existsSync(target)).toBe(false);
   });
+
+  // PR #4333 review fold-in: the noFollow EXDEV fallback must open the
+  // target with O_EXCL so a symlink racing back into existence between
+  // the pre-open unlink and the open cannot redirect the credential
+  // write (the TOCTOU the whole noFollow branch defends against). The
+  // open/openSync call is routed through the `_testFs` seam specifically
+  // so these tests can assert the no-clobber flag *directly* — dropping
+  // O_EXCL silently re-introduces the symlink-follow hole yet leaves
+  // every behavioral test green (they pre-place a static symlink, so the
+  // unlink-then-open window is never actually raced). The earlier tests
+  // only inject an EEXIST-style error; this asserts the create flags.
+  it('atomicWriteFile: noFollow EXDEV opens the target with O_EXCL (no-clobber create)', async () => {
+    const target = path.join(tmpDir, 'oexcl-async.txt');
+    const exdevRename = async () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+    const openSpy = vi.fn(fs.open);
+
+    await atomicWriteFile(
+      target,
+      'NEW',
+      { noFollow: true },
+      { rename: exdevRename, open: openSpy },
+    );
+
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    const flags = openSpy.mock.calls[0][1] as number;
+    // The load-bearing assertion: O_EXCL must be set (no-clobber create).
+    expect(flags & fsSync.constants.O_EXCL).toBe(fsSync.constants.O_EXCL);
+    expect(flags & fsSync.constants.O_CREAT).toBe(fsSync.constants.O_CREAT);
+    // Sanity: the write genuinely went through the seam-routed open.
+    expect(await fs.readFile(target, 'utf-8')).toBe('NEW');
+  });
+
+  it('atomicWriteFileSync: noFollow EXDEV opens the target with O_EXCL (no-clobber create)', () => {
+    const target = path.join(tmpDir, 'oexcl-sync.txt');
+    const exdevRename = () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+    const openSpy = vi.fn(fsSync.openSync);
+
+    atomicWriteFileSync(
+      target,
+      'NEW',
+      { noFollow: true },
+      { rename: exdevRename, open: openSpy },
+    );
+
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    const flags = openSpy.mock.calls[0][1] as number;
+    expect(flags & fsSync.constants.O_EXCL).toBe(fsSync.constants.O_EXCL);
+    expect(flags & fsSync.constants.O_CREAT).toBe(fsSync.constants.O_CREAT);
+    expect(fsSync.readFileSync(target, 'utf-8')).toBe('NEW');
+  });
 });
