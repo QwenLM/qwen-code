@@ -220,9 +220,11 @@ function writeClipboard(text: string): void {
       linuxWriteCmd = null;
       for (const [bin, args] of candidates) {
         try {
-          const child = execFile(bin, args, cb);
-          child.stdin?.end(text);
-          child.unref();
+          execFileSync(bin, args, {
+            input: text,
+            timeout: 200,
+            stdio: ['pipe', 'pipe', 'ignore'],
+          });
           linuxWriteCmd = [bin, ...args];
           return;
         } catch {
