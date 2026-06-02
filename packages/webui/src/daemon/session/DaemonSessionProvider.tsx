@@ -508,12 +508,11 @@ export function DaemonSessionProvider({
                     : undefined;
                 setPromptStatus('idle');
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                store.reset();
                 if (reason === 'epoch_reset') {
-                  store.reset();
                   activeSession.setLastEventId(0);
                 } else if (reason !== 'ring_evicted') {
                   resyncRequested = true;
-                  store.reset();
                   session = undefined;
                   sessionRef.current = undefined;
                   setConnection((current) => ({

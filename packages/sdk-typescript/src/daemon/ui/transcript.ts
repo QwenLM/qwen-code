@@ -316,7 +316,7 @@ function handleStateResyncRequired(
   appendStatusBlock(
     state,
     'error',
-    `State resync required: ${formatMissedRange(event.lastDeliveredId, event.earliestAvailableId)}. Reload the session to recover.`,
+    `State resync required: ${formatMissedRange(event.lastDeliveredId, event.earliestAvailableId)}.`,
     event,
   );
 }

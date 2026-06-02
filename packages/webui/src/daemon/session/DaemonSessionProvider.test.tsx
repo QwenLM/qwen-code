@@ -1934,7 +1934,7 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('clears awaitingResync on replay_complete after ring-evicted resync', async () => {
+  it('resets store on ring-evicted resync so replay events rebuild transcript', async () => {
     const liveDelivered = createDeferred<void>();
     const session = createMockSession({
       lastEventId: 10,
@@ -1951,12 +1951,23 @@ describe('DaemonSessionProvider', () => {
           },
         };
         yield {
+          id: 12,
           v: 1,
-          type: 'replay_complete',
-          data: { replayedCount: 0 },
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'replayed history' },
+            },
+          },
         };
         yield {
-          id: 12,
+          v: 1,
+          type: 'replay_complete',
+          data: { replayedCount: 1 },
+        };
+        yield {
+          id: 13,
           v: 1,
           type: 'session_update',
           data: {
@@ -1999,7 +2010,19 @@ describe('DaemonSessionProvider', () => {
       expect.arrayContaining([
         expect.objectContaining({
           kind: 'assistant',
+          text: 'replayed history',
+        }),
+        expect.objectContaining({
+          kind: 'assistant',
           text: 'live after replay',
+        }),
+      ]),
+    );
+    expect(blocks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'error',
+          text: expect.stringContaining('State resync required'),
         }),
       ]),
     );
@@ -2078,7 +2101,7 @@ describe('DaemonSessionProvider', () => {
       await firstStreamDone.promise;
       await flushPromises();
     });
-    expect(blocks).toEqual(
+    expect(blocks).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: 'error',
