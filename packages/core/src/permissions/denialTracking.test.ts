@@ -8,7 +8,9 @@ import { describe, it, expect } from 'vitest';
 import {
   AUTO_MODE_DENIAL_LIMITS,
   createDenialState,
+  formatDenialStateLog,
   isApproveOutcome,
+  isDenialFallbackReason,
   recordAllow,
   recordBlock,
   recordFallbackApprove,
@@ -28,6 +30,35 @@ const FRESH: AutoModeDenialState = {
 describe('createDenialState', () => {
   it('starts with all counters at zero', () => {
     expect(createDenialState()).toEqual(FRESH);
+  });
+});
+
+describe('formatDenialStateLog', () => {
+  it('formats every denial counter in a stable order', () => {
+    expect(
+      formatDenialStateLog({
+        consecutiveBlock: 1,
+        consecutiveUnavailable: 2,
+        totalBlock: 3,
+        totalUnavailable: 4,
+      }),
+    ).toBe(
+      'consecutiveBlock=1, consecutiveUnavailable=2, totalBlock=3, totalUnavailable=4',
+    );
+  });
+});
+
+describe('isDenialFallbackReason', () => {
+  it('accepts denial-tracking fallback reasons', () => {
+    expect(isDenialFallbackReason('consecutive_block')).toBe(true);
+    expect(isDenialFallbackReason('consecutive_unavailable')).toBe(true);
+    expect(isDenialFallbackReason('total_denial')).toBe(true);
+  });
+
+  it('rejects non-denial fallback reasons', () => {
+    expect(isDenialFallbackReason('ask_rule')).toBe(false);
+    expect(isDenialFallbackReason('safety_check')).toBe(false);
+    expect(isDenialFallbackReason('')).toBe(false);
   });
 });
 
@@ -114,14 +145,34 @@ describe('shouldFallback', () => {
     });
   });
 
-  it('does NOT trigger on totalBlock alone (telemetry-only)', () => {
+  it('triggers fallback after 20 total denials even when they are not consecutive', () => {
     let s: AutoModeDenialState = FRESH;
-    for (let i = 0; i < 50; i++) {
-      s = recordBlock(s);
+    for (let i = 0; i < AUTO_MODE_DENIAL_LIMITS.maxTotalDenials - 1; i++) {
+      s = i % 2 === 0 ? recordBlock(s) : recordUnavailable(s);
       s = recordAllow(s); // cycle block→allow so consecutive resets each round
     }
-    expect(s.totalBlock).toBe(50);
+    expect(s.totalBlock + s.totalUnavailable).toBe(19);
     expect(shouldFallback(s)).toEqual({ fallback: false });
+    s = recordBlock(s);
+    expect(s.totalBlock + s.totalUnavailable).toBe(20);
+    expect(shouldFallback(s)).toEqual({
+      fallback: true,
+      reason: 'total_denial',
+    });
+  });
+
+  it('gives total-denial fallback precedence over consecutive thresholds', () => {
+    const s: AutoModeDenialState = {
+      consecutiveBlock: AUTO_MODE_DENIAL_LIMITS.maxConsecutiveBlock,
+      consecutiveUnavailable: 0,
+      totalBlock: AUTO_MODE_DENIAL_LIMITS.maxTotalDenials,
+      totalUnavailable: 0,
+    };
+
+    expect(shouldFallback(s)).toEqual({
+      fallback: true,
+      reason: 'total_denial',
+    });
   });
 });
 
@@ -153,7 +204,7 @@ describe('recordFallbackApprove', () => {
     expect(shouldFallback(s).fallback).toBe(false);
   });
 
-  it('preserves total counters (telemetry)', () => {
+  it('preserves total counters below the total denial cap', () => {
     let s: AutoModeDenialState = FRESH;
     s = recordBlock(s);
     s = recordUnavailable(s);
@@ -161,6 +212,37 @@ describe('recordFallbackApprove', () => {
     s = recordFallbackApprove(s);
     expect(s.totalBlock).toBe(1);
     expect(s.totalUnavailable).toBe(2);
+  });
+
+  it('resets total counters after the user approves a total-cap fallback prompt', () => {
+    let s: AutoModeDenialState = FRESH;
+    for (let i = 0; i < AUTO_MODE_DENIAL_LIMITS.maxTotalDenials; i++) {
+      s = recordBlock(s);
+      s = recordAllow(s);
+    }
+    expect(shouldFallback(s)).toEqual({
+      fallback: true,
+      reason: 'total_denial',
+    });
+
+    s = recordFallbackApprove(s);
+
+    expect(s.consecutiveBlock).toBe(0);
+    expect(s.consecutiveUnavailable).toBe(0);
+    expect(s.totalBlock).toBe(0);
+    expect(s.totalUnavailable).toBe(0);
+    expect(shouldFallback(s)).toEqual({ fallback: false });
+  });
+
+  it('resets all counters when total and consecutive caps overlap', () => {
+    const s: AutoModeDenialState = {
+      consecutiveBlock: AUTO_MODE_DENIAL_LIMITS.maxConsecutiveBlock,
+      consecutiveUnavailable: 0,
+      totalBlock: AUTO_MODE_DENIAL_LIMITS.maxTotalDenials,
+      totalUnavailable: 0,
+    };
+
+    expect(recordFallbackApprove(s)).toEqual(FRESH);
   });
 
   it('is a no-op when both consecutive counters are already zero', () => {
@@ -203,5 +285,6 @@ describe('AUTO_MODE_DENIAL_LIMITS', () => {
   it('is frozen at the documented values', () => {
     expect(AUTO_MODE_DENIAL_LIMITS.maxConsecutiveBlock).toBe(3);
     expect(AUTO_MODE_DENIAL_LIMITS.maxConsecutiveUnavailable).toBe(2);
+    expect(AUTO_MODE_DENIAL_LIMITS.maxTotalDenials).toBe(20);
   });
 });

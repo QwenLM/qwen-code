@@ -545,7 +545,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           setLivePanelFocused(false);
           return true;
         }
-        if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
+        if (
+          key.sequence &&
+          key.sequence.length === 1 &&
+          !key.ctrl &&
+          !key.meta
+        ) {
           setLivePanelFocused(false);
           return false;
         }

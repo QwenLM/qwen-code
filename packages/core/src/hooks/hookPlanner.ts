@@ -74,6 +74,11 @@ export function getHookMatcherTarget(
   }
 }
 
+export function hookEventSupportsMatcher(eventName: HookEventName): boolean {
+  const target = getHookMatcherTarget(eventName);
+  return typeof target === 'object' && target !== null;
+}
+
 /**
  * Hook planner that selects matching hooks and creates execution plans
  */
