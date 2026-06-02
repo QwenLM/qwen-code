@@ -1107,13 +1107,20 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           case '~': {
             const [startRow, startCol] = buffer.cursor;
             const line = buffer.lines[startRow] ?? '';
-            let col = startCol;
-            for (let i = 0; i < repeatCount && col < line.length; i++) {
-              const ch = line[col];
-              const toggled =
-                ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase();
-              buffer.replaceRange(startRow, col, startRow, col + 1, toggled);
-              col++;
+            const count = Math.min(repeatCount, line.length - startCol);
+            if (count > 0) {
+              const toggled = [...line.slice(startCol, startCol + count)]
+                .map((ch) =>
+                  ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase(),
+                )
+                .join('');
+              buffer.replaceRange(
+                startRow,
+                startCol,
+                startRow,
+                startCol + count,
+                toggled,
+              );
             }
             dispatch({ type: 'CLEAR_COUNT' });
             return true;
