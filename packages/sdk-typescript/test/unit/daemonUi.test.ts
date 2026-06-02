@@ -6188,6 +6188,14 @@ describe('parallel subAgent text interleaving fix', () => {
     ) as { streaming?: boolean } | undefined;
     expect(scalarBlock?.streaming).toBe(true);
     expect(state.activeAssistantBlockId).toBeDefined();
+
+    const keyedBlock = state.blocks.find(
+      (b) =>
+        b.kind === 'assistant' &&
+        (b as { parentToolCallId?: string }).parentToolCallId === 'task-K',
+    ) as { streaming?: boolean } | undefined;
+    expect(keyedBlock?.streaming).toBe(false);
+    expect(state.activeAssistantBlockByParent['task-K']).toBeUndefined();
   });
 
   it('T15: finishAssistant finalizes both scalar and keyed blocks', () => {
