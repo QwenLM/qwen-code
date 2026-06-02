@@ -10,15 +10,16 @@ import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { join } from 'path';
+import { pathToFileURL } from 'node:url';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import {
   createDebugLogger,
   encodeInsightErrorMessage,
   encodeInsightProgressMessage,
   encodeInsightReadyMessage,
+  openBrowserSecurely,
   Storage,
 } from '@qwen-code/qwen-code-core';
-import open from 'open';
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -221,18 +222,20 @@ export const insightCommand: SlashCommand = {
         Date.now(),
       );
 
-      try {
-        await open(outputPath);
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Opening insights in your browser: {{path}}', {
+            path: outputPath,
+          }),
+        },
+        Date.now(),
+      );
 
-        context.ui.addItem(
-          {
-            type: MessageType.INFO,
-            text: t('Opening insights in your browser: {{path}}', {
-              path: outputPath,
-            }),
-          },
-          Date.now(),
-        );
+      try {
+        await openBrowserSecurely(pathToFileURL(outputPath).href, {
+          allowFile: true,
+        });
       } catch (browserError) {
         logger.error('Failed to open browser automatically:', browserError);
 

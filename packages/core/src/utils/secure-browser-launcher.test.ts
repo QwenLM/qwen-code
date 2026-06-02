@@ -23,12 +23,14 @@ describe('secure-browser-launcher', () => {
     vi.clearAllMocks();
     mockExecFile.mockResolvedValue({ stdout: '', stderr: '' });
     originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    vi.stubEnv('BROWSER', '');
   });
 
   afterEach(() => {
     if (originalPlatform) {
       Object.defineProperty(process, 'platform', originalPlatform);
     }
+    vi.unstubAllEnvs();
   });
 
   function setPlatform(platform: string) {
@@ -68,6 +70,24 @@ describe('secure-browser-launcher', () => {
       );
       await expect(openBrowserSecurely('ftp://example.com')).rejects.toThrow(
         'Unsafe protocol',
+      );
+    });
+
+    it('should allow file URLs only when explicitly requested', async () => {
+      setPlatform('linux');
+
+      await expect(openBrowserSecurely('file:///tmp/report.html')).rejects.toThrow(
+        'Unsafe protocol',
+      );
+
+      await openBrowserSecurely('file:///tmp/report.html', {
+        allowFile: true,
+      });
+
+      expect(mockExecFile).toHaveBeenCalledWith(
+        'xdg-open',
+        ['file:///tmp/report.html'],
+        expect.any(Object),
       );
     });
 
@@ -196,6 +216,19 @@ describe('secure-browser-launcher', () => {
       setPlatform('aix');
       await expect(openBrowserSecurely('https://example.com')).rejects.toThrow(
         'Unsupported platform',
+      );
+    });
+
+    it('should prefer BROWSER when it is configured', async () => {
+      setPlatform('linux');
+      vi.stubEnv('BROWSER', 'firefox --new-tab');
+
+      await openBrowserSecurely('https://example.com');
+
+      expect(mockExecFile).toHaveBeenCalledWith(
+        'firefox',
+        ['--new-tab', 'https://example.com'],
+        expect.any(Object),
       );
     });
   });

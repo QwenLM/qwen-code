@@ -18,7 +18,7 @@ const execFileAsync = promisify(execFile);
  * @param url The URL to validate
  * @throws Error if the URL is invalid or uses an unsafe protocol
  */
-function validateUrl(url: string): void {
+function validateUrl(url: string, { allowFile = false } = {}): void {
   let parsedUrl: URL;
 
   try {
@@ -27,10 +27,16 @@ function validateUrl(url: string): void {
     throw new Error(`Invalid URL: ${url}`);
   }
 
-  // Only allow HTTP and HTTPS protocols
-  if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+  const allowedProtocols = allowFile
+    ? ['http:', 'https:', 'file:']
+    : ['http:', 'https:'];
+
+  // Only allow browser-safe protocols by default.
+  if (!allowedProtocols.includes(parsedUrl.protocol)) {
     throw new Error(
-      `Unsafe protocol: ${parsedUrl.protocol}. Only HTTP and HTTPS are allowed.`,
+      `Unsafe protocol: ${parsedUrl.protocol}. Only ${allowedProtocols.join(
+        ', ',
+      )} are allowed.`,
     );
   }
 
@@ -49,51 +55,67 @@ function validateUrl(url: string): void {
  * and resolves successfully to prevent application crashes.
  *
  * @param url - The URL to open.
+ * @param options.allowFile - Allow file:// URLs for locally generated reports.
  * @returns A promise that resolves when the attempt is made (whether successful or logged).
  */
-export async function openBrowserSecurely(url: string): Promise<void> {
+export async function openBrowserSecurely(
+  url: string,
+  browserOptions: { allowFile?: boolean } = {},
+): Promise<void> {
   // Validate the URL first
-  validateUrl(url);
+  validateUrl(url, browserOptions);
 
   const platformName = platform();
   let command: string;
   let args: string[];
 
-  switch (platformName) {
-    case 'darwin':
-      // macOS
-      command = 'open';
-      args = [url];
-      break;
+  const browserEnv = process.env['BROWSER']?.trim();
+  const browserBlocklist = ['www-browser'];
+  if (browserEnv && !browserBlocklist.includes(browserEnv)) {
+    const browserCommand = parseBrowserCommand(browserEnv);
+    if (browserCommand) {
+      command = browserCommand.command;
+      args = [...browserCommand.args, url];
+    } else {
+      throw new Error('Invalid BROWSER environment variable');
+    }
+  } else {
+    switch (platformName) {
+      case 'darwin':
+        // macOS
+        command = 'open';
+        args = [url];
+        break;
 
-    case 'win32':
-      // Windows - use PowerShell with Start-Process
-      // This avoids the cmd.exe shell which is vulnerable to injection
-      command = 'powershell.exe';
-      args = [
-        '-NoProfile',
-        '-NonInteractive',
-        '-WindowStyle',
-        'Hidden',
-        '-Command',
-        `Start-Process '${url.replace(/'/g, "''")}'`,
-      ];
-      break;
+      case 'win32':
+        // Windows - use PowerShell with Start-Process
+        // This avoids the cmd.exe shell which is vulnerable to injection
+        command = 'powershell.exe';
+        args = [
+          '-NoProfile',
+          '-NonInteractive',
+          '-WindowStyle',
+          'Hidden',
+          '-Command',
+          `Start-Process '${url.replace(/'/g, "''")}'`,
+        ];
+        break;
 
-    case 'linux':
-    case 'freebsd':
-    case 'openbsd':
-      // Linux and BSD variants
-      // Try xdg-open first, fall back to other options
-      command = 'xdg-open';
-      args = [url];
-      break;
+      case 'linux':
+      case 'freebsd':
+      case 'openbsd':
+        // Linux and BSD variants
+        // Try xdg-open first, fall back to other options
+        command = 'xdg-open';
+        args = [url];
+        break;
 
-    default:
-      throw new Error(`Unsupported platform: ${platformName}`);
+      default:
+        throw new Error(`Unsupported platform: ${platformName}`);
+    }
   }
 
-  const options: Record<string, unknown> = {
+  const execOptions: Record<string, unknown> = {
     // Don't inherit parent's environment to avoid potential issues
     env: {
       ...process.env,
@@ -106,7 +128,7 @@ export async function openBrowserSecurely(url: string): Promise<void> {
   };
 
   try {
-    await execFileAsync(command, args, options);
+    await execFileAsync(command, args, execOptions);
   } catch (_error) {
     // For Linux, try fallback commands if xdg-open fails
     if (
@@ -126,7 +148,7 @@ export async function openBrowserSecurely(url: string): Promise<void> {
 
       for (const fallbackCommand of fallbackCommands) {
         try {
-          await execFileAsync(fallbackCommand, [url], options);
+          await execFileAsync(fallbackCommand, [url], execOptions);
           return; // Success!
         } catch {
           // Try next command
@@ -143,6 +165,27 @@ export async function openBrowserSecurely(url: string): Promise<void> {
     /* eslint-enable no-console */
     return;
   }
+}
+
+function parseBrowserCommand(
+  browserEnv: string,
+): { command: string; args: string[] } | undefined {
+  const parts =
+    browserEnv.match(/"[^"]*"|'[^']*'|[^\s]+/g)?.map((part) => {
+      if (
+        (part.startsWith('"') && part.endsWith('"')) ||
+        (part.startsWith("'") && part.endsWith("'"))
+      ) {
+        return part.slice(1, -1);
+      }
+      return part;
+    }) ?? [];
+
+  const [command, ...args] = parts;
+  if (!command) {
+    return undefined;
+  }
+  return { command, args };
 }
 
 /**

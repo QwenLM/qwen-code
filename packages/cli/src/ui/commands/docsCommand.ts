@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import open from 'open';
 import process from 'node:process';
 import {
   type CommandContext,
   type SlashCommand,
   CommandKind,
 } from './types.js';
+import { openBrowserSecurely } from '@qwen-code/qwen-code-core';
 import { MessageType } from '../types.js';
 import { t, getCurrentLanguage } from '../../i18n/index.js';
 
@@ -57,7 +57,7 @@ export const docsCommand: SlashCommand = {
         },
         Date.now(),
       );
-      await open(docsUrl);
+      await openBrowserSecurely(docsUrl);
     }
     return;
   },

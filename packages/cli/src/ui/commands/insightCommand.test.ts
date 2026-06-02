@@ -6,22 +6,28 @@
 
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import path from 'path';
-import open from 'open';
+import { pathToFileURL } from 'node:url';
 import { parseInsightMessage, Storage } from '@qwen-code/qwen-code-core';
 import { insightCommand } from './insightCommand.js';
 import type { CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 const mockGenerateStaticInsight = vi.fn();
+const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    openBrowserSecurely: mockOpenBrowserSecurely,
+  };
+});
 
 vi.mock('../../services/insight/generators/StaticInsightGenerator.js', () => ({
   StaticInsightGenerator: vi.fn(() => ({
     generateStaticInsight: mockGenerateStaticInsight,
   })),
-}));
-
-vi.mock('open', () => ({
-  default: vi.fn(),
 }));
 
 describe('insightCommand', () => {
@@ -32,7 +38,8 @@ describe('insightCommand', () => {
     mockGenerateStaticInsight.mockResolvedValue(
       path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
     );
-    vi.mocked(open).mockResolvedValue(undefined as never);
+    mockOpenBrowserSecurely.mockClear();
+    mockOpenBrowserSecurely.mockResolvedValue(undefined);
 
     mockContext = createMockCommandContext({
       services: {
@@ -61,6 +68,12 @@ describe('insightCommand', () => {
     expect(mockGenerateStaticInsight).toHaveBeenCalledWith(
       path.join(Storage.getRuntimeBaseDir(), 'projects'),
       expect.any(Function),
+    );
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+      pathToFileURL(
+        path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
+      ).href,
+      { allowFile: true },
     );
   });
 
@@ -198,7 +211,7 @@ describe('insightCommand', () => {
     expect((result as { content: string }).content).toContain(
       path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
     );
-    expect(open).not.toHaveBeenCalled();
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
   });
 
   it('non_interactive: returns error message when generation fails', async () => {
@@ -227,6 +240,6 @@ describe('insightCommand', () => {
       messageType: 'error',
     });
     expect((result as { content: string }).content).toContain('disk full');
-    expect(open).not.toHaveBeenCalled();
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
   });
 });
