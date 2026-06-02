@@ -1356,6 +1356,54 @@ describe('composePostCompactHistory — subagent snapshot', () => {
     expect(flat).toContain('&lt;evil&gt;');
   });
 
+  it('caps the snapshot at MAX_SUBAGENT_SNAPSHOT_COUNT and notes the overflow', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'u' }] },
+      { role: 'model', parts: [{ text: 'm' }] },
+    ];
+    // Build 35 tasks; cap is 30, so 5 should overflow into the trailing line.
+    const subs = Array.from({ length: 35 }, (_, i) => ({
+      id: `agent-${i}`,
+      description: `task ${i}`,
+      status: 'running' as const,
+      startTime: i,
+    }));
+    const result = await composePostCompactHistory(history, 'SUMMARY', {
+      runningSubagents: subs,
+    });
+    const flat = result
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+    // Newest 30 retained (agent-5 .. agent-34); oldest 5 dropped (agent-0..4).
+    expect(flat).toContain('agent-34');
+    expect(flat).toContain('agent-5');
+    expect(flat).not.toMatch(/\bagent-0\b/);
+    expect(flat).not.toMatch(/\bagent-4\b/);
+    expect(flat).toMatch(/and 5 older tasks not shown/);
+  });
+
+  it('uses singular "task" in the overflow line when exactly one is hidden', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'u' }] },
+      { role: 'model', parts: [{ text: 'm' }] },
+    ];
+    const subs = Array.from({ length: 31 }, (_, i) => ({
+      id: `agent-${i}`,
+      description: `t`,
+      status: 'running' as const,
+      startTime: i,
+    }));
+    const result = await composePostCompactHistory(history, 'SUMMARY', {
+      runningSubagents: subs,
+    });
+    const flat = result
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+    expect(flat).toMatch(/and 1 older task not shown/);
+  });
+
   it('sorts subagents by startTime ascending', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'u' }] },

@@ -674,6 +674,14 @@ const PLAN_MODE_REMINDER_TEXT =
  *  it a full progress log. */
 const MAX_SUBAGENT_DESC_CHARS = 200;
 
+/** Cap on the number of subagent rows the snapshot lists. Defends against
+ *  pathological sessions with hundreds of backgrounded agents that never
+ *  completed — without this, a malformed registry could produce a multi-KB
+ *  attachment block that consumes the post-compact prompt budget. Newest
+ *  agents (highest startTime) are kept; older ones are dropped with a
+ *  trailing "and N more" line so the model knows the snapshot is partial. */
+const MAX_SUBAGENT_SNAPSHOT_COUNT = 30;
+
 function buildPlanModeReminderPart(): Part {
   return { text: PLAN_MODE_REMINDER_TEXT };
 }
@@ -694,13 +702,23 @@ function escapeForXmlText(text: string): string {
 function buildSubagentSnapshotPart(snaps: SubagentSnapshot[]): Part | null {
   if (snaps.length === 0) return null;
   const sorted = [...snaps].sort((a, b) => a.startTime - b.startTime);
-  const lines = sorted.map((s) => {
+  // Keep the NEWEST rows (highest startTime). When over the cap, the model
+  // is most likely interacting with recent tasks; older long-runners are
+  // surfaced via the trailing summary line so nothing silently disappears.
+  const overflow = Math.max(0, sorted.length - MAX_SUBAGENT_SNAPSHOT_COUNT);
+  const shown = overflow > 0 ? sorted.slice(overflow) : sorted;
+  const lines = shown.map((s) => {
     const truncated =
       s.description.length > MAX_SUBAGENT_DESC_CHARS
         ? s.description.slice(0, MAX_SUBAGENT_DESC_CHARS) + '…'
         : s.description;
     return `- [${s.status}] ${s.id}: ${escapeForXmlText(truncated)}`;
   });
+  if (overflow > 0) {
+    lines.push(
+      `- (… and ${overflow} older task${overflow === 1 ? '' : 's'} not shown)`,
+    );
+  }
   return {
     text:
       '<background-tasks>\n' +
