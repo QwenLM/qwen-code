@@ -272,6 +272,26 @@ describe('isAutoModeProtectedWritePath', () => {
     }
   });
 
+  it('re-resolves write paths after symlinks are created', () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-write-path-'));
+
+    try {
+      const protectedDir = path.join(tmpRoot, '.qwen');
+      const settingsPath = path.join(protectedDir, 'settings.json');
+      const linkPath = path.join(tmpRoot, 'scratch');
+      fs.mkdirSync(protectedDir, { recursive: true });
+      fs.writeFileSync(settingsPath, '{}');
+
+      expect(isAutoModeProtectedWritePath(linkPath)).toBe(false);
+
+      fs.symlinkSync(settingsPath, linkPath);
+
+      expect(isAutoModeProtectedWritePath(linkPath)).toBe(true);
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+
   it('caches normalized QWEN_HOME prefixes per configured home', () => {
     const originalQwenHome = process.env['QWEN_HOME'];
     const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-home-cache-'));
