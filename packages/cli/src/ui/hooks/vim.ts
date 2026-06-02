@@ -1439,6 +1439,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             if (normalizedKey.name === 'left') {
               if (state.pendingOperator === 'c')
                 return handleChangeMovement('h');
+              if (state.pendingOperator) {
+                dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+              }
               buffer.vimMoveLeft(repeatCount);
               dispatch({ type: 'CLEAR_COUNT' });
               return true;
@@ -1446,6 +1449,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             if (normalizedKey.name === 'down') {
               if (state.pendingOperator === 'c')
                 return handleChangeMovement('j');
+              if (state.pendingOperator) {
+                dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+              }
               buffer.vimMoveDown(repeatCount);
               dispatch({ type: 'CLEAR_COUNT' });
               return true;
@@ -1453,6 +1459,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             if (normalizedKey.name === 'up') {
               if (state.pendingOperator === 'c')
                 return handleChangeMovement('k');
+              if (state.pendingOperator) {
+                dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+              }
               buffer.vimMoveUp(repeatCount);
               dispatch({ type: 'CLEAR_COUNT' });
               return true;
@@ -1460,6 +1469,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             if (normalizedKey.name === 'right') {
               if (state.pendingOperator === 'c')
                 return handleChangeMovement('l');
+              if (state.pendingOperator) {
+                dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+              }
               buffer.vimMoveRight(repeatCount);
               dispatch({ type: 'CLEAR_COUNT' });
               return true;
