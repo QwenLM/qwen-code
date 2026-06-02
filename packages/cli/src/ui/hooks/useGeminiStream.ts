@@ -1198,11 +1198,15 @@ export const useGeminiStream = (
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      const reasonClause =
+        eventValue?.triggerReason === 'image_overflow'
+          ? `accumulated enough tool screenshots to trigger compaction for ${config.getModel()}`
+          : `approached the input token limit for ${config.getModel()}`;
       return addItem(
         {
           type: 'info',
           text:
-            `IMPORTANT: This conversation approached the input token limit for ${config.getModel()}. ` +
+            `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${eventValue?.originalTokenCount ?? 'unknown'} to ` +
             `${eventValue?.newTokenCount ?? 'unknown'} tokens).`,
@@ -2347,8 +2351,7 @@ export const useGeminiStream = (
           config
             .getChatRecordingService()
             ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
-          // Record in UI history so the transcript stays complete.
-          addItem({ type: MessageType.USER, text: msg }, Date.now());
+          addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
         }
       }
 
@@ -2459,7 +2462,7 @@ export const useGeminiStream = (
             const toolName = toolCall.request.name;
             const fileName = path.basename(filePath);
             const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
-            const clientHistory = await geminiClient?.getHistory();
+            const clientHistory = geminiClient?.getHistoryShallow();
             const toolCallWithSnapshotFilePath = path.join(
               checkpointDir,
               toolCallWithSnapshotFileName,
@@ -2548,6 +2551,22 @@ export const useGeminiStream = (
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
+    registry.setNotificationCallback((displayText, modelText) => {
+      notificationQueueRef.current.push({
+        displayText,
+        modelText,
+        sendMessageType: SendMessageType.Notification,
+      });
+      setNotificationTrigger((n) => n + 1);
+    });
+    return () => {
+      registry.setNotificationCallback(undefined);
+    };
+  }, [config]);
+
+  // Register background shell terminal notification callback onto the shared queue.
+  useEffect(() => {
+    const registry = config.getBackgroundShellRegistry();
     registry.setNotificationCallback((displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,

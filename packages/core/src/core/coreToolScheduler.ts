@@ -51,6 +51,7 @@ import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { escapeSystemReminderTags, escapeXml } from '../utils/xml.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
+import type { MemoryPressureMonitor } from '../services/memoryPressureMonitor.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
@@ -67,11 +68,15 @@ import {
 import {
   applyAutoModeDecision,
   evaluateAutoMode,
+  getAutoModePermissionDeniedReason,
+  shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
 } from '../permissions/autoMode.js';
 import { MAX_TRANSCRIPT_MESSAGES } from '../permissions/classifier-transcript.js';
 import {
+  formatDenialStateLog,
   isApproveOutcome,
+  isDenialFallbackReason,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
@@ -798,6 +803,7 @@ export class CoreToolScheduler {
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private validationRetryCounts = new Map<string, number>();
+  private autoModeFallbackCallIds = new Set<string>();
   // Tool span lifecycle now spans validating → awaiting_approval → executing
   // → terminal, so we hold the span across method boundaries by callId.
   // Decoupling from ToolCall identity is intentional — setStatusInternal
@@ -836,6 +842,10 @@ export class CoreToolScheduler {
     this.getPreferredEditor = options.getPreferredEditor;
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
+  }
+
+  private get memoryMonitor(): MemoryPressureMonitor | undefined {
+    return this.config.getMemoryPressureMonitor?.();
   }
 
   private setStatusInternal(
@@ -1037,6 +1047,7 @@ export class CoreToolScheduler {
         call.tool,
         args as Record<string, unknown>,
         targetCallId,
+        call.request.prompt_id,
       );
       if (invocationOrError instanceof Error) {
         const response = createErrorResponse(
@@ -1249,10 +1260,23 @@ export class CoreToolScheduler {
     }
   }
 
+  /**
+   * Builds a tool invocation and threads optional context (callId,
+   * promptId) into it via duck-typed setters when the invocation
+   * exposes them. Both setters are intentionally optional:
+   * - Existing tools whose invocations do not implement these setters
+   *   stay compatible without any change.
+   * - Future contexts (subagent / direct buildAndExecute / non-scheduler
+   *   callers) may invoke this with fewer arguments and still get a
+   *   valid invocation back.
+   * Production call sites in this scheduler always pass both — see
+   * the setArgs path at L1036 and the schedule path at L1497.
+   */
   private buildInvocation(
     tool: AnyDeclarativeTool,
     args: object,
     callId?: string,
+    promptId?: string,
   ): AnyToolInvocation | Error {
     try {
       const invocation = tool.build(structuredClone(args));
@@ -1260,6 +1284,14 @@ export class CoreToolScheduler {
         const maybeAware = invocation as { setCallId?: (id: string) => void };
         if (typeof maybeAware.setCallId === 'function') {
           maybeAware.setCallId(callId);
+        }
+      }
+      if (promptId) {
+        const maybeAware = invocation as {
+          setPromptId?: (id: string) => void;
+        };
+        if (typeof maybeAware.setPromptId === 'function') {
+          maybeAware.setPromptId(promptId);
         }
       }
       return invocation;
@@ -1498,6 +1530,7 @@ export class CoreToolScheduler {
           toolInstance,
           reqInfo.args,
           reqInfo.callId,
+          reqInfo.prompt_id,
         );
         if (invocationOrError instanceof Error) {
           const baseError = reqInfo.wasOutputTruncated
@@ -1696,7 +1729,9 @@ export class CoreToolScheduler {
               messages,
               config: this.config,
               signal,
-              skipClassifier: fallback.fallback,
+              skipClassifierReason: fallback.fallback
+                ? fallback.reason
+                : undefined,
             });
 
             const outcome = applyAutoModeDecision(
@@ -1704,6 +1739,20 @@ export class CoreToolScheduler {
               this.config,
               denialState,
             );
+            if (
+              !this.config.getDisableAllHooks() &&
+              shouldFirePermissionDeniedForAutoMode(decision, outcome)
+            ) {
+              await this.config
+                .getHookSystem?.()
+                ?.firePermissionDeniedEvent(
+                  canonicalName,
+                  toolParams,
+                  reqInfo.callId,
+                  getAutoModePermissionDeniedReason(decision),
+                  signal,
+                );
+            }
             switch (outcome.kind) {
               case 'approved':
                 this.setToolCallOutcome(
@@ -1713,6 +1762,10 @@ export class CoreToolScheduler {
                 this.setStatusInternal(reqInfo.callId, 'scheduled');
                 continue;
               case 'blocked':
+                debugLogger.warn(
+                  `Auto mode blocked (${outcome.reason}): tool=${canonicalName}, ` +
+                    formatDenialStateLog(denialState),
+                );
                 this.setStatusInternal(
                   reqInfo.callId,
                   'error',
@@ -1729,9 +1782,11 @@ export class CoreToolScheduler {
                 // operators see the cause in the debug log (only when
                 // fallback was specifically armed by denialTracking —
                 // a pmForcedAsk fallback isn't an audit-worthy event).
-                if (fallback.fallback) {
+                if (isDenialFallbackReason(outcome.reason)) {
+                  this.autoModeFallbackCallIds.add(reqInfo.callId);
                   debugLogger.warn(
-                    `Auto mode fallback to manual approval (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                    `Auto mode fallback to manual approval (${outcome.reason}): ` +
+                      formatDenialStateLog(denialState),
                   );
                 }
                 break;
@@ -1863,6 +1918,10 @@ export class CoreToolScheduler {
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.ProceedOnce,
                   );
+                  this.recordAutoModeFallbackResolution(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
                   this.setToolCallOutcome(
                     reqInfo.callId,
                     ToolConfirmationOutcome.ProceedOnce,
@@ -1876,6 +1935,10 @@ export class CoreToolScheduler {
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.Cancel,
                     cancelPayload,
+                  );
+                  this.recordAutoModeFallbackResolution(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.Cancel,
                   );
                   this.setToolCallOutcome(
                     reqInfo.callId,
@@ -2187,22 +2250,7 @@ export class CoreToolScheduler {
 
     this.setToolCallOutcome(callId, outcome);
 
-    // AUTO-mode denialTracking recovery: when the user manually approves a
-    // call that fell back from AUTO (either by streak threshold or by an
-    // explicit ask rule), reset the consecutiveBlock counter so subsequent
-    // calls return to classifier flow. Without this, a session that hit
-    // the denial threshold once would stay in fallback for the rest of
-    // the session even after the user explicitly approves the next call.
-    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
-    // signal that the classifier was correct to block.
-    if (
-      this.config.getApprovalMode() === ApprovalMode.AUTO &&
-      isApproveOutcome(outcome)
-    ) {
-      this.config.setAutoModeDenialState(
-        recordFallbackApprove(this.config.getAutoModeDenialState()),
-      );
-    }
+    this.recordAutoModeFallbackResolution(callId, outcome);
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
       // Use custom cancel message from payload if provided, otherwise use default
@@ -2318,6 +2366,40 @@ export class CoreToolScheduler {
     // (handleConfirmationResponse, outside its catch) so a sister
     // tool's prelude throw can't be mis-attributed to this callId
     // (#4321 review-9 wenshao Critical).
+  }
+
+  private recordAutoModeFallbackResolution(
+    callId: string,
+    outcome: ToolConfirmationOutcome,
+  ): void {
+    const wasAutoModeFallback = this.autoModeFallbackCallIds.delete(callId);
+
+    // AUTO-mode denialTracking recovery: when the user manually approves a
+    // call that fell back because denialTracking was armed, clear the armed
+    // counters so subsequent calls return to classifier flow. Ordinary AUTO
+    // approvals for ask rules must not clear cumulative denial totals.
+    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
+    // signal that the classifier was correct to block.
+    if (
+      this.config.getApprovalMode() === ApprovalMode.AUTO &&
+      wasAutoModeFallback &&
+      isApproveOutcome(outcome)
+    ) {
+      const before = this.config.getAutoModeDenialState();
+      const after = recordFallbackApprove(before);
+      if (after === before) {
+        debugLogger.warn(
+          `Auto mode denial counters already clear after fallback approval: ` +
+            formatDenialStateLog(before),
+        );
+        return;
+      }
+      debugLogger.warn(
+        `Auto mode denial counters reset after fallback approval: ` +
+          `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
+      );
+      this.config.setAutoModeDenialState(after);
+    }
   }
 
   /**
@@ -2560,6 +2642,7 @@ export class CoreToolScheduler {
       // _executeToolCallBody pre-sets status (OK / FAILURE / CANCELLED) via
       // setToolSpan*; finalize without metadata to preserve that.
       this.finalizeToolSpan(callId);
+      this.memoryMonitor?.scheduleCheck();
     }
   }
 

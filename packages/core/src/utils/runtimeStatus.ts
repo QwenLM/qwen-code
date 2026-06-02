@@ -29,9 +29,10 @@
  *   keeps running while no longer serving the recorded session
  *   (e.g. a hypothetical future mode-switch). Not currently invoked.
  *
- * The file is written atomically (tmp-file + rename) and contains a
- * small, stable schema. External consumers should treat unknown fields
- * as forward-compatible additions.
+ * The file is written via `atomicWriteJSON` (write-to-temp + rename,
+ * with in-place fallback when ownership differs).
+ * The schema is small and stable; external consumers should treat
+ * unknown fields as forward-compatible additions.
  */
 
 import * as fs from 'node:fs/promises';
@@ -78,17 +79,11 @@ export interface WriteRuntimeStatusFields {
 }
 
 /**
- * Atomically write the runtime status file at `filePath`.
+ * Write the runtime status file at `filePath`.
  *
- * Writes via tmp-file + rename so an external observer never sees a
- * partially written file: it sees either the previous contents or the
- * fully committed new contents.
- *
- * The parent directory of `filePath` is created on demand. Exceptions
- * from the underlying I/O propagate to the caller; this function does
- * not log or swallow them. Callers that want best-effort semantics
- * should wrap the call in a try/catch. On failure no leftover `.tmp`
- * file is kept on disk.
+ * The parent directory is created on demand. Exceptions propagate to
+ * the caller; callers that want best-effort semantics should wrap in
+ * a try/catch.
  */
 export async function writeRuntimeStatus(
   filePath: string,

@@ -83,6 +83,22 @@ type ToolSpanRecord = {
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
 const shouldThrowToolSpanSetAttribute = vi.hoisted(() => ({ value: false }));
 const shouldThrowToolSpanSetStatus = vi.hoisted(() => ({ value: false }));
+const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const runSideQueryMock = vi.hoisted(() => vi.fn());
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: debugLoggerWarnSpy,
+      error: vi.fn(),
+    }),
+  };
+});
 
 vi.mock('../telemetry/tracer.js', () => ({
   safeSetStatus: (
@@ -95,6 +111,10 @@ vi.mock('../telemetry/tracer.js', () => ({
       // Match production best-effort telemetry behavior.
     }
   },
+}));
+
+vi.mock('../utils/sideQuery.js', () => ({
+  runSideQuery: (...args: unknown[]) => runSideQueryMock(...args),
 }));
 
 function createMockToolSpan(
@@ -479,14 +499,154 @@ async function waitForStatus(
 }
 
 describe('CoreToolScheduler', () => {
+  beforeEach(() => {
+    runSideQueryMock.mockReset();
+  });
+
+  type SchedulerDenialTrackingInternals = {
+    toolCalls: ToolCall[];
+    autoModeFallbackCallIds: Set<string>;
+    _handleConfirmationResponseInner: (
+      callId: string,
+      toolCall: ToolCall,
+      originalOnConfirm: (
+        outcome: ToolConfirmationOutcome,
+        payload?: ToolConfirmationPayload,
+      ) => Promise<void>,
+      outcome: ToolConfirmationOutcome,
+      signal: AbortSignal,
+      payload?: ToolConfirmationPayload,
+    ) => Promise<void>;
+  };
+
+  function createSchedulerForDenialTrackingApprovalTest() {
+    const denialState = {
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 20,
+      totalUnavailable: 0,
+    };
+    const setAutoModeDenialState = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: {
+        getSessionId: () => 'test-session-id',
+        getApprovalMode: () => ApprovalMode.AUTO,
+        getAutoModeDenialState: () => denialState,
+        setAutoModeDenialState,
+        getToolRegistry: () =>
+          ({
+            getTool: () => undefined,
+          }) as unknown as ToolRegistry,
+        getUsageStatisticsEnabled: () => false,
+        getDebugMode: () => false,
+        getChatRecordingService: () => undefined,
+      } as unknown as Config,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Run command',
+      command: 'python',
+      rootCommand: 'python',
+      onConfirm: vi.fn().mockResolvedValue(undefined),
+    };
+    const toolCall = {
+      status: 'awaiting_approval',
+      request: {
+        callId: 'call-1',
+        name: ToolNames.SHELL,
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+      tool: {},
+      confirmationDetails,
+    } as unknown as ToolCall;
+    const internals = scheduler as unknown as SchedulerDenialTrackingInternals;
+    internals.toolCalls = [toolCall];
+    return { internals, toolCall, setAutoModeDenialState };
+  }
+
+  it('does not reset total denial counters for unrelated AUTO approvals', async () => {
+    const { internals, toolCall, setAutoModeDenialState } =
+      createSchedulerForDenialTrackingApprovalTest();
+
+    await internals._handleConfirmationResponseInner(
+      'call-1',
+      toolCall,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.ProceedOnce,
+      new AbortController().signal,
+    );
+
+    expect(setAutoModeDenialState).not.toHaveBeenCalled();
+  });
+
+  it('resets denial counters after approving a denialTracking fallback prompt', async () => {
+    const { internals, toolCall, setAutoModeDenialState } =
+      createSchedulerForDenialTrackingApprovalTest();
+    internals.autoModeFallbackCallIds.add('call-1');
+    debugLoggerWarnSpy.mockClear();
+
+    await internals._handleConfirmationResponseInner(
+      'call-1',
+      toolCall,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.ProceedOnce,
+      new AbortController().signal,
+    );
+
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    });
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Auto mode denial counters reset after fallback approval',
+      ),
+    );
+  });
+
+  it('does not reset denial counters after cancelling a denialTracking fallback prompt', async () => {
+    const { internals, toolCall, setAutoModeDenialState } =
+      createSchedulerForDenialTrackingApprovalTest();
+    internals.autoModeFallbackCallIds.add('call-1');
+
+    await internals._handleConfirmationResponseInner(
+      'call-1',
+      toolCall,
+      vi.fn().mockResolvedValue(undefined),
+      ToolConfirmationOutcome.Cancel,
+      new AbortController().signal,
+    );
+
+    expect(setAutoModeDenialState).not.toHaveBeenCalled();
+  });
+
   function createSchedulerForLegacyToolTests(options: {
     toolsByName: Map<string, MockTool>;
     approvalMode?: ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
     messageBus?: { request: ReturnType<typeof vi.fn> };
+    hookSystem?: {
+      firePermissionDeniedEvent: ReturnType<typeof vi.fn>;
+    };
     disableHooks?: boolean;
+    autoModeDenialState?: {
+      consecutiveBlock: number;
+      consecutiveUnavailable: number;
+      totalBlock: number;
+      totalUnavailable: number;
+    };
+    setAutoModeDenialState?: ReturnType<typeof vi.fn>;
     onAllToolCallsComplete?: ReturnType<typeof vi.fn>;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
+    memoryMonitor?: { scheduleCheck: () => void };
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -522,6 +682,7 @@ describe('CoreToolScheduler', () => {
           model: 'test-model',
           authType: 'gemini',
         }),
+        getModel: () => 'test-model',
         getShellExecutionConfig: () => ({
           terminalWidth: 90,
           terminalHeight: 30,
@@ -536,10 +697,24 @@ describe('CoreToolScheduler', () => {
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
+        getMemoryPressureMonitor: () => options.memoryMonitor,
         getMessageBus: vi.fn().mockReturnValue(options.messageBus),
+        getHookSystem: vi.fn().mockReturnValue(options.hookSystem),
         getDisableAllHooks: vi
           .fn()
           .mockReturnValue(options.disableHooks ?? true),
+        getAutoModeDenialState: () =>
+          options.autoModeDenialState ?? {
+            consecutiveBlock: 0,
+            consecutiveUnavailable: 0,
+            totalBlock: 0,
+            totalUnavailable: 0,
+          },
+        setAutoModeDenialState: options.setAutoModeDenialState ?? vi.fn(),
+        getAutoModeSettings: () => ({}),
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: () => false,
+        }),
         isInteractive: () => true,
         getInputFormat: () => undefined,
         getExperimentalZedIntegration: () => false,
@@ -605,6 +780,43 @@ describe('CoreToolScheduler', () => {
     );
   });
 
+  it('schedules a memory pressure check after tool execution', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'mockTool',
+        new MockTool({
+          name: 'mockTool',
+          execute,
+        }),
+      ],
+    ]);
+    const scheduleCheck = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      memoryMonitor: { scheduleCheck },
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'memory-check',
+          name: 'mockTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-memory-check',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(scheduleCheck).toHaveBeenCalledTimes(1);
+  });
+
   it('applies canonical legacy tool names to the deny-list fallback', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'edited',
@@ -653,6 +865,221 @@ describe('CoreToolScheduler', () => {
     }
     expect(execute).not.toHaveBeenCalled();
     expect(ensureTool).not.toHaveBeenCalled();
+  });
+
+  it('fires PermissionDenied hooks for AUTO classifier blocks', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({
+        shouldBlock: true,
+        reason: 'dangerous shell command',
+      });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'should not execute',
+      returnDisplay: 'should not execute',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+          execute,
+        }),
+      ],
+    ]);
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        hookSystem,
+        disableHooks: false,
+      });
+    const abortController = new AbortController();
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'auto-denied',
+          name: ToolNames.SHELL,
+          args: { command: 'rm -rf /tmp/example' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-auto-denied',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalledWith(
+      ToolNames.SHELL,
+      { command: 'rm -rf /tmp/example' },
+      'auto-denied',
+      'classifier_blocked',
+      abortController.signal,
+    );
+    expect(execute).not.toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+  });
+
+  it('fires PermissionDenied hooks for AUTO classifier unavailable blocks', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockRejectedValueOnce(new Error('classifier timed out'));
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'should not execute',
+      returnDisplay: 'should not execute',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+          execute,
+        }),
+      ],
+    ]);
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        hookSystem,
+        disableHooks: false,
+      });
+    const abortController = new AbortController();
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'auto-unavailable',
+          name: ToolNames.SHELL,
+          args: { command: 'rm -rf /tmp/example' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-auto-unavailable',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalledWith(
+      ToolNames.SHELL,
+      { command: 'rm -rf /tmp/example' },
+      'auto-unavailable',
+      'classifier_unavailable',
+      abortController.signal,
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('skips PermissionDenied hooks when hooks are disabled', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({
+        shouldBlock: true,
+        reason: 'dangerous shell command',
+      });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+        }),
+      ],
+    ]);
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        hookSystem,
+        disableHooks: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'auto-denied-hooks-off',
+          name: ToolNames.SHELL,
+          args: { command: 'rm -rf /tmp/example' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-auto-denied-hooks-off',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+  });
+
+  it('does not fire PermissionDenied hooks when AUTO classifier approves', async () => {
+    runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'executed',
+      returnDisplay: 'executed',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+          execute,
+        }),
+      ],
+    ]);
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        hookSystem,
+        disableHooks: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'auto-approved',
+          name: ToolNames.SHELL,
+          args: { command: 'echo ok' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-auto-approved',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it.each(Object.entries(ToolNamesMigration))(
@@ -745,6 +1172,96 @@ describe('CoreToolScheduler', () => {
       expect(execute).toHaveBeenCalledOnce();
     },
   );
+
+  it('resets denial counters when PermissionRequest hook approves a denialTracking fallback prompt', async () => {
+    const setAutoModeDenialState = vi.fn();
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'executed',
+      returnDisplay: 'executed',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SHELL,
+        new MockTool({
+          name: ToolNames.SHELL,
+          kind: Kind.Execute,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'exec',
+            title: 'Run command',
+            command: 'python',
+            rootCommand: 'python',
+            onConfirm: onConfirmSpy,
+          }),
+          execute,
+        }),
+      ],
+    ]);
+    const messageBus = {
+      request: vi.fn().mockImplementation(
+        async (request: {
+          eventName: string;
+        }): Promise<HookExecutionResponse> => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output:
+            request.eventName === 'PermissionRequest'
+              ? {
+                  hookSpecificOutput: {
+                    decision: {
+                      behavior: 'allow',
+                    },
+                  },
+                }
+              : { decision: 'allow' },
+        }),
+      ),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        approvalMode: ApprovalMode.AUTO,
+        messageBus,
+        disableHooks: false,
+        autoModeDenialState: {
+          consecutiveBlock: 0,
+          consecutiveUnavailable: 0,
+          totalBlock: 20,
+          totalUnavailable: 0,
+        },
+        setAutoModeDenialState,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'hook-approved-denial-fallback',
+          name: ToolNames.SHELL,
+          args: { command: 'python -c "print(1)"' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-hook-approved-denial-fallback',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(onConfirmSpy).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    });
+    expect(execute).toHaveBeenCalledOnce();
+  });
 
   it('should cancel a tool call if the signal is aborted before confirmation', async () => {
     const mockTool = new MockTool({
@@ -8359,5 +8876,371 @@ describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => 
       );
     });
     expect(sawPromoteAcWhileExecuting).toBe(true);
+  });
+});
+
+// Verifies the duck-typed setPromptId contract between CoreToolScheduler
+// and tool invocations. This is the integration point that lets
+// SkillToolInvocation (and any future invocation) record the prompt_id
+// of the user turn that triggered them — required for the
+// SkillFollowupRecord join in §4.1.2 of the RT optimization design.
+describe('CoreToolScheduler prompt_id propagation', () => {
+  class PromptIdAwareInvocation extends BaseToolInvocation<
+    Record<string, unknown>,
+    ToolResult
+  > {
+    capturedPromptId?: string;
+
+    constructor(params: Record<string, unknown>) {
+      super(params);
+    }
+
+    setPromptId(id: string): void {
+      this.capturedPromptId = id;
+    }
+
+    override async getDefaultPermission(): Promise<PermissionDecision> {
+      return 'allow';
+    }
+
+    getDescription(): string {
+      return 'prompt-id-aware test tool';
+    }
+
+    async execute(): Promise<ToolResult> {
+      return {
+        llmContent: `captured prompt_id=${this.capturedPromptId ?? '<unset>'}`,
+        returnDisplay: '',
+      };
+    }
+  }
+
+  class PromptIdAwareTool extends BaseDeclarativeTool<
+    Record<string, unknown>,
+    ToolResult
+  > {
+    lastBuiltInvocation?: PromptIdAwareInvocation;
+
+    constructor() {
+      super(
+        'promptIdAwareTool',
+        'promptIdAwareTool',
+        'A tool that captures prompt_id via setPromptId',
+        Kind.Read,
+        {},
+      );
+    }
+
+    protected createInvocation(
+      params: Record<string, unknown>,
+    ): ToolInvocation<Record<string, unknown>, ToolResult> {
+      const invocation = new PromptIdAwareInvocation(params);
+      this.lastBuiltInvocation = invocation;
+      return invocation;
+    }
+  }
+
+  it('passes request.prompt_id to invocation.setPromptId via buildInvocation', async () => {
+    const tool = new PromptIdAwareTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const abortController = new AbortController();
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-1',
+          name: 'promptIdAwareTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'expected-prompt-id-xyz',
+        },
+      ],
+      abortController.signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(tool.lastBuiltInvocation?.capturedPromptId).toBe(
+      'expected-prompt-id-xyz',
+    );
+  });
+
+  it('buildInvocation calls setPromptId when promptId is provided (covers both setArgs and schedule call sites)', () => {
+    // Directly exercises the private buildInvocation method so that both
+    // call sites (L1036 setArgs path, L1497 main schedule path) are
+    // covered by a single test on the wiring itself — testing setArgs
+    // through the public confirmation API requires mocking modifyWithEditor
+    // + filesystem + editor type, which would dwarf the change under test.
+    const tool = new PromptIdAwareTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    // Direct call: this is the same code path that L1036 (setArgs) and
+    // L1497 (schedule) both go through. Both callers pass
+    // call.request.prompt_id / reqInfo.prompt_id as the fourth arg.
+    const invocation = (
+      scheduler as unknown as {
+        buildInvocation: (
+          t: typeof tool,
+          a: Record<string, unknown>,
+          callId: string,
+          promptId: string,
+        ) => PromptIdAwareInvocation;
+      }
+    ).buildInvocation(tool, {}, 'call-direct', 'expected-via-setArgs-path');
+
+    expect(invocation.capturedPromptId).toBe('expected-via-setArgs-path');
+  });
+
+  it('buildInvocation does not throw when promptId is omitted', () => {
+    // Ensures the optional fourth argument stays optional — callers that
+    // do not yet pass promptId (none in production today, but the type
+    // is `promptId?: string`) keep working.
+    const tool = new PromptIdAwareTool();
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const invocation = (
+      scheduler as unknown as {
+        buildInvocation: (
+          t: typeof tool,
+          a: Record<string, unknown>,
+          callId?: string,
+          promptId?: string,
+        ) => PromptIdAwareInvocation;
+      }
+    ).buildInvocation(tool, {}, 'call-omitted');
+
+    // promptId not passed → setPromptId not called → field stays undefined.
+    expect(invocation.capturedPromptId).toBeUndefined();
+  });
+
+  it('is a no-op when invocation does not expose setPromptId', async () => {
+    // Reuses the existing TestApprovalTool which has no setPromptId.
+    // The scheduler must not throw when the duck-type check fails.
+    const tool = new TestApprovalTool({
+      getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+      setApprovalMode: () => {},
+    } as unknown as Config);
+
+    const mockToolRegistry = {
+      getTool: () => tool,
+      ensureTool: async () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const abortController = new AbortController();
+    await expect(
+      scheduler.schedule(
+        [
+          {
+            callId: 'call-1',
+            name: 'testApprovalTool',
+            args: { id: 'a' },
+            isClientInitiated: false,
+            prompt_id: 'whatever',
+          },
+        ],
+        abortController.signal,
+      ),
+    ).resolves.not.toThrow();
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
   });
 });

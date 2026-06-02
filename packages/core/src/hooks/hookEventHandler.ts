@@ -31,6 +31,8 @@ import type {
   PostCompactTrigger,
   NotificationInput,
   NotificationType,
+  PermissionDeniedInput,
+  PermissionDeniedReason,
   PermissionRequestInput,
   PermissionSuggestion,
   SubagentStartInput,
@@ -357,6 +359,37 @@ export class HookEventHandler {
     // Pass tool name as context for matcher filtering
     return this.executeHooks(
       HookEventName.PermissionRequest,
+      input,
+      {
+        toolName,
+      },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a PermissionDenied event for tool calls rejected before manual
+   * permission handling starts. Unlike PermissionRequest, this event does not
+   * ask hooks to approve or modify the call; it reports AUTO-mode denials that
+   * happen before any permission dialog would be shown.
+   */
+  async firePermissionDeniedEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolUseId: string,
+    reason: PermissionDeniedReason,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: PermissionDeniedInput = {
+      ...this.createBaseInput(HookEventName.PermissionDenied),
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_use_id: toolUseId,
+      reason,
+    };
+
+    return this.executeHooks(
+      HookEventName.PermissionDenied,
       input,
       {
         toolName,
