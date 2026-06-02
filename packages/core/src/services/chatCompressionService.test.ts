@@ -2267,6 +2267,18 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     vi.restoreAllMocks();
   });
 
+  // The HookSystem wrapper returns DefaultHookOutput | undefined to consumers
+  // (see hookSystem.ts:274-287). Source code calls `result?.getAdditionalContext()`,
+  // so mocks must expose that method — not the raw AggregatedHookResult shape
+  // that hookEventHandler returns. This tiny helper builds a stand-in.
+  function makeHookOutput(opts: { additionalContext?: string }): {
+    getAdditionalContext: () => string | undefined;
+  } {
+    return {
+      getAdditionalContext: () => opts.additionalContext,
+    };
+  }
+
   // Tiny helper to keep each case readable. Builds a 4-message history
   // (passes the curatedHistory.length >= 2 guard) and a config with all
   // accessors required by compress(). hookSystem is overridable so each
@@ -2374,17 +2386,11 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     } as never);
     const { mockChat, mockConfig } = setup({
       hookSystem: {
-        firePreCompactEvent: vi.fn().mockResolvedValue({
-          success: true,
-          allOutputs: [],
-          errors: [],
-          totalDuration: 0,
-          finalOutput: {
-            hookSpecificOutput: {
-              additionalContext: 'prefer Chinese summaries',
-            },
-          },
-        }),
+        firePreCompactEvent: vi
+          .fn()
+          .mockResolvedValue(
+            makeHookOutput({ additionalContext: 'prefer Chinese summaries' }),
+          ),
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       },
     });
@@ -2414,15 +2420,11 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     } as never);
     const { mockChat, mockConfig } = setup({
       hookSystem: {
-        firePreCompactEvent: vi.fn().mockResolvedValue({
-          success: true,
-          allOutputs: [],
-          errors: [],
-          totalDuration: 0,
-          finalOutput: {
-            hookSpecificOutput: { additionalContext: 'HOOK_TEXT' },
-          },
-        }),
+        firePreCompactEvent: vi
+          .fn()
+          .mockResolvedValue(
+            makeHookOutput({ additionalContext: 'HOOK_TEXT' }),
+          ),
         firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
       },
     });

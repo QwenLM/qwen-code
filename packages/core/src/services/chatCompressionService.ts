@@ -367,9 +367,12 @@ export class ChatCompressionService {
           opts.customInstructions ?? '',
           signal,
         );
-        const merged =
-          result.finalOutput?.hookSpecificOutput?.['additionalContext'];
-        if (typeof merged === 'string' && merged.trim().length > 0) {
+        // `getAdditionalContext()` sanitises (`<`/`>` → `&lt;`/`&gt;`) so a
+        // hook can't inject XML structure into the summary prompt. Mirrors
+        // every other call-site in this repo (toolHookTriggers, agent.ts,
+        // client.ts) — keep it consistent.
+        const merged = result?.getAdditionalContext();
+        if (merged && merged.trim().length > 0) {
           hookExtraInstructions = merged.trim();
         }
       } catch (err) {
