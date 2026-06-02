@@ -1132,12 +1132,14 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               );
             }
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
 
           case 'u': {
             buffer.undo();
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
 
@@ -1326,6 +1328,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               );
             }
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
           case '>': {
