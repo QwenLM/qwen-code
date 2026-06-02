@@ -203,11 +203,13 @@ function writeClipboard(text: string): void {
     if (platform === 'darwin') {
       const child = execFile('pbcopy', [], cb);
       child.stdin?.end(text);
+      child.unref();
       return;
     }
     if (platform === 'win32') {
       const child = execFile('clip', [], cb);
       child.stdin?.end(text);
+      child.unref();
       return;
     }
     // Linux: probe once, then use cached tool
