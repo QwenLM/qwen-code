@@ -784,6 +784,71 @@ describe('AppContainer State Management', () => {
       capturedOnCancelSubmit(info);
     };
 
+    it('does not fire outer cancel handler on Esc when vim is enabled in INSERT mode', async () => {
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      const cancelSpy = vi.fn();
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: cancelSpy,
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const handleKeypress = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .reverse()
+        .find(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function' &&
+            handler.toString().includes('handleExit'),
+        ) as ((key: Key) => void) | undefined;
+      expect(handleKeypress).toBeDefined();
+
+      const escKey: Key = {
+        name: 'escape',
+        sequence: '\u001b',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+      };
+      handleKeypress!(escKey);
+
+      // In vim INSERT mode, Esc must NOT trigger the outer cancel handler.
+      expect(cancelSpy).not.toHaveBeenCalled();
+    });
+
     it('does not repopulate the buffer with the previous prompt on ESC cancel', async () => {
       const mockSetText = vi.fn();
       mockedUseTextBuffer.mockReturnValue({
