@@ -49,6 +49,20 @@ function findModelConfig(
   return models.find((m) => m.id === modelId);
 }
 
+function hasEnvValue(settings: Settings, envKey: string | undefined): boolean {
+  if (!envKey) {
+    return false;
+  }
+  if (process.env[envKey]) {
+    return true;
+  }
+  const settingsEnv = settings.env as Record<string, unknown> | undefined;
+  const settingsEnvValue = settingsEnv?.[envKey];
+  return (
+    typeof settingsEnvValue === 'string' && settingsEnvValue.trim().length > 0
+  );
+}
+
 /**
  * Check if API key is available for the given auth type and model configuration.
  * Prioritizes custom envKey from modelProviders over default environment variables.
@@ -94,7 +108,7 @@ function hasApiKeyForAuth(
 
   if (modelConfig?.envKey) {
     // Explicit envKey configured - only check this env var, no apiKey fallback
-    const hasKey = !!process.env[modelConfig.envKey];
+    const hasKey = hasEnvValue(settings, modelConfig.envKey);
     return {
       hasKey,
       checkedEnvKey: modelConfig.envKey,
@@ -105,7 +119,7 @@ function hasApiKeyForAuth(
   // Using default environment variable - apiKey fallback is allowed
   const defaultEnvKey = DEFAULT_ENV_KEYS[authType];
   if (defaultEnvKey) {
-    const hasKey = !!process.env[defaultEnvKey];
+    const hasKey = hasEnvValue(settings, defaultEnvKey);
     if (hasKey) {
       return { hasKey, checkedEnvKey: defaultEnvKey, isExplicitEnvKey: false };
     }
