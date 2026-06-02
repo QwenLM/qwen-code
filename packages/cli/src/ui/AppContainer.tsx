@@ -1006,10 +1006,6 @@ export const AppContainer = (props: AppContainerProps) => {
     },
     [],
   );
-  const notifyStatusLineReloaded = useCallback(() => {
-    setStatusLineConfigOverride(undefined);
-    setStatusLineSettingsVersion((version) => version + 1);
-  }, []);
   const { isMemoryDialogOpen, openMemoryDialog, closeMemoryDialog } =
     useMemoryDialog();
 
@@ -1138,7 +1134,6 @@ export const AppContainer = (props: AppContainerProps) => {
       handleBranch,
       openDeleteDialog,
       openHelpDialog,
-      notifyStatusLineReloaded,
     }),
     [
       openAuthDialog,
@@ -1166,7 +1161,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       openHelpDialog,
       openDiffDialog,
-      notifyStatusLineReloaded,
     ],
   );
 

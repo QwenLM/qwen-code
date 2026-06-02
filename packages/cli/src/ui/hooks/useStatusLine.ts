@@ -615,23 +615,24 @@ export function useStatusLine(): {
     updatePullRequestNumber,
   ]);
 
-  // Reload settings from disk when the model turn finishes (streamingState →
-  // Idle). The statusline-setup agent edits settings.json via file tools, but
-  // the in-memory LoadedSettings object is never updated. A one-shot
-  // readFileSync at turn end keeps the two in sync so the status line picks
-  // up type changes (e.g. preset → command) without a CLI restart.
-  //
-  // The reload bumps `settingsReloadKey` so the component re-renders with
-  // fresh `settings.merged` data. The key is included in the command-change
-  // effect deps to ensure `doUpdate()` fires when the config type switches.
+  // Reload the statusLine setting from disk when a model turn finishes
+  // (streamingState → Idle). The statusline-setup agent edits settings.json
+  // via file tools, but the in-memory LoadedSettings is never updated. We
+  // snapshot the raw statusLine value before reloading; if the on-disk value
+  // differs, we bump `settingsReloadKey` to trigger a re-render + doUpdate().
+  // This avoids unnecessary work on turns that didn't touch the statusline.
   const [settingsReloadKey, setSettingsReloadKey] = useState(0);
   const prevStreamingForReloadRef = useRef(streamingState);
   useEffect(() => {
     const prev = prevStreamingForReloadRef.current;
     prevStreamingForReloadRef.current = streamingState;
     if (prev !== streamingState && streamingState === 'idle') {
+      const before = JSON.stringify(settings.merged.ui?.statusLine);
       settings.reloadScopeFromDisk(SettingScope.User);
-      setSettingsReloadKey((k) => k + 1);
+      const after = JSON.stringify(settings.merged.ui?.statusLine);
+      if (before !== after) {
+        setSettingsReloadKey((k) => k + 1);
+      }
     }
   }, [streamingState, settings]);
 
