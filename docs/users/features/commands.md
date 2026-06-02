@@ -31,15 +31,17 @@ These commands help you save, restore, and summarize work progress.
 
 Commands for adjusting interface appearance and work environment.
 
-| Command      | Description                              | Usage Examples                |
-| ------------ | ---------------------------------------- | ----------------------------- |
-| `/clear`     | Clear terminal screen content            | `/clear` (shortcut: `Ctrl+L`) |
-| `/context`   | Show context window usage breakdown      | `/context`                    |
-| → `detail`   | Show per-item context usage breakdown    | `/context detail`             |
-| `/theme`     | Change Qwen Code visual theme            | `/theme`                      |
-| `/vim`       | Turn input area Vim editing mode on/off  | `/vim`                        |
-| `/directory` | Manage multi-directory support workspace | `/dir add ./src,./tests`      |
-| `/editor`    | Open dialog to select supported editor   | `/editor`                     |
+| Command              | Description                                                       | Usage Examples                          |
+| -------------------- | ----------------------------------------------------------------- | --------------------------------------- |
+| `/clear`             | Clear terminal screen content                                     | `/clear` (shortcut: `Ctrl+L`)           |
+| `/context`           | Show context window usage breakdown                               | `/context`                              |
+| → `detail`           | Show per-item context usage breakdown                             | `/context detail`                       |
+| `/theme`             | Change Qwen Code visual theme                                     | `/theme`                                |
+| `/vim`               | Turn input area Vim editing mode on/off                           | `/vim`                                  |
+| `/directory`         | Manage multi-directory support workspace                          | `/dir add ./src,./tests`                |
+| `/editor`            | Open dialog to select supported editor                            | `/editor`                               |
+| `/statusline`        | Open interactive [status line](./status-line.md) preset dialog    | `/statusline`                           |
+| `/statusline <text>` | Generate a command-mode [status line](./status-line.md) via agent | `/statusline show model and git branch` |
 
 ### 1.3 Language Settings
 
