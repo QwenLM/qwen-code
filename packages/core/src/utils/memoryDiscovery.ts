@@ -230,7 +230,9 @@ async function readGeminiMdFiles(
       await onInstructionsLoaded?.(notification);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      logger.warn(`InstructionsLoaded notification failed: ${message}`);
+      logger.warn(
+        `InstructionsLoaded notification failed for ${notification.filePath}: ${message}`,
+      );
     }
   };
 

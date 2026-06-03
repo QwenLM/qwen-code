@@ -18,6 +18,16 @@ import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { QWEN_DIR } from './paths.js';
 import type { InstructionsLoadedNotification } from './memoryDiscovery.js';
 
+const mockLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => mockLogger,
+}));
+
 vi.mock('os', async (importOriginal) => {
   const actualOs = await importOriginal<typeof os>();
   return {
@@ -650,6 +660,9 @@ describe('loadServerHierarchicalMemory', () => {
     expect(result.fileCount).toBe(1);
     expect(result.memoryContent).toContain(
       `--- Context from: ${path.relative(cwd, projectFile)} ---\nproject context`,
+    );
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      `InstructionsLoaded notification failed for ${projectFile}: hook failed`,
     );
   });
 
