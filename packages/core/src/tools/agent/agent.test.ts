@@ -2671,6 +2671,13 @@ describe('AgentTool', () => {
     });
 
     it('persists fork capability snapshots in the bootstrap transcript', async () => {
+      // Fork requires opt-in + interactive
+      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
+        vi.fn().mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+
       const forkParams: AgentParams = {
         description: 'Fork task',
         prompt: 'Investigate issue',
