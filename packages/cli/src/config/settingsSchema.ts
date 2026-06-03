@@ -1760,7 +1760,7 @@ const SETTINGS_SCHEMA = {
         showInDialog: true,
         options: [
           { value: ApprovalMode.PLAN, label: 'Plan' },
-          { value: ApprovalMode.DEFAULT, label: 'Default' },
+          { value: ApprovalMode.DEFAULT, label: 'Ask permissions' },
           { value: ApprovalMode.AUTO_EDIT, label: 'Auto Edit' },
           { value: ApprovalMode.AUTO, label: 'Auto' },
           { value: ApprovalMode.YOLO, label: 'YOLO' },

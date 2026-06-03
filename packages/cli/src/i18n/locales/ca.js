@@ -450,7 +450,7 @@ export default {
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Planificació',
-  Default: 'Per defecte',
+  'Ask permissions': 'Demanar permisos',
   'Auto Edit': 'Edició automàtica',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activar/desactivar el mode Vim',

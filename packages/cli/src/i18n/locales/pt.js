@@ -404,7 +404,7 @@ export default {
   Text: 'Texto',
   JSON: 'JSON',
   Plan: 'Planejamento',
-  Default: 'Padrão',
+  'Ask permissions': 'Pedir permissão',
   'Auto Edit': 'Edição Automática',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'alternar modo vim ligado/desligado',

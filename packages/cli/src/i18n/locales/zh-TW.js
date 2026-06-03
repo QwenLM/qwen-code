@@ -415,7 +415,7 @@ export default {
   Text: '文本',
   JSON: 'JSON',
   Plan: '規劃',
-  Default: '默認',
+  'Ask permissions': '請求授權',
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',

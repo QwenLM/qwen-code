@@ -452,7 +452,7 @@ export default {
   Text: '文本',
   JSON: 'JSON',
   Plan: '规划',
-  Default: '默认',
+  'Ask permissions': '请求授权',
   'Auto Edit': '自动编辑',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切换 vim 模式开关',
