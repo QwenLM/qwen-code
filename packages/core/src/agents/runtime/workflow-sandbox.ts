@@ -83,6 +83,16 @@ export interface WorkflowAgentOpts {
  */
 export type WorkflowAgentResult = string;
 
+/**
+ * P5: budget global API surface. P1 default is throwing stubs (total = null,
+ * spent()/remaining() throw). P5 will inject a real tracker.
+ */
+export interface WorkflowBudget {
+  total: number | null;
+  spent(): number;
+  remaining(): number;
+}
+
 export interface SandboxOptions {
   /** Value bound to the `args` global inside the script. */
   args: unknown;
@@ -99,6 +109,24 @@ export interface SandboxOptions {
     prompt: string,
     opts: WorkflowAgentOpts,
   ) => Promise<WorkflowAgentResult>;
+  /**
+   * FIX-H (Round 5 ARCH I1/I2/I3): forward-compatibility injection seams for
+   * P2 (parallel / pipeline) and P5 (budget). If omitted, the sandbox falls
+   * back to throwing stubs that surface a clear "scheduled for PN" error
+   * — so P1 behaviour is preserved when callers don't provide these.
+   *
+   * Adding these now means P2/P5 can wire real implementations from the
+   * orchestrator layer without modifying createWorkflowSandbox internals
+   * (and thereby invalidating the sandbox's security-review surface).
+   */
+  parallel?: (thunks: Array<() => Promise<unknown>>) => Promise<unknown[]>;
+  pipeline?: (
+    items: unknown[],
+    ...stages: Array<
+      (prev: unknown, item: unknown, idx: number) => Promise<unknown>
+    >
+  ) => Promise<unknown[]>;
+  budget?: WorkflowBudget;
 }
 
 export interface WorkflowSandbox {
@@ -292,24 +320,40 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         return opts.dispatch(prompt, agentOpts);
       },
     ),
-    // FIX-F (Round 4 UP Critical): P2/P5 primitives surfaced as throwing
-    // stubs so model-authored scripts get a clear "scheduled for PN"
-    // message instead of `ReferenceError: parallel is not defined`. The
-    // model is trained on the upstream surface where these always exist;
-    // silent ReferenceError is hostile to debugging.
-    parallel: hardenInjected(async (_thunks: unknown): Promise<unknown> => {
-      throw new Error(
-        'parallel() is not supported in P1. Sequential agent() is the only ' +
-          'execution mode in P1. Concurrent fan-out is scheduled for P2.',
-      );
-    }),
+    // FIX-F + FIX-H (Round 4 UP Critical + Round 5 ARCH I1/I2): P2/P5
+    // primitives are surfaced as injectable seams. If the caller supplies
+    // `opts.parallel` / `opts.pipeline` / `opts.budget`, the sandbox uses
+    // them; otherwise it falls back to throwing stubs that give the model
+    // a clear "scheduled for PN" message instead of `ReferenceError`.
+    //
+    // Adding the injection seams in P1 means P2 can wire real concurrent
+    // dispatchers without modifying createWorkflowSandbox itself — keeping
+    // the sandbox's already-reviewed security surface unchanged.
+    parallel: hardenInjected(
+      opts.parallel
+        ? async (thunks: Array<() => Promise<unknown>>) =>
+            opts.parallel!(thunks)
+        : async (_thunks: unknown): Promise<unknown> => {
+            throw new Error(
+              'parallel() is not supported in P1. Sequential agent() is the only ' +
+                'execution mode in P1. Concurrent fan-out is scheduled for P2.',
+            );
+          },
+    ),
     pipeline: hardenInjected(
-      async (_items: unknown, ..._stages: unknown[]): Promise<unknown> => {
-        throw new Error(
-          'pipeline() is not supported in P1. Staggered multi-stage execution ' +
-            'is scheduled for P2.',
-        );
-      },
+      opts.pipeline
+        ? async (
+            items: unknown[],
+            ...stages: Array<
+              (prev: unknown, item: unknown, idx: number) => Promise<unknown>
+            >
+          ) => opts.pipeline!(items, ...stages)
+        : async (_items: unknown, ..._stages: unknown[]): Promise<unknown> => {
+            throw new Error(
+              'pipeline() is not supported in P1. Staggered multi-stage execution ' +
+                'is scheduled for P2.',
+            );
+          },
     ),
     workflow: hardenInjected(
       async (_nameOrRef: unknown, _args?: unknown): Promise<unknown> => {
@@ -319,33 +363,50 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         );
       },
     ),
-    // FIX-F + FIX-G (Round 4 test Critical): budget exposes a hardened
-    // sentinel. The OUTER object is null-proto + constructor undefined; the
-    // INNER methods (spent/remaining) are ALSO `hardenInjected` so
-    // `budget.spent.constructor("return process")()` cannot reach host
-    // Function. P5 will replace this with a real budget tracker.
+    // FIX-F + FIX-G + FIX-H: budget injected if provided, else hardened
+    // throwing stub. The injected budget is wrapped in hardenInjected too,
+    // and its inner spent/remaining methods are re-hardened to block the
+    // `budget.spent.constructor` host-Function escape vector.
     budget: hardenInjected(
-      Object.create(null, {
-        total: { value: null, writable: false, configurable: false },
-        spent: {
-          value: hardenInjected(() => {
-            throw new Error(
-              'budget.spent() is not supported in P1. Token tracking is scheduled for P5.',
-            );
-          }),
-          writable: false,
-          configurable: false,
-        },
-        remaining: {
-          value: hardenInjected(() => {
-            throw new Error(
-              'budget.remaining() is not supported in P1. Token tracking is scheduled for P5.',
-            );
-          }),
-          writable: false,
-          configurable: false,
-        },
-      }) as object,
+      opts.budget
+        ? (Object.create(null, {
+            total: {
+              value: opts.budget.total,
+              writable: false,
+              configurable: false,
+            },
+            spent: {
+              value: hardenInjected(() => opts.budget!.spent()),
+              writable: false,
+              configurable: false,
+            },
+            remaining: {
+              value: hardenInjected(() => opts.budget!.remaining()),
+              writable: false,
+              configurable: false,
+            },
+          }) as object)
+        : (Object.create(null, {
+            total: { value: null, writable: false, configurable: false },
+            spent: {
+              value: hardenInjected(() => {
+                throw new Error(
+                  'budget.spent() is not supported in P1. Token tracking is scheduled for P5.',
+                );
+              }),
+              writable: false,
+              configurable: false,
+            },
+            remaining: {
+              value: hardenInjected(() => {
+                throw new Error(
+                  'budget.remaining() is not supported in P1. Token tracking is scheduled for P5.',
+                );
+              }),
+              writable: false,
+              configurable: false,
+            },
+          }) as object),
     ),
     // FIX-3 + FIX-D: console.* closures hardened (proto null) and routed
     // through safeLog for the log cap. The `console` container object is

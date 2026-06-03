@@ -410,6 +410,59 @@ describe('createWorkflowSandbox security', () => {
     );
   });
 
+  // FIX-H (Round 5 ARCH I1/I2/I3): injection seams for parallel/pipeline/
+  // budget. These regression tests guard the contract: P2/P5 will provide
+  // real implementations via SandboxOptions without modifying sandbox source.
+  it('opts.parallel overrides the throwing stub when provided', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      parallel: async (thunks) => Promise.all(thunks.map((t) => t())),
+    });
+    const result = await sandbox.run(`
+      return await parallel([async () => 1, async () => 2, async () => 3]);
+    `);
+    expect(result).toEqual([1, 2, 3]);
+  });
+
+  it('opts.pipeline overrides the throwing stub when provided', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      pipeline: async (items, ...stages) => {
+        const out: unknown[] = [];
+        for (let i = 0; i < items.length; i++) {
+          let cur: unknown = items[i];
+          for (const stage of stages) {
+            cur = await stage(cur, items[i], i);
+          }
+          out.push(cur);
+        }
+        return out;
+      },
+    });
+    const result = await sandbox.run(`
+      return await pipeline([1, 2, 3], async (x) => x * 10);
+    `);
+    expect(result).toEqual([10, 20, 30]);
+  });
+
+  it('opts.budget overrides the throwing stub when provided', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      budget: {
+        total: 500_000,
+        spent: () => 123,
+        remaining: () => 499_877,
+      },
+    });
+    const result = await sandbox.run(`
+      return { total: budget.total, spent: budget.spent(), remaining: budget.remaining() };
+    `);
+    expect(result).toEqual({ total: 500_000, spent: 123, remaining: 499_877 });
+  });
+
   it('budget.total is null in P1 (matches upstream "no target" sentinel)', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,

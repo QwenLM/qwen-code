@@ -130,6 +130,16 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         returnDisplay: '```json\n' + displayJson + '\n```',
       };
     } catch (err) {
+      // FIX-H (Round 5 SEC Minor): Error.stack frames include absolute host
+      // file paths. Surface only the message — never `err.stack` — to the
+      // LLM and the UI. Caller's stderr/debug log can still see the full
+      // stack via standard logging mechanisms.
+      //
+      // KNOWN LIMITATION: a script that intentionally captures `e.stack`
+      // inside the sandbox and returns it (e.g. `try { throw 0 } catch(e)
+      // { return e.stack }`) still surfaces stack frames to the LLM via the
+      // script's return value. Model-authored scripts are unlikely to do
+      // this; documented as out-of-scope for P1.
       const message = err instanceof Error ? err.message : String(err);
       return {
         llmContent: [{ text: `Workflow failed: ${message}` }],
