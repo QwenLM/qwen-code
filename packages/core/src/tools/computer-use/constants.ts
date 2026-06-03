@@ -41,7 +41,7 @@ export const PINNED_OPEN_COMPUTER_USE_PACKAGE_NAME =
  * surface we tested against; a new release can't silently drift our
  * hardcoded schemas out of sync.
  */
-export const PINNED_OPEN_COMPUTER_USE_VERSION = '0.2.2';
+export const PINNED_OPEN_COMPUTER_USE_VERSION = '0.2.3';
 
 /**
  * Resolve the package spec to `npx` for spawning the MCP server. Reads

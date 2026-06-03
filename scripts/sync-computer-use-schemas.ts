@@ -27,7 +27,7 @@ import { resolve } from 'node:path';
 // literals here because importing TypeScript from `scripts/` into the
 // package tree adds tooling complexity for a two-string lookup.
 const DEFAULT_PACKAGE_NAME = '@qwen-code/open-computer-use';
-const DEFAULT_PINNED_VERSION = '0.2.2';
+const DEFAULT_PINNED_VERSION = '0.2.3';
 
 async function main(): Promise<void> {
   const packageSpec =

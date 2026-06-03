@@ -38,6 +38,7 @@ describe('runBootstrap', () => {
       platform: 'darwin',
       promptInstallApproval: vi.fn(async () => true),
       probePermissions: vi.fn(async () => 'ok' as const),
+      probePermissionStatus: vi.fn(async () => 'ok' as const),
     };
   });
 
@@ -104,17 +105,22 @@ describe('runBootstrap', () => {
     );
   });
 
-  it('polls probePermissions when permissions are missing then granted', async () => {
+  it('shows the window once via doctor, then polls the window-free permission-status until granted', async () => {
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
       approvedPackageSpec: '@qwen-code/open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
 
-    let probeCount = 0;
-    deps.probePermissions = vi.fn(async () => {
-      probeCount++;
-      return probeCount < 3 ? 'accessibility' : 'ok';
+    // Initial probe (doctor) reports missing → enters the poll loop and
+    // launches the onboarding window ONCE.
+    deps.probePermissions = vi.fn(async () => 'accessibility' as const);
+    // Poll probe (permission-status, window-free) reports missing twice
+    // then granted.
+    let pollCount = 0;
+    deps.probePermissionStatus = vi.fn(async () => {
+      pollCount++;
+      return pollCount < 2 ? 'accessibility' : 'ok';
     });
     deps.pollIntervalMs = 1; // speed up test
     deps.pollTimeoutMs = 1000;
@@ -126,11 +132,11 @@ describe('runBootstrap', () => {
       deps,
     );
 
-    // probe is called by bootstrap (each call is a doctor invocation in
-    // production, but here it's a mock). Doctor itself launches the
-    // onboarding window when needed — no separate spawnDoctor step.
-    expect(probeCount).toBeGreaterThanOrEqual(3);
-    expect(deps.probePermissions).toHaveBeenCalledWith(
+    // doctor (window) called exactly once; the window-free status command
+    // is what gets polled — never doctor again (no window storm).
+    expect(deps.probePermissions).toHaveBeenCalledTimes(1);
+    expect(pollCount).toBeGreaterThanOrEqual(2);
+    expect(deps.probePermissionStatus).toHaveBeenCalledWith(
       '@qwen-code/open-computer-use@^0.3.0',
     );
   });
@@ -142,7 +148,10 @@ describe('runBootstrap', () => {
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
 
+    // Initial doctor reports missing (enters loop); window-free poll never
+    // grants → must time out.
     deps.probePermissions = vi.fn(async () => 'accessibility' as const);
+    deps.probePermissionStatus = vi.fn(async () => 'accessibility' as const);
     deps.pollIntervalMs = 1;
     deps.pollTimeoutMs = 50;
 
@@ -172,6 +181,7 @@ describe('runBootstrap', () => {
     );
 
     expect(deps.probePermissions).not.toHaveBeenCalled();
+    expect(deps.probePermissionStatus).not.toHaveBeenCalled();
   });
 
   it('emits a fresh updateOutput message when permission kind changes mid-poll', async () => {
@@ -181,12 +191,13 @@ describe('runBootstrap', () => {
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
 
-    // Probe sequence: accessibility → screenRecording → ok
-    let probeCount = 0;
-    deps.probePermissions = vi.fn(async () => {
-      probeCount++;
-      if (probeCount === 1) return 'accessibility' as const;
-      if (probeCount === 2) return 'screenRecording' as const;
+    // Initial doctor reports accessibility missing (enters loop, window once).
+    deps.probePermissions = vi.fn(async () => 'accessibility' as const);
+    // Window-free poll sequence: accessibility → screenRecording → ok
+    let pollCount = 0;
+    deps.probePermissionStatus = vi.fn(async () => {
+      pollCount++;
+      if (pollCount === 1) return 'screenRecording' as const;
       return 'ok' as const;
     });
     deps.pollIntervalMs = 1;
@@ -204,8 +215,7 @@ describe('runBootstrap', () => {
     );
 
     // The transition (accessibility → screenRecording) must emit a
-    // user-facing message naming the new permission kind. LaunchServices
-    // dedups doctor's window so we don't need a separate spawn step.
+    // user-facing message naming the new permission kind.
     expect(messages.some((m) => m.includes('screenRecording'))).toBe(true);
     expect(messages.some((m) => m.includes('accessibility'))).toBe(true);
   });
@@ -237,6 +247,7 @@ describe('runBootstrap', () => {
 
     expect(startSpy).not.toHaveBeenCalled();
     expect(deps.probePermissions).not.toHaveBeenCalled();
+    expect(deps.probePermissionStatus).not.toHaveBeenCalled();
   });
 });
 
