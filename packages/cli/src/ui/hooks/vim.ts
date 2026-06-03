@@ -1422,7 +1422,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                   insertCol,
                   text.repeat(repeatCount),
                 );
-                buffer.vimMoveRight(1);
+                buffer.vimMoveLeft(1);
               }
             }
             dispatch({ type: 'CLEAR_COUNT' });

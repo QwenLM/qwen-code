@@ -2212,7 +2212,7 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('p')));
 
         expect(buffer.replaceRange).toHaveBeenCalledWith(0, 1, 0, 1, 'hello ');
-        expect(buffer.vimMoveRight).toHaveBeenCalledWith(1);
+        expect(buffer.vimMoveLeft).toHaveBeenCalledWith(1);
       });
     });
 
