@@ -6,6 +6,10 @@ import {
 import { StatsMessage, parseStatsMessage } from './StatsMessage';
 import { StatusMessage, parseStatusMessage } from './StatusMessage';
 import { McpStatusMessage, parseMcpStatusMessage } from './McpStatusMessage';
+import {
+  TasksStatusMessage,
+  parseTasksStatusMessage,
+} from './TasksStatusMessage';
 import { Markdown } from './Markdown';
 import styles from './SystemMessage.module.css';
 
@@ -57,6 +61,16 @@ export const SystemMessage = memo(function SystemMessage({
     return (
       <div className={styles.flushMessage}>
         <McpStatusMessage message={mcpStatus} />
+      </div>
+    );
+  }
+
+  const tasksStatus =
+    variant === 'info' ? parseTasksStatusMessage(content) : null;
+  if (tasksStatus) {
+    return (
+      <div className={styles.flushMessage}>
+        <TasksStatusMessage message={tasksStatus} />
       </div>
     );
   }

@@ -3513,6 +3513,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async cancelSessionTask(sessionId, taskId, taskKind) {
+      return requestSessionStatus<{ cancelled: boolean }>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionTaskCancel,
+        { taskId, taskKind },
+      );
+    },
+
     async getSessionStatsStatus(sessionId) {
       return requestSessionStatus<ServeSessionStatsStatus>(
         sessionId,

@@ -389,6 +389,11 @@ export class Session implements SessionContext {
   private readonly createdAt: number = Date.now();
   private readonly runtimeBaseDir: string;
 
+  // Background task notification state
+  private notificationQueue: Array<{ displayText: string; modelText: string }> =
+    [];
+  private notificationResolve: (() => void) | null = null;
+
   // Cron scheduling state
   private cronQueue: string[] = [];
   private cronProcessing = false;
@@ -771,6 +776,7 @@ export class Session implements SessionContext {
 
     try {
       const result = await this.#executePrompt(params, pendingSend);
+      await this.#drainBackgroundTaskNotifications(pendingSend);
       this.pendingPrompt = null;
       this.#startCronSchedulerIfNeeded();
       void this.#drainCronQueue();
@@ -1757,6 +1763,187 @@ export class Session implements SessionContext {
       );
       return [];
     }
+  }
+
+  async #drainBackgroundTaskNotifications(
+    pendingSend: AbortController,
+  ): Promise<void> {
+    const registry = this.config.getBackgroundTaskRegistry();
+    if (!registry.hasUnfinalizedTasks()) return;
+
+    registry.setNotificationCallback((displayText, modelText) => {
+      this.notificationQueue.push({ displayText, modelText });
+      if (this.notificationResolve) {
+        this.notificationResolve();
+        this.notificationResolve = null;
+      }
+    });
+
+    try {
+      while (true) {
+        if (pendingSend.signal.aborted) {
+          registry.abortAll();
+          break;
+        }
+
+        while (this.notificationQueue.length > 0) {
+          const item = this.notificationQueue.shift()!;
+          await this.#executeNotificationPrompt(item, pendingSend);
+        }
+
+        if (
+          !registry.hasUnfinalizedTasks() &&
+          this.notificationQueue.length === 0
+        ) {
+          break;
+        }
+
+        await new Promise<void>((resolve) => {
+          this.notificationResolve = resolve;
+          setTimeout(resolve, 100);
+        });
+      }
+    } finally {
+      registry.setNotificationCallback(undefined);
+      this.notificationResolve = null;
+    }
+  }
+
+  async #executeNotificationPrompt(
+    item: { displayText: string; modelText: string },
+    pendingSend: AbortController,
+  ): Promise<void> {
+    return Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      async () => {
+        const promptId =
+          this.config.getSessionId() + '########notif' + Date.now();
+
+        await withInteractionSpan(
+          this.config,
+          {
+            promptId,
+            model: this.config.getModel(),
+            messageType: 'acp_prompt',
+          },
+          async () => {
+            let turnCount = 0;
+            try {
+              await this.sendUpdate({
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: item.displayText },
+              });
+
+              const reminders = await this.#buildInitialSystemReminders();
+              let nextMessage: Content | null = {
+                role: 'user',
+                parts: [...reminders, { text: item.modelText }],
+              };
+
+              while (nextMessage !== null) {
+                turnCount++;
+                if (pendingSend.signal.aborted) return;
+
+                const functionCalls: FunctionCall[] = [];
+                let usageMetadata: GenerateContentResponseUsageMetadata | null =
+                  null;
+                const streamStartTime = Date.now();
+
+                const sendResult =
+                  await this.#sendMessageStreamWithAutoCompression(
+                    promptId,
+                    nextMessage.parts ?? [],
+                    pendingSend.signal,
+                  );
+                if (!sendResult.responseStream) {
+                  this.#preserveUnsentMessageHistory(
+                    nextMessage,
+                    sendResult.stopReason === 'cancelled',
+                  );
+                  return;
+                }
+                const responseStream = sendResult.responseStream;
+                nextMessage = null;
+
+                for await (const resp of responseStream) {
+                  if (pendingSend.signal.aborted) return;
+
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.candidates &&
+                    resp.value.candidates.length > 0
+                  ) {
+                    const candidate = resp.value.candidates[0];
+                    for (const part of candidate.content?.parts ?? []) {
+                      if (!part.text) continue;
+                      this.messageEmitter.emitMessage(
+                        part.text,
+                        'assistant',
+                        part.thought,
+                      );
+                    }
+                  }
+
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.usageMetadata
+                  ) {
+                    usageMetadata = resp.value.usageMetadata;
+                  }
+
+                  if (
+                    resp.type === StreamEventType.CHUNK &&
+                    resp.value.functionCalls
+                  ) {
+                    functionCalls.push(...resp.value.functionCalls);
+                  }
+                }
+
+                if (usageMetadata) {
+                  this.#recordPromptTokenCount(usageMetadata);
+                  if (this.messageRewriter) {
+                    this.messageRewriter.flushTurn(pendingSend.signal);
+                  }
+                  const durationMs = Date.now() - streamStartTime;
+                  await this.messageEmitter.emitUsageMetadata(
+                    usageMetadata,
+                    '',
+                    durationMs,
+                  );
+                }
+
+                if (functionCalls.length > 0) {
+                  const toolResponseParts = await this.runToolCalls(
+                    pendingSend.signal,
+                    promptId,
+                    functionCalls,
+                  );
+                  nextMessage = { role: 'user', parts: toolResponseParts };
+                }
+              }
+            } catch (error) {
+              if (pendingSend.signal.aborted) return;
+              debugLogger.error('Error processing notification prompt:', error);
+              const msg =
+                error instanceof Error ? error.message : String(error);
+              await this.messageEmitter.emitAgentMessage(
+                `[notification error] ${msg}`,
+              );
+            } finally {
+              logConversationFinishedEvent(
+                this.config,
+                new ConversationFinishedEvent(
+                  this.config.getApprovalMode(),
+                  turnCount,
+                ),
+              );
+            }
+          },
+          () => 'ok',
+        );
+      },
+    );
   }
 
   /**

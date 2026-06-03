@@ -1582,6 +1582,53 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('does not put approved background permission placeholders on the active subagent stack', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-1',
+        kind: 'permission',
+        requestId: 'req-1',
+        sessionId: 'sess-1',
+        title: 'Agent A',
+        options: [{ optionId: 'opt-1', label: 'Allow', raw: {} }],
+        toolCall: {
+          toolCallId: 'agent-1',
+          rawInput: {
+            subagent_type: 'Explore',
+            prompt: 'a',
+            run_in_background: true,
+          },
+        },
+        preview: { kind: 'generic' as const },
+        resolved: 'selected:allow',
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+      textBlock('thought-1', 'thought', 'background agent is running', 3),
+      textBlock('assistant-1', 'assistant', 'main turn continues', 4),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'agent-1',
+          status: 'pending',
+        },
+      ],
+    });
+    const agent =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agent?.subContent).toBeUndefined();
+    expect(messages[1]).toMatchObject({
+      role: 'assistant',
+      content: 'main turn continues',
+      thinking: 'background agent is running',
+    });
+  });
+
   it('keeps approved regular tool permission visible until tool update arrives', () => {
     const pendingMessages = transcriptBlocksToDaemonMessages([
       {

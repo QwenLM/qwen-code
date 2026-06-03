@@ -13,6 +13,7 @@ import {
 // instead of inlining the string literals, so upstream changes
 // are compiler-flagged here.
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
 
 /**
  * Stage 1 daemon mode shape.
@@ -236,6 +237,79 @@ export interface CapabilitiesEnvelope {
      */
     permission?: PermissionPolicy;
   };
+}
+
+export interface ServeAuthProviderModel {
+  id: string;
+  contextWindowSize?: number;
+  enableThinking?: boolean;
+  modalities?: InputModalities;
+  description?: string;
+}
+
+export interface ServeAuthProviderBaseUrlOption {
+  id: string;
+  label: string;
+  url: string;
+  documentationUrl?: string;
+  apiKeyUrl?: string;
+}
+
+export interface ServeAuthProviderDescriptor {
+  id: string;
+  label: string;
+  description: string;
+  uiGroup?: string;
+  protocol: AuthType;
+  protocolOptions?: AuthType[];
+  baseUrl?: string | ServeAuthProviderBaseUrlOption[];
+  envKey?: string;
+  models?: ServeAuthProviderModel[];
+  modelsEditable?: boolean;
+  apiKeyPlaceholder?: string;
+  documentationUrl?: string;
+  showAdvancedConfig?: boolean;
+  uiLabels?: {
+    flowTitle?: string;
+    baseUrlStepTitle?: string;
+  };
+  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+}
+
+export interface ServeAuthProviderCatalog {
+  v: 1;
+  workspaceCwd: string;
+  providers: ServeAuthProviderDescriptor[];
+  groups: Array<{
+    id: 'alibaba' | 'third-party' | 'custom';
+    label: string;
+    description: string;
+    providerIds: string[];
+  }>;
+}
+
+export interface ServeAuthProviderInstallRequest {
+  providerId: string;
+  protocol?: AuthType;
+  baseUrl?: string;
+  apiKey: string;
+  modelIds?: string[];
+  advancedConfig?: {
+    enableThinking?: boolean;
+    multimodal?: InputModalities;
+    contextWindowSize?: number;
+    maxTokens?: number;
+  };
+}
+
+export interface ServeAuthProviderInstallResult {
+  v: 1;
+  providerId: string;
+  providerLabel: string;
+  authType: AuthType;
+  modelId?: string;
+  baseUrl?: string;
+  message: string;
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

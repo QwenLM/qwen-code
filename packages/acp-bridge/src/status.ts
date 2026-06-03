@@ -134,6 +134,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
   // Runtime MCP server mutation ext-methods
+  sessionTaskCancel: 'qwen/control/session/task/cancel',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReloadEnv: 'qwen/control/workspace/reload_env',

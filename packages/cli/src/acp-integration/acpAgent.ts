@@ -5667,6 +5667,49 @@ class QwenAgent implements Agent {
         });
         return { sessionId, injected: true };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionTaskCancel: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const taskId = params['taskId'];
+        if (typeof taskId !== 'string' || taskId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing taskId',
+          );
+        }
+        const taskKind = params['taskKind'];
+        if (
+          taskKind !== 'agent' &&
+          taskKind !== 'shell' &&
+          taskKind !== 'monitor'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'taskKind must be "agent", "shell", or "monitor"',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        switch (taskKind) {
+          case 'agent':
+            config.getBackgroundTaskRegistry().cancel(taskId);
+            break;
+          case 'shell':
+            config.getBackgroundShellRegistry().requestCancel(taskId);
+            break;
+          case 'monitor':
+            config.getMonitorRegistry().cancel(taskId);
+            break;
+          default:
+            break;
+        }
+        return { cancelled: true };
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
         const name = params['name'];
         const config = params['config'];

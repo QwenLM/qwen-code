@@ -363,6 +363,18 @@ export class DaemonSessionClient {
     return await this.client.sessionTasks(this.sessionId, this.clientId);
   }
 
+  async cancelTask(
+    taskId: string,
+    kind: string,
+  ): Promise<{ cancelled: boolean }> {
+    return await this.client.sessionTaskCancel(
+      this.sessionId,
+      taskId,
+      kind,
+      this.clientId,
+    );
+  }
+
   async stats(): Promise<DaemonSessionStatsStatus> {
     return await this.client.sessionStats(this.sessionId, this.clientId);
   }

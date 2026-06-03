@@ -62,6 +62,7 @@ interface EditorProps {
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
+  sessionName?: string;
 }
 
 export interface EditorHandle {
@@ -172,6 +173,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     followupState,
     onAcceptFollowup,
     onDismissFollowup,
+    sessionName,
   },
   ref,
 ) {
@@ -1137,7 +1139,11 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
 
   return (
     <div className={containerClass} onClick={focus}>
-      <div className={styles.borderTop} />
+      <div className={styles.borderTop}>
+        {sessionName && (
+          <span className={styles.borderTopLabel}>{sessionName}</span>
+        )}
+      </div>
       {searchMode && (
         <div className={styles.searchBar}>
           <span className={styles.searchLabel}>reverse-i-search:</span>

@@ -46,6 +46,7 @@ export interface DaemonConnectionState {
   models?: DaemonModelInfo[];
   currentModel?: string;
   currentMode?: string;
+  displayName?: string;
   tokenCount?: number;
   contextWindow?: number;
   providers?: DaemonWorkspaceProvidersStatus;
@@ -240,6 +241,7 @@ export interface DaemonSessionActions {
   ): Promise<DaemonSessionBtwResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(): Promise<DaemonSessionTasksStatus>;
+  cancelTask(taskId: string, kind: string): Promise<{ cancelled: boolean }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
 }
 

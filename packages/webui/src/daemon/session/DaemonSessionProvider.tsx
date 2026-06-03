@@ -40,6 +40,7 @@ import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider
 import {
   getCurrentMode,
   getReplayTokenCount,
+  getSessionDisplayName,
   mapProviderStatus,
   mapSupportedCommands,
   updateConnectionFromDaemonEvent,
@@ -478,6 +479,11 @@ export function DaemonSessionProvider({
             models,
             currentModel,
             currentMode,
+            displayName:
+              getSessionDisplayName(activeSession.state) ??
+              (current.sessionId === activeSession.sessionId
+                ? current.displayName
+                : undefined),
             tokenCount:
               // A freshly loaded snapshot covers everything up to the SSE
               // resume point, so its usage supersedes the in-memory count;

@@ -53,6 +53,10 @@ import {
   ModelMessage,
   type ModelInlineMode,
 } from './components/messages/ModelMessage';
+import {
+  AUTH_ACTIVE_EVENT,
+  AuthMessage,
+} from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import {
   SETTINGS_ACTIVE_EVENT,
@@ -84,7 +88,11 @@ import {
 } from './utils/copyCommand';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
-import { handleTasksSlashCommand } from './utils/tasksCommand';
+import { serializeTasksStatusMessage } from './components/messages/TasksStatusMessage';
+import {
+  isBackgroundSubAgentToolCall,
+  isSubAgentToolCall,
+} from './adapters/toolClassification';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
@@ -103,6 +111,7 @@ import {
   parseMcpStatusMessage,
   serializeMcpStatusMessage,
 } from './components/messages/McpStatusMessage';
+import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import type {
   ACPToolCall,
@@ -395,10 +404,7 @@ function parseRenameArgument(
 }
 
 function isAgentTool(tool: ACPToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  return (
-    name === 'agent' || name === 'task' || Boolean(tool.args?.subagent_type)
-  );
+  return isSubAgentToolCall(tool);
 }
 
 function isActiveTool(tool: ACPToolCall): boolean {
@@ -430,7 +436,11 @@ function getFloatingPanels(messages: readonly Message[]): FloatingPanels {
       if (nextTodos) {
         todos = hasActiveTodos(nextTodos) ? nextTodos : [];
       }
-      if (isAgentTool(tool) && isActiveTool(tool)) {
+      if (
+        isAgentTool(tool) &&
+        isActiveTool(tool) &&
+        !isBackgroundSubAgentToolCall(tool)
+      ) {
         agents.push(tool);
       }
     }
@@ -721,6 +731,7 @@ export function App({
   const [showToolsDialog, setShowToolsDialog] = useState(false);
   const [settingsInlineOpen, setSettingsInlineOpen] = useState(false);
   const [memoryInlineOpen, setMemoryInlineOpen] = useState(false);
+  const [authInlineOpen, setAuthInlineOpen] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [memoryAddScope, setMemoryAddScope] = useState<'workspace' | 'global'>(
@@ -736,10 +747,12 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const approvalModePanelActive = usePanelActive(APPROVAL_MODE_ACTIVE_EVENT);
   const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
+  const tasksPanelActive = usePanelActive(TASKS_STATUS_ACTIVE_EVENT);
   const agentsPanelActive = usePanelActive(AGENTS_ACTIVE_EVENT);
   const memoryPanelActive = usePanelActive(MEMORY_ACTIVE_EVENT);
   const modelPanelActive = usePanelActive(MODEL_ACTIVE_EVENT);
   const settingsPanelActive = usePanelActive(SETTINGS_ACTIVE_EVENT);
+  const authPanelActive = usePanelActive(AUTH_ACTIVE_EVENT);
   const [selectedTheme, setSelectedTheme] =
     useState<WebShellTheme>(providedTheme);
   const [currentModel, setCurrentModel] = useState('');
@@ -747,6 +760,8 @@ export function App({
   currentModelRef.current = currentModel;
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  const sessionDisplayName = (connection as { displayName?: string })
+    .displayName;
   const [currentMode, setCurrentMode] = useState('default');
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
@@ -763,10 +778,12 @@ export function App({
     dialogOpen ||
     approvalModePanelActive ||
     mcpPanelActive ||
+    tasksPanelActive ||
     agentsPanelActive ||
     memoryPanelActive ||
     modelPanelActive ||
-    settingsPanelActive;
+    settingsPanelActive ||
+    authPanelActive;
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -1219,15 +1236,21 @@ export function App({
             setShowHelpDialog(true);
             return true;
           }
-          if (
-            handleTasksSlashCommand({
-              cmd,
-              promptBlocked,
-              getTasks: sessionActions.getTasks,
-              dispatch: store.dispatch,
-              reportError,
-            })
-          ) {
+          if (cmd === 'tasks') {
+            store.appendLocalUserMessage(text);
+            sessionActions
+              .getTasks()
+              .then((snapshot) => {
+                store.dispatch([
+                  {
+                    type: 'status',
+                    text: serializeTasksStatusMessage({ snapshot }),
+                  },
+                ]);
+              })
+              .catch((error: unknown) => {
+                reportError(error, 'Failed to load tasks');
+              });
             return true;
           }
           if (cmd === 'theme') {
@@ -1322,6 +1345,11 @@ export function App({
           }
           if (cmd === 'release') {
             setShowReleaseDialog(true);
+            return true;
+          }
+          if (cmd === 'auth') {
+            store.appendLocalUserMessage(text);
+            setAuthInlineOpen(true);
             return true;
           }
           if (cmd === 'model') {
@@ -2137,9 +2165,18 @@ export function App({
                     agentsInlineMode ||
                     memoryInlineOpen ||
                     modelInlineMode ||
+                    authInlineOpen ||
                     approvalModeInlineOpen ||
                     settingsInlineOpen ? (
                       <>
+                        {authInlineOpen && (
+                          <AuthMessage
+                            onMessage={(text, type = 'status') => {
+                              store.dispatch([{ type, text }]);
+                            }}
+                            onClose={() => setAuthInlineOpen(false)}
+                          />
+                        )}
                         {approvalModeInlineOpen && (
                           <ApprovalModeMessage
                             currentMode={currentMode}
@@ -2199,9 +2236,10 @@ export function App({
                     agentsInlineMode ||
                     memoryInlineOpen ||
                     modelInlineMode ||
+                    authInlineOpen ||
                     approvalModeInlineOpen ||
                     settingsInlineOpen
-                      ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
+                      ? `inline-${authInlineOpen ? 'auth' : 'none'}-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}-${settingsInlineOpen ? 'settings' : 'none'}`
                       : undefined
                   }
                   // The approval-mode/model pickers and the settings panel are
@@ -2261,6 +2299,7 @@ export function App({
                   onPopQueuedMessages={popQueuedPromptsForEdit}
                   onClearQueuedMessages={clearQueuedPrompts}
                   currentMode={currentMode}
+                  sessionName={sessionDisplayName}
                   dialogOpen={bottomHidden}
                   followupState={followupState}
                   onAcceptFollowup={onAcceptFollowup}

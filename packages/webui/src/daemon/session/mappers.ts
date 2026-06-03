@@ -146,6 +146,16 @@ export function updateConnectionFromDaemonEvent(
   }
 
   switch (event.type) {
+    case 'session_metadata_updated': {
+      const data = getRecord(event.data);
+      if (Object.prototype.hasOwnProperty.call(data ?? {}, 'displayName')) {
+        setConnection((current) => ({
+          ...current,
+          displayName: getString(data, 'displayName'),
+        }));
+      }
+      break;
+    }
     case 'model_switched': {
       const modelId = getString(getRecord(event.data), 'modelId');
       if (modelId) {
@@ -164,6 +174,13 @@ export function updateConnectionFromDaemonEvent(
     default:
       break;
   }
+}
+
+export function getSessionDisplayName(
+  state: Record<string, unknown> | undefined,
+): string | undefined {
+  const displayName = getString(state, 'displayName');
+  return displayName?.trim() ? displayName : undefined;
 }
 
 export function getCurrentMode(

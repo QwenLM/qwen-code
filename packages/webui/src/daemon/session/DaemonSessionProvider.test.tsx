@@ -38,6 +38,7 @@ interface MockSession {
   sessionId: string;
   workspaceCwd: string;
   clientId: string;
+  state?: Record<string, unknown>;
   client?: MockClient;
   lastEventId?: number;
   setLastEventId: (lastEventId: number | undefined) => void;
@@ -2235,6 +2236,70 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('exposes the restored session display name on the connection state', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({ state: { displayName: 'Named session' } }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+
+    expect(connection).toMatchObject({
+      sessionId: 'session-1',
+      displayName: 'Named session',
+    });
+  });
+
+  it('updates the connection display name from metadata events', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* metadataEvents(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          yield {
+            id: 9,
+            v: 1,
+            type: 'session_metadata_updated',
+            data: {
+              sessionId: 'session-1',
+              displayName: 'Updated session',
+            },
+          };
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      sessionId: 'session-1',
+      displayName: 'Updated session',
+    });
+  });
+
   it('recovers internally when the daemon requests a state resync', async () => {
     const firstSession = createMockSession({
       sessionId: 'session-resync',
@@ -4033,6 +4098,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     sessionId: opts.sessionId ?? 'session-1',
     workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
     clientId: opts.clientId ?? 'client-1',
+    state: opts.state ?? {},
     lastEventId: opts.lastEventId,
     setLastEventId:
       opts.setLastEventId ??

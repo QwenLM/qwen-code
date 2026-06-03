@@ -635,6 +635,22 @@ export function createDaemonSessionActions({
       }
     },
 
+    async cancelTask(taskId: string, kind: string) {
+      const session = requireSessionForAction(
+        store,
+        sessionRef.current,
+        'Cancel task failed',
+      );
+      try {
+        return await withActionTimeout(
+          session.cancelTask(taskId, kind),
+          'Cancel task timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(store, 'Cancel task failed', error);
+      }
+    },
+
     async getStats() {
       const session = requireSessionForAction(
         addNotice,

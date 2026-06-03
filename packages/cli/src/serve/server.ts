@@ -11,8 +11,10 @@ import type { Application, NextFunction, Request, Response } from 'express';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
   APPROVAL_MODES,
+  ALL_PROVIDERS,
   BTW_MAX_INPUT_LENGTH,
   SessionService,
+  shouldShowStep,
   TrustGateError,
   emitDaemonLog,
   hashDaemonWorkspace,
@@ -86,6 +88,10 @@ import { SubscriberLimitExceededError, type BridgeEvent } from './eventBus.js';
 import {
   CAPABILITIES_SCHEMA_VERSION,
   type CapabilitiesEnvelope,
+  type ServeAuthProviderCatalog,
+  type ServeAuthProviderDescriptor,
+  type ServeAuthProviderInstallRequest,
+  type ServeAuthProviderInstallResult,
   type ServeOptions,
 } from './types.js';
 import { getDemoHtml } from './demo.js';
@@ -220,6 +226,179 @@ async function listWorkspaceSessionsForResponse(
   });
 }
 
+const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
+  'protocol',
+  'baseUrl',
+  'apiKey',
+  'models',
+  'advancedConfig',
+];
+
+function buildAuthProviderDescriptor(
+  provider: (typeof ALL_PROVIDERS)[number],
+): ServeAuthProviderDescriptor {
+  const steps = AUTH_PROVIDER_STEPS.filter((step) =>
+    shouldShowStep(provider, step),
+  );
+  return {
+    id: provider.id,
+    label: provider.label,
+    description: provider.description,
+    ...(provider.uiGroup ? { uiGroup: provider.uiGroup } : {}),
+    protocol: provider.protocol,
+    ...(provider.protocolOptions
+      ? { protocolOptions: [...provider.protocolOptions] }
+      : {}),
+    ...(provider.baseUrl !== undefined ? { baseUrl: provider.baseUrl } : {}),
+    ...(typeof provider.envKey === 'string' ? { envKey: provider.envKey } : {}),
+    ...(provider.models
+      ? {
+          models: provider.models.map((model) => ({
+            id: model.id,
+            ...(model.contextWindowSize !== undefined
+              ? { contextWindowSize: model.contextWindowSize }
+              : {}),
+            ...(model.enableThinking !== undefined
+              ? { enableThinking: model.enableThinking }
+              : {}),
+            ...(model.modalities ? { modalities: model.modalities } : {}),
+            ...(model.description ? { description: model.description } : {}),
+          })),
+        }
+      : {}),
+    ...(provider.modelsEditable !== undefined
+      ? { modelsEditable: provider.modelsEditable }
+      : {}),
+    ...(provider.apiKeyPlaceholder
+      ? { apiKeyPlaceholder: provider.apiKeyPlaceholder }
+      : {}),
+    ...(typeof provider.documentationUrl === 'string'
+      ? { documentationUrl: provider.documentationUrl }
+      : {}),
+    ...(provider.showAdvancedConfig !== undefined
+      ? { showAdvancedConfig: provider.showAdvancedConfig }
+      : {}),
+    ...(provider.uiLabels ? { uiLabels: provider.uiLabels } : {}),
+    steps,
+  };
+}
+
+function buildAuthProviderCatalog(
+  workspaceCwd: string,
+): ServeAuthProviderCatalog {
+  const providers = ALL_PROVIDERS.map(buildAuthProviderDescriptor);
+  const providerIdsByGroup = (group: string) =>
+    providers
+      .filter((provider) => provider.uiGroup === group)
+      .map((provider) => provider.id);
+  return {
+    v: 1,
+    workspaceCwd,
+    providers,
+    groups: [
+      {
+        id: 'alibaba',
+        label: 'Alibaba ModelStudio',
+        description:
+          'Official recommended setup: Coding Plan, Token Plan, or Standard API Key',
+        providerIds: providerIdsByGroup('alibaba'),
+      },
+      {
+        id: 'third-party',
+        label: 'Third-party Providers',
+        description: 'Choose a built-in provider and connect with an API key',
+        providerIds: providerIdsByGroup('third-party'),
+      },
+      {
+        id: 'custom',
+        label: 'Custom Provider',
+        description:
+          'Manually connect a local server, proxy, or unsupported provider',
+        providerIds: providerIdsByGroup('custom'),
+      },
+    ],
+  };
+}
+
+function parseStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const result = value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => item.length > 0);
+  return result.length > 0 ? [...new Set(result)] : undefined;
+}
+
+function parseAuthProviderInstallRequest(
+  body: Record<string, unknown>,
+): ServeAuthProviderInstallRequest | undefined {
+  const providerId = body['providerId'];
+  const apiKey = body['apiKey'];
+  if (
+    typeof providerId !== 'string' ||
+    providerId.trim().length === 0 ||
+    typeof apiKey !== 'string'
+  ) {
+    return undefined;
+  }
+  const protocol = body['protocol'];
+  const baseUrl = body['baseUrl'];
+  const modelIds = parseStringArray(body['modelIds']);
+  const rawAdvanced =
+    body['advancedConfig'] && typeof body['advancedConfig'] === 'object'
+      ? (body['advancedConfig'] as Record<string, unknown>)
+      : undefined;
+  const rawMultimodal =
+    rawAdvanced?.['multimodal'] && typeof rawAdvanced['multimodal'] === 'object'
+      ? (rawAdvanced['multimodal'] as Record<string, unknown>)
+      : undefined;
+  const advancedConfig = rawAdvanced
+    ? {
+        ...(typeof rawAdvanced['enableThinking'] === 'boolean'
+          ? { enableThinking: rawAdvanced['enableThinking'] }
+          : {}),
+        ...(rawMultimodal
+          ? {
+              multimodal: {
+                ...(typeof rawMultimodal['image'] === 'boolean'
+                  ? { image: rawMultimodal['image'] }
+                  : {}),
+                ...(typeof rawMultimodal['pdf'] === 'boolean'
+                  ? { pdf: rawMultimodal['pdf'] }
+                  : {}),
+                ...(typeof rawMultimodal['audio'] === 'boolean'
+                  ? { audio: rawMultimodal['audio'] }
+                  : {}),
+                ...(typeof rawMultimodal['video'] === 'boolean'
+                  ? { video: rawMultimodal['video'] }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(typeof rawAdvanced['contextWindowSize'] === 'number'
+          ? { contextWindowSize: rawAdvanced['contextWindowSize'] }
+          : {}),
+        ...(typeof rawAdvanced['maxTokens'] === 'number'
+          ? { maxTokens: rawAdvanced['maxTokens'] }
+          : {}),
+      }
+    : undefined;
+  return {
+    providerId: providerId.trim(),
+    ...(typeof protocol === 'string' && protocol.trim()
+      ? {
+          protocol:
+            protocol.trim() as ServeAuthProviderInstallRequest['protocol'],
+        }
+      : {}),
+    ...(typeof baseUrl === 'string' && baseUrl.trim()
+      ? { baseUrl: baseUrl.trim() }
+      : {}),
+    apiKey,
+    ...(modelIds ? { modelIds } : {}),
+    ...(advancedConfig ? { advancedConfig } : {}),
+  };
+}
+
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
@@ -264,7 +443,19 @@ export interface ServeAppDeps {
    */
   deviceFlowProviders?: DeviceFlowProvider[];
   /**
-   * Optional daemon logger.
+   * Installs an LLM auth provider by applying the same provider install plan
+   * used by interactive `/auth`. Production `runQwenServe` injects a
+   * settings-backed implementation; tests/direct embeds may omit it, in which
+   * case the route reports `not_implemented`.
+   */
+  installAuthProvider?: (
+    req: ServeAuthProviderInstallRequest,
+  ) => Promise<ServeAuthProviderInstallResult>;
+  /**
+   * Optional daemon logger. When provided, `sendBridgeError` routes
+   * each 5xx error through `daemonLog.error(...)` (which tees to stderr +
+   * the daemon log file). When omitted, falls back to existing
+   * stderr-only behavior.
    */
   daemonLog?: DaemonLogger;
   workspace?: DaemonWorkspaceService;
@@ -1297,6 +1488,49 @@ export function createServeApp(
     });
   });
 
+  app.get('/workspace/auth/providers', (_req, res) => {
+    res.status(200).json(buildAuthProviderCatalog(boundWorkspace));
+  });
+
+  app.post(
+    '/workspace/auth/provider',
+    mutate({ strict: true }),
+    async (req, res) => {
+      if (!deps.installAuthProvider) {
+        res.status(501).json({
+          error: 'Auth provider installation is not implemented by this daemon',
+          code: 'not_implemented',
+        });
+        return;
+      }
+      const parsed = parseAuthProviderInstallRequest(safeBody(req));
+      if (!parsed) {
+        res.status(400).json({
+          error: '`providerId` and `apiKey` are required',
+          code: 'invalid_request',
+        });
+        return;
+      }
+      const knownProvider = ALL_PROVIDERS.find(
+        (provider) => provider.id === parsed.providerId,
+      );
+      if (!knownProvider) {
+        res.status(400).json({
+          error: `Unsupported auth provider: ${parsed.providerId}`,
+          code: 'unsupported_provider',
+        });
+        return;
+      }
+      try {
+        res.status(200).json(await deps.installAuthProvider(parsed));
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /workspace/auth/provider',
+        });
+      }
+    },
+  );
+
   app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
     // 1 daemon = 1 workspace. Three input shapes:
@@ -1636,6 +1870,37 @@ export function createServeApp(
       res.status(200).json(await bridge.getSessionHooksStatus(sessionId));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /session/:id/hooks', sessionId });
+    }
+  });
+
+  app.post('/session/:id/tasks/:taskId/cancel', mutate(), async (req, res) => {
+    const sessionId = req.params['id'];
+    const taskId = req.params['taskId'];
+    if (!sessionId || !taskId) {
+      res
+        .status(400)
+        .json({
+          error: '`sessionId` and `taskId` route parameters are required',
+        });
+      return;
+    }
+    const body = safeBody(req);
+    const kind = body['kind'];
+    if (kind !== 'agent' && kind !== 'shell' && kind !== 'monitor') {
+      res
+        .status(400)
+        .json({ error: '`kind` must be "agent", "shell", or "monitor"' });
+      return;
+    }
+    try {
+      res
+        .status(200)
+        .json(await bridge.cancelSessionTask(sessionId, taskId, kind));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/tasks/:taskId/cancel',
+        sessionId,
+      });
     }
   });
 

@@ -15,6 +15,7 @@ import {
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
+import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
@@ -35,8 +36,15 @@ import {
   recordDaemonPromptQueueWait,
   recordDaemonSessionLifecycle,
   registerDaemonGaugeCallbacks,
+  findProviderById,
+  buildInstallPlan,
+  applyProviderInstallPlan,
+  resolveBaseUrl,
+  getDefaultModelIds,
   resolveTelemetrySettings,
   shutdownTelemetry,
+  type AuthType,
+  type ProviderSetupInputs,
   type TelemetryRuntimeConfig,
   type TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
@@ -57,7 +65,10 @@ import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { createDaemonWorkspaceService } from './workspace-service/index.js';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
-import type { ServeOptions } from './types.js';
+import type { ServeOptions ,
+  ServeAuthProviderInstallRequest,
+  ServeAuthProviderInstallResult,
+} from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
 import { getCliVersion } from '../utils/version.js';
@@ -328,6 +339,35 @@ export interface RunHandle {
   bridge: AcpSessionBridge;
   /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
+}
+
+function normalizeInstallModelIds(
+  req: ServeAuthProviderInstallRequest,
+  provider: NonNullable<ReturnType<typeof findProviderById>>,
+): string[] {
+  const fromRequest = req.modelIds
+    ?.map((id) => id.trim())
+    .filter((id) => id.length > 0);
+  const modelIds =
+    fromRequest && fromRequest.length > 0
+      ? fromRequest
+      : getDefaultModelIds(provider);
+  return [...new Set(modelIds)];
+}
+
+function buildProviderSetupInputs(
+  req: ServeAuthProviderInstallRequest,
+  provider: NonNullable<ReturnType<typeof findProviderById>>,
+): ProviderSetupInputs {
+  const protocol = (req.protocol ?? provider.protocol) as AuthType;
+  const baseUrl = resolveBaseUrl(provider, req.baseUrl);
+  return {
+    ...(provider.protocolOptions ? { protocol } : {}),
+    baseUrl,
+    apiKey: req.apiKey.trim(),
+    modelIds: normalizeInstallModelIds(req, provider),
+    ...(req.advancedConfig ? { advancedConfig: req.advancedConfig } : {}),
+  };
 }
 
 export interface RunQwenServeDeps {
@@ -897,6 +937,34 @@ export async function runQwenServe(
         const fresh = loadSettings(workspace);
         fresh.setValue(scope, key, value);
       }),
+    installAuthProvider: (req) =>
+      withSettingsLock(
+        boundWorkspace,
+        async (): Promise<ServeAuthProviderInstallResult> => {
+          const provider = findProviderById(req.providerId);
+          if (!provider) {
+            throw new Error(`Unsupported auth provider: ${req.providerId}`);
+          }
+          const inputs = buildProviderSetupInputs(req, provider);
+          const plan = buildInstallPlan(provider, inputs);
+          const fresh = loadSettings(boundWorkspace);
+          await applyProviderInstallPlan(plan, {
+            settings: createLoadedSettingsAdapter(fresh),
+            doRefreshAuth: false,
+          });
+          return {
+            v: 1,
+            providerId: provider.id,
+            providerLabel: provider.label,
+            authType: plan.authType,
+            ...(plan.modelSelection?.modelId
+              ? { modelId: plan.modelSelection.modelId }
+              : {}),
+            ...(inputs.baseUrl ? { baseUrl: inputs.baseUrl } : {}),
+            message: `Successfully configured ${provider.label}. Use /model to switch models.`,
+          };
+        },
+      ),
   });
   // Pull the device-flow registry back out so the close hook can
   // dispose it before `bridge.shutdown()`, ensuring polling timers +

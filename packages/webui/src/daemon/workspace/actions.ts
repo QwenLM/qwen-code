@@ -369,6 +369,22 @@ export function createDaemonWorkspaceActions({
         'Get auth status timed out',
       );
     },
+
+    async getAuthProviders() {
+      const client = requireClient(getClient, 'Get auth providers failed');
+      return withActionTimeout(
+        client.getAuthProviders(),
+        'Get auth providers timed out',
+      );
+    },
+
+    async installAuthProvider(req) {
+      const client = requireClient(getClient, 'Install auth provider failed');
+      return withActionTimeout(
+        client.installAuthProvider(req),
+        'Install auth provider timed out',
+      );
+    },
   };
 }
 
