@@ -456,55 +456,6 @@ export interface AcpSessionBridge {
   >;
 
   /**
-   * Restart a configured MCP server through the ACP child's
-   * `McpClientManager` (pre-F2) or transport pool (F2 #4175 commit 5).
-   */
-  restartMcpServer(
-    serverName: string,
-    originatorClientId: string | undefined,
-    opts?: { entryIndex?: number },
-  ): Promise<
-    | { serverName: string; restarted: true; durationMs: number }
-    | {
-        serverName: string;
-        restarted: false;
-        skipped: true;
-        reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
-      }
-    | {
-        serverName: string;
-        entries: Array<{
-          entryIndex: number;
-          restarted: boolean;
-          durationMs?: number;
-          reason?: string;
-        }>;
-      }
-  >;
-
-  manageMcpServer(
-    serverName: string,
-    action: 'enable' | 'disable' | 'authenticate' | 'clear-auth',
-    originatorClientId: string | undefined,
-  ): Promise<{
-    serverName: string;
-    action: 'enable' | 'disable' | 'authenticate' | 'clear-auth';
-    ok: true;
-    changed?: boolean;
-    messages?: string[];
-    authUrl?: string;
-  }>;
-
-  generateWorkspaceAgent(
-    description: string,
-    originatorClientId: string | undefined,
-  ): Promise<{
-    name: string;
-    description: string;
-    systemPrompt: string;
-  }>;
-
-  /**
    * Tear down a session — kill the child, drop from maps, publish
    * `session_died`. Idempotent on already-dead sessions.
    *
