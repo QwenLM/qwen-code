@@ -5541,6 +5541,11 @@ describe('detectBlockedSleepPattern', () => {
         'sleep 2s # intentional-sleep: deliberate rate limit backoff',
       ),
     ).toBeNull();
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 10m # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBeNull();
   });
 
   it('requires a meaningful intentional sleep reason', () => {
@@ -5550,6 +5555,20 @@ describe('detectBlockedSleepPattern', () => {
     expect(detectBlockedSleepPattern('sleep 5 # intentional-sleep: wait')).toBe(
       'standalone sleep 5',
     );
+    expect(
+      detectBlockedSleepPattern('sleep 5 # intentional-sleep: 1234567'),
+    ).toBe('standalone sleep 5');
+    expect(
+      detectBlockedSleepPattern('sleep 5 # intentional-sleep: 12345678'),
+    ).toBeNull();
+  });
+
+  it('blocks intentional sleep comments above the duration cap', () => {
+    expect(
+      detectBlockedSleepPattern(
+        'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
+      ),
+    ).toBe('standalone sleep 601s');
   });
 
   it('does not allow intentional sleep comments on leading sleep chains', () => {

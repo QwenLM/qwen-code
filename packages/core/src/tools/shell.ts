@@ -1061,13 +1061,21 @@ export function detectBlockedSleepPattern(command: string): string | null {
   if (separator === null) return null;
 
   const rest = separator.rest.trim();
-  if (!rest && hasIntentionalSleepComment(comment)) return null;
+  if (
+    !rest &&
+    secs <= MAX_INTENTIONAL_SLEEP_SECONDS &&
+    hasIntentionalSleepComment(comment)
+  ) {
+    return null;
+  }
   return rest
     ? `sleep ${durationToken} followed by: ${rest}`
     : `standalone sleep ${durationToken}`;
 }
 
 const INTENTIONAL_SLEEP_COMMENT_PREFIX = 'intentional-sleep:';
+const MAX_INTENTIONAL_SLEEP_SECONDS = 10 * 60;
+// Require a real reason, not a trivial opt-out like "wait".
 const MIN_INTENTIONAL_SLEEP_REASON_LENGTH = 8;
 
 function hasIntentionalSleepComment(comment: string | null): boolean {
