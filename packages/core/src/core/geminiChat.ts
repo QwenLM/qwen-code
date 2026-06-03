@@ -41,6 +41,7 @@ import {
   logContentRetry,
   logContentRetryFailure,
 } from '../telemetry/loggers.js';
+import { clearDetailedSpanState } from '../telemetry/detailed-span-attributes.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
@@ -139,6 +140,39 @@ function getHardRescueFailureMessage(
   );
 }
 
+/**
+ * Defensive coercion for API-reported token counts.
+ *
+ * Hostile providers (broken upstream, OpenAI-compat proxy returning
+ * `null`/`NaN`, misconfigured override) can yield non-finite or negative
+ * token counts on `usageMetadata`. This function coerces the four fields that
+ * feed the compaction gate, its cache-hit telemetry, or OTel spans —
+ * `promptTokenCount`, `totalTokenCount`, `candidatesTokenCount`, and
+ * `cachedContentTokenCount`. Letting hostile values
+ * flow into the compaction gate arithmetic is catastrophic:
+ *
+ * - `lastPromptTokenCount + NaN >= hard` is always false → hard-rescue is
+ *   silently disabled, eventually OOMing the V8 heap.
+ * - `Infinity >= hard` is always true → hard-rescue fires on every send.
+ *
+ * Coercing unknown / negative / non-finite to `0` keeps the gate well-defined
+ * and is a no-op for any provider returning sane values.
+ *
+ * `Number.isFinite(-1)` is `true`, so the explicit `>= 0` check is required
+ * in addition to `isFinite`.
+ */
+function coerceUsageCount(value: unknown, field?: string): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return value;
+  }
+  if (value != null && field) {
+    debugLogger.warn(
+      `coerceUsageCount: hostile ${field}=${String(value)}, coercing to 0`,
+    );
+  }
+  return 0;
+}
+
 export enum StreamEventType {
   /** A regular content chunk from the API. */
   CHUNK = 'chunk',
@@ -195,6 +229,13 @@ interface TryCompressOptions {
    * post-compression guards that may roll the in-memory chat state back.
    */
   deferChatCompressionRecord?: boolean;
+  /**
+   * Forwarded to the compression side-query system prompt. Sourced from
+   * `/compress <text>` invocation arg; appended after the base prompt as
+   * an `Additional Instructions:` block so the summary model can focus
+   * on the user's stated concern.
+   */
+  customInstructions?: string;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -1406,6 +1447,7 @@ export class GeminiChat {
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
+      customInstructions: options?.customInstructions,
       signal,
     });
 
@@ -1419,6 +1461,7 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
+      clearDetailedSpanState();
       this.lastPromptTokenCount = info.newTokenCount;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
@@ -2632,6 +2675,14 @@ export class GeminiChat {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
+    let coercedUsage:
+      | {
+          promptTokenCount: number;
+          totalTokenCount: number;
+          candidatesTokenCount: number;
+          cachedContentTokenCount: number;
+        }
+      | undefined;
 
     let hasToolCall = false;
     let hasFinishReason = false;
@@ -2667,8 +2718,34 @@ export class GeminiChat {
         if (chunk.usageMetadata) {
           usageMetadata = chunk.usageMetadata;
           // Context usage tracks prompt size; output isn't in history yet.
-          const lastPromptTokenCount =
-            usageMetadata.promptTokenCount || usageMetadata.totalTokenCount;
+          // Coerce hostile-provider values (NaN / Infinity / negative) to 0
+          // so the compaction gate arithmetic stays well-defined; see
+          // `coerceUsageCount` for the failure modes this guards against.
+          const promptTokenCount = coerceUsageCount(
+            usageMetadata.promptTokenCount,
+            'promptTokenCount',
+          );
+          const totalTokenCount = coerceUsageCount(
+            usageMetadata.totalTokenCount,
+            'totalTokenCount',
+          );
+          const candidatesTokenCount = coerceUsageCount(
+            usageMetadata.candidatesTokenCount,
+            'candidatesTokenCount',
+          );
+          const cachedContentTokenCount = coerceUsageCount(
+            usageMetadata.cachedContentTokenCount,
+            'cachedContentTokenCount',
+          );
+          // Stash coerced values so recordAssistantTurn can reuse them
+          // without re-calling coerceUsageCount inline.
+          coercedUsage = {
+            promptTokenCount,
+            totalTokenCount,
+            candidatesTokenCount,
+            cachedContentTokenCount,
+          };
+          const lastPromptTokenCount = promptTokenCount || totalTokenCount;
           if (lastPromptTokenCount) {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
@@ -2680,9 +2757,9 @@ export class GeminiChat {
               lastPromptTokenCount,
             );
           }
-          if (usageMetadata.cachedContentTokenCount && this.telemetryService) {
+          if (cachedContentTokenCount && this.telemetryService) {
             this.telemetryService.setLastCachedContentTokenCount(
-              usageMetadata.cachedContentTokenCount,
+              cachedContentTokenCount,
             );
           }
         }
@@ -2770,7 +2847,9 @@ export class GeminiChat {
                 )
             : []),
         ],
-        tokens: usageMetadata,
+        tokens: coercedUsage
+          ? { ...usageMetadata, ...coercedUsage }
+          : usageMetadata,
         contextWindowSize,
       };
       if (streamError !== null) {

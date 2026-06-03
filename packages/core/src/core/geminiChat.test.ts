@@ -92,6 +92,24 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
   },
 }));
 
+const { mockDebugLoggerWarn } = vi.hoisted(() => ({
+  mockDebugLoggerWarn: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: mockDebugLoggerWarn,
+      error: vi.fn(),
+    }),
+  };
+});
+
 describe('GeminiChat', async () => {
   let mockContentGenerator: ContentGenerator;
   let chat: GeminiChat;
@@ -1562,6 +1580,133 @@ describe('GeminiChat', async () => {
 
       // The global uiTelemetryService must NOT be called by subagent chats
       expect(uiTelemetryService.setLastPromptTokenCount).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['NaN', NaN],
+      ['Infinity', Number.POSITIVE_INFINITY],
+      ['-Infinity', Number.NEGATIVE_INFINITY],
+      ['negative', -100],
+      ['null', null],
+      ['undefined', undefined],
+      ['string', '42' as unknown as number],
+    ])(
+      'coerces hostile-provider %s promptTokenCount so the compaction gate is not poisoned',
+      async (_label, badValue) => {
+        const response = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: 'response' }],
+                  role: 'model',
+                },
+                finishReason: 'STOP',
+                index: 0,
+                safetyRatings: [],
+              },
+            ],
+            text: () => 'response',
+            // Both prompt and total are hostile here. With coercion both go
+            // to 0, so the per-chat counter stays at its initial 0 and the
+            // global telemetry is NOT called (the `if (lastPromptTokenCount)`
+            // guard skips the zero case).
+            usageMetadata: {
+              promptTokenCount: badValue,
+              totalTokenCount: badValue,
+              candidatesTokenCount: 15,
+            },
+          } as unknown as GenerateContentResponse;
+        })();
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          response,
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'hello' },
+          `prompt-id-hostile-${_label}`,
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // Per-chat counter must not be poisoned (stays at initial 0).
+        expect(chat.getLastPromptTokenCount()).toBe(0);
+        // Global telemetry must not receive a hostile value either.
+        expect(
+          uiTelemetryService.setLastPromptTokenCount,
+        ).not.toHaveBeenCalled();
+
+        // `coerceUsageCount` warns on hostile, defined values so operators can
+        // diagnose silent coercion. `null` / `undefined` (the "field omitted"
+        // case) is expected and must stay silent.
+        const warnCalls = mockDebugLoggerWarn.mock.calls;
+        if (badValue == null) {
+          // No warn should mention prompt/total — provider simply omitted them.
+          const tokenWarn = warnCalls.find(
+            (args) =>
+              typeof args[0] === 'string' &&
+              (args[0].includes('promptTokenCount') ||
+                args[0].includes('totalTokenCount')),
+          );
+          expect(tokenWarn).toBeUndefined();
+        } else {
+          const promptWarn = warnCalls.find(
+            (args) =>
+              typeof args[0] === 'string' &&
+              args[0].includes('hostile promptTokenCount'),
+          );
+          const totalWarn = warnCalls.find(
+            (args) =>
+              typeof args[0] === 'string' &&
+              args[0].includes('hostile totalTokenCount'),
+          );
+          expect(promptWarn).toBeDefined();
+          expect(totalWarn).toBeDefined();
+          // The hostile value must be embedded so logs are actionable.
+          expect(promptWarn?.[0]).toContain(String(badValue));
+        }
+      },
+    );
+
+    it('falls back to coerced totalTokenCount when promptTokenCount is hostile', async () => {
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'response' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+            },
+          ],
+          text: () => 'response',
+          usageMetadata: {
+            promptTokenCount: NaN,
+            totalTokenCount: 73,
+            candidatesTokenCount: 15,
+          },
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hello' },
+        'prompt-id-hostile-fallback',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(chat.getLastPromptTokenCount()).toBe(73);
+      expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(
+        73,
+      );
     });
 
     it('should keep parts with thoughtSignature when consolidating history', async () => {

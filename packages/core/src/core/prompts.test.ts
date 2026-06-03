@@ -8,7 +8,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   getCoreSystemPrompt,
   getCustomSystemPrompt,
-  getSubagentSystemReminder,
   getPlanModeSystemReminder,
   resolvePathFromEnv,
   getCompressionPrompt,
@@ -454,31 +453,6 @@ describe('getCustomSystemPrompt', () => {
   });
 });
 
-describe('getSubagentSystemReminder', () => {
-  it('should format single agent type correctly', () => {
-    const result = getSubagentSystemReminder(['python']);
-
-    expect(result).toMatch(/^<system-reminder>.*<\/system-reminder>$/);
-    expect(result).toContain('available agent types are: python');
-    expect(result).toContain('PROACTIVELY use the');
-  });
-
-  it('should join multiple agent types with commas', () => {
-    const result = getSubagentSystemReminder(['python', 'web', 'analysis']);
-
-    expect(result).toContain(
-      'available agent types are: python, web, analysis',
-    );
-  });
-
-  it('should handle empty array', () => {
-    const result = getSubagentSystemReminder([]);
-
-    expect(result).toContain('available agent types are: ');
-    expect(result).toContain('<system-reminder>');
-  });
-});
-
 describe('getPlanModeSystemReminder', () => {
   it('should return plan mode system reminder with proper structure', () => {
     const result = getPlanModeSystemReminder();
@@ -491,8 +465,8 @@ describe('getPlanModeSystemReminder', () => {
   it('should include workflow instructions', () => {
     const result = getPlanModeSystemReminder();
 
-    expect(result).toContain("1. Answer the user's query comprehensively");
-    expect(result).toContain("2. When you're done researching");
+    expect(result).toContain('Iterative Planning Workflow');
+    expect(result).toContain('### The Loop');
     expect(result).toContain('exit_plan_mode tool');
   });
 

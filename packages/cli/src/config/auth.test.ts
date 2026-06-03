@@ -61,6 +61,20 @@ describe('validateAuthMethod', () => {
     expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
   });
 
+  it('should return null for USE_OPENAI with custom envKey stored in settings.env', () => {
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        env: { CUSTOM_API_KEY: 'settings-env-key' },
+        model: { name: 'custom-model' },
+        modelProviders: {
+          openai: [{ id: 'custom-model', envKey: 'CUSTOM_API_KEY' }],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+
+    expect(validateAuthMethod(AuthType.USE_OPENAI)).toBeNull();
+  });
+
   it('should return error with custom envKey hint when modelProviders envKey is set but env var is missing', () => {
     vi.mocked(settings.loadSettings).mockReturnValue({
       merged: {

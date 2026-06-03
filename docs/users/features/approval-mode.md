@@ -4,18 +4,22 @@ Qwen Code offers five distinct permission modes that allow you to flexibly contr
 
 ## Permission Modes Comparison
 
-| Mode           | File Editing                | Shell Commands              | Best For                                                                                               | Risk Level |
-| -------------- | --------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------ | ---------- |
-| **Plan**​      | ❌ Read-only analysis only  | ❌ Not executed             | • Code exploration <br>• Planning complex changes <br>• Safe code review                               | Lowest     |
-| **Default**​   | ✅ Manual approval required | ✅ Manual approval required | • New/unfamiliar codebases <br>• Critical systems <br>• Team collaboration <br>• Learning and teaching | Low        |
-| **Auto-Edit**​ | ✅ Auto-approved            | ❌ Manual approval required | • Daily development tasks <br>• Refactoring and code improvements <br>• Safe automation                | Medium     |
-| **Auto**​      | ✅ Classifier-evaluated     | ✅ Classifier-evaluated     | • Long autonomous sessions <br>• When Auto-Edit is too cautious but YOLO is too risky                  | Medium     |
-| **YOLO**​      | ✅ Auto-approved            | ✅ Auto-approved            | • Trusted personal projects <br>• Automated scripts/CI/CD <br>• Batch processing tasks                 | Highest    |
+| Mode                 | File Editing                | Shell Commands              | Best For                                                                                               | Risk Level |
+| -------------------- | --------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------ | ---------- |
+| **Plan**​            | ❌ Read-only analysis only  | ❌ Not executed             | • Code exploration <br>• Planning complex changes <br>• Safe code review                               | Lowest     |
+| **Ask Permissions**​ | ✅ Manual approval required | ✅ Manual approval required | • New/unfamiliar codebases <br>• Critical systems <br>• Team collaboration <br>• Learning and teaching | Low        |
+| **Auto-Edit**​       | ✅ Auto-approved            | ❌ Manual approval required | • Daily development tasks <br>• Refactoring and code improvements <br>• Safe automation                | Medium     |
+| **Auto**​            | ✅ Classifier-evaluated     | ✅ Classifier-evaluated     | • Long autonomous sessions <br>• When Auto-Edit is too cautious but YOLO is too risky                  | Medium     |
+| **YOLO**​            | ✅ Auto-approved            | ✅ Auto-approved            | • Trusted personal projects <br>• Automated scripts/CI/CD <br>• Batch processing tasks                 | Highest    |
+
+> [!NOTE]
+>
+> The mode previously named **Default** has been renamed to **Ask Permissions** to better describe its behavior. The underlying configuration value (`tools.approvalMode: "default"`) and the `/approval-mode default` command are unchanged for backward compatibility.
 
 ### Quick Reference Guide
 
 - **Start in Plan Mode**: Great for understanding before making changes
-- **Work in Default Mode**: The balanced choice for most development work
+- **Work in Ask Permissions Mode**: The balanced choice for most development work
 - **Switch to Auto-Edit**: When you're making lots of safe code changes
 - **Try Auto Mode**: When you want fewer interruptions but still want safety on shell commands and network calls — an LLM classifier evaluates each call
 - **Use YOLO sparingly**: Only for trusted automation in controlled environments
@@ -96,11 +100,11 @@ How should we handle database migration?
 }
 ```
 
-## 2. Use Default Mode for Controlled Interaction
+## 2. Use Ask Permissions Mode for Controlled Interaction
 
-Default Mode is the standard way to work with Qwen Code. In this mode, you maintain full control over all potentially risky operations - Qwen Code will ask for your approval before making any file changes or executing shell commands.
+Ask Permissions Mode is the standard way to work with Qwen Code. In this mode, you maintain full control over all potentially risky operations - Qwen Code will ask for your approval before making any file changes or executing shell commands.
 
-### When to use Default Mode
+### When to use Ask Permissions Mode
 
 - **New to a codebase**: When you're exploring an unfamiliar project and want to be extra cautious
 - **Critical systems**: When working on production code, infrastructure, or sensitive data
@@ -108,23 +112,23 @@ Default Mode is the standard way to work with Qwen Code. In this mode, you maint
 - **Team collaboration**: When multiple people are working on the same codebase
 - **Complex operations**: When the changes involve multiple files or complex logic
 
-### How to use Default Mode
+### How to use Ask Permissions Mode
 
-**Turn on Default Mode during a session**
+**Turn on Ask Permissions Mode during a session**
 
-You can switch into Default Mode during a session using **Shift+Tab**​ (or **Tab** on Windows) to cycle through permission modes. If you're in any other mode, pressing **Shift+Tab** (or **Tab** on Windows) will eventually cycle back to Default Mode, indicated by the absence of any mode indicator at the bottom of the terminal.
+You can switch into Ask Permissions Mode during a session using **Shift+Tab**​ (or **Tab** on Windows) to cycle through permission modes. If you're in any other mode, pressing **Shift+Tab** (or **Tab** on Windows) will eventually cycle back to Ask Permissions Mode, indicated by the absence of any mode indicator at the bottom of the terminal.
 
-**Start a new session in Default Mode**
+**Start a new session in Ask Permissions Mode**
 
-Default Mode is the initial mode when you start Qwen Code. If you've changed modes and want to return to Default Mode, use:
+Ask Permissions Mode is the initial mode when you start Qwen Code. If you've changed modes and want to return to Ask Permissions Mode, use:
 
 ```
 /approval-mode default
 ```
 
-**Run "headless" queries in Default Mode**
+**Run "headless" queries in Ask Permissions Mode**
 
-When running headless commands, Default Mode is the default behavior. You can explicitly specify it with:
+When running headless commands, Ask Permissions Mode is the default behavior. You can explicitly specify it with:
 
 ```
 qwen --prompt "Analyze this code for potential bugs"
@@ -148,7 +152,7 @@ Qwen Code will analyze your codebase and propose a plan. It will then ask for ap
 
 You can review each proposed change and approve or reject it individually.
 
-### Configure Default Mode as default
+### Configure Ask Permissions Mode as default
 
 ```bash
 // .qwen/settings.json
@@ -200,7 +204,7 @@ configuration, troubleshooting, FAQ).
 
 ### When to use Auto Mode
 
-- **Long autonomous sessions**: When Default Mode interrupts too often but
+- **Long autonomous sessions**: When Ask Permissions Mode interrupts too often but
   YOLO is too risky.
 - **Trusted projects**: Internal codebases where the agent should keep
   moving but you still want a guardrail on destructive shell commands and
@@ -277,7 +281,7 @@ Refactor the auth module to use OAuth2. Run the full test suite afterwards.
 Qwen Code makes the file edits (in-workspace edits skip the classifier),
 runs `npm test` (classifier judges safe), and surfaces a block if it ever
 tries something risky like `rm -rf /Users/me/.aws`. You can review the
-reason inline and decide whether to switch to Default Mode for that step.
+reason inline and decide whether to switch to Ask Permissions Mode for that step.
 
 ### Configure Auto Mode as default
 
@@ -363,7 +367,7 @@ qwen --prompt "Run the test suite, fix all failing tests, then commit changes"
 During a Qwen Code session, use **Shift+Tab**​ (or **Tab** on Windows) to quickly cycle through the four modes:
 
 ```
-Default Mode → Auto-Edit Mode → YOLO Mode → Plan Mode → Default Mode
+Ask Permissions Mode → Auto-Edit Mode → YOLO Mode → Plan Mode → Ask Permissions Mode
 ```
 
 ### Persistent Configuration

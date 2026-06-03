@@ -31,15 +31,18 @@ These commands help you save, restore, and summarize work progress.
 
 Commands for adjusting interface appearance and work environment.
 
-| Command      | Description                              | Usage Examples                |
-| ------------ | ---------------------------------------- | ----------------------------- |
-| `/clear`     | Clear terminal screen content            | `/clear` (shortcut: `Ctrl+L`) |
-| `/context`   | Show context window usage breakdown      | `/context`                    |
-| → `detail`   | Show per-item context usage breakdown    | `/context detail`             |
-| `/theme`     | Change Qwen Code visual theme            | `/theme`                      |
-| `/vim`       | Turn input area Vim editing mode on/off  | `/vim`                        |
-| `/directory` | Manage multi-directory support workspace | `/dir add ./src,./tests`      |
-| `/editor`    | Open dialog to select supported editor   | `/editor`                     |
+| Command              | Description                                                                                                                                                                       | Usage Examples                          |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `/clear`             | Clear terminal screen content                                                                                                                                                     | `/clear` (shortcut: `Ctrl+L`)           |
+| `/context`           | Show context window usage breakdown                                                                                                                                               | `/context`                              |
+| → `detail`           | Show per-item context usage breakdown                                                                                                                                             | `/context detail`                       |
+| `/diff`              | Open an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between current git diff and individual conversation turns, ↑/↓ to browse files | `/diff`                                 |
+| `/theme`             | Change Qwen Code visual theme                                                                                                                                                     | `/theme`                                |
+| `/vim`               | Turn input area Vim editing mode on/off                                                                                                                                           | `/vim`                                  |
+| `/directory`         | Manage multi-directory support workspace                                                                                                                                          | `/dir add ./src,./tests`                |
+| `/editor`            | Open dialog to select supported editor                                                                                                                                            | `/editor`                               |
+| `/statusline`        | Open interactive [status line](./status-line.md) preset dialog                                                                                                                    | `/statusline`                           |
+| `/statusline <text>` | Generate a command-mode [status line](./status-line.md) via agent                                                                                                                 | `/statusline show model and git branch` |
 
 ### 1.3 Language Settings
 
@@ -85,6 +88,7 @@ These commands invoke bundled skills that provide specialized workflows.
 | ------------ | ------------------------------------------------------------------- | ------------------------------------------------- |
 | `/review`    | Review code changes with 5 parallel agents + deterministic analysis | `/review`, `/review 123`, `/review 123 --comment` |
 | `/loop`      | Run a prompt on a recurring schedule                                | `/loop 5m check the build`                        |
+| `/simplify`  | Review recent changes and apply safe cleanup edits directly         | `/simplify`, `/simplify focus on duplication`     |
 | `/qc-helper` | Answer questions about Qwen Code usage and configuration            | `/qc-helper how do I configure MCP?`              |
 
 See [Code Review](./code-review.md) for full `/review` documentation.
@@ -208,7 +212,59 @@ this setting.
 > `general.showSessionRecap` to `false` to opt out of the auto-trigger
 > while keeping the manual command available.
 
-### 1.8 Information, Settings, and Help
+### 1.8 Diff Viewer (`/diff`)
+
+The `/diff` command opens an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between the current git diff and individual conversation turns, ↑/↓ to browse files, and Enter to view inline diffs.
+
+**How it works:**
+
+In interactive mode, `/diff` opens a dialog with a **source picker** along the top:
+
+- **Current** — working tree vs HEAD (`git diff HEAD`). Shows all uncommitted changes including staged, unstaged, and untracked files.
+- **T1, T2, T3, …** — per-turn diffs, one tab per model turn that modified files. Most recent turns appear first. Each tab shows a preview of the original prompt for context.
+
+The file list displays per-file stats (lines added/removed) with tags for special states (`new`, `deleted`, `untracked`, `binary`, `truncated`, `oversized`). Press Enter on a file to view its inline diff with syntax-highlighted hunks.
+
+Per-turn diffs require [file checkpointing](./checkpointing) to be enabled (on by default in interactive mode). When file checkpointing is off, only the "Current" source is available.
+
+**Keyboard shortcuts:**
+
+| Key       | Action                                      |
+| --------- | ------------------------------------------- |
+| `←` / `→` | Switch between sources (Current / T1 / T2…) |
+| `↑` / `↓` | Navigate file list                          |
+| `j` / `k` | Navigate file list (vim-style)              |
+| Enter     | View inline diff for selected file          |
+| `←` / Esc | Return to file list from inline diff view   |
+| Esc       | Close the dialog                            |
+
+**Example:**
+
+```
+┌ /diff · Turn 3 "refactor the auth middleware" ──── 3 files +45 -12 ┐
+│                                                                     │
+│ ◀ Current · T3 · T2 · T1 ▶                                         │
+│                                                                     │
+│ › src/utils/parser.ts                              +30 -8           │
+│   src/utils/parser.test.ts                         +12 -2           │
+│   README.md                                        +3 -2            │
+│                                                                     │
+│ ←/→ source · ↑/↓ file · Enter view · Esc close                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Non-interactive mode:**
+
+In headless (`--prompt`) or non-interactive contexts, `/diff` prints a plain-text summary of the working tree vs HEAD. Per-turn navigation is not available.
+
+```
+3 files changed, +45 / -12
+  +30  -8  src/utils/parser.ts
+  +12  -2  src/utils/parser.test.ts
+   +3  -2  README.md
+```
+
+### 1.9 Information, Settings, and Help
 
 Commands for obtaining information and performing system settings.
 
@@ -224,7 +280,7 @@ Commands for obtaining information and performing system settings.
 | `/copy`         | Copy last output content to clipboard           | `/copy`                          |
 | `/quit`         | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
 
-### 1.9 Common Shortcuts
+### 1.10 Common Shortcuts
 
 | Shortcut           | Function                | Note                   |
 | ------------------ | ----------------------- | ---------------------- |
@@ -234,7 +290,7 @@ Commands for obtaining information and performing system settings.
 | `Ctrl/cmd+Z`       | Undo input              | Text editing           |
 | `Ctrl/cmd+Shift+Z` | Redo input              | Text editing           |
 
-### 1.10 Authentication Commands
+### 1.11 Authentication Commands
 
 Use `/auth` inside a Qwen Code session to configure authentication. Use `/doctor` to inspect the current authentication and environment status.
 

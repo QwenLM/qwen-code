@@ -55,7 +55,7 @@ function getBtwCacheSafeParams(
     geminiClient &&
     typeof geminiClient === 'object' &&
     typeof geminiClient.getChat === 'function' &&
-    typeof geminiClient.getHistory === 'function'
+    typeof geminiClient.getHistoryTail === 'function'
   ) {
     const chat = geminiClient.getChat();
     if (
@@ -65,12 +65,7 @@ function getBtwCacheSafeParams(
     ) {
       const generationConfig = chat.getGenerationConfig();
       if (generationConfig) {
-        const fullHistory = geminiClient.getHistory(true);
-        const maxHistoryEntries = 40;
-        const history =
-          fullHistory.length > maxHistoryEntries
-            ? fullHistory.slice(-maxHistoryEntries)
-            : fullHistory;
+        const history = geminiClient.getHistoryTail(40, true);
 
         return {
           generationConfig,

@@ -40,6 +40,7 @@ export interface StatusLinePresetConfig {
   type: 'preset';
   items: StatusLinePresetItemId[];
   useThemeColors?: boolean;
+  hideContextIndicator?: boolean;
 }
 
 export type StatusLinePresetReasoning =
@@ -220,6 +221,10 @@ export function normalizeStatusLinePresetConfig(
         ? candidate['useThemeColors']
         : true,
     items: hasItemsArray ? items : [...DEFAULT_STATUS_LINE_PRESET_CONFIG.items],
+    hideContextIndicator:
+      typeof candidate['hideContextIndicator'] === 'boolean'
+        ? candidate['hideContextIndicator']
+        : undefined,
   };
 }
 
