@@ -160,6 +160,32 @@ describe('ShellTool', () => {
       ).toThrow('Command cannot be empty.');
     });
 
+    it('should mention the intentional sleep escape hatch when blocking sleep', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5',
+        is_background: false,
+      });
+
+      expect(error).toContain('intentional-sleep:');
+    });
+
+    it('should explain rejected intentional sleep comments', async () => {
+      const shortReasonError = shellTool.validateToolParams({
+        command: 'sleep 5 # intentional-sleep: wait',
+        is_background: false,
+      });
+      const overCapError = shellTool.validateToolParams({
+        command:
+          'sleep 601s # intentional-sleep: wait for MCP rate limit reset',
+        is_background: false,
+      });
+
+      expect(shortReasonError).toContain('reason is too short');
+      expect(shortReasonError).not.toContain('add a trailing comment like');
+      expect(overCapError).toContain('foreground sleeps over 10 minutes');
+      expect(overCapError).not.toContain('add a trailing comment like');
+    });
+
     it('should throw an error for a relative directory path', async () => {
       expect(() =>
         shellTool.build({

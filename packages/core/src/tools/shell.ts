@@ -1027,6 +1027,17 @@ export function buildLongRunningForegroundHint(elapsedMs: number): string {
  * fine).
  */
 export function detectBlockedSleepPattern(command: string): string | null {
+  return detectBlockedSleepPatternDetails(command)?.description ?? null;
+}
+
+type BlockedSleepPatternDetails = {
+  description: string;
+  intentionalSleepRejection?: string;
+};
+
+function detectBlockedSleepPatternDetails(
+  command: string,
+): BlockedSleepPatternDetails | null {
   // Strip trailing shell comments first; otherwise `sleep 5 # wait` would
   // present `# wait` as the suffix, which `getSleepSequentialSeparator`
   // rejects (only &&/||/;/\n are recognized), letting the foreground sleep
@@ -1061,16 +1072,32 @@ export function detectBlockedSleepPattern(command: string): string | null {
   if (separator === null) return null;
 
   const rest = separator.rest.trim();
-  if (
-    !rest &&
-    secs <= MAX_INTENTIONAL_SLEEP_SECONDS &&
-    hasIntentionalSleepComment(comment)
-  ) {
-    return null;
-  }
-  return rest
+  const description = rest
     ? `sleep ${durationToken} followed by: ${rest}`
     : `standalone sleep ${durationToken}`;
+  if (!rest && hasIntentionalSleepCommentPrefix(comment)) {
+    const reason = getIntentionalSleepReason(comment);
+    if (reason === null) {
+      return {
+        description,
+        intentionalSleepRejection:
+          'The intentional-sleep comment was recognized, but the reason is too short; explain why the delay is needed after `intentional-sleep:`.',
+      };
+    }
+    if (secs > MAX_INTENTIONAL_SLEEP_SECONDS) {
+      return {
+        description,
+        intentionalSleepRejection:
+          'The intentional-sleep comment was recognized, but foreground sleeps over 10 minutes are not allowed; use is_background: true or Monitor for longer waits.',
+      };
+    }
+    debugLogger.debug('intentional sleep allowed', {
+      durationSeconds: secs,
+      reason,
+    });
+    return null;
+  }
+  return { description };
 }
 
 const INTENTIONAL_SLEEP_COMMENT_PREFIX = 'intentional-sleep:';
@@ -1078,14 +1105,20 @@ const MAX_INTENTIONAL_SLEEP_SECONDS = 10 * 60;
 // Require a real reason, not a trivial opt-out like "wait".
 const MIN_INTENTIONAL_SLEEP_REASON_LENGTH = 8;
 
-function hasIntentionalSleepComment(comment: string | null): boolean {
+function hasIntentionalSleepCommentPrefix(comment: string | null): boolean {
   if (comment === null) return false;
 
+  return comment.trim().startsWith(INTENTIONAL_SLEEP_COMMENT_PREFIX);
+}
+
+function getIntentionalSleepReason(comment: string | null): string | null {
+  if (comment === null) return null;
+
   const trimmed = comment.trim();
-  if (!trimmed.startsWith(INTENTIONAL_SLEEP_COMMENT_PREFIX)) return false;
+  if (!trimmed.startsWith(INTENTIONAL_SLEEP_COMMENT_PREFIX)) return null;
 
   const reason = trimmed.slice(INTENTIONAL_SLEEP_COMMENT_PREFIX.length).trim();
-  return reason.length >= MIN_INTENTIONAL_SLEEP_REASON_LENGTH;
+  return reason.length >= MIN_INTENTIONAL_SLEEP_REASON_LENGTH ? reason : null;
 }
 
 function parseSleepDurationToSeconds(token: string): number | null {
@@ -4326,16 +4359,19 @@ export class ShellTool extends BaseDeclarativeTool<
     // `-c` script. This matches every other sensitive check in this file
     // (directory, read-only, command-root extraction, etc.).
     if (!params.is_background) {
-      const sleepPattern = detectBlockedSleepPattern(
+      const sleepPattern = detectBlockedSleepPatternDetails(
         stripShellWrapper(params.command),
       );
       if (sleepPattern !== null) {
+        const intentionalSleepGuidance =
+          sleepPattern.intentionalSleepRejection ??
+          'If you genuinely need a standalone delay (rate limiting, deliberate pacing), ' +
+            'add a trailing comment like `# intentional-sleep: wait for MCP rate limit reset` (up to 10 minutes).';
         return (
-          `Blocked: ${sleepPattern}. ` +
+          `Blocked: ${sleepPattern.description}. ` +
           'Run blocking commands in the background with is_background: true. ' +
           'For streaming events (watching logs, polling APIs), use the Monitor tool. ' +
-          'If you genuinely need a standalone delay (rate limiting, deliberate pacing), ' +
-          'add a trailing comment like `# intentional-sleep: wait for MCP rate limit reset`.'
+          intentionalSleepGuidance
         );
       }
     }
