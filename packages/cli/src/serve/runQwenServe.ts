@@ -705,10 +705,11 @@ export async function runQwenServe(
     env: process.env,
     settings: bootSettings?.merged.telemetry,
   });
+  const cliVersion = await getCliVersion();
   initializeTelemetry(
     createDaemonTelemetryRuntimeConfig(
       daemonTelemetrySettings,
-      await getCliVersion(),
+      cliVersion,
       `daemon:${daemonWorkspaceHash}:${process.pid}`,
     ),
   );
@@ -861,6 +862,7 @@ export async function runQwenServe(
   const app = createServeApp(opts, () => actualPort, {
     bridge,
     boundWorkspace,
+    qwenCodeVersion: cliVersion,
     fsFactory,
     daemonLog,
   });

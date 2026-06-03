@@ -173,6 +173,11 @@ export interface CapabilitiesEnvelope {
    * additive to v=1; older v=1 daemons omit it.
    */
   protocolVersions?: ServeProtocolVersions;
+  /**
+   * Qwen Code CLI/SDK version served by this daemon. Optional because this is
+   * additive to v=1; older v=1 daemons omit it.
+   */
+  qwenCodeVersion?: string;
   mode: ServeMode;
   features: string[];
   /**

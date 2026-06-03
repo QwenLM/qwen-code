@@ -28,6 +28,11 @@ export interface DaemonCapabilities {
    * additive to v=1; older v=1 daemons omit it.
    */
   protocolVersions?: DaemonProtocolVersions;
+  /**
+   * Qwen Code CLI/SDK version served by this daemon. Optional because this is
+   * additive to v=1; older v=1 daemons omit it.
+   */
+  qwenCodeVersion?: string;
   mode: DaemonMode;
   /**
    * Feature tags the client should gate UI off (e.g. `permission_vote`,

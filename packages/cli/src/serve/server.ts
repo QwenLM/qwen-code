@@ -226,6 +226,11 @@ export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: HttpAcpBridge;
   /**
+   * Qwen Code version advertised to web/SDK clients. Production passes the
+   * resolved CLI package version; tests/direct embeds may omit it.
+   */
+  qwenCodeVersion?: string;
+  /**
    * Pre-canonicalized workspace path. When supplied, `createServeApp`
    * skips its own `canonicalizeWorkspace` call (which would issue a
    * redundant `realpathSync.native` syscall — idempotent, but a hot
@@ -1009,6 +1014,9 @@ export function createServeApp(
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
       protocolVersions: getServeProtocolVersions(),
+      ...(deps.qwenCodeVersion
+        ? { qwenCodeVersion: deps.qwenCodeVersion }
+        : {}),
       mode: opts.mode,
       // PR 15. Pass `requireAuth` so the `require_auth` tag appears
       // ONLY when the operator opted in. Tag presence = behavior is
