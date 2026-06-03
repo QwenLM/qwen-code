@@ -226,6 +226,11 @@ export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: HttpAcpBridge;
   /**
+   * Qwen Code version advertised to web/SDK clients. Production passes the
+   * resolved CLI package version; tests/direct embeds may omit it.
+   */
+  qwenCodeVersion?: string;
+  /**
    * Pre-canonicalized workspace path. When supplied, `createServeApp`
    * skips its own `canonicalizeWorkspace` call (which would issue a
    * redundant `realpathSync.native` syscall — idempotent, but a hot
@@ -1009,6 +1014,9 @@ export function createServeApp(
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
       protocolVersions: getServeProtocolVersions(),
+      ...(deps.qwenCodeVersion
+        ? { qwenCodeVersion: deps.qwenCodeVersion }
+        : {}),
       mode: opts.mode,
       // PR 15. Pass `requireAuth` so the `require_auth` tag appears
       // ONLY when the operator opted in. Tag presence = behavior is
@@ -1629,6 +1637,24 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/context-usage',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/stats', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    try {
+      res.status(200).json(await bridge.getSessionStatsStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/stats',
         sessionId,
       });
     }
@@ -2370,6 +2396,49 @@ export function createServeApp(
       }
     },
   );
+
+  for (const [routeAction, bridgeAction] of [
+    ['enable', 'enable'],
+    ['disable', 'disable'],
+    ['authenticate', 'authenticate'],
+    ['clear-auth', 'clear-auth'],
+  ] as const) {
+    app.post(
+      `/workspace/mcp/:server/${routeAction}`,
+      mutate({ strict: true }),
+      async (req, res) => {
+        const serverName = req.params['server'];
+        if (!serverName || typeof serverName !== 'string') {
+          res.status(400).json({
+            error: 'Server name path parameter is required',
+            code: 'invalid_server_name',
+          });
+          return;
+        }
+        if (serverName.length > MAX_SERVER_NAME_LENGTH) {
+          res.status(400).json({
+            error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+            code: 'invalid_server_name',
+          });
+          return;
+        }
+        const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
+        if (clientId === null) return;
+        try {
+          const result = await bridge.manageMcpServer(
+            serverName,
+            bridgeAction,
+            clientId,
+          );
+          res.status(200).json(result);
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: `POST /workspace/mcp/:server/${routeAction}`,
+          });
+        }
+      },
+    );
+  }
 
   // T2.8 (#4514): Add a runtime MCP server. Validates body.name +
   // body.config shape, forwards to HttpAcpBridge.addRuntimeMcpServer.

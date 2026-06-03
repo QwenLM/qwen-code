@@ -60,11 +60,13 @@ export function normalizeDaemonEvent(
     case 'shell_output': {
       const text = getOutputText(event.data);
       const stream = getShellStream(event.data);
+      const source = getSource(event.data);
       return text
         ? [
             {
               ...base,
-              type: 'shell.output',
+              type:
+                source === 'user-shell' ? 'user.shell.output' : 'shell.output',
               text,
               ...(stream ? { stream } : {}),
             },
@@ -170,8 +172,17 @@ export function normalizeDaemonEvent(
 
     case 'user_shell_command': {
       const command = getString(event.data, 'command');
+      const cwd = getString(event.data, 'cwd');
       return command
-        ? [{ ...base, type: 'user.text.delta', text: `! ${command}` }]
+        ? [
+            {
+              ...base,
+              type: 'user.shell.command',
+              command,
+              ...(cwd ? { cwd } : {}),
+            },
+            { ...base, type: 'user.text.delta', text: `$ ${command}` },
+          ]
         : [];
     }
     case 'user_shell_result': {
@@ -410,11 +421,13 @@ function normalizeSessionUpdate(
     case 'tool_output': {
       const text = getOutputText(update);
       const stream = getShellStream(update) ?? getShellStream(event.data);
+      const source = getSource(update) ?? getSource(event.data);
       return text
         ? [
             {
               ...base,
-              type: 'shell.output',
+              type:
+                source === 'user-shell' ? 'user.shell.output' : 'shell.output',
               text,
               ...(stream ? { stream } : {}),
             },
@@ -774,6 +787,14 @@ function describeToolCall(value: unknown): string {
 function getShellStream(value: unknown): 'stdout' | 'stderr' | undefined {
   const stream = getString(value, 'stream');
   return stream === 'stdout' || stream === 'stderr' ? stream : undefined;
+}
+
+function getSource(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const direct = getString(value, 'source');
+  if (direct) return direct;
+  const meta = value['_meta'];
+  return isRecord(meta) ? getString(meta, 'source') : undefined;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────

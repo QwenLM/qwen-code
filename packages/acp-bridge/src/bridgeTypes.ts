@@ -29,6 +29,7 @@ import type {
   ServeWorkspaceSkillsStatus,
   ServeWorkspaceToolsStatus,
   ServeSessionContextUsageStatus,
+  ServeSessionStatsStatus,
 } from './status.js';
 
 export interface BridgeSpawnRequest {
@@ -346,6 +347,9 @@ export interface HttpAcpBridge {
   /** Read the live background task snapshot for a live session. */
   getSessionTasksStatus(sessionId: string): Promise<ServeSessionTasksStatus>;
 
+  /** Read structured session usage stats (tokens, tools, files). */
+  getSessionStatsStatus(sessionId: string): Promise<ServeSessionStatsStatus>;
+
   /**
    * Switch the active model service for a session. Throws
    * `SessionNotFoundError` for unknown ids.
@@ -528,6 +532,28 @@ export interface HttpAcpBridge {
         }>;
       }
   >;
+
+  manageMcpServer(
+    serverName: string,
+    action: 'enable' | 'disable' | 'authenticate' | 'clear-auth',
+    originatorClientId: string | undefined,
+  ): Promise<{
+    serverName: string;
+    action: 'enable' | 'disable' | 'authenticate' | 'clear-auth';
+    ok: true;
+    changed?: boolean;
+    messages?: string[];
+    authUrl?: string;
+  }>;
+
+  generateWorkspaceAgent(
+    description: string,
+    originatorClientId: string | undefined,
+  ): Promise<{
+    name: string;
+    description: string;
+    systemPrompt: string;
+  }>;
 
   /**
    * Tear down a session — kill the child, drop from maps, publish

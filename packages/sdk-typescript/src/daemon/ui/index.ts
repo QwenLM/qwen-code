@@ -58,6 +58,7 @@ export { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
 export type { DaemonUiContentPart } from './utils.js';
 export type {
   DaemonShellTranscriptBlock,
+  DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
   DaemonTextTranscriptBlock,

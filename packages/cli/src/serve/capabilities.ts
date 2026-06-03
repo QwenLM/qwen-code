@@ -77,12 +77,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // create / update / delete project- and user-level subagent
   // definitions. Built-in / extension agents stay read-only.
   workspace_agents: { since: 'v1' },
+  workspace_agent_generate: { since: 'v1' },
   workspace_env: { since: 'v1' },
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  session_stats: { since: 'v1' },
   session_close: { since: 'v1' },
   session_metadata: { since: 'v1' },
   // Issue #4175 PR 14. Daemon supports the MCP client guardrail
@@ -98,6 +100,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `require_auth` is the only conditional tag, kept last for
   // visibility in `Object.keys(SERVE_CAPABILITY_REGISTRY)`.
   mcp_guardrails: { since: 'v1', modes: ['warn', 'enforce'] },
+  workspace_mcp_manage: { since: 'v1' },
   // Issue #4175 PR 14b. Daemon emits typed push events for MCP budget
   // state crossings: `mcp_budget_warning` (synthetic, fires once per
   // upward 75% crossing with hysteresis re-arm at 37.5%) and

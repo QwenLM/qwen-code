@@ -122,11 +122,20 @@
   flex-shrink: 0;
 }
 
+.footerHidden {
+  display: none;
+}
+
 .bottomPanels {
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding-bottom: 4px;
+}
+
+.btwPanel {
+  flex-shrink: 0;
+  padding: 4px 0;
 }
 
 .composer {
@@ -145,6 +154,8 @@
 }
 
 .queuedPrompt {
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

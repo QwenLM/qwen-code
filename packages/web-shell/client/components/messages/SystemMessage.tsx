@@ -3,6 +3,9 @@ import {
   ContextUsageMessage,
   parseContextUsageMessage,
 } from './ContextUsageMessage';
+import { StatsMessage, parseStatsMessage } from './StatsMessage';
+import { StatusMessage, parseStatusMessage } from './StatusMessage';
+import { McpStatusMessage, parseMcpStatusMessage } from './McpStatusMessage';
 import { Markdown } from './Markdown';
 import styles from './SystemMessage.module.css';
 
@@ -25,9 +28,45 @@ export const SystemMessage = memo(function SystemMessage({
     );
   }
 
+  const statsData = variant === 'info' ? parseStatsMessage(content) : null;
+  if (statsData) {
+    return (
+      <div className={styles.flushMessage}>
+        <StatsMessage view={statsData.view} status={statsData.status} />
+      </div>
+    );
+  }
+
+  const statusInfo = variant === 'info' ? parseStatusMessage(content) : null;
+  if (statusInfo) {
+    return (
+      <div className={styles.flushMessage}>
+        <StatusMessage info={statusInfo} />
+      </div>
+    );
+  }
+
+  const mcpStatus = variant === 'info' ? parseMcpStatusMessage(content) : null;
+  if (mcpStatus) {
+    return (
+      <div className={styles.flushMessage}>
+        <McpStatusMessage message={mcpStatus} />
+      </div>
+    );
+  }
+
+  const preserveWhitespace =
+    variant === 'info' && content.startsWith('● authType:');
+
   return (
-    <div className={`${styles.message} ${styles[variant]}`}>
-      {variant === 'info' ? (
+    <div
+      className={`${styles.message} ${styles[variant]} ${
+        preserveWhitespace ? styles.modelSwitch : ''
+      }`}
+    >
+      {preserveWhitespace ? (
+        <pre>{content}</pre>
+      ) : variant === 'info' ? (
         <Markdown content={content} />
       ) : (
         <pre>{content}</pre>

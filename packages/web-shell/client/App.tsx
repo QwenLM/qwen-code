@@ -27,14 +27,22 @@ import { StreamingStatus } from './components/StreamingStatus';
 import { TodoPanel } from './components/panels/TodoPanel';
 import { ActiveAgentsPanel } from './components/panels/ActiveAgentsPanel';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { ModelDialog } from './components/dialogs/ModelDialog';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
-import { McpDialog } from './components/dialogs/McpDialog';
-import { MemoryDialog } from './components/dialogs/MemoryDialog';
-import type { MemoryDialogInitialMode } from './components/dialogs/MemoryDialog';
-import { AgentsDialog } from './components/dialogs/AgentsDialog';
-import type { AgentsDialogInitialMode } from './components/dialogs/AgentsDialog';
+import {
+  AGENTS_ACTIVE_EVENT,
+  AgentsMessage,
+  type AgentsInitialMode,
+} from './components/messages/AgentsMessage';
+import {
+  MEMORY_ACTIVE_EVENT,
+  MemoryMessage,
+} from './components/messages/MemoryMessage';
+import {
+  MODEL_ACTIVE_EVENT,
+  ModelMessage,
+  type ModelInlineMode,
+} from './components/messages/ModelMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { HelpDialog } from './components/dialogs/HelpDialog';
 import {
@@ -46,6 +54,7 @@ import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog'
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
+import { usePanelActive } from './hooks/usePanelActive';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
@@ -59,12 +68,27 @@ import {
   COPY_MESSAGES,
 } from './utils/copyCommand';
 import type { SkillInfo } from './completions/slashCompletion';
+import { collectSystemInfo } from './utils/systemInfo';
 import { handleTasksSlashCommand } from './utils/tasksCommand';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonApprovalMode,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
+import {
+  serializeStatsMessage,
+  type StatsView,
+} from './components/messages/StatsMessage';
+import {
+  serializeStatusMessage,
+  type StatusInfo,
+} from './components/messages/StatusMessage';
+import {
+  MCP_STATUS_ACTIVE_EVENT,
+  parseMcpStatusMessage,
+  serializeMcpStatusMessage,
+} from './components/messages/McpStatusMessage';
+import { BtwMessage } from './components/messages/BtwMessage';
 import type {
   ACPToolCall,
   Message,
@@ -77,9 +101,9 @@ import styles from './App.module.css';
 
 export const CompactModeContext = createContext(false);
 
-const WEB_SHELL_VERSION = __WEB_SHELL_VERSION__;
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
+const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
 
 interface QueuedPrompt {
   id: number;
@@ -87,10 +111,23 @@ interface QueuedPrompt {
   images?: PromptImage[];
 }
 
-interface LocalRecapMessage {
+interface LocalAnchoredMessage {
   anchorAfterId?: string;
   anchorIndex: number;
   message: Message;
+}
+
+interface ModelSwitchSummary {
+  authType: string;
+  modelId: string;
+  baseUrl: string;
+  apiKey: string;
+  isRuntime?: boolean;
+}
+
+export interface BugReportInfo {
+  title: string;
+  systemInfo: Record<string, string>;
 }
 
 export interface WebShellProps {
@@ -114,14 +151,18 @@ export interface WebShellProps {
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
   /** Called when a critical error occurs (auth failure, session gone, etc). */
   onError?: (error: Error) => void;
+  /** Called when `/bug` is invoked. Receives system info. If omitted, web-shell opens the report URL itself. */
+  onBugReport?: (info: BugReportInfo) => void;
 }
 
 function replaceSessionUrl(sessionId: string): void {
   if (typeof window === 'undefined') return;
   const url = new URL(window.location.href);
   url.pathname = `/session/${encodeURIComponent(sessionId)}`;
-  url.searchParams.delete('token');
-  url.searchParams.delete('daemon');
+  if (!import.meta.env.DEV) {
+    url.searchParams.delete('token');
+    url.searchParams.delete('daemon');
+  }
   window.history.replaceState(null, '', url);
 }
 
@@ -135,6 +176,95 @@ function getInitialLanguage(): WebShellLanguage {
 
 function formatError(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function formatModelAuthType(authType: string): string {
+  const normalized = authType.trim();
+  if (normalized.startsWith('USE_')) {
+    return normalized.slice(4).toLowerCase().replace(/_/g, '-');
+  }
+  return normalized.toLowerCase();
+}
+
+function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
+  if (!isRecord(result)) return null;
+  const meta = result._meta;
+  if (!isRecord(meta)) return null;
+  const summary = meta.qwenModelSwitch;
+  if (!isRecord(summary)) return null;
+  const authType = summary.authType;
+  const modelId = summary.modelId;
+  const baseUrl = summary.baseUrl;
+  const apiKey = summary.apiKey;
+  if (
+    typeof authType !== 'string' ||
+    typeof modelId !== 'string' ||
+    typeof baseUrl !== 'string' ||
+    typeof apiKey !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    authType,
+    modelId,
+    baseUrl,
+    apiKey,
+    ...(typeof summary.isRuntime === 'boolean'
+      ? { isRuntime: summary.isRuntime }
+      : {}),
+  };
+}
+
+function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
+  return (
+    `● authType: ${formatModelAuthType(summary.authType)}` +
+    `\n  Using ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}` +
+    `\n  Base URL: ${summary.baseUrl}` +
+    `\n  API key: ${summary.apiKey}`
+  );
+}
+
+function parseModelSwitchStatusModel(content: string): string | null {
+  const prefix = 'Model switched: ';
+  if (!content.startsWith(prefix)) return null;
+  const rawModel = content.slice(prefix.length).trim();
+  return rawModel.replace(/\([^()]+\)$/, '');
+}
+
+function parseModelSwitchSummaryModel(content: string): string | null {
+  if (!content.startsWith('● authType:')) return null;
+  const match = content.match(/\n {2}Using (?:runtime )?model: ([^\n]+)/);
+  return match?.[1]?.trim() || null;
+}
+
+function filterDuplicateModelSwitchMessages(
+  messages: readonly Message[],
+): Message[] {
+  const summarizedModels = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== 'system' || message.variant !== 'info') continue;
+    const model = parseModelSwitchSummaryModel(message.content);
+    if (model) summarizedModels.add(model);
+  }
+  if (summarizedModels.size === 0) return [...messages];
+  return messages.filter((message) => {
+    if (message.role !== 'system' || message.variant !== 'info') return true;
+    const statusModel = parseModelSwitchStatusModel(message.content);
+    return !statusModel || !summarizedModels.has(statusModel);
+  });
+}
+
+function hasMcpStatusPanel(messages: readonly Message[]): boolean {
+  return messages.some(
+    (message) =>
+      message.role === 'system' &&
+      message.variant === 'info' &&
+      parseMcpStatusMessage(message.content) !== null,
+  );
 }
 
 function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
@@ -269,7 +399,11 @@ function QueuedPromptDisplay({
   return (
     <div className={styles.queuedPrompts}>
       {prompts.slice(0, MAX_DISPLAYED_QUEUED_PROMPTS).map((prompt) => {
-        const preview = prompt.text.replace(/\s+/g, ' ');
+        const normalizedPreview = prompt.text.replace(/\s+/g, ' ').trim();
+        const preview =
+          normalizedPreview.length > MAX_QUEUED_PROMPT_PREVIEW_CHARS
+            ? `${normalizedPreview.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS)}...`
+            : normalizedPreview;
         const imageCount = prompt.images?.length ?? 0;
         return (
           <div key={prompt.id} className={styles.queuedPrompt}>
@@ -303,6 +437,7 @@ export function App({
   onConnectionChange,
   onStreamingStateChange,
   onError,
+  onBugReport,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
@@ -320,28 +455,51 @@ export function App({
   const messages = useMessages();
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
-  const [recapMessage, setRecapMessage] = useState<LocalRecapMessage | null>(
+  const [recapMessage, setRecapMessage] = useState<LocalAnchoredMessage | null>(
     null,
   );
+  const [btwMessage, setBtwMessage] = useState<Message | null>(null);
   const nextRecapMessageIdRef = useRef(1);
+  const nextBtwMessageIdRef = useRef(1);
+  const btwAbortControllerRef = useRef<AbortController | null>(null);
   const activeSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
-    if (!recapMessage) return messages;
-    const anchorIndex = recapMessage.anchorAfterId
-      ? messages.findIndex(
-          (message) => message.id === recapMessage.anchorAfterId,
-        )
-      : -1;
-    const index =
-      anchorIndex >= 0
-        ? anchorIndex + 1
-        : Math.min(recapMessage.anchorIndex, messages.length);
-    return [
-      ...messages.slice(0, index),
-      recapMessage.message,
-      ...messages.slice(index),
-    ];
+    const localMessages = [recapMessage].filter(
+      (message): message is LocalAnchoredMessage => message !== null,
+    );
+    if (localMessages.length === 0) {
+      return filterDuplicateModelSwitchMessages(messages);
+    }
+
+    const result = [...messages];
+    for (const localMessage of localMessages.sort(
+      (a, b) => a.anchorIndex - b.anchorIndex,
+    )) {
+      const anchorIndex = localMessage.anchorAfterId
+        ? result.findIndex(
+            (message) => message.id === localMessage.anchorAfterId,
+          )
+        : -1;
+      const index =
+        anchorIndex >= 0
+          ? anchorIndex + 1
+          : Math.min(localMessage.anchorIndex, result.length);
+      result.splice(index, 0, localMessage.message);
+    }
+    return filterDuplicateModelSwitchMessages(result);
   }, [messages, recapMessage]);
+  const hasMcpPanelMessage = useMemo(
+    () => hasMcpStatusPanel(displayMessages),
+    [displayMessages],
+  );
+  useEffect(() => {
+    if (hasMcpPanelMessage) return;
+    window.dispatchEvent(
+      new CustomEvent(MCP_STATUS_ACTIVE_EVENT, {
+        detail: { active: false },
+      }),
+    );
+  }, [hasMcpPanelMessage]);
   const messageBlocks = useAnimationFrameValue(blocks);
   const rawPendingApproval = useMemo(
     () => extractPendingPermission(messageBlocks),
@@ -408,42 +566,56 @@ export function App({
       .catch(() => {});
   }, [connected, workspaceActions]);
 
-  const [modelDialogMode, setModelDialogMode] = useState<
-    'main' | 'fast' | null
-  >(null);
+  const [modelInlineMode, setModelInlineMode] =
+    useState<ModelInlineMode | null>(null);
   const [showModeDialog, setShowModeDialog] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
-  const [showMcpDialog, setShowMcpDialog] = useState(false);
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
-  const [memoryDialogMode, setMemoryDialogMode] =
-    useState<MemoryDialogInitialMode | null>(null);
-  const [agentsDialogMode, setAgentsDialogMode] =
-    useState<AgentsDialogInitialMode | null>(null);
+  const [memoryInlineOpen, setMemoryInlineOpen] = useState(false);
+  const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
+  const [memoryAddSignal, setMemoryAddSignal] = useState(0);
+  const [memoryAddScope, setMemoryAddScope] = useState<'workspace' | 'global'>(
+    'workspace',
+  );
+  const [agentsInlineMode, setAgentsInlineMode] =
+    useState<AgentsInitialMode | null>(null);
+  const [memoryPortalHost, setMemoryPortalHost] =
+    useState<HTMLDivElement | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
+  const agentsPanelActive = usePanelActive(AGENTS_ACTIVE_EVENT);
+  const memoryPanelActive = usePanelActive(MEMORY_ACTIVE_EVENT);
+  const modelPanelActive = usePanelActive(MODEL_ACTIVE_EVENT);
   const [selectedTheme, setSelectedTheme] =
     useState<WebShellTheme>(providedTheme);
   const [currentModel, setCurrentModel] = useState('');
+  const currentModelRef = useRef(currentModel);
+  currentModelRef.current = currentModel;
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
   const [currentMode, setCurrentMode] = useState('default');
   const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
   const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
   const nextQueuedPromptIdRef = useRef(1);
   const drainingQueueRef = useRef(false);
   const dialogOpen =
-    !!modelDialogMode ||
     showModeDialog ||
     showResumeDialog ||
     showDeleteDialog ||
     showReleaseDialog ||
-    showMcpDialog ||
     showHelpDialog ||
     showThemeDialog ||
-    showToolsDialog ||
-    !!memoryDialogMode ||
-    !!agentsDialogMode;
+    showToolsDialog;
+  const bottomHidden =
+    dialogOpen ||
+    mcpPanelActive ||
+    agentsPanelActive ||
+    memoryPanelActive ||
+    modelPanelActive;
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -452,9 +624,15 @@ export function App({
     [store],
   );
 
+  const onBugReportRef = useRef(onBugReport);
+  onBugReportRef.current = onBugReport;
+
   useEffect(() => {
     activeSessionIdRef.current = connection.sessionId;
+    btwAbortControllerRef.current?.abort();
+    btwAbortControllerRef.current = null;
     setRecapMessage(null);
+    setBtwMessage(null);
     lastRecapBlockCountRef.current = 0;
   }, [connection.sessionId]);
 
@@ -504,6 +682,114 @@ export function App({
       },
     );
   }, [connection.sessionId, messages, sessionActions, t]);
+
+  const runVisibleBtw = useCallback(
+    (rawQuestion: string) => {
+      const question = rawQuestion.trim();
+      if (!question) {
+        store.dispatch([
+          {
+            type: 'error',
+            text: t('btw.empty'),
+          },
+        ]);
+        return;
+      }
+
+      const messageId = `local-btw-${nextBtwMessageIdRef.current++}`;
+      const sessionId = connection.sessionId;
+      btwAbortControllerRef.current?.abort();
+      const abortController = new AbortController();
+      btwAbortControllerRef.current = abortController;
+      setBtwMessage({
+        id: messageId,
+        role: 'btw',
+        question,
+        answer: '',
+        isPending: true,
+      });
+
+      sessionActions
+        .btwSession(question, { signal: abortController.signal })
+        .then(
+          (result) => {
+            if (activeSessionIdRef.current !== sessionId) return;
+            if (btwAbortControllerRef.current !== abortController) return;
+            btwAbortControllerRef.current = null;
+            setBtwMessage({
+              id: messageId,
+              role: 'btw',
+              question,
+              answer: result.answer || t('btw.emptyAnswer'),
+              isPending: false,
+            });
+          },
+          (error: unknown) => {
+            if (activeSessionIdRef.current !== sessionId) return;
+            if (btwAbortControllerRef.current !== abortController) return;
+            btwAbortControllerRef.current = null;
+            setBtwMessage({
+              id: messageId,
+              role: 'btw',
+              question,
+              answer: formatError(error, t('btw.failed')),
+              isPending: false,
+            });
+          },
+        );
+    },
+    [connection.sessionId, sessionActions, store, t],
+  );
+
+  const dismissBtwMessage = useCallback(() => {
+    btwAbortControllerRef.current?.abort();
+    btwAbortControllerRef.current = null;
+    setBtwMessage(null);
+  }, []);
+
+  useEffect(() => {
+    const onBtwShortcut = (e: KeyboardEvent) => {
+      if (bottomHidden || pendingApproval) return;
+      const message = btwMessage;
+      if (!message || message.role !== 'btw') return;
+
+      const key = e.key.toLowerCase();
+      const isPlainEscape =
+        e.key === 'Escape' &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !e.shiftKey;
+      const isCtrlCancel =
+        e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        !e.shiftKey &&
+        (key === 'c' || key === 'd');
+
+      if (message.isPending) {
+        if (!isPlainEscape && !isCtrlCancel) return;
+      } else {
+        const editorHasText =
+          (editorRef.current?.getText().trim().length ?? 0) > 0;
+        const isPlainDismiss =
+          !e.ctrlKey &&
+          !e.metaKey &&
+          !e.altKey &&
+          !e.shiftKey &&
+          (e.key === 'Escape' ||
+            (!editorHasText && (e.key === 'Enter' || e.key === ' ')));
+        if (!isPlainDismiss) return;
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+      dismissBtwMessage();
+    };
+
+    window.addEventListener('keydown', onBtwShortcut, true);
+    return () => window.removeEventListener('keydown', onBtwShortcut, true);
+  }, [bottomHidden, btwMessage, dismissBtwMessage, pendingApproval]);
 
   useEffect(() => {
     queuedPromptsRef.current = queuedPrompts;
@@ -862,8 +1148,8 @@ export function App({
           if (cmd === 'model') {
             const modelArg = text.slice(match[0].length).trim();
             if (modelArg === '--fast') {
-              if (promptBlocked) return false;
-              setModelDialogMode('fast');
+              store.appendLocalUserMessage(text);
+              setModelInlineMode('fast');
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
@@ -883,7 +1169,8 @@ export function App({
                   reportError(error, t('model.switch'));
                 });
             } else {
-              setModelDialogMode('main');
+              store.appendLocalUserMessage(text);
+              setModelInlineMode('main');
             }
             return true;
           }
@@ -915,7 +1202,41 @@ export function App({
             return true;
           }
           if (cmd === 'mcp') {
-            setShowMcpDialog(true);
+            const mcpArg = text.slice(match[0].length).trim().toLowerCase();
+            store.appendLocalUserMessage(text);
+            workspaceActions
+              .loadMcpStatus()
+              .then(async (status) => {
+                const toolsByServer: Record<
+                  string,
+                  Awaited<ReturnType<typeof workspaceActions.loadMcpTools>>
+                > = {};
+                await Promise.all(
+                  (status?.servers ?? []).map(async (server) => {
+                    try {
+                      toolsByServer[server.name] =
+                        await workspaceActions.loadMcpTools(server.name);
+                    } catch {
+                      // Allow partial failure — other servers still render
+                    }
+                  }),
+                );
+                store.dispatch([
+                  {
+                    type: 'status',
+                    text: serializeMcpStatusMessage({
+                      status,
+                      toolsByServer,
+                      showDescriptions: mcpArg === 'desc',
+                      showSchema: mcpArg === 'schema',
+                      showTips: !mcpArg,
+                    }),
+                  },
+                ]);
+              })
+              .catch((error: unknown) => {
+                reportError(error, 'Failed to load MCP status');
+              });
             return true;
           }
           if (cmd === 'skills') {
@@ -1015,43 +1336,41 @@ export function App({
           }
           if (cmd === 'memory') {
             const memoryArg = text.slice(match[0].length).trim().toLowerCase();
-            if (memoryArg === 'show') {
-              setMemoryDialogMode('show');
-            } else if (memoryArg === 'refresh') {
-              setMemoryDialogMode('refresh');
-            } else if (memoryArg === 'add user' || memoryArg === 'add global') {
-              setMemoryDialogMode('add-user');
-            } else if (
-              memoryArg === 'add project' ||
-              memoryArg === 'add workspace'
-            ) {
-              setMemoryDialogMode('add-project');
-            } else if (memoryArg.startsWith('add')) {
-              setMemoryDialogMode('add');
-            } else {
-              setMemoryDialogMode('menu');
+            store.appendLocalUserMessage(text);
+            if (memoryArg === 'refresh') {
+              setMemoryRefreshSignal((signal) => signal + 1);
+            } else if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
+              const addTarget = memoryArg.slice('add'.length).trim();
+              setMemoryAddScope(
+                addTarget === 'user' || addTarget === 'global'
+                  ? 'global'
+                  : 'workspace',
+              );
+              setMemoryAddSignal((signal) => signal + 1);
             }
+            setMemoryInlineOpen(true);
             return true;
           }
           if (cmd === 'agents') {
             const subCommand = text.slice(match[0].length).trim().toLowerCase();
+            store.appendLocalUserMessage(text);
+            let agentsMode: AgentsInitialMode = 'menu';
             if (subCommand === 'create') {
-              setAgentsDialogMode('create');
+              agentsMode = 'create';
             } else if (
               subCommand === 'create user' ||
               subCommand === 'create global'
             ) {
-              setAgentsDialogMode('create-user');
+              agentsMode = 'create-user';
             } else if (
               subCommand === 'create project' ||
               subCommand === 'create workspace'
             ) {
-              setAgentsDialogMode('create-project');
+              agentsMode = 'create-project';
             } else if (subCommand === 'manage') {
-              setAgentsDialogMode('manage');
-            } else {
-              setAgentsDialogMode('menu');
+              agentsMode = 'manage';
             }
+            setAgentsInlineMode(agentsMode);
             return true;
           }
           if (cmd === 'clear') {
@@ -1121,6 +1440,147 @@ export function App({
             runVisibleRecap();
             return true;
           }
+          if (cmd === 'btw') {
+            runVisibleBtw(text.slice(match[0].length));
+            return true;
+          }
+          if (cmd === 'stats') {
+            const statsArg = text.slice(match[0].length).trim().toLowerCase();
+            let statsView: StatsView = 'overview';
+            if (statsArg === 'model') statsView = 'model';
+            else if (statsArg === 'tools') statsView = 'tools';
+            store.appendLocalUserMessage(text);
+            sessionActions
+              .getStats()
+              .then((result) => {
+                store.dispatch([
+                  {
+                    type: 'status',
+                    text: serializeStatsMessage(result, statsView),
+                  },
+                ]);
+              })
+              .catch(() => {});
+            return true;
+          }
+          if (cmd === 'status' || cmd === 'about') {
+            store.appendLocalUserMessage(text);
+            Promise.all([
+              workspaceActions.loadPreflight().catch(() => null),
+              workspaceActions.loadProviders().catch(() => null),
+              workspaceActions.loadEnv().catch(() => null),
+            ]).then(([preflight, providers, env]) => {
+              const sys = collectSystemInfo(preflight, env);
+
+              let authSource = sys.authSource;
+              if (!authSource && providers?.current?.authType) {
+                authSource = providers.current.authType;
+              }
+
+              const runtimeParts: string[] = [];
+              if (sys.nodeVersion)
+                runtimeParts.push(`Node.js v${sys.nodeVersion}`);
+              if (sys.npmVersion) runtimeParts.push(`npm ${sys.npmVersion}`);
+
+              let formattedAuth = '';
+              if (authSource) {
+                if (
+                  authSource.startsWith('oauth') ||
+                  authSource === 'qwen-oauth'
+                ) {
+                  formattedAuth = 'Qwen OAuth';
+                } else {
+                  formattedAuth = `API Key - ${authSource}`;
+                }
+              }
+
+              const platformStr = `${sys.platform} ${sys.arch}`.trim();
+              const curModel = currentModelRef.current;
+              const conn = connectionRef.current;
+              const qwenCodeVersion = conn.capabilities?.qwenCodeVersion || '';
+              const info: StatusInfo = {
+                cliVersion: qwenCodeVersion,
+                runtime: runtimeParts.join(' / '),
+                platform: platformStr,
+                auth: formattedAuth,
+                baseUrl: providers?.current?.baseUrl || '',
+                model:
+                  curModel ||
+                  conn.currentModel ||
+                  providers?.current?.modelId ||
+                  '',
+                fastModel:
+                  providers?.current?.fastModelId ||
+                  curModel ||
+                  conn.currentModel ||
+                  providers?.current?.modelId ||
+                  '',
+                sessionId: conn.sessionId || '',
+                sandbox: sys.sandbox,
+                proxy: sys.proxy,
+                memoryUsage: sys.memoryUsage,
+              };
+
+              store.dispatch([
+                { type: 'status', text: serializeStatusMessage(info) },
+              ]);
+            });
+            return true;
+          }
+          if (cmd === 'bug') {
+            const bugTitle = text.slice(match[0].length).trim();
+            store.appendLocalUserMessage(text);
+            Promise.all([
+              workspaceActions.loadPreflight().catch(() => null),
+              workspaceActions.loadEnv().catch(() => null),
+            ])
+              .then(([preflight, env]) => {
+                const sys = collectSystemInfo(preflight, env);
+                const qwenCodeVersion =
+                  connectionRef.current.capabilities?.qwenCodeVersion || '';
+                const sysInfo: Record<string, string> = {};
+                if (qwenCodeVersion) sysInfo.cliVersion = qwenCodeVersion;
+                if (sys.nodeVersion) sysInfo.nodeVersion = sys.nodeVersion;
+                if (sys.npmVersion) sysInfo.npmVersion = sys.npmVersion;
+                if (sys.platform) sysInfo.platform = sys.platform;
+                if (sys.arch) sysInfo.arch = sys.arch;
+                if (sys.sandbox) sysInfo.sandbox = sys.sandbox;
+                if (sys.memoryUsage) sysInfo.memoryUsage = sys.memoryUsage;
+                if (onBugReportRef.current) {
+                  onBugReportRef.current({
+                    title: bugTitle,
+                    systemInfo: sysInfo,
+                  });
+                  store.dispatch([
+                    { type: 'status', text: t('bug.submitted') },
+                  ]);
+                } else {
+                  const fields = Object.entries(sysInfo)
+                    .filter(([, v]) => v)
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join('\n');
+                  const url =
+                    `https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml` +
+                    `&title=${encodeURIComponent(bugTitle)}` +
+                    `&info=${encodeURIComponent('\n' + fields + '\n')}`;
+                  const win = window.open(url, '_blank');
+                  if (win) {
+                    win.opener = null;
+                    store.dispatch([
+                      { type: 'status', text: t('bug.submitted') },
+                    ]);
+                  } else {
+                    store.dispatch([
+                      { type: 'error', text: t('bug.popupBlocked') },
+                    ]);
+                  }
+                }
+              })
+              .catch((error: unknown) => {
+                reportError(error, t('bug.failed'));
+              });
+            return true;
+          }
         }
         // Forward slash commands as prompts
         if (promptBlocked) return enqueuePrompt(text, images);
@@ -1154,6 +1614,7 @@ export function App({
       onLanguageChange,
       reportError,
       runVisibleRecap,
+      runVisibleBtw,
       selectedLanguage,
       t,
       workspaceActions,
@@ -1164,7 +1625,7 @@ export function App({
     if (drainingQueueRef.current) return;
     if (!connected) return;
     if (streamingState !== 'idle') return;
-    if (dialogOpen) return;
+    if (bottomHidden) return;
     if (pendingApproval) return;
     if (queuedPrompts.length === 0) return;
 
@@ -1185,7 +1646,7 @@ export function App({
     };
   }, [
     connected,
-    dialogOpen,
+    bottomHidden,
     handleSubmit,
     pendingApproval,
     popNextQueuedPrompt,
@@ -1234,7 +1695,7 @@ export function App({
 
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {
-      if (dialogOpen) return;
+      if (bottomHidden) return;
       if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         if (e.key === 'l') {
           e.preventDefault();
@@ -1255,12 +1716,12 @@ export function App({
     };
     window.addEventListener('keydown', onGlobalShortcut, true);
     return () => window.removeEventListener('keydown', onGlobalShortcut, true);
-  }, [dialogOpen, handleClearScreen, handleToggleCompact]);
+  }, [bottomHidden, handleClearScreen, handleToggleCompact]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
-      if (e.key === 'Tab' && e.shiftKey && !dialogOpen) {
+      if (e.key === 'Tab' && e.shiftKey && !bottomHidden) {
         e.preventDefault();
         handleCycleMode();
         return;
@@ -1268,7 +1729,7 @@ export function App({
       if (
         e.key === 'Escape' &&
         !pendingApproval &&
-        !dialogOpen &&
+        !bottomHidden &&
         clearQueuedPrompts()
       ) {
         e.preventDefault();
@@ -1278,7 +1739,7 @@ export function App({
         e.key === 'Escape' &&
         streamingState !== 'idle' &&
         !pendingApproval &&
-        !dialogOpen
+        !bottomHidden
       ) {
         handleCancel();
         return;
@@ -1291,7 +1752,7 @@ export function App({
     handleCancel,
     handleCycleMode,
     pendingApproval,
-    dialogOpen,
+    bottomHidden,
     clearQueuedPrompts,
   ]);
 
@@ -1301,14 +1762,21 @@ export function App({
     (modelId: string) => {
       sessionActions
         .setModel(modelId)
-        .then(() => {
-          setCurrentModel(modelId);
+        .then((result) => {
+          const summary = getModelSwitchSummary(result);
+          setCurrentModel(summary?.modelId ?? modelId);
+          if (summary) {
+            store.dispatch({
+              type: 'debug',
+              text: serializeModelSwitchSummary(summary),
+            });
+          }
         })
         .catch((error: unknown) => {
           reportError(error, t('model.switch'));
         });
     },
-    [sessionActions, reportError, t],
+    [sessionActions, store, reportError, t],
   );
 
   const handleFastModelSelect = useCallback(
@@ -1334,13 +1802,18 @@ export function App({
   const welcomeHeader = useMemo(
     () => (
       <WelcomeHeader
-        version={WEB_SHELL_VERSION}
+        version={connection.capabilities?.qwenCodeVersion || ''}
         cwd={connection.workspaceCwd || ''}
         currentModel={currentModel}
         currentMode={currentMode}
       />
     ),
-    [connection.workspaceCwd, currentModel, currentMode],
+    [
+      connection.capabilities?.qwenCodeVersion,
+      connection.workspaceCwd,
+      currentModel,
+      currentMode,
+    ],
   );
 
   const appClassName = [
@@ -1354,20 +1827,9 @@ export function App({
   return (
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
-        <div className={appClassName} style={externalStyle}>
+        <div className={appClassName} style={externalStyle} data-web-shell-root>
           {dialogOpen && (
             <div className={styles.dialogOverlay} data-keyboard-scope>
-              {modelDialogMode && (
-                <ModelDialog
-                  mode={modelDialogMode}
-                  onSelect={
-                    modelDialogMode === 'fast'
-                      ? handleFastModelSelect
-                      : handleModelSelect
-                  }
-                  onClose={() => setModelDialogMode(null)}
-                />
-              )}
               {showResumeDialog && (
                 <ResumeDialog
                   onSelect={(sessionId) => {
@@ -1438,9 +1900,6 @@ export function App({
                   onClose={() => setShowModeDialog(false)}
                 />
               )}
-              {showMcpDialog && (
-                <McpDialog onClose={() => setShowMcpDialog(false)} />
-              )}
               {showHelpDialog && (
                 <HelpDialog
                   commands={commands}
@@ -1456,24 +1915,6 @@ export function App({
               )}
               {showToolsDialog && (
                 <ToolsDialog onClose={() => setShowToolsDialog(false)} />
-              )}
-              {memoryDialogMode && (
-                <MemoryDialog
-                  initialMode={memoryDialogMode}
-                  onMessage={(text, type = 'status') => {
-                    store.dispatch([{ type, text }]);
-                  }}
-                  onClose={() => setMemoryDialogMode(null)}
-                />
-              )}
-              {agentsDialogMode && (
-                <AgentsDialog
-                  initialMode={agentsDialogMode}
-                  onMessage={(text, type = 'status') => {
-                    store.dispatch([{ type, text }]);
-                  }}
-                  onClose={() => setAgentsDialogMode(null)}
-                />
               )}
             </div>
           )}
@@ -1494,15 +1935,72 @@ export function App({
                 catchingUp={connection.catchingUp}
                 workspaceCwd={connection.workspaceCwd || ''}
                 welcomeHeader={welcomeHeader}
+                tailContent={
+                  agentsInlineMode || memoryInlineOpen || modelInlineMode ? (
+                    <>
+                      {modelInlineMode && (
+                        <ModelMessage
+                          mode={modelInlineMode}
+                          onSelect={
+                            modelInlineMode === 'fast'
+                              ? handleFastModelSelect
+                              : handleModelSelect
+                          }
+                          onClose={() => setModelInlineMode(null)}
+                        />
+                      )}
+                      {agentsInlineMode && (
+                        <AgentsMessage
+                          mode={agentsInlineMode}
+                          onMessage={(text) =>
+                            store.dispatch([{ type: 'status', text }])
+                          }
+                          onClose={() => setAgentsInlineMode(null)}
+                        />
+                      )}
+                      {memoryInlineOpen && (
+                        <MemoryMessage
+                          refreshSignal={memoryRefreshSignal}
+                          addSignal={memoryAddSignal}
+                          addScope={memoryAddScope}
+                          portalHost={memoryPortalHost}
+                          onMessage={(text, type = 'status') => {
+                            store.dispatch([{ type, text }]);
+                          }}
+                          onClose={() => setMemoryInlineOpen(false)}
+                        />
+                      )}
+                    </>
+                  ) : undefined
+                }
+                tailKey={
+                  agentsInlineMode || memoryInlineOpen || modelInlineMode
+                    ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}`
+                    : undefined
+                }
               />
+
+              {btwMessage?.role === 'btw' && (
+                <div className={styles.btwPanel}>
+                  <BtwMessage
+                    question={btwMessage.question}
+                    answer={btwMessage.answer}
+                    isPending={btwMessage.isPending}
+                  />
+                </div>
+              )}
 
               <StreamingStatus />
             </div>
+            <div ref={setMemoryPortalHost} data-web-shell-overlay-root />
           </CompactModeContext.Provider>
 
           <div
-            className={styles.footer}
-            style={dialogOpen ? { visibility: 'hidden' } : undefined}
+            className={
+              bottomHidden
+                ? `${styles.footer} ${styles.footerHidden}`
+                : styles.footer
+            }
           >
             {floatingTodos.length > 0 && (
               <div className={styles.bottomPanels}>
@@ -1525,7 +2023,7 @@ export function App({
                   onPopQueuedMessages={popQueuedPromptsForEdit}
                   onClearQueuedMessages={clearQueuedPrompts}
                   currentMode={currentMode}
-                  dialogOpen={dialogOpen}
+                  dialogOpen={bottomHidden}
                   followupState={followupState}
                   onAcceptFollowup={onAcceptFollowup}
                   onDismissFollowup={onDismissFollowup}

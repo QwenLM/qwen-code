@@ -98,7 +98,9 @@
 }
 
 .resume-picker-item {
-  padding: 6px 12px;
+  display: flex;
+  align-items: baseline;
+  padding: 0px 12px;
   cursor: pointer;
 }
 
@@ -134,7 +136,8 @@
   flex-shrink: 0;
   color: var(--accent-color);
   font-weight: 700;
-  font-size: 15px;
+  font-size: 20px;
+  margin-right: 8px;
   white-space: pre;
 }
 
@@ -196,6 +199,27 @@
   font-size: 11px;
   color: var(--accent-color, #4a9eff);
   opacity: 0.8;
+}
+
+.mcp-status {
+  font-weight: 700;
+}
+
+.mcp-status-connected {
+  color: var(--success-color);
+}
+
+.mcp-status-connecting {
+  color: var(--warning-color);
+}
+
+.mcp-status-disconnected {
+  color: var(--error-color);
+}
+
+.mcp-status-disabled,
+.mcp-status-unknown {
+  color: var(--text-dimmed);
 }
 
 .resume-picker-item-current {

@@ -247,28 +247,6 @@ function getWriteContent(tool: ACPToolCall): string {
   return '';
 }
 
-function ExpandedWriteContent({ tool }: { tool: ACPToolCall }) {
-  const content = useMemo(() => getWriteContent(tool), [tool]);
-  const lines = useMemo(() => {
-    const nextLines = content.split('\n');
-    if (nextLines.length > 0 && nextLines[nextLines.length - 1] === '') {
-      nextLines.pop();
-    }
-    return nextLines;
-  }, [content]);
-  if (!content) return null;
-
-  return (
-    <div className={styles.expandedWrite}>
-      <pre className={styles.expandedOutput}>
-        {lines.map((line, i) => (
-          <span key={i} className={styles.writeAdd}>{`+ ${line}\n`}</span>
-        ))}
-      </pre>
-    </div>
-  );
-}
-
 function TodoWriteContent({ tool }: { tool: ACPToolCall }) {
   const todos = extractTodosFromToolCall(tool);
   if (todos) {
@@ -473,6 +451,7 @@ function areToolLinePropsEqual(
     a.endTime === b.endTime &&
     a.subContent === b.subContent &&
     a.rawOutput === b.rawOutput &&
+    a.args === b.args &&
     a.content === b.content &&
     a.title === b.title &&
     areSubToolsEqual(a.subTools, b.subTools)
@@ -511,6 +490,7 @@ const ToolLine = memo(function ToolLine({
   onConfirm,
   workspaceCwd,
 }: ToolLineProps) {
+  const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
   const [expanded, setExpanded] = useState(
     () => !compactMode && shouldAutoExpand(tool),
@@ -524,13 +504,13 @@ const ToolLine = memo(function ToolLine({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [compactMode, tool.callId, tool.toolName],
   );
+  const isAgent = isSubAgentToolCall(tool);
   const hasApproval = approval && approval.toolCallId === tool.callId;
   const hasSubToolApproval =
     !hasApproval &&
     approval?.toolCallId &&
-    isSubAgentToolCall(tool) &&
+    isAgent &&
     toolContainsCallId(tool, approval.toolCallId);
-  const isAgent = isSubAgentToolCall(tool);
   const isRunningAgent = isAgent && tool.status === 'in_progress';
 
   useEffect(() => {
@@ -541,6 +521,14 @@ const ToolLine = memo(function ToolLine({
   }, [isRunningAgent]);
 
   if (isAgent) {
+    if (hasApproval && onConfirm) {
+      return (
+        <div className={styles.line}>
+          <ToolApproval request={approval} onConfirm={onConfirm} />
+        </div>
+      );
+    }
+
     const info = getAgentDisplayInfo(tool, now);
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
     const toolHint = getAgentCurrentToolHint(tool);
@@ -553,7 +541,7 @@ const ToolLine = memo(function ToolLine({
       <div className={styles.line}>
         <div className={styles.lineMain}>
           <StatusIcon status={tool.status} />
-          <span className={styles.lineName}>Agent</span>
+          <span className={styles.lineName}>{t('agent.label')}</span>
           {info.description && (
             <span className={styles.lineArg}>
               {truncateText(info.description, 60)}
@@ -629,6 +617,14 @@ const ToolLine = memo(function ToolLine({
   const name = tool.toolName.toLowerCase();
   const isTodo = name === 'todowrite';
 
+  if (hasApproval && onConfirm) {
+    return (
+      <div className={styles.line}>
+        <ToolApproval request={approval} onConfirm={onConfirm} />
+      </div>
+    );
+  }
+
   return (
     <div className={styles.line}>
       <div
@@ -642,9 +638,6 @@ const ToolLine = memo(function ToolLine({
         {description && <span className={styles.lineArg}>{description}</span>}
         {elapsed && <span className={styles.lineElapsed}>{elapsed}</span>}
       </div>
-      {hasApproval && onConfirm && (
-        <ToolApproval request={approval} onConfirm={onConfirm} />
-      )}
       {isTodo && <TodoWriteContent tool={tool} />}
       {!isTodo && !expanded && result && (
         <div className={styles.lineOutput}>{result}</div>
@@ -653,7 +646,7 @@ const ToolLine = memo(function ToolLine({
         <div className={styles.lineDetail}>
           {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
           {(name === 'write_file' || name === 'writefile') && (
-            <ExpandedWriteContent tool={tool} />
+            <ExpandedEditDiff tool={tool} />
           )}
           {(name === 'edit' || name === 'write' || name === 'editfile') && (
             <ExpandedEditDiff tool={tool} />
@@ -674,10 +667,17 @@ export const ToolGroup = memo(function ToolGroup({
   workspaceCwd,
 }: ToolGroupProps) {
   const compactMode = useContext(CompactModeContext);
+  const directApprovalTool =
+    pendingApproval?.toolCallId &&
+    tools.find((t) => t.callId === pendingApproval.toolCallId);
   const hasApprovalTool =
     pendingApproval?.toolCallId &&
     tools.some((t) => toolContainsCallId(t, pendingApproval.toolCallId!));
   const showCompact = compactMode && !hasApprovalTool;
+
+  if (directApprovalTool && tools.length === 1 && onConfirm) {
+    return <ToolApproval request={pendingApproval} onConfirm={onConfirm} />;
+  }
 
   if (showCompact) {
     return <CompactToolGroup tools={tools} workspaceCwd={workspaceCwd} />;

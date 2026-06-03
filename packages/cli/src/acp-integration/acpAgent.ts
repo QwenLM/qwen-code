@@ -32,9 +32,13 @@ import {
   WorkspaceMcpBudget,
   DiscoveredMCPTool,
   restoreWorktreeContext,
+  uiTelemetryService,
   McpBudgetWouldExceedError,
   McpServerSpawnFailedError,
   InvalidMcpConfigError,
+  MCPOAuthProvider,
+  MCPOAuthTokenStorage,
+  subagentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type {
   ApprovalMode,
@@ -102,6 +106,7 @@ import {
 } from '../utils/acpModelUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
+import { appEvents, AppEvent } from '../utils/events.js';
 import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
@@ -134,6 +139,7 @@ import {
   type ServeWorkspaceToolStatus,
   type ServeWorkspaceToolsStatus,
   type ServeSessionContextUsageStatus,
+  type ServeSessionStatsStatus,
 } from '../serve/status.js';
 import {
   collectContextData,
@@ -1110,9 +1116,15 @@ class QwenAgent implements Agent {
     }
   }
 
-  private buildWorkspaceMcpStatus(config: Config): ServeWorkspaceMcpStatus {
+  private async buildWorkspaceMcpStatus(
+    config: Config,
+  ): Promise<ServeWorkspaceMcpStatus> {
     try {
       const workspaceCwd = this.workspaceCwd(config);
+      const settings = loadSettings(config.getTargetDir());
+      const workspaceSettings = settings.forScope(
+        SettingScope.Workspace,
+      ).settings;
       const servers = config.getMcpServers() ?? {};
 
       // F2 (#4175 commit 5): pool snapshot powers `entryCount` +
@@ -1200,79 +1212,131 @@ class QwenAgent implements Agent {
         }
       }
 
+      const sharedTokenStorage = new MCPOAuthTokenStorage();
+
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd,
         initialized: true,
         discoveryState: this.discoveryState(),
-        servers: Object.entries(servers).map(([name, server]) => {
-          const disabled = config.isMcpServerDisabled(name);
-          const rawStatus = getMCPServerStatus(name);
-          const refusedByBudget = refusedSet.has(name);
-          // PR 14 fix (review #4247): config-disable takes precedence
-          // over budget-refusal. `lastRefusedServerNames` is a
-          // per-discovery-pass snapshot; if an operator runs
-          // `/mcp disable <name>` against a server that was refused
-          // last pass, the entry stays in the refused list until the
-          // next discovery pass clears it (`McpClientManager.removeServer`
-          // now drops the entry too — see sibling fix). Either way,
-          // a `disabled` cell should NEVER show `budget_exhausted` —
-          // the operator's deliberate disable wins.
-          const effectivelyRefused = refusedByBudget && !disabled;
-          const out: ServeWorkspaceMcpServerStatus = {
-            kind: 'mcp_server',
-            // Refused-by-budget shadows the raw status: the rawStatus
-            // is `DISCONNECTED` (we never tried to connect), but the
-            // operator-facing severity is `error` with an explanatory
-            // errorKind rather than the generic disconnected `error`.
-            status: effectivelyRefused
-              ? 'error'
-              : this.mcpCellStatus(rawStatus, disabled),
-            name,
-            mcpStatus: this.mcpStatus(rawStatus),
-            transport: this.mcpTransport(server),
-            disabled,
-          };
-          if (effectivelyRefused) {
-            out.errorKind = 'budget_exhausted';
-            out.disabledReason = 'budget';
-            out.hint =
-              'Raise --mcp-client-budget or remove servers from mcpServers config.';
-          } else if (disabled) {
-            out.disabledReason = 'config';
-          }
-          const description =
-            server && typeof server === 'object'
-              ? (server as { description?: unknown }).description
-              : undefined;
-          const extensionName =
-            server && typeof server === 'object'
-              ? (server as { extensionName?: unknown }).extensionName
-              : undefined;
-          if (typeof description === 'string') {
-            out.description = description;
-          }
-          if (typeof extensionName === 'string') {
-            out.extensionName = extensionName;
-          }
-          // F2 (#4175 commit 5): pool entries enrichment. `entryCount`
-          // and `entrySummary` are present together (or both absent)
-          // — guards on `mcp_workspace_pool` capability advertise the
-          // pair atomically. The runtime status is mapped through the
-          // existing `this.mcpStatus(...)` so downstream string-typed
-          // consumers see the same `'connected' | 'connecting' |
-          // 'disconnected'` enum the top-level `mcpStatus` field uses.
-          const poolRow = poolByName[name];
-          if (poolRow) {
-            out.entryCount = poolRow.entryCount;
-            out.entrySummary = poolRow.entrySummary.map((e) => ({
-              entryIndex: e.entryIndex,
-              refs: e.refs,
-              status: this.mcpStatus(e.status),
-            }));
-          }
-          return out;
-        }),
+        servers: await Promise.all(
+          Object.entries(servers).map(async ([name, server]) => {
+            const disabled = config.isMcpServerDisabled(name);
+            let hasOAuthTokens = false;
+            try {
+              const credentials = await sharedTokenStorage.getCredentials(name);
+              hasOAuthTokens = credentials !== null;
+            } catch {
+              // Match CLI: token lookup errors should not break /mcp status.
+            }
+            const rawStatus = getMCPServerStatus(name);
+            const refusedByBudget = refusedSet.has(name);
+            // PR 14 fix (review #4247): config-disable takes precedence
+            // over budget-refusal. `lastRefusedServerNames` is a
+            // per-discovery-pass snapshot; if an operator runs
+            // `/mcp disable <name>` against a server that was refused
+            // last pass, the entry stays in the refused list until the
+            // next discovery pass clears it (`McpClientManager.removeServer`
+            // now drops the entry too — see sibling fix). Either way,
+            // a `disabled` cell should NEVER show `budget_exhausted` —
+            // the operator's deliberate disable wins.
+            const effectivelyRefused = refusedByBudget && !disabled;
+            const out: ServeWorkspaceMcpServerStatus = {
+              kind: 'mcp_server',
+              // Refused-by-budget shadows the raw status: the rawStatus
+              // is `DISCONNECTED` (we never tried to connect), but the
+              // operator-facing severity is `error` with an explanatory
+              // errorKind rather than the generic disconnected `error`.
+              status: effectivelyRefused
+                ? 'error'
+                : this.mcpCellStatus(rawStatus, disabled),
+              name,
+              mcpStatus: this.mcpStatus(rawStatus),
+              transport: this.mcpTransport(server),
+              disabled,
+              hasOAuthTokens,
+            };
+            if (effectivelyRefused) {
+              out.errorKind = 'budget_exhausted';
+              out.disabledReason = 'budget';
+              out.hint =
+                'Raise --mcp-client-budget or remove servers from mcpServers config.';
+            } else if (disabled) {
+              out.disabledReason = 'config';
+            }
+            const description =
+              server && typeof server === 'object'
+                ? (server as { description?: unknown }).description
+                : undefined;
+            const extensionName =
+              server && typeof server === 'object'
+                ? (server as { extensionName?: unknown }).extensionName
+                : undefined;
+            if (typeof description === 'string') {
+              out.description = description;
+            }
+            if (typeof extensionName === 'string') {
+              out.extensionName = extensionName;
+            }
+            out.source = out.extensionName
+              ? 'extension'
+              : workspaceSettings.mcpServers?.[name]
+                ? 'project'
+                : 'user';
+            if (server && typeof server === 'object') {
+              const candidate = server as {
+                command?: unknown;
+                args?: unknown;
+                httpUrl?: unknown;
+                url?: unknown;
+                cwd?: unknown;
+              };
+              const serverConfig: NonNullable<
+                ServeWorkspaceMcpServerStatus['config']
+              > = {};
+              if (typeof candidate.command === 'string') {
+                serverConfig.command = candidate.command;
+              }
+              if (Array.isArray(candidate.args)) {
+                const args = candidate.args.filter(
+                  (arg): arg is string => typeof arg === 'string',
+                );
+                if (args.length > 0) {
+                  serverConfig.args = args;
+                }
+              }
+              if (typeof candidate.httpUrl === 'string') {
+                serverConfig.httpUrl = candidate.httpUrl;
+              }
+              if (typeof candidate.url === 'string') {
+                serverConfig.url = candidate.url;
+              }
+              if (typeof candidate.cwd === 'string') {
+                serverConfig.cwd = candidate.cwd;
+              }
+              if (Object.keys(serverConfig).length > 0) {
+                out.config = serverConfig;
+              }
+            }
+            // F2 (#4175 commit 5): pool entries enrichment. `entryCount`
+            // and `entrySummary` are present together (or both absent)
+            // — guards on `mcp_workspace_pool` capability advertise the
+            // pair atomically. The runtime status is mapped through the
+            // existing `this.mcpStatus(...)` so downstream string-typed
+            // consumers see the same `'connected' | 'connecting' |
+            // 'disconnected'` enum the top-level `mcpStatus` field uses.
+            const poolRow = poolByName[name];
+            if (poolRow) {
+              out.entryCount = poolRow.entryCount;
+              out.entrySummary = poolRow.entrySummary.map((e) => ({
+                entryIndex: e.entryIndex,
+                refs: e.refs,
+                status: this.mcpStatus(e.status),
+              }));
+            }
+            return out;
+          }),
+        ),
         ...(clientCount !== undefined ? { clientCount } : {}),
         ...(clientBudget !== undefined ? { clientBudget } : {}),
         ...(budgetMode !== undefined ? { budgetMode } : {}),
@@ -1336,8 +1400,28 @@ class QwenAgent implements Agent {
         };
       }
 
-      const registry = config.getToolRegistry();
-      const allTools = registry?.getAllTools() ?? [];
+      let registry = config.getToolRegistry();
+      let allTools = registry?.getAllTools() ?? [];
+      if (
+        allTools.filter(
+          (t) => t instanceof DiscoveredMCPTool && t.serverName === serverName,
+        ).length === 0
+      ) {
+        for (const session of this.getActiveSessions()) {
+          const sessionRegistry = session.getConfig().getToolRegistry();
+          const sessionTools = sessionRegistry?.getAllTools() ?? [];
+          if (
+            sessionTools.some(
+              (t) =>
+                t instanceof DiscoveredMCPTool && t.serverName === serverName,
+            )
+          ) {
+            registry = sessionRegistry;
+            allTools = sessionTools;
+            break;
+          }
+        }
+      }
       const tools: ServeWorkspaceMcpToolStatus[] = allTools
         .filter(
           (tool): tool is DiscoveredMCPTool =>
@@ -1602,12 +1686,21 @@ class QwenAgent implements Agent {
             ? { description: model.description }
             : {}),
           contextLimit: model.contextWindowSize ?? tokenLimit(effectiveModelId),
+          ...(model.modalities !== undefined
+            ? { modalities: model.modalities }
+            : {}),
+          ...(model.baseUrl !== undefined ? { baseUrl: model.baseUrl } : {}),
+          ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
           isCurrent,
           isRuntime: model.isRuntimeModel === true,
         };
         provider.models.push(providerModel);
         if (isCurrent) provider.current = true;
       }
+
+      const cgConfig = config.getContentGeneratorConfig?.();
+      const baseUrl = cgConfig?.baseUrl || undefined;
+      const fastModelId = this.settings.merged?.fastModel || undefined;
 
       return {
         v: STATUS_SCHEMA_VERSION,
@@ -1618,6 +1711,8 @@ class QwenAgent implements Agent {
               current: {
                 ...(currentAuth ? { authType: String(currentAuth) } : {}),
                 ...(currentAcpModelId ? { modelId: currentAcpModelId } : {}),
+                ...(baseUrl ? { baseUrl } : {}),
+                ...(fastModelId ? { fastModelId } : {}),
               },
             }
           : {}),
@@ -2092,6 +2187,60 @@ class QwenAgent implements Agent {
     return buildSessionTasksStatus(sessionId, session.getConfig());
   }
 
+  private buildSessionStatsStatus(sessionId: string): ServeSessionStatsStatus {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    // TODO: uiTelemetryService is process-wide; multi-session stats are cumulative
+    const metrics = uiTelemetryService.getMetrics();
+    const now = Date.now();
+    const createdAt = session.getCreatedAt();
+
+    const models: ServeSessionStatsStatus['models'] = {};
+    for (const [name, m] of Object.entries(metrics.models)) {
+      models[name] = {
+        api: { ...m.api },
+        tokens: { ...m.tokens },
+      };
+    }
+
+    const byName: ServeSessionStatsStatus['tools']['byName'] = {};
+    for (const [name, t] of Object.entries(metrics.tools.byName)) {
+      byName[name] = {
+        count: t.count,
+        success: t.success,
+        fail: t.fail,
+        durationMs: t.durationMs,
+        decisions: {
+          accept: t.decisions.accept,
+          reject: t.decisions.reject,
+          modify: t.decisions.modify,
+          auto_accept: t.decisions.auto_accept,
+        },
+      };
+    }
+
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      workspaceCwd: this.workspaceCwd(config),
+      sessionStartTimeMs: createdAt,
+      durationMs: now - createdAt,
+      promptCount: session.getTurnCount(),
+      models,
+      tools: {
+        totalCalls: metrics.tools.totalCalls,
+        totalSuccess: metrics.tools.totalSuccess,
+        totalFail: metrics.tools.totalFail,
+        totalDurationMs: metrics.tools.totalDurationMs,
+        byName,
+      },
+      files: {
+        totalLinesAdded: metrics.files.totalLinesAdded,
+        totalLinesRemoved: metrics.files.totalLinesRemoved,
+      },
+    };
+  }
+
   async extMethod(
     method: string,
     params: Record<string, unknown>,
@@ -2101,10 +2250,9 @@ class QwenAgent implements Agent {
 
     switch (method) {
       case SERVE_STATUS_EXT_METHODS.workspaceMcp:
-        return this.buildWorkspaceMcpStatus(this.config) as unknown as Record<
-          string,
-          unknown
-        >;
+        return (await this.buildWorkspaceMcpStatus(
+          this.config,
+        )) as unknown as Record<string, unknown>;
       case SERVE_STATUS_EXT_METHODS.workspaceMcpTools: {
         const serverName = params['serverName'];
         if (typeof serverName !== 'string' || serverName.length === 0) {
@@ -2182,6 +2330,19 @@ class QwenAgent implements Agent {
           );
         }
         return this.buildSessionTasksStatus(sessionId) as unknown as Record<
+          string,
+          unknown
+        >;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionStats: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return this.buildSessionStatsStatus(sessionId) as unknown as Record<
           string,
           unknown
         >;
@@ -2458,6 +2619,181 @@ class QwenAgent implements Agent {
           restarted: true,
           durationMs: Date.now() - start,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMcpManage: {
+        const serverName = params['serverName'];
+        const action = params['action'];
+        if (typeof serverName !== 'string' || serverName.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing serverName',
+          );
+        }
+        if (
+          action !== 'enable' &&
+          action !== 'disable' &&
+          action !== 'authenticate' &&
+          action !== 'clear-auth'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing MCP manage action',
+          );
+        }
+        const servers = this.config.getMcpServers() ?? {};
+        const server = servers[serverName];
+        if (!server) {
+          throw new RequestError(
+            -32004,
+            `MCP server not configured: ${JSON.stringify(serverName)}`,
+            { errorKind: 'mcp_server_not_found', serverName },
+          );
+        }
+        const toolRegistry = this.config.getToolRegistry();
+        if (!toolRegistry) {
+          throw RequestError.internalError(
+            undefined,
+            'ToolRegistry unavailable on this Config',
+          );
+        }
+
+        if (action === 'enable') {
+          const settings = loadSettings(this.config.getTargetDir());
+          for (const scope of [SettingScope.User, SettingScope.Workspace]) {
+            const scopeSettings = settings.forScope(scope).settings;
+            const currentExcluded = scopeSettings.mcp?.excluded || [];
+            if (currentExcluded.includes(serverName)) {
+              settings.setValue(
+                scope,
+                'mcp.excluded',
+                currentExcluded.filter((name: string) => name !== serverName),
+              );
+            }
+          }
+          const currentExcluded = this.config.getExcludedMcpServers() || [];
+          this.config.setExcludedMcpServers(
+            currentExcluded.filter((name: string) => name !== serverName),
+          );
+          await toolRegistry.discoverToolsForServer(serverName);
+          return { serverName, action, ok: true, changed: true };
+        }
+
+        if (action === 'disable') {
+          const settings = loadSettings(this.config.getTargetDir());
+          const userSettings = settings.forScope(SettingScope.User).settings;
+          const workspaceSettings = settings.forScope(
+            SettingScope.Workspace,
+          ).settings;
+          let targetScope = SettingScope.User;
+          if (server.extensionName) {
+            throw RequestError.invalidParams(
+              undefined,
+              `Cannot disable extension MCP server: ${serverName}`,
+            );
+          }
+          if (workspaceSettings.mcpServers?.[serverName]) {
+            targetScope = SettingScope.Workspace;
+          } else if (userSettings.mcpServers?.[serverName]) {
+            targetScope = SettingScope.User;
+          }
+          const scopeSettings = settings.forScope(targetScope).settings;
+          const currentExcluded = scopeSettings.mcp?.excluded || [];
+          if (!currentExcluded.includes(serverName)) {
+            settings.setValue(targetScope, 'mcp.excluded', [
+              ...currentExcluded,
+              serverName,
+            ]);
+          }
+          const runtimeExcluded = this.config.getExcludedMcpServers() || [];
+          if (!runtimeExcluded.includes(serverName)) {
+            this.config.setExcludedMcpServers([...runtimeExcluded, serverName]);
+          }
+          await toolRegistry.disableMcpServer(serverName);
+          return { serverName, action, ok: true, changed: true };
+        }
+
+        if (action === 'clear-auth') {
+          const tokenStorage = new MCPOAuthTokenStorage();
+          await tokenStorage.deleteCredentials(serverName);
+          await toolRegistry.disconnectServer(serverName);
+          return { serverName, action, ok: true, changed: true };
+        }
+
+        const messages: string[] = [];
+        let authUrl: string | undefined;
+        const displayListener = (message: unknown) => {
+          if (typeof message === 'string') {
+            messages.push(message);
+          } else if (message && typeof message === 'object') {
+            const key = (message as { key?: unknown }).key;
+            if (typeof key === 'string') {
+              messages.push(key);
+            }
+          }
+        };
+        const authUrlListener = (url: unknown) => {
+          if (typeof url === 'string') {
+            authUrl = url;
+          }
+        };
+        appEvents.on(AppEvent.OauthDisplayMessage, displayListener);
+        appEvents.on(AppEvent.OauthAuthUrl, authUrlListener);
+        try {
+          const oauthConfig = server.oauth ?? { enabled: false };
+          const mcpServerUrl = server.httpUrl || server.url;
+          const authProvider = new MCPOAuthProvider(new MCPOAuthTokenStorage());
+          await authProvider.authenticate(
+            serverName,
+            oauthConfig,
+            mcpServerUrl,
+            appEvents,
+          );
+          messages.push(
+            `Successfully authenticated and refreshed tools for '${serverName}'.`,
+          );
+          await toolRegistry.discoverToolsForServer(serverName);
+          const geminiClient = this.config.getGeminiClient();
+          if (geminiClient) {
+            await geminiClient.setTools();
+          }
+          return {
+            serverName,
+            action,
+            ok: true,
+            changed: true,
+            messages,
+            ...(authUrl ? { authUrl } : {}),
+          };
+        } finally {
+          appEvents.removeListener(
+            AppEvent.OauthDisplayMessage,
+            displayListener,
+          );
+          appEvents.removeListener(AppEvent.OauthAuthUrl, authUrlListener);
+        }
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceAgentGenerate: {
+        const description = params['description'];
+        if (
+          typeof description !== 'string' ||
+          !description.trim() ||
+          description.length > 4096
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing description (max 4096 chars)',
+          );
+        }
+        // No end-to-end AbortSignal from the bridge ext-method yet.
+        // The bridge may time out via Promise.race, but that only
+        // rejects the caller — this generator keeps running until it
+        // finishes naturally. A real fix requires wiring an abort
+        // signal through the ext-method protocol.
+        return (await subagentGenerator(
+          description.trim(),
+          this.config,
+          AbortSignal.timeout(5 * 60_000),
+        )) as unknown as Record<string, unknown>;
       }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];

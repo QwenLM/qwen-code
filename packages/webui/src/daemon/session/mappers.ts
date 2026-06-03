@@ -40,8 +40,14 @@ export function mapProviderStatus(
       ) {
         contextWindow = model.contextLimit;
       }
-      if (seen.has(model.modelId)) continue;
-      seen.add(model.modelId);
+      const modelKey = [
+        provider.authType,
+        model.modelId,
+        model.baseUrl ?? '',
+        model.envKey ?? '',
+      ].join('\0');
+      if (seen.has(modelKey)) continue;
+      seen.add(modelKey);
       models.push({
         id: model.modelId,
         baseModelId: model.baseModelId,
@@ -50,6 +56,11 @@ export function mapProviderStatus(
         ...(model.contextLimit !== undefined
           ? { contextWindow: model.contextLimit }
           : {}),
+        ...(model.modalities !== undefined
+          ? { modalities: model.modalities }
+          : {}),
+        ...(model.baseUrl !== undefined ? { baseUrl: model.baseUrl } : {}),
+        ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
         ...(model.isRuntime ? { isRuntime: true } : {}),
       });
     }

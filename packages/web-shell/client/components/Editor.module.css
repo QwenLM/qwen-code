@@ -10,7 +10,7 @@
 
 .line {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   padding: 6px 0;
 }
 

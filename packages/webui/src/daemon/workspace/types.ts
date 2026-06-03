@@ -12,10 +12,13 @@ import type {
   DaemonCapabilities,
   DaemonClient,
   DaemonCreateAgentRequest,
+  DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
+  DaemonMcpManageAction,
+  DaemonMcpManageResult,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
@@ -131,6 +134,10 @@ export interface DaemonWorkspaceActions {
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
   loadMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus>;
   restartMcpServer(serverName: string): Promise<DaemonMcpRestartResult>;
+  manageMcpServer(
+    serverName: string,
+    action: DaemonMcpManageAction,
+  ): Promise<DaemonMcpManageResult>;
 
   // Skills (read-only)
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;
@@ -150,6 +157,7 @@ export interface DaemonWorkspaceActions {
   createAgent(
     req: DaemonCreateAgentRequest,
   ): Promise<DaemonAgentMutationResult>;
+  generateAgent(description: string): Promise<DaemonGeneratedAgentContent>;
   deleteAgent(agentType: string, scope?: 'workspace' | 'global'): Promise<void>;
 
   // Files

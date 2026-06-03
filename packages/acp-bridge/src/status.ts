@@ -106,6 +106,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionContextUsage: 'qwen/status/session/context_usage',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
+  sessionStats: 'qwen/status/session/stats',
 } as const;
 
 /**
@@ -122,6 +123,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
+  workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
+  workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
   // T2.8 (#4514): runtime MCP server mutation ext-methods
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
@@ -167,6 +170,15 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
   mcpStatus?: ServeMcpServerRuntimeStatus;
   transport: ServeMcpTransport;
   disabled: boolean;
+  hasOAuthTokens?: boolean;
+  source?: 'user' | 'project' | 'extension';
+  config?: {
+    command?: string;
+    args?: string[];
+    httpUrl?: string;
+    url?: string;
+    cwd?: string;
+  };
   description?: string;
   extensionName?: string;
   /**
@@ -321,6 +333,8 @@ export interface ServeWorkspaceSkillsStatus {
 export interface ServeWorkspaceProviderCurrent {
   authType?: string;
   modelId?: string;
+  baseUrl?: string;
+  fastModelId?: string;
 }
 
 export interface ServeWorkspaceProviderModel {
@@ -329,6 +343,14 @@ export interface ServeWorkspaceProviderModel {
   name: string;
   description?: string | null;
   contextLimit?: number;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  baseUrl?: string;
+  envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
 }
@@ -492,6 +514,55 @@ export interface ServeSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: ServeSessionTaskStatus[];
+}
+
+export interface ServeSessionStatsModelMetrics {
+  api: {
+    totalRequests: number;
+    totalErrors: number;
+    totalLatencyMs: number;
+  };
+  tokens: {
+    prompt: number;
+    candidates: number;
+    total: number;
+    cached: number;
+    thoughts: number;
+  };
+}
+
+export interface ServeSessionStatsToolByName {
+  count: number;
+  success: number;
+  fail: number;
+  durationMs: number;
+  decisions: {
+    accept: number;
+    reject: number;
+    modify: number;
+    auto_accept: number;
+  };
+}
+
+export interface ServeSessionStatsStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  sessionStartTimeMs: number;
+  durationMs: number;
+  promptCount: number;
+  models: Record<string, ServeSessionStatsModelMetrics>;
+  tools: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    totalDurationMs: number;
+    byName: Record<string, ServeSessionStatsToolByName>;
+  };
+  files: {
+    totalLinesAdded: number;
+    totalLinesRemoved: number;
+  };
 }
 
 /**
@@ -690,7 +761,8 @@ export type ServeEnvKind =
   | 'platform'
   | 'sandbox'
   | 'proxy'
-  | 'env_var';
+  | 'env_var'
+  | 'memory';
 
 export interface ServeEnvCell extends ServeStatusCell {
   kind: ServeEnvKind;

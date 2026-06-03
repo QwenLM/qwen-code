@@ -17,11 +17,13 @@ export const DAEMON_PLAN_TOOL_CALL_ID = 'daemon-plan';
 export type DaemonUiEventType =
   // Chat-stream events (Stage 1)
   | 'user.text.delta'
+  | 'user.shell.command'
   | 'assistant.text.delta'
   | 'assistant.done'
   | 'thought.text.delta'
   | 'tool.update'
   | 'shell.output'
+  | 'user.shell.output'
   | 'permission.request'
   | 'permission.resolved'
   | 'model.changed'
@@ -80,6 +82,12 @@ export interface DaemonUiEventBase {
 export interface DaemonUiTextEvent extends DaemonUiEventBase {
   type: 'user.text.delta' | 'assistant.text.delta' | 'thought.text.delta';
   text: string;
+}
+
+export interface DaemonUiUserShellCommandEvent extends DaemonUiEventBase {
+  type: 'user.shell.command';
+  command: string;
+  cwd?: string;
 }
 
 export interface DaemonUiAssistantDoneEvent extends DaemonUiEventBase {
@@ -144,6 +152,12 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
 
 export interface DaemonUiShellOutputEvent extends DaemonUiEventBase {
   type: 'shell.output';
+  text: string;
+  stream?: 'stdout' | 'stderr';
+}
+
+export interface DaemonUiUserShellOutputEvent extends DaemonUiEventBase {
+  type: 'user.shell.output';
   text: string;
   stream?: 'stdout' | 'stderr';
 }
@@ -415,9 +429,11 @@ export type DaemonUiAuthDeviceFlowEvent =
 export type DaemonUiEvent =
   // Chat-stream events
   | DaemonUiTextEvent
+  | DaemonUiUserShellCommandEvent
   | DaemonUiAssistantDoneEvent
   | DaemonUiToolUpdateEvent
   | DaemonUiShellOutputEvent
+  | DaemonUiUserShellOutputEvent
   | DaemonUiPermissionRequestEvent
   | DaemonUiPermissionResolvedEvent
   | DaemonUiModelChangedEvent
@@ -579,6 +595,7 @@ export type DaemonTranscriptBlockKind =
   | 'thought'
   | 'tool'
   | 'shell'
+  | 'user_shell'
   | 'permission'
   | 'status'
   | 'error'
@@ -674,6 +691,15 @@ export interface DaemonShellTranscriptBlock extends DaemonTranscriptBlockBase {
   stream?: 'stdout' | 'stderr';
 }
 
+export interface DaemonUserShellTranscriptBlock
+  extends DaemonTranscriptBlockBase {
+  kind: 'user_shell';
+  text: string;
+  command: string;
+  cwd?: string;
+  stream?: 'stdout' | 'stderr';
+}
+
 export interface DaemonPermissionTranscriptBlock
   extends DaemonTranscriptBlockBase {
   kind: 'permission';
@@ -695,6 +721,7 @@ export type DaemonTranscriptBlock =
   | DaemonTextTranscriptBlock
   | DaemonToolTranscriptBlock
   | DaemonShellTranscriptBlock
+  | DaemonUserShellTranscriptBlock
   | DaemonPermissionTranscriptBlock
   | DaemonStatusTranscriptBlock;
 
@@ -744,6 +771,10 @@ export interface DaemonTranscriptSidechannelState {
   lastFollowupSuggestion?: {
     suggestion: string;
     promptId: string;
+  };
+  pendingUserShellCommand?: {
+    command: string;
+    cwd?: string;
   };
 }
 

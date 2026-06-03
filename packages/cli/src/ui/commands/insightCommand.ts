@@ -13,6 +13,7 @@ import { join } from 'path';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import {
   createDebugLogger,
+  encodeInsightErrorMessage,
   encodeInsightProgressMessage,
   encodeInsightReadyMessage,
   Storage,
@@ -155,10 +156,15 @@ export const insightCommand: SlashCommand = {
               content: encodeInsightReadyMessage(outputPath),
             });
           } catch (error) {
+            const errorText = (error as Error).message;
+            pushMessage({
+              messageType: 'info',
+              content: encodeInsightErrorMessage(errorText),
+            });
             pushMessage({
               messageType: 'error',
               content: t('Failed to generate insights: {{error}}', {
-                error: (error as Error).message,
+                error: errorText,
               }),
             });
             logger.error('Insight generation error:', error);

@@ -199,6 +199,61 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ).toMatchObject([{ type: 'user.text.delta', text: 'hello' }]);
   });
 
+  it('carries user shell command metadata into user shell transcript blocks', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    const commandEvents = normalizeDaemonEvent({
+      id: 25,
+      v: 1,
+      type: 'user_shell_command',
+      data: {
+        sessionId: 'session-1',
+        command: 'ls',
+        cwd: '/workspace/project',
+      },
+    });
+    const outputEvents = normalizeDaemonEvent({
+      id: 26,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'shell_output',
+          output: 'README.md\n',
+          _meta: { source: 'user-shell' },
+        },
+      },
+    });
+
+    expect(commandEvents).toMatchObject([
+      {
+        type: 'user.shell.command',
+        command: 'ls',
+        cwd: '/workspace/project',
+      },
+      { type: 'user.text.delta', text: '$ ls' },
+    ]);
+    expect(outputEvents).toMatchObject([
+      { type: 'user.shell.output', text: 'README.md\n' },
+    ]);
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [...commandEvents, ...outputEvents],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'user', text: '$ ls' },
+      {
+        kind: 'user_shell',
+        text: 'README.md\n',
+        command: 'ls',
+        cwd: '/workspace/project',
+      },
+    ]);
+  });
+
   it('optionally carries raw daemon events for diagnostics', () => {
     const event = {
       id: 24,
