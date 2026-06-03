@@ -138,6 +138,7 @@ export const DialogManager = ({
         serverName={uiState.currentMcpApproval.name}
         summary={uiState.currentMcpApproval.summary}
         source={uiState.currentMcpApproval.source}
+        pendingServers={uiState.pendingMcpApprovals}
         remaining={uiState.mcpApprovalRemaining}
         onSelect={uiActions.handleMcpApprovalSelect}
       />

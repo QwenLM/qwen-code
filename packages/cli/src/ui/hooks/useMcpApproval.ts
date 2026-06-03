@@ -142,6 +142,7 @@ export const useMcpApproval = (config: Config) => {
   return {
     isMcpApprovalDialogOpen: queue.length > 0,
     currentMcpApproval: queue[0],
+    pendingMcpApprovals: queue,
     mcpApprovalRemaining: Math.max(0, queue.length - 1),
     handleMcpApprovalSelect,
   };

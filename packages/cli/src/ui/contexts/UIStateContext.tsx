@@ -96,6 +96,7 @@ export interface UIState {
   isFolderTrustDialogOpen: boolean;
   isMcpApprovalDialogOpen: boolean;
   currentMcpApproval: PendingMcpServer | undefined;
+  pendingMcpApprovals: PendingMcpServer[];
   mcpApprovalRemaining: number;
   isTrustedFolder: boolean | undefined;
   constrainHeight: boolean;

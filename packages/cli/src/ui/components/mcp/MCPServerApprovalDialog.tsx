@@ -10,6 +10,7 @@ import { theme } from '../../semantic-colors.js';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import type { PendingMcpServer } from '../../hooks/useMcpApproval.js';
 
 export enum McpApprovalChoice {
   APPROVE = 'approve',
@@ -24,6 +25,8 @@ interface MCPServerApprovalDialogProps {
   summary: string;
   /** Where the config came from (e.g. `.mcp.json`, `.qwen/settings.json`). */
   source: string;
+  /** All pending servers that would be approved by "Approve all". */
+  pendingServers: PendingMcpServer[];
   /** How many more pending gated servers follow this one. */
   remaining: number;
   onSelect: (choice: McpApprovalChoice) => void;
@@ -31,7 +34,7 @@ interface MCPServerApprovalDialogProps {
 
 export const MCPServerApprovalDialog: React.FC<
   MCPServerApprovalDialogProps
-> = ({ serverName, summary, source, remaining, onSelect }) => {
+> = ({ serverName, summary, source, pendingServers, remaining, onSelect }) => {
   // Esc declines this server (treated as reject), matching the folder-trust
   // dialog's escape-to-deny convention.
   useKeypress(
@@ -86,9 +89,16 @@ export const MCPServerApprovalDialog: React.FC<
             {`  ${summary}`}
           </Text>
           {remaining > 0 && (
-            <Text color={theme.text.secondary}>
-              {`${remaining} more pending server${remaining === 1 ? '' : 's'} after this`}
-            </Text>
+            <Box flexDirection="column" marginTop={1}>
+              <Text color={theme.text.secondary}>
+                Approve all will trust these servers:
+              </Text>
+              {pendingServers.map((server) => (
+                <Text key={server.name} color={theme.text.secondary}>
+                  {`  ${server.name}  ${server.summary}`}
+                </Text>
+              ))}
+            </Box>
           )}
         </Box>
 

@@ -17,14 +17,14 @@ describe('mcp command', () => {
     expect(typeof mcpCommand.handler).toBe('function');
   });
 
-  it('should have exactly one option (help flag)', () => {
+  it('should have exactly one option (help flag)', async () => {
     // Test to ensure that the global 'gemini' flags are not added to the mcp command
     const yargsInstance = yargs();
     const builder = mcpCommand.builder;
     if (typeof builder !== 'function') {
       throw new Error('mcp command builder must be a function');
     }
-    const builtYargs = builder(yargsInstance);
+    const builtYargs = await builder(yargsInstance);
     const options = builtYargs.getOptions();
 
     // Should have exactly 1 option (help flag)

@@ -2044,6 +2044,9 @@ export class Config {
       if (this.isMcpServerDisabled(name)) {
         continue;
       }
+      if (this.isMcpServerPendingApproval(name)) {
+        continue;
+      }
       if (getMCPServerStatus(name) !== MCPServerStatus.CONNECTED) {
         failed.push(name);
       }

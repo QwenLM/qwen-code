@@ -2300,6 +2300,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     isMcpApprovalDialogOpen,
     currentMcpApproval,
+    pendingMcpApprovals,
     mcpApprovalRemaining,
     handleMcpApprovalSelect,
   } = useMcpApproval(config);
@@ -3321,6 +3322,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isFolderTrustDialogOpen: isFolderTrustDialogOpen ?? false,
       isMcpApprovalDialogOpen,
       currentMcpApproval,
+      pendingMcpApprovals,
       mcpApprovalRemaining,
       isTrustedFolder,
       constrainHeight,
@@ -3452,6 +3454,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isFolderTrustDialogOpen,
       isMcpApprovalDialogOpen,
       currentMcpApproval,
+      pendingMcpApprovals,
       mcpApprovalRemaining,
       isTrustedFolder,
       constrainHeight,
