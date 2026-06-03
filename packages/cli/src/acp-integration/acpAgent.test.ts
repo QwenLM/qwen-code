@@ -2044,9 +2044,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }),
       );
       expect(
-        fetchMock.mock.calls.some(([url]) =>
-          String(url).includes('codeload.github.com'),
-        ),
+        fetchMock.mock.calls.some(([url]) => {
+          const { hostname } = new URL(String(url));
+          return hostname === 'codeload.github.com';
+        }),
       ).toBe(false);
       expect(parseSkillContent).toHaveBeenCalledWith(
         expect.stringContaining('name: pptx'),
