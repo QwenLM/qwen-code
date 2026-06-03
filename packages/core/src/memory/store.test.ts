@@ -121,12 +121,78 @@ describe('auto-memory storage scaffold', () => {
     );
   });
 
+  it('uses QWEN_RUNTIME_DIR for managed auto-memory', () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const envRuntimeDir = path.join(tempDir, 'env-runtime-output');
+    process.env['QWEN_RUNTIME_DIR'] = envRuntimeDir;
+    Storage.setRuntimeBaseDir(path.join(tempDir, 'settings-runtime-output'));
+    clearAutoMemoryRootCache();
+
+    expect(getAutoMemoryRoot(projectRoot)).toBe(
+      path.join(
+        envRuntimeDir,
+        'projects',
+        sanitizeCwd(path.resolve(projectRoot)),
+        'memory',
+      ),
+    );
+  });
+
+  it('does not reuse cached roots across runtime output dirs', () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const runtimeA = path.join(tempDir, 'runtime-a');
+    const runtimeB = path.join(tempDir, 'runtime-b');
+
+    const rootA = Storage.runWithRuntimeBaseDir(runtimeA, undefined, () =>
+      getAutoMemoryRoot(projectRoot),
+    );
+    const rootB = Storage.runWithRuntimeBaseDir(runtimeB, undefined, () =>
+      getAutoMemoryRoot(projectRoot),
+    );
+
+    expect(rootA).toBe(
+      path.join(
+        runtimeA,
+        'projects',
+        sanitizeCwd(path.resolve(projectRoot)),
+        'memory',
+      ),
+    );
+    expect(rootB).toBe(
+      path.join(
+        runtimeB,
+        'projects',
+        sanitizeCwd(path.resolve(projectRoot)),
+        'memory',
+      ),
+    );
+  });
+
   it('keeps QWEN_CODE_MEMORY_BASE_DIR ahead of the runtime output directory', () => {
     delete process.env['QWEN_CODE_MEMORY_LOCAL'];
     const memoryBaseDir = path.join(tempDir, 'memory-base');
     const runtimeDir = path.join(tempDir, 'runtime-output');
     process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBaseDir;
     Storage.setRuntimeBaseDir(runtimeDir);
+    clearAutoMemoryRootCache();
+
+    expect(getAutoMemoryRoot(projectRoot)).toBe(
+      path.join(
+        memoryBaseDir,
+        'projects',
+        sanitizeCwd(path.resolve(projectRoot)),
+        'memory',
+      ),
+    );
+  });
+
+  it('resolves QWEN_CODE_MEMORY_BASE_DIR before using it', () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const memoryBaseDir = path.join(tempDir, 'relative-memory-base');
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.relative(
+      process.cwd(),
+      memoryBaseDir,
+    );
     clearAutoMemoryRootCache();
 
     expect(getAutoMemoryRoot(projectRoot)).toBe(
