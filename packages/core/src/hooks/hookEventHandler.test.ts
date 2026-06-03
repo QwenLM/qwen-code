@@ -819,6 +819,85 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('firePostToolBatchEvent', () => {
+    it('should execute hooks for PostToolBatch without matcher context', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.firePostToolBatchEvent([
+        {
+          tool_name: 'read_file',
+          tool_input: { path: 'README.md' },
+          tool_use_id: 'call-1',
+          status: 'success',
+          tool_response: { output: 'contents' },
+        },
+      ]);
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.PostToolBatch,
+        undefined,
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include tool_calls in hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.firePostToolBatchEvent([
+        {
+          tool_name: 'shell',
+          tool_input: { command: 'pwd' },
+          tool_use_id: 'call-2',
+          status: 'success',
+          tool_response: { output: '/tmp/project' },
+        },
+      ]);
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        hook_event_name: string;
+        permission_mode: string;
+        tool_calls: Array<{
+          tool_name: string;
+          tool_input: Record<string, unknown>;
+          tool_use_id: string;
+          tool_response?: Record<string, unknown>;
+        }>;
+      };
+
+      expect(input.hook_event_name).toBe(HookEventName.PostToolBatch);
+      expect(input.permission_mode).toBe(PermissionMode.Default);
+      expect(input.tool_calls).toEqual([
+        {
+          tool_name: 'shell',
+          tool_input: { command: 'pwd' },
+          tool_use_id: 'call-2',
+          status: 'success',
+          tool_response: { output: '/tmp/project' },
+        },
+      ]);
+    });
+  });
+
   describe('firePostToolUseFailureEvent', () => {
     it('should execute hooks for PostToolUseFailure event', async () => {
       const mockPlan = createMockExecutionPlan([]);

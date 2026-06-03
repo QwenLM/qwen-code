@@ -13,12 +13,12 @@ import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { DefaultHookOutput, HookPhase } from './types.js';
-import { createHookOutput } from './types.js';
+import { createHookOutput, PermissionMode } from './types.js';
 import type {
   SessionStartSource,
   SessionEndReason,
   AgentType,
-  PermissionMode,
+  PostToolBatchToolCall,
   PreCompactTrigger,
   PostCompactTrigger,
   NotificationType,
@@ -289,6 +289,24 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('PostToolUseFailure', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PostToolBatch event - called once after a tool-call batch resolves
+   */
+  async firePostToolBatchEvent(
+    toolCalls: PostToolBatchToolCall[],
+    permissionMode: PermissionMode = PermissionMode.Default,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePostToolBatchEvent(
+      toolCalls,
+      permissionMode,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PostToolBatch', result.finalOutput)
       : undefined;
   }
 

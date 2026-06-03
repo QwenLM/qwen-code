@@ -63,6 +63,7 @@ export function getHookMatcherTarget(
 
     case HookEventName.UserPromptSubmit:
     case HookEventName.Stop:
+    case HookEventName.PostToolBatch:
     case HookEventName.TodoCreated:
     case HookEventName.TodoCompleted:
       return undefined;

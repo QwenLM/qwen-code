@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { partToString } from '../utils/partUtils.js';
 import {
@@ -90,10 +91,10 @@ async function writeExtractCursor(
   projectRoot: string,
   cursor: AutoMemoryExtractCursor,
 ): Promise<void> {
-  await fs.writeFile(
+  await atomicWriteFile(
     getAutoMemoryExtractCursorPath(projectRoot),
     `${JSON.stringify(cursor, null, 2)}\n`,
-    'utf-8',
+    { encoding: 'utf-8' },
   );
 }
 
@@ -115,10 +116,10 @@ async function bumpMetadata(
     metadata.lastExtractionTouchedTopics = touchedTopics;
     metadata.lastExtractionStatus =
       touchedTopics.length > 0 ? 'updated' : 'noop';
-    await fs.writeFile(
+    await atomicWriteFile(
       getAutoMemoryMetadataPath(projectRoot),
       `${JSON.stringify(metadata, null, 2)}\n`,
-      'utf-8',
+      { encoding: 'utf-8' },
     );
   } catch {
     // Scaffold creation already writes metadata; ignore non-critical update errors.

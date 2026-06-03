@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ProxyAgent, fetch as undiciFetch, type Dispatcher } from 'undici';
+import {
+  Agent,
+  ProxyAgent,
+  fetch as undiciFetch,
+  type Dispatcher,
+} from 'undici';
 
 import { createDebugLogger } from './debugLogger.js';
 
@@ -94,8 +99,9 @@ export function buildRuntimeFetchOptions(
   // When using a custom dispatcher (proxy mode), disable undici timeouts (set to 0)
   // to let SDK's timeout parameter control the total request time. This ensures
   // user-configured timeouts work as expected for long-running requests.
-  // When no proxy is configured, the runtime's built-in fetch is used with its
-  // default timeout behavior.
+  // When no proxy is configured, a bundled undici Agent with disabled timeouts
+  // is used so local LLM backends (LM Studio, Ollama, etc.) are not limited
+  // by undici's 300s default bodyTimeout.
 
   switch (runtime) {
     case 'bun': {
@@ -130,9 +136,9 @@ export function buildRuntimeFetchOptions(
     }
 
     case 'node': {
-      // Node.js: Use a custom undici dispatcher only when a proxy is configured.
-      // Proxy dispatchers disable undici timeouts so SDK timeout controls the
-      // total request time; no-proxy calls use the runtime's built-in fetch.
+      // Node.js: Use a custom undici dispatcher with disabled timeouts in both
+      // proxy and no-proxy paths so SDK timeout controls the total request time.
+      // No-proxy uses a plain Agent (not ProxyAgent) for local LLM backends.
       return buildFetchOptionsWithDispatcher(sdkType, proxyUrl);
     }
 
@@ -591,24 +597,32 @@ function buildFetchOptionsWithDispatcher(
   sdkType: SDKType,
   proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
-  // When no proxy is configured, skip the custom dispatcher and let the SDK
-  // use the runtime's built-in fetch. This avoids version-mismatch issues
-  // between the project's bundled undici and the Node.js built-in undici.
-  // Re-verify compatibility if the bundled undici version changes.
+  // When no proxy is configured, use a cached plain undici Agent with disabled
+  // timeouts (headersTimeout: 0, bodyTimeout: 0). This prevents undici's 300s
+  // default bodyTimeout from aborting long-running requests to local LLM
+  // backends (LM Studio, Ollama, llama.cpp, MLX). The Agent is cached for
+  // connection pool reuse, matching the proxy path's caching behavior.
   if (!proxyUrl) {
-    return NO_DISPATCHER_FALLBACK[sdkType];
+    const NO_PROXY_KEY = '__no_proxy__';
+    let dispatcher = dispatcherCache.get(NO_PROXY_KEY);
+    if (!dispatcher) {
+      dispatcher = new Agent({
+        headersTimeout: 0,
+        bodyTimeout: 0,
+        keepAliveTimeout: 60_000,
+      });
+      dispatcherCache.set(NO_PROXY_KEY, dispatcher);
+    }
+    return { fetchOptions: { dispatcher }, fetch: undiciFetch };
   }
 
-  // Note: Without a custom dispatcher, Node.js built-in fetch uses its default
-  // 300s bodyTimeout. This is sufficient for all current model streaming responses.
   try {
     const dispatcher = getOrCreateSharedDispatcher(proxyUrl);
     // Pin fetch to undici's own implementation so the dispatcher and fetch
     // come from the same undici version. Node's bundled undici may differ in
     // major version from the project's bundled one (e.g. v8 vs v6), which
     // breaks dispatcher handler-interface checks (`invalid onError method`).
-    // The no-proxy branch above intentionally skips this so the runtime's
-    // built-in fetch continues to be used when no dispatcher is involved.
+    // The no-proxy branch above also pins undiciFetch for consistency.
     return { fetchOptions: { dispatcher }, fetch: undiciFetch };
   } catch (error) {
     // Log dispatcher creation failure - requests will fallback to direct connection

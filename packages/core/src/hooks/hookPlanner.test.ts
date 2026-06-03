@@ -98,6 +98,7 @@ describe('HookPlanner', () => {
       expect(getHookMatcherTarget(HookEventName.UserPromptSubmit)).toBe(
         undefined,
       );
+      expect(getHookMatcherTarget(HookEventName.PostToolBatch)).toBe(undefined);
     });
   });
 

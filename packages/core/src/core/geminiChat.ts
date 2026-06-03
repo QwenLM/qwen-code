@@ -227,6 +227,13 @@ interface TryCompressOptions {
    * post-compression guards that may roll the in-memory chat state back.
    */
   deferChatCompressionRecord?: boolean;
+  /**
+   * Forwarded to the compression side-query system prompt. Sourced from
+   * `/compress <text>` invocation arg; appended after the base prompt as
+   * an `Additional Instructions:` block so the summary model can focus
+   * on the user's stated concern.
+   */
+  customInstructions?: string;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -1420,6 +1427,7 @@ export class GeminiChat {
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
+      customInstructions: options?.customInstructions,
       signal,
     });
 

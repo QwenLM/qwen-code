@@ -248,6 +248,7 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PreToolUse);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostToolUse);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostToolUseFailure);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostToolBatch);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.Notification);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.UserPromptSubmit);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.SessionStart);
@@ -286,6 +287,7 @@ describe('hooks constants', () => {
 
     it('returns false for events without matchers', () => {
       expect(supportsMatchers(HookEventName.Stop)).toBe(false);
+      expect(supportsMatchers(HookEventName.PostToolBatch)).toBe(false);
       expect(supportsMatchers(HookEventName.UserPromptSubmit)).toBe(false);
       expect(supportsMatchers(HookEventName.TodoCreated)).toBe(false);
       expect(supportsMatchers(HookEventName.TodoCompleted)).toBe(false);

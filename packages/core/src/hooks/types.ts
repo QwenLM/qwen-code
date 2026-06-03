@@ -26,6 +26,8 @@ export enum HookEventName {
   PostToolUse = 'PostToolUse',
   // PostToolUseFailure - After tool execution fails
   PostToolUseFailure = 'PostToolUseFailure',
+  // PostToolBatch - After a batch of tool calls resolves
+  PostToolBatch = 'PostToolBatch',
   // Notification - When notifications are sent
   Notification = 'Notification',
   // UserPromptSubmit - When the user submits a prompt
@@ -298,6 +300,8 @@ export function createHookOutput(
       return new PostToolUseHookOutput(data);
     case HookEventName.PostToolUseFailure:
       return new PostToolUseFailureHookOutput(data);
+    case HookEventName.PostToolBatch:
+      return new PostToolBatchHookOutput(data);
     case HookEventName.Stop:
     case HookEventName.SubagentStop:
       return new StopHookOutput(data);
@@ -503,6 +507,18 @@ export class PostToolUseFailureHookOutput extends DefaultHookOutput {
 }
 
 /**
+ * Specific hook output class for PostToolBatch events.
+ */
+export class PostToolBatchHookOutput extends DefaultHookOutput {
+  /**
+   * Check if batch processing should stop after the resolved tool calls.
+   */
+  override shouldStopExecution(): boolean {
+    return super.shouldStopExecution() || this.isBlockingDecision();
+  }
+}
+
+/**
  * Specific hook output class for Stop events.
  */
 export class StopHookOutput extends DefaultHookOutput {
@@ -696,6 +712,40 @@ export interface PostToolUseFailureInput extends HookInput {
 export interface PostToolUseFailureOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'PostToolUseFailure';
+    additionalContext?: string;
+  };
+}
+
+/**
+ * Tool call summary for PostToolBatch hook input
+ */
+export interface PostToolBatchToolCall {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  tool_use_id: string;
+  status: 'success' | 'error' | 'cancelled';
+  /**
+   * Serialized ToolCallResponseInfo fields for the resolved call:
+   * response_parts, result_display, error, error_type, and content_length.
+   */
+  tool_response?: Record<string, unknown>;
+}
+
+/**
+ * PostToolBatch hook input
+ * Fired once after all tool calls in a batch have resolved.
+ */
+export interface PostToolBatchInput extends HookInput {
+  permission_mode: PermissionMode;
+  tool_calls: PostToolBatchToolCall[];
+}
+
+/**
+ * PostToolBatch hook output
+ */
+export interface PostToolBatchOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'PostToolBatch';
     additionalContext?: string;
   };
 }

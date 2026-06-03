@@ -39,6 +39,7 @@ import { randomUUID } from 'node:crypto';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   logMemoryDream,
@@ -288,10 +289,10 @@ async function writeDreamMetadata(
   projectRoot: string,
   metadata: AutoMemoryMetadata,
 ): Promise<void> {
-  await fs.writeFile(
+  await atomicWriteFile(
     getAutoMemoryMetadataPath(projectRoot),
     `${JSON.stringify(metadata, null, 2)}\n`,
-    'utf-8',
+    { encoding: 'utf-8' },
   );
 }
 
