@@ -5,22 +5,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import {
-  substituteHookArguments,
-  DEFAULT_AGENT_HOOK_PROMPT,
-} from './hookPromptUtils.js';
+import { substituteHookArguments } from './hookPromptUtils.js';
 
 describe('hookPromptUtils', () => {
-  describe('DEFAULT_AGENT_HOOK_PROMPT', () => {
-    it('should contain the $ARGUMENTS placeholder', () => {
-      expect(DEFAULT_AGENT_HOOK_PROMPT).toContain('$ARGUMENTS');
-    });
-
-    it('should mention report_verdict tool', () => {
-      expect(DEFAULT_AGENT_HOOK_PROMPT).toContain('report_verdict');
-    });
-  });
-
   describe('substituteHookArguments', () => {
     it('should replace $ARGUMENTS with the provided JSON input', () => {
       const result = substituteHookArguments(
@@ -51,14 +38,12 @@ describe('hookPromptUtils', () => {
       expect(result).toBe('Data: ');
     });
 
-    it('should handle the default prompt template', () => {
-      const jsonInput = '{"session_id":"abc","cwd":"/tmp"}';
+    it('should not interpret $& as a special replacement sequence', () => {
       const result = substituteHookArguments(
-        DEFAULT_AGENT_HOOK_PROMPT,
-        jsonInput,
+        'Path: $ARGUMENTS',
+        '{"path":"/foo/$&/bar"}',
       );
-      expect(result).not.toContain('$ARGUMENTS');
-      expect(result).toContain(jsonInput);
+      expect(result).toBe('Path: {"path":"/foo/$&/bar"}');
     });
   });
 });

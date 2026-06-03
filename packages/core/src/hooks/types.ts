@@ -165,7 +165,13 @@ export interface AgentHookConfig {
   prompt: string;
   /** SubagentManager resolvable name; defaults to 'general-purpose' */
   agent?: string;
-  /** Wall-clock timeout in seconds; default 60 */
+  /**
+   * Wall-clock timeout in **seconds**; default 720 (12 minutes).
+   *
+   * Note: Unlike `CommandHookConfig.timeout` which is in milliseconds,
+   * this field uses seconds to match the subagent's lifecycle semantics.
+   * Values are clamped to [1, 86400] to prevent indefinite runs.
+   */
   timeout?: number;
   /** Model override; defaults to config.getModel() */
   model?: string;
@@ -178,6 +184,14 @@ export interface AgentHookConfig {
   source?: HooksConfigSource;
   /** Custom status message to display while hook is executing */
   statusMessage?: string;
+  /**
+   * Fallback verdict when the model finishes without calling `report_verdict`
+   * and the text-based inference cannot determine a clear signal.
+   *
+   * - `false` (default) — fail-safe: block the action when in doubt.
+   * - `true` — lenient: allow the action when in doubt.
+   */
+  defaultVerdict?: boolean;
 }
 
 export type HookConfig =

@@ -69,19 +69,22 @@ const DEFAULT_TIMEOUT_SECONDS = 720;
  * the verdict is inferred as `ok: false`.
  */
 const NEGATIVE_VERDICT_PATTERNS = [
-  /\bnot\s+(met|satisfied|fulfilled|passed|completed|done)\b/i,
-  /\bfail(ed|s|ure)?\b/i,
+  // Match "not/never/no" followed (within 30 chars) by positive-signal words,
+  // to avoid false positives like "found no failures" being classified as ok=true.
+  /\b(not|never|no)\b.{0,30}\b(met|satisfied|fulfilled|passed|completed|done|successfully|complete|good|correct|fine)\b/i,
   /\bdoes\s+not\s+(meet|satisfy|pass|match)\b/i,
   /\bcondition\s+(is|was)\s+not\b/i,
   /\bnot\s+ok\b/i,
   /\bok\s*[:=]\s*false\b/i,
+  // Standalone "failed/fails/failure" without a preceding "no/without/zero"
+  /\b(?:^|(?<!\b(?:no|without|zero)\s+))fail(ed|s|ure)?\b/i,
 ];
 
 /**
  * Positive-signal patterns for text-based verdict fallback.
+ * These are only matched if NO negative pattern matched first.
  */
 const POSITIVE_VERDICT_PATTERNS = [
-  /\b(met|satisfied|fulfilled|passed|completed|verified)\b/i,
   /\bcondition\s+(is|was)\s+(met|satisfied)\b/i,
   /\bok\s*[:=]\s*true\b/i,
   /\ball\s+(checks?\s+)?(pass|passed|good|correct)\b/i,
@@ -222,17 +225,39 @@ export class AgentHookRunner {
     };
 
     // ── Step E: Set up verdict capture via postToolUse ───────
+    // Note: report_verdict is injected as a FunctionDeclaration (not in
+    // ToolRegistry), so the tool execution may report success=false in
+    // postToolUse. We therefore do NOT gate on payload.success — instead
+    // we validate the args structure at runtime.
     const captured: { verdict?: VerdictPayload } = {};
     const agentHooks: AgentHooks = {
       postToolUse(payload: PostToolUsePayload): void {
-        if (payload.success && payload.toolName === VERDICT_TOOL_NAME) {
-          captured.verdict = payload.args as unknown as VerdictPayload;
+        if (payload.toolName === VERDICT_TOOL_NAME) {
+          if (captured.verdict) {
+            debugLogger.warn(
+              `Agent hook "${hookName}": report_verdict called multiple times, ignoring subsequent call`,
+            );
+            return;
+          }
+          const args = payload.args as Record<string, unknown> | undefined;
+          if (args && typeof args['ok'] === 'boolean') {
+            captured.verdict = {
+              ok: args['ok'],
+              reason:
+                typeof args['reason'] === 'string' ? args['reason'] : undefined,
+            };
+          } else {
+            debugLogger.warn(
+              `Agent hook "${hookName}": report_verdict args missing or invalid ok field`,
+            );
+          }
         }
       },
     };
 
     // ── Step F: Configure timeout + abort signal ─────────────
-    const timeoutSeconds = hookConfig.timeout ?? DEFAULT_TIMEOUT_SECONDS;
+    const rawTimeout = hookConfig.timeout ?? DEFAULT_TIMEOUT_SECONDS;
+    const timeoutSeconds = Math.max(1, Math.min(rawTimeout, 86400));
     const timeoutMs = timeoutSeconds * 1000;
     const { signal: combinedSignal, cleanup: cleanupSignal } =
       createCombinedAbortSignal(signal, { timeoutMs });
@@ -240,9 +265,19 @@ export class AgentHookRunner {
     // ── Step G: Create YOLO-mode Config override (Gap 4: dontAsk) ──
     // Mirrors Claude Code's `mode: 'dontAsk'` — the hook subagent should
     // never trigger permission dialogs; all tools are auto-approved.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const hookAgentConfig = Object.create(this.config) as any as Config;
-    hookAgentConfig.getApprovalMode = () => ApprovalMode.YOLO;
+    // Using spread pattern instead of Object.create for robustness —
+    // Object.create only works if getApprovalMode is a prototype method;
+    // if it's ever changed to an instance property/arrow, the override
+    // would silently fail.
+    const hookAgentConfig = {
+      ...this.config,
+      getApprovalMode: () => ApprovalMode.YOLO,
+    } as unknown as Config;
+    if (hookAgentConfig.getApprovalMode() !== ApprovalMode.YOLO) {
+      debugLogger.error(
+        `Agent hook "${hookName}": failed to set YOLO approval mode`,
+      );
+    }
     debugLogger.debug(
       `Agent hook "${hookName}": using YOLO approval mode (dontAsk)`,
     );
@@ -283,7 +318,10 @@ IMPORTANT: If you do not call ${VERDICT_TOOL_NAME}, your verification will be co
         {
           hooks: agentHooks,
           promptConfigOverrides: {
-            systemPrompt: systemPromptOverride,
+            // Use renderedSystemPrompt to bypass buildChatSystemPrompt's
+            // non-interactive append, which contradicts the hook's instruction
+            // that the model MUST call report_verdict (not respond with text).
+            renderedSystemPrompt: systemPromptOverride,
           },
           runConfigOverrides: {
             max_turns: maxTurns,
@@ -314,13 +352,20 @@ IMPORTANT: If you do not call ${VERDICT_TOOL_NAME}, your verification will be co
           );
         } else {
           debugLogger.warn(
-            `Agent hook "${hookName}": could not infer verdict from text, defaulting to ok=true`,
+            `Agent hook "${hookName}": could not infer verdict from text, defaulting to ok=${hookConfig.defaultVerdict ?? false}`,
           );
-          // When the model completes analysis but we cannot parse a clear
-          // negative signal, default to allowing the action. This avoids
-          // blocking the user when the hook subagent simply forgot to call
-          // the tool but did not find any problems.
-          captured.verdict = { ok: true };
+          // Default to blocking when the verdict cannot be inferred —
+          // failing safe is better than silently allowing an action
+          // that the model may have intended to block.
+          // Users can override via `defaultVerdict: true` in AgentHookConfig
+          // if they prefer lenient behavior.
+          const fallbackOk = hookConfig.defaultVerdict ?? false;
+          captured.verdict = {
+            ok: fallbackOk,
+            reason: fallbackOk
+              ? 'Verdict could not be inferred from model output; defaulted to ok=true via defaultVerdict config'
+              : 'Verdict could not be inferred from model output',
+          };
         }
       }
 
@@ -328,14 +373,19 @@ IMPORTANT: If you do not call ${VERDICT_TOOL_NAME}, your verification will be co
       const duration = Date.now() - startTime;
 
       if (!captured.verdict) {
-        debugLogger.warn(
-          `Agent hook "${hookName}": no verdict (terminate=${terminateMode})`,
-        );
+        const reason =
+          terminateMode === AgentTerminateMode.TIMEOUT
+            ? `Agent hook timed out after ${timeoutSeconds}s`
+            : terminateMode === AgentTerminateMode.MAX_TURNS
+              ? `Agent hook exceeded max turns (${hookConfig.maxTurns ?? MAX_AGENT_HOOK_TURNS})`
+              : `Agent hook cancelled (terminate=${terminateMode})`;
+        debugLogger.warn(`Agent hook "${hookName}": ${reason}`);
         return {
           hookConfig,
           eventName,
           success: false,
           outcome: 'cancelled',
+          error: new Error(reason),
           duration,
         };
       }

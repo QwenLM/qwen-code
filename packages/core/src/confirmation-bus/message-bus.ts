@@ -89,7 +89,7 @@ export class MessageBus extends EventEmitter {
   async request<TRequest extends Message, TResponse extends Message>(
     request: Omit<TRequest, 'correlationId'>,
     responseType: TResponse['type'],
-    timeoutMs: number = 720000,
+    timeoutMs: number = 60000,
     signal?: AbortSignal,
   ): Promise<TResponse> {
     const correlationId = randomUUID();

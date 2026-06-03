@@ -27,10 +27,7 @@ export {
 } from './reportVerdictTool.js';
 export type { VerdictPayload } from './reportVerdictTool.js';
 export { AGENT_HOOK_DISALLOWED_TOOLS } from './agentHookDisallowedTools.js';
-export {
-  substituteHookArguments,
-  DEFAULT_AGENT_HOOK_PROMPT,
-} from './hookPromptUtils.js';
+export { substituteHookArguments } from './hookPromptUtils.js';
 
 // Export session and async hook management
 export { SessionHooksManager } from './sessionHooksManager.js';

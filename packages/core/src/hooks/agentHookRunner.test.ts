@@ -456,11 +456,15 @@ describe('AgentHookRunner', () => {
       const callArgs = subagentManager.createAgentHeadless.mock.calls[0];
       const options = callArgs[2] as Record<string, unknown>;
       const promptOverrides = options['promptConfigOverrides'] as {
-        systemPrompt?: string;
+        renderedSystemPrompt?: string;
       };
-      expect(promptOverrides.systemPrompt).toBeDefined();
-      expect(promptOverrides.systemPrompt).toContain('/test/transcript.jsonl');
-      expect(promptOverrides.systemPrompt).toContain('conversation transcript');
+      expect(promptOverrides.renderedSystemPrompt).toBeDefined();
+      expect(promptOverrides.renderedSystemPrompt).toContain(
+        '/test/transcript.jsonl',
+      );
+      expect(promptOverrides.renderedSystemPrompt).toContain(
+        'conversation transcript',
+      );
     });
 
     it('should handle empty transcript path gracefully', async () => {
@@ -481,11 +485,11 @@ describe('AgentHookRunner', () => {
       const callArgs = subagentManager.createAgentHeadless.mock.calls[0];
       const options = callArgs[2] as Record<string, unknown>;
       const promptOverrides = options['promptConfigOverrides'] as {
-        systemPrompt?: string;
+        renderedSystemPrompt?: string;
       };
       // Should still have a system prompt, just without transcript mention
-      expect(promptOverrides.systemPrompt).toBeDefined();
-      expect(promptOverrides.systemPrompt).not.toContain(
+      expect(promptOverrides.renderedSystemPrompt).toBeDefined();
+      expect(promptOverrides.renderedSystemPrompt).not.toContain(
         'transcript is available at',
       );
     });
@@ -524,6 +528,111 @@ describe('AgentHookRunner', () => {
 
       // Original config should still return 'default'
       expect(config.getApprovalMode()).toBe('default');
+    });
+  });
+
+  describe('execute — text fallback verdict (fail-safe)', () => {
+    it('should default to ok=false when text does not match any pattern', async () => {
+      const headless = createMockHeadless(
+        AgentTerminateMode.GOAL,
+        'I have reviewed the code and have no further comments.',
+      );
+      const subagentManager = createMockSubagentManager(headless);
+      const config = createMockConfig(subagentManager);
+      runner = new AgentHookRunner(config);
+
+      const result = await runner.execute(
+        createAgentHookConfig(),
+        HookEventName.Stop,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('blocking');
+      expect(result.output?.continue).toBe(false);
+      expect(result.output?.stopReason).toContain(
+        'Verdict could not be inferred from model output',
+      );
+    });
+
+    it('should default to ok=true when defaultVerdict is true and text is ambiguous', async () => {
+      const headless = createMockHeadless(
+        AgentTerminateMode.GOAL,
+        'I have reviewed the code and have no further comments.',
+      );
+      const subagentManager = createMockSubagentManager(headless);
+      const config = createMockConfig(subagentManager);
+      runner = new AgentHookRunner(config);
+
+      const result = await runner.execute(
+        createAgentHookConfig({ defaultVerdict: true }),
+        HookEventName.Stop,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('success');
+      expect(result.output?.continue).toBe(true);
+    });
+
+    it('should infer ok=true from positive text patterns', async () => {
+      const headless = createMockHeadless(
+        AgentTerminateMode.GOAL,
+        'All checks passed and the task was completed successfully.',
+      );
+      const subagentManager = createMockSubagentManager(headless);
+      const config = createMockConfig(subagentManager);
+      runner = new AgentHookRunner(config);
+
+      const result = await runner.execute(
+        createAgentHookConfig(),
+        HookEventName.Stop,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('success');
+      expect(result.output?.continue).toBe(true);
+    });
+
+    it('should infer ok=false from negative text patterns', async () => {
+      const headless = createMockHeadless(
+        AgentTerminateMode.GOAL,
+        'The condition was not met because tests failed.',
+      );
+      const subagentManager = createMockSubagentManager(headless);
+      const config = createMockConfig(subagentManager);
+      runner = new AgentHookRunner(config);
+
+      const result = await runner.execute(
+        createAgentHookConfig(),
+        HookEventName.Stop,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('blocking');
+      expect(result.output?.continue).toBe(false);
+    });
+
+    it('should block with ok=false even when defaultVerdict is true if negative pattern matches', async () => {
+      const headless = createMockHeadless(
+        AgentTerminateMode.GOAL,
+        'The verification failed — tests are broken.',
+      );
+      const subagentManager = createMockSubagentManager(headless);
+      const config = createMockConfig(subagentManager);
+      runner = new AgentHookRunner(config);
+
+      const result = await runner.execute(
+        createAgentHookConfig({ defaultVerdict: true }),
+        HookEventName.Stop,
+        createMockInput(),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('blocking');
+      expect(result.output?.continue).toBe(false);
     });
   });
 });

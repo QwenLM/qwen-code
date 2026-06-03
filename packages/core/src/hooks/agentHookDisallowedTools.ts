@@ -33,4 +33,13 @@ export const AGENT_HOOK_DISALLOWED_TOOLS: readonly string[] = [
   ToolNames.CRON_DELETE,
   // Prevent todo writes (hook agent should not manage parent todos)
   ToolNames.TODO_WRITE,
+  // Prevent arbitrary command execution in YOLO mode
+  ToolNames.SHELL,
+  ToolNames.MONITOR,
+  // Prevent SSRF and data exfiltration
+  ToolNames.WEB_FETCH,
+  // Prevent persistent memory corruption
+  ToolNames.MEMORY,
+  // Prevent skill execution (can spawn agents / execute shell)
+  ToolNames.SKILL,
 ];
