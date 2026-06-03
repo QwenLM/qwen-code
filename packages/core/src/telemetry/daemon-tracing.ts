@@ -200,6 +200,7 @@ export function recordDaemonError(
 export function emitDaemonLog(
   body: string,
   attributes: LogAttributes = {},
+  options?: { eventName?: string; severityNumber?: number },
 ): void {
   if (!isTelemetrySdkInitialized()) return;
   try {
@@ -207,9 +208,12 @@ export function emitDaemonLog(
       body,
       timestamp: new Date(),
       attributes: {
-        'event.name': EVENT_DAEMON_ERROR,
+        'event.name': options?.eventName ?? EVENT_DAEMON_ERROR,
         ...attributes,
       },
+      ...(options?.severityNumber != null
+        ? { severityNumber: options.severityNumber }
+        : {}),
     });
   } catch {
     // Telemetry must not affect daemon behavior.
@@ -313,6 +317,14 @@ export function extractDaemonTraceContext(
   );
 }
 
+interface DaemonBridgeTelemetryMetrics {
+  sessionLifecycle(action: 'spawn' | 'close' | 'die'): void;
+  channelLifecycle(action: 'spawn' | 'exit', expected?: boolean): void;
+  promptQueueWait(durationMs: number): void;
+  promptDuration(durationMs: number): void;
+  cancelled(): void;
+}
+
 export function createDaemonBridgeTelemetry(): {
   captureContext(): unknown;
   runWithContext<T>(captured: unknown, fn: () => Promise<T>): Promise<T>;
@@ -323,6 +335,7 @@ export function createDaemonBridgeTelemetry(): {
   ): Promise<T>;
   event(name: string, attributes: DaemonAttributes): void;
   injectPromptContext<T extends object>(request: T): T;
+  metrics?: DaemonBridgeTelemetryMetrics;
 } {
   return {
     captureContext: captureDaemonTelemetryContext,

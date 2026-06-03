@@ -16,7 +16,9 @@ import {
   TrustGateError,
   emitDaemonLog,
   hashDaemonWorkspace,
+  recordDaemonBridgeError,
   recordDaemonError,
+  recordDaemonHttpRequest,
   recordDaemonHttpResponse,
   withDaemonRequestSpan,
 } from '@qwen-code/qwen-code-core';
@@ -91,6 +93,11 @@ import {
 } from './fs/index.js';
 import { registerWorkspaceFileReadRoutes } from './routes/workspaceFileRead.js';
 import { registerWorkspaceFileWriteRoutes } from './routes/workspaceFileWrite.js';
+
+let activeSseCount = 0;
+export function getActiveSseCount(): number {
+  return activeSseCount;
+}
 
 /**
  * Build a no-op fs-audit emitter that logs a warning every
@@ -365,6 +372,7 @@ function daemonTelemetryMiddleware(
       CLIENT_ID_RE.test(rawClientId)
         ? rawClientId
         : undefined;
+    const startMs = Date.now();
     void withDaemonRequestSpan(
       {
         method: req.method,
@@ -383,6 +391,11 @@ function daemonTelemetryMiddleware(
             if (done) return;
             done = true;
             recordDaemonHttpResponse(span, res.statusCode);
+            recordDaemonHttpRequest(
+              Date.now() - startMs,
+              route.route,
+              res.statusCode,
+            );
             resolve();
           };
           res.once('finish', finish);
@@ -2402,11 +2415,15 @@ export function createServeApp(
       const sseClientId = req.headers['x-qwen-client-id'] as string | undefined;
       daemonLog.info('SSE stream opened', { sessionId, clientId: sseClientId });
       res.on('close', () => {
-        daemonLog.info('SSE stream closed', {
-          sessionId,
-          clientId: sseClientId,
-          durationMs: Date.now() - sseOpenedAt,
-        });
+        try {
+          daemonLog.info('SSE stream closed', {
+            sessionId,
+            clientId: sseClientId,
+            durationMs: Date.now() - sseOpenedAt,
+          });
+        } catch {
+          /* logger failure must not prevent counter decrement */
+        }
       });
     }
 
@@ -2419,6 +2436,11 @@ export function createServeApp(
     res.setHeader('X-Accel-Buffering', 'no');
     // Always present on the supported Node versions (engines.node >=22).
     res.flushHeaders();
+
+    activeSseCount++;
+    res.on('close', () => {
+      activeSseCount--;
+    });
 
     // Backpressure helper: `res.write` returns false when the kernel send
     // buffer is full. Without awaiting `drain` Node accumulates the
@@ -3572,6 +3594,7 @@ function sendBridgeErrorImpl(
   // structured daemon logger (which tees to stderr + log file). When
   // absent (tests, direct embeds), fall back to the legacy stderr-only
   // `writeStderrLine` path.
+  recordDaemonBridgeError(err);
   recordDaemonError(undefined, err, {
     ...(ctx?.route ? { 'http.route': ctx.route } : {}),
     ...(ctx?.sessionId ? { 'session.id': ctx.sessionId } : {}),

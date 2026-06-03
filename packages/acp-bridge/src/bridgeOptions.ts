@@ -97,6 +97,14 @@ export type BridgeTelemetryAttributes = Record<
   string | number | boolean
 >;
 
+export interface BridgeTelemetryMetrics {
+  sessionLifecycle(action: 'spawn' | 'close' | 'die'): void;
+  channelLifecycle(action: 'spawn' | 'exit', expected?: boolean): void;
+  promptQueueWait(durationMs: number): void;
+  promptDuration(durationMs: number): void;
+  cancelled(): void;
+}
+
 export interface BridgeTelemetry {
   captureContext(): unknown;
   runWithContext<T>(captured: unknown, fn: () => Promise<T>): Promise<T>;
@@ -107,6 +115,7 @@ export interface BridgeTelemetry {
   ): Promise<T>;
   event(name: string, attributes: BridgeTelemetryAttributes): void;
   injectPromptContext<T extends object>(request: T): T;
+  metrics?: BridgeTelemetryMetrics;
 }
 
 /**

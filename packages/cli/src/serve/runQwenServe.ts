@@ -20,8 +20,17 @@ import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
   createDaemonBridgeTelemetry,
+  emitDaemonLog,
+  forceFlushMetrics,
   hashDaemonWorkspace,
+  initializeDaemonMetrics,
   initializeTelemetry,
+  recordDaemonCancel,
+  recordDaemonChannelLifecycle,
+  recordDaemonPromptDuration,
+  recordDaemonPromptQueueWait,
+  recordDaemonSessionLifecycle,
+  registerDaemonGaugeCallbacks,
   resolveTelemetrySettings,
   shutdownTelemetry,
   type TelemetryRuntimeConfig,
@@ -35,7 +44,11 @@ import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
 } from './permissionAudit.js';
-import { createServeApp, resolveBridgeFsFactory } from './server.js';
+import {
+  createServeApp,
+  getActiveSseCount,
+  resolveBridgeFsFactory,
+} from './server.js';
 import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
@@ -110,7 +123,10 @@ function createDaemonTelemetryRuntimeConfig(
     getTelemetryOutfile: () => telemetry.outfile,
     getTelemetryIncludeSensitiveSpanAttributes: () =>
       telemetry.includeSensitiveSpanAttributes ?? false,
-    getTelemetryResourceAttributes: () => telemetry.resourceAttributes ?? {},
+    getTelemetryResourceAttributes: () => ({
+      ...(telemetry.resourceAttributes ?? {}),
+      'service.instance.id': daemonSessionId,
+    }),
     getTelemetryMetricsIncludeSessionId: () =>
       telemetry.metrics?.includeSessionId ?? false,
     getTelemetryResourceAttributeWarnings: () =>
@@ -659,7 +675,45 @@ export async function runQwenServe(
       `daemon:${daemonWorkspaceHash}:${process.pid}`,
     ),
   );
+  initializeDaemonMetrics();
   const daemonTelemetry = createDaemonBridgeTelemetry();
+  daemonTelemetry.metrics = {
+    sessionLifecycle(action) {
+      recordDaemonSessionLifecycle(action);
+      emitDaemonLog(
+        `Session ${action}.`,
+        {
+          'qwen-code.workspace.hash': daemonWorkspaceHash,
+        },
+        {
+          eventName: `qwen-code.daemon.session.${action}`,
+          ...(action === 'die' ? { severityNumber: 13 } : {}),
+        },
+      );
+    },
+    channelLifecycle(action, expected) {
+      recordDaemonChannelLifecycle(action, expected);
+      emitDaemonLog(
+        action === 'spawn'
+          ? 'ACP channel spawned.'
+          : `ACP channel exited (expected=${expected}).`,
+        { 'qwen-code.daemon.channel.expected': expected ?? true },
+        {
+          eventName: `qwen-code.daemon.channel.${action}`,
+          ...(!expected && action === 'exit' ? { severityNumber: 13 } : {}),
+        },
+      );
+    },
+    promptQueueWait(durationMs) {
+      recordDaemonPromptQueueWait(durationMs);
+    },
+    promptDuration(durationMs) {
+      recordDaemonPromptDuration(durationMs);
+    },
+    cancelled() {
+      recordDaemonCancel();
+    },
+  };
 
   // Allocate the audit ring + publisher in the daemon host (here)
   // rather than inside the bridge factory, because the ring is the
@@ -757,6 +811,11 @@ export async function runQwenServe(
           );
         }),
     });
+  registerDaemonGaugeCallbacks({
+    sessionCount: () => bridge.sessionCount,
+    sseCount: () => getActiveSseCount(),
+    heapUsed: () => process.memoryUsage().heapUsed,
+  });
   let actualPort = opts.port;
   // Pass the already-canonical `boundWorkspace` into `createServeApp`
   // via `deps.boundWorkspace`. That field is the pre-canonicalized
@@ -1026,6 +1085,15 @@ export async function runQwenServe(
                 );
               }
             }
+            void forceFlushMetrics().catch((flushErr) => {
+              daemonLog.warn(
+                `pre-shutdown metrics flush failed: ${
+                  flushErr instanceof Error
+                    ? flushErr.message
+                    : String(flushErr)
+                }`,
+              );
+            });
             bridge
               .shutdown()
               .catch((err) => {
