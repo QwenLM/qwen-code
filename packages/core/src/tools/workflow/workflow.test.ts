@@ -90,6 +90,24 @@ describe('WorkflowTool', () => {
   // FIX-C9 (TST-M2): scripts without an explicit `return` resolve to
   // undefined. WorkflowTool surfaces a clear placeholder rather than the
   // literal string "undefined".
+  // FIX-G (Round 4 test Minor): args threading through WorkflowTool.build()
+  // → orchestrator.run() → sandbox. A regression where args is dropped
+  // (e.g. forgetting to pass `args: this.params.args` to orchestrator.run)
+  // would go uncaught.
+  it('execute() threads params.args through to the sandbox args global', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async () => 'unused',
+    });
+    const invocation = tool.build({
+      script: 'return args.who',
+      args: { who: 'world' },
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const llmText = (result.llmContent as Array<{ text: string }>)[0]!.text;
+    expect(llmText).toBe('world');
+  });
+
   it('execute() handles scripts that return undefined (no explicit return)', async () => {
     const tool = new WorkflowTool(fakeConfig(), {
       dispatch: async () => 'ignored',

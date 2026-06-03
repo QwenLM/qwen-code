@@ -319,28 +319,29 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         );
       },
     ),
-    // FIX-F: budget is exposed as a hardened sentinel object whose
-    // properties throw on access. P1 cannot honor budget.spent() /
-    // .remaining() — the dispatch path has no token tracker. P5 will wire
-    // a real budget tracker; until then any access fails loud.
+    // FIX-F + FIX-G (Round 4 test Critical): budget exposes a hardened
+    // sentinel. The OUTER object is null-proto + constructor undefined; the
+    // INNER methods (spent/remaining) are ALSO `hardenInjected` so
+    // `budget.spent.constructor("return process")()` cannot reach host
+    // Function. P5 will replace this with a real budget tracker.
     budget: hardenInjected(
       Object.create(null, {
         total: { value: null, writable: false, configurable: false },
         spent: {
-          value: () => {
+          value: hardenInjected(() => {
             throw new Error(
               'budget.spent() is not supported in P1. Token tracking is scheduled for P5.',
             );
-          },
+          }),
           writable: false,
           configurable: false,
         },
         remaining: {
-          value: () => {
+          value: hardenInjected(() => {
             throw new Error(
               'budget.remaining() is not supported in P1. Token tracking is scheduled for P5.',
             );
-          },
+          }),
           writable: false,
           configurable: false,
         },

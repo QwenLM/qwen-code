@@ -154,3 +154,17 @@ describe('WorkflowTool registration', () => {
     expect(registry.getAllToolNames()).not.toContain(ToolNames.WORKFLOW);
   });
 });
+
+// FIX-G (Round 4 test Important): regression test for the FIX-8 anti-recursion
+// guard. A subagent spawned BY a workflow must not be able to call the
+// Workflow tool again — that would create unbounded O(k^n) fan-out. Without
+// this assertion, a rename of `ToolNames.WORKFLOW` or accidental deletion of
+// the exclusion entry would silently open the recursion.
+describe('Workflow anti-recursion guard', () => {
+  it('ToolNames.WORKFLOW is in EXCLUDED_TOOLS_FOR_SUBAGENTS', async () => {
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.WORKFLOW)).toBe(true);
+  });
+});

@@ -419,6 +419,41 @@ describe('createWorkflowSandbox security', () => {
     expect(result).toBeNull();
   });
 
+  // FIX-G (Round 4 test Critical): inner descriptor functions on budget
+  // must ALSO be hardened. Without it, `budget.spent.constructor` returns
+  // host Function (because the spent function's prototype chain still
+  // points at host Function.prototype).
+  it('budget.spent.constructor is undefined (blocks inner-function escape)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`return budget.spent.constructor`);
+    expect(result).toBeUndefined();
+  });
+
+  it('budget.remaining.constructor is undefined (blocks inner-function escape)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`return budget.remaining.constructor`);
+    expect(result).toBeUndefined();
+  });
+
+  // FIX-G (Round 4 test Important): Date.parse is implemented but was
+  // previously untested. Refactors that drop .parse would silently leave a
+  // gap where parse() works (legacy host Date) and leaks real time math.
+  it('Date.parse() throws inside sandbox', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return Date.parse("2026-01-01")`),
+    ).rejects.toThrow(/unavailable in workflow scripts/i);
+  });
+
   // FIX-E (Round 4 Important): explicit max-depth cap on args nesting.
   it('rejects args with nesting beyond max depth with a clear error', () => {
     const deep: Record<string, unknown> = {};
