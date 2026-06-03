@@ -624,7 +624,7 @@ validate_archive_entry_path() {
     esac
 }
 
-archive_contains_symlinks() {
+archive_contains_symlinks_or_hardlinks() {
     local archive_path="$1"
 
     case "${archive_path}" in
@@ -632,7 +632,7 @@ archive_contains_symlinks() {
             unzip -Z -v "${archive_path}" 2>/dev/null | grep -E 'Unix file attributes \(12[0-7]{4} octal\)' >/dev/null
             ;;
         *.tar.gz|*.tgz|*.tar.xz)
-            tar -tvf "${archive_path}" 2>/dev/null | awk '$1 ~ /^l/ { found=1 } END { exit found ? 0 : 1 }'
+            tar -tvf "${archive_path}" 2>/dev/null | awk '$1 ~ /^[lh]/ { found=1 } END { exit found ? 0 : 1 }'
             ;;
         *)
             return 1
@@ -673,8 +673,8 @@ validate_archive_contents() {
         return 1
     fi
 
-    if archive_contains_symlinks "${archive_path}"; then
-        log_error "Archive contains symlinks; refusing to install."
+    if archive_contains_symlinks_or_hardlinks "${archive_path}"; then
+        log_error "Archive contains symlinks or hardlinks; refusing to install."
         return 1
     fi
 

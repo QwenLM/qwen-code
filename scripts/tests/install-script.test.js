@@ -2096,6 +2096,31 @@ describe('isPrivateOrReservedHost', () => {
     // Public IPv6
     expect(isPrivateOrReservedHost('2607:f8b0:4004:800::200e')).toBe(false);
   });
+
+  it('does not flag decimal or octal encoded IPs (URL API normalizes them before reaching the helper)', async () => {
+    const { isPrivateOrReservedHost } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    // Decimal-encoded 127.0.0.1 — not 4 dotted parts, so parseIpv4Octets
+    // returns null and the value is treated as a non-IP hostname (safe).
+    expect(isPrivateOrReservedHost('2130706433')).toBe(false);
+    // Octal-encoded 127.0.0.1 — parsed as dotted quad but leading zeros
+    // are interpreted as decimal by Number(), so 0177 → 177 (not 127).
+    // The resulting IP 177.0.0.1 is public, so this returns false.
+    // Node's URL API normalizes these before they reach isPrivateOrReservedHost.
+    expect(isPrivateOrReservedHost('0177.0.0.1')).toBe(false);
+  });
+
+  it('handles IPv6 zone IDs and empty brackets', async () => {
+    const { isPrivateOrReservedHost } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    expect(isPrivateOrReservedHost('[]')).toBe(true);
+    // Node's URL API rejects URLs with IPv6 zone IDs as invalid, so this
+    // value would not normally reach isPrivateOrReservedHost. If it arrives
+    // raw, fe80::1%25eth0 contains ':' and is parsed as IPv6 link-local.
+    expect(isPrivateOrReservedHost('fe80::1%25eth0')).toBe(true);
+  });
 });
 
 describe('redactUrlForLog', () => {

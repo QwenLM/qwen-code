@@ -247,6 +247,72 @@ describe('getInstallationInfo', () => {
     expect(info.updateMessage).not.toContain('npm install');
   });
 
+  it('should detect macOS standalone installs and avoid npm auto-update', () => {
+    setPlatform('darwin');
+    const installDir = '/Users/test/.local/lib/qwen-code';
+    const cliPath = `${installDir}/lib/cli.js`;
+    process.argv[1] = cliPath;
+    mockedRealPathSync.mockReturnValue(cliPath);
+    mockedExistsSync.mockImplementation((candidate) =>
+      [
+        path.join(installDir, 'manifest.json'),
+        path.join(installDir, 'bin', 'qwen'),
+        path.join(installDir, 'node', 'bin', 'node'),
+      ].includes(String(candidate)),
+    );
+    mockedReadFileSync.mockImplementation((candidate) => {
+      if (candidate === path.join(installDir, 'manifest.json')) {
+        return JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          target: 'darwin-arm64',
+        });
+      }
+      throw new Error(`Unexpected read: ${candidate}`);
+    });
+    mockedLstatSync.mockImplementation((candidate) => {
+      if (
+        [
+          path.join(installDir, 'bin', 'qwen'),
+          path.join(installDir, 'node', 'bin', 'node'),
+        ].includes(String(candidate))
+      ) {
+        return fileStats();
+      }
+      throw new Error(`Unexpected lstat: ${candidate}`);
+    });
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.STANDALONE);
+    expect(info.isGlobal).toBe(true);
+    expect(info.updateMessage).toContain('Standalone install detected');
+    expect(info.updateMessage).toContain('install-qwen-standalone.sh');
+  });
+
+  it('should fall back to npm when manifest.json is malformed', () => {
+    setPlatform('linux');
+    const installDir = '/Users/test/.local/lib/qwen-code';
+    const cliPath = `${installDir}/lib/cli.js`;
+    process.argv[1] = cliPath;
+    mockedRealPathSync.mockReturnValue(cliPath);
+    mockedExistsSync.mockImplementation((candidate) =>
+      [
+        path.join(installDir, 'manifest.json'),
+        path.join(installDir, 'bin', 'qwen'),
+        path.join(installDir, 'node', 'bin', 'node'),
+      ].includes(String(candidate)),
+    );
+    mockedReadFileSync.mockReturnValue('{invalid json');
+    mockedLstatSync.mockReturnValue(fileStats());
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.NPM);
+    expect(info.updateCommand).toBe(
+      'npm install -g @qwen-code/qwen-code@latest',
+    );
+  });
+
   it('should ignore standalone-like installs for the wrong target', () => {
     setPlatform('linux');
     const installDir = '/Users/test/.local/lib/qwen-code';
