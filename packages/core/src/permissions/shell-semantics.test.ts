@@ -444,6 +444,39 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  it('handles leading env assignments before redirected commands', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'FOO=bar echo x > .qwen/settings.json',
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+
+  it('handles leading env assignments before write commands', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        'FOO=bar tee .qwen/settings.json',
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+
+  it('tracks cwd before leading env assignments', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "cd .qwen && FOO=bar echo '{}' > settings.json",
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+
   it('recursively unwraps nested shell wrappers', () => {
     // The actual write is nested two wrapper levels deep.
     expect(
@@ -526,6 +559,17 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  it('does not treat quoted heredoc-looking text as a heredoc marker', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        ["echo '<<EOF'", 'cd .qwen', "echo '{}' > settings.json"].join('\n'),
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+
   it('handles `cd --` and other POSIX flag forms before the target', () => {
     expect(
       extractShellOperationsAcrossCommand(
@@ -551,6 +595,17 @@ describe('extractShellOperationsAcrossCommand', () => {
         virtualTool: 'write_file',
         filePath: '/repo/-some-dir/settings.local.json',
       },
+    ]);
+  });
+
+  it('ignores redirects attached to cd when resolving static cwd', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        "cd .qwen >/dev/null && echo '{}' > settings.json",
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
     ]);
   });
 

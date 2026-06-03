@@ -33,7 +33,6 @@
 
 import nodePath from 'node:path';
 import os from 'node:os';
-import { parse } from 'shell-quote';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { splitCompoundCommand } from './rule-parser.js';
@@ -183,6 +182,10 @@ function resolvePath(p: string, cwd: string): string {
 
 function isShellAbsolutePath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:\//.test(p.replace(/\\/g, '/'));
+}
+
+function isEnvAssignmentToken(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
 }
 
 /**
@@ -1656,9 +1659,13 @@ export function extractShellOperations(
   const { readFiles: redirectReads, writeFiles: redirectWrites } =
     extractRedirects(tokens, cwd);
 
+  while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
+    tokens.shift();
+  }
+
   const cmdName = tokens[0];
   if (!cmdName) {
-    // Only redirections were present (e.g. `> file` or `< file`)
+    // Only assignments and/or redirections were present.
     return [
       ...redirectReads.map((p) => ({
         virtualTool: 'read_file' as const,
@@ -1670,9 +1677,6 @@ export function extractShellOperations(
       })),
     ];
   }
-
-  // Skip pure environment variable assignments: `FOO=bar`, `FOO=bar BAR=baz`
-  if (cmdName.includes('=')) return [];
 
   const ops: ShellOperation[] = [];
 
@@ -1696,7 +1700,7 @@ export function extractShellOperations(
         ) {
           startIdx++;
         }
-      } else if (t.includes('=')) {
+      } else if (isEnvAssignmentToken(t)) {
         // Environment variable assignment: skip
         startIdx++;
       } else {
@@ -1780,23 +1784,8 @@ function resolveCdTargetCwd(
   cwd: string,
   cwdUnknown: boolean,
 ): CdResolution {
-  const words: string[] = [];
-  try {
-    for (const part of parse(command)) {
-      // `parse` returns string for literal words, objects for
-      // operators/substitutions/expansions — bail on anything we can't
-      // statically resolve.
-      if (typeof part !== 'string') {
-        return words[0] === 'cd' || words[0] === 'pushd' || words[0] === 'popd'
-          ? { kind: 'dynamic' }
-          : { kind: 'not-cd' };
-      }
-      if (part === '{' || part === '}') continue;
-      words.push(trimShellSyntax(part));
-    }
-  } catch {
-    return { kind: 'not-cd' };
-  }
+  const words = tokenize(command);
+  extractRedirects(words, cwd);
 
   if (words[0] === 'popd') return { kind: 'dynamic' };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
@@ -1929,10 +1918,60 @@ function stripHeredocBodies(command: string): string {
 
 function getHeredocDelimiters(line: string): string[] {
   const delimiters: string[] = [];
-  const re = /(?:^|[^<])<<-?(?!<)\s*(["']?)([A-Za-z0-9_./-]+)\1/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(line)) !== null) {
-    delimiters.push(match[2]!);
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!;
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble || ch !== '<' || line[i + 1] !== '<') {
+      continue;
+    }
+    if (line[i + 2] === '<') {
+      i += 2;
+      continue;
+    }
+
+    let wordStart = i + 2;
+    if (line[wordStart] === '-') wordStart++;
+    while (line[wordStart] === ' ' || line[wordStart] === '\t') {
+      wordStart++;
+    }
+
+    const quote = line[wordStart];
+    const quoted = quote === "'" || quote === '"';
+    if (quoted) wordStart++;
+
+    let wordEnd = wordStart;
+    while (wordEnd < line.length) {
+      const wordCh = line[wordEnd]!;
+      if (quoted ? wordCh === quote : !/[A-Za-z0-9_./-]/.test(wordCh)) {
+        break;
+      }
+      wordEnd++;
+    }
+
+    if (wordEnd > wordStart) {
+      delimiters.push(line.slice(wordStart, wordEnd));
+    }
+    i = wordEnd;
   }
   return delimiters;
 }
