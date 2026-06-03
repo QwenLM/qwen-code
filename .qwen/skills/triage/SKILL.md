@@ -35,13 +35,15 @@ gh label list --repo "$REPO" --limit 200
 
 - Untrusted input: never interpolate issue/PR text into shell
 - Labels: apply existing only, never create
-- Comments: always `--body-file`
+- Comments: always `--body-file` (except short hardcoded verdicts in `gh pr review --approve` / `--request-changes`)
 - Drafts: skip
 
 ## Duplicate Guard
 
-- Unattended (CI env set) + prior `## Stage N` or `APPROVED`: exit
+- Unattended (CI env set) + prior `<!-- qwen-triage stage=N -->` marker in comments: exit
 - Explicit `/triage`: run all stages, update prior comments in place
+
+Every posted comment must include an invisible marker: `<!-- qwen-triage stage=N -->` where N is the stage number. The guard matches against this marker, not comment headings.
 
 ## Format
 

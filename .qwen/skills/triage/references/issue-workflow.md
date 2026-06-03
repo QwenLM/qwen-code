@@ -7,6 +7,8 @@ comment; Stage 2 appends results to the same comment via `gh api PATCH`.
 Key points only — no verbose prose.
 
 ```markdown
+<!-- qwen-triage stage=1 -->
+
 ## Triage
 
 - **Type**: bug | feature | docs | unclear | inadmissible
@@ -50,7 +52,7 @@ below). This comment is updated in place by Stage 2; never post a second one.
 If inadmissible, close the issue and stop:
 
 ```bash
-gh issue close "$ISSUE_NUMBER" --repo "$REPO"
+gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason "not planned"
 ```
 
 Save the comment ID for Stage 2 to update.
@@ -69,6 +71,7 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 1. Add `status/need-information`.
 2. Ask for specific missing data: `/about` output, exact commands, expected vs
    actual behavior, logs, screenshots.
+3. Stop — no further analysis is useful until the reporter responds.
 
 ### For docs / usage issues:
 
@@ -77,7 +80,12 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 
    ```bash
    SAFE_KEYWORDS=$(printf '%s' "$TITLE" | tr -cd '[:alnum:] _-' | cut -c1-60)
-   gh issue list --repo "$REPO" --state all --search "$SAFE_KEYWORDS"
+   if [ -n "$SAFE_KEYWORDS" ]; then
+     gh issue list --repo "$REPO" --state all --search "$SAFE_KEYWORDS"
+   else
+     echo "No Latin keywords (CJK-only title); falling back to label search"
+     gh issue list --repo "$REPO" --label "type/bug"
+   fi
    ```
 
 3. Append the answer with links.
@@ -85,7 +93,21 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 ### For bugs with clear reproduction:
 
 1. Check safety — no untrusted code with write tokens or secrets.
-2. Use `tmux-real-user-testing` skill if available; otherwise tmux manually (runs in main working tree, not worktree).
+2. Use `tmux-real-user-testing` skill if available; otherwise tmux manually (runs in main working tree, not worktree):
+
+   ```bash
+   S=triage-test-$(date +%H%M%S); mkdir -p "tmp/$S"
+   tmux new-session -d -s "$S" -x 200 -y 50 -c "$(pwd)"
+   SAFE_SCENARIO=$(printf '%s' "$SCENARIO" | tr -cd '[:alnum:] _-.,' | cut -c1-200)
+   tmux send-keys -t "$S" "qwen -p '$SAFE_SCENARIO' 2>&1 | tee tmp/$S/before.log" Enter
+   for i in $(seq 1 120); do tmux capture-pane -t "$S" -p | tail -1 | grep -qE '\$|#' && break; sleep 1; done
+   tmux capture-pane -t "$S" -p -S -5000 > "tmp/$S/before-session.txt"
+   tmux send-keys -t "$S" "npm run dev -- -p '$SAFE_SCENARIO' 2>&1 | tee tmp/$S/after.log" Enter
+   for i in $(seq 1 120); do tmux capture-pane -t "$S" -p | tail -1 | grep -qE '\$|#' && break; sleep 1; done
+   tmux capture-pane -t "$S" -p -S -5000 > "tmp/$S/after-session.txt"
+   tmux kill-session -t "$S"
+   ```
+
 3. Inspect source for root cause and likely fix (read files inside worktree).
 4. Append: reproduced (yes/no), affected area, fix direction.
 

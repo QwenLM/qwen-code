@@ -6,7 +6,11 @@ Shared rules (untrusted input, skip, bilingual format) are in `SKILL.md`.
 
 ### Comment Management
 
-Three comments, one per stage. Save each comment's ID for re-runs:
+Three comments, one per stage. Post each with `gh pr comment` and capture its ID:
+
+```bash
+COMMENT_ID=$(gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/stage-N.md --json id --jq '.id')
+```
 
 | Stage   | Comment                                       |
 | ------- | --------------------------------------------- |
@@ -14,7 +18,13 @@ Three comments, one per stage. Save each comment's ID for re-runs:
 | Stage 2 | Code review + test results (with screenshots) |
 | Stage 3 | Reflection + verdict                          |
 
-**Re-runs:** if the triage runs again on the same PR, update each comment in place (`gh api -X PATCH`) — never create duplicates.
+**Re-runs:** if the triage runs again on the same PR, update each comment in place:
+
+```bash
+gh api -X PATCH "/repos/$REPO/issues/comments/$COMMENT_ID" -f body=@/tmp/stage-N-updated.md
+```
+
+Never create duplicates.
 
 **Signature:** every comment ends with:
 
@@ -55,7 +65,7 @@ curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.
 
 **Escalate to maintainer** (never auto-reject): touches auth/sandbox/model selection/telemetry/release/public contract, or direction is genuinely unclear.
 
-**1c. Solution review** (never skip — judge from the PR description alone, before reading code):
+**1c. Solution review** (never skip — judge from the PR description and a skim of the diff structure, before reading code in detail):
 
 - If we cut 80% of the scope, would the remaining 20% already solve the problem?
 - Could we achieve the same goal by modifying something that already exists, instead of adding something new?
@@ -68,6 +78,8 @@ Implementation-level concerns (over-abstraction, code duplication, "10 lines vs 
 Post a single Stage 1 comment. Be direct — say what you actually think, not what's polite:
 
 ```markdown
+<!-- qwen-triage stage=1 -->
+
 Thanks for the PR!
 
 Template looks good ✓
@@ -148,11 +160,15 @@ Drive the real product in tmux, using the `tmux-real-user-testing` skill. Captur
 ```bash
 S=triage-test-$(date +%H%M%S); mkdir -p "tmp/$S"
 tmux new-session -d -s "$S" -x 200 -y 50 -c "$(pwd)"
+# sanitize scenario — derived from PR text, must not reach shell unsanitized
+SAFE_SCENARIO=$(printf '%s' "$SCENARIO" | tr -cd '[:alnum:] _-.,' | cut -c1-200)
 # before — installed qwen (bug reproduces)
-tmux send-keys -t "$S" "qwen -p '<scenario>' 2>&1 | tee tmp/$S/before.log" Enter
+tmux send-keys -t "$S" "qwen -p '$SAFE_SCENARIO' 2>&1 | tee tmp/$S/before.log" Enter
+for i in $(seq 1 120); do tmux capture-pane -t "$S" -p | tail -1 | grep -qE '\$|#' && break; sleep 1; done
 tmux capture-pane -t "$S" -p -S -5000 > "tmp/$S/before-session.txt"
 # after — this PR via dev build (bug fixed)
-tmux send-keys -t "$S" "npm run dev -- -p '<scenario>' 2>&1 | tee tmp/$S/after.log" Enter
+tmux send-keys -t "$S" "npm run dev -- -p '$SAFE_SCENARIO' 2>&1 | tee tmp/$S/after.log" Enter
+for i in $(seq 1 120); do tmux capture-pane -t "$S" -p | tail -1 | grep -qE '\$|#' && break; sleep 1; done
 tmux capture-pane -t "$S" -p -S -5000 > "tmp/$S/after-session.txt"
 tmux kill-session -t "$S"
 ```
@@ -162,7 +178,7 @@ tmux kill-session -t "$S"
 - Cannot run after exhausting workarounds → FAIL, not skip.
 - Fork code: sandbox (strip write tokens/secrets).
 
-Post a single Stage 2 comment: code review findings + testing result. **Inline the tmux screenshots** (before/after) directly in the comment — that's what makes the review self-contained and decision-ready. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
+Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top): code review findings + testing result. **Inline the tmux screenshots** (before/after) directly in the comment — that's what makes the review self-contained and decision-ready. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
 
 ### Stage 3: Reflect
 
@@ -179,7 +195,7 @@ Step back and look at the whole picture — the motivation, the implementation, 
 
 If your independent proposal was materially simpler — say so. Not as a blocker, but as an honest question the contributor should think about.
 
-**Step 1: Post the reflection comment.** Write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
+**Step 1: Post the reflection comment** (must include `<!-- qwen-triage stage=3 -->` at the top). Write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
 
 **Step 2: Act on the verdict.**
 
