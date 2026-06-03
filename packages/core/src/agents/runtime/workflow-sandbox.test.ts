@@ -57,27 +57,26 @@ describe('createWorkflowSandbox', () => {
   it('exposes args verbatim', async () => {
     const sandbox = createWorkflowSandbox({
       args: { question: 'why?' },
-      startTime: 1000,
       dispatch: async () => 'ignored',
     });
     const result = await sandbox.run(`return args.question`);
     expect(result).toBe('why?');
   });
 
-  it('Date.now() returns startTime fixed value', async () => {
+  // FIX-C6 (UP-2-I1): Date.now() throws (matches binary's static-reject
+  // intent + matches Math.random treatment). Previously it returned a
+  // sentinel which let scripts compute wrong durations silently.
+  it('Date.now() throws inside sandbox', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 42,
       dispatch: async () => 'ignored',
     });
-    const result = await sandbox.run(`return Date.now()`);
-    expect(result).toBe(42);
+    await expect(sandbox.run(`return Date.now()`)).rejects.toThrow(/Date\.now/);
   });
 
   it('Math.random() throws inside sandbox', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 1,
       dispatch: async () => 'ignored',
     });
     await expect(sandbox.run(`return Math.random()`)).rejects.toThrow(
@@ -88,7 +87,6 @@ describe('createWorkflowSandbox', () => {
   it('return statement at top level captures the script result', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 1,
       dispatch: async () => 'ignored',
     });
     const result = await sandbox.run(`return 1 + 2`);
@@ -103,7 +101,6 @@ describe('createWorkflowSandbox security', () => {
   it('blocks args.constructor.constructor realm escape', async () => {
     const sandbox = createWorkflowSandbox({
       args: { x: 1 },
-      startTime: 0,
       dispatch: async () => 'ignored',
     });
     await expect(
@@ -123,7 +120,6 @@ describe('createWorkflowSandbox security', () => {
   it('hardens phase global against constructor escape', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 0,
       dispatch: async () => 'ignored',
     });
     const result = await sandbox.run(`return phase.constructor`);
@@ -134,7 +130,6 @@ describe('createWorkflowSandbox security', () => {
   it('synchronous infinite loop is aborted by vm timeout', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 0,
       dispatch: async () => 'ignored',
     });
     await expect(sandbox.run(`while(true){}`)).rejects.toThrow(
@@ -146,7 +141,6 @@ describe('createWorkflowSandbox security', () => {
   it('agent() rejects unsupported schema opt with a clear error', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 0,
       dispatch: async () => 'ignored',
     });
     await expect(
@@ -160,7 +154,6 @@ describe('createWorkflowSandbox security', () => {
   it('agent() honors opts.phase by appending to phases', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 0,
       dispatch: async (_p, opts) => `done:${opts.phase ?? 'no-phase'}`,
     });
     const result = await sandbox.run(`
@@ -174,7 +167,6 @@ describe('createWorkflowSandbox security', () => {
   it('log() caps at MAX_LOG_LINES with a truncation marker', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 0,
       dispatch: async () => 'ignored',
     });
     await sandbox.run(`for (let i = 0; i < 10100; i++) log(i); return 0;`);
@@ -182,13 +174,107 @@ describe('createWorkflowSandbox security', () => {
     expect(logs.length).toBe(10_001); // 10_000 entries + 1 truncation marker
     expect(logs[10_000]).toMatch(/truncated/);
   });
+
+  // FIX-C5 (SEC-2-I1): same cap pattern for phases array — protects host
+  // from `for(let i=0;i<1e6;i++) phase("p"+i)` style memory bombs.
+  it('phase() caps at MAX_PHASE_ENTRIES with a truncation marker', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await sandbox.run(
+      `for (let i = 0; i < 10100; i++) phase("p"+i); return 0;`,
+    );
+    const phases = sandbox.getPhases();
+    expect(phases.length).toBe(10_001);
+    expect(phases[10_000]).toMatch(/truncated/);
+  });
+
+  // FIX-C1 (SEC-2-C1): Round 2 PoC — `Math.constructor.constructor("return process")()`
+  // reaches host realm because Math is the host realm's Math object. The Proxy
+  // `get` trap on `constructor` blocks the chain.
+  it('blocks Math.constructor realm escape', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`
+      const ctor = Math.constructor;
+      return ctor === undefined ? 'blocked' : 'leaked:' + typeof ctor;
+    `);
+    expect(result).toBe('blocked');
+  });
+
+  // FIX-C1 (Round 1 Minor): defense in depth — getOwnPropertyDescriptor
+  // would otherwise bypass the Math Proxy's get trap on `random`.
+  it('blocks Object.getOwnPropertyDescriptor on Math.random', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`
+      return Object.getOwnPropertyDescriptor(Math, 'random');
+    `);
+    expect(result).toBeUndefined();
+  });
+
+  // FIX-C7 (TST-2-I1): each of the four unsupported-opts throw branches must
+  // have its own test. A refactor that deletes any branch passes the others.
+  it('agent() rejects isolation opt with clear error', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("hi", { isolation: "worktree" });`),
+    ).rejects.toThrow(/isolation.*not supported in P1/);
+  });
+
+  it('agent() rejects model opt with clear error', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("hi", { model: "gpt-4" });`),
+    ).rejects.toThrow(/model.*not supported in P1/);
+  });
+
+  it('agent() rejects agentType opt with clear error', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("hi", { agentType: "Explore" });`),
+    ).rejects.toThrow(/agentType.*not supported in P1/);
+  });
+
+  // FIX-C7 (TST-2-I3): the dedup branch in agent({phase}) — consecutive
+  // identical opts.phase values must not produce duplicate entries.
+  it('agent() opts.phase dedups consecutive identical entries', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'done',
+    });
+    await sandbox.run(`
+      await agent("a", { phase: "Search" });
+      await agent("b", { phase: "Search" });
+      await agent("c", { phase: "Verify" });
+      await agent("d", { phase: "Verify" });
+      await agent("e", { phase: "Search" });
+      return 0;
+    `);
+    // The implementation only dedups against the most recent entry, so a
+    // phase repeating after a different one is appended again.
+    expect(sandbox.getPhases()).toEqual(['Search', 'Verify', 'Search']);
+  });
 });
 
 describe('createWorkflowSandbox primitives', () => {
   it('phase() pushes titles in script order', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 1,
       dispatch: async () => 'ignored',
     });
     await sandbox.run(`phase("plan"); phase("build"); return 0`);
@@ -198,7 +284,6 @@ describe('createWorkflowSandbox primitives', () => {
   it('log() accumulates string and non-string arguments', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 1,
       dispatch: async () => 'ignored',
     });
     await sandbox.run(`log("hi"); log(42); return 0`);
@@ -209,7 +294,6 @@ describe('createWorkflowSandbox primitives', () => {
     const seen: Array<{ prompt: string; label?: string }> = [];
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 1,
       dispatch: async (prompt, opts) => {
         seen.push({ prompt, label: opts.label });
         return `echo: ${prompt}`;
@@ -228,7 +312,6 @@ describe('createWorkflowSandbox primitives', () => {
     let counter = 0;
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 1,
       dispatch: async () => {
         const myOrder = ++counter;
         await new Promise((r) => setTimeout(r, 5));
@@ -248,7 +331,6 @@ describe('createWorkflowSandbox primitives', () => {
   it('full P1 acceptance script: phase + agent returns expected value', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
-      startTime: 1,
       dispatch: async (prompt) => `agent-response:${prompt}`,
     });
     const result = await sandbox.run(`

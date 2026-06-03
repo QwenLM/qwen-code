@@ -1,11 +1,26 @@
-import { describe, it, expect, vi as vitest } from 'vitest';
+import { describe, it, expect, beforeEach, vi as vitest } from 'vitest';
 import {
   WorkflowOrchestrator,
   createProductionDispatch,
 } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
 
-const created: Array<{ name: string; prompt: string }> = [];
+// FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
+// vi.mock factory runs AND remains accessible inside tests for assertion +
+// reset between cases. Without this, the module-level `created` array
+// accumulated across tests, so a later test could pass by coincidence.
+//
+// FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
+// and the (ctx, signal?) shape of execute so any drift between the production
+// call site and the real AgentHeadless surface becomes a test failure.
+const { created } = vitest.hoisted(() => ({
+  created: [] as Array<{
+    name: string;
+    prompt: string;
+    signal?: AbortSignal;
+    promptConfigSystemPrompt?: string;
+  }>,
+}));
 
 vitest.mock('./agent-headless.js', () => ({
   AgentHeadless: {
@@ -16,9 +31,24 @@ vitest.mock('./agent-headless.js', () => ({
       _modelConfig: unknown,
       _runConfig: unknown,
       _toolConfig?: unknown,
+      // The next three optional params reflect the real AgentHeadless.create
+      // signature (eventEmitter?, hooks?, runtimeView?). Accepting them as
+      // `unknown` lets the mock detect if the production call site ever adds
+      // a positional argument that the mock would silently drop.
+      _eventEmitter?: unknown,
+      _hooks?: unknown,
+      _runtimeView?: unknown,
     ) => ({
-      execute: async (ctx: { get: (k: string) => unknown }) => {
-        created.push({ name, prompt: ctx.get('task_prompt') as string });
+      execute: async (
+        ctx: { get: (k: string) => unknown },
+        signal?: AbortSignal,
+      ) => {
+        created.push({
+          name,
+          prompt: ctx.get('task_prompt') as string,
+          signal,
+          promptConfigSystemPrompt: promptConfig.systemPrompt,
+        });
         if (
           !promptConfig.systemPrompt?.includes('subagent spawned by a workflow')
         ) {
@@ -40,7 +70,6 @@ vitest.mock('./agent-headless.js', () => ({
       this.state[key] = value;
     }
   },
-  __getCreated: () => created,
 }));
 
 function fakeConfig(): Config {
@@ -127,16 +156,49 @@ describe('WorkflowOrchestrator', () => {
 });
 
 describe('createProductionDispatch', () => {
+  // FIX-C3: reset the shared mock-state array between tests so each case
+  // observes its own subagent.execute call only.
+  beforeEach(() => {
+    created.length = 0;
+  });
+
   it('routes calls through AgentHeadless and returns getFinalText', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     const result = await dispatch('hello', { label: 'h1' });
     expect(result).toBe('headless-said:hello');
+    expect(created.length).toBe(1);
+    expect(created[0]!.name).toBe('h1');
+    expect(created[0]!.prompt).toBe('hello');
   });
 
-  it('threads abort signal through to subagent.execute (no crash)', async () => {
-    const signal = new AbortController().signal;
-    const dispatch = createProductionDispatch(fakeConfig(), signal);
-    const result = await dispatch('hello', { label: 'h1' });
-    expect(result).toBe('headless-said:hello');
+  // FIX-C4 (TST-2-C2): the previous test only asserted no-crash. This one
+  // actually captures the signal in the mock and asserts identity, so a
+  // regression that drops the second arg of subagent.execute() would fail.
+  it('threads abort signal through to subagent.execute', async () => {
+    const controller = new AbortController();
+    const dispatch = createProductionDispatch(fakeConfig(), controller.signal);
+    await dispatch('hello', { label: 'h1' });
+    expect(created.length).toBe(1);
+    expect(created[0]!.signal).toBe(controller.signal);
+  });
+
+  it('passes undefined signal when none provided', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await dispatch('hello', { label: 'h1' });
+    expect(created.length).toBe(1);
+    expect(created[0]!.signal).toBeUndefined();
+  });
+
+  // FIX-C2 (UP-2-C1): the subagent system prompt must include the binary's
+  // §XmO bullets. We assert the JSON-format instruction is present because
+  // its absence causes JSON-returning subagents to wrap output in code fences.
+  it('passes the binary §XmO verbatim system prompt to subagent', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await dispatch('hello', { label: 'h1' });
+    const sp = created[0]!.promptConfigSystemPrompt ?? '';
+    expect(sp).toContain('subagent spawned by a workflow');
+    expect(sp).toContain('return ONLY the raw JSON');
+    expect(sp).toContain('no code fences');
+    expect(sp).toContain('SendUserMessage');
   });
 });

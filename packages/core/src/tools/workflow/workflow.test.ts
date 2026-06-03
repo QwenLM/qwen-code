@@ -86,4 +86,20 @@ describe('WorkflowTool', () => {
     // NOT a wrapper with {runId, result, phases, logs}.
     expect(JSON.parse(llmText)).toEqual({ kind: 'report', body: 'hello' });
   });
+
+  // FIX-C9 (TST-M2): scripts without an explicit `return` resolve to
+  // undefined. WorkflowTool surfaces a clear placeholder rather than the
+  // literal string "undefined".
+  it('execute() handles scripts that return undefined (no explicit return)', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async () => 'ignored',
+    });
+    const invocation = tool.build({
+      script: 'phase("noop"); /* no return */',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const llmText = (result.llmContent as Array<{ text: string }>)[0]!.text;
+    expect(llmText).toBe('(workflow returned no value)');
+  });
 });

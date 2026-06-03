@@ -46,6 +46,9 @@ import * as vm from 'node:vm';
 
 // FIX-9 (SEC-I2): cap the number of log lines to prevent unbounded memory use.
 const MAX_LOG_LINES = 10_000;
+// FIX-C5 (SEC-2-I1): cap phases entries similarly; large model-authored loops
+// could otherwise push millions of phase titles and OOM the host.
+const MAX_PHASE_ENTRIES = 10_000;
 
 /**
  * WorkflowAgentOpts — structured options for the `agent()` global.
@@ -74,21 +77,12 @@ export interface SandboxOptions {
   /** Value bound to the `args` global inside the script. */
   args: unknown;
   /**
-   * Fixed value returned by `Date.now()` inside the script. Workflow scripts
-   * must be deterministic for resume; live wall-clock is not exposed.
-   */
-  startTime: number;
-  /**
    * Function called by the script's `agent(prompt, opts)` global. Returns the
    * agent's final text. Injected so tests can mock without spawning an LLM.
    *
    * FIX-4 (UP-C1): opts type widened to WorkflowAgentOpts.
    */
   dispatch: (prompt: string, opts: WorkflowAgentOpts) => Promise<string>;
-  /**
-   * Optional abort signal. When aborted, in-flight script execution rejects.
-   */
-  signal?: AbortSignal;
 }
 
 export interface WorkflowSandbox {
@@ -160,6 +154,17 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     // Beyond MAX_LOG_LINES + 1, additional entries are silently dropped.
   };
 
+  // FIX-C5 (SEC-2-I1): same cap pattern for phases.
+  const safePhase = (title: string): void => {
+    if (phases.length < MAX_PHASE_ENTRIES) {
+      phases.push(String(title));
+    } else if (phases.length === MAX_PHASE_ENTRIES) {
+      phases.push(
+        `[workflow phases truncated at ${MAX_PHASE_ENTRIES} entries]`,
+      );
+    }
+  };
+
   // FIX-2 (SEC-C1): JSON-roundtrip args then strip all Object.prototype links
   // via deepNullProto. Two-step rationale:
   //
@@ -186,10 +191,25 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     // FIX-2 (SEC-C1): use JSON-roundtripped args instead of opts.args directly.
     args: safeArgs,
     Date: {
-      now: () => opts.startTime,
+      // FIX-C6 (UP-2-I1): Date.now() throws instead of returning a placeholder.
+      // Binary statically rejects scripts that use Date.now; silently returning
+      // 0 produced wrong results in scripts that do `Date.now() - start` style
+      // duration math. Throwing matches the Math.random treatment.
+      now: () => {
+        throw new Error(
+          'Date.now() is unavailable in workflow scripts (breaks resume). ' +
+            'Pass timestamps via args or stamp results after the workflow returns.',
+        );
+      },
     },
     Math: new Proxy(Math, {
       get(target, prop) {
+        // FIX-C1 (SEC-2-C1): block Math.constructor realm escape. PoC:
+        //   `Math.constructor.constructor("return process")()` reaches host
+        //   `process` because Math is the host realm's Math, and its
+        //   constructor chain points at host Function. Returning undefined
+        //   severs the chain.
+        if (prop === 'constructor') return undefined;
         if (prop === 'random') {
           return () => {
             throw new Error(
@@ -200,11 +220,18 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         }
         return Reflect.get(target, prop);
       },
+      // FIX-C1 (defense in depth): block `Object.getOwnPropertyDescriptor(Math, 'random').value()`
+      // which would otherwise bypass the get trap on `random`.
+      getOwnPropertyDescriptor(target, prop) {
+        if (prop === 'random' || prop === 'constructor') return undefined;
+        return Reflect.getOwnPropertyDescriptor(target, prop);
+      },
     }),
     // FIX-3 (SEC-C1): harden phase/log/agent closures so .constructor is
     // undefined — blocking the fn.constructor.constructor realm-escape PoC.
+    // FIX-C5: route phase through safePhase for the entries cap.
     phase: hardenClosure((title: string): void => {
-      phases.push(String(title));
+      safePhase(String(title));
     }),
     log: hardenClosure((message: unknown): void => {
       safeLog(message);
@@ -239,9 +266,10 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
           throw new Error('agent({agentType}) is not supported in P1.');
         }
         // opts.phase IS honored — push it to the phases array if not duplicate.
+        // FIX-C5: route through safePhase for the entries cap.
         if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
           if (phases[phases.length - 1] !== agentOpts.phase) {
-            phases.push(agentOpts.phase);
+            safePhase(agentOpts.phase);
           }
         }
         // opts.label is harmless to dispatch as-is.

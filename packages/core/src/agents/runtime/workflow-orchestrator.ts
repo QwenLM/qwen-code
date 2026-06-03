@@ -69,12 +69,14 @@ export class WorkflowOrchestrator {
   constructor(private readonly dispatch: WorkflowAgentDispatch) {}
 
   async run(req: WorkflowRunRequest): Promise<WorkflowRunOutcome> {
+    // FIX-C6 / Round 2 architecture C1: dropped `startTime` (Date.now throws
+    // instead of returning a sentinel) and `signal` from sandbox options
+    // (sandbox cannot honor signal in P1 — async-loop cancellation flows
+    // through dispatch's subagent.execute path, which already has signal).
     const runId = generateRunId();
     const sandbox = createWorkflowSandbox({
       args: req.args,
-      startTime: 0, // P1: fixed sentinel; resume work in P6 will use real run-start time.
       dispatch: this.dispatch,
-      signal: req.signal,
     });
     const result = await sandbox.run(req.script);
     return {
