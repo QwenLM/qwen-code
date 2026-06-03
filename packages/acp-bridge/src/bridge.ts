@@ -593,6 +593,8 @@ function hasControlCharacter(value: string): boolean {
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const PERSIST_TIMEOUT_MS = 5_000;
+const MCP_RESTART_TIMEOUT_MS = 300_000;
+const MCP_OAUTH_TIMEOUT_MS = 600_000;
 /**
  * Backstop timeout for `qwen/control/session/recap`. The underlying
  * side-query is single-attempt with `maxOutputTokens: 300`, so a
@@ -3477,6 +3479,67 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } finally {
         signal?.removeEventListener('abort', onSignalAbort);
       }
+    },
+
+    async manageMcpServer(serverName, action, originatorClientId) {
+      const info = liveChannelInfo();
+      if (!info) {
+        throw new SessionNotFoundError(`mcp:${serverName}`);
+      }
+      const timeout =
+        action === 'authenticate'
+          ? MCP_OAUTH_TIMEOUT_MS
+          : MCP_RESTART_TIMEOUT_MS;
+      const response = (await Promise.race([
+        withTimeout(
+          info.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+            { serverName, action, originatorClientId },
+          ),
+          timeout,
+          SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+        ),
+        getChannelClosedReject(info),
+      ])) as {
+        serverName: string;
+        action: 'enable' | 'disable' | 'authenticate' | 'clear-auth';
+        ok: true;
+        changed?: boolean;
+        messages?: string[];
+        authUrl?: string;
+      };
+      broadcastWorkspaceEvent({
+        type: 'mcp_server_changed',
+        data: {
+          serverName: response.serverName,
+          action: response.action,
+          originatorClientId,
+        },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+      return response;
+    },
+
+    async generateWorkspaceAgent(description, _originatorClientId) {
+      const info = liveChannelInfo();
+      if (!info) {
+        throw new SessionNotFoundError('agents:generate');
+      }
+      return (await Promise.race([
+        withTimeout(
+          info.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceAgentGenerate,
+            { description },
+          ),
+          MCP_RESTART_TIMEOUT_MS,
+          SERVE_CONTROL_EXT_METHODS.workspaceAgentGenerate,
+        ),
+        getChannelClosedReject(info),
+      ])) as {
+        name: string;
+        description: string;
+        systemPrompt: string;
+      };
     },
 
     async addRuntimeMcpServer(name, config, originatorClientId) {

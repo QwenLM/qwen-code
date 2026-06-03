@@ -455,6 +455,28 @@ export interface AcpSessionBridge {
     | { name: string; skipped: true; reason: 'not_present' }
   >;
 
+  manageMcpServer(
+    serverName: string,
+    action: 'enable' | 'disable' | 'authenticate' | 'clear-auth',
+    originatorClientId: string | undefined,
+  ): Promise<{
+    serverName: string;
+    action: 'enable' | 'disable' | 'authenticate' | 'clear-auth';
+    ok: true;
+    changed?: boolean;
+    messages?: string[];
+    authUrl?: string;
+  }>;
+
+  generateWorkspaceAgent(
+    description: string,
+    originatorClientId: string | undefined,
+  ): Promise<{
+    name: string;
+    description: string;
+    systemPrompt: string;
+  }>;
+
   /**
    * Tear down a session — kill the child, drop from maps, publish
    * `session_died`. Idempotent on already-dead sessions.
