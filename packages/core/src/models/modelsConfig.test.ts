@@ -154,7 +154,7 @@ describe('ModelsConfig', () => {
     expect(modelsConfig.getGenerationConfigSources()).toEqual(baselineSources);
   });
 
-  it('should require provider-sourced apiKey when switching models even if envKey is missing', async () => {
+  it('should preserve an existing apiKey when switching between models with the same provider credentials', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
         {
@@ -187,8 +187,47 @@ describe('ModelsConfig', () => {
 
     const gc = currentGenerationConfig(modelsConfig);
     expect(gc.model).toBe('model-b');
-    expect(gc.apiKey).toBeUndefined();
+    expect(gc.apiKey).toBe('manual-key');
     expect(gc.apiKeyEnvKey).toBe('API_KEY_SHARED');
+    expect(modelsConfig.getGenerationConfigSources()['apiKey']?.kind).toBe(
+      'programmatic',
+    );
+  });
+
+  it('should not reuse an apiKey when switching to a model with different provider credentials', async () => {
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'model-a',
+          name: 'Model A',
+          baseUrl: 'https://api-a.example.com/v1',
+          envKey: 'API_KEY_A',
+        },
+        {
+          id: 'model-b',
+          name: 'Model B',
+          baseUrl: 'https://api-b.example.com/v1',
+          envKey: 'API_KEY_B',
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'model-a',
+      },
+    });
+
+    modelsConfig.updateCredentials({ apiKey: 'manual-key', model: 'model-a' });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'model-b');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    expect(gc.model).toBe('model-b');
+    expect(gc.apiKey).toBeUndefined();
+    expect(gc.apiKeyEnvKey).toBe('API_KEY_B');
   });
 
   it('should use provider config when modelId exists in registry even after updateCredentials', () => {

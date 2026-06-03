@@ -289,6 +289,7 @@ export * from './followup/index.js';
 // Utilities
 // ============================================================================
 
+export * from './utils/atomicFileWrite.js';
 export * from './utils/browser.js';
 export * from './utils/bundlePaths.js';
 export * from './utils/configResolver.js';

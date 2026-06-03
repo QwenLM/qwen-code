@@ -596,8 +596,8 @@ describe('getPlanModeSystemReminder', () => {
   it('should include workflow instructions', () => {
     const result = getPlanModeSystemReminder();
 
-    expect(result).toContain("1. Answer the user's query comprehensively");
-    expect(result).toContain("2. When you're done researching");
+    expect(result).toContain('Iterative Planning Workflow');
+    expect(result).toContain('### The Loop');
     expect(result).toContain('exit_plan_mode tool');
   });
 

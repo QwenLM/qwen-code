@@ -1,7 +1,25 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
+import type { Config } from '../../config/config.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
+
+/**
+ * Fork subagent feature gate.
+ *
+ * Fork requires two conditions:
+ * 1. Explicit opt-in via QWEN_CODE_ENABLE_FORK_SUBAGENT=1 env var
+ *    or programmatic `forkSubagentEnabled: true` (defaults to off).
+ * 2. An interactive session — non-interactive sessions (e.g. `qwen -p`,
+ *    SDK headless, CI/CD) lack a terminal UI for fork progress display
+ *    and permission bubble-up, which can cause hangs or silent failures.
+ *
+ * When fork is disabled, omitting `subagent_type` falls back to a
+ * general-purpose subagent instead of forking.
+ */
+export function isForkSubagentEnabled(config: Config): boolean {
+  return config.isForkSubagentEnabled() && config.isInteractive();
+}
 
 export const FORK_BOILERPLATE_TAG = 'fork-boilerplate';
 export const FORK_DIRECTIVE_PREFIX = 'Directive: ';

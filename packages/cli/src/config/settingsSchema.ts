@@ -397,6 +397,19 @@ const SETTINGS_SCHEMA = {
           "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
         showInDialog: true,
       },
+      cleanupPeriodDays: {
+        type: 'number',
+        label: 'Cleanup Period (days)',
+        category: 'General',
+        // LoadedSettings._merged is cached without verified setValue→recompute
+        // paths in all UI flows. Mark restart-required so users aren't
+        // surprised when a mid-session edit doesn't take effect immediately.
+        requiresRestart: true,
+        default: 30,
+        description:
+          'Number of days to retain ~/.qwen/file-history/ session backups used by /rewind. Backups older than this are removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session. Other persistent caches will honor the same setting in the future.',
+        showInDialog: true,
+      },
       gitCoAuthor: {
         type: 'object',
         label: 'Attribution',
@@ -642,16 +655,19 @@ const SETTINGS_SCHEMA = {
                   type: 'command';
                   command: string;
                   refreshInterval?: number;
+                  respectUserColors?: boolean;
+                  hideContextIndicator?: boolean;
                 }
               | {
                   type: 'preset';
                   items: string[];
                   useThemeColors?: boolean;
+                  hideContextIndicator?: boolean;
                 }
             )
           | undefined,
         description:
-          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
+          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section.',
         showInDialog: false,
       },
       customThemes: {
@@ -839,6 +855,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+        showInDialog: true,
+      },
+      useTerminalBuffer: {
+        type: 'boolean',
+        label: 'Virtualized History (reduces flicker on long sessions)',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.',
         showInDialog: true,
       },
       shellOutputMaxLines: {
@@ -1765,7 +1791,7 @@ const SETTINGS_SCHEMA = {
         showInDialog: true,
         options: [
           { value: ApprovalMode.PLAN, label: 'Plan' },
-          { value: ApprovalMode.DEFAULT, label: 'Default' },
+          { value: ApprovalMode.DEFAULT, label: 'Ask permissions' },
           { value: ApprovalMode.AUTO_EDIT, label: 'Auto Edit' },
           { value: ApprovalMode.AUTO, label: 'Auto' },
           { value: ApprovalMode.YOLO, label: 'YOLO' },
@@ -2263,6 +2289,18 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: [],
         description: 'Hooks that execute when tool execution fails. ',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      PostToolBatch: {
+        type: 'array',
+        label: 'Post Tool Batch Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute once after all tool calls in a batch resolve.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,

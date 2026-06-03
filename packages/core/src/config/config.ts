@@ -119,6 +119,7 @@ import {
   type PermissionSuggestion,
   type HookEventName,
   type HookDefinition,
+  type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 
@@ -721,6 +722,7 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  forkSubagentEnabled?: boolean;
   computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
@@ -945,6 +947,12 @@ const DEFAULT_BARE_CORE_TOOLS = [
   ToolNames.SHELL,
 ];
 
+// Tracks whether the first Config in this process has claimed the global
+// QWEN_CODE_SESSION_ID env var. Prevents throwaway Config instances from
+// overwriting the real session's ID while still allowing nested qwen-code
+// processes to claim their own (they start with a fresh module scope).
+let sessionEnvClaimed = false;
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
@@ -1086,6 +1094,7 @@ export class Config {
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
+  private readonly forkSubagentEnabled: boolean = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -1149,6 +1158,16 @@ export class Config {
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
+    // Only set the global env marker once per process lifetime, so
+    // throwaway Config instances (e.g. telemetry-only) don't clobber
+    // the real interactive session's ID. Uses a module-level flag
+    // rather than checking env existence — otherwise a nested qwen-code
+    // launched from within a session would inherit the parent's ID and
+    // never claim its own.
+    if (!sessionEnvClaimed && process.env) {
+      process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
+      sessionEnvClaimed = true;
+    }
     this.sessionData = params.sessionData;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
@@ -1258,6 +1277,7 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
+    this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
@@ -1484,6 +1504,13 @@ export class Config {
                   (input['tool_input'] as Record<string, unknown>) || {},
                   (input['error'] as string) || '',
                   input['is_interrupt'] as boolean | undefined,
+                  (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
+                );
+                break;
+              case 'PostToolBatch':
+                result = await hookSystem.firePostToolBatchEvent(
+                  (input['tool_calls'] as PostToolBatchToolCall[]) || [],
                   (input['permission_mode'] as PermissionMode) || 'default',
                   signal,
                 );
@@ -2067,6 +2094,12 @@ export class Config {
 
     const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
+    // Unconditional: startNewSession is only called on the canonical Config
+    // instance (the one that already claimed via sessionEnvClaimed), so this
+    // correctly updates the env var to reflect the new active session.
+    if (process.env) {
+      process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
+    }
     this.sessionData = sessionData;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
@@ -3181,6 +3214,10 @@ export class Config {
     return this.cronEnabled;
   }
 
+  isForkSubagentEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
+    return this.forkSubagentEnabled;
+  }
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
   }

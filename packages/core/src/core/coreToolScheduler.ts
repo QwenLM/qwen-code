@@ -24,11 +24,13 @@ import {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  firePostToolBatchHook,
   fireNotificationHook,
   firePermissionRequestHook,
   appendAdditionalContext,
 } from './toolHookTriggers.js';
 import { NotificationType } from '../hooks/types.js';
+import type { PostToolBatchToolCall } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
@@ -76,7 +78,9 @@ import {
 } from '../permissions/autoMode.js';
 import { MAX_TRANSCRIPT_MESSAGES } from '../permissions/classifier-transcript.js';
 import {
+  formatDenialStateLog,
   isApproveOutcome,
+  isDenialFallbackReason,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
@@ -712,6 +716,168 @@ const createErrorResponse = (
   contentLength: error.message.length,
 });
 
+function serializeToolResponse(
+  response: ToolCallResponseInfo,
+): Record<string, unknown> {
+  // Keep this payload aligned with the persisted ToolCallResponseInfo fields
+  // hook authors need for batch-level auditing.
+  return {
+    response_parts: response.responseParts.map(summarizeBatchResponsePart),
+    result_display: response.resultDisplay,
+    error: response.error?.message,
+    error_type: response.errorType,
+    content_length: response.contentLength,
+  };
+}
+
+function summarizeBatchResponsePart(part: Part): Part {
+  const summarized = part.inlineData
+    ? {
+        ...part,
+        inlineData: {
+          mimeType: part.inlineData.mimeType,
+          data: '<binary omitted>',
+        },
+      }
+    : part;
+
+  if (!summarized.functionResponse?.parts) {
+    return summarized;
+  }
+
+  return {
+    ...summarized,
+    functionResponse: {
+      ...summarized.functionResponse,
+      parts: summarized.functionResponse.parts.map(summarizeBatchResponsePart),
+    },
+  };
+}
+
+function toPostToolBatchToolCall(
+  call: CompletedToolCall,
+): PostToolBatchToolCall {
+  return {
+    tool_name: call.request.name,
+    tool_input: call.request.args,
+    tool_use_id: call.request.callId,
+    status: call.status,
+    tool_response: serializeToolResponse(call.response),
+  };
+}
+
+function appendContextToResponsePart(
+  part: Part,
+  additionalContext: string,
+): Part {
+  if (!part.functionResponse) {
+    debugLogger.warn(
+      'appendContextToResponsePart: no functionResponse on part, additionalContext dropped',
+    );
+    return part;
+  }
+
+  const response = part.functionResponse.response ?? {};
+  const output = response['output'];
+  const error = response['error'];
+  const hasOutput = Object.prototype.hasOwnProperty.call(response, 'output');
+  const useOutputKey =
+    typeof output === 'string' || (hasOutput && typeof error !== 'string');
+  const key = useOutputKey ? 'output' : 'error';
+  const currentText = useOutputKey
+    ? typeof output === 'string'
+      ? output
+      : JSON.stringify(output)
+    : typeof error === 'string'
+      ? error
+      : JSON.stringify(response);
+
+  return {
+    ...part,
+    functionResponse: {
+      ...part.functionResponse,
+      response: {
+        ...response,
+        [key]: `${currentText}\n\n${additionalContext}`,
+      },
+    },
+  };
+}
+
+function appendContextToToolResponse(
+  response: ToolCallResponseInfo,
+  additionalContext: string | undefined,
+): ToolCallResponseInfo {
+  if (!additionalContext || response.responseParts.length === 0) {
+    return response;
+  }
+
+  const responseParts = [...response.responseParts];
+  const lastIndex = responseParts.length - 1;
+  const appendedPart = appendContextToResponsePart(
+    responseParts[lastIndex],
+    additionalContext,
+  );
+  if (appendedPart === responseParts[lastIndex]) {
+    return response;
+  }
+  responseParts[lastIndex] = appendedPart;
+
+  return {
+    ...response,
+    responseParts,
+    contentLength:
+      response.contentLength !== undefined
+        ? response.contentLength + additionalContext.length + 2
+        : undefined,
+  };
+}
+
+function withPostToolBatchAdditionalContext(
+  completedCalls: CompletedToolCall[],
+  additionalContext: string | undefined,
+): CompletedToolCall[] {
+  if (!additionalContext || completedCalls.length === 0) {
+    return completedCalls;
+  }
+
+  const calls = [...completedCalls];
+  const lastIndex = calls.length - 1;
+  calls[lastIndex] = {
+    ...calls[lastIndex],
+    response: appendContextToToolResponse(
+      calls[lastIndex].response,
+      additionalContext,
+    ),
+  } as CompletedToolCall;
+  return calls;
+}
+
+function withPostToolBatchStop(
+  completedCalls: CompletedToolCall[],
+  stopReason: string,
+): CompletedToolCall[] {
+  if (completedCalls.length === 0) {
+    return completedCalls;
+  }
+
+  const calls = [...completedCalls];
+  const lastCall = calls[calls.length - 1];
+  calls[calls.length - 1] = {
+    status: 'error',
+    request: lastCall.request,
+    tool: lastCall.tool,
+    response: createErrorResponse(
+      lastCall.request,
+      new Error(stopReason),
+      ToolErrorType.EXECUTION_DENIED,
+    ),
+    durationMs: lastCall.durationMs,
+    outcome: undefined,
+  } as ErroredToolCall;
+  return calls;
+}
+
 interface CoreToolSchedulerOptions {
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
@@ -803,6 +969,7 @@ export class CoreToolScheduler {
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private validationRetryCounts = new Map<string, number>();
+  private autoModeFallbackCallIds = new Set<string>();
   // Tool span lifecycle now spans validating → awaiting_approval → executing
   // → terminal, so we hold the span across method boundaries by callId.
   // Decoupling from ToolCall identity is intentional — setStatusInternal
@@ -825,6 +992,10 @@ export class CoreToolScheduler {
   // sessions reusing the same AbortSignal don't accumulate listeners
   // and trip Node's MaxListenersExceededWarning (#4321 review-3).
   private callIdToBatch = new Map<string, BatchAbortState>();
+  // Keep the scheduling signal until the all-calls-complete hook fires.
+  // callIdToBatch is drained earlier when spans end, so it cannot be used
+  // to recover the PostToolBatch AbortSignal reliably.
+  private callIdToPostToolBatchSignal = new Map<string, AbortSignal>();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
@@ -1031,7 +1202,13 @@ export class CoreToolScheduler {
       }
     });
     this.notifyToolCallsUpdate();
-    this.checkAndNotifyCompletion();
+    void this.checkAndNotifyCompletion().catch((error: unknown) => {
+      debugLogger.warn(
+        `setStatusInternal completion notification failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
   }
 
   private setArgsInternal(targetCallId: string, args: unknown): void {
@@ -1186,6 +1363,7 @@ export class CoreToolScheduler {
             setToolSpanCancelled(span);
             this.finalizeToolSpan(callId);
           }
+          this.callIdToPostToolBatchSignal.delete(callId);
         } catch (e) {
           debugLogger.warn(
             `drainSpansForBatch: failed to drain ${callId}: ${e instanceof Error ? e.message : String(e)}`,
@@ -1628,6 +1806,7 @@ export class CoreToolScheduler {
         this.toolSpans.set(reqInfo.callId, toolSpan);
         batchState.callIds.add(reqInfo.callId);
         this.callIdToBatch.set(reqInfo.callId, batchState);
+        this.callIdToPostToolBatchSignal.set(reqInfo.callId, signal);
 
         try {
           if (signal.aborted) {
@@ -1742,7 +1921,9 @@ export class CoreToolScheduler {
               messages,
               config: this.config,
               signal,
-              skipClassifier: fallback.fallback,
+              skipClassifierReason: fallback.fallback
+                ? fallback.reason
+                : undefined,
             });
 
             const outcome = applyAutoModeDecision(
@@ -1779,6 +1960,10 @@ export class CoreToolScheduler {
                 this.setStatusInternal(reqInfo.callId, 'scheduled');
                 continue;
               case 'blocked':
+                debugLogger.warn(
+                  `Auto mode blocked (${outcome.reason}): tool=${canonicalName}, ` +
+                    formatDenialStateLog(denialState),
+                );
                 this.setStatusInternal(
                   reqInfo.callId,
                   'error',
@@ -1795,9 +1980,11 @@ export class CoreToolScheduler {
                 // operators see the cause in the debug log (only when
                 // fallback was specifically armed by denialTracking —
                 // a pmForcedAsk fallback isn't an audit-worthy event).
-                if (fallback.fallback) {
+                if (isDenialFallbackReason(outcome.reason)) {
+                  this.autoModeFallbackCallIds.add(reqInfo.callId);
                   debugLogger.warn(
-                    `Auto mode fallback to manual approval (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                    `Auto mode fallback to manual approval (${outcome.reason}): ` +
+                      formatDenialStateLog(denialState),
                   );
                 }
                 break;
@@ -1933,6 +2120,10 @@ export class CoreToolScheduler {
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.ProceedOnce,
                   );
+                  this.recordAutoModeFallbackResolution(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.ProceedOnce,
+                  );
                   this.setToolCallOutcome(
                     reqInfo.callId,
                     ToolConfirmationOutcome.ProceedOnce,
@@ -1946,6 +2137,10 @@ export class CoreToolScheduler {
                   await confirmationDetails.onConfirm(
                     ToolConfirmationOutcome.Cancel,
                     cancelPayload,
+                  );
+                  this.recordAutoModeFallbackResolution(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.Cancel,
                   );
                   this.setToolCallOutcome(
                     reqInfo.callId,
@@ -2119,7 +2314,13 @@ export class CoreToolScheduler {
         }
       }
       await this.attemptExecutionOfScheduledCalls(signal);
-      void this.checkAndNotifyCompletion();
+      void this.checkAndNotifyCompletion().catch((error: unknown) => {
+        debugLogger.warn(
+          `_schedule completion notification failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
       // Listener removal happens inside `finalizeToolSpan` →
       // `releaseBatchListenerIfDrained` for every callId, so we don't
       // need a duplicate cleanup here. That path also covers the
@@ -2257,22 +2458,7 @@ export class CoreToolScheduler {
 
     this.setToolCallOutcome(callId, outcome);
 
-    // AUTO-mode denialTracking recovery: when the user manually approves a
-    // call that fell back from AUTO (either by streak threshold or by an
-    // explicit ask rule), reset the consecutiveBlock counter so subsequent
-    // calls return to classifier flow. Without this, a session that hit
-    // the denial threshold once would stay in fallback for the rest of
-    // the session even after the user explicitly approves the next call.
-    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
-    // signal that the classifier was correct to block.
-    if (
-      this.config.getApprovalMode() === ApprovalMode.AUTO &&
-      isApproveOutcome(outcome)
-    ) {
-      this.config.setAutoModeDenialState(
-        recordFallbackApprove(this.config.getAutoModeDenialState()),
-      );
-    }
+    this.recordAutoModeFallbackResolution(callId, outcome);
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
       // Use custom cancel message from payload if provided, otherwise use default
@@ -2388,6 +2574,40 @@ export class CoreToolScheduler {
     // (handleConfirmationResponse, outside its catch) so a sister
     // tool's prelude throw can't be mis-attributed to this callId
     // (#4321 review-9 wenshao Critical).
+  }
+
+  private recordAutoModeFallbackResolution(
+    callId: string,
+    outcome: ToolConfirmationOutcome,
+  ): void {
+    const wasAutoModeFallback = this.autoModeFallbackCallIds.delete(callId);
+
+    // AUTO-mode denialTracking recovery: when the user manually approves a
+    // call that fell back because denialTracking was armed, clear the armed
+    // counters so subsequent calls return to classifier flow. Ordinary AUTO
+    // approvals for ask rules must not clear cumulative denial totals.
+    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
+    // signal that the classifier was correct to block.
+    if (
+      this.config.getApprovalMode() === ApprovalMode.AUTO &&
+      wasAutoModeFallback &&
+      isApproveOutcome(outcome)
+    ) {
+      const before = this.config.getAutoModeDenialState();
+      const after = recordFallbackApprove(before);
+      if (after === before) {
+        debugLogger.warn(
+          `Auto mode denial counters already clear after fallback approval: ` +
+            formatDenialStateLog(before),
+        );
+        return;
+      }
+      debugLogger.warn(
+        `Auto mode denial counters reset after fallback approval: ` +
+          `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
+      );
+      this.config.setAutoModeDenialState(after);
+    }
   }
 
   /**
@@ -3227,28 +3447,107 @@ export class CoreToolScheduler {
     );
 
     if (this.toolCalls.length > 0 && allCallsAreTerminal) {
-      const completedCalls = [...this.toolCalls] as CompletedToolCall[];
+      let completedCalls = [...this.toolCalls] as CompletedToolCall[];
       this.toolCalls = [];
-
+      this.isFinalizingToolCalls = true;
+      const batchSignal = completedCalls
+        .map((call) =>
+          this.callIdToPostToolBatchSignal.get(call.request.callId),
+        )
+        .find((candidate): candidate is AbortSignal => !!candidate);
       for (const call of completedCalls) {
-        logToolCall(this.config, new ToolCallEvent(call));
+        this.callIdToPostToolBatchSignal.delete(call.request.callId);
       }
 
-      // Record tool results before notifying completion
-      this.recordToolResults(completedCalls);
+      let messageBus: MessageBus | undefined;
+      try {
+        const shouldFirePostToolBatch =
+          !this.config.getDisableAllHooks() &&
+          (this.config.hasHooksForEvent?.('PostToolBatch') ?? false);
+        messageBus = shouldFirePostToolBatch
+          ? this.config.getMessageBus()
+          : undefined;
+      } catch (error) {
+        debugLogger.warn(
+          `PostToolBatch hook setup failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      try {
+        if (messageBus) {
+          const batchToolCalls = completedCalls.map(toPostToolBatchToolCall);
+          const permissionMode = this.config.getApprovalMode();
+          const batchHookResult = await this.withHookSpan(
+            { hookEvent: 'PostToolBatch', toolName: 'batch' },
+            () =>
+              firePostToolBatchHook(
+                messageBus,
+                batchToolCalls,
+                permissionMode,
+                batchSignal,
+              ),
+            (r) =>
+              r.hookError
+                ? {
+                    success: false,
+                    error: r.hookError,
+                    shouldStop: false,
+                    postBatchStop: false,
+                  }
+                : {
+                    success: true,
+                    shouldStop: r.shouldStop,
+                    hasAdditionalContext: !!r.additionalContext,
+                    blockType: r.shouldStop ? 'stop' : undefined,
+                    postBatchStop: r.shouldStop,
+                    postBatchStopReason: r.shouldStop
+                      ? r.stopReason || 'no reason given'
+                      : undefined,
+                  },
+          );
 
-      if (this.onAllToolCallsComplete) {
-        this.isFinalizingToolCalls = true;
-        await this.onAllToolCallsComplete(completedCalls);
+          // Order matters: stop replaces the last response, so append
+          // additionalContext only after the stop decision is applied.
+          if (batchHookResult.shouldStop) {
+            debugLogger.info(
+              `PostToolBatch hook stopped batch (${completedCalls.length} calls): ${
+                batchHookResult.stopReason || 'no reason given'
+              }`,
+            );
+            completedCalls = withPostToolBatchStop(
+              completedCalls,
+              batchHookResult.stopReason ||
+                'Execution stopped by PostToolBatch hook',
+            );
+          }
+
+          completedCalls = withPostToolBatchAdditionalContext(
+            completedCalls,
+            batchHookResult.additionalContext,
+          );
+        }
+
+        for (const call of completedCalls) {
+          logToolCall(this.config, new ToolCallEvent(call));
+        }
+
+        // Record tool results before notifying completion
+        this.recordToolResults(completedCalls);
+
+        if (this.onAllToolCallsComplete) {
+          await this.onAllToolCallsComplete(completedCalls);
+        }
+        this.notifyToolCallsUpdate();
+      } finally {
         this.isFinalizingToolCalls = false;
-      }
-      this.notifyToolCallsUpdate();
-      // After completion, process the next item in the queue.
-      if (this.requestQueue.length > 0) {
-        const next = this.requestQueue.shift()!;
-        this._schedule(next.request, next.signal)
-          .then(next.resolve)
-          .catch(next.reject);
+        // Always drain the queue, even if completion callbacks throw.
+        if (this.requestQueue.length > 0) {
+          const next = this.requestQueue.shift()!;
+          this._schedule(next.request, next.signal)
+            .then(next.resolve)
+            .catch(next.reject);
+        }
       }
     }
   }
@@ -3342,7 +3641,9 @@ export class CoreToolScheduler {
             messages,
             config: this.config,
             signal,
-            skipClassifier: fallback.fallback,
+            skipClassifierReason: fallback.fallback
+              ? fallback.reason
+              : undefined,
           });
 
           const outcome = applyAutoModeDecision(

@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import process from 'node:process';
 import { useCallback, useContext, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
@@ -105,6 +106,24 @@ function persistAuthTypeSelection(
 ): void {
   const scope = getPersistScopeForModelSelection(settings);
   settings.setValue(scope, 'security.auth.selectedType', authType);
+}
+
+function hydrateApiKeyEnvFromSettings(
+  settings: ReturnType<typeof useSettings>,
+  envKey: string | undefined,
+): void {
+  if (!envKey || process.env[envKey]) {
+    return;
+  }
+  const settingsEnvValue = (
+    settings?.merged?.env as Record<string, unknown> | undefined
+  )?.[envKey];
+  if (
+    typeof settingsEnvValue === 'string' &&
+    settingsEnvValue.trim().length > 0
+  ) {
+    process.env[envKey] = settingsEnvValue;
+  }
 }
 
 interface HandleModelSwitchSuccessParams {
@@ -390,6 +409,16 @@ export function ModelDialog({
   const handleSelect = useCallback(
     async (selected: string) => {
       setErrorMessage(null);
+      const selectedEntry = availableModelEntries.find(
+        ({ authType: t2, model, isRuntime, snapshotId }) => {
+          const value =
+            isRuntime && snapshotId
+              ? snapshotId
+              : buildModelSelectionKey(t2, model.id, model.baseUrl);
+          return value === selected;
+        },
+      );
+      hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model.envKey);
 
       // Fast model mode: save authType:modelId so duplicate model ids across
       // providers remain unambiguous. baseUrl is intentionally discarded.
@@ -520,6 +549,7 @@ export function ModelDialog({
       uiState,
       setErrorMessage,
       isFastModelMode,
+      availableModelEntries,
     ],
   );
 

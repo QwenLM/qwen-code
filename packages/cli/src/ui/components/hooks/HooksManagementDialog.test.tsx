@@ -6,12 +6,14 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { cleanup } from 'ink-testing-library';
+import { HookEventName } from '@qwen-code/qwen-code-core';
 import { HooksManagementDialog } from './HooksManagementDialog.js';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
 import type { Key } from '../../contexts/KeypressContext.js';
+import { DISPLAY_HOOK_EVENTS } from './constants.js';
 
 vi.mock('../../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
@@ -338,14 +340,15 @@ describe('HooksManagementDialog', () => {
       expect(lastFrame()).toContain('Hooks');
     });
 
-    for (let i = 0; i < 6; i++) {
+    const stopEventIndex = DISPLAY_HOOK_EVENTS.indexOf(HookEventName.Stop);
+    for (let i = 0; i < stopEventIndex; i++) {
       pressKey('down');
       await vi.waitFor(() => {
         expect(lastFrame()).toContain(`❯  ${i + 2}.`);
       });
     }
     await vi.waitFor(() => {
-      expect(lastFrame()).toContain('❯  7. Stop');
+      expect(lastFrame()).toContain(`❯  ${stopEventIndex + 1}. Stop`);
     });
     pressKey('return');
     await vi.waitFor(() => {

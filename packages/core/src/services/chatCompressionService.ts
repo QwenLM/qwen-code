@@ -6,6 +6,7 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/config.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import {
   type ChatCompressionInfo,
@@ -26,10 +27,12 @@ import {
 } from './compactionInputSlimming.js';
 import { CHARS_PER_TOKEN, estimatePromptTokens } from './tokenEstimation.js';
 import {
+  buildStateReminderParts,
   composePostCompactHistory,
   countToolResponseImages,
   postProcessSummary,
   stripAnalysisBlock,
+  type SubagentSnapshot,
 } from './postCompactAttachments.js';
 
 /**
@@ -87,6 +90,18 @@ export const HARD_BUFFER = 3_000;
  * tuning constants; the counter state itself lives on GeminiChat.
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
+
+/**
+ * Hard cap on the PreCompact hook's `additionalContext` once it is merged
+ * into the side-query system prompt. The user-supplied `/compress` text is
+ * already capped at `MAX_COMPRESS_INSTRUCTIONS_CHARS` (2000) in
+ * compressCommand.ts for exactly this reason — the side-query has no
+ * input-truncation retry, so an unbounded hook payload could inflate the
+ * prompt and trigger a PTL the compaction path can't recover from. Hooks
+ * may legitimately concatenate context across several scripts, so this cap
+ * is set higher than the user-text cap.
+ */
+export const MAX_HOOK_INSTRUCTIONS_CHARS = 4000;
 
 export interface CompactionThresholds {
   /** Token count at which UI warn tier triggers. */
@@ -180,6 +195,74 @@ export interface CompressOptions {
    * (review #4168 R1.3 / R1.4)
    */
   precomputedEffectiveTokens?: number;
+  /**
+   * User-supplied focus directives passed to the compression side-query.
+   * Appended to the system prompt as an `Additional Instructions:` block.
+   * Sourced from `/compress <text>`. PreCompact hooks may further append
+   * `additionalContext` via `hookSpecificOutput`; user text always comes
+   * first, hook text last (matches claude-code mergeHookInstructions).
+   */
+  customInstructions?: string;
+}
+
+/**
+ * Project active background subagent tasks into the minimal shape
+ * `composePostCompactHistory` needs. `running` and `paused` are the only
+ * statuses the post-compact agent might need to act on; terminal states
+ * (completed / failed / cancelled) already emitted their notification XML
+ * and need no reminder. Only `agent` kinds are interactive (shell and
+ * monitor kinds are excluded — they don't have a send_message channel).
+ *
+ * Returns `[]` (not `undefined`) when the registry is absent so the
+ * downstream attachment builder takes the empty-array branch and emits
+ * no block, rather than treating `undefined` as a configuration error.
+ */
+function collectActiveSubagents(config: Config): SubagentSnapshot[] {
+  const registry = config.getBackgroundTaskRegistry?.();
+  if (!registry) return [];
+  return registry
+    .getAll()
+    .filter(
+      (t) =>
+        t.kind === 'agent' &&
+        // Only TRUE background subagents belong in a `<background-tasks>`
+        // block. Foreground entries (`isBackgrounded: false`) are the
+        // parent's synchronously-awaited tool call — their pending
+        // functionCall is still in history and resolves through the normal
+        // tool-result channel, so a reminder would mislabel them. Mirrors
+        // the `getRunningBackgroundCount` filter in background-tasks.ts.
+        t.isBackgrounded &&
+        (t.status === 'running' || t.status === 'paused'),
+    )
+    .map((t) => ({
+      id: t.id,
+      description: t.description,
+      status: t.status as 'running' | 'paused',
+      startTime: t.startTime,
+    }));
+}
+
+/**
+ * Compose the compression side-query system prompt: the base template,
+ * optionally followed by an `Additional Instructions:` block containing
+ * the user's `/compress <text>` directives and any `additionalContext`
+ * returned by PreCompact hooks. Order is user-first / hook-appended so an
+ * explicit user intent outranks a global hook policy when both speak.
+ */
+function buildCompressionSystemPrompt(
+  userInstructions: string | undefined,
+  hookInstructions: string,
+): string {
+  const base = getCompressionPrompt();
+  const parts: string[] = [];
+  if (userInstructions && userInstructions.trim().length > 0) {
+    parts.push(userInstructions.trim());
+  }
+  if (hookInstructions.length > 0) {
+    parts.push(hookInstructions);
+  }
+  if (parts.length === 0) return base;
+  return `${base}\n\nAdditional Instructions:\n${parts.join('\n\n')}`;
 }
 
 export class ChatCompressionService {
@@ -288,20 +371,6 @@ export class ChatCompressionService {
       };
     }
 
-    // Fire PreCompact hook before compression begins
-    const hookSystem = config.getHookSystem();
-    if (hookSystem) {
-      const preCompactTrigger =
-        compactTrigger === 'manual'
-          ? PreCompactTrigger.Manual
-          : PreCompactTrigger.Auto;
-      try {
-        await hookSystem.firePreCompactEvent(preCompactTrigger, '', signal);
-      } catch (err) {
-        config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
-      }
-    }
-
     // CLAUDE-CODE-STYLE FULL-HISTORY COMPRESSION: the entire curated
     // history is sent to the summary side-query (no split, no tail
     // preservation), and the post-compact history is assembled by
@@ -309,6 +378,9 @@ export class ChatCompressionService {
     // file restores + recent image restore).
 
     // Guard: need at least a user+model pair for a meaningful summary.
+    // This runs BEFORE the PreCompact hook fires — a hook with side effects
+    // (transcript dump, external notification) shouldn't be triggered for
+    // a session we're about to NOOP on anyway.
     if (curatedHistory.length < 2) {
       return {
         newHistory: null,
@@ -318,6 +390,41 @@ export class ChatCompressionService {
           compressionStatus: CompressionStatus.NOOP,
         },
       };
+    }
+
+    // Fire PreCompact hook before compression begins. Pass any user-supplied
+    // `/compress` instructions so hook scripts can read / log / amend them
+    // via `hookSpecificOutput.additionalContext`. The aggregator concatenates
+    // additionalContext across all hooks with '\n' separators.
+    let hookExtraInstructions = '';
+    const hookSystem = config.getHookSystem();
+    if (hookSystem) {
+      const preCompactTrigger =
+        compactTrigger === 'manual'
+          ? PreCompactTrigger.Manual
+          : PreCompactTrigger.Auto;
+      try {
+        const result = await hookSystem.firePreCompactEvent(
+          preCompactTrigger,
+          opts.customInstructions ?? '',
+          signal,
+        );
+        // `getAdditionalContext()` sanitises (`<`/`>` → `&lt;`/`&gt;`) so a
+        // hook can't inject XML structure into the summary prompt. Mirrors
+        // every other call-site in this repo (toolHookTriggers, agent.ts,
+        // client.ts) — keep it consistent.
+        const merged = result?.getAdditionalContext();
+        if (merged && merged.trim().length > 0) {
+          // Cap like the user-text path: an unbounded hook payload would
+          // otherwise bypass MAX_COMPRESS_INSTRUCTIONS_CHARS and inflate the
+          // side-query prompt past a recoverable size.
+          hookExtraInstructions = merged
+            .trim()
+            .slice(0, MAX_HOOK_INSTRUCTIONS_CHARS);
+        }
+      } catch (err) {
+        config.getDebugLogger().warn(`PreCompact hook failed: ${err}`);
+      }
     }
 
     // Slim the side-query input: replace inlineData with placeholders.
@@ -339,7 +446,10 @@ export class ChatCompressionService {
       // Best-effort: failures fall back to NOOP and the next turn re-triggers
       // compression anyway, so don't burn 7 retries blocking the user mid-turn.
       maxAttempts: 1,
-      systemInstruction: getCompressionPrompt(),
+      systemInstruction: buildCompressionSystemPrompt(
+        opts.customInstructions,
+        hookExtraInstructions,
+      ),
       contents: [
         ...slim.slimmedHistory,
         {
@@ -461,6 +571,12 @@ export class ChatCompressionService {
             signal,
             maxFiles: tuning.maxRecentFiles,
             maxImages: tuning.maxRecentImages,
+            // Restore plan-mode reminder + running-subagent snapshot so the
+            // post-compact agent does not lose either piece of mid-session
+            // state. Both reduce to no-ops when the corresponding source is
+            // empty.
+            planModeActive: config.getApprovalMode?.() === ApprovalMode.PLAN,
+            runningSubagents: collectActiveSubagents(config),
           },
         );
       } catch (err) {
@@ -484,8 +600,20 @@ export class ChatCompressionService {
           trailingFc?.role === 'model'
             ? (trailingFc.parts ?? []).filter((p) => !!p.functionCall)
             : [];
+        // Re-apply the SAME plan-mode + subagent reminders the normal path
+        // injects. These builders are pure (no disk I/O / history walking),
+        // so the failure that took out composePostCompactHistory can't take
+        // them out too — and dropping them here would silently lose plan-mode
+        // enforcement and the subagent roster on the degraded path.
+        const reminderParts = buildStateReminderParts({
+          planModeActive: config.getApprovalMode?.() === ApprovalMode.PLAN,
+          runningSubagents: collectActiveSubagents(config),
+        });
         extraHistory = [
-          { role: 'user', parts: [{ text: postProcessSummary(summary) }] },
+          {
+            role: 'user',
+            parts: [{ text: postProcessSummary(summary) }, ...reminderParts],
+          },
           {
             role: 'model',
             parts: [

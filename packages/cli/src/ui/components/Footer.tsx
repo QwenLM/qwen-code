@@ -31,7 +31,12 @@ export const Footer: React.FC = () => {
   const config = useConfig();
   const settings = useSettings();
   const { vimEnabled, vimMode } = useVimMode();
-  const { lines: statusLineLines, useThemeColors } = useStatusLine();
+  const {
+    lines: statusLineLines,
+    useThemeColors,
+    respectUserColors,
+    hideContextIndicator,
+  } = useStatusLine();
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
@@ -113,7 +118,7 @@ export const Footer: React.FC = () => {
   // alongside the other background-task kinds. The previous `✦ dreaming`
   // right-column indicator was removed to avoid two simultaneous signals
   // for the same underlying state.
-  if (promptTokenCount > 0 && contextWindowSize) {
+  if (promptTokenCount > 0 && contextWindowSize && !hideContextIndicator) {
     rightItems.push({
       key: 'context',
       node: (
@@ -153,8 +158,14 @@ export const Footer: React.FC = () => {
           statusLineLines.map((line, i) => (
             <Text
               key={`status-line-${i}`}
-              color={useThemeColors ? theme.text.accent : undefined}
-              dimColor={!useThemeColors}
+              color={
+                respectUserColors
+                  ? undefined
+                  : useThemeColors
+                    ? theme.text.accent
+                    : undefined
+              }
+              dimColor={respectUserColors ? false : !useThemeColors}
               wrap="truncate"
             >
               {line}
