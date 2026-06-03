@@ -325,6 +325,61 @@ describe('createWorkflowSandbox security', () => {
     expect(result).toBeUndefined();
   });
 
+  // FIX-E (Round 4 Critical): Array args used to leak host process because
+  // `deepNullProto` recursed into elements but left Array.prototype intact
+  // on the array body. PoC: `args.constructor.constructor("return process")()`
+  // returned host process with .env.HOME readable.
+  it('blocks args.constructor escape when args is an array', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: [1, 2, 3],
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`
+      try {
+        const v = args.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw'; }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux/i);
+    expect(['undefined', 'threw']).toContain(result);
+  });
+
+  // FIX-E: Symbol.iterator path via array's prototype.
+  it('blocks args[Symbol.iterator] realm escape when args is an array', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: [1, 2, 3],
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`
+      try {
+        const it = args[Symbol.iterator] && args[Symbol.iterator]();
+        if (!it) return 'no-iterator';
+        const ctor = it.next.constructor;
+        const v = ctor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw'; }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux/i);
+    expect(['undefined', 'threw', 'no-iterator']).toContain(result);
+  });
+
+  // FIX-E (Round 4 Important): explicit max-depth cap on args nesting.
+  it('rejects args with nesting beyond max depth with a clear error', () => {
+    const deep: Record<string, unknown> = {};
+    let cur = deep;
+    for (let i = 0; i < 200; i++) {
+      const next: Record<string, unknown> = {};
+      cur['nested'] = next;
+      cur = next;
+    }
+    expect(() =>
+      createWorkflowSandbox({
+        args: deep,
+        dispatch: async () => 'ignored',
+      }),
+    ).toThrow(/max nesting depth/);
+  });
+
   // FIX-C7 (TST-2-I1): each of the four unsupported-opts throw branches must
   // have its own test. A refactor that deletes any branch passes the others.
   it('agent() rejects isolation opt with clear error', async () => {

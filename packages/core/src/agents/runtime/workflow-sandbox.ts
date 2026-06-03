@@ -73,6 +73,16 @@ export interface WorkflowAgentOpts {
   [key: string]: unknown;
 }
 
+/**
+ * Forward-compatibility alias for the agent dispatch return type.
+ *
+ * P1: always `string`. P3 will widen this to support StructuredOutput
+ * (the schema-validated object path). Re-declared here so SandboxOptions
+ * stays decoupled from `workflow-orchestrator.ts`; the orchestrator
+ * re-exports the same alias for external consumers.
+ */
+export type WorkflowAgentResult = string;
+
 export interface SandboxOptions {
   /** Value bound to the `args` global inside the script. */
   args: unknown;
@@ -81,8 +91,14 @@ export interface SandboxOptions {
    * agent's final text. Injected so tests can mock without spawning an LLM.
    *
    * FIX-4 (UP-C1): opts type widened to WorkflowAgentOpts.
+   * FIX-E (Round 4 ARCH-I1): return type now uses `WorkflowAgentResult` so
+   * P3's widening (to `string | { schema; value }`) propagates here
+   * automatically.
    */
-  dispatch: (prompt: string, opts: WorkflowAgentOpts) => Promise<string>;
+  dispatch: (
+    prompt: string,
+    opts: WorkflowAgentOpts,
+  ) => Promise<WorkflowAgentResult>;
 }
 
 export interface WorkflowSandbox {
@@ -106,12 +122,30 @@ export interface WorkflowSandbox {
  * pass through. This is applied after the JSON roundtrip so the shape is
  * guaranteed to be JSON-safe (no cycles, no functions).
  */
-function deepNullProto(val: unknown): unknown {
+const DEEP_NULL_PROTO_MAX_DEPTH = 64;
+
+function deepNullProto(val: unknown, depth = 0): unknown {
+  if (depth > DEEP_NULL_PROTO_MAX_DEPTH) {
+    // FIX-E (Round 4 Important): explicit depth cap. Without this, an args
+    // object with nesting depth ~5_000 throws a generic RangeError from the
+    // host stack overflow — opaque to the caller.
+    throw new Error(
+      `WorkflowSandbox: args exceeded max nesting depth of ${DEEP_NULL_PROTO_MAX_DEPTH}`,
+    );
+  }
   if (val === null || typeof val !== 'object') return val;
-  if (Array.isArray(val)) return val.map(deepNullProto);
+  if (Array.isArray(val)) {
+    // FIX-E (Round 4 CRITICAL): sever the array's own prototype too.
+    // Previously the array body kept Array.prototype, so `args.constructor`
+    // was host `Array` and `args.constructor.constructor` was host
+    // `Function` — a confirmed PoC read `process.env.HOME`.
+    const out = val.map((x) => deepNullProto(x, depth + 1));
+    Object.setPrototypeOf(out, null);
+    return out;
+  }
   const out: Record<string, unknown> = Object.create(null);
   for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
-    out[k] = deepNullProto(v);
+    out[k] = deepNullProto(v, depth + 1);
   }
   return out;
 }

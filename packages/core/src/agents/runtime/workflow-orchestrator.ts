@@ -1,8 +1,16 @@
 import { randomBytes } from 'node:crypto';
 import type { Config } from '../../config/config.js';
 import { createWorkflowSandbox } from './workflow-sandbox.js';
-import type { WorkflowAgentOpts } from './workflow-sandbox.js';
+import type {
+  WorkflowAgentOpts,
+  WorkflowAgentResult,
+} from './workflow-sandbox.js';
 import { WORKFLOW_SUBAGENT_SYSTEM_PROMPT } from './workflow-prompts.js';
+
+// FIX-E (Round 4 ARCH-I1): single source of truth for the dispatch return
+// type is `workflow-sandbox.ts`. Re-exported here so external consumers
+// (WorkflowTool) can import the alias from the orchestrator module.
+export type { WorkflowAgentResult };
 
 export interface WorkflowRunRequest {
   script: string;
@@ -19,15 +27,6 @@ export interface WorkflowRunOutcome {
   phases: string[];
   logs: string[];
 }
-
-/**
- * FIX-D (Round 3 ARCH-I2): forward-compatibility alias for the agent
- * dispatch return type. P1: always `string`. P3 will widen this to
- * `string | { schema: object; value: unknown }` (or similar) for the
- * StructuredOutput contract. Wrapping the alias here lets P3 change one
- * type in one place rather than touching every call site.
- */
-export type WorkflowAgentResult = string;
 
 export type WorkflowAgentDispatch = (
   prompt: string,
