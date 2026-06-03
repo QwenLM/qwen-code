@@ -1748,8 +1748,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     ).resolves.toEqual({
       paths: {
-        userMemoryFile: '/tmp/qwen-global-test/QWEN.md',
-        projectMemoryFile: '/tmp/qwen-memory-cwd-test/QWEN.md',
+        userMemoryFile: path.join('/tmp/qwen-global-test', 'QWEN.md'),
+        projectMemoryFile: path.join(
+          '/tmp/qwen-memory-cwd-test',
+          'QWEN.md',
+        ),
         autoMemoryDir: '/tmp/qwen-memory-root-test/.qwen/memory',
       },
     });
