@@ -52,7 +52,7 @@ export async function generateSessionRecap(
       return null;
     }
 
-    const fullHistory = geminiClient.getChat().getHistory();
+    const fullHistory = geminiClient.getHistoryShallow();
     if (fullHistory.length < 2) {
       debugLogger.debug(
         `recap skipped: history too short (${fullHistory.length} messages)`,

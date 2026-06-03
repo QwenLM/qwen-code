@@ -47,10 +47,6 @@ import {
 } from './turn.js';
 
 // Services
-import {
-  COMPRESSION_PRESERVE_THRESHOLD,
-  COMPRESSION_TOKEN_THRESHOLD,
-} from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -2145,6 +2141,7 @@ export class GeminiClient {
     prompt_id: string,
     force: boolean = false,
     signal?: AbortSignal,
+    customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
@@ -2153,6 +2150,7 @@ export class GeminiClient {
       this.config.getModel(),
       force,
       signal,
+      customInstructions ? { customInstructions } : undefined,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const chat = this.getChat();
@@ -2185,8 +2183,3 @@ export class GeminiClient {
     return info;
   }
 }
-
-export const TEST_ONLY = {
-  COMPRESSION_PRESERVE_THRESHOLD,
-  COMPRESSION_TOKEN_THRESHOLD,
-};

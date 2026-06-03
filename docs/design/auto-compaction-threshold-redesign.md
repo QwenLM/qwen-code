@@ -4,6 +4,8 @@
 
 ## 背景
 
+> 本节描述本 PR 落地**之前**的状态（pre-redesign behavior）。下文出现的 `COMPRESSION_TOKEN_THRESHOLD`、`thinkingConfig.includeThoughts = true`、`hasFailedCompressionAttempt`、以及具体的 file:line 引用都对应 PR #4345 合入前的代码——合入后这些符号 / 行号会不再有效。
+
 当前 qwen-code 的自动压缩仅使用单一比例阈值 `COMPRESSION_TOKEN_THRESHOLD = 0.7`（`chatCompressionService.ts:33`），所有窗口大小共用同一比例。对比 claude-code 的「绝对 token 梯子」（autoCompact.ts:62-65），qwen-code 存在三个具体问题：
 
 1. **大窗口下预留过多**：1M 模型 70% 阈值在 700K 触发，剩余 300K 远超摘要 + 输出实际所需的 ~33K
@@ -136,11 +138,21 @@ export interface ChatCompressionSettings {
 
 ### Breaking change 处理
 
-启动时 `Config` 加载发现 `chatCompression.contextPercentageThreshold` 存在：
+**用户面：** 启动时 `Config` 加载发现 `chatCompression.contextPercentageThreshold` 存在：
 
 - 写入 stderr 一行警告：`"chatCompression.contextPercentageThreshold has been removed and is now controlled by built-in thresholds."`
 - **不**报错、**不**阻塞启动
 - 字段值被忽略
+
+**SDK 面（R5.4）：** `CompressOptions` 的 `hasFailedCompressionAttempt: boolean` 字段重命名为 `consecutiveFailures: number`。两点差异：
+
+|      | 旧字段                         | 新字段                                                               |
+| ---- | ------------------------------ | -------------------------------------------------------------------- |
+| 名称 | `hasFailedCompressionAttempt`  | `consecutiveFailures`                                                |
+| 类型 | `boolean`                      | `number`                                                             |
+| 语义 | `true` = 永久禁用 auto-compact | `>= MAX_CONSECUTIVE_FAILURES`（默认 3）= 暂时禁用直到 force 成功重置 |
+
+仓库内只有 `GeminiChat.tryCompress` 一个内部消费方，所以内部 migration 风险低；但 `@qwen-code/qwen-code-core` 是 published package、`CompressOptions` 在 d.ts 里可见，下游 SDK 直接调 `service.compress({ ..., hasFailedCompressionAttempt: true })` 的代码会拿到 TS 编译错误。**迁移指引：** 把 `true` 改为 `MAX_CONSECUTIVE_FAILURES`（或任意 >= 3 的整数），`false` 改为 `0`。如果调用方维护自己的失败计数，直接传入即可。
 
 ## Token 估算补偿
 
@@ -415,4 +427,10 @@ const { warn, auto, hard, effectiveWindow } =
 ## 开放问题（等 review）
 
 1. **breaking change 强度**：警告 + 忽略字段 vs 启动报错。当前选警告，需要确认对企业部署/团队配置是否够友好
-2. **小窗口（32K）下 hard 与 auto 退化为同一值**：用户视角是否需要在 `/context` 明示「该窗口下 hard 已退化」
+
+## 已结案
+
+2. **小窗口（≤ ~76.7K）下 hard 与 auto 退化为同一值** — 决定**不在 `/context` 明示**。理由：
+   - 塌缩范围不只是 32K，所有 `effectiveWindow - HARD_BUFFER ≤ 0.7 × window` 的窗口都塌缩（包括 64K）
+   - 用户行为不变：塌缩窗口上 `currentTier` 跳过 `'auto'` 直接报 `'hard'`（`contextCommand.ts:43-44` 先判 `>= hard`），`context-high` band（`auto ≤ t < hard`）变成空带，少一档提示在小窗口上是合理的——窗口本身就小，用户大概率手动管理上下文
+   - 如果未来有真实用户报告"小窗口看不到中间档提示"，再决定加 UI 标注或调整 `context-high` 触发条件（这是 UI 工作，不是 spec 工作）。当前选不增加 UI 复杂度

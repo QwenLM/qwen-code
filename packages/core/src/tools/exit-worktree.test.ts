@@ -27,6 +27,10 @@ function makeMockConfig(targetDir = process.cwd()): Config {
   return {
     getTargetDir: vi.fn(() => targetDir),
     getSessionId: vi.fn(() => 'mock-session-id'),
+    // Phase D-2: EnterWorktreeTool (used here for setup) reads this
+    // setting when creating a worktree. Return empty so the symlink
+    // loop is a no-op in tests.
+    getWorktreeSymlinkDirectories: vi.fn(() => []),
   } as unknown as Config;
 }
 
@@ -181,6 +185,7 @@ describe('ExitWorktreeTool', () => {
       const enterCfg = {
         getTargetDir: () => repoRoot,
         getSessionId: () => 'session-creator',
+        getWorktreeSymlinkDirectories: () => [],
       } as unknown as Config;
       const enter = new EnterWorktreeTool(enterCfg);
       const inv = enter.build({ name: slug });

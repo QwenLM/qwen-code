@@ -23,6 +23,8 @@ import type {
   MessageBus,
   StreamEvent,
   ChatCompressionInfo,
+  AutoModeDecision,
+  AutoModeOutcome,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -67,11 +69,13 @@ import {
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
   evaluateAutoMode,
+  getAutoModePermissionDeniedReason,
   isApproveOutcome,
   MAX_TRANSCRIPT_MESSAGES,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
+  shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
   withInteractionSpan,
@@ -178,6 +182,31 @@ export function computeInitialTurnFromHistory(
   }
 
   return maxPromptTurn > 0 ? maxPromptTurn : userMessageCount;
+}
+
+export async function fireSessionPermissionDeniedForAutoMode(
+  config: Config,
+  decision: AutoModeDecision,
+  outcome: AutoModeOutcome,
+  toolName: string,
+  toolParams: Record<string, unknown>,
+  callId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (
+    !config.getDisableAllHooks?.() &&
+    shouldFirePermissionDeniedForAutoMode(decision, outcome)
+  ) {
+    await config
+      .getHookSystem?.()
+      ?.firePermissionDeniedEvent(
+        toolName,
+        toolParams,
+        callId,
+        getAutoModePermissionDeniedReason(decision),
+        signal,
+      );
+  }
 }
 
 function getRecordPromptIds(record: ChatRecord): string[] {
@@ -410,7 +439,7 @@ export class Session implements SessionContext {
     }
 
     const chat = this.config.getGeminiClient()!.getChat();
-    const apiHistory = chat.getHistory();
+    const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
       targetTurnIndex,
@@ -434,7 +463,7 @@ export class Session implements SessionContext {
   }
 
   captureHistorySnapshot(): Content[] {
-    return this.config.getGeminiClient()!.getChat().getHistory();
+    return this.config.getGeminiClient()!.getChat().getHistoryShallow();
   }
 
   restoreHistory(history: Content[]): void {
@@ -1055,16 +1084,10 @@ export class Session implements SessionContext {
         return { stopReason: 'end_turn' };
       }
 
-      // Get response text from the chat history
-      const history = this.#getCurrentChat().getHistory();
-      const lastModelMessage = history
-        .filter((msg: Content) => msg.role === 'model')
-        .pop();
+      // Extract last model text without cloning the full history.
       const responseText =
-        lastModelMessage?.parts
-          ?.filter((p: Part): p is { text: string } & Part => 'text' in p)
-          .map((p: { text: string }) => p.text)
-          .join('') || '[no response text]';
+        this.#getCurrentChat().getLastModelMessageText?.() ||
+        '[no response text]';
 
       const response = await messageBus.request<
         HookExecutionRequest,
@@ -1309,8 +1332,12 @@ export class Session implements SessionContext {
         compressionInfo = compressed;
         this.#recordCompressionTokenCount(compressed);
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+          const reasonClause =
+            compressed.triggerReason === 'image_overflow'
+              ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
+              : `approached the input token limit for ${this.config.getModel()}`;
           compressionDiagnostic =
-            `IMPORTANT: This conversation approached the input token limit for ${this.config.getModel()}. ` +
+            `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${compressed.originalTokenCount ?? 'unknown'} to ` +
             `${compressed.newTokenCount ?? 'unknown'} tokens).`;
@@ -2240,7 +2267,10 @@ export class Session implements SessionContext {
               messages,
               config: this.config,
               signal: abortSignal,
-              skipClassifier: shouldFallback(denialState).fallback,
+              skipClassifierReason: (() => {
+                const fb = shouldFallback(denialState);
+                return fb.fallback ? fb.reason : undefined;
+              })(),
             });
 
             // Apply decision via shared helper — eliminates ~40 lines of

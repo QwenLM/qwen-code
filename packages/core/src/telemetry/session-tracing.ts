@@ -27,10 +27,7 @@ import {
 } from './constants.js';
 import { clearDetailedSpanState } from './detailed-span-attributes.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
-import {
-  getCurrentSessionId,
-  setSessionContext,
-} from './session-context.js';
+import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
@@ -934,7 +931,11 @@ export function endToolBlockedOnUserSpan(
 
 // --- Hook Spans ---
 
-export type HookEvent = 'PreToolUse' | 'PostToolUse' | 'PostToolUseFailure';
+export type HookEvent =
+  | 'PreToolUse'
+  | 'PostToolUse'
+  | 'PostToolUseFailure'
+  | 'PostToolBatch';
 
 export interface StartHookSpanOptions {
   hookEvent: HookEvent;
@@ -954,6 +955,10 @@ export interface HookSpanMetadata {
   /** Discriminator for blocking decision when applicable. */
   blockType?: 'denied' | 'ask' | 'stop';
   hasAdditionalContext?: boolean;
+  /** PostToolBatch only: true when the batch hook stopped before the next turn. */
+  postBatchStop?: boolean;
+  /** PostToolBatch only: reason attached to a stop decision. */
+  postBatchStopReason?: string;
   /** Hook threw — span ends as ERROR with this message. */
   error?: string;
 }
@@ -1029,6 +1034,12 @@ export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
         endAttributes['block_type'] = metadata.blockType;
       if (metadata.hasAdditionalContext !== undefined)
         endAttributes['has_additional_context'] = metadata.hasAdditionalContext;
+      if (metadata.postBatchStop !== undefined)
+        endAttributes['post_batch_stop'] = metadata.postBatchStop;
+      if (metadata.postBatchStopReason !== undefined)
+        endAttributes['post_batch_stop_reason'] = truncateSpanError(
+          metadata.postBatchStopReason,
+        );
       if (metadata.error !== undefined)
         endAttributes['error'] = truncateSpanError(metadata.error);
     }

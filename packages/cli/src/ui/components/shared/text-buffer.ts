@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import pathMod from 'node:path';
-import { useState, useCallback, useEffect, useMemo, useReducer } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   createDebugLogger,
   unescapePath,
@@ -2096,7 +2096,14 @@ export function useTextBuffer({
     };
   }, [initialText, initialCursorOffset, viewport.width, viewport.height]);
 
-  const [state, dispatch] = useReducer(textBufferReducer, initialState);
+  const stateRef = useRef(initialState);
+  const [state, setState] = useState(initialState);
+
+  const dispatch = useCallback((action: TextBufferAction) => {
+    stateRef.current = textBufferReducer(stateRef.current, action);
+    setState(stateRef.current);
+  }, []);
+
   const {
     lines,
     cursorRow,
@@ -2128,7 +2135,7 @@ export function useTextBuffer({
       type: 'set_viewport',
       payload: { width: viewport.width, height: viewport.height },
     });
-  }, [viewport.width, viewport.height]);
+  }, [dispatch, viewport.width, viewport.height]);
 
   // Update visual scroll (vertical)
   useEffect(() => {
@@ -2199,20 +2206,20 @@ export function useTextBuffer({
         dispatch({ type: 'insert', payload: currentText });
       }
     },
-    [isValidPath, shellModeActive],
+    [dispatch, isValidPath, shellModeActive],
   );
 
   const newline = useCallback((): void => {
     dispatch({ type: 'insert', payload: '\n' });
-  }, []);
+  }, [dispatch]);
 
   const backspace = useCallback((): void => {
     dispatch({ type: 'backspace' });
-  }, []);
+  }, [dispatch]);
 
   const del = useCallback((): void => {
     dispatch({ type: 'delete' });
-  }, []);
+  }, [dispatch]);
 
   const move = useCallback(
     (dir: Direction): void => {
@@ -2223,164 +2230,218 @@ export function useTextBuffer({
 
   const undo = useCallback((): void => {
     dispatch({ type: 'undo' });
-  }, []);
+  }, [dispatch]);
 
   const redo = useCallback((): void => {
     dispatch({ type: 'redo' });
-  }, []);
+  }, [dispatch]);
 
-  const setText = useCallback((newText: string): void => {
-    dispatch({ type: 'set_text', payload: newText });
-  }, []);
+  const setText = useCallback(
+    (newText: string): void => {
+      dispatch({ type: 'set_text', payload: newText });
+    },
+    [dispatch],
+  );
 
   const deleteWordLeft = useCallback((): void => {
     dispatch({ type: 'delete_word_left' });
-  }, []);
+  }, [dispatch]);
 
   const deleteWordRight = useCallback((): void => {
     dispatch({ type: 'delete_word_right' });
-  }, []);
+  }, [dispatch]);
 
   const killLineRight = useCallback((): void => {
     dispatch({ type: 'kill_line_right' });
-  }, []);
+  }, [dispatch]);
 
   const killLineLeft = useCallback((): void => {
     dispatch({ type: 'kill_line_left' });
-  }, []);
+  }, [dispatch]);
 
   // Vim-specific operations
-  const vimDeleteWordForward = useCallback((count: number): void => {
-    dispatch({ type: 'vim_delete_word_forward', payload: { count } });
-  }, []);
+  const vimDeleteWordForward = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_delete_word_forward', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimDeleteWordBackward = useCallback((count: number): void => {
-    dispatch({ type: 'vim_delete_word_backward', payload: { count } });
-  }, []);
+  const vimDeleteWordBackward = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_delete_word_backward', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimDeleteWordEnd = useCallback((count: number): void => {
-    dispatch({ type: 'vim_delete_word_end', payload: { count } });
-  }, []);
+  const vimDeleteWordEnd = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_delete_word_end', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimChangeWordForward = useCallback((count: number): void => {
-    dispatch({ type: 'vim_change_word_forward', payload: { count } });
-  }, []);
+  const vimChangeWordForward = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_change_word_forward', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimChangeWordBackward = useCallback((count: number): void => {
-    dispatch({ type: 'vim_change_word_backward', payload: { count } });
-  }, []);
+  const vimChangeWordBackward = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_change_word_backward', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimChangeWordEnd = useCallback((count: number): void => {
-    dispatch({ type: 'vim_change_word_end', payload: { count } });
-  }, []);
+  const vimChangeWordEnd = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_change_word_end', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimDeleteLine = useCallback((count: number): void => {
-    dispatch({ type: 'vim_delete_line', payload: { count } });
-  }, []);
+  const vimDeleteLine = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_delete_line', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimChangeLine = useCallback((count: number): void => {
-    dispatch({ type: 'vim_change_line', payload: { count } });
-  }, []);
+  const vimChangeLine = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_change_line', payload: { count } });
+    },
+    [dispatch],
+  );
 
   const vimDeleteToEndOfLine = useCallback((): void => {
     dispatch({ type: 'vim_delete_to_end_of_line' });
-  }, []);
+  }, [dispatch]);
 
   const vimChangeToEndOfLine = useCallback((): void => {
     dispatch({ type: 'vim_change_to_end_of_line' });
-  }, []);
+  }, [dispatch]);
 
   const vimChangeMovement = useCallback(
     (movement: 'h' | 'j' | 'k' | 'l', count: number): void => {
       dispatch({ type: 'vim_change_movement', payload: { movement, count } });
     },
-    [],
+    [dispatch],
   );
 
   // New vim navigation and operation methods
-  const vimMoveLeft = useCallback((count: number): void => {
-    dispatch({ type: 'vim_move_left', payload: { count } });
-  }, []);
+  const vimMoveLeft = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_move_left', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimMoveRight = useCallback((count: number): void => {
-    dispatch({ type: 'vim_move_right', payload: { count } });
-  }, []);
+  const vimMoveRight = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_move_right', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimMoveUp = useCallback((count: number): void => {
-    dispatch({ type: 'vim_move_up', payload: { count } });
-  }, []);
+  const vimMoveUp = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_move_up', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimMoveDown = useCallback((count: number): void => {
-    dispatch({ type: 'vim_move_down', payload: { count } });
-  }, []);
+  const vimMoveDown = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_move_down', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimMoveWordForward = useCallback((count: number): void => {
-    dispatch({ type: 'vim_move_word_forward', payload: { count } });
-  }, []);
+  const vimMoveWordForward = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_move_word_forward', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimMoveWordBackward = useCallback((count: number): void => {
-    dispatch({ type: 'vim_move_word_backward', payload: { count } });
-  }, []);
+  const vimMoveWordBackward = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_move_word_backward', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimMoveWordEnd = useCallback((count: number): void => {
-    dispatch({ type: 'vim_move_word_end', payload: { count } });
-  }, []);
+  const vimMoveWordEnd = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_move_word_end', payload: { count } });
+    },
+    [dispatch],
+  );
 
-  const vimDeleteChar = useCallback((count: number): void => {
-    dispatch({ type: 'vim_delete_char', payload: { count } });
-  }, []);
+  const vimDeleteChar = useCallback(
+    (count: number): void => {
+      dispatch({ type: 'vim_delete_char', payload: { count } });
+    },
+    [dispatch],
+  );
 
   const vimInsertAtCursor = useCallback((): void => {
     dispatch({ type: 'vim_insert_at_cursor' });
-  }, []);
+  }, [dispatch]);
 
   const vimAppendAtCursor = useCallback((): void => {
     dispatch({ type: 'vim_append_at_cursor' });
-  }, []);
+  }, [dispatch]);
 
   const vimOpenLineBelow = useCallback((): void => {
     dispatch({ type: 'vim_open_line_below' });
-  }, []);
+  }, [dispatch]);
 
   const vimOpenLineAbove = useCallback((): void => {
     dispatch({ type: 'vim_open_line_above' });
-  }, []);
+  }, [dispatch]);
 
   const vimAppendAtLineEnd = useCallback((): void => {
     dispatch({ type: 'vim_append_at_line_end' });
-  }, []);
+  }, [dispatch]);
 
   const vimInsertAtLineStart = useCallback((): void => {
     dispatch({ type: 'vim_insert_at_line_start' });
-  }, []);
+  }, [dispatch]);
 
   const vimMoveToLineStart = useCallback((): void => {
     dispatch({ type: 'vim_move_to_line_start' });
-  }, []);
+  }, [dispatch]);
 
   const vimMoveToLineEnd = useCallback((): void => {
     dispatch({ type: 'vim_move_to_line_end' });
-  }, []);
+  }, [dispatch]);
 
   const vimMoveToFirstNonWhitespace = useCallback((): void => {
     dispatch({ type: 'vim_move_to_first_nonwhitespace' });
-  }, []);
+  }, [dispatch]);
 
   const vimMoveToFirstLine = useCallback((): void => {
     dispatch({ type: 'vim_move_to_first_line' });
-  }, []);
+  }, [dispatch]);
 
   const vimMoveToLastLine = useCallback((): void => {
     dispatch({ type: 'vim_move_to_last_line' });
-  }, []);
+  }, [dispatch]);
 
-  const vimMoveToLine = useCallback((lineNumber: number): void => {
-    dispatch({ type: 'vim_move_to_line', payload: { lineNumber } });
-  }, []);
+  const vimMoveToLine = useCallback(
+    (lineNumber: number): void => {
+      dispatch({ type: 'vim_move_to_line', payload: { lineNumber } });
+    },
+    [dispatch],
+  );
 
   const vimEscapeInsertMode = useCallback((): void => {
     dispatch({ type: 'vim_escape_insert_mode' });
-  }, []);
+  }, [dispatch]);
 
   const openInExternalEditor = useCallback(
     async (opts: { editor?: string } = {}): Promise<void> => {
@@ -2470,7 +2531,11 @@ export function useTextBuffer({
 
       const wasRaw = stdin?.isRaw ?? false;
       try {
-        fs.writeFileSync(filePath, text, { encoding: 'utf8', mode: 0o600 });
+        const currentText = stateRef.current.lines.join('\n');
+        fs.writeFileSync(filePath, currentText, {
+          encoding: 'utf8',
+          mode: 0o600,
+        });
         setRawMode?.(false);
 
         debugLogger.warn(
@@ -2489,7 +2554,7 @@ export function useTextBuffer({
 
         let newText = fs.readFileSync(filePath, 'utf8');
         newText = newText.replace(/\r\n?/g, '\n');
-        if (newText !== text) {
+        if (newText !== currentText) {
           dispatch({ type: 'create_undo_snapshot' });
           dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
         }
@@ -2517,7 +2582,7 @@ export function useTextBuffer({
         }
       }
     },
-    [text, stdin, setRawMode, preferredEditor],
+    [dispatch, stdin, setRawMode, preferredEditor],
   );
 
   const handleInput = useCallback(
@@ -2619,27 +2684,39 @@ export function useTextBuffer({
         payload: { startRow, startCol, endRow, endCol, text },
       });
     },
-    [],
+    [dispatch],
   );
 
   const replaceRangeByOffset = useCallback(
     (startOffset: number, endOffset: number, replacementText: string): void => {
-      const [startRow, startCol] = offsetToLogicalPos(text, startOffset);
-      const [endRow, endCol] = offsetToLogicalPos(text, endOffset);
+      const currentText = stateRef.current.lines.join('\n');
+      const [startRow, startCol] = offsetToLogicalPos(currentText, startOffset);
+      const [endRow, endCol] = offsetToLogicalPos(currentText, endOffset);
       replaceRange(startRow, startCol, endRow, endCol, replacementText);
     },
-    [text, replaceRange],
+    [replaceRange],
   );
 
-  const moveToOffset = useCallback((offset: number): void => {
-    dispatch({ type: 'move_to_offset', payload: { offset } });
-  }, []);
+  const moveToOffset = useCallback(
+    (offset: number): void => {
+      dispatch({ type: 'move_to_offset', payload: { offset } });
+    },
+    [dispatch],
+  );
 
+  // Getters read from stateRef.current so event handlers (which may hold a stale
+  // closure reference to this object) always see the latest state.
   const returnValue: TextBuffer = useMemo(
     () => ({
-      lines,
-      text,
-      cursor: [cursorRow, cursorCol],
+      get lines() {
+        return stateRef.current.lines;
+      },
+      get text() {
+        return stateRef.current.lines.join('\n');
+      },
+      get cursor(): [number, number] {
+        return [stateRef.current.cursorRow, stateRef.current.cursorCol];
+      },
       preferredCol,
       selectionAnchor,
 
@@ -2702,10 +2779,6 @@ export function useTextBuffer({
       vimEscapeInsertMode,
     }),
     [
-      lines,
-      text,
-      cursorRow,
-      cursorCol,
       preferredCol,
       selectionAnchor,
       visualLines,

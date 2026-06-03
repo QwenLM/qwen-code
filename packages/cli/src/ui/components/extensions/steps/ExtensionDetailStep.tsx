@@ -6,7 +6,10 @@
 
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
-import { type Extension } from '@qwen-code/qwen-code-core';
+import {
+  redactUrlCredentials,
+  type Extension,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../../../i18n/index.js';
 
 interface ExtensionDetailStepProps {
@@ -68,7 +71,7 @@ export const ExtensionDetailStep = ({
             <Box width={LABEL_WIDTH} flexShrink={0}>
               <Text color={theme.text.primary}>{t('Source:')}</Text>
             </Box>
-            <Text>{ext.installMetadata.source}</Text>
+            <Text>{redactUrlCredentials(ext.installMetadata.source)}</Text>
           </Box>
         )}
 

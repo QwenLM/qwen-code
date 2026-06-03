@@ -104,7 +104,7 @@ export function useCommandCompletion(
           if (backslashCount % 2 === 0) {
             break;
           }
-        } else if (char === '@') {
+        } else if (char === '@' && (i === 0 || /\s/.test(codePoints[i - 1]))) {
           let end = codePoints.length;
           for (let i = cursorCol; i < codePoints.length; i++) {
             if (codePoints[i] === ' ') {

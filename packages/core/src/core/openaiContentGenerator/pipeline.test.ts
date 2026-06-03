@@ -15,7 +15,7 @@ import { OpenAIContentConverter } from './converter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
-import type { ContentGeneratorConfig, AuthType } from '../contentGenerator.js';
+import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 
 // Mock dependencies
@@ -464,15 +464,31 @@ describe('ContentGenerationPipeline', () => {
     });
 
     it('should override enable_thinking when thinkingConfig disables it', async () => {
-      // Arrange — provider injects enable_thinking: true via extra_body,
-      // but request explicitly disables thinking
+      // Arrange — provider injects enable_thinking: true via extra_body
+      // (e.g. user configured `enableThinking: true` via setup wizard,
+      // see provider-config.ts), but request explicitly disables thinking.
+      // DashScope hostname + qwen model name are both required: the gate
+      // is hostname + model-name to avoid leaking the qwen-specific
+      // `enable_thinking` field to non-qwen routings (off-DashScope, or
+      // GLM/DeepSeek on the same DashScope hostname).
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
       (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
         ...req,
         enable_thinking: true, // Simulates extra_body injection
       }));
 
       const request: GenerateContentParameters = {
-        model: 'test-model',
+        model: 'qwen3.5-flash',
         contents: [{ parts: [{ text: 'Suggest next' }], role: 'user' }],
         config: { thinkingConfig: { includeThoughts: false } },
       };
@@ -746,6 +762,375 @@ describe('ContentGenerationPipeline', () => {
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.thinking).toBeUndefined();
+    });
+
+    it('emits enable_thinking:false on DashScope hostname when includeThoughts is false', async () => {
+      // Regression for #4501: qwen3 hybrid models (e.g. qwen3.5-flash)
+      // default to thinking-on. Provider buildRequest never auto-injects
+      // `enable_thinking`, so a previous guarded `'enable_thinking' in typed`
+      // check never fired and side-queries burned reasoning tokens (24-95x
+      // output bloat in production). The disable must be emitted explicitly.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      // Provider passes the request through unchanged — simulates the
+      // common case where the user has not configured
+      // `extra_body.enable_thinking` (so the field never appears on the
+      // wire body unless we add it here).
+      const request: GenerateContentParameters = {
+        model: 'qwen3.5-flash',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('emits enable_thinking:false on DashScope hostname when reasoning is configured to false', async () => {
+      // Config-level opt-out (`reasoning: false`) should also disable
+      // qwen3 thinking, mirroring the DeepSeek pair above.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.5-flash',
+        reasoning: false,
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.5-flash',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'main');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('emits enable_thinking:false on QWEN_OAUTH with the default coder-model', async () => {
+      // QWEN_OAUTH is the default auth flow for first-time users and
+      // ships with `model: 'coder-model'` (DEFAULT_QWEN_MODEL in
+      // config/models.ts — aliased to Qwen 3.6 Plus hybrid). The string
+      // doesn't start with `qwen`, so the gate must special-case it;
+      // otherwise the exact regression that #4501 fixes (side-queries
+      // burning reasoning tokens on the default flow) remains live.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: 'https://some-oauth-issued-endpoint.example/v1',
+        model: 'coder-model',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'coder-model',
+        contents: [{ parts: [{ text: 'Hi' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hi' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('emits enable_thinking:false on internal alibaba-inc.com hostname', async () => {
+      // Internal Alibaba domains proxy to DashScope-compatible APIs and
+      // are treated as DashScope by design (provider/dashscope.ts:75-78).
+      // Cover the internal-origin path explicitly so a future tightening
+      // of the hostname rules does not silently drop coverage for
+      // internal users.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://gateway.alibaba-inc.com/v1',
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.5-flash',
+        contents: [{ parts: [{ text: 'Hi' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hi' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('does NOT emit enable_thinking on a non-DashScope hostname', async () => {
+      // `enable_thinking` is a qwen-specific extension. Pushing it at a
+      // strict OpenAI-compatible backend could trip an unknown-key 400
+      // and would also pollute logs with a meaningless field. Mirror of
+      // the DeepSeek negative test above.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-5',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('does NOT emit enable_thinking on a non-qwen model routed through DashScope', async () => {
+      // DashScope's compatible-mode endpoint routes multiple model families
+      // (qwen3, GLM, DeepSeek). Hostname alone is not enough — GLM uses
+      // `extra_body.thinking.enabled` and DeepSeek-on-DashScope uses
+      // `thinking: { type: 'disabled' }`, so sending `enable_thinking` is
+      // at best a no-op and at worst forwarded upstream and rejected.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'glm-5',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('gates on the wire model, not config: qwen config + non-qwen request.model does NOT emit', async () => {
+      // buildRequest ships `context.model` (= request.model || config.model).
+      // A qwen *config* with a non-qwen *request* model must gate on the
+      // request model — otherwise the qwen-only field leaks to the non-qwen
+      // routing that is actually on the wire (e.g. GLM rejecting it upstream).
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'glm-5', // request-level override to a non-qwen wire model
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('gates on the wire model, not config: non-qwen config + qwen request.model emits false', async () => {
+      // The mirror direction: a non-qwen *config* with a qwen *request* model
+      // must still emit the disable signal, since the wire model is qwen and
+      // would otherwise keep thinking-on (the #4501 regression).
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'glm-5',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.5-flash', // request-level override to a qwen wire model
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('emits enable_thinking:false when baseUrl is unset (DashScope default)', async () => {
+      // `isDashScopeProvider` treats a missing baseUrl as DashScope
+      // (`dashscope.ts:49` returns true for `!baseUrl`). A fresh install
+      // that hasn't run the setup wizard hits this path. All other
+      // positive tests above explicitly set baseUrl, so pin this
+      // implicit-default branch separately to detect future tightening
+      // of the `!baseUrl` early-return.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'qwen3.5-flash',
+      } as ContentGeneratorConfig;
+      delete (mockContentGeneratorConfig as { baseUrl?: string }).baseUrl;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.5-flash',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
     });
 
     it('should handle errors and log them', async () => {

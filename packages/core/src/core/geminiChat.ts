@@ -41,11 +41,16 @@ import {
   logContentRetry,
   logContentRetryFailure,
 } from '../telemetry/loggers.js';
+import { clearDetailedSpanState } from '../telemetry/detailed-span-attributes.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
+  computeThresholds,
+  MAX_CONSECUTIVE_FAILURES,
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
+import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
+import { estimatePromptTokens } from '../services/tokenEstimation.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
@@ -97,8 +102,74 @@ function isCompressionFailureStatus(status: CompressionStatus): boolean {
   return (
     status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
     status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
-    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR
+    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED
   );
+}
+
+function shouldStopAfterHardRescue(
+  shouldForceFromHard: boolean,
+  hardLimit: number,
+  localPromptTokensAfterCompression: number,
+): boolean {
+  return shouldForceFromHard && localPromptTokensAfterCompression >= hardLimit;
+}
+
+function getHardRescueFailureMessage(
+  effectiveTokens: number,
+  hardLimit: number,
+  compressionInfo: ChatCompressionInfo,
+  localPromptTokensAfterCompression: number,
+): string {
+  const compressionStatus =
+    CompressionStatus[compressionInfo.compressionStatus] ??
+    String(compressionInfo.compressionStatus);
+  const tokenCount =
+    compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+      ? Math.max(
+          compressionInfo.newTokenCount,
+          localPromptTokensAfterCompression,
+        )
+      : Math.max(effectiveTokens, localPromptTokensAfterCompression);
+  return (
+    `Context is too large to send safely after automatic compression. ` +
+    `Estimated prompt tokens: ${tokenCount}; hard limit: ${hardLimit}; ` +
+    `compression status: ${compressionStatus}. ` +
+    `Start a new session or reduce the resumed history before continuing.`
+  );
+}
+
+/**
+ * Defensive coercion for API-reported token counts.
+ *
+ * Hostile providers (broken upstream, OpenAI-compat proxy returning
+ * `null`/`NaN`, misconfigured override) can yield non-finite or negative
+ * token counts on `usageMetadata`. This function coerces the four fields that
+ * feed the compaction gate, its cache-hit telemetry, or OTel spans —
+ * `promptTokenCount`, `totalTokenCount`, `candidatesTokenCount`, and
+ * `cachedContentTokenCount`. Letting hostile values
+ * flow into the compaction gate arithmetic is catastrophic:
+ *
+ * - `lastPromptTokenCount + NaN >= hard` is always false → hard-rescue is
+ *   silently disabled, eventually OOMing the V8 heap.
+ * - `Infinity >= hard` is always true → hard-rescue fires on every send.
+ *
+ * Coercing unknown / negative / non-finite to `0` keeps the gate well-defined
+ * and is a no-op for any provider returning sane values.
+ *
+ * `Number.isFinite(-1)` is `true`, so the explicit `>= 0` check is required
+ * in addition to `isFinite`.
+ */
+function coerceUsageCount(value: unknown, field?: string): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return value;
+  }
+  if (value != null && field) {
+    debugLogger.warn(
+      `coerceUsageCount: hostile ${field}=${String(value)}, coercing to 0`,
+    );
+  }
+  return 0;
 }
 
 export enum StreamEventType {
@@ -139,6 +210,31 @@ interface ContentRetryOptions {
 interface TryCompressOptions {
   originalTokenCountOverride?: number;
   trigger?: CompactTrigger;
+  /**
+   * Pending user message about to be sent. Threaded through to the
+   * compression service's cheap-gate so it can see the real prompt size
+   * even when `lastPromptTokenCount === 0` (first send after inherited
+   * history). See `estimatePromptTokens` for the fallback math.
+   */
+  pendingUserMessage?: Content;
+  /**
+   * Pre-computed `estimatePromptTokens` value from the caller. When set,
+   * the cheap-gate uses this instead of recomputing — avoids a second
+   * `getHistory(true)` clone per send. (review #4168 R1.3 / R1.4)
+   */
+  precomputedEffectiveTokens?: number;
+  /**
+   * Delay writing the compression checkpoint until the caller has run any
+   * post-compression guards that may roll the in-memory chat state back.
+   */
+  deferChatCompressionRecord?: boolean;
+  /**
+   * Forwarded to the compression side-query system prompt. Sourced from
+   * `/compress <text>` invocation arg; appended after the base prompt as
+   * an `Additional Instructions:` block so the summary model can focus
+   * on the user's stated concern.
+   */
+  customInstructions?: string;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -1195,12 +1291,35 @@ export class GeminiChat {
   private lastPromptTokenCount = 0;
 
   /**
-   * Per-chat sticky flag. After an unforced compression attempt fails (empty
-   * summary or inflated token count), automatic compaction is suppressed
-   * for the remainder of this chat to avoid burning compression API calls
-   * in a loop. Manual `/compress` still works (it passes `force=true`).
+   * Number of consecutive auto-compaction failures for this chat. The
+   * cheap-gate NOOPs once this reaches MAX_CONSECUTIVE_FAILURES (default 3)
+   * until a successful compress (forced or not) resets it to 0. Replaces the
+   * single-shot hasFailedCompressionAttempt lock that previously disabled
+   * auto-compaction for the rest of the session on any failure.
+   *
+   * SEMANTICS (R5.3): this counter tracks "non-force, non-hard-rescue
+   * consecutive failures", NOT every failure literally.
+   *   - Auto-compaction failures (cheap-gate path): increment by 1.
+   *   - Manual `/compress` failures: skipped (`force=true` → `!force`
+   *     guard in the failure branch).
+   *   - Hard-tier rescue failures: skipped (force=true → `!force` guard
+   *     in tryCompress's failure branch). The counter is NOT pre-reset
+   *     before the rescue call — force=true already bypasses the breaker
+   *     check in compress's cheap-gate, and pre-resetting would in fact
+   *     defeat the breaker entirely (hard-rescue failures don't increment
+   *     via tryCompress, and a pre-reset every send would wipe the
+   *     reactive-overflow increment). The forwarded counter value is
+   *     whatever the chat carried; on COMPRESSED success the post-call
+   *     branch in tryCompress's COMPRESSED handler resets to 0, which is
+   *     the correct recovery path for a previously-latched session.
+   *     Reactive overflow remains the explicit-increment safety net for
+   *     the force=true path — its handler bumps the counter by +1 so N
+   *     reactive failures will still trip the breaker.
+   *
+   * If you're debugging "why is hard-rescue firing but the counter is 0",
+   * that's by design.
    */
-  private hasFailedCompressionAttempt = false;
+  private consecutiveFailures = 0;
 
   /**
    * Partial-push markers — index of the in-memory `model[partial fc]`
@@ -1284,9 +1403,11 @@ export class GeminiChat {
    *
    * Returns the compression info regardless of outcome. On a successful
    * compaction (`COMPRESSED`), this method has already mutated the chat's
-   * history, recorded the event to `chatRecordingService` (if wired), and
-   * updated both the per-chat token count and (when wired) the global
-   * telemetry singleton.
+   * history, recorded the event to `chatRecordingService` (if wired and
+   * unless `options.deferChatCompressionRecord` is set), and updated both
+   * the per-chat token count and (when wired) the global telemetry singleton.
+   * Deferred callers are responsible for recording after their own
+   * post-compression guards pass.
    */
   async tryCompress(
     promptId: string,
@@ -1301,27 +1422,44 @@ export class GeminiChat {
       force,
       model,
       config: this.config,
-      hasFailedCompressionAttempt: this.hasFailedCompressionAttempt,
+      consecutiveFailures: this.consecutiveFailures,
       originalTokenCount:
         options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
+      pendingUserMessage: options?.pendingUserMessage,
+      precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
+      customInstructions: options?.customInstructions,
       signal,
     });
 
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
-      this.chatRecordingService?.recordChatCompression({
-        info,
-        compressedHistory: newHistory,
-      });
+      if (!options?.deferChatCompressionRecord) {
+        this.chatRecordingService?.recordChatCompression({
+          info,
+          compressedHistory: newHistory,
+        });
+      }
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
+      clearDetailedSpanState();
       this.lastPromptTokenCount = info.newTokenCount;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
-      this.hasFailedCompressionAttempt = false;
+      // Reset the consecutive-failure counter on success so a forced /compress
+      // (or any successful compaction) recovers a chat whose breaker had
+      // tripped.
+      this.consecutiveFailures = 0;
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
+      // Track failed attempts (only count if not forced) so we stop spending
+      // compression-API calls on a chat that can't shrink after
+      // MAX_CONSECUTIVE_FAILURES strikes in a row.
       if (!force) {
-        this.hasFailedCompressionAttempt = true;
+        this.consecutiveFailures += 1;
+        if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          debugLogger.warn(
+            `[compaction] circuit breaker tripped after ${this.consecutiveFailures} consecutive failures (cheap-gate path); auto-compaction will NOOP until a successful force compaction resets the counter.`,
+          );
+        }
       }
     }
 
@@ -1415,14 +1553,154 @@ export class GeminiChat {
       // resolves it) has not run yet. Any setup error before returning the
       // generator must release the lock or subsequent sends will block forever
       // at `await this.sendPromise`.
+      // Build the user content BEFORE compression so the cheap-gate can size
+      // the upcoming prompt — closes the "first send after inherited history"
+      // gap where `lastPromptTokenCount === 0` and the gate would otherwise
+      // see only the stale prior-turn count (0).
+      const userContent = createUserContent(params.message);
+
+      // Hard-tier rescue: when the estimated prompt size is at or above the
+      // hard threshold (effectiveWindow - HARD_BUFFER), force compaction in
+      // this send instead of waiting for the API to reject the request as too
+      // large.
+      //
+      // We compute `effectiveTokens` ONCE here and pass it through to
+      // tryCompress → service.compress so the cheap-gate doesn't redo the
+      // estimation (which involves another `getHistory(true)` clone). This
+      // reuse also fixes a per-config-knob inconsistency: previously the
+      // hard-tier rescue used the default imageTokenEstimate while the
+      // cheap-gate inside tryCompress used the user's resolved value.
+      // (review #4168 R1.3 + R1.4)
+      //
+      // The consecutive-failure counter is NOT pre-reset here. force=true
+      // already bypasses the breaker (the `!force` check in
+      // `chatCompressionService.compress`'s cheap-gate), so a latched session
+      // can still attempt hard-rescue; pre-resetting would defeat the breaker
+      // entirely because hard-rescue failures don't increment via tryCompress
+      // (force=true skips the `if (!force)` increment in the failure branch),
+      // and only the reactive overflow handler explicitly increments. With a
+      // pre-reset the counter would oscillate 0↔1 across sends and never trip.
+      // On COMPRESSED success, the post-call branch in `tryCompress` (the
+      // `consecutiveFailures = 0` line in the COMPRESSED handler) still resets
+      // to 0, which is the correct recovery path for a previously-latched
+      // session.
+      const contextLimit =
+        this.config.getContentGeneratorConfig()?.contextWindowSize ??
+        DEFAULT_TOKEN_LIMIT;
+      const { hard } = computeThresholds(contextLimit);
+      const imageTokenEstimate = resolveSlimmingConfig(
+        this.config.getChatCompression(),
+      ).imageTokenEstimate;
+      // When lastPromptTokenCount > 0, estimatePromptTokens uses the
+      // API-authoritative count + a tiny estimate of just the new user
+      // message — it does NOT touch the history at all in that branch, so
+      // skip the costly `getHistory(true)` clone on the steady-state path.
+      // The lastPromptTokenCount=0 branch (first send after --continue
+      // restore / subagent inheritance) walks history with a char/4
+      // heuristic that can under-count by ~15-20K tokens; the reactive
+      // overflow recovery path inside the async iterator below (the
+      // `getContextLengthExceededInfo` → `tryCompress` → RETRY branch)
+      // is the documented safety net when this under-count causes
+      // hard-rescue to miss.
+      const effectiveTokens = estimatePromptTokens(
+        this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
+        userContent,
+        this.lastPromptTokenCount,
+        imageTokenEstimate,
+      );
+      const shouldForceFromHard = effectiveTokens >= hard;
+      const historyBeforeHardRescue = shouldForceFromHard
+        ? this.getHistoryShallow()
+        : undefined;
+      const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
+      if (shouldForceFromHard) {
+        debugLogger.warn(
+          `[compaction] hard-tier rescue triggered: prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}, consecutiveFailures=${this.consecutiveFailures}.`,
+        );
+      }
+
       compressionInfo = await this.tryCompress(
         prompt_id,
         model,
-        false,
+        shouldForceFromHard,
         params.config?.abortSignal,
+        {
+          pendingUserMessage: userContent,
+          precomputedEffectiveTokens: effectiveTokens,
+          deferChatCompressionRecord: shouldForceFromHard,
+          // Hard-rescue is force=true to bypass the cheap-gate breaker
+          // but it remains a semantically AUTOMATIC trigger. Tag the
+          // compactTrigger explicitly as 'auto' so the PostCompact
+          // hook event fires with the correct trigger category (the
+          // default `force=true → 'manual'` mapping would otherwise
+          // misclassify it). The compress() service preserves a
+          // trailing model+functionCall via
+          // composePostCompactHistory's `trailingFunctionCallContent`
+          // handling on its own, so the API request's tool-call /
+          // response pairing stays intact regardless of trigger value.
+          trigger: shouldForceFromHard ? 'auto' : undefined,
+        },
       );
 
-      const userContent = createUserContent(params.message);
+      const localPromptTokensAfterCompression = shouldForceFromHard
+        ? estimatePromptTokens(
+            this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
+            userContent,
+            this.lastPromptTokenCount,
+            imageTokenEstimate,
+          )
+        : 0;
+      if (
+        shouldStopAfterHardRescue(
+          shouldForceFromHard,
+          hard,
+          localPromptTokensAfterCompression,
+        )
+      ) {
+        const message = getHardRescueFailureMessage(
+          effectiveTokens,
+          hard,
+          compressionInfo,
+          localPromptTokensAfterCompression,
+        );
+        if (
+          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED &&
+          historyBeforeHardRescue
+        ) {
+          // Hard-rescue compression mutates in-memory history before this
+          // guard can compare the compressed prompt size. If the compressed
+          // prompt is still too large to send, restore the pre-compression
+          // state. The JSONL compression checkpoint is intentionally not
+          // written because the send is about to be rejected.
+          this.setHistory(historyBeforeHardRescue);
+          this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
+          this.telemetryService?.setLastPromptTokenCount(
+            lastPromptTokenCountBeforeHardRescue,
+          );
+        }
+        const compressionStatus =
+          CompressionStatus[compressionInfo.compressionStatus] ??
+          String(compressionInfo.compressionStatus);
+        debugLogger.warn(
+          `[compaction] hard-tier rescue stopped oversized prompt: ` +
+            `prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, ` +
+            `hard=${hard}, localPromptTokensAfterCompression=` +
+            `${localPromptTokensAfterCompression}, compressionStatus=` +
+            `${compressionStatus}, newTokenCount=` +
+            `${compressionInfo.newTokenCount}, consecutiveFailures=` +
+            `${this.consecutiveFailures}. ${message}`,
+        );
+        throw new Error(message);
+      }
+      if (
+        shouldForceFromHard &&
+        compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+      ) {
+        this.chatRecordingService?.recordChatCompression({
+          info: compressionInfo,
+          compressedHistory: this.getHistoryShallow(),
+        });
+      }
 
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
@@ -1698,7 +1976,21 @@ export class GeminiChat {
                   if (
                     isCompressionFailureStatus(reactiveInfo.compressionStatus)
                   ) {
-                    self.hasFailedCompressionAttempt = true;
+                    // Reactive compression is force=true so tryCompress's
+                    // failure branch did not increment the counter. Count it
+                    // explicitly as one strike — a single transient error
+                    // (network blip, model 5xx) should not permanently latch
+                    // the breaker; only repeated reactive failures should.
+                    // The only recovery path for a latched counter is a
+                    // successful compaction (post-call reset at the COMPRESSED
+                    // branch in tryCompress); hard-rescue forwards the counter
+                    // as-is since force=true bypasses the breaker.
+                    self.consecutiveFailures += 1;
+                    if (self.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                      debugLogger.warn(
+                        `[compaction] circuit breaker tripped after ${self.consecutiveFailures} consecutive failures (reactive overflow path); auto-compaction will NOOP on the cheap-gate until a successful force compaction resets the counter.`,
+                      );
+                    }
                   }
                 } catch (compressionError) {
                   if (
@@ -2347,6 +2639,14 @@ export class GeminiChat {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
+    let coercedUsage:
+      | {
+          promptTokenCount: number;
+          totalTokenCount: number;
+          candidatesTokenCount: number;
+          cachedContentTokenCount: number;
+        }
+      | undefined;
 
     let hasToolCall = false;
     let hasFinishReason = false;
@@ -2382,8 +2682,34 @@ export class GeminiChat {
         if (chunk.usageMetadata) {
           usageMetadata = chunk.usageMetadata;
           // Context usage tracks prompt size; output isn't in history yet.
-          const lastPromptTokenCount =
-            usageMetadata.promptTokenCount || usageMetadata.totalTokenCount;
+          // Coerce hostile-provider values (NaN / Infinity / negative) to 0
+          // so the compaction gate arithmetic stays well-defined; see
+          // `coerceUsageCount` for the failure modes this guards against.
+          const promptTokenCount = coerceUsageCount(
+            usageMetadata.promptTokenCount,
+            'promptTokenCount',
+          );
+          const totalTokenCount = coerceUsageCount(
+            usageMetadata.totalTokenCount,
+            'totalTokenCount',
+          );
+          const candidatesTokenCount = coerceUsageCount(
+            usageMetadata.candidatesTokenCount,
+            'candidatesTokenCount',
+          );
+          const cachedContentTokenCount = coerceUsageCount(
+            usageMetadata.cachedContentTokenCount,
+            'cachedContentTokenCount',
+          );
+          // Stash coerced values so recordAssistantTurn can reuse them
+          // without re-calling coerceUsageCount inline.
+          coercedUsage = {
+            promptTokenCount,
+            totalTokenCount,
+            candidatesTokenCount,
+            cachedContentTokenCount,
+          };
+          const lastPromptTokenCount = promptTokenCount || totalTokenCount;
           if (lastPromptTokenCount) {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
@@ -2395,9 +2721,9 @@ export class GeminiChat {
               lastPromptTokenCount,
             );
           }
-          if (usageMetadata.cachedContentTokenCount && this.telemetryService) {
+          if (cachedContentTokenCount && this.telemetryService) {
             this.telemetryService.setLastCachedContentTokenCount(
-              usageMetadata.cachedContentTokenCount,
+              cachedContentTokenCount,
             );
           }
         }
@@ -2485,7 +2811,9 @@ export class GeminiChat {
                 )
             : []),
         ],
-        tokens: usageMetadata,
+        tokens: coercedUsage
+          ? { ...usageMetadata, ...coercedUsage }
+          : usageMetadata,
         contextWindowSize,
       };
       if (streamError !== null) {
