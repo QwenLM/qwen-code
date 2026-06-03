@@ -383,8 +383,7 @@ describe('workspace memory routes', () => {
       expect(res.body.error).not.toContain(filePath);
     });
 
-    // chmod 0o555 does not block root — skip in CI Docker containers running as root
-    it.skipIf(process.getuid?.() === 0)('omits errorMessage + filePath in 500/413 responses unless QWEN_SERVE_DEBUG is on', async () => {
+    it('omits errorMessage + filePath in 500/413 responses unless QWEN_SERVE_DEBUG is on', async () => {
       // Windows ignores Unix-style permission bits passed to
       // `fs.chmod` — the directory stays writable, the POST succeeds
       // with 200, and the EACCES path this test exercises is

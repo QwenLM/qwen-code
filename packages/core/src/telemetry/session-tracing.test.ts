@@ -985,6 +985,30 @@ describe('session-tracing', () => {
       endToolSpan(toolSpan, { success: true });
     });
 
+    it('records shouldStop/hasAdditionalContext on PostToolBatch', () => {
+      const hookSpan = startHookSpan({
+        hookEvent: 'PostToolBatch',
+        toolName: 'batch',
+      });
+      endHookSpan(hookSpan, {
+        success: true,
+        shouldStop: true,
+        hasAdditionalContext: true,
+        postBatchStop: true,
+        postBatchStopReason: 'policy halt',
+      });
+
+      const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+      expect(hookRecord?.attributes['hook_event']).toBe('PostToolBatch');
+      expect(hookRecord?.attributes['should_stop']).toBe(true);
+      expect(hookRecord?.attributes['has_additional_context']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop_reason']).toBe(
+        'policy halt',
+      );
+      expect(hookRecord?.statuses).toHaveLength(0);
+    });
+
     it('marks status ERROR only when the hook itself threw', () => {
       const toolSpan = startToolSpan('Bash');
       let hookSpan!: ReturnType<typeof startHookSpan>;

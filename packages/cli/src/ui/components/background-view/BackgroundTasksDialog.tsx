@@ -951,8 +951,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
   const selectedAgentIdForActivity =
     selectedEntry?.kind === 'agent' ? selectedEntry.agentId : undefined;
   useEffect(() => {
-    if (!dialogOpen || !isDetailMode || !selectedAgentIdForActivity)
-      return;
+    if (!dialogOpen || !isDetailMode || !selectedAgentIdForActivity) return;
     const registry = config.getBackgroundTaskRegistry();
     const onActivity = (entry: AgentTask) => {
       if (entry.agentId !== selectedAgentIdForActivity) return;
@@ -960,7 +959,13 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     };
     registry.setActivityChangeCallback(onActivity);
     return () => registry.setActivityChangeCallback(undefined);
-  }, [dialogOpen, dialogMode, isDetailMode, config, selectedAgentIdForActivity]);
+  }, [
+    dialogOpen,
+    dialogMode,
+    isDetailMode,
+    config,
+    selectedAgentIdForActivity,
+  ]);
 
   // Wall-clock tick for the running agent's duration. Activity callbacks
   // fire when tools run, but duration needs to advance even when the agent
@@ -1021,7 +1026,14 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     ) {
       exitDetail();
     }
-  }, [dialogOpen, dialogMode, isDetailMode, selectedEntryId, selectedStatus, exitDetail]);
+  }, [
+    dialogOpen,
+    dialogMode,
+    isDetailMode,
+    selectedEntryId,
+    selectedStatus,
+    exitDetail,
+  ]);
 
   // Encapsulates the cancel flow with the foreground confirm-step.
   // Foreground entries: first `x` arms; second `x` confirms. Background

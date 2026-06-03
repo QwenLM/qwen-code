@@ -84,9 +84,6 @@ describe('runDoctorChecks', () => {
   });
 
   it('should pass Node.js version check for v22+', async () => {
-    if (parseInt(process.versions.node.split('.')[0]!, 10) < 22) {
-      return; // Test requires Node.js v22+
-    }
     const results = await runDoctorChecks(mockContext);
     const nodeCheck = results.find((r) => r.name === 'Node.js version');
     expect(nodeCheck).toBeDefined();

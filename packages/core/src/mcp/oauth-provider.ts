@@ -18,7 +18,6 @@ import {
   MCP_OAUTH_CLIENT_NAME,
   OAUTH_REDIRECT_PORT,
   OAUTH_REDIRECT_PATH,
-  getOAuthRedirectUri,
 } from './constants.js';
 
 export const OAUTH_DISPLAY_MESSAGE_EVENT = 'oauth-display-message' as const;
@@ -358,7 +357,9 @@ export class MCPOAuthProvider {
     pkceParams: PKCEParams,
     mcpServerUrl?: string,
   ): string {
-    const redirectUri = config.redirectUri || getOAuthRedirectUri();
+    const redirectUri =
+      config.redirectUri ||
+      `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`;
 
     const params = new URLSearchParams({
       client_id: config.clientId!,

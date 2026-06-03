@@ -1164,11 +1164,15 @@ export const useGeminiStream = (
           'Response stopped due to malformed function call.',
         [FinishReason.IMAGE_SAFETY]:
           'Response stopped due to image safety violations.',
-        [FinishReason.UNEXPECTED_TOOL_CALL]:
-          'Response stopped due to unexpected tool call.',
         [FinishReason.IMAGE_PROHIBITED_CONTENT]:
           'Response stopped due to image prohibited content.',
+        [FinishReason.IMAGE_RECITATION]:
+          'Response stopped due to image recitation policy.',
+        [FinishReason.IMAGE_OTHER]:
+          'Response stopped due to other image-related reasons.',
         [FinishReason.NO_IMAGE]: 'Response stopped due to no image.',
+        [FinishReason.UNEXPECTED_TOOL_CALL]:
+          'Response stopped due to unexpected tool call.',
       };
 
       const message = finishReasonMessages[finishReason];
@@ -1853,6 +1857,7 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
+            submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
             return;
           }
@@ -1878,7 +1883,9 @@ export const useGeminiStream = (
           const onComplete = submitPromptOnCompleteRef.current;
           if (onComplete) {
             submitPromptOnCompleteRef.current = null;
-            void onComplete();
+            void onComplete().catch((err) => {
+              debugLogger.error('onComplete callback failed:', err);
+            });
           }
 
           // After the turn completes, wire up notifications for any background
@@ -1918,6 +1925,7 @@ export const useGeminiStream = (
             });
           }
         } finally {
+          submitPromptOnCompleteRef.current = null;
           setIsResponding(false);
           isSubmittingQueryRef.current = false;
         }
@@ -2462,7 +2470,7 @@ export const useGeminiStream = (
             const toolName = toolCall.request.name;
             const fileName = path.basename(filePath);
             const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
-            const clientHistory = await geminiClient?.getHistory();
+            const clientHistory = geminiClient?.getHistoryShallow();
             const toolCallWithSnapshotFilePath = path.join(
               checkpointDir,
               toolCallWithSnapshotFileName,
@@ -2551,6 +2559,22 @@ export const useGeminiStream = (
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
+    registry.setNotificationCallback((displayText, modelText) => {
+      notificationQueueRef.current.push({
+        displayText,
+        modelText,
+        sendMessageType: SendMessageType.Notification,
+      });
+      setNotificationTrigger((n) => n + 1);
+    });
+    return () => {
+      registry.setNotificationCallback(undefined);
+    };
+  }, [config]);
+
+  // Register background shell terminal notification callback onto the shared queue.
+  useEffect(() => {
+    const registry = config.getBackgroundShellRegistry();
     registry.setNotificationCallback((displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,

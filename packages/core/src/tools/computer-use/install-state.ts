@@ -9,7 +9,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 
 export interface InstallState {
-  /** The package spec the user approved (e.g. "open-computer-use@^0.3.0"). */
+  /** The package spec the user approved (e.g. "@qwen-code/open-computer-use@0.2.3"). */
   approvedPackageSpec: string;
   /** ISO 8601 UTC timestamp of approval. */
   approvedAtIso: string;

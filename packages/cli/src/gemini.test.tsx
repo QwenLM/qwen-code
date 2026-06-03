@@ -27,6 +27,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 
 // Custom error to identify mock process.exit calls
 class MockProcessExitError extends Error {
@@ -108,6 +109,10 @@ vi.mock('./core/initializer.js', () => ({
     shouldOpenAuthDialog: false,
     geminiMdFileCount: 0,
   }),
+}));
+
+vi.mock('./commands/extensions/list.js', () => ({
+  handleList: mockHandleListExtensions,
 }));
 
 describe('gemini.tsx main function', () => {
@@ -226,6 +231,52 @@ describe('gemini.tsx main function', () => {
     // For the sandbox case we still have to load a partial cli config.
     // we can authorize outside the sandbox.
     expect(callOrder).toEqual(['relaunch', 'loadCliConfig']);
+    processExitSpy.mockRestore();
+  });
+
+  it('handles --list-extensions before sandbox and app config startup', async () => {
+    vi.clearAllMocks();
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      listExtensions: true,
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    mockHandleListExtensions.mockResolvedValue(undefined);
+
+    try {
+      await main();
+    } catch (e) {
+      if (!(e instanceof MockProcessExitError)) throw e;
+    }
+
+    expect(mockHandleListExtensions).toHaveBeenCalledOnce();
+    expect(processExitSpy).toHaveBeenCalledWith(0);
+    expect(loadSandboxConfig).not.toHaveBeenCalled();
+    expect(loadCliConfig).not.toHaveBeenCalled();
+
     processExitSpy.mockRestore();
   });
 

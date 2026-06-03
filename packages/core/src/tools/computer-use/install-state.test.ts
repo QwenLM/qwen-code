@@ -26,39 +26,48 @@ describe('install-state', () => {
 
   it('round-trips state', async () => {
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedPackageSpec: '@qwen-code/open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
     const loaded = await loadInstallState(tmpHome);
     expect(loaded).toEqual({
-      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedPackageSpec: '@qwen-code/open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
   });
 
   it('isPackageSpecApproved returns false when no state', async () => {
     expect(
-      await isPackageSpecApproved(tmpHome, 'open-computer-use@^0.3.0'),
+      await isPackageSpecApproved(
+        tmpHome,
+        '@qwen-code/open-computer-use@^0.3.0',
+      ),
     ).toBe(false);
   });
 
   it('isPackageSpecApproved returns true on exact match', async () => {
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedPackageSpec: '@qwen-code/open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
     expect(
-      await isPackageSpecApproved(tmpHome, 'open-computer-use@^0.3.0'),
+      await isPackageSpecApproved(
+        tmpHome,
+        '@qwen-code/open-computer-use@^0.3.0',
+      ),
     ).toBe(true);
   });
 
   it('isPackageSpecApproved returns false when version differs', async () => {
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedPackageSpec: '@qwen-code/open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
     expect(
-      await isPackageSpecApproved(tmpHome, 'open-computer-use@^0.4.0'),
+      await isPackageSpecApproved(
+        tmpHome,
+        '@qwen-code/open-computer-use@^0.4.0',
+      ),
     ).toBe(false);
   });
 

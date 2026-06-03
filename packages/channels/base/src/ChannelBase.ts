@@ -89,20 +89,6 @@ export abstract class ChannelBase {
   onToolCall(_chatId: string, _event: ToolCallEvent): void {}
 
   /**
-   * Cancel the currently active prompt for a session.
-   * Sets the cancelled flag so onResponseComplete won't send the response,
-   * then calls bridge.cancelSession() to stop generation.
-   * Does NOT destroy the session — the next message reuses it.
-   */
-  protected async cancelCurrentPrompt(sessionId: string): Promise<boolean> {
-    const active = this.activePrompts.get(sessionId);
-    if (!active) return false;
-    active.cancelled = true;
-    await this.bridge.cancelSession(sessionId).catch(() => {});
-    return true;
-  }
-
-  /**
    * Called when a prompt actually begins processing (inside the session queue).
    * Override to show a platform-specific working indicator (e.g., typing, reaction).
    * Not called for buffered messages (collect mode) or gated/blocked messages.

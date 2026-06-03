@@ -222,29 +222,6 @@ export function supportsHyperlinks(
   // JediTerm backend has supported OSC 8 since 2022.3.
   if (env['TERMINAL_EMULATOR'] === 'JetBrains-JediTerm') return true;
 
-  // Alishu / internal-deployment positive signals: these environments embed
-  // qwen TUI in an xterm.js-based web terminal that registers an OSC 8 link
-  // handler, but expose no standard env var the upstream detector would
-  // recognize. Trust them by their internal markers.
-  //   - OPENCODE_TERMINAL=1 — the alishu OpenCode web terminal sets this on
-  //     every spawned shell.
-  //   - BFF_TOKEN — present whenever the BFF auth layer has injected its
-  //     bearer token, which only happens inside the web-terminal host.
-  //   - TERM=xterm / xterm-256color — broad fallback for the same web
-  //     terminal when no more specific marker is present. Generic TERM
-  //     values that the upstream conservative path rejects; we accept here
-  //     because internal deployments funnel through these terminfos and
-  //     any terminal that doesn't honor OSC 8 will just print the visible
-  //     label (the bytes are still well-formed via sanitizeForOsc).
-  if (
-    env['OPENCODE_TERMINAL'] === '1' ||
-    env['BFF_TOKEN'] !== undefined ||
-    env['TERM'] === 'xterm' ||
-    env['TERM'] === 'xterm-256color'
-  ) {
-    return true;
-  }
-
   if (env['TERM_PROGRAM']) {
     const version = parseVersion(env['TERM_PROGRAM_VERSION']);
     switch (env['TERM_PROGRAM']) {
@@ -503,8 +480,6 @@ export const HYPERLINK_ENV_KEYS = [
   'ALACRITTY_LOG',
   'ALACRITTY_WINDOW_ID',
   'ALACRITTY_SOCKET',
-  'OPENCODE_TERMINAL',
-  'BFF_TOKEN',
   'TERM',
   'TEAMCITY_VERSION',
   'FORCE_HYPERLINK',

@@ -41,6 +41,7 @@ import {
   buildChildMessage,
   buildWorktreeNotice,
   isInForkExecution,
+  isForkSubagentEnabled,
   runInForkContext,
 } from './fork-subagent.js';
 import {
@@ -66,7 +67,10 @@ import type {
   AgentApprovalRequestEvent,
   AgentUsageEvent,
 } from '../../agents/runtime/agent-events.js';
-import { BuiltinAgentRegistry } from '../../subagents/builtin-agents.js';
+import {
+  BuiltinAgentRegistry,
+  DEFAULT_BUILTIN_SUBAGENT_TYPE,
+} from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import type { StopHookOutput } from '../../hooks/types.js';
@@ -527,7 +531,11 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
+${
+  isForkSubagentEnabled(this.config)
+    ? `When using the Agent tool, specify a subagent_type to use a specialized agent, or omit it to fork yourself — a fork inherits your full conversation context.`
+    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.`
+}
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
@@ -547,6 +555,39 @@ Usage notes:
 - If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
 - You can optionally set \`run_in_background: true\` to run the agent in the background. You will be notified when it completes. Use this when you have genuinely independent work to do in parallel and don't need the agent's results before you can proceed.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
+${
+  isForkSubagentEnabled(this.config)
+    ? `
+## When to fork
+
+Fork yourself (omit \`subagent_type\`) when the intermediate tool output isn't worth keeping in your context. The criterion is qualitative — "will I need this output again" — not task size.
+- **Research**: fork open-ended questions. If research can be broken into independent questions, launch parallel forks in one message. A fork beats a fresh subagent for this — it inherits context and shares your cache.
+- **Implementation**: prefer to fork implementation work that requires more than a couple of edits. Do research before jumping to implementation.
+
+Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork — a different model can't reuse the parent's cache. Pass a short \`name\` (one or two words, lowercase) so the user can track the fork.
+
+**Don't peek.** The tool result includes an output — do not read or tail it unless the user explicitly asks for a progress check. You get a completion notification; trust it. Reading the transcript mid-flight pulls the fork's tool noise into your context, which defeats the point of forking.
+
+**Don't race.** After launching, you know nothing about what the fork found. Never fabricate or predict fork results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the fork is still running — give status, not a guess.
+
+**Writing a fork prompt.** Since the fork inherits your context, the prompt is a *directive* — what to do, not what the situation is. Be specific about scope: what's in, what's out, what another agent is handling. Don't re-explain background.
+`
+    : ''
+}
+## Writing the prompt
+
+${isForkSubagentEnabled(this.config) ? 'When spawning a fresh agent (with a `subagent_type`), it starts with zero context. ' : ''}Brief the agent like a smart colleague who just walked into the room — it has not seen this conversation, does not know what you've tried, and does not understand why this task matters.
+- Explain what you're trying to accomplish and why.
+- Describe what you've already learned or ruled out.
+- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
+- If you need a short response, say so explicitly.
+- For lookups, provide the exact target. For investigations, provide the actual question rather than an over-prescribed sequence of steps.
+
+${isForkSubagentEnabled(this.config) ? 'For fresh agents, terse' : 'Terse'} command-style prompts produce shallow, generic work.
+
+**Never delegate understanding.** Do not write prompts like "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood the task: include relevant file paths, constraints, what specifically needs to be learned or changed, and what is out of scope.
+
+After launching an agent, do not fabricate or predict what it found before it returns. If the user asks a follow-up before the result arrives, provide status rather than guessing.
 
 Example usage:
 
@@ -1385,7 +1426,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let restoreParentPM: () => void = () => {};
 
     try {
-      const isFork = !this.params.subagent_type;
+      // When subagent_type is omitted and fork is enabled (opt-in +
+      // interactive), use fork. Otherwise fall back to general-purpose.
+      const isFork =
+        !this.params.subagent_type && isForkSubagentEnabled(this.config);
+      const effectiveSubagentType =
+        this.params.subagent_type ??
+        (isFork ? undefined : DEFAULT_BUILTIN_SUBAGENT_TYPE);
       let subagentConfig: SubagentConfig;
 
       if (isFork) {
@@ -1411,18 +1458,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
       } else {
         const loadedConfig = await this.subagentManager.loadSubagent(
-          this.params.subagent_type!,
+          effectiveSubagentType!,
         );
         if (!loadedConfig) {
           return {
-            llmContent: `Subagent "${this.params.subagent_type}" not found`,
+            llmContent: `Subagent "${effectiveSubagentType}" not found`,
             returnDisplay: {
               type: 'task_execution' as const,
-              subagentName: this.params.subagent_type!,
+              subagentName: effectiveSubagentType!,
               taskDescription: this.params.description,
               taskPrompt: this.params.prompt,
               status: 'failed' as const,
-              terminateReason: `Subagent "${this.params.subagent_type}" not found`,
+              terminateReason: `Subagent "${effectiveSubagentType}" not found`,
             },
           };
         }

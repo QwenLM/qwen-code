@@ -490,55 +490,6 @@ describe('osc8 helpers', () => {
       expect(supportsHyperlinks()).toBe(true);
     });
 
-    it('alishu / OpenCode web terminal is enabled via OPENCODE_TERMINAL=1', () => {
-      setTTY(true);
-      process.env['OPENCODE_TERMINAL'] = '1';
-      expect(supportsHyperlinks()).toBe(true);
-    });
-
-    it('alishu BFF-injected sessions are enabled via BFF_TOKEN', () => {
-      setTTY(true);
-      process.env['BFF_TOKEN'] = 'eyJhbGciOi...';
-      expect(supportsHyperlinks()).toBe(true);
-    });
-
-    it('treats TERM=xterm-256color as OSC-8-capable (internal-deployment fallback)', () => {
-      setTTY(true);
-      process.env['TERM'] = 'xterm-256color';
-      expect(supportsHyperlinks()).toBe(true);
-    });
-
-    it('treats TERM=xterm as OSC-8-capable (internal-deployment fallback)', () => {
-      setTTY(true);
-      process.env['TERM'] = 'xterm';
-      expect(supportsHyperlinks()).toBe(true);
-    });
-
-    it('alishu signals still respect NO_COLOR / QWEN_DISABLE_HYPERLINKS', () => {
-      setTTY(true);
-      process.env['OPENCODE_TERMINAL'] = '1';
-      process.env['NO_COLOR'] = '1';
-      expect(supportsHyperlinks()).toBe(false);
-      delete process.env['NO_COLOR'];
-      process.env['QWEN_DISABLE_HYPERLINKS'] = '1';
-      expect(supportsHyperlinks()).toBe(false);
-    });
-
-    it('alishu signals still respect non-TTY suppression', () => {
-      setTTY(false);
-      process.env['OPENCODE_TERMINAL'] = '1';
-      process.env['BFF_TOKEN'] = 'x';
-      process.env['TERM'] = 'xterm-256color';
-      expect(supportsHyperlinks()).toBe(false);
-    });
-
-    it('OPENCODE_TERMINAL=0 does not enable (only "1" is the trigger)', () => {
-      setTTY(true);
-      process.env['OPENCODE_TERMINAL'] = '0';
-      // No other positive signal — should fall through to false.
-      expect(supportsHyperlinks()).toBe(false);
-    });
-
     it('Warp Terminal is intentionally NOT auto-detected (no OSC 8 support yet)', () => {
       // Warp's current rendering engine doesn't honor OSC 8 — it prints the
       // envelope as visible garbage. Falls through to the final return false
