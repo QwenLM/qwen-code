@@ -2262,6 +2262,18 @@ const SETTINGS_SCHEMA = {
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
       },
+      PostToolBatch: {
+        type: 'array',
+        label: 'Post Tool Batch Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute once after all tool calls in a batch resolve.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
       SessionStart: {
         type: 'array',
         label: 'Session Start Hooks',
