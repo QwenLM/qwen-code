@@ -793,6 +793,45 @@ describe('SkillTool', () => {
       );
     });
 
+    it('includes empty command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: '',
+      });
+
+      expect(invocation.getDescription()).toBe(
+        'Use skill: "mcp-prompt-a" with args: ""',
+      );
+    });
+
+    it('truncates markdown-looking command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: `${'x'.repeat(121)} **bold** [link](https://example.com)`,
+      });
+
+      expect(invocation.getDescription()).toBe(
+        `Use skill: "mcp-prompt-a" with args: "${'x'.repeat(117)}..."`,
+      );
+    });
+
+    it('escapes markdown-looking command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: '**bold** [link](https://example.com)',
+      });
+
+      expect(invocation.getDescription()).toBe(
+        'Use skill: "mcp-prompt-a" with args: "\\*\\*bold\\*\\* \\[link\\]\\(https://example\\.com\\)"',
+      );
+    });
+
     it('should not duplicate commands already present as file-based skills', async () => {
       // 'code-review' matches a skill in mockSkills → should be filtered out
       const commandsIncludingSkill = [

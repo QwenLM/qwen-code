@@ -378,9 +378,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
   }
 
   getDescription(): string {
-    return this.params.args
-      ? `Use skill: "${this.params.skill}" with args: "${this.params.args}"`
-      : `Use skill: "${this.params.skill}"`;
+    return this.params.args === undefined
+      ? `Use skill: "${this.params.skill}"`
+      : `Use skill: "${this.params.skill}" with args: "${formatArgsForDescription(this.params.args)}"`;
   }
 
   /**
@@ -534,4 +534,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       };
     }
   }
+}
+
+function formatArgsForDescription(args: string): string {
+  const escapeMarkdown = (value: string) =>
+    value.replace(/([\\`*_{}[\]()#+\-.!|>])/g, '\\$1');
+  return args.length > 120
+    ? `${escapeMarkdown(args.slice(0, 117))}...`
+    : escapeMarkdown(args);
 }
