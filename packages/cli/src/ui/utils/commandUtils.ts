@@ -42,7 +42,7 @@ export const isAtCommand = (query: string): boolean =>
 const SLASH_PATH_SEPARATOR_RE = /[/\\]/;
 
 const getSlashCommandFirstToken = (query: string): string =>
-  query.slice(1).trimStart().split(/\s+/)[0] ?? '';
+  query.slice(1).trimStart().split(/\s+/u)[0] ?? '';
 
 export const hasSlashCommandPathSeparator = (query: string): boolean =>
   SLASH_PATH_SEPARATOR_RE.test(getSlashCommandFirstToken(query));
@@ -51,6 +51,10 @@ export const hasSlashCommandPathSeparator = (query: string): boolean =>
  * Checks if a query string potentially represents an '/' command.
  * It triggers if the query starts with '/' but excludes code comments like '//'
  * and '/*', and file paths where the first token contains a path separator.
+ *
+ * WARNING: This lexical classifier is also used as the legacy fallback for
+ * UI history items that do not have explicit sentToModel metadata. Coordinate
+ * changes here with isRealUserTurn in historyMapping.ts.
  *
  * @param query The input query string.
  * @returns True if the query looks like an '/' command, false otherwise.

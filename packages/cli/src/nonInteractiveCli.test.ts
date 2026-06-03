@@ -174,6 +174,8 @@ describe('runNonInteractive', () => {
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getMaxSessionTurns: vi.fn().mockReturnValue(10),
+      getMaxWallTimeSeconds: vi.fn().mockReturnValue(-1),
+      getMaxToolCalls: vi.fn().mockReturnValue(-1),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getTargetDir: vi.fn().mockReturnValue('/test/project'),
       getMcpServers: vi.fn().mockReturnValue(undefined),
@@ -212,6 +214,12 @@ describe('runNonInteractive', () => {
       // restore worktree context. These tests don't exercise resume, so
       // return undefined to short-circuit the helper.
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      // Phase D-1: nonInteractiveCli calls this on every prompt to pick
+      // up the one-shot startup-worktree notice (set by gemini.tsx
+      // when --worktree was passed). These tests don't exercise the
+      // --worktree flag, so return null to short-circuit injection
+      // and let the resume-restore branch run.
+      consumePendingStartupWorktreeNotice: vi.fn().mockReturnValue(null),
     } as unknown as Config;
 
     mockSettings = {

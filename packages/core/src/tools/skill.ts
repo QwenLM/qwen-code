@@ -352,6 +352,10 @@ ${skillDescriptions}
 }
 
 class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
+  // Populated by scheduler via setPromptId; empty = direct/non-scheduled
+  // call, filter `prompt_id != ''` downstream. See design doc §4.1.1.
+  private promptId = '';
+
   constructor(
     private readonly config: Config,
     private readonly skillManager: SkillManager,
@@ -365,6 +369,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       | null = null,
   ) {
     super(params);
+  }
+
+  setPromptId(promptId: string): void {
+    this.promptId = promptId;
   }
 
   getDescription(): string {
@@ -417,7 +425,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
           if (typeof commandResult === 'string') {
             logSkillLaunch(
               this.config,
-              new SkillLaunchEvent(this.params.skill, true),
+              new SkillLaunchEvent(this.params.skill, true, this.promptId),
             );
             this.onSkillLoaded(this.params.skill);
             return {
@@ -430,7 +438,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         // Log failed skill launch
         logSkillLaunch(
           this.config,
-          new SkillLaunchEvent(this.params.skill, false),
+          new SkillLaunchEvent(this.params.skill, false, this.promptId),
         );
 
         // Get parse errors if any
@@ -457,7 +465,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // Log successful skill launch
       logSkillLaunch(
         this.config,
-        new SkillLaunchEvent(this.params.skill, true),
+        new SkillLaunchEvent(this.params.skill, true, this.promptId),
       );
       this.onSkillLoaded(this.params.skill);
 
@@ -513,7 +521,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // Log failed skill launch
       logSkillLaunch(
         this.config,
-        new SkillLaunchEvent(this.params.skill, false),
+        new SkillLaunchEvent(this.params.skill, false, this.promptId),
       );
 
       return {

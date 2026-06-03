@@ -61,6 +61,7 @@ import {
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
   API_CALL_FAILED_SPAN_STATUS_MESSAGE,
 } from '../../telemetry/tracer.js';
+import { hasUserVisibleContent } from './streamContentDetection.js';
 
 const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
@@ -285,6 +286,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         success: true,
         inputTokens: response.usageMetadata?.promptTokenCount,
         outputTokens: response.usageMetadata?.candidatesTokenCount,
+        cachedInputTokens: response.usageMetadata?.cachedContentTokenCount,
         durationMs: Date.now() - startTime,
       });
       return response;
@@ -462,6 +464,14 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let errorOccurred = false;
+
+    // TTFT (time to first token): wall-clock from generateContentStream
+    // dispatch to the first stream chunk containing user-visible content.
+    // Method-local closure variable — NEVER an instance field — because
+    // LoggingContentGenerator is shared across concurrent generateContentStream
+    // calls (one per ContentGenerator, see contentGenerator.ts:createContentGenerator).
+    // See docs/design/telemetry-llm-request-timing-design.md (D1, D2).
+    let ttftMs: number | undefined;
     // Tracks whether the idle timeout fired and ended the span. If so,
     // a resumed-after-timeout consumer must not call endLLMRequestSpan
     // again (the helper would no-op, but more importantly we skip the
@@ -515,6 +525,13 @@ export class LoggingContentGenerator implements ContentGenerator {
         }
         if (response.usageMetadata) {
           lastUsageMetadata = response.usageMetadata;
+        }
+        // Capture TTFT on the first stream chunk that contains user-visible
+        // content. hasUserVisibleContent skips role-only / usageMetadata-only
+        // chunks, so TTFT reflects "model produced something the operator can
+        // attribute to user-perceived latency."
+        if (ttftMs === undefined && hasUserVisibleContent(response)) {
+          ttftMs = Date.now() - startTime;
         }
         resetSpanTimeout?.();
         yield response;
@@ -601,6 +618,8 @@ export class LoggingContentGenerator implements ContentGenerator {
           success: !errorOccurred,
           inputTokens: lastUsageMetadata?.promptTokenCount,
           outputTokens: lastUsageMetadata?.candidatesTokenCount,
+          cachedInputTokens: lastUsageMetadata?.cachedContentTokenCount,
+          ttftMs,
           durationMs: Date.now() - startTime,
           error: errorOccurred
             ? aborted

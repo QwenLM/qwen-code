@@ -161,7 +161,9 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
       );
     }
 
-    const result = await service.createUserWorktree(slug, baseBranch);
+    const result = await service.createUserWorktree(slug, baseBranch, {
+      symlinkDirectories: this.config.getWorktreeSymlinkDirectories(),
+    });
     if (!result.success || !result.worktree) {
       const reason = result.error ?? 'Failed to create worktree.';
       debugLogger.warn(`enter_worktree: createUserWorktree failed: ${reason}`);

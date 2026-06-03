@@ -24,9 +24,10 @@ import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { OutputFormat } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 
 // Custom error to identify mock process.exit calls
 class MockProcessExitError extends Error {
@@ -110,6 +111,10 @@ vi.mock('./core/initializer.js', () => ({
   }),
 }));
 
+vi.mock('./commands/extensions/list.js', () => ({
+  handleList: mockHandleListExtensions,
+}));
+
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
   let originalEnvSandbox: string | undefined;
@@ -181,6 +186,7 @@ describe('gemini.tsx main function', () => {
         isInteractive: () => false,
         getQuestion: () => '',
         getSandbox: () => false,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
         getDebugMode: () => false,
         getListExtensions: () => false,
         getMcpServers: () => ({}),
@@ -228,6 +234,52 @@ describe('gemini.tsx main function', () => {
     processExitSpy.mockRestore();
   });
 
+  it('handles --list-extensions before sandbox and app config startup', async () => {
+    vi.clearAllMocks();
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      listExtensions: true,
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    mockHandleListExtensions.mockResolvedValue(undefined);
+
+    try {
+      await main();
+    } catch (e) {
+      if (!(e instanceof MockProcessExitError)) throw e;
+    }
+
+    expect(mockHandleListExtensions).toHaveBeenCalledOnce();
+    expect(processExitSpy).toHaveBeenCalledWith(0);
+    expect(loadSandboxConfig).not.toHaveBeenCalled();
+    expect(loadCliConfig).not.toHaveBeenCalled();
+
+    processExitSpy.mockRestore();
+  });
+
   it('should skip full settings discovery in bare mode', async () => {
     const originalArgv = process.argv;
     process.argv = ['node', 'script.js', '--bare'];
@@ -260,6 +312,7 @@ describe('gemini.tsx main function', () => {
       isInteractive: () => false,
       getQuestion: () => 'bare prompt',
       getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
@@ -569,6 +622,7 @@ describe('gemini.tsx main function', () => {
       isInteractive: () => false,
       getQuestion: () => '  hello stream  ',
       getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
       getDebugMode: () => false,
       getListExtensions: () => false,
       getMcpServers: () => ({}),
@@ -773,6 +827,8 @@ describe('gemini.tsx main function kitty protocol', () => {
       disabledSlashCommands: undefined,
       authType: undefined,
       maxSessionTurns: undefined,
+      maxWallTime: undefined,
+      maxToolCalls: undefined,
       experimentalLsp: undefined,
       channel: undefined,
       chatRecording: undefined,

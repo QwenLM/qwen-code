@@ -20,6 +20,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
+  'Auto mode': 'Auto 模式',
   'plan mode': '規劃模式',
   'auto-accept edits': '自動接受編輯',
   'Accepting edits': '接受編輯',
@@ -773,6 +774,7 @@ export default {
   'Auto-memory: {{status}}': '自動記憶：{{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     '自動整理：{{status}} · {{lastDream}} · /dream 立即運行',
+  'Auto-skill: {{status}}': '自動技能：{{status}}',
   never: '從未',
   on: '開',
   off: '關',

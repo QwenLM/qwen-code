@@ -22,6 +22,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Mode shell',
   'YOLO mode': 'Mode YOLO',
+  'Auto mode': 'Mode auto',
   'plan mode': 'mode plan',
   'auto-accept edits': 'acceptation automatique des modifications',
   'Accepting edits': 'Acceptation des modifications',
@@ -1865,6 +1866,7 @@ export default {
   'Auto-memory: {{status}}': 'Mémoire automatique : {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Rêve automatique : {{status}} · {{lastDream}} · /dream pour lancer',
+  'Auto-skill: {{status}}': 'Compétence automatique : {{status}}',
   never: 'jamais',
   on: 'activé',
   off: 'désactivé',

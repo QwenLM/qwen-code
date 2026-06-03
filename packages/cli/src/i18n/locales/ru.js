@@ -24,6 +24,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Режим терминала',
   'YOLO mode': 'Режим YOLO',
+  'Auto mode': 'Автоматический режим',
   'plan mode': 'Режим планирования',
   'auto-accept edits': 'Режим принятия правок',
   'Accepting edits': 'Принятие правок',
@@ -838,6 +839,7 @@ export default {
   'Auto-memory: {{status}}': 'Автопамять: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Автоконсолидация: {{status}} · {{lastDream}} · /dream для запуска',
+  'Auto-skill: {{status}}': 'Автонавык: {{status}}',
   never: 'никогда',
   on: 'вкл',
   off: 'выкл',
