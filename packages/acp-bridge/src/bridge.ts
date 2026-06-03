@@ -553,6 +553,37 @@ function broadcastTurnComplete(
   });
 }
 
+/**
+ * Extract a human-readable message from an unknown error value.
+ * Handles Error instances, JSON-RPC error objects (`{ code, message,
+ * data: { details } }`), and plain objects with a `message` property.
+ * JSON-RPC internal errors carry the generic `"Internal error"` as
+ * `message`; the actual detail lives in `data.details`.
+ */
+function extractErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null) {
+    const obj = err as Record<string, unknown>;
+    const data = obj['data'];
+    if (typeof data === 'object' && data !== null) {
+      const details = (data as Record<string, unknown>)['details'];
+      if (typeof details === 'string' && details.length > 0) return details;
+    }
+    const msg = obj['message'];
+    if (typeof msg === 'string') return msg;
+  }
+  return String(err);
+}
+
+function extractErrorCode(err: unknown): string | undefined {
+  if (typeof err !== 'object' || err === null || !('code' in err))
+    return undefined;
+  const raw = (err as Record<string, unknown>)['code'];
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'number') return String(raw);
+  return undefined;
+}
+
 function broadcastTurnError(
   entry: SessionEntry,
   sessionId: string,
@@ -560,13 +591,8 @@ function broadcastTurnError(
   promptId: string | undefined,
   originatorClientId: string | undefined,
 ): void {
-  const message = err instanceof Error ? err.message : String(err);
-  const code =
-    err instanceof Error &&
-    'code' in err &&
-    typeof (err as Error & { code?: unknown }).code === 'string'
-      ? (err as Error & { code: string }).code
-      : undefined;
+  const message = extractErrorMessage(err);
+  const code = extractErrorCode(err);
   entry.events.publish({
     type: 'turn_error',
     data: {
@@ -2362,9 +2388,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
                     () => {},
                     (err) => {
                       writeStderrLine(
-                        `sendPrompt: forward failed for session ${sessionId}: ${
-                          err instanceof Error ? err.message : String(err)
-                        }`,
+                        `sendPrompt: forward failed for session ${sessionId}: ${extractErrorMessage(err)}`,
                       );
                       broadcastPromptCancelledOnce(
                         entry,

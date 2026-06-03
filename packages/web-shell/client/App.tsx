@@ -586,10 +586,17 @@ export function App({
       opts?: { optimisticUserMessage?: boolean },
     ) => {
       clearFollowup();
-      return sessionActions.sendPrompt(text, {
-        images,
-        optimisticUserMessage: opts?.optimisticUserMessage,
-      });
+      return sessionActions
+        .sendPrompt(text, {
+          images,
+          optimisticUserMessage: opts?.optimisticUserMessage,
+        })
+        .catch((error: unknown) => {
+          throw Object.assign(
+            error instanceof Error ? error : new Error(String(error)),
+            { _alreadyDispatched: true },
+          );
+        });
     },
     [clearFollowup, sessionActions],
   );
@@ -665,6 +672,13 @@ export function App({
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        (error as { _alreadyDispatched?: boolean })._alreadyDispatched
+      ) {
+        return;
+      }
       store.dispatch([{ type: 'error', text: formatError(error, fallback) }]);
     },
     [store],
