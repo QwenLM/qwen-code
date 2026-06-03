@@ -691,6 +691,22 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ).toBe(true);
   });
 
+  it('returns true for protected heredoc redirects with repeated quote tokens', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: [
+            "bash <<'SCRIPT'",
+            'echo "{}" > """.qwen/settings.json"""',
+            'SCRIPT',
+          ].join('\n'),
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it('uses the provided cwd fallback when ctx.cwd is absent', () => {
     expect(
       shouldForceAutoModeReviewForAllow(

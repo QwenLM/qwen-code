@@ -315,12 +315,29 @@ function hasRawProtectedRedirect(command: string, cwd: string): boolean {
       i++;
     }
 
-    const target = token.replace(/^['"]/, '').replace(/['")&]+$/, '');
+    const target = stripRawRedirectTargetToken(token);
     if (!target || target.startsWith('&')) continue;
     const resolved = path.isAbsolute(target) ? target : path.join(cwd, target);
     if (isAutoModeProtectedWritePath(resolved)) return true;
   }
   return false;
+}
+
+function stripRawRedirectTargetToken(token: string): string {
+  let start = 0;
+  let end = token.length;
+
+  while (start < end && (token[start] === "'" || token[start] === '"')) {
+    start++;
+  }
+
+  while (end > start) {
+    const ch = token[end - 1];
+    if (ch !== "'" && ch !== '"' && ch !== ')' && ch !== '&') break;
+    end--;
+  }
+
+  return token.slice(start, end);
 }
 
 /**
