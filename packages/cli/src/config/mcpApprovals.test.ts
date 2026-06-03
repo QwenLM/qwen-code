@@ -45,28 +45,28 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     expect(approvals.getState(projectRoot, 'slack', server)).toBe('pending');
   });
 
-  it('returns approved after approval', () => {
+  it('returns approved after approval', async () => {
     const approvals = loadMcpApprovals();
-    approvals.setState(projectRoot, 'slack', server, 'approved');
+    await approvals.setState(projectRoot, 'slack', server, 'approved');
     expect(approvals.getState(projectRoot, 'slack', server)).toBe('approved');
   });
 
-  it('returns rejected after rejection', () => {
+  it('returns rejected after rejection', async () => {
     const approvals = loadMcpApprovals();
-    approvals.setState(projectRoot, 'slack', server, 'rejected');
+    await approvals.setState(projectRoot, 'slack', server, 'rejected');
     expect(approvals.getState(projectRoot, 'slack', server)).toBe('rejected');
   });
 
-  it('persists decisions across reload', () => {
-    loadMcpApprovals().setState(projectRoot, 'slack', server, 'approved');
+  it('persists decisions across reload', async () => {
+    await loadMcpApprovals().setState(projectRoot, 'slack', server, 'approved');
     resetMcpApprovalsForTesting();
     expect(loadMcpApprovals().getState(projectRoot, 'slack', server)).toBe(
       'approved',
     );
   });
 
-  it('writes the file with the documented shape', () => {
-    loadMcpApprovals().setState(projectRoot, 'slack', server, 'approved');
+  it('writes the file with the documented shape', async () => {
+    await loadMcpApprovals().setState(projectRoot, 'slack', server, 'approved');
     const onDisk = JSON.parse(
       fs.readFileSync(path.join(dir, MCP_APPROVALS_FILENAME), 'utf-8'),
     );
@@ -75,23 +75,23 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     expect(record.hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it('recovers when a per-project approvals record is corrupted', () => {
+  it('recovers when a per-project approvals record is corrupted', async () => {
     const filePath = path.join(dir, MCP_APPROVALS_FILENAME);
     fs.writeFileSync(
       filePath,
       JSON.stringify({ [path.resolve(projectRoot)]: 'garbage' }),
     );
     const approvals = loadMcpApprovals();
-    expect(() =>
+    await expect(
       approvals.setState(projectRoot, 'slack', server, 'approved'),
-    ).not.toThrow();
+    ).resolves.toBeUndefined();
     expect(approvals.getState(projectRoot, 'slack', server)).toBe('approved');
   });
 
   describe('hash binding (the issue #4615 requirement)', () => {
-    it('reverts to pending when the config changes after approval', () => {
+    it('reverts to pending when the config changes after approval', async () => {
       const approvals = loadMcpApprovals();
-      approvals.setState(projectRoot, 'slack', server, 'approved');
+      await approvals.setState(projectRoot, 'slack', server, 'approved');
       expect(approvals.getState(projectRoot, 'slack', server)).toBe('approved');
 
       // Same name, edited command — the user never reviewed this.
@@ -99,16 +99,16 @@ describe('mcpApprovals (hash-bound approval store)', () => {
       expect(approvals.getState(projectRoot, 'slack', edited)).toBe('pending');
     });
 
-    it('a rejected server also reverts to pending when edited', () => {
+    it('a rejected server also reverts to pending when edited', async () => {
       const approvals = loadMcpApprovals();
-      approvals.setState(projectRoot, 'slack', server, 'rejected');
+      await approvals.setState(projectRoot, 'slack', server, 'rejected');
       const edited: MCPServerConfig = { ...server, args: ['other.js'] };
       expect(approvals.getState(projectRoot, 'slack', edited)).toBe('pending');
     });
 
-    it('ignores provenance-only changes (scope) — stays approved', () => {
+    it('ignores provenance-only changes (scope) — stays approved', async () => {
       const approvals = loadMcpApprovals();
-      approvals.setState(projectRoot, 'slack', server, 'approved');
+      await approvals.setState(projectRoot, 'slack', server, 'approved');
       const sameBehavior: MCPServerConfig = {
         command: 'node',
         args: ['server.js'],
@@ -119,9 +119,9 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     });
   });
 
-  it('keeps decisions independent per project root', () => {
+  it('keeps decisions independent per project root', async () => {
     const approvals = loadMcpApprovals();
-    approvals.setState(projectRoot, 'slack', server, 'approved');
+    await approvals.setState(projectRoot, 'slack', server, 'approved');
     expect(approvals.getState('/work/other-repo', 'slack', server)).toBe(
       'pending',
     );
@@ -153,8 +153,8 @@ describe('mcpApprovals (hash-bound approval store)', () => {
       expect(pending.sort()).toEqual(['proj', 'ws']);
     });
 
-    it('drops a gated server once it is approved', () => {
-      loadMcpApprovals().setState(
+    it('drops a gated server once it is approved', async () => {
+      await loadMcpApprovals().setState(
         projectRoot,
         'ws',
         workspaceServer,
@@ -167,8 +167,8 @@ describe('mcpApprovals (hash-bound approval store)', () => {
       expect(pending).toEqual([]);
     });
 
-    it('keeps a rejected gated server in the pending (skip) set', () => {
-      loadMcpApprovals().setState(
+    it('keeps a rejected gated server in the pending (skip) set', async () => {
+      await loadMcpApprovals().setState(
         projectRoot,
         'ws',
         workspaceServer,

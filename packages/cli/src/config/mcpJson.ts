@@ -66,7 +66,11 @@ export function loadProjectMcpServers(
   }
 
   const mcpServers = (parsed as { mcpServers?: unknown })?.mcpServers;
-  if (!mcpServers || typeof mcpServers !== 'object') {
+  if (
+    !mcpServers ||
+    typeof mcpServers !== 'object' ||
+    Array.isArray(mcpServers)
+  ) {
     return {
       servers: {},
       path: filePath,

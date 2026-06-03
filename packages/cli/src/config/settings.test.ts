@@ -3861,9 +3861,10 @@ describe('Settings Loading and Merging', () => {
         expect(process.env['QWEN_HOME_TEST_VAR']).toEqual('hello');
       });
 
-      it('ignores QWEN_HOME and QWEN_RUNTIME_DIR set in a project .env', () => {
+      it('ignores global-state paths set in a project .env', () => {
         delete process.env['QWEN_HOME'];
         delete process.env['QWEN_RUNTIME_DIR'];
+        delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
 
         const cwdSpy = vi
           .spyOn(process, 'cwd')
@@ -3884,6 +3885,7 @@ describe('Settings Loading and Merging', () => {
               return [
                 'QWEN_HOME=/tmp/hijack',
                 'QWEN_RUNTIME_DIR=/tmp/hijack-runtime',
+                'QWEN_CODE_MCP_APPROVALS_PATH=/tmp/preapproved.json',
                 'OTHER_VAR=ok',
               ].join('\n');
             return '{}';
@@ -3895,6 +3897,7 @@ describe('Settings Loading and Merging', () => {
         // A project .env must never redirect global state.
         expect(process.env['QWEN_HOME']).toBeUndefined();
         expect(process.env['QWEN_RUNTIME_DIR']).toBeUndefined();
+        expect(process.env['QWEN_CODE_MCP_APPROVALS_PATH']).toBeUndefined();
         // Other vars from the same project .env still load.
         expect(process.env['OTHER_VAR']).toEqual('ok');
 

@@ -98,7 +98,7 @@ export const useMcpApproval = (config: Config) => {
   );
 
   const handleMcpApprovalSelect = useCallback(
-    (choice: McpApprovalChoice) => {
+    async (choice: McpApprovalChoice) => {
       const approvals = loadMcpApprovals();
       const root = config.getWorkingDir();
       const current = queue[0];
@@ -107,17 +107,32 @@ export const useMcpApproval = (config: Config) => {
       }
       if (choice === McpApprovalChoice.APPROVE_ALL) {
         for (const server of queue) {
-          approvals.setState(root, server.name, server.config, 'approved');
+          await approvals.setState(
+            root,
+            server.name,
+            server.config,
+            'approved',
+          );
           reconnect(server.name);
         }
         setQueue([]);
         return;
       }
       if (choice === McpApprovalChoice.APPROVE) {
-        approvals.setState(root, current.name, current.config, 'approved');
+        await approvals.setState(
+          root,
+          current.name,
+          current.config,
+          'approved',
+        );
         reconnect(current.name);
       } else {
-        approvals.setState(root, current.name, current.config, 'rejected');
+        await approvals.setState(
+          root,
+          current.name,
+          current.config,
+          'rejected',
+        );
       }
       setQueue((q) => q.slice(1));
     },

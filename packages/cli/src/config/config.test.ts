@@ -2148,7 +2148,7 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    const mcpServers = config.getMcpServers()!;
+    const mcpServers = config.getMcpServers() ?? {};
     expect(mcpServers['cli-server']).toEqual({
       command: 'node',
       args: ['server.js'],
@@ -2167,7 +2167,8 @@ describe('loadCliConfig with --mcp-config', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv);
 
-    expect(config.getMcpServers()!['direct-server']).toEqual({
+    const mcpServers = config.getMcpServers() ?? {};
+    expect(mcpServers['direct-server']).toEqual({
       url: 'http://localhost:8080',
     });
   });
@@ -2181,7 +2182,8 @@ describe('loadCliConfig with --mcp-config', () => {
     const config = await loadCliConfig(baseSettings, argv);
 
     // CLI config should override settings
-    expect(config.getMcpServers()!['settings-server']).toEqual({
+    const mcpServers = config.getMcpServers() ?? {};
+    expect(mcpServers['settings-server']).toEqual({
       url: 'http://localhost:8888',
     });
   });
@@ -2535,13 +2537,13 @@ describe('loadCliConfig chatCompression', () => {
     const settings: Settings = {
       model: {
         chatCompression: {
-          contextPercentageThreshold: 0.5,
+          imageTokenEstimate: 1234,
         },
       },
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getChatCompression()).toEqual({
-      contextPercentageThreshold: 0.5,
+      imageTokenEstimate: 1234,
     });
   });
 

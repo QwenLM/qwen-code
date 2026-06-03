@@ -79,7 +79,7 @@ describe('useMcpApproval', () => {
     expect(result.current.mcpApprovalRemaining).toBe(1);
   });
 
-  it('approve persists, un-gates, reconnects, and advances the queue', () => {
+  it('approve persists, un-gates, reconnects, and advances the queue', async () => {
     const a: MCPServerConfig = { command: 'a', scope: 'project' };
     const config = makeConfig({
       a,
@@ -87,7 +87,7 @@ describe('useMcpApproval', () => {
     });
     const { result } = renderHook(() => useMcpApproval(config));
 
-    act(() =>
+    await act(async () =>
       result.current.handleMcpApprovalSelect(McpApprovalChoice.APPROVE),
     );
 
@@ -97,25 +97,27 @@ describe('useMcpApproval', () => {
     expect(result.current.currentMcpApproval?.name).toBe('b');
   });
 
-  it('reject persists rejected, does not reconnect, advances', () => {
+  it('reject persists rejected, does not reconnect, advances', async () => {
     const a: MCPServerConfig = { command: 'a', scope: 'project' };
     const config = makeConfig({ a, b: { command: 'b', scope: 'project' } });
     const { result } = renderHook(() => useMcpApproval(config));
 
-    act(() => result.current.handleMcpApprovalSelect(McpApprovalChoice.REJECT));
+    await act(async () =>
+      result.current.handleMcpApprovalSelect(McpApprovalChoice.REJECT),
+    );
 
     expect(stateOf('a', a)).toBe('rejected');
     expect(discoverSpy).not.toHaveBeenCalled();
     expect(result.current.currentMcpApproval?.name).toBe('b');
   });
 
-  it('approve-all approves every queued server and closes the dialog', () => {
+  it('approve-all approves every queued server and closes the dialog', async () => {
     const a: MCPServerConfig = { command: 'a', scope: 'project' };
     const b: MCPServerConfig = { command: 'b', scope: 'project' };
     const config = makeConfig({ a, b });
     const { result } = renderHook(() => useMcpApproval(config));
 
-    act(() =>
+    await act(async () =>
       result.current.handleMcpApprovalSelect(McpApprovalChoice.APPROVE_ALL),
     );
 
@@ -125,10 +127,10 @@ describe('useMcpApproval', () => {
     expect(result.current.isMcpApprovalDialogOpen).toBe(false);
   });
 
-  it('skips servers already decided (only prompts pending)', () => {
+  it('skips servers already decided (only prompts pending)', async () => {
     const a: MCPServerConfig = { command: 'a', scope: 'project' };
     // Pre-approve a.
-    loadMcpApprovals().setState(dir, 'a', a, 'approved');
+    await loadMcpApprovals().setState(dir, 'a', a, 'approved');
     resetMcpApprovalsForTesting();
 
     const config = makeConfig({ a, b: { command: 'b', scope: 'project' } });

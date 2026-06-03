@@ -106,6 +106,13 @@ describe('loadProjectMcpServers', () => {
     expect(result.errors[0]).toContain('no "mcpServers" object');
   });
 
+  it('rejects an array mcpServers value', () => {
+    write(JSON.stringify({ mcpServers: [{ command: 'node' }] }));
+    const result = loadProjectMcpServers(dir);
+    expect(result.servers).toEqual({});
+    expect(result.errors[0]).toContain('no "mcpServers" object');
+  });
+
   it('skips non-object server entries but keeps the valid ones', () => {
     write(
       JSON.stringify({

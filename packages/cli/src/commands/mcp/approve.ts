@@ -33,11 +33,11 @@ function loadGatedServers(cwd: string): Record<string, MCPServerConfig> {
   return gated;
 }
 
-function setProjectServerStatus(
+async function setProjectServerStatus(
   name: string | undefined,
   status: McpApprovalStatus,
   all: boolean,
-): void {
+): Promise<void> {
   const cwd = process.cwd();
   const servers = loadGatedServers(cwd);
 
@@ -68,7 +68,7 @@ function setProjectServerStatus(
     }
     // The decision binds to this exact config's hash: editing the server in
     // its source file later returns it to pending (issue #4615).
-    approvals.setState(cwd, target, config, status);
+    await approvals.setState(cwd, target, config, status);
     writeStdoutLine(
       `${verb} MCP server "${target}" (bound to its current config).`,
     );
@@ -98,7 +98,7 @@ export const approveCommand: CommandModule = {
         default: false,
       }),
   handler: async (argv) => {
-    setProjectServerStatus(
+    await setProjectServerStatus(
       argv['name'] as string | undefined,
       'approved',
       argv['all'] as boolean,
@@ -123,7 +123,7 @@ export const rejectCommand: CommandModule = {
         default: false,
       }),
   handler: async (argv) => {
-    setProjectServerStatus(
+    await setProjectServerStatus(
       argv['name'] as string | undefined,
       'rejected',
       argv['all'] as boolean,

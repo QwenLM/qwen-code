@@ -11,6 +11,7 @@ import {
   hashMcpServerConfig,
   isGatedMcpScope,
   Storage,
+  atomicWriteFile,
   type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
@@ -87,12 +88,12 @@ export class LoadedMcpApprovals {
   }
 
   /** Persist an approve/reject decision bound to the current config hash. */
-  setState(
+  async setState(
     projectRoot: string,
     serverName: string,
     config: MCPServerConfig,
     status: McpApprovalStatus,
-  ): void {
+  ): Promise<void> {
     const root = normalizeProjectRoot(projectRoot);
     const existing = this.file.config[root];
     const project: Record<string, McpApprovalRecord> =
@@ -101,7 +102,7 @@ export class LoadedMcpApprovals {
         : {};
     project[serverName] = { hash: hashMcpServerConfig(config), status };
     this.file.config[root] = project;
-    saveMcpApprovals(this.file);
+    await saveMcpApprovals(this.file);
   }
 }
 
@@ -146,6 +147,9 @@ export function loadMcpApprovals(): LoadedMcpApprovals {
     { path: filePath, config },
     errors,
   );
+  for (const error of errors) {
+    writeStderrLine(`Warning: MCP approvals file error: ${error.message}`);
+  }
   return loadedMcpApprovals;
 }
 
@@ -174,17 +178,16 @@ export function getPendingProjectMcpServers(
   return pending;
 }
 
-export function saveMcpApprovals(file: {
+export async function saveMcpApprovals(file: {
   path: string;
   config: McpApprovalsConfig;
-}): void {
+}): Promise<void> {
   try {
     const dirPath = path.dirname(file.path);
     if (!fs.existsSync(dirPath)) {
       fs.mkdirSync(dirPath, { recursive: true });
     }
-    fs.writeFileSync(file.path, JSON.stringify(file.config, null, 2), {
-      encoding: 'utf-8',
+    await atomicWriteFile(file.path, JSON.stringify(file.config, null, 2), {
       mode: 0o600,
     });
   } catch (error) {
