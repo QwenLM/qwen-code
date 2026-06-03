@@ -219,6 +219,7 @@ async function readGeminiMdFiles(
   onInstructionsLoaded?: (
     notification: InstructionsLoadedNotification,
   ) => void | Promise<void>,
+  loadReason: Exclude<InstructionLoadReason, 'include'> = 'session_start',
 ): Promise<GeminiFileContent[]> {
   // Process files in parallel with concurrency limit to prevent EMFILE errors
   const CONCURRENT_LIMIT = 20; // Higher limit for file reads as they're typically faster
@@ -245,7 +246,7 @@ async function readGeminiMdFiles(
           await notifyInstructionsLoaded({
             filePath,
             memoryType: getMemoryType(filePath),
-            loadReason: 'session_start',
+            loadReason,
           });
 
           // Process imports in the content
@@ -262,12 +263,13 @@ async function readGeminiMdFiles(
             importFormat,
             {
               onFileImported: async (notification) => {
+                const parentFilePath = notification.parentFilePath;
                 await notifyInstructionsLoaded({
                   filePath: notification.filePath,
-                  memoryType: getMemoryType(notification.filePath),
+                  memoryType: getMemoryType(parentFilePath),
                   loadReason: 'include',
                   triggerFilePath: filePath,
-                  parentFilePath: notification.parentFilePath,
+                  parentFilePath,
                 });
               },
             },
@@ -345,6 +347,7 @@ export interface LoadServerHierarchicalMemoryResponse {
 
 export interface LoadServerHierarchicalMemoryOptions {
   explicitOnly?: boolean;
+  loadReason?: Exclude<InstructionLoadReason, 'include'>;
   onInstructionsLoaded?: (
     notification: InstructionsLoadedNotification,
   ) => void | Promise<void>;
@@ -469,6 +472,7 @@ export async function loadServerHierarchicalMemory(
   let fileCount = 0;
 
   if (filePaths.length > 0) {
+    const loadReason = options.loadReason ?? 'session_start';
     const contentsWithPaths = await readGeminiMdFiles(
       filePaths,
       importFormat,
@@ -478,6 +482,7 @@ export async function loadServerHierarchicalMemory(
         extensionContextFilePaths,
       ),
       options.onInstructionsLoaded,
+      loadReason,
     );
     // Pass CWD for relative path display in concatenated content
     combinedInstructions = concatenateInstructions(

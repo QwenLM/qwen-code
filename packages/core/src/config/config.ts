@@ -68,6 +68,7 @@ import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
+import type { InstructionLoadReason } from '../hooks/types.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -1610,7 +1611,7 @@ export class Config {
       await this.extensionManager.refreshCache();
     }
 
-    await this.refreshHierarchicalMemory();
+    await this.refreshHierarchicalMemory('session_start');
     this.debugLogger.debug('Hierarchical memory loaded');
 
     // Progressive MCP availability: skip MCP discovery in the synchronous
@@ -1866,7 +1867,9 @@ export class Config {
     return failed;
   }
 
-  async refreshHierarchicalMemory(): Promise<void> {
+  async refreshHierarchicalMemory(
+    loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
+  ): Promise<void> {
     const { memoryContent, fileCount, conditionalRules, projectRoot } =
       await loadServerHierarchicalMemory(
         this.getWorkingDir(),
@@ -1878,6 +1881,7 @@ export class Config {
         this.contextRuleExcludes,
         {
           explicitOnly: this.getBareMode(),
+          loadReason,
           onInstructionsLoaded: createInstructionsLoadedCallback(
             () => this.hookSystem,
           ),

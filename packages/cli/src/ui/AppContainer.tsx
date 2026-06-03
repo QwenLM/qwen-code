@@ -1326,6 +1326,7 @@ export const AppContainer = (props: AppContainerProps) => {
           settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
           config.getContextRuleExcludes(),
           {
+            loadReason: 'refresh',
             onInstructionsLoaded: createInstructionsLoadedCallback(() =>
               config.getHookSystem(),
             ),

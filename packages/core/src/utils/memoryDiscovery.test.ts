@@ -501,6 +501,40 @@ describe('loadServerHierarchicalMemory', () => {
     );
   });
 
+  it('uses refresh load reason for explicit memory refreshes', async () => {
+    const projectFile = await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        loadReason: 'refresh',
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        {
+          filePath: projectFile,
+          memoryType: 'project',
+          loadReason: 'refresh',
+        },
+      ]),
+    );
+  });
+
   it('notifies when imported instruction files are loaded', async () => {
     await createEmptyDir(path.join(projectRoot, '.git'));
     const importedFile = await createTestFile(
@@ -548,6 +582,50 @@ describe('loadServerHierarchicalMemory', () => {
       notifications.findIndex((item) => item.filePath === projectFile),
     ).toBeLessThan(
       notifications.findIndex((item) => item.filePath === importedFile),
+    );
+  });
+
+  it('inherits memory type from the importing instruction file', async () => {
+    const importedFile = await createTestFile(
+      path.join(homedir, 'rules', 'personal.md'),
+      'personal included content',
+    );
+    const userFile = await createTestFile(
+      path.join(homedir, DEFAULT_CONTEXT_FILENAME),
+      'user context @./rules/personal.md',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      homedir,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filePath: userFile,
+          memoryType: 'user',
+          loadReason: 'session_start',
+        }),
+        expect.objectContaining({
+          filePath: importedFile,
+          memoryType: 'user',
+          loadReason: 'include',
+          triggerFilePath: userFile,
+          parentFilePath: userFile,
+        }),
+      ]),
     );
   });
 

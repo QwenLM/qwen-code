@@ -259,7 +259,7 @@ export interface HookInput {
 
 export type InstructionMemoryType = 'user' | 'project' | 'local' | 'extension';
 
-export type InstructionLoadReason = 'session_start' | 'include';
+export type InstructionLoadReason = 'session_start' | 'include' | 'refresh';
 
 /**
  * Input for InstructionsLoaded hook events
