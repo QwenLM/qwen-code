@@ -48,6 +48,12 @@ import { GitService } from '../services/gitService.js';
 import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
+import {
+  MemoryPressureMonitor,
+  DEFAULT_PRESSURE_CONFIG,
+  validateMemoryPressureConfig,
+  type MemoryPressureConfig,
+} from '../services/memoryPressureMonitor.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
 import {
@@ -109,9 +115,11 @@ import {
 import {
   PermissionMode,
   NotificationType,
+  type PermissionDeniedReason,
   type PermissionSuggestion,
   type HookEventName,
   type HookDefinition,
+  type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 
@@ -155,6 +163,7 @@ import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
 const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
+const memoryPressureConfigLogger = createDebugLogger('MEMORY_PRESSURE');
 
 import {
   ModelsConfig,
@@ -270,12 +279,39 @@ export interface BugCommandSettings {
 export interface ChatCompressionSettings {
   /**
    * Estimated tokens for a single inline image / document part when
-   * apportioning chars across history in `findCompressSplitPoint`.
+   * apportioning chars across history during compression size estimation.
    * Also used as the placeholder budget when stripping inline media
    * out of the side-query compaction prompt. Default 1600.
    * Env override: `QWEN_IMAGE_TOKEN_ESTIMATE`.
    */
   imageTokenEstimate?: number;
+  /**
+   * Number of most-recently-touched files whose current content is
+   * restored (embedded or referenced) after auto-compaction. Default 5.
+   * Env override: `QWEN_COMPACT_MAX_RECENT_FILES`.
+   */
+  maxRecentFilesToRetain?: number;
+  /**
+   * Number of most-recent images (tool screenshots / user pastes)
+   * restored after auto-compaction. Default 3.
+   * Env override: `QWEN_COMPACT_MAX_RECENT_IMAGES`.
+   */
+  maxRecentImagesToRetain?: number;
+  /**
+   * When true, auto-compaction also fires once the number of
+   * tool-returned images accumulated in history reaches
+   * `screenshotTriggerThreshold`, independent of token usage. Aimed at
+   * computer-use sessions where frequent screenshots dilute model
+   * attention without necessarily exceeding the token budget. Default true.
+   * Env override: `QWEN_COMPACT_SCREENSHOT_TRIGGER` (`1`/`true`/`0`/`false`).
+   */
+  enableScreenshotTrigger?: boolean;
+  /**
+   * Tool-returned image count at or above which the screenshot trigger
+   * fires (only when `enableScreenshotTrigger`). Default 50.
+   * Env override: `QWEN_COMPACT_SCREENSHOT_THRESHOLD`.
+   */
+  screenshotTriggerThreshold?: number;
 }
 
 /**
@@ -668,6 +704,7 @@ export interface ConfigParameters {
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
   forkSubagentEnabled?: boolean;
+  computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -821,6 +858,53 @@ function normalizeConfigOutputFormat(
   }
 }
 
+function loadMemoryPressureConfig(): MemoryPressureConfig {
+  const config: MemoryPressureConfig = { ...DEFAULT_PRESSURE_CONFIG };
+
+  try {
+    config.softPressureRatio = readMemoryPressureRatioEnv(
+      'QWEN_MEMORY_PRESSURE_SOFT',
+      config.softPressureRatio,
+    );
+    config.hardPressureRatio = readMemoryPressureRatioEnv(
+      'QWEN_MEMORY_PRESSURE_HARD',
+      config.hardPressureRatio,
+    );
+    config.criticalRatio = readMemoryPressureRatioEnv(
+      'QWEN_MEMORY_PRESSURE_CRITICAL',
+      config.criticalRatio,
+    );
+
+    if (process.env['QWEN_MEMORY_ENABLE_GC'] === '1') {
+      config.enableExplicitGC = true;
+    }
+
+    validateMemoryPressureConfig(config);
+  } catch (err) {
+    const fallbackMsg =
+      '[QWEN] WARNING: Invalid memory pressure config; using defaults. ' +
+      `Error: ${getErrorMessage(err)}`;
+    process.stderr.write(`${fallbackMsg}\n`);
+    memoryPressureConfigLogger.warn(fallbackMsg);
+    return { ...DEFAULT_PRESSURE_CONFIG };
+  }
+
+  return config;
+}
+
+function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
+  const raw = process.env[envName];
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`${envName} must be a finite number`);
+  }
+  return parsed;
+}
+
 /**
  * Options for Config.initialize()
  */
@@ -843,6 +927,12 @@ const DEFAULT_BARE_CORE_TOOLS = [
   ToolNames.NOTEBOOK_EDIT,
   ToolNames.SHELL,
 ];
+
+// Tracks whether the first Config in this process has claimed the global
+// QWEN_CODE_SESSION_ID env var. Prevents throwaway Config instances from
+// overwriting the real session's ID while still allowing nested qwen-code
+// processes to claim their own (they start with a fresh module scope).
+let sessionEnvClaimed = false;
 
 export class Config {
   private sessionId: string;
@@ -876,6 +966,8 @@ export class Config {
   private pendingMcpBudgetCallback?: (event: McpBudgetEvent) => void;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
+  private memoryPressureConfig?: MemoryPressureConfig;
+  private memoryPressureMonitor?: MemoryPressureMonitor;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
   private readonly monitorRegistry = new MonitorRegistry();
   private backgroundAgentResumeService?: BackgroundAgentResumeService;
@@ -984,6 +1076,7 @@ export class Config {
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
   private readonly forkSubagentEnabled: boolean = false;
+  private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -1046,6 +1139,16 @@ export class Config {
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
+    // Only set the global env marker once per process lifetime, so
+    // throwaway Config instances (e.g. telemetry-only) don't clobber
+    // the real interactive session's ID. Uses a module-level flag
+    // rather than checking env existence — otherwise a nested qwen-code
+    // launched from within a session would inherit the parent's ID and
+    // never claim its own.
+    if (!sessionEnvClaimed && process.env) {
+      process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
+      sessionEnvClaimed = true;
+    }
     this.sessionData = params.sessionData;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
@@ -1156,6 +1259,7 @@ export class Config {
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
     this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
+    this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -1171,24 +1275,6 @@ export class Config {
     this.loadMemoryFromIncludeDirectories =
       params.loadMemoryFromIncludeDirectories ?? false;
     this.importFormat = params.importFormat ?? 'tree';
-    // Auto-compaction threshold moved to built-in constants (computeThresholds
-    // in chatCompressionService.ts). The old `contextPercentageThreshold`
-    // field is deprecated; if present in user settings, emit a one-time
-    // warning and ignore the value.
-    if (
-      params.chatCompression &&
-      typeof (params.chatCompression as Record<string, unknown>)[
-        'contextPercentageThreshold'
-      ] !== 'undefined'
-    ) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        '[qwen-code] chatCompression.contextPercentageThreshold has been removed ' +
-          'and is now controlled by built-in thresholds. Setting will be ignored. ' +
-          'Remove this key from your settings.json to silence this warning; ' +
-          'see docs/users/configuration/settings.md for current compaction behavior.',
-      );
-    }
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
@@ -1403,6 +1489,13 @@ export class Config {
                   signal,
                 );
                 break;
+              case 'PostToolBatch':
+                result = await hookSystem.firePostToolBatchEvent(
+                  (input['tool_calls'] as PostToolBatchToolCall[]) || [],
+                  (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
+                );
+                break;
               case 'Notification':
                 result = await hookSystem.fireNotificationEvent(
                   (input['message'] as string) || '',
@@ -1421,6 +1514,16 @@ export class Config {
                   (input['permission_suggestions'] as
                     | PermissionSuggestion[]
                     | undefined) || undefined,
+                  signal,
+                );
+                break;
+              case 'PermissionDenied':
+                result = await hookSystem.firePermissionDeniedEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input['reason'] as PermissionDeniedReason) ||
+                    'classifier_blocked',
                   signal,
                 );
                 break;
@@ -1486,6 +1589,12 @@ export class Config {
       await this.skillManager.startWatching();
     }
     this.debugLogger.debug('Skill manager initialized');
+
+    this.memoryPressureConfig = loadMemoryPressureConfig();
+    this.memoryPressureMonitor = new MemoryPressureMonitor(
+      this,
+      this.memoryPressureConfig,
+    );
 
     this.permissionManager = new PermissionManager(this);
     this.permissionManager.initialize();
@@ -1966,6 +2075,12 @@ export class Config {
 
     const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
+    // Unconditional: startNewSession is only called on the canonical Config
+    // instance (the one that already claimed via sessionEnvClaimed), so this
+    // correctly updates the env var to reflect the new active session.
+    if (process.env) {
+      process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
+    }
     this.sessionData = sessionData;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
@@ -1982,6 +2097,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
@@ -2655,6 +2771,10 @@ export class Config {
     return this.userMemory;
   }
 
+  getOutputLanguageFilePath(): string | undefined {
+    return this.outputLanguageFilePath;
+  }
+
   setUserMemory(newUserMemory: string): void {
     this.userMemory = newUserMemory;
   }
@@ -3035,6 +3155,33 @@ export class Config {
     return this.geminiClient;
   }
 
+  /**
+   * Session-scoped memory pressure monitor. Child Configs created with
+   * `Object.create(parent)` inherit the parent's monitor through the prototype
+   * chain until this getter installs an own monitor backed by the inherited
+   * pressure config snapshot. This mirrors getFileReadCache()'s isolation
+   * contract while keeping type-safe direct field assignment inside the class.
+   */
+  getMemoryPressureMonitor(): MemoryPressureMonitor | undefined {
+    if (!Object.prototype.hasOwnProperty.call(this, 'memoryPressureMonitor')) {
+      const inheritedMonitor = this.memoryPressureMonitor;
+      if (inheritedMonitor) {
+        const inheritedConfig = this.memoryPressureConfig;
+        if (!inheritedConfig) {
+          throw new Error(
+            'Inherited memory pressure monitor is missing config',
+          );
+        }
+        this.memoryPressureConfig = { ...inheritedConfig };
+        this.memoryPressureMonitor = new MemoryPressureMonitor(
+          this,
+          this.memoryPressureConfig,
+        );
+      }
+    }
+    return this.memoryPressureMonitor;
+  }
+
   getCronScheduler(): CronScheduler {
     if (!this.cronScheduler) {
       this.cronScheduler = new CronScheduler();
@@ -3051,6 +3198,9 @@ export class Config {
   isForkSubagentEnabled(): boolean {
     if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
     return this.forkSubagentEnabled;
+  }
+  isComputerUseEnabled(): boolean {
+    return this.computerUseEnabled;
   }
 
   /**
@@ -3971,6 +4121,21 @@ export class Config {
         const { CronDeleteTool } = await import('../tools/cron-delete.js');
         return new CronDeleteTool(this);
       });
+    }
+
+    // Register computer-use tools unless disabled. All 9 are deferred —
+    // they surface only via ToolSearch keyword match
+    // (see packages/core/src/tools/computer-use/).
+    //
+    // Pass `registerLazy` (not the bare `registry`) so the same
+    // PermissionManager.isToolEnabled() check that gates every other
+    // built-in also gates these. Direct registry.registerFactory() would
+    // bypass coreTools allowlist + whole-tool deny rules.
+    if (this.isComputerUseEnabled()) {
+      const { registerComputerUseTools } = await import(
+        '../tools/computer-use/index.js'
+      );
+      await registerComputerUseTools(registerLazy);
     }
 
     // Register monitor tool

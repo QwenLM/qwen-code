@@ -450,17 +450,45 @@ export class ModelsConfig {
         );
       }
 
+      const previousModelId = rollbackSnapshot.generationConfig.model || '';
+      const previousModel =
+        !isAuthTypeChange && previousModelId
+          ? (this.modelRegistry.getModel(
+              authType,
+              previousModelId,
+              rollbackSnapshot.generationConfig.baseUrl,
+            ) ?? this.modelRegistry.getModel(authType, previousModelId))
+          : undefined;
+      const canReusePreviousApiKey =
+        authType !== AuthType.QWEN_OAUTH &&
+        !isAuthTypeChange &&
+        !!rollbackSnapshot.generationConfig.apiKey &&
+        !!model.envKey &&
+        previousModel?.envKey === model.envKey &&
+        previousModel.baseUrl === model.baseUrl;
+      const previousApiKey = canReusePreviousApiKey
+        ? rollbackSnapshot.generationConfig.apiKey
+        : undefined;
+      const previousApiKeySource = canReusePreviousApiKey
+        ? rollbackSnapshot.generationConfigSources['apiKey']
+        : undefined;
+
       // Apply model defaults
       this.applyResolvedModelDefaults(model);
+      if (!this._generationConfig.apiKey && previousApiKey) {
+        this._generationConfig.apiKey = previousApiKey;
+        if (previousApiKeySource) {
+          this.generationConfigSources['apiKey'] =
+            ModelsConfig.deepClone(previousApiKeySource);
+        }
+      }
 
       // Clear active runtime model snapshot since we're now using a registry model
       this.activeRuntimeModelSnapshotId = undefined;
 
       const requiresRefresh = isAuthTypeChange
         ? true
-        : this.checkRequiresRefresh(
-            rollbackSnapshot.generationConfig.model || '',
-          );
+        : this.checkRequiresRefresh(previousModelId);
 
       if (this.onModelChange) {
         await this.onModelChange(authType, requiresRefresh);
