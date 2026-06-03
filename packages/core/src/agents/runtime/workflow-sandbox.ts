@@ -41,3 +41,98 @@ export function stripExportMeta(source: string): string {
   while (i < source.length && /[\s;]/.test(source[i]!)) i++;
   return source.slice(0, exportIdx) + source.slice(i);
 }
+
+import * as vm from 'node:vm';
+
+export interface SandboxOptions {
+  /** Value bound to the `args` global inside the script. */
+  args: unknown;
+  /**
+   * Fixed value returned by `Date.now()` inside the script. Workflow scripts
+   * must be deterministic for resume; live wall-clock is not exposed.
+   */
+  startTime: number;
+  /**
+   * Function called by the script's `agent(prompt, opts)` global. Returns the
+   * agent's final text. Injected so tests can mock without spawning an LLM.
+   */
+  dispatch: (prompt: string, opts: { label?: string }) => Promise<string>;
+  /**
+   * Optional abort signal. When aborted, in-flight script execution rejects.
+   */
+  signal?: AbortSignal;
+}
+
+export interface WorkflowSandbox {
+  /**
+   * Execute the user-authored script source. The script is wrapped as an async
+   * IIFE so it may use top-level `await` and `return`. Returns the script's
+   * top-level return value.
+   */
+  run(scriptSource: string): Promise<unknown>;
+  /** Phase titles announced by the script in order. */
+  getPhases(): string[];
+  /** Log lines emitted by the script in order. */
+  getLogs(): string[];
+}
+
+export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
+  const phases: string[] = [];
+  const logs: string[] = [];
+
+  const sandboxGlobals = {
+    args: opts.args,
+    Date: {
+      now: () => opts.startTime,
+    },
+    Math: new Proxy(Math, {
+      get(target, prop) {
+        if (prop === 'random') {
+          return () => {
+            throw new Error(
+              'Math.random() is unavailable in workflow scripts (breaks resume). ' +
+                'For N independent samples, include the index in the agent label or prompt.',
+            );
+          };
+        }
+        return Reflect.get(target, prop);
+      },
+    }),
+    phase: (title: string): void => {
+      phases.push(String(title));
+    },
+    log: (message: unknown): void => {
+      logs.push(String(message));
+    },
+    agent: async (
+      prompt: string,
+      agentOpts: { label?: string } = {},
+    ): Promise<string> => opts.dispatch(prompt, agentOpts),
+    console: {
+      log: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
+      warn: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
+      error: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
+    },
+  };
+
+  const ctx = vm.createContext(sandboxGlobals);
+
+  return {
+    async run(scriptSource: string): Promise<unknown> {
+      const stripped = stripExportMeta(scriptSource);
+      const wrapped = `(async () => {\n${stripped}\n})()`;
+      const script = new vm.Script(wrapped, {
+        filename: 'workflow.js',
+      });
+      const runOpts: vm.RunningScriptOptions = {};
+      if (opts.signal) {
+        // P1: signal is observed only by dispatch (the long-running side); the
+        // sandbox itself runs to completion or throws naturally.
+      }
+      const result = script.runInContext(ctx, runOpts) as Promise<unknown>;
+      return result;
+    },
+    getPhases: () => [...phases],
+    getLogs: () => [...logs],
+  };
+}

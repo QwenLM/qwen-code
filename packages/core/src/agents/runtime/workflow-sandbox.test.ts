@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { stripExportMeta } from './workflow-sandbox.js';
+import { stripExportMeta, createWorkflowSandbox } from './workflow-sandbox.js';
 
 describe('stripExportMeta', () => {
   it('returns input unchanged when no export meta present', () => {
@@ -50,5 +50,48 @@ return 1`;
     const src = `export const meta = { name: 'x', description: 'it\\'s fine }' }
 phase("plan")`;
     expect(stripExportMeta(src).trim()).toBe(`phase("plan")`);
+  });
+});
+
+describe('createWorkflowSandbox', () => {
+  it('exposes args verbatim', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: { question: 'why?' },
+      startTime: 1000,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`return args.question`);
+    expect(result).toBe('why?');
+  });
+
+  it('Date.now() returns startTime fixed value', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 42,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`return Date.now()`);
+    expect(result).toBe(42);
+  });
+
+  it('Math.random() throws inside sandbox', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 1,
+      dispatch: async () => 'ignored',
+    });
+    await expect(sandbox.run(`return Math.random()`)).rejects.toThrow(
+      /Math\.random/,
+    );
+  });
+
+  it('return statement at top level captures the script result', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 1,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`return 1 + 2`);
+    expect(result).toBe(3);
   });
 });
