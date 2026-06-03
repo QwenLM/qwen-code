@@ -36,6 +36,14 @@ Never create duplicates.
 
 ### Stage 1: Gate (Template + Direction + Solution Review)
 
+**⛔ Before anything else: create a worktree.** This is the #1 forgotten step.
+
+```
+enter_worktree(name: "triage")
+```
+
+Save the `worktreePath`. All `read_file`, `grep_search`, `glob` calls below must use it as root. `gh` commands do not need it.
+
 This is the most important stage — catch problems before anyone spends time reviewing code.
 
 **1a. Template check:**
@@ -151,9 +159,9 @@ When posting findings, summarize in a few sentences like a human would — "the 
 
 **Mandatory.** Unit tests don't substitute. Unrelated build failure ≠ excuse to skip.
 
-**The point:** tmux screenshots are the evidence. Reviewers should be able to **see** what actually happened — no guesswork, no "trust me it works." Inline screenshots in the review comment = the reviewer can make a decision without running anything locally.
+**⛔ The tmux output IS the review.** The maintainer reads your Stage 2 comment and decides approve/reject from it. You **must** paste the actual `capture-pane` terminal output inline in the comment — inside a fenced code block. Not a file path, not "see attached log", not a text summary. If you didn't inline the output, the review is worthless.
 
-Drive the real product in tmux, using the `tmux-real-user-testing` skill. Capture screenshots at key moments — these are what make the review actionable.
+Drive the real product in tmux, using the `tmux-real-user-testing` skill. Capture the terminal at key moments with `capture-pane` — these are the evidence that makes the review actionable.
 
 **Before/after** (for bug fixes / behavior changes):
 
@@ -178,7 +186,21 @@ tmux kill-session -t "$S"
 - Cannot run after exhausting workarounds → FAIL, not skip.
 - Fork code: sandbox (strip write tokens/secrets).
 
-Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top): code review findings + testing result. **Inline the tmux screenshots** (before/after) directly in the comment — that's what makes the review self-contained and decision-ready. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
+Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top): code review findings + testing result.
+
+**⛔ BEFORE POSTING: verify your comment contains the tmux output.** Read back through your draft — does it have a fenced code block with the actual terminal capture? If not, add it now. The maintainer cannot approve without seeing what actually happened.
+
+````markdown
+## Before (installed build)
+
+<!-- paste capture-pane output here inside ``` -->
+
+## After (this PR)
+
+<!-- paste capture-pane output here inside ``` -->
+````
+
+Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
 
 ### Stage 3: Reflect
 

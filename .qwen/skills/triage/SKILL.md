@@ -52,23 +52,27 @@ Bilingual: English first, Chinese in `<details>`. @mention author when blocking.
 - **Issue**: one comment, Stage 2 updates it in place. Key-point bullet format.
 - **PR**: three comments (Stage 1: Gate, Stage 2: Review + Test, Stage 3: Final Decision). Key-point bullet format.
 
-## Worktree Isolation
+## ⛔ Mandatory Pre-flight Checks (DO NOT SKIP)
 
-Before reading any local code, create an isolated worktree so the main working tree is never touched:
+These two steps are the most commonly forgotten. Execute them before any other action.
+
+### 1. Worktree — ALWAYS create before reading any code
+
+**PR workflow: mandatory.** Issue workflow: skip (no code reading needed).
 
 ```
 enter_worktree(name: "triage")
 ```
 
-All subsequent local file operations (`read_file`, `grep_search`, `glob`, shell commands that read code) MUST operate inside the returned `worktreePath`. Shell commands that interact with GitHub (`gh issue view`, `gh pr view`, `gh pr diff`, `gh label list`, etc.) do NOT need the worktree — they talk to the API, not local files.
+Save the returned `worktreePath`. Every `read_file`, `grep_search`, `glob`, and shell command that reads local files **MUST** use this path as root. `gh` commands (API calls) do NOT need the worktree.
 
-The one exception: **tmux real-scenario testing** (PR workflow Stage 2b) runs in the main working tree, not the worktree — it needs the local build environment.
+Exception: **tmux real-scenario testing** (Stage 2b) runs in the main working tree — it needs the local build environment.
 
-When triage is complete, clean up:
+When triage is complete: `exit_worktree(action: "remove")`
 
-```
-exit_worktree(action: "remove")
-```
+### 2. Tmux screenshots — ALWAYS inline in Stage 2 comment
+
+Stage 2 comment **must contain the actual tmux capture-pane output** pasted inline — not a file path, not "see attached", not a summary. The maintainer reads the comment and makes a decision from it. Without inlined terminal output, the review is incomplete and useless.
 
 ## Workflow
 
