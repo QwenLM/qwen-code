@@ -415,7 +415,7 @@ export default {
   Text: '文本',
   JSON: 'JSON',
   Plan: '規劃',
-  Default: '默認',
+  'Ask permissions': '請求授權',
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',
@@ -1491,6 +1491,8 @@ export default {
   // === Core: added from PR #3328 ===
   'Open the memory manager.': '打開記憶管理器。',
   'Show current process memory diagnostics': '顯示目前程序的內存診斷。',
+  'Record a CPU profile for Chrome DevTools analysis':
+    '錄製 CPU 效能分析檔案，用於 Chrome DevTools 分析',
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
   'Ask a quick side question without affecting the main conversation':
     '在不影響主對話的情況下快速提問旁支問題',

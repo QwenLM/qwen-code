@@ -16,6 +16,11 @@ import {
   isHighHeapPressure,
   writeMemoryHeapSnapshot,
 } from '../../utils/memoryDiagnostics.js';
+import {
+  isCpuProfileRecording,
+  startCpuProfile,
+  stopCpuProfile,
+} from '../../utils/cpuProfiler.js';
 import { t } from '../../i18n/index.js';
 import {
   collectMemoryDiagnostics,
@@ -24,7 +29,8 @@ import {
 import { formatMemoryUsage } from '../utils/formatters.js';
 
 const MEMORY_SUBCOMMAND = 'memory';
-const DOCTOR_SUBCOMMANDS = [MEMORY_SUBCOMMAND] as const;
+const CPU_PROFILE_SUBCOMMAND = 'cpu-profile';
+const DOCTOR_SUBCOMMANDS = [MEMORY_SUBCOMMAND, CPU_PROFILE_SUBCOMMAND] as const;
 function getHeapSnapshotSensitiveDataWarning(): string {
   return t(
     'Heap snapshot may contain prompts, file contents, tool results, and other sensitive data. Do not share it publicly without reviewing it first.',
@@ -49,12 +55,14 @@ export const doctorCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  argumentHint: '[memory] [--sample] [--snapshot]',
+  argumentHint: '[memory|cpu-profile] [--sample] [--snapshot] [--duration]',
   examples: [
     '/doctor',
     '/doctor memory',
     '/doctor memory --sample',
     '/doctor memory --snapshot',
+    '/doctor cpu-profile',
+    '/doctor cpu-profile --duration 10',
   ],
   completion: async (_context, partialArg) => {
     const trimmed = partialArg.trimStart();
@@ -181,6 +189,10 @@ export const doctorCommand: SlashCommand = {
       };
     }
 
+    if (subCommand === CPU_PROFILE_SUBCOMMAND) {
+      return cpuProfileDoctorAction(context, subCommandArgs.slice(1).join(' '));
+    }
+
     if (executionMode === 'interactive') {
       context.ui.setPendingItem({
         type: 'info',
@@ -232,6 +244,16 @@ export const doctorCommand: SlashCommand = {
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       argumentHint: '[--json] [--sample] [--snapshot]',
       action: memoryDoctorAction,
+    },
+    {
+      name: 'cpu-profile',
+      get description() {
+        return t('Record a CPU profile for Chrome DevTools analysis');
+      },
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+      argumentHint: '[--duration <seconds>]',
+      action: cpuProfileDoctorAction,
     },
   ],
 };
@@ -381,4 +403,180 @@ function formatCoreDiagnostics(diagnostics: MemoryDiagnostics): string {
     `recommendation: ${diagnostics.analysis.recommendation}`,
   );
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// /doctor cpu-profile
+// ---------------------------------------------------------------------------
+
+const CPU_PROFILE_USAGE_HINT = '/doctor cpu-profile [--duration <seconds>]';
+const DEFAULT_CPU_PROFILE_DURATION_SEC = 30;
+const MAX_CPU_PROFILE_DURATION_SEC = 300;
+
+async function cpuProfileDoctorAction(
+  context: CommandContext,
+  args = '',
+): Promise<void | {
+  type: 'message';
+  messageType: 'info' | 'error';
+  content: string;
+}> {
+  const executionMode = context.executionMode ?? 'interactive';
+  const abortSignal = context.abortSignal;
+
+  if (abortSignal?.aborted) return;
+
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+
+  // Parse --duration flag
+  let durationSec = DEFAULT_CPU_PROFILE_DURATION_SEC;
+  const durationIdx = tokens.indexOf('--duration');
+  if (durationIdx !== -1) {
+    const rawVal = tokens[durationIdx + 1];
+    const val = rawVal ? parseInt(rawVal, 10) : NaN;
+    if (
+      !Number.isFinite(val) ||
+      val < 1 ||
+      val > MAX_CPU_PROFILE_DURATION_SEC
+    ) {
+      const errorMsg = `${t('Duration must be between 1 and {max} seconds', { max: String(MAX_CPU_PROFILE_DURATION_SEC) })}. ${t('Usage')}: ${CPU_PROFILE_USAGE_HINT}`;
+      if (executionMode === 'interactive') {
+        context.ui.addItem({ type: 'error', text: errorMsg }, Date.now());
+        return;
+      }
+      return { type: 'message', messageType: 'error', content: errorMsg };
+    }
+    durationSec = val;
+  }
+
+  // Validate unknown arguments
+  const knownTokens = new Set(['--duration']);
+  const unknown = tokens.filter((token, idx) => {
+    if (knownTokens.has(token)) return false;
+    // Skip the value after --duration
+    if (idx > 0 && tokens[idx - 1] === '--duration') return false;
+    return true;
+  });
+  if (unknown.length > 0) {
+    const errorMsg = `${t('Unknown argument(s)')}: ${unknown.join(', ')}. ${t('Usage')}: ${CPU_PROFILE_USAGE_HINT}`;
+    if (executionMode === 'interactive') {
+      context.ui.addItem({ type: 'error', text: errorMsg }, Date.now());
+      return;
+    }
+    return { type: 'message', messageType: 'error', content: errorMsg };
+  }
+
+  // Check if already recording
+  if (isCpuProfileRecording()) {
+    const errorMsg =
+      process.platform === 'win32'
+        ? t('CPU profiling is already in progress. Wait for it to complete.')
+        : t(
+            'CPU profiling is already in progress. Send SIGUSR1 or wait for it to complete.',
+          );
+    if (executionMode === 'interactive') {
+      context.ui.addItem({ type: 'error', text: errorMsg }, Date.now());
+      return;
+    }
+    return { type: 'message', messageType: 'error', content: errorMsg };
+  }
+
+  // Start recording
+  const startResult = await startCpuProfile();
+  if (!startResult.ok) {
+    if (executionMode === 'interactive') {
+      context.ui.addItem(
+        { type: 'error', text: startResult.error },
+        Date.now(),
+      );
+      return;
+    }
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: startResult.error,
+    };
+  }
+
+  if (abortSignal?.aborted) {
+    const abortResult = await stopCpuProfile();
+    if (abortResult.ok) {
+      const msg = t('CPU profile aborted early. Profile saved: {path}', {
+        path: abortResult.filePath,
+      });
+      if (executionMode === 'interactive') {
+        context.ui.addItem({ type: 'info', text: msg }, Date.now());
+      }
+    } else {
+      const msg = `${t('CPU profile aborted but failed to stop cleanly')}: ${abortResult.error}`;
+      if (executionMode === 'interactive') {
+        context.ui.addItem({ type: 'error', text: msg }, Date.now());
+      }
+    }
+    return;
+  }
+
+  // Show progress in interactive mode
+  if (executionMode === 'interactive') {
+    context.ui.setPendingItem({
+      type: 'info',
+      text: t('Recording CPU profile for {duration}s...', {
+        duration: String(durationSec),
+      }),
+    });
+  }
+
+  // Wait for duration or abort. Timer is NOT unref'd so non-interactive
+  // mode keeps the process alive for the full recording window.
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, durationSec * 1000);
+    if (abortSignal) {
+      abortSignal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+    }
+  });
+
+  if (executionMode === 'interactive') {
+    context.ui.setPendingItem(null);
+  }
+
+  // Stop and write profile. If profiler is no longer recording (e.g., SIGUSR1
+  // stopped it during the wait), treat as success — the profile was already written.
+  const stopResult = await stopCpuProfile();
+  if (!stopResult.ok) {
+    const alreadyStopped = stopResult.error.includes('not recording');
+    if (alreadyStopped) {
+      const infoMsg =
+        process.platform === 'win32'
+          ? t(
+              'CPU profile was stopped externally. Check ~/.qwen/cpu-profiles/ for the output.',
+            )
+          : t(
+              'CPU profile was stopped externally (e.g., via SIGUSR1). Check ~/.qwen/cpu-profiles/ for the output.',
+            );
+      if (executionMode === 'interactive') {
+        context.ui.addItem({ type: 'info', text: infoMsg }, Date.now());
+        return;
+      }
+      return { type: 'message', messageType: 'info', content: infoMsg };
+    }
+    if (executionMode === 'interactive') {
+      context.ui.addItem({ type: 'error', text: stopResult.error }, Date.now());
+      return;
+    }
+    return { type: 'message', messageType: 'error', content: stopResult.error };
+  }
+
+  const successMsg = `${t('CPU profile written:')} ${stopResult.filePath}\n${t('Open in Chrome DevTools → Performance tab → Load profile')}`;
+  if (executionMode === 'interactive') {
+    context.ui.addItem({ type: 'info', text: successMsg }, Date.now());
+    return;
+  }
+  return { type: 'message', messageType: 'info', content: successMsg };
 }

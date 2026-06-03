@@ -23,6 +23,7 @@ vi.mock('child_process');
 
 const mockSettings = {
   merged: {} as Record<string, unknown>,
+  reloadScopeFromDisk: vi.fn(),
 };
 vi.mock('../contexts/SettingsContext.js', () => ({
   useSettings: () => mockSettings,
@@ -136,6 +137,7 @@ describe('useStatusLine', () => {
     stdinWrittenData = '';
     stdinErrorHandler = undefined;
     mockKill = vi.fn();
+    mockSettings.reloadScopeFromDisk.mockImplementation(() => undefined);
 
     // Set up exec mock implementation
     vi.mocked(child_process.exec).mockImplementation(((
@@ -364,6 +366,38 @@ describe('useStatusLine', () => {
       });
 
       expect(result.current.lines).toEqual(['test-model | #4118']);
+    });
+
+    it('reloads status line settings from disk when streaming becomes idle', async () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+      });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual(['test-model']);
+
+      mockSettings.reloadScopeFromDisk.mockImplementationOnce(() => {
+        setStatusLineConfig({
+          type: 'preset',
+          items: ['model-with-reasoning'],
+        });
+      });
+
+      mockUIState.streamingState = StreamingState.Responding;
+      rerender();
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      mockUIState.streamingState = StreamingState.Idle;
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledOnce();
+      expect(result.current.lines).toEqual(['test-model high']);
     });
 
     it('uses command settings when a stale preset override no longer matches the settings type', () => {

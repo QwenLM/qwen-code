@@ -208,6 +208,12 @@ The assistant did not use the todo list because this is a single command executi
 </reasoning>
 </example>
 
+## Planning with Todos
+
+Before breaking work into low-level edits, use the todo list to reflect the overall approach at a meaningful level (for example: investigate, design, implement, verify). This helps maintain a global view of the task instead of jumping between isolated local changes.
+
+When new information changes your understanding of the task, update the todo structure to reflect the revised plan rather than only appending isolated follow-up items. The todo list should continue to represent the current overall strategy.
+
 ## Task States and Management
 
 1. **Task States**: Use these states to track progress:

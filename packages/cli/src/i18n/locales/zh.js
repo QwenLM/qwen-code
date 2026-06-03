@@ -452,7 +452,7 @@ export default {
   Text: '文本',
   JSON: 'JSON',
   Plan: '规划',
-  Default: '默认',
+  'Ask permissions': '请求授权',
   'Auto Edit': '自动编辑',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切换 vim 模式开关',
@@ -1726,6 +1726,8 @@ export default {
   'Loading suggestions...': '正在加载建议...',
   'Open the memory manager.': '打开记忆管理器。',
   'Show current process memory diagnostics': '显示当前进程的内存诊断。',
+  'Record a CPU profile for Chrome DevTools analysis':
+    '录制 CPU 性能分析文件，用于 Chrome DevTools 分析',
   'Save a durable memory to the memory system.':
     '将一条持久记忆保存到记忆系统。',
   'Show per-item context usage breakdown.': '显示按项目划分的上下文使用详情。',

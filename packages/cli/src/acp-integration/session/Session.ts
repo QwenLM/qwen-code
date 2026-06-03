@@ -428,7 +428,7 @@ export class Session implements SessionContext {
   }
 
   captureHistorySnapshot(): Content[] {
-    return this.config.getGeminiClient()!.getChat().getHistory();
+    return this.config.getGeminiClient()!.getChat().getHistoryShallow();
   }
 
   restoreHistory(history: Content[]): void {
