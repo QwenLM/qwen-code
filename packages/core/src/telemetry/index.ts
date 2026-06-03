@@ -172,4 +172,5 @@ export {
   addToolInputAttributes,
   addToolResultAttributes,
   truncateContent,
+  clearDetailedSpanState,
 } from './detailed-span-attributes.js';
