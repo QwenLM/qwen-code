@@ -95,6 +95,12 @@ export class SkillCommandLoader implements ICommandLoader {
           modelInvocable,
           argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,
+          skillDetail: {
+            name: skill.name,
+            description: skill.description,
+            body: skill.body,
+            level: skill.level,
+          },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
             const body = buildSkillLlmContent(
               dirname(skill.filePath),

@@ -748,12 +748,22 @@ describe('Session', () => {
         },
       ]);
       mockConfig.getSkillManager = vi.fn().mockReturnValue({
-        listSkills: vi
-          .fn()
-          .mockResolvedValue([
-            { name: 'code-review-expert' },
-            { name: 'verification-pack' },
-          ]),
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'code-review-expert',
+            description: 'Review code changes',
+            body: 'Review instructions',
+            filePath: '/skills/code-review-expert/SKILL.md',
+            level: 'user',
+          },
+          {
+            name: 'verification-pack',
+            description: 'Verify changes',
+            body: 'Verification instructions',
+            filePath: '/skills/verification-pack/SKILL.md',
+            level: 'project',
+          },
+        ]),
       });
 
       await session.sendAvailableCommandsUpdate();
@@ -780,6 +790,78 @@ describe('Session', () => {
           ],
           _meta: {
             availableSkills: ['code-review-expert', 'verification-pack'],
+            availableSkillDetails: [
+              {
+                name: 'code-review-expert',
+                description: 'Review code changes',
+                body: 'Review instructions',
+                filePath: '/skills/code-review-expert/SKILL.md',
+                level: 'user',
+                modelInvocable: true,
+              },
+              {
+                name: 'verification-pack',
+                description: 'Verify changes',
+                body: 'Verification instructions',
+                filePath: '/skills/verification-pack/SKILL.md',
+                level: 'project',
+                modelInvocable: true,
+              },
+            ],
+          },
+        },
+      });
+    });
+
+    it('derives skill details from skill slash commands', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'batch',
+          description: 'Run a batch operation',
+          kind: 'skill',
+          argumentHint: '<operation> <file-pattern>',
+          skillDetail: {
+            name: 'batch',
+            description: 'Run a batch operation',
+            body: 'Batch instructions',
+            level: 'bundled',
+          },
+        },
+      ]);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'batch',
+              description: 'Run a batch operation',
+              input: { hint: '<operation> <file-pattern>' },
+              _meta: {
+                argumentHint: '<operation> <file-pattern>',
+                source: undefined,
+                sourceLabel: undefined,
+                supportedModes: ['interactive', 'non_interactive', 'acp'],
+                subcommands: [],
+                modelInvocable: false,
+              },
+            },
+          ],
+          _meta: {
+            availableSkills: ['batch'],
+            availableSkillDetails: [
+              {
+                name: 'batch',
+                description: 'Run a batch operation',
+                body: 'Batch instructions',
+                level: 'bundled',
+                modelInvocable: false,
+              },
+            ],
           },
         },
       });
@@ -1426,6 +1508,67 @@ describe('Session', () => {
           mockGeminiClient.tryCompressChat,
           sendMessageStream,
           1,
+        );
+      });
+
+      it('injects drained mid-turn user messages with tool responses', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          messages: ['please also check tests'],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(mockClient.extMethod).toHaveBeenCalledWith(
+          'craft/drainMidTurnQueue',
+          { sessionId: 'test-session-id' },
+        );
+        const secondCall = vi.mocked(mockChat.sendMessageStream).mock.calls[1];
+        expect(secondCall?.[1].message).toEqual(
+          expect.arrayContaining([
+            {
+              text: '\n[User message received during tool execution]: please also check tests',
+            },
+          ]),
         );
       });
 
