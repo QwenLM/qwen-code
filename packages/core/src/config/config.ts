@@ -4140,6 +4140,14 @@ export class Config {
       });
     }
 
+    // Register workflow tool when enabled
+    if (this.isWorkflowsEnabled()) {
+      await registerLazy(ToolNames.WORKFLOW, async () => {
+        const { WorkflowTool } = await import('../tools/workflow/workflow.js');
+        return new WorkflowTool(this);
+      });
+    }
+
     // Register computer-use tools unless disabled. All 9 are deferred —
     // they surface only via ToolSearch keyword match
     // (see packages/core/src/tools/computer-use/).
