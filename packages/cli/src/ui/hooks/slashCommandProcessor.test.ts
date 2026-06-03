@@ -719,6 +719,54 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it('should not submit a prompt cancelled while UserPromptExpansion hook is in flight', async () => {
+      let resolveHook: (() => void) | undefined;
+      mockFireUserPromptExpansionEvent.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveHook = () =>
+              resolve({
+                getBlockingError: () => ({ blocked: false }),
+                shouldStopExecution: () => false,
+                getAdditionalContext: () => undefined,
+              });
+          }),
+      );
+      const fileCommand = createTestCommand(
+        {
+          name: 'filecmd',
+          description: 'A command from a file',
+          action: async () => ({
+            type: 'submit_prompt',
+            content: [{ text: 'The actual prompt from the TOML file.' }],
+          }),
+        },
+        CommandKind.FILE,
+      );
+
+      const result = setupProcessorHook([], [fileCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      const pending = act(async () => {
+        actionResult = await result.current.handleSlashCommand('/filecmd');
+      });
+      await waitFor(() =>
+        expect(mockFireUserPromptExpansionEvent).toHaveBeenCalled(),
+      );
+
+      act(() => {
+        result.current.cancelSlashCommand();
+        resolveHook?.();
+      });
+      await pending;
+
+      expect(actionResult).toEqual({ type: 'handled' });
+      expect(mockUpdateItem).not.toHaveBeenCalledWith(1, {
+        sentToModel: true,
+      });
+    });
+
     it('should block submit_prompt actions when UserPromptExpansion blocks', async () => {
       mockFireUserPromptExpansionEvent.mockResolvedValue({
         getBlockingError: () => ({

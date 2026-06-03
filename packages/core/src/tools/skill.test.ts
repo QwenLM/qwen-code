@@ -779,6 +779,19 @@ describe('SkillTool', () => {
       expect(tool.description).toContain('mcp-prompt-a');
     });
 
+    it('includes command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: 'dangerous input',
+      });
+
+      expect(invocation.getDescription()).toBe(
+        'Use skill: "mcp-prompt-a" with args: "dangerous input"',
+      );
+    });
+
     it('should not duplicate commands already present as file-based skills', async () => {
       // 'code-review' matches a skill in mockSkills → should be filtered out
       const commandsIncludingSkill = [

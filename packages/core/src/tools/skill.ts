@@ -312,7 +312,9 @@ ${skillDescriptions}
   }
 
   override toAutoClassifierInput(params: SkillParams): Record<string, unknown> {
-    return { skill: params.skill };
+    return params.args === undefined
+      ? { skill: params.skill }
+      : { skill: params.skill, args: params.args };
   }
 
   getAvailableSkillNames(): string[] {
@@ -376,7 +378,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
   }
 
   getDescription(): string {
-    return `Use skill: "${this.params.skill}"`;
+    return this.params.args
+      ? `Use skill: "${this.params.skill}" with args: "${this.params.args}"`
+      : `Use skill: "${this.params.skill}"`;
   }
 
   /**

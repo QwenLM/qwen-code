@@ -818,6 +818,9 @@ export const useSlashCommandProcessor = (
                           abortController.signal,
                         )
                     : undefined;
+                  if (abortController.signal.aborted) {
+                    return { type: 'handled' };
+                  }
                   if (output) {
                     const blockingError = output.getBlockingError();
                     if (blockingError.blocked || output.shouldStopExecution()) {
@@ -1060,6 +1063,7 @@ export const useSlashCommandProcessor = (
     btwItem,
     setBtwItem,
     cancelBtw,
+    cancelSlashCommand,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
