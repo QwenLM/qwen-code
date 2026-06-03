@@ -19,6 +19,7 @@ export type VimMode = 'NORMAL' | 'INSERT';
 // Constants
 const DIGIT_MULTIPLIER = 10;
 const DEFAULT_COUNT = 1;
+const MAX_COUNT = 9999;
 const DIGIT_1_TO_9 = /^[1-9]$/;
 
 const debugLogger = createDebugLogger('VIM_MODE');
@@ -107,7 +108,13 @@ const vimReducer = (state: VimState, action: VimAction): VimState => {
     case 'SET_COUNT':
       return { ...state, count: action.count };
     case 'INCREMENT_COUNT':
-      return { ...state, count: state.count * DIGIT_MULTIPLIER + action.digit };
+      return {
+        ...state,
+        count: Math.min(
+          state.count * DIGIT_MULTIPLIER + action.digit,
+          MAX_COUNT,
+        ),
+      };
     case 'CLEAR_COUNT':
       return { ...state, count: 0 };
     case 'SET_PENDING_OPERATOR':
