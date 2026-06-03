@@ -95,3 +95,80 @@ describe('createWorkflowSandbox', () => {
     expect(result).toBe(3);
   });
 });
+
+describe('createWorkflowSandbox primitives', () => {
+  it('phase() pushes titles in script order', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 1,
+      dispatch: async () => 'ignored',
+    });
+    await sandbox.run(`phase("plan"); phase("build"); return 0`);
+    expect(sandbox.getPhases()).toEqual(['plan', 'build']);
+  });
+
+  it('log() accumulates string and non-string arguments', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 1,
+      dispatch: async () => 'ignored',
+    });
+    await sandbox.run(`log("hi"); log(42); return 0`);
+    expect(sandbox.getLogs()).toEqual(['hi', '42']);
+  });
+
+  it('agent() invokes dispatch and resolves with its return value', async () => {
+    const seen: Array<{ prompt: string; label?: string }> = [];
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 1,
+      dispatch: async (prompt, opts) => {
+        seen.push({ prompt, label: opts.label });
+        return `echo: ${prompt}`;
+      },
+    });
+    const result = await sandbox.run(
+      `const a = await agent("write hello", { label: "h1" });
+       return a;`,
+    );
+    expect(result).toBe('echo: write hello');
+    expect(seen).toEqual([{ prompt: 'write hello', label: 'h1' }]);
+  });
+
+  it('agent() runs sequentially when called multiple times', async () => {
+    const order: number[] = [];
+    let counter = 0;
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 1,
+      dispatch: async () => {
+        const myOrder = ++counter;
+        await new Promise((r) => setTimeout(r, 5));
+        order.push(myOrder);
+        return String(myOrder);
+      },
+    });
+    const result = await sandbox.run(`
+      const a = await agent("first");
+      const b = await agent("second");
+      return [a, b];
+    `);
+    expect(result).toEqual(['1', '2']);
+    expect(order).toEqual([1, 2]);
+  });
+
+  it('full P1 acceptance script: phase + agent returns expected value', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 1,
+      dispatch: async (prompt) => `agent-response:${prompt}`,
+    });
+    const result = await sandbox.run(`
+      phase("plan");
+      const out = await agent("write a hello", { label: "h1" });
+      return out;
+    `);
+    expect(result).toBe('agent-response:write a hello');
+    expect(sandbox.getPhases()).toEqual(['plan']);
+  });
+});
