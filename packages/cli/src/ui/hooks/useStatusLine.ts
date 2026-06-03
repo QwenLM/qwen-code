@@ -621,6 +621,8 @@ export function useStatusLine(): {
   // snapshot the raw statusLine value before reloading; if the on-disk value
   // differs, we bump `settingsReloadKey` to trigger a re-render + doUpdate().
   // This avoids unnecessary work on turns that didn't touch the statusline.
+  // The reload intentionally refreshes the whole user scope, matching startup
+  // settings semantics for file edits made during the turn.
   const [settingsReloadKey, setSettingsReloadKey] = useState(0);
   const prevStreamingForReloadRef = useRef(streamingState);
   useEffect(() => {

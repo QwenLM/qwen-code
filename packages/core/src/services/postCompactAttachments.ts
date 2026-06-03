@@ -21,6 +21,8 @@ import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep as pathSep } from 'node:path';
 import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
+import { escapeXml } from '../utils/xml.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 
@@ -542,6 +544,20 @@ export function postProcessSummary(rawSummary: string): string {
   return `${body}\n\n${RESUME_TRAILER}`;
 }
 
+/**
+ * Minimal projection of a background subagent task carried into post-compact
+ * attachments. Decoupled from the registry's `AgentTask` so the attachment
+ * layer does not import the registry types and so tests can build cases
+ * inline.
+ */
+export interface SubagentSnapshot {
+  id: string;
+  description: string;
+  status: 'running' | 'paused';
+  /** ms epoch when the task was registered. Used for stable ordering. */
+  startTime: number;
+}
+
 export interface ComposePostCompactOptions {
   /**
    * Workspace root. When set, file paths from history that resolve
@@ -571,6 +587,24 @@ export interface ComposePostCompactOptions {
    * `QWEN_COMPACT_MAX_RECENT_IMAGES`).
    */
   maxImages?: number;
+  /**
+   * When `true`, prepend a `<plan-mode-active>` reminder block before the
+   * file/image attachments so the post-compact agent does not forget that
+   * destructive tools remain gated. Sourced from `config.getApprovalMode()
+   * === ApprovalMode.PLAN` at the call site. The summary itself may
+   * mention plan mode but cannot be trusted to — the reminder is a
+   * structural guarantee.
+   */
+  planModeActive?: boolean;
+  /**
+   * Snapshot of background subagent tasks (running or paused) at
+   * compaction time. Rendered as a `<background-tasks>` reminder block.
+   * Empty array or `undefined` renders no block. Terminal-state tasks
+   * (completed/failed/cancelled) should already be filtered out by the
+   * caller — they have already emitted their notification XML and need
+   * no reminder.
+   */
+  runningSubagents?: SubagentSnapshot[];
 }
 
 /**
@@ -628,6 +662,113 @@ function safeRealpath(p: string): string {
   }
 }
 
+// Tool names are pulled from the `ToolNames` constant source rather than
+// retyped, so a future rename updates this reminder automatically instead of
+// leaving stale guidance. Keep the list small (the most common modification
+// tools) — an exhaustive enumeration would drift faster than it helps.
+const PLAN_MODE_REMINDER_TEXT =
+  '<plan-mode-active>\n' +
+  'You are currently in PLAN mode. You may research, read files, and ' +
+  'propose plans, but you may not execute modification tools (' +
+  `${ToolNames.WRITE_FILE}, ${ToolNames.EDIT}, ${ToolNames.SHELL}, etc.) ` +
+  'until the user exits plan mode. The summary above may not reflect this ' +
+  'constraint — honor plan mode regardless.\n' +
+  '</plan-mode-active>';
+
+/** Cap per-task description text in the snapshot block. Prevents a
+ *  pathologically long subagent description from inflating the post-compact
+ *  history. 200 chars keeps the snapshot useful as a pointer without making
+ *  it a full progress log. */
+const MAX_SUBAGENT_DESC_CHARS = 200;
+
+/** Cap on the number of subagent rows the snapshot lists. Defends against
+ *  pathological sessions with hundreds of backgrounded agents that never
+ *  completed — without this, a malformed registry could produce a multi-KB
+ *  attachment block that consumes the post-compact prompt budget. Newest
+ *  agents (highest startTime) are kept; older ones are dropped with a
+ *  trailing "and N more" line so the model knows the snapshot is partial. */
+const MAX_SUBAGENT_SNAPSHOT_COUNT = 30;
+
+function buildPlanModeReminderPart(): Part {
+  return { text: PLAN_MODE_REMINDER_TEXT };
+}
+
+/**
+ * Collapse interior whitespace (newlines, tabs, carriage returns) to single
+ * spaces before the description goes into a single bullet line. A raw `\n`
+ * inside `s.description` would otherwise split the bullet across multiple
+ * lines, producing "- [running] id: line1\nline2\n- [running] next: …"
+ * which the model reads as a malformed list (and could even read `line2`
+ * as a sibling row). Mirrors `sanitizePathForDisplay` further up in this
+ * file.
+ */
+function flattenWhitespaceForBullet(text: string): string {
+  return text.replace(/[\r\n\t]+/g, ' ');
+}
+
+function buildSubagentSnapshotPart(snaps: SubagentSnapshot[]): Part | null {
+  if (snaps.length === 0) return null;
+  const sorted = [...snaps].sort((a, b) => a.startTime - b.startTime);
+  // Keep the NEWEST rows (highest startTime). When over the cap, the model
+  // is most likely interacting with recent tasks; older long-runners are
+  // surfaced via the trailing summary line so nothing silently disappears.
+  const overflow = Math.max(0, sorted.length - MAX_SUBAGENT_SNAPSHOT_COUNT);
+  const shown = overflow > 0 ? sorted.slice(overflow) : sorted;
+  const lines = shown.map((s) => {
+    // Order: flatten whitespace FIRST, then truncate. Otherwise a 200-char
+    // slice that lands inside a `\n` keeps the newline in the bullet.
+    const flattened = flattenWhitespaceForBullet(s.description);
+    const truncated =
+      flattened.length > MAX_SUBAGENT_DESC_CHARS
+        ? flattened.slice(0, MAX_SUBAGENT_DESC_CHARS) + '…'
+        : flattened;
+    // Escape EVERY interpolated field (id and status as well as the
+    // description) with the shared 5-char escaper. Subagent ids derive from
+    // a user-configurable `subagentConfig.name`, so a `<`/`&` there could
+    // otherwise close the `<background-tasks>` wrapper or forge sibling
+    // markup the model would treat as trusted metadata.
+    return `- [${escapeXml(s.status)}] ${escapeXml(s.id)}: ${escapeXml(truncated)}`;
+  });
+  if (overflow > 0) {
+    lines.push(
+      `- (… and ${overflow} older task${overflow === 1 ? '' : 's'} not shown)`,
+    );
+  }
+  return {
+    text:
+      '<background-tasks>\n' +
+      'The following background subagent tasks were active at compaction. ' +
+      'The summary above does not include their per-task state. Use ' +
+      '`task_stop` / `send_message` to interact; do not assume they ' +
+      'completed.\n' +
+      lines.join('\n') +
+      '\n</background-tasks>',
+  };
+}
+
+/**
+ * Build the mid-session state-reminder parts (plan-mode banner + background
+ * subagent snapshot) that lead the post-compact attachment. Extracted as a
+ * single source of truth so BOTH the normal `composePostCompactHistory`
+ * path AND its catch-fallback emit the same blocks — otherwise the fallback
+ * silently drops plan-mode enforcement and the subagent roster (the exact
+ * drift PR #4688 review caught). Pure: no I/O, safe to call from a catch.
+ */
+export function buildStateReminderParts(options: {
+  planModeActive?: boolean;
+  runningSubagents?: SubagentSnapshot[];
+}): Part[] {
+  const parts: Part[] = [];
+  if (options.planModeActive) {
+    parts.push(buildPlanModeReminderPart());
+  }
+  if (options.runningSubagents && options.runningSubagents.length > 0) {
+    const snap = buildSubagentSnapshotPart(options.runningSubagents);
+    if (snap) parts.push(snap);
+  }
+  return parts;
+}
+
 export async function composePostCompactHistory(
   history: Content[],
   summary: string,
@@ -638,6 +779,8 @@ export async function composePostCompactHistory(
     signal,
     maxFiles = POST_COMPACT_MAX_FILES_TO_RESTORE,
     maxImages = POST_COMPACT_MAX_IMAGES_TO_RESTORE,
+    planModeActive,
+    runningSubagents,
   } = options;
 
   // Workspace-boundary filter on the extracted file paths (Finding 4).
@@ -654,7 +797,18 @@ export async function composePostCompactHistory(
   // Contents produces consecutive same-role entries, which
   // geminiChat.test.ts:6289 enforces against and which Gemini
   // providers reject as 400 "consecutive same-role content".
-  const postAckParts: Part[] = [];
+  //
+  // Order within the merged user Content:
+  //   1. plan-mode reminder (if active)        — most behaviourally critical
+  //   2. background subagent snapshot          — informs next-turn dispatch
+  //   3. file restoration blocks               — model-readable file contents
+  //   4. image restoration block               — recent screenshots
+  // Reminder text comes first so a token-conservative model that skims the
+  // attachment still sees the plan-mode constraint and task pointers before
+  // it gets to file bodies.
+  const postAckParts: Part[] = [
+    ...buildStateReminderParts({ planModeActive, runningSubagents }),
+  ];
   for (const block of fileBlocks) {
     for (const part of block.parts ?? []) postAckParts.push(part);
   }

@@ -34,7 +34,7 @@ describe('Interactive Mode', () => {
       const { ptyProcess } = rig.runInteractive();
 
       let fullOutput = '';
-      ptyProcess.onData((data) => (fullOutput += data));
+      ptyProcess.onData((data: string) => (fullOutput += data));
 
       // Wait for the app to be ready
       const isReady = await rig.waitForText('Type your message', 15000);
@@ -80,7 +80,7 @@ describe('Interactive Mode', () => {
     const { ptyProcess } = rig.runInteractive();
 
     let fullOutput = '';
-    ptyProcess.onData((data) => (fullOutput += data));
+    ptyProcess.onData((data: string) => (fullOutput += data));
 
     // Wait for the app to be ready
     const isReady = await rig.waitForText('Type your message', 25000);
@@ -105,4 +105,56 @@ describe('Interactive Mode', () => {
 
     expect(compressionFailed).toBe(true);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'should forward /compress instructions through to the side-query',
+    async () => {
+      await rig.setup('interactive-compress-instructions-test', {
+        settings: {
+          security: {
+            auth: {
+              selectedType: 'openai',
+            },
+          },
+        },
+      });
+
+      const { ptyProcess } = rig.runInteractive();
+
+      let fullOutput = '';
+      ptyProcess.onData((data: string) => (fullOutput += data));
+
+      const isReady = await rig.waitForText('Type your message', 15000);
+      expect(
+        isReady,
+        'CLI did not start up in interactive mode correctly',
+      ).toBe(true);
+
+      // Seed history so /compress has material to summarize.
+      const seedPrompt =
+        'Dont do anything except returning a 1000 token long paragragh with the <name of the scientist who discovered theory of relativity> at the end to indicate end of response. This is a moderately long sentence.';
+
+      await type(ptyProcess, seedPrompt);
+      await type(ptyProcess, '\r');
+
+      await rig.waitForText('einstein', 25000);
+
+      // Fire /compress with a trailing instruction. We are not asserting on
+      // summary CONTENT (model behaviour) — only that the wiring runs
+      // end-to-end and the compression telemetry event lands. Earlier unit
+      // tests cover the prompt-composition path; this is the smoke test that
+      // the args plumbing reaches the side-query.
+      await type(ptyProcess, '/compress focus on the scientist mentioned');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await type(ptyProcess, '\r');
+
+      const foundEvent = await rig.waitForTelemetryEvent(
+        'chat_compression',
+        90000,
+      );
+      expect(foundEvent, 'chat_compression telemetry event was not found').toBe(
+        true,
+      );
+    },
+  );
 });
