@@ -363,6 +363,62 @@ describe('createWorkflowSandbox security', () => {
     expect(['undefined', 'threw', 'no-iterator']).toContain(result);
   });
 
+  // FIX-F (Round 4 UP Critical): P2/P5 primitives are stub-throwing globals
+  // so model-authored scripts get a clear "scheduled for PN" error rather
+  // than `ReferenceError: parallel is not defined` (which the model would
+  // misdiagnose as a bug in its own script).
+  it('parallel() throws a P1-unsupported error rather than ReferenceError', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return parallel([() => agent("a")]);`),
+    ).rejects.toThrow(/parallel.*not supported in P1/);
+  });
+
+  it('pipeline() throws a P1-unsupported error rather than ReferenceError', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return pipeline([1, 2], x => x, x => x);`),
+    ).rejects.toThrow(/pipeline.*not supported in P1/);
+  });
+
+  it('workflow() throws a P1-unsupported error rather than ReferenceError', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return workflow('child', { foo: 1 });`),
+    ).rejects.toThrow(/workflow\(\).*not supported in P1/);
+  });
+
+  it('budget.spent() / .remaining() throw with clear P1-unsupported errors', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(sandbox.run(`return budget.spent();`)).rejects.toThrow(
+      /budget\.spent.*not supported in P1/,
+    );
+    await expect(sandbox.run(`return budget.remaining();`)).rejects.toThrow(
+      /budget\.remaining.*not supported in P1/,
+    );
+  });
+
+  it('budget.total is null in P1 (matches upstream "no target" sentinel)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`return budget.total`);
+    expect(result).toBeNull();
+  });
+
   // FIX-E (Round 4 Important): explicit max-depth cap on args nesting.
   it('rejects args with nesting beyond max depth with a clear error', () => {
     const deep: Record<string, unknown> = {};

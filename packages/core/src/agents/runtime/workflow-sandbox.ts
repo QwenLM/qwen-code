@@ -292,6 +292,60 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         return opts.dispatch(prompt, agentOpts);
       },
     ),
+    // FIX-F (Round 4 UP Critical): P2/P5 primitives surfaced as throwing
+    // stubs so model-authored scripts get a clear "scheduled for PN"
+    // message instead of `ReferenceError: parallel is not defined`. The
+    // model is trained on the upstream surface where these always exist;
+    // silent ReferenceError is hostile to debugging.
+    parallel: hardenInjected(async (_thunks: unknown): Promise<unknown> => {
+      throw new Error(
+        'parallel() is not supported in P1. Sequential agent() is the only ' +
+          'execution mode in P1. Concurrent fan-out is scheduled for P2.',
+      );
+    }),
+    pipeline: hardenInjected(
+      async (_items: unknown, ..._stages: unknown[]): Promise<unknown> => {
+        throw new Error(
+          'pipeline() is not supported in P1. Staggered multi-stage execution ' +
+            'is scheduled for P2.',
+        );
+      },
+    ),
+    workflow: hardenInjected(
+      async (_nameOrRef: unknown, _args?: unknown): Promise<unknown> => {
+        throw new Error(
+          'workflow() (nested workflow invocation) is not supported in P1. ' +
+            'Scheduled for a later phase.',
+        );
+      },
+    ),
+    // FIX-F: budget is exposed as a hardened sentinel object whose
+    // properties throw on access. P1 cannot honor budget.spent() /
+    // .remaining() — the dispatch path has no token tracker. P5 will wire
+    // a real budget tracker; until then any access fails loud.
+    budget: hardenInjected(
+      Object.create(null, {
+        total: { value: null, writable: false, configurable: false },
+        spent: {
+          value: () => {
+            throw new Error(
+              'budget.spent() is not supported in P1. Token tracking is scheduled for P5.',
+            );
+          },
+          writable: false,
+          configurable: false,
+        },
+        remaining: {
+          value: () => {
+            throw new Error(
+              'budget.remaining() is not supported in P1. Token tracking is scheduled for P5.',
+            );
+          },
+          writable: false,
+          configurable: false,
+        },
+      }) as object,
+    ),
     // FIX-3 + FIX-D: console.* closures hardened (proto null) and routed
     // through safeLog for the log cap. The `console` container object is
     // ALSO hardened so `console.constructor.constructor` cannot escape.
