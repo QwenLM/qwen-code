@@ -19,7 +19,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
 import { GeminiClient, SendMessageType } from './client.js';
-import { findCompressSplitPoint } from '../services/chatCompressionService.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   AuthType,
@@ -264,84 +263,6 @@ function getLastTurnRequestText(): string {
   }
   return JSON.stringify(request ?? '');
 }
-
-describe('findCompressSplitPoint', () => {
-  it('should throw an error for non-positive numbers', () => {
-    expect(() => findCompressSplitPoint([], 0)).toThrow(
-      'Fraction must be between 0 and 1',
-    );
-  });
-
-  it('should throw an error for a fraction greater than or equal to 1', () => {
-    expect(() => findCompressSplitPoint([], 1)).toThrow(
-      'Fraction must be between 0 and 1',
-    );
-  });
-
-  it('should handle an empty history', () => {
-    expect(findCompressSplitPoint([], 0.5)).toBe(0);
-  });
-
-  it('should handle a fraction in the middle', () => {
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'This is the first message.' }] }, // JSON length: 66 (19%)
-      { role: 'model', parts: [{ text: 'This is the second message.' }] }, // JSON length: 68 (40%)
-      { role: 'user', parts: [{ text: 'This is the third message.' }] }, // JSON length: 66 (60%)
-      { role: 'model', parts: [{ text: 'This is the fourth message.' }] }, // JSON length: 68 (80%)
-      { role: 'user', parts: [{ text: 'This is the fifth message.' }] }, // JSON length: 65 (100%)
-    ];
-    expect(findCompressSplitPoint(history, 0.5)).toBe(4);
-  });
-
-  it('should handle a fraction of last index', () => {
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'This is the first message.' }] }, // JSON length: 66 (19%)
-      { role: 'model', parts: [{ text: 'This is the second message.' }] }, // JSON length: 68 (40%)
-      { role: 'user', parts: [{ text: 'This is the third message.' }] }, // JSON length: 66 (60%)
-      { role: 'model', parts: [{ text: 'This is the fourth message.' }] }, // JSON length: 68 (80%)
-      { role: 'user', parts: [{ text: 'This is the fifth message.' }] }, // JSON length: 65 (100%)
-    ];
-    expect(findCompressSplitPoint(history, 0.9)).toBe(4);
-  });
-
-  it('should handle a fraction of after last index', () => {
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'This is the first message.' }] }, // JSON length: 66 (24%%)
-      { role: 'model', parts: [{ text: 'This is the second message.' }] }, // JSON length: 68 (50%)
-      { role: 'user', parts: [{ text: 'This is the third message.' }] }, // JSON length: 66 (74%)
-      { role: 'model', parts: [{ text: 'This is the fourth message.' }] }, // JSON length: 68 (100%)
-    ];
-    expect(findCompressSplitPoint(history, 0.8)).toBe(4);
-  });
-
-  it('compresses everything before the trailing in-flight functionCall', () => {
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'This is the first message.' }] },
-      { role: 'model', parts: [{ text: 'This is the second message.' }] },
-      { role: 'user', parts: [{ text: 'This is the third message.' }] },
-      { role: 'model', parts: [{ functionCall: {} }] },
-    ];
-    // Trailing m+fc is in-flight; the in-flight fallback compresses
-    // everything except the trailing fc (no preceding pair to retain).
-    expect(findCompressSplitPoint(history, 0.99)).toBe(3);
-  });
-
-  it('should handle a history with only one item', () => {
-    const historyWithEmptyParts: Content[] = [
-      { role: 'user', parts: [{ text: 'Message 1' }] },
-    ];
-    expect(findCompressSplitPoint(historyWithEmptyParts, 0.5)).toBe(0);
-  });
-
-  it('should handle history with weird parts', () => {
-    const historyWithEmptyParts: Content[] = [
-      { role: 'user', parts: [{ text: 'Message 1' }] },
-      { role: 'model', parts: [{ fileData: { fileUri: 'derp' } }] },
-      { role: 'user', parts: [{ text: 'Message 2' }] },
-    ];
-    expect(findCompressSplitPoint(historyWithEmptyParts, 0.5)).toBe(2);
-  });
-});
 
 describe('Gemini Client (client.ts)', () => {
   let mockContentGenerator: ContentGenerator;
@@ -2009,7 +1930,38 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.tryCompressChat('p1', true, signal);
 
-      expect(tryCompress).toHaveBeenCalledWith('p1', 'the-model', true, signal);
+      // 5th arg is the `options` bag for `customInstructions` plumbing;
+      // omitted here means undefined which is the correct contract.
+      expect(tryCompress).toHaveBeenCalledWith(
+        'p1',
+        'the-model',
+        true,
+        signal,
+        undefined,
+      );
+    });
+
+    it('forwards customInstructions through the options bag when supplied', async () => {
+      const tryCompress = vi.fn().mockResolvedValue({
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: CompressionStatus.NOOP,
+      });
+      client['chat'] = {
+        tryCompress,
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getModel).mockReturnValue('the-model');
+
+      await client.tryCompressChat('p1', true, undefined, 'focus on auth bug');
+
+      expect(tryCompress).toHaveBeenCalledWith(
+        'p1',
+        'the-model',
+        true,
+        undefined,
+        { customInstructions: 'focus on auth bug' },
+      );
     });
 
     it('flips forceFullIdeContext on a successful compression', async () => {

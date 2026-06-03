@@ -20,12 +20,12 @@ import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.
 import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
 import { useExportCompletion } from '../hooks/useExportCompletion.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
-import type { Config } from '@qwen-code/qwen-code-core';
 import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import {
   ApprovalMode,
+  type Config,
   Storage,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
@@ -56,6 +56,7 @@ import {
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
+import { getApprovalModePromptStyle } from './approvalModeVisuals.js';
 
 /**
  * Represents an attachment (e.g., pasted image) displayed above the input prompt
@@ -1560,22 +1561,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only trigger on prop change
   }, [promptSuggestion]);
 
-  const showAutoAcceptStyling =
-    !shellModeActive && approvalMode === ApprovalMode.AUTO_EDIT;
-  const showYoloStyling =
-    !shellModeActive && approvalMode === ApprovalMode.YOLO;
+  const approvalModePromptStyle = !shellModeActive
+    ? getApprovalModePromptStyle(approvalMode)
+    : undefined;
 
   let statusColor: string | undefined;
   let statusText = '';
   if (shellModeActive) {
     statusColor = theme.ui.symbol;
     statusText = t('Shell mode');
-  } else if (showYoloStyling) {
-    statusColor = theme.status.errorDim;
-    statusText = t('YOLO mode');
-  } else if (showAutoAcceptStyling) {
-    statusColor = theme.status.warningDim;
-    statusText = t('Accepting edits');
+  } else if (approvalModePromptStyle?.color) {
+    statusColor = approvalModePromptStyle.color;
+    if (approvalMode === ApprovalMode.YOLO) {
+      statusText = t('YOLO mode');
+    } else if (approvalMode === ApprovalMode.AUTO_EDIT) {
+      statusText = t('Accepting edits');
+    } else if (approvalMode === ApprovalMode.AUTO) {
+      statusText = t('Auto mode');
+    }
   }
 
   const borderColor =
@@ -1598,13 +1601,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         )
       ) : commandSearchActive ? (
         <Text color={theme.text.accent}>(r:) </Text>
-      ) : showYoloStyling ? (
-        '*'
+      ) : approvalModePromptStyle ? (
+        approvalModePromptStyle.prefix
       ) : (
         '>'
       )}{' '}
     </Text>
   );
+
+  // Calculate prefix width for physical cursor positioning
+  const prefixWidth = shellModeActive
+    ? reverseSearchActive
+      ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
+      : 2 // "! " = 2 chars
+    : commandSearchActive
+      ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
+      : showYoloStyling
+        ? 2 // "* " = 2 chars
+        : 2; // "> " = 2 chars
 
   return (
     <>
@@ -1636,6 +1650,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             : placeholder
         }
         prefix={prefixNode}
+        prefixWidth={prefixWidth}
         borderColor={borderColor}
         topRightLabel={uiState.sessionName || undefined}
         isActive={!isEmbeddedShellFocused}

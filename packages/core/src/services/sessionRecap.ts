@@ -49,7 +49,7 @@ export async function generateSessionRecap(
     const geminiClient = config.getGeminiClient();
     if (!geminiClient) return null;
 
-    const fullHistory = geminiClient.getChat().getHistory();
+    const fullHistory = geminiClient.getHistoryShallow();
     if (fullHistory.length < 2) return null;
 
     const dialog = filterToDialog(fullHistory);

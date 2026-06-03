@@ -37,6 +37,10 @@ function validateAuthTypeKey(key: string): AuthType | undefined {
   return undefined;
 }
 
+function shouldUseCanonicalModalities(modelId: string): boolean {
+  return /^minimax-m3/i.test(modelId.trim().toLowerCase());
+}
+
 /**
  * Build a composite registry key from model id and optional baseUrl.
  * Two models with the same id but different baseUrls are distinct entries.
@@ -212,7 +216,10 @@ export class ModelRegistry {
     // them explicitly. Without this, downstream consumers that read straight
     // from the registry (e.g. sub-agents via getResolvedModel) would inherit
     // the parent session's modalities instead of the agent's own.
-    if (generationConfig.modalities === undefined) {
+    if (
+      generationConfig.modalities === undefined ||
+      shouldUseCanonicalModalities(config.id)
+    ) {
       generationConfig.modalities = defaultModalities(config.id);
     }
 

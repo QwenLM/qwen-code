@@ -143,7 +143,11 @@ describe('resumeHistoryUtils', () => {
       20,
     );
 
-    expect(items).toContainEqual({ id: 21, type: 'user', text: 'save logs' });
+    expect(items).toContainEqual({
+      id: 21,
+      type: 'notification',
+      text: 'save logs',
+    });
   });
 
   it('marks tool results as error, captures thought text, and falls back when tool is missing', () => {

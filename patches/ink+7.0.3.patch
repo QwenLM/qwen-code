@@ -1,0 +1,22 @@
+diff --git a/node_modules/ink/package.json b/node_modules/ink/package.json
+--- a/node_modules/ink/package.json
++++ b/node_modules/ink/package.json
+@@ -11,8 +11,16 @@
+ 	},
+ 	"type": "module",
+ 	"exports": {
+-		"types": "./build/index.d.ts",
+-		"default": "./build/index.js"
++		".": {
++			"types": "./build/index.d.ts",
++			"default": "./build/index.js"
++		},
++		"./dom": {
++			"default": "./build/dom.js"
++		},
++		"./components/CursorContext": {
++			"default": "./build/components/CursorContext.js"
++		}
+ 	},
+ 	"engines": {
+ 		"node": ">=22"

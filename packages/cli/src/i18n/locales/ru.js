@@ -24,6 +24,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Режим терминала',
   'YOLO mode': 'Режим YOLO',
+  'Auto mode': 'Автоматический режим',
   'plan mode': 'Режим планирования',
   'auto-accept edits': 'Режим принятия правок',
   'Accepting edits': 'Принятие правок',

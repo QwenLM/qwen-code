@@ -18,6 +18,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'シェルモード',
   'YOLO mode': 'YOLOモード',
+  'Auto mode': 'Autoモード',
   'plan mode': 'プランモード',
   'auto-accept edits': '編集を自動承認',
   'Accepting edits': '編集を承認中',

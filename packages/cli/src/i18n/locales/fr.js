@@ -22,6 +22,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Mode shell',
   'YOLO mode': 'Mode YOLO',
+  'Auto mode': 'Mode auto',
   'plan mode': 'mode plan',
   'auto-accept edits': 'acceptation automatique des modifications',
   'Accepting edits': 'Acceptation des modifications',

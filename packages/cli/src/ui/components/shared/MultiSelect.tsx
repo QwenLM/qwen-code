@@ -32,6 +32,7 @@ export interface MultiSelectProps<T> {
   showScrollArrows?: boolean;
   maxItemsToShow?: number;
   checkedText?: string;
+  uncheckedText?: string;
   showActiveMarker?: boolean;
 }
 
@@ -60,6 +61,7 @@ export function MultiSelect<T>({
   showScrollArrows = false,
   maxItemsToShow = 10,
   checkedText = '[✓]',
+  uncheckedText = '[ ]',
   showActiveMarker = false,
 }: MultiSelectProps<T>): React.JSX.Element {
   const [scrollOffset, setScrollOffset] = useState(0);
@@ -143,7 +145,7 @@ export function MultiSelect<T>({
 
       {visibleItems.map((item, index) => {
         const itemIndex = scrollOffset + index;
-        const isActive = activeIndex === itemIndex;
+        const isActive = isFocused && activeIndex === itemIndex;
         const isChecked = selectedKeySet.has(item.key);
         const activeMarker = isActive ? '›' : ' ';
 
@@ -154,7 +156,7 @@ export function MultiSelect<T>({
           ? '[x]'
           : isChecked
             ? checkedText
-            : '[ ]';
+            : uncheckedText;
 
         let textColor = theme.text.primary;
         if (item.disabled) {
