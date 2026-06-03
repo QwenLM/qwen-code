@@ -2272,71 +2272,30 @@ describe('useVim hook', () => {
   });
 
   describe('Pending operator clearing', () => {
-    it('should clear pending operator on Escape during char-read (r)', () => {
-      const buffer = createMockBuffer('hello world', [0, 0]);
-      const { result } = renderHook(() =>
-        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
-      );
+    it.each(['r', 'f', 't'] as const)(
+      'should clear pending operator on Escape during char-read (%s)',
+      (key) => {
+        const buffer = createMockBuffer('hello world', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
 
-      // Set pending operator d
-      act(() => result.current.handleInput(makeKey('d')));
+        // Set pending operator d
+        act(() => result.current.handleInput(makeKey('d')));
 
-      // Enter char-read mode with r
-      act(() => result.current.handleInput(makeKey('r')));
+        // Enter char-read mode
+        act(() => result.current.handleInput(makeKey(key)));
 
-      // Press Escape to cancel
-      act(() => result.current.handleInput(makeKey('\u001b', 'escape')));
+        // Press Escape to cancel
+        act(() => result.current.handleInput(makeKey('\u001b', 'escape')));
 
-      // Now w should just move cursor, not delete
-      act(() => result.current.handleInput(makeKey('w')));
+        // Now w should just move cursor, not delete
+        act(() => result.current.handleInput(makeKey('w')));
 
-      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
-      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
-    });
-
-    it('should clear pending operator on Escape during char-read (f)', () => {
-      const buffer = createMockBuffer('hello world', [0, 0]);
-      const { result } = renderHook(() =>
-        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
-      );
-
-      // Set pending operator d
-      act(() => result.current.handleInput(makeKey('d')));
-
-      // Enter char-read mode with f
-      act(() => result.current.handleInput(makeKey('f')));
-
-      // Press Escape to cancel
-      act(() => result.current.handleInput(makeKey('\u001b', 'escape')));
-
-      // Now w should just move cursor, not delete
-      act(() => result.current.handleInput(makeKey('w')));
-
-      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
-      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
-    });
-
-    it('should clear pending operator on Escape during char-read (t)', () => {
-      const buffer = createMockBuffer('hello world', [0, 0]);
-      const { result } = renderHook(() =>
-        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
-      );
-
-      // Set pending operator d
-      act(() => result.current.handleInput(makeKey('d')));
-
-      // Enter char-read mode with t
-      act(() => result.current.handleInput(makeKey('t')));
-
-      // Press Escape to cancel
-      act(() => result.current.handleInput(makeKey('\u001b', 'escape')));
-
-      // Now w should just move cursor, not delete
-      act(() => result.current.handleInput(makeKey('w')));
-
-      expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
-      expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
-    });
+        expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
+        expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+      },
+    );
 
     it('should clear pending operator on ~ (toggle case)', () => {
       const buffer = createMockBuffer('Hello', [0, 0]);
