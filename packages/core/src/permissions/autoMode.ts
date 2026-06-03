@@ -43,6 +43,9 @@ import type { PermissionCheckContext } from './types.js';
 
 const autoModeDebugLogger = createDebugLogger('AUTO_MODE');
 
+const RAW_PROTECTED_WRITE_COMMANDS =
+  /\b(?:cp|mv|install|rsync|patch|perl|sed)\b/;
+
 /**
  * Built-in tools whose any-parameter behavior is safe under the AUTO mode
  * classifier's threat model — they never write files, never perform network
@@ -285,6 +288,7 @@ export function shouldForceAutoModeReviewForAllow(
   const cwd = ctx.cwd ?? cwdFallback;
 
   if (hasRawProtectedRedirect(command, cwd)) return true;
+  if (hasRawProtectedWriteCommand(command, cwd)) return true;
 
   return extractShellOperationsAcrossCommand(command, cwd).some((op) => {
     if (
@@ -321,6 +325,24 @@ function hasRawProtectedRedirect(command: string, cwd: string): boolean {
     if (!target || target.startsWith('&')) continue;
     const resolved = path.isAbsolute(target) ? target : path.join(cwd, target);
     if (isAutoModeProtectedWritePath(resolved)) return true;
+  }
+  return false;
+}
+
+function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {
+  for (const line of command.split('\n')) {
+    if (!RAW_PROTECTED_WRITE_COMMANDS.test(line)) continue;
+    for (const rawToken of line.split(/\s+/)) {
+      const target = stripRawRedirectTargetToken(rawToken).replace(
+        /^[({]+|[),;]+$/g,
+        '',
+      );
+      if (!target || target.startsWith('-')) continue;
+      const resolved = path.isAbsolute(target)
+        ? target
+        : path.join(cwd, target);
+      if (isAutoModeProtectedWritePath(resolved)) return true;
+    }
   }
   return false;
 }

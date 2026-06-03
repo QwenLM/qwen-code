@@ -691,6 +691,22 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ).toBe(true);
   });
 
+  it('returns true for protected write commands embedded in heredoc bodies', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: [
+            "bash <<'SCRIPT'",
+            'cp /tmp/payload .qwen/settings.json',
+            'SCRIPT',
+          ].join('\n'),
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it('returns true for protected heredoc redirects with repeated quote tokens', () => {
     expect(
       shouldForceAutoModeReviewForAllow(

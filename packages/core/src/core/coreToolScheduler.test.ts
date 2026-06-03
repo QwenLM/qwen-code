@@ -3932,18 +3932,17 @@ describe('CoreToolScheduler request queueing', () => {
     expect(statuses).toContain('error');
   });
 
-  it('schedules pending protected writes during AUTO fallback', async () => {
+  it('keeps pending protected writes awaiting approval during AUTO fallback', async () => {
     runSideQueryMock.mockReset();
-    const { scheduler, onToolCallsUpdate, hookSystem } =
-      createPendingProtectedWriteHarness({
-        denialState: {
-          consecutiveBlock: 3,
-          consecutiveUnavailable: 0,
-          totalBlock: 3,
-          totalUnavailable: 0,
-        },
-        disableHooks: false,
-      });
+    const { scheduler, hookSystem } = createPendingProtectedWriteHarness({
+      denialState: {
+        consecutiveBlock: 3,
+        consecutiveUnavailable: 0,
+        totalBlock: 3,
+        totalUnavailable: 0,
+      },
+      disableHooks: false,
+    });
 
     await (
       scheduler as unknown as {
@@ -3958,13 +3957,20 @@ describe('CoreToolScheduler request queueing', () => {
     );
 
     expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
-    expect(onToolCallsUpdate).toHaveBeenCalled();
     const toolCalls = (
       scheduler as unknown as {
         toolCalls: ToolCall[];
+        autoModeFallbackCallIds: Set<string>;
       }
     ).toolCalls;
-    expect(toolCalls[0]?.status).toBe('scheduled');
+    expect(toolCalls[0]?.status).toBe('awaiting_approval');
+    expect(
+      (
+        scheduler as unknown as {
+          autoModeFallbackCallIds: Set<string>;
+        }
+      ).autoModeFallbackCallIds.has('pending-protected-write'),
+    ).toBe(true);
   });
 });
 

@@ -3712,6 +3712,7 @@ export class CoreToolScheduler {
             }
             case 'fallback':
               if (fallback.fallback) {
+                this.autoModeFallbackCallIds.add(pendingTool.request.callId);
                 debugLogger.warn(
                   `Auto mode fallback for pending tool (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
                 );
@@ -3722,7 +3723,11 @@ export class CoreToolScheduler {
               void _exhaustive;
             }
           }
-          if (outcome.kind === 'approved' || outcome.kind === 'blocked') {
+          if (
+            outcome.kind === 'approved' ||
+            outcome.kind === 'blocked' ||
+            outcome.kind === 'fallback'
+          ) {
             continue;
           }
         }
