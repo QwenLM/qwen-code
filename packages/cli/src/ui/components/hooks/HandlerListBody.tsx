@@ -91,6 +91,8 @@ function describeHook(info: HookConfigDisplayInfo): string {
           : promptText)
       );
     }
+    case HookType.Agent:
+      return config.name || `agent:${config.agent ?? 'general-purpose'}`;
     default: {
       const _exhaustive: never = config;
       void _exhaustive;
