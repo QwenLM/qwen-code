@@ -3316,6 +3316,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             sessionId: entry.sessionId,
             language: result.language,
             outputLanguage: result.outputLanguage,
+            refreshed: result.refreshed ?? false,
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });

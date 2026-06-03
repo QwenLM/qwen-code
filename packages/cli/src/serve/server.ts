@@ -292,7 +292,7 @@ function resolveDaemonTelemetryRoute(
     return { route: 'POST /sessions/delete' };
   }
   const sessionAction = path.match(
-    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|approval-mode)$/,
+    /^\/session\/([^/]+)\/(load|resume|prompt|cancel|recap|btw|model|shell|detach|approval-mode|language)$/,
   );
   const sessionActionId = sessionAction?.[1];
   const sessionActionName = sessionAction?.[2];

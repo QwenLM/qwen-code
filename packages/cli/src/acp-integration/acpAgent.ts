@@ -102,7 +102,7 @@ import {
 } from '../utils/acpModelUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
-import { setLanguageAsync } from '../i18n/index.js';
+import { setLanguageAsync, getCurrentLanguage } from '../i18n/index.js';
 import {
   resolveOutputLanguage,
   updateOutputLanguageFile,
@@ -2541,13 +2541,25 @@ class QwenAgent implements Agent {
           );
         }
 
-        await setLanguageAsync(language);
+        this.sessionOrThrow(sessionId);
+
+        try {
+          await setLanguageAsync(language);
+        } catch (err) {
+          debugLogger.warn('setLanguageAsync failed:', err);
+          throw new RequestError(
+            -32603,
+            `Failed to switch UI language: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+
+        const resolvedLanguage = getCurrentLanguage();
 
         try {
           this.settings.setValue(
             SettingScope.User,
             'general.language',
-            language,
+            resolvedLanguage,
           );
         } catch (err) {
           debugLogger.warn('Failed to persist UI language setting:', err);
@@ -2562,7 +2574,11 @@ class QwenAgent implements Agent {
             ? OUTPUT_LANGUAGE_AUTO
             : resolved;
 
-          updateOutputLanguageFile(settingValue);
+          try {
+            updateOutputLanguageFile(settingValue);
+          } catch (err) {
+            debugLogger.warn('Failed to write output-language.md:', err);
+          }
 
           try {
             this.settings.setValue(
@@ -2586,7 +2602,7 @@ class QwenAgent implements Agent {
           outputLanguage = resolved;
         }
 
-        return { language, outputLanguage, refreshed };
+        return { language: resolvedLanguage, outputLanguage, refreshed };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionRecap: {
         // #4175 follow-up. Generate a one-sentence "where did I leave
