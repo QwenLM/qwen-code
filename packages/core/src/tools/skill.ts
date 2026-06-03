@@ -419,7 +419,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
           ) {
             logSkillLaunch(
               this.config,
-              new SkillLaunchEvent(this.params.skill, false),
+              new SkillLaunchEvent(this.params.skill, false, this.promptId),
             );
             return {
               llmContent: commandResult.error,

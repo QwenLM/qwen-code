@@ -491,6 +491,7 @@ export const useSlashCommandProcessor = (
                       controller.signal,
                     )
                 : undefined;
+              if (controller.signal.aborted) return null;
               if (output) {
                 const blockingError = output.getBlockingError();
                 if (blockingError.blocked || output.shouldStopExecution()) {
@@ -819,6 +820,7 @@ export const useSlashCommandProcessor = (
                         )
                     : undefined;
                   if (abortController.signal.aborted) {
+                    hasError = true;
                     return { type: 'handled' };
                   }
                   if (output) {

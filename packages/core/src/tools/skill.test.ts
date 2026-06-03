@@ -26,6 +26,7 @@ type SkillToolWithProtectedMethods = SkillTool & {
       returnDisplay: ToolResultDisplay;
     }>;
     getDescription: () => string;
+    setPromptId: (promptId: string) => void;
   };
 };
 
@@ -944,6 +945,31 @@ describe('SkillTool', () => {
       expect(llmText).toBe('UserPromptExpansion blocked: Blocked by policy');
       expect(result.returnDisplay).toBe(
         'UserPromptExpansion blocked: Blocked by policy',
+      );
+    });
+
+    it('logs prompt attribution when executor returns an error', async () => {
+      const executor = vi.fn().mockResolvedValue({
+        error: 'UserPromptExpansion blocked: Blocked by policy',
+      });
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      invocation.setPromptId('prompt-123');
+      await invocation.execute();
+
+      expect(logSkillLaunch).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          skill_name: 'mcp-prompt-a',
+          success: false,
+          prompt_id: 'prompt-123',
+        }),
       );
     });
 

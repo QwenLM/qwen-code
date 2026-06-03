@@ -915,6 +915,67 @@ describe('useSlashCommandProcessor', () => {
         error: 'UserPromptExpansion blocked: Blocked by policy',
       });
     });
+
+    it('should stop model-invocable command execution when hook unmounts', async () => {
+      let resolveHook: (() => void) | undefined;
+      mockFireUserPromptExpansionEvent.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolveHook = () =>
+              resolve({
+                getBlockingError: () => ({ blocked: false }),
+                shouldStopExecution: () => false,
+                getAdditionalContext: () => 'Hook context',
+              });
+          }),
+      );
+      const fileCommand = createTestCommand(
+        {
+          name: 'filecmd',
+          description: 'A command from a file',
+          modelInvocable: true,
+          action: async () => ({
+            type: 'submit_prompt',
+            content: 'The actual prompt from the TOML file.',
+          }),
+        },
+        CommandKind.FILE,
+      );
+
+      mockFileLoadCommands.mockResolvedValue(Object.freeze([fileCommand]));
+      const { result, unmount } = renderHook(() =>
+        useSlashCommandProcessor(
+          mockConfig,
+          mockSettings,
+          mockAddItem,
+          mockClearItems,
+          mockLoadHistory,
+          vi.fn(),
+          vi.fn(),
+          false,
+          vi.fn(),
+          { current: true },
+          vi.fn(),
+          createMockActions(),
+          new Map(),
+          true,
+          null,
+          mockUpdateItem,
+        ),
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      const executor = mockConfig.getModelInvocableCommandsExecutor?.();
+      const pendingContent = executor?.('filecmd', 'with args');
+      await waitFor(() =>
+        expect(mockFireUserPromptExpansionEvent).toHaveBeenCalled(),
+      );
+
+      unmount();
+      resolveHook?.();
+
+      await expect(pendingContent).resolves.toBeNull();
+    });
   });
 
   describe('Shell Command Confirmation Flow', () => {
