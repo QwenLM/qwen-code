@@ -43,6 +43,7 @@ export type {
   DaemonConnectionStatus,
   DaemonMessage,
   DaemonAssistantMessage,
+  DaemonInsightErrorMessage,
   DaemonInsightProgressMessage,
   DaemonInsightReadyMessage,
   DaemonMessageToolCall,

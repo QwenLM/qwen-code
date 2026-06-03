@@ -493,7 +493,11 @@ export function createDaemonSessionActions({
         sessionRef.current,
         'Load stats failed',
       );
-      return await withActionTimeout(session.stats(), 'Load stats timed out');
+      try {
+        return await withActionTimeout(session.stats(), 'Load stats timed out');
+      } catch (error) {
+        throw dispatchActionError(store, 'Load stats failed', error);
+      }
     },
 
     async respondToGlobalPermission(

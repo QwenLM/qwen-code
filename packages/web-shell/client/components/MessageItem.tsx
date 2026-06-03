@@ -81,6 +81,12 @@ export const MessageItem = memo(function MessageItem({
       );
     case 'insight_ready':
       return <InsightReady path={message.path} />;
+    case 'insight_error':
+      return (
+        <div style={{ color: 'var(--color-error, #e06c75)' }}>
+          {message.error}
+        </div>
+      );
     default:
       return null;
   }
@@ -138,6 +144,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       );
     case 'insight_ready':
       return next.role === 'insight_ready' && prev.path === next.path;
+    case 'insight_error':
+      return next.role === 'insight_error' && prev.error === next.error;
     case 'plan':
       return next.role === 'plan' && areTodosEqual(prev.todos, next.todos);
     case 'tool_group':

@@ -2190,6 +2190,7 @@ class QwenAgent implements Agent {
   private buildSessionStatsStatus(sessionId: string): ServeSessionStatsStatus {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
+    // TODO: uiTelemetryService is process-wide; multi-session stats are cumulative
     const metrics = uiTelemetryService.getMetrics();
     const now = Date.now();
     const createdAt = session.getCreatedAt();

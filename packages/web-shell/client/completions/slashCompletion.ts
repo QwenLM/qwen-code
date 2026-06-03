@@ -87,10 +87,7 @@ const IMPLICIT_SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
   ],
   mcp: [
     { name: 'desc', description: '显示 MCP server 和工具描述' },
-    { name: 'nodesc', description: '隐藏 MCP 描述' },
     { name: 'schema', description: '显示工具参数 schema' },
-    { name: 'auth', description: '认证 OAuth MCP server' },
-    { name: 'noauth', description: '隐藏 OAuth 认证状态' },
   ],
   memory: [
     { name: 'show', description: '查看 memory 文件' },

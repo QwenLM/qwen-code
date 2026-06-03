@@ -294,13 +294,16 @@ export function mountWorkspaceAgentsRoutes(
       if (clientIdResult === null) return;
       const originatorClientId = clientIdResult;
       const description = body['description'];
-      if (
-        typeof description !== 'string' ||
-        description.trim().length === 0 ||
-        Buffer.byteLength(description, 'utf8') > MAX_DESCRIPTION_BYTES
-      ) {
+      if (typeof description !== 'string' || description.trim().length === 0) {
         res.status(400).json({
           error: '`description` must be a non-empty string',
+          code: 'invalid_description',
+        });
+        return;
+      }
+      if (description.length > 4096) {
+        res.status(400).json({
+          error: '`description` exceeds the 4096-character limit',
           code: 'invalid_description',
         });
         return;
@@ -318,10 +321,7 @@ export function mountWorkspaceAgentsRoutes(
           }`,
         );
         res.status(500).json({
-          error:
-            err instanceof Error
-              ? err.message
-              : 'Failed to generate workspace agent',
+          error: 'Failed to generate workspace agent',
           code: 'agent_generate_failed',
         });
       }

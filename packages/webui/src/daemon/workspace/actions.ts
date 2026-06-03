@@ -102,9 +102,11 @@ export function createDaemonWorkspaceActions({
 
     async manageMcpServer(serverName, action) {
       const client = requireClient(getClient, 'Manage MCP server failed');
+      const timeoutMs = action === 'authenticate' ? 10 * 60_000 : undefined;
       return withActionTimeout(
         client.manageMcpServer(serverName, action),
         'Manage MCP server timed out',
+        timeoutMs,
       );
     },
 

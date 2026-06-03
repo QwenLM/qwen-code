@@ -101,7 +101,6 @@ import styles from './App.module.css';
 
 export const CompactModeContext = createContext(false);
 
-const WEB_SHELL_VERSION = __WEB_SHELL_VERSION__;
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
@@ -1214,8 +1213,12 @@ export function App({
                 > = {};
                 await Promise.all(
                   (status?.servers ?? []).map(async (server) => {
-                    toolsByServer[server.name] =
-                      await workspaceActions.loadMcpTools(server.name);
+                    try {
+                      toolsByServer[server.name] =
+                        await workspaceActions.loadMcpTools(server.name);
+                    } catch {
+                      // Allow partial failure — other servers still render
+                    }
                   }),
                 );
                 store.dispatch([
@@ -1438,6 +1441,7 @@ export function App({
             return true;
           }
           if (cmd === 'btw') {
+            store.appendLocalUserMessage(text);
             runVisibleBtw(text.slice(match[0].length));
             return true;
           }
@@ -1496,8 +1500,9 @@ export function App({
               const platformStr = `${sys.platform} ${sys.arch}`.trim();
               const curModel = currentModelRef.current;
               const conn = connectionRef.current;
+              const qwenCodeVersion = conn.capabilities?.qwenCodeVersion || '';
               const info: StatusInfo = {
-                cliVersion: WEB_SHELL_VERSION,
+                cliVersion: qwenCodeVersion,
                 runtime: runtimeParts.join(' / '),
                 platform: platformStr,
                 auth: formattedAuth,
@@ -1527,15 +1532,17 @@ export function App({
           }
           if (cmd === 'bug') {
             const bugTitle = text.slice(match[0].length).trim();
+            store.appendLocalUserMessage(text);
             Promise.all([
               workspaceActions.loadPreflight().catch(() => null),
               workspaceActions.loadEnv().catch(() => null),
             ])
               .then(([preflight, env]) => {
                 const sys = collectSystemInfo(preflight, env);
-                const sysInfo: Record<string, string> = {
-                  cliVersion: WEB_SHELL_VERSION,
-                };
+                const qwenCodeVersion =
+                  connectionRef.current.capabilities?.qwenCodeVersion || '';
+                const sysInfo: Record<string, string> = {};
+                if (qwenCodeVersion) sysInfo.cliVersion = qwenCodeVersion;
                 if (sys.nodeVersion) sysInfo.nodeVersion = sys.nodeVersion;
                 if (sys.npmVersion) sysInfo.npmVersion = sys.npmVersion;
                 if (sys.platform) sysInfo.platform = sys.platform;
@@ -1547,6 +1554,9 @@ export function App({
                     title: bugTitle,
                     systemInfo: sysInfo,
                   });
+                  store.dispatch([
+                    { type: 'status', text: t('bug.submitted') },
+                  ]);
                 } else {
                   const fields = Object.entries(sysInfo)
                     .filter(([, v]) => v)
@@ -1556,9 +1566,17 @@ export function App({
                     `https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml` +
                     `&title=${encodeURIComponent(bugTitle)}` +
                     `&info=${encodeURIComponent('\n' + fields + '\n')}`;
-                  window.open(url, '_blank');
+                  const win = window.open(url, '_blank', 'noopener,noreferrer');
+                  if (win) {
+                    store.dispatch([
+                      { type: 'status', text: t('bug.submitted') },
+                    ]);
+                  } else {
+                    store.dispatch([
+                      { type: 'error', text: t('bug.popupBlocked') },
+                    ]);
+                  }
                 }
-                store.dispatch([{ type: 'status', text: t('bug.submitted') }]);
               })
               .catch((error: unknown) => {
                 reportError(error, t('bug.failed'));
@@ -1786,13 +1804,18 @@ export function App({
   const welcomeHeader = useMemo(
     () => (
       <WelcomeHeader
-        version={WEB_SHELL_VERSION}
+        version={connection.capabilities?.qwenCodeVersion || ''}
         cwd={connection.workspaceCwd || ''}
         currentModel={currentModel}
         currentMode={currentMode}
       />
     ),
-    [connection.workspaceCwd, currentModel, currentMode],
+    [
+      connection.capabilities?.qwenCodeVersion,
+      connection.workspaceCwd,
+      currentModel,
+      currentMode,
+    ],
   );
 
   const appClassName = [

@@ -198,8 +198,8 @@ export type {
   /** Assistant (model) response message. */
   DaemonAssistantMessage,
   /** Insight generation progress update (stage + percent). */
+  DaemonInsightErrorMessage,
   DaemonInsightProgressMessage,
-  /** Insight generation completed (file path). */
   DaemonInsightReadyMessage,
   /** User prompt message. */
   DaemonUserMessage,

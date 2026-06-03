@@ -6,6 +6,7 @@ import type {
   DaemonWorkspaceMcpToolsStatus,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useMcp } from '@qwen-code/webui/daemon-react-sdk';
+import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import styles from './McpStatusMessage.module.css';
@@ -439,6 +440,7 @@ export function McpStatusMessage({
   useEffect(() => {
     const id = panelIdRef.current;
     dispatchActive(id, isOpen);
+    return () => dispatchActive(id, false);
   }, [isOpen]);
 
   useEffect(() => {
@@ -452,11 +454,10 @@ export function McpStatusMessage({
     return () => window.removeEventListener(ACTIVE_EVENT, onActiveChange);
   }, []);
 
-  useEffect(() => {
-    if (!isOpen) return;
+  useDelayedGlobalKeyDown(
+    (event: KeyboardEvent) => {
+      if (!isOpen) return;
 
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
@@ -514,19 +515,17 @@ export function McpStatusMessage({
           setStep('tool');
         }
       }
-    };
-
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [
-    isOpen,
-    selectedServerActionIndex,
-    selectedTools.length,
-    serverActions,
-    runServerAction,
-    servers.length,
-    step,
-  ]);
+    },
+    [
+      isOpen,
+      selectedServerActionIndex,
+      selectedTools.length,
+      serverActions,
+      runServerAction,
+      servers.length,
+      step,
+    ],
+  );
 
   if (!isOpen) return null;
 

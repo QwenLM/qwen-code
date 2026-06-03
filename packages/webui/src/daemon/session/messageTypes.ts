@@ -123,6 +123,12 @@ export interface DaemonInsightReadyMessage {
   path: string;
 }
 
+export interface DaemonInsightErrorMessage {
+  id: string;
+  role: 'insight_error';
+  error: string;
+}
+
 export type DaemonMessage =
   | DaemonUserMessage
   | DaemonAssistantMessage
@@ -132,4 +138,5 @@ export type DaemonMessage =
   | DaemonUserShellMessage
   | DaemonBtwMessage
   | DaemonInsightProgressMessage
-  | DaemonInsightReadyMessage;
+  | DaemonInsightReadyMessage
+  | DaemonInsightErrorMessage;

@@ -78,17 +78,25 @@ export function transcriptBlocksToDaemonMessages(
         const insightSegments = splitInsightSegments(textBlock.text);
         if (insightSegments) {
           let lastProgress: ParsedInsight | null = null;
-          let hasReady = false;
+          let hasTerminal = false;
+          let readyCount = 0;
           for (const seg of insightSegments) {
             if (seg.kind === 'insight') {
               if (seg.data.type === 'insight_progress') {
                 lastProgress = seg.data;
-              } else {
-                hasReady = true;
+              } else if (seg.data.type === 'insight_ready') {
+                hasTerminal = true;
                 messages.push({
-                  id: `${block.id}-ir`,
+                  id: `${block.id}-ir-${readyCount++}`,
                   role: 'insight_ready',
                   path: seg.data.path,
+                });
+              } else if (seg.data.type === 'insight_error') {
+                hasTerminal = true;
+                messages.push({
+                  id: `${block.id}-ie`,
+                  role: 'insight_error',
+                  error: seg.data.error,
                 });
               }
             } else {
@@ -100,7 +108,7 @@ export function transcriptBlocksToDaemonMessages(
               currentAssistantIdx = messages.length - 1;
             }
           }
-          if (lastProgress && !hasReady) {
+          if (lastProgress && !hasTerminal) {
             messages.push({
               id: `${block.id}-ip`,
               role: 'insight_progress',
@@ -745,13 +753,18 @@ type ParsedInsight =
       progress: number;
       detail?: string;
     }
-  | { type: 'insight_ready'; path: string };
+  | { type: 'insight_ready'; path: string }
+  | { type: 'insight_error'; error: string };
 
 type InsightSegment =
   | { kind: 'text'; text: string }
   | { kind: 'insight'; data: ParsedInsight };
 
-const INSIGHT_PREFIXES = ['"insight_progress":', '"insight_ready":'];
+const INSIGHT_PREFIXES = [
+  '"insight_progress":',
+  '"insight_ready":',
+  '"insight_error":',
+];
 
 function parseInsightJson(json: string): ParsedInsight | null {
   try {
@@ -775,6 +788,10 @@ function parseInsightJson(json: string): ParsedInsight | null {
     const ready = getRecord(parsed['insight_ready']);
     if (ready && typeof ready['path'] === 'string') {
       return { type: 'insight_ready', path: ready['path'] as string };
+    }
+    const insightError = getRecord(parsed['insight_error']);
+    if (insightError && typeof insightError['error'] === 'string') {
+      return { type: 'insight_error', error: insightError['error'] as string };
     }
   } catch {
     // not valid JSON
