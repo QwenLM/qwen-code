@@ -119,20 +119,6 @@ function createMockStdout() {
 }
 
 /**
- * Set up environment for wl-paste/Wayland testing.
- */
-function _setupWaylandEnv() {
-  vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
-  vi.stubEnv('XDG_SESSION_TYPE', undefined as unknown as string);
-  vi.stubEnv('DISPLAY', undefined as unknown as string);
-  Object.defineProperty(process, 'platform', {
-    value: 'linux',
-    configurable: true,
-    writable: true,
-  });
-}
-
-/**
  * Set up environment for xclip/X11 testing.
  */
 function setupX11Env() {
