@@ -304,7 +304,9 @@ function hasRawProtectedRedirect(command: string, cwd: string): boolean {
   for (let i = 0; i < command.length; i++) {
     if (command[i] !== '>') continue;
     if (command[i - 1] === '<') continue;
-    while (command[i] === '>') i++;
+    while (command[i] === '>' || command[i] === '|' || command[i] === '&') {
+      i++;
+    }
     while (command[i] === ' ' || command[i] === '\t') i++;
 
     let token = '';
@@ -327,7 +329,11 @@ function stripRawRedirectTargetToken(token: string): string {
   let start = 0;
   let end = token.length;
 
-  while (start < end && (token[start] === "'" || token[start] === '"')) {
+  while (
+    start < end &&
+    (token[start] === "'" || token[start] === '"' || token[start] === '$')
+  ) {
+    if (token[start] === '$' && token[start + 1] !== "'") break;
     start++;
   }
 

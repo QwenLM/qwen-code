@@ -707,6 +707,35 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ).toBe(true);
   });
 
+  it('returns true for protected clobber and fd redirects', () => {
+    for (const command of [
+      "echo '{}' >| .qwen/settings.json",
+      "echo '{}' >& .qwen/settings.json",
+    ]) {
+      expect(
+        shouldForceAutoModeReviewForAllow(
+          ctx({
+            toolName: ToolNames.SHELL,
+            command,
+            cwd: '/repo',
+          }),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('returns true for ANSI-C quoted protected redirect targets', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: "echo '{}' > $'.qwen/settings.json'",
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it('uses the provided cwd fallback when ctx.cwd is absent', () => {
     expect(
       shouldForceAutoModeReviewForAllow(

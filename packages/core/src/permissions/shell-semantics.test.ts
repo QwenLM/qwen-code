@@ -241,6 +241,12 @@ describe('extractShellOperations', () => {
       { virtualTool: 'read_file', filePath: '/tmp/target' },
       { virtualTool: 'write_file', filePath: `${CWD}/.qwen` },
     ]);
+    expect(
+      sorted(extractShellOperations('cp -rt .qwen /tmp/payload', CWD)),
+    ).toEqual([
+      { virtualTool: 'read_file', filePath: '/tmp/payload' },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen` },
+    ]);
   });
 
   // ── rm ─────────────────────────────────────────────────────────────────────
@@ -337,6 +343,12 @@ describe('extractShellOperations', () => {
       CWD,
     );
     expect(ops).toEqual([
+      { virtualTool: 'edit', filePath: `${CWD}/.qwen/settings.json` },
+    ]);
+
+    expect(
+      extractShellOperations("perl -i -e 's/x/y/' .qwen/settings.json", CWD),
+    ).toEqual([
       { virtualTool: 'edit', filePath: `${CWD}/.qwen/settings.json` },
     ]);
   });

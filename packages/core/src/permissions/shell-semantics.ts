@@ -341,6 +341,18 @@ function getPositionalArgs(
     // Flag: check if it consumes the next token
     if (flagsWithValue.has(arg)) {
       skipNext = true;
+      continue;
+    }
+    for (const flag of flagsWithValue) {
+      if (
+        flag.startsWith('-') &&
+        !flag.startsWith('--') &&
+        flag.length === 2 &&
+        hasCombinedShortFlag(arg, flag.slice(1))
+      ) {
+        skipNext = true;
+        break;
+      }
     }
     // Flags combined with their value in the same token (`-n10`) are ignored
     // because looksLikePath will filter out anything starting with `-`.
@@ -361,6 +373,9 @@ function getFlagValue(
     }
     if (arg.startsWith(`${longName}=`)) {
       return arg.slice(longName.length + 1);
+    }
+    if (hasCombinedShortFlag(arg, shortName.slice(1))) {
+      return args[i + 1];
     }
   }
   return undefined;
@@ -1469,11 +1484,18 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const hasInPlace = args.some(
       (a) => a === '-i' || a.startsWith('-i') || hasCombinedShortFlag(a, 'i'),
     );
+    const hasExplicitScript = args.some(
+      (a) =>
+        a === '-e' ||
+        a === '-f' ||
+        a.startsWith('-e') ||
+        hasCombinedShortFlag(a, 'e'),
+    );
     const positional = getPositionalArgs(
       args,
       new Set(['-e', '-f', '-I', '-M', '-m', '-0']),
     ).filter(looksLikePath);
-    const files = positional.slice(1);
+    const files = hasExplicitScript ? positional : positional.slice(1);
     const tool: 'edit' | 'read_file' = hasInPlace ? 'edit' : 'read_file';
     return files.map((p) => ({
       virtualTool: tool,
@@ -1488,7 +1510,11 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       (a) => a === '-i' || a.startsWith('-i') || hasCombinedShortFlag(a, 'i'),
     );
     const hasExplicitScript = args.some(
-      (a) => a === '-e' || a === '-f' || a.startsWith('-e'),
+      (a) =>
+        a === '-e' ||
+        a === '-f' ||
+        a.startsWith('-e') ||
+        hasCombinedShortFlag(a, 'e'),
     );
     const flagsWithValue = new Set([
       '-e',
