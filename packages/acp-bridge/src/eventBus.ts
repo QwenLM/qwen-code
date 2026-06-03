@@ -228,7 +228,12 @@ export class EventBus {
       ...input,
     };
     this.ring.push(event);
-    this.compactionEngine?.ingest(event);
+    try {
+      this.compactionEngine?.ingest(event);
+    } catch {
+      // CompactionEngine is best-effort; a throw must not break the
+      // publish() never-throws contract (BX9_p).
+    }
     // Eviction-by-shift is O(n) once the ring is full. At the current
     // default `ringSize=8000` (#3803 §02) the per-publish shift work
     // measures in low milliseconds on chatty sessions — still well
