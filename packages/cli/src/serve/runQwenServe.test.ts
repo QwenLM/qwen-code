@@ -208,6 +208,7 @@ describe('runQwenServe daemon logger wiring', () => {
       publishWorkspaceEvent: vi.fn(),
       getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
       resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
     } as unknown as HttpAcpBridge;
 
     // Point daemon logger at our temp debug dir

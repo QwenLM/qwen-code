@@ -600,6 +600,13 @@ export interface HttpAcpBridge {
 
   /** Close all live child processes; called on daemon shutdown. */
   shutdown(): Promise<void>;
+
+  /**
+   * Eagerly spawn the ACP child so the first session doesn't pay
+   * cold-start latency. Fire-and-forget; failures are logged and the
+   * first session falls back to lazy spawn.
+   */
+  preheat(): Promise<void>;
 }
 
 export interface ShellCommandResult {

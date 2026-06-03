@@ -49,6 +49,7 @@ interface ServeArgs {
   'allow-origin'?: string[];
   'prompt-deadline-ms'?: number;
   'writer-idle-timeout-ms'?: number;
+  'channel-idle-timeout-ms'?: number;
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -170,6 +171,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'T2.9 (#4514). Per-SSE-connection idle deadline (ms). ' +
           'Falls back to QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS. Positive integer.',
+      })
+      .option('channel-idle-timeout-ms', {
+        type: 'number',
+        default: 0,
+        description:
+          'Milliseconds to keep ACP child alive after last session closes. ' +
+          '0 = immediate kill (default).',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
     if (!argv['http-bridge']) {
@@ -284,6 +292,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['writer-idle-timeout-ms'] !== undefined
           ? { writerIdleTimeoutMs: argv['writer-idle-timeout-ms'] }
+          : {}),
+        ...(argv['channel-idle-timeout-ms'] !== undefined
+          ? { channelIdleTimeoutMs: argv['channel-idle-timeout-ms'] }
           : {}),
       });
     } catch (err) {

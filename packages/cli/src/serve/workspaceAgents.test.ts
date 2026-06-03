@@ -102,6 +102,7 @@ function buildBridgeStub(
     pendingPermissionCount: 0,
     killAllSync: () => {},
     shutdown: async () => {},
+    preheat: async () => {},
   } as unknown as HttpAcpBridge & { events: RecordedEvent[] };
 }
 

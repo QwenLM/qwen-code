@@ -763,6 +763,9 @@ export async function runQwenServe(
       ...(opts.eventRingSize !== undefined
         ? { eventRingSize: opts.eventRingSize }
         : {}),
+      ...(opts.channelIdleTimeoutMs !== undefined
+        ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+        : {}),
       boundWorkspace,
       childEnvOverrides,
       channelFactory,
@@ -1200,6 +1203,16 @@ export async function runQwenServe(
       server.on('error', (err) => {
         daemonLog.error('server error', err instanceof Error ? err : null);
       });
+      Promise.resolve()
+        .then(() => bridge.preheat())
+        .catch((err) => {
+          writeStderrLine(
+            `qwen serve: ACP preheat failed, will retry on first session: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+
       resolve(handle);
     });
     server.once('error', reject);

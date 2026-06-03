@@ -1001,6 +1001,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     killAllSync() {
       shutdownCalls += 1;
     },
+    async preheat() {},
   };
 }
 

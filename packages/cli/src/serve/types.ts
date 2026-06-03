@@ -158,6 +158,7 @@ export interface ServeOptions {
    * Issue #4514 T2.9. Per-SSE-connection idle deadline.
    */
   writerIdleTimeoutMs?: number;
+  channelIdleTimeoutMs?: number;
 }
 
 /**

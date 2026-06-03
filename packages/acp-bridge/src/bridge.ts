@@ -828,6 +828,41 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // `killAllSync`) gate on `isDying` rather than presence; see
   // `ChannelInfo.isDying` for the per-set-site rationale.
   let channelInfo: ChannelInfo | undefined;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function cancelIdleTimer(): void {
+    if (idleTimer !== undefined) {
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    }
+  }
+
+  const killWithLog = (ci: ChannelInfo): void => {
+    ci.isDying = true;
+    void ci.channel.kill().catch((err) => {
+      writeStderrLine(`qwen serve: channel kill failed: ${String(err)}`);
+    });
+  };
+
+  function startIdleTimer(ci: ChannelInfo): void {
+    const raw = opts.channelIdleTimeoutMs;
+    const timeoutMs =
+      raw !== undefined && Number.isFinite(raw) && raw > 0
+        ? Math.min(raw, 2_147_483_647)
+        : 0;
+    if (!timeoutMs || timeoutMs <= 0) {
+      killWithLog(ci);
+      return;
+    }
+    cancelIdleTimer();
+    idleTimer = setTimeout(() => {
+      idleTimer = undefined;
+      if (ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
+        killWithLog(ci);
+      }
+    }, timeoutMs);
+    idleTimer.unref();
+  }
   // tanzhenxin BkUyD: superset of `channelInfo` covering channels
   // that are dying but not yet OS-reaped. `killSession` /
   // `doSpawn`-newSession-failure / `shutdown` mark a channel as
@@ -1037,6 +1072,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     // mid-SIGTERM-or-already-dead and `connection.newSession()` on it
     // would either hang or land the caller with a sessionId that
     // immediately 404s on every follow-up.
+    cancelIdleTimer();
     if (channelInfo && !channelInfo.isDying) return channelInfo;
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
@@ -1144,6 +1180,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // concurrent `spawnOrAttach` has already reassigned
       // `channelInfo` to a fresh channel.
       void channel.exited.then((exitInfo) => {
+        if (channelInfo === info) cancelIdleTimer();
         aliveChannels.delete(info);
         if (channelInfo === info) channelInfo = undefined;
         const sessions = Array.from(info.sessionIds);
@@ -2826,13 +2863,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         /* no active prompt or session already torn down */
       }
       if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
-        ci.isDying = true;
-        await ci.channel.kill().catch((err) => {
-          writeStderrLine(
-            `qwen serve: closeSession channel kill failed for session ` +
-              `${JSON.stringify(sessionId)}: ${String(err)}`,
-          );
-        });
+        startIdleTimer(ci);
       }
     },
 
@@ -4460,18 +4491,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // SIGTERM the restore mid-flight and 500 the caller for a
       // failure orthogonal to their request.
       if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
-        // Mark dying SYNCHRONOUSLY before the await so a concurrent
-        // `spawnOrAttach` arriving during the SIGTERM grace window
-        // doesn't attach to a transport we're tearing down — without
-        // this it would land the caller with a sessionId that 404s on
-        // every follow-up once `channel.exited` fires (the equivalent
-        // of the pre-PR eager `byWorkspaceChannel.delete()` from the
-        // Stage 1 routing era). `channelInfo` stays set until OS reap
-        // so `killAllSync` still finds a target (BkUyD).
-        ci.isDying = true;
-        await ci.channel.kill().catch(() => {
-          // Best-effort kill — channel may already be dead.
-        });
+        startIdleTimer(ci);
       }
     },
 
@@ -4525,6 +4545,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // SIGTERM grace would leave the dying child without SIGKILL
       // escalation when `process.exit(1)` fires.
       shuttingDown = true;
+      cancelIdleTimer();
       const channels = Array.from(aliveChannels);
       defaultEntry = undefined;
       byId.clear();
@@ -4543,6 +4564,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // entered the bridge.shutdown() phase fails fast instead of
       // spawning a child this teardown won't see.
       shuttingDown = true;
+      cancelIdleTimer();
       const entries = Array.from(byId.values());
       // Snapshot every alive channel (typically 1; up to 2 during a
       // `killSession`-then-`spawnOrAttach` overlap) — entries are
@@ -4622,6 +4644,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         ...inFlightRestoreAwaits,
         inFlightChannelAwait,
       ]);
+    },
+
+    async preheat() {
+      if (shuttingDown) return;
+      const ci = await ensureChannel();
+      if (ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
+        startIdleTimer(ci);
+      }
     },
   };
 }
