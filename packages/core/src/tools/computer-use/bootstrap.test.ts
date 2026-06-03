@@ -34,7 +34,7 @@ describe('runBootstrap', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'qwen-cu-bs-'));
     deps = {
       homeDir: tmpHome,
-      packageSpec: 'open-computer-use@^0.3.0',
+      packageSpec: '@qwen-code/open-computer-use@^0.3.0',
       platform: 'darwin',
       promptInstallApproval: vi.fn(async () => true),
       probePermissions: vi.fn(async () => 'ok' as const),
@@ -48,7 +48,7 @@ describe('runBootstrap', () => {
   it('starts the client when binary is approved + permissions ok', async () => {
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedPackageSpec: '@qwen-code/open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
 
@@ -99,13 +99,15 @@ describe('runBootstrap', () => {
 
     const { loadInstallState } = await import('./install-state.js');
     const state = await loadInstallState(tmpHome);
-    expect(state?.approvedPackageSpec).toBe('open-computer-use@^0.3.0');
+    expect(state?.approvedPackageSpec).toBe(
+      '@qwen-code/open-computer-use@^0.3.0',
+    );
   });
 
   it('polls probePermissions when permissions are missing then granted', async () => {
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedPackageSpec: '@qwen-code/open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
 
@@ -129,14 +131,14 @@ describe('runBootstrap', () => {
     // onboarding window when needed — no separate spawnDoctor step.
     expect(probeCount).toBeGreaterThanOrEqual(3);
     expect(deps.probePermissions).toHaveBeenCalledWith(
-      'open-computer-use@^0.3.0',
+      '@qwen-code/open-computer-use@^0.3.0',
     );
   });
 
   it('throws after pollTimeoutMs when permissions never grant', async () => {
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedPackageSpec: '@qwen-code/open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
 
@@ -157,7 +159,7 @@ describe('runBootstrap', () => {
   it('skips permission flow on non-darwin platforms', async () => {
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedPackageSpec: '@qwen-code/open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
     deps.platform = 'linux';
@@ -175,7 +177,7 @@ describe('runBootstrap', () => {
   it('emits a fresh updateOutput message when permission kind changes mid-poll', async () => {
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedPackageSpec: '@qwen-code/open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
 
@@ -215,7 +217,7 @@ describe('runBootstrap', () => {
     // probe fire only on a fresh client start.
     const { saveInstallState } = await import('./install-state.js');
     await saveInstallState(tmpHome, {
-      approvedPackageSpec: 'open-computer-use@^0.3.0',
+      approvedPackageSpec: '@qwen-code/open-computer-use@^0.3.0',
       approvedAtIso: '2026-05-28T10:00:00Z',
     });
 

@@ -26,7 +26,7 @@ import { resolveComputerUsePackageSpec } from './constants.js';
  * action.
  */
 export interface ComputerUseClientOptions {
-  /** npm package spec to npx. Example: "open-computer-use@^0.3.0". */
+  /** npm package spec to npx. Example: "@qwen-code/open-computer-use@0.2.2". */
   packageSpec: string;
   /** Streaming hook for progress messages during slow operations. */
   onProgress?: (message: string) => void;
