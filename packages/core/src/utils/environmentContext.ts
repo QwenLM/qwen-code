@@ -270,14 +270,13 @@ export function getStartupContextLength(history: Content[]): number {
   const firstEntry = history[0];
   if (firstEntry?.role !== 'user') return 0;
   const firstText = firstEntry.parts?.[0]?.text;
-  // Require BOTH the opening prefix and a closing tag. A prefix-only check
-  // would misclassify a user message that merely begins with the literal
-  // text `<system-reminder>` (e.g. someone quoting/testing the tag) as
-  // startup context, corrupting stripStartupContext and rewind indexing.
+  // Open prefix, and close tag AT THE END (not merely present). Excludes a
+  // prompt quoting the literal tag, and — since IDE mode merges the reminder
+  // into the prompt's text part — a real first turn trailing after the close.
   if (
     typeof firstText === 'string' &&
     firstText.startsWith(SYSTEM_REMINDER_OPEN) &&
-    firstText.includes(SYSTEM_REMINDER_CLOSE)
+    firstText.trimEnd().endsWith(SYSTEM_REMINDER_CLOSE)
   ) {
     return 1;
   }
@@ -312,8 +311,12 @@ export function getStartupContextLength(history: Content[]): number {
  * prompt as structural (e.g. dropping it from rewind truncation, or
  * preserving an orphaned failed turn whose prompt then leaks via coalescing).
  *
- * Mirrors `getStartupContextLength`'s open+close requirement so a user message
- * that merely quotes the literal tag text isn't misclassified.
+ * Each part must END with the close tag, not merely contain it. IDE mode is
+ * the case "every part" alone misses: the editor reminder is concatenated into
+ * the prompt's text part (not a separate part), so that part trails the real
+ * prompt after the close tag. `wrapSystemReminder`/`wrapIdeContext` emit the
+ * close tag last, so genuine reminders still match. Mirrors
+ * `getStartupContextLength`'s open+close requirement.
  */
 export function isSystemReminderContent(content: Content): boolean {
   const parts = content.parts;
@@ -322,7 +325,7 @@ export function isSystemReminderContent(content: Content): boolean {
     (part) =>
       typeof part.text === 'string' &&
       part.text.startsWith(SYSTEM_REMINDER_OPEN) &&
-      part.text.includes(SYSTEM_REMINDER_CLOSE),
+      part.text.trimEnd().endsWith(SYSTEM_REMINDER_CLOSE),
   );
 }
 

@@ -13,7 +13,7 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
-import type { Content } from '@google/genai';
+import { createUserContent, type Content } from '@google/genai';
 import {
   buildAddedMcpToolsReminder,
   buildDeferredToolsReminder,
@@ -21,9 +21,13 @@ import {
   getEnvironmentContext,
   getDirectoryContextString,
   getInitialChatHistory,
+  getStartupContextLength,
+  isSystemReminderContent,
   stripStartupContext,
   SYSTEM_REMINDER_OPEN,
+  SYSTEM_REMINDER_CLOSE,
 } from './environmentContext.js';
+import { prependToFirstTextPart } from './partUtils.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { getFolderStructure } from './getFolderStructure.js';
@@ -487,5 +491,94 @@ describe('startup reminder builders', () => {
 
   it('omits MCP instructions when none are available', () => {
     expect(buildMcpServerInstructionsReminder(registry({}))).toBeNull();
+  });
+});
+
+describe('isSystemReminderContent', () => {
+  const wrap = (body: string) =>
+    `${SYSTEM_REMINDER_OPEN}\n${body}\n${SYSTEM_REMINDER_CLOSE}`;
+  const ide = wrap('Active file: /repo/foo.ts');
+
+  it('is true for a pure single-part reminder', () => {
+    const content: Content = { role: 'user', parts: [{ text: wrap('env') }] };
+    expect(isSystemReminderContent(content)).toBe(true);
+  });
+
+  it('is true when every part is a reminder', () => {
+    const content: Content = {
+      role: 'user',
+      parts: [{ text: wrap('deferred tools') }, { text: wrap('env') }],
+    };
+    expect(isSystemReminderContent(content)).toBe(true);
+  });
+
+  it('is false for a plain user prompt', () => {
+    const content: Content = { role: 'user', parts: [{ text: 'hi' }] };
+    expect(isSystemReminderContent(content)).toBe(false);
+  });
+
+  it('is false for a plan-mode turn [reminder, prompt]', () => {
+    const content: Content = {
+      role: 'user',
+      parts: [{ text: wrap('plan mode') }, { text: 'hi' }],
+    };
+    expect(isSystemReminderContent(content)).toBe(false);
+  });
+
+  it('is false for empty parts', () => {
+    expect(isSystemReminderContent({ role: 'user', parts: [] })).toBe(false);
+  });
+
+  // IDE mode merges the reminder into the prompt's text part, so the single
+  // part trails the real prompt after the close tag — not structural.
+  it('is false for an IDE-merged prompt (close tag mid-string)', () => {
+    const merged = createUserContent(
+      prependToFirstTextPart([{ text: 'what does this do?' }], ide),
+    );
+    expect(merged.parts).toHaveLength(1);
+    expect(isSystemReminderContent(merged)).toBe(false);
+  });
+
+  it('is false for an IDE-merged prompt beside a separate reminder', () => {
+    const parts = prependToFirstTextPart([{ text: 'what does this do?' }], ide);
+    const content = createUserContent([wrap('plan mode'), ...parts]);
+    expect(isSystemReminderContent(content)).toBe(false);
+  });
+});
+
+describe('getStartupContextLength', () => {
+  const wrap = (body: string) =>
+    `${SYSTEM_REMINDER_OPEN}\n${body}\n${SYSTEM_REMINDER_CLOSE}`;
+
+  it('is 1 for a genuine reminder prelude', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: wrap('env') }] },
+    ];
+    expect(getStartupContextLength(history)).toBe(1);
+  });
+
+  it('is 2 for the legacy ack-pair prelude', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'env text' }] },
+      { role: 'model', parts: [{ text: 'Got it. Thanks for the context!' }] },
+    ];
+    expect(getStartupContextLength(history)).toBe(2);
+  });
+
+  it('is 0 when there is no prelude', () => {
+    const history: Content[] = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    expect(getStartupContextLength(history)).toBe(0);
+  });
+
+  // Empty-prelude session whose first turn is IDE-merged must not be mistaken
+  // for a startup reminder.
+  it('is 0 for an IDE-merged first turn', () => {
+    const merged = createUserContent(
+      prependToFirstTextPart(
+        [{ text: 'what does this do?' }],
+        wrap('Active file: /repo/foo.ts'),
+      ),
+    );
+    expect(getStartupContextLength([merged])).toBe(0);
   });
 });
