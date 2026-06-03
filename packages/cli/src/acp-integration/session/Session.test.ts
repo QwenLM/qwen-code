@@ -26,6 +26,22 @@ import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 
+const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    createDebugLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: debugLoggerWarnSpy,
+      error: vi.fn(),
+    }),
+  };
+});
+
 vi.mock('../../nonInteractiveCliCommands.js', () => ({
   ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE: [
     'init',
@@ -2220,6 +2236,105 @@ describe('Session', () => {
       expect(executeSpy).toHaveBeenCalled();
     });
 
+    it('resets AUTO denial counters when a permission-request hook approves a denialTracking fallback prompt', async () => {
+      const hookSpy = vi
+        .spyOn(core, 'firePermissionRequestHook')
+        .mockResolvedValue({
+          hasDecision: true,
+          shouldAllow: true,
+          updatedInput: undefined,
+          denyMessage: undefined,
+        });
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const setAutoModeDenialState = vi.fn();
+      const invocation = {
+        params: { command: 'python -c "print(1)"' },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Need permission',
+          command: 'python',
+          rootCommand: 'python',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue('Run command'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.AUTO);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      mockConfig.getAutoModeDenialState = vi.fn().mockReturnValue({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 20,
+        totalUnavailable: 0,
+      });
+      mockConfig.setAutoModeDenialState = setAutoModeDenialState;
+      (
+        mockGeminiClient as unknown as {
+          getHistoryTail: ReturnType<typeof vi.fn>;
+        }
+      ).getHistoryTail = vi.fn().mockReturnValue([]);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-auto-fallback-hook-approved',
+                  name: core.ToolNames.SHELL,
+                  args: { command: 'python -c "print(1)"' },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+      debugLoggerWarnSpy.mockClear();
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'run tool' }],
+        });
+
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
+        await vi.waitFor(() => {
+          expect(onConfirmSpy).toHaveBeenCalledWith(
+            core.ToolConfirmationOutcome.ProceedOnce,
+          );
+          expect(setAutoModeDenialState).toHaveBeenCalledWith({
+            consecutiveBlock: 0,
+            consecutiveUnavailable: 0,
+            totalBlock: 0,
+            totalUnavailable: 0,
+          });
+          expect(executeSpy).toHaveBeenCalled();
+        });
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Auto mode denial counters reset after fallback approval',
+          ),
+        );
+      } finally {
+        hookSpy.mockRestore();
+      }
+    });
+
     describe('hooks', () => {
       describe('PermissionDenied hook', () => {
         it('fires PermissionDenied hooks for AUTO classifier blocks', async () => {
@@ -2240,7 +2355,11 @@ describe('Session', () => {
               stage: 'fast',
               durationMs: 20,
             },
-            { kind: 'blocked', errorMessage: 'blocked' },
+            {
+              kind: 'blocked',
+              errorMessage: 'blocked',
+              reason: 'classifier_blocked',
+            },
             core.ToolNames.SHELL,
             { command: 'rm -rf /tmp/example' },
             'auto-denied-acp',
@@ -2273,7 +2392,11 @@ describe('Session', () => {
               stage: 'fast',
               durationMs: 3000,
             },
-            { kind: 'blocked', errorMessage: 'blocked' },
+            {
+              kind: 'blocked',
+              errorMessage: 'blocked',
+              reason: 'classifier_unavailable',
+            },
             core.ToolNames.SHELL,
             { command: 'rm -rf /tmp/example' },
             'auto-denied-acp',
@@ -2306,7 +2429,11 @@ describe('Session', () => {
               stage: 'fast',
               durationMs: 20,
             },
-            { kind: 'blocked', errorMessage: 'blocked' },
+            {
+              kind: 'blocked',
+              errorMessage: 'blocked',
+              reason: 'classifier_blocked',
+            },
             core.ToolNames.SHELL,
             { command: 'rm -rf /tmp/example' },
             'auto-denied-acp',
@@ -2333,7 +2460,7 @@ describe('Session', () => {
               stage: 'fast',
               durationMs: 20,
             },
-            { kind: 'fallback' },
+            { kind: 'fallback', reason: 'safety_check' },
             core.ToolNames.SHELL,
             { command: 'rm -rf /tmp/example' },
             'auto-denied-acp',

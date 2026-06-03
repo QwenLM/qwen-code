@@ -93,6 +93,7 @@ describe('HookSystem', () => {
       firePreToolUseEvent: vi.fn(),
       firePostToolUseEvent: vi.fn(),
       firePostToolUseFailureEvent: vi.fn(),
+      firePostToolBatchEvent: vi.fn(),
       firePreCompactEvent: vi.fn(),
       fireNotificationEvent: vi.fn(),
       firePermissionRequestEvent: vi.fn(),
@@ -845,6 +846,59 @@ describe('HookSystem', () => {
     });
   });
 
+  describe('firePostToolBatchEvent', () => {
+    it('should fire PostToolBatch event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          hookSpecificOutput: {
+            hookEventName: 'PostToolBatch',
+            additionalContext: 'batch context',
+          },
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePostToolBatchEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const toolCalls = [
+        {
+          tool_name: 'read_file',
+          tool_input: { path: 'README.md' },
+          tool_use_id: 'call-1',
+          status: 'success' as const,
+          tool_response: { output: 'contents' },
+        },
+      ];
+      const result = await hookSystem.firePostToolBatchEvent(toolCalls);
+
+      expect(mockHookEventHandler.firePostToolBatchEvent).toHaveBeenCalledWith(
+        toolCalls,
+        PermissionMode.Default,
+        undefined,
+      );
+      expect(result).toBeDefined();
+      expect(result?.getAdditionalContext()).toBe('batch context');
+    });
+
+    it('should return undefined when no final output', async () => {
+      vi.mocked(mockHookEventHandler.firePostToolBatchEvent).mockResolvedValue({
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      });
+
+      const result = await hookSystem.firePostToolBatchEvent([]);
+
+      expect(result).toBeUndefined();
+    });
+  });
+
   describe('firePostToolUseFailureEvent', () => {
     it('should fire PostToolUseFailure event and return output', async () => {
       const mockResult = {
@@ -1451,6 +1505,26 @@ describe('HookSystem', () => {
         undefined,
       );
       expect(result).toBeUndefined();
+    });
+
+    it('should return DefaultHookOutput when finalOutput exists', async () => {
+      const mockResult = createMockAggregatedResult(true, {
+        decision: 'block' as HookDecision,
+        reason: 'Observed denial',
+      });
+      vi.mocked(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.firePermissionDeniedEvent(
+        'ReadFile',
+        { path: '/secret.txt' },
+        'tool-use-2',
+        'classifier_unavailable',
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.isBlockingDecision()).toBe(true);
     });
 
     it('should return PermissionDenied hook output when present', async () => {

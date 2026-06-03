@@ -29,6 +29,7 @@ import { FunctionHookRunner } from './functionHookRunner.js';
 import { PromptHookRunner } from './promptHookRunner.js';
 import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
+import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -573,6 +574,7 @@ export class HookRunner {
         GEMINI_PROJECT_DIR: input.cwd,
         CLAUDE_PROJECT_DIR: input.cwd, // For compatibility
         QWEN_PROJECT_DIR: input.cwd, // For Qwen Code compatibility
+        ...getShellContextEnvVars(),
         ...hookConfig.env,
       };
 
