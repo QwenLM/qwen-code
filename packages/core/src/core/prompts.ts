@@ -906,26 +906,6 @@ function getToolCallExamples(model?: string): string {
 }
 
 /**
- * Generates a system reminder message about available subagents for the AI assistant.
- *
- * This function creates an internal system message that informs the AI about specialized
- * agents it can delegate tasks to. The reminder encourages proactive use of the TASK tool
- * when user requests match agent capabilities.
- *
- * @param agentTypes - Array of available agent type names (e.g., ['python', 'web', 'analysis'])
- * @returns A formatted system reminder string wrapped in XML tags for internal AI processing
- *
- * @example
- * ```typescript
- * const reminder = getSubagentSystemReminder(['python', 'web']);
- * // Returns: "<system-reminder>You have powerful specialized agents..."
- * ```
- */
-export function getSubagentSystemReminder(agentTypes: string[]): string {
-  return `<system-reminder>You have powerful specialized agents at your disposal, available agent types are: ${agentTypes.join(', ')}. PROACTIVELY use the ${ToolNames.AGENT} tool to delegate user's task to appropriate agent when user's task matches agent capabilities. Ignore this message if user's task is not relevant to any agent. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`;
-}
-
-/**
  * Generates a system reminder message for plan mode operation.
  *
  * This function creates an internal system message that enforces plan mode constraints,

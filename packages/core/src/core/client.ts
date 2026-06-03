@@ -36,7 +36,6 @@ import {
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
-  getSubagentSystemReminder,
 } from './prompts.js';
 import {
   CompressionStatus,
@@ -1608,20 +1607,6 @@ export class GeminiClient {
         messageType === SendMessageType.Cron
       ) {
         const systemReminders = [];
-
-        // add subagent system reminder if there are subagents
-        const hasAgentTool = await this.config
-          .getToolRegistry()
-          .ensureTool(ToolNames.AGENT);
-        const subagents = (
-          await this.config.getSubagentManager().listSubagents()
-        )
-          .filter((subagent) => subagent.level !== 'builtin')
-          .map((subagent) => subagent.name);
-
-        if (hasAgentTool && subagents.length > 0) {
-          systemReminders.push(getSubagentSystemReminder(subagents));
-        }
 
         // add plan mode system reminder if approval mode is plan
         if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
