@@ -18,12 +18,14 @@ import type { PermissionRule } from './types.js';
 /**
  * Tokens that, when used as the leading command of a Bash allow rule, let the
  * model execute arbitrary code under the AUTO classifier's nose. Covers
- * shell interpreters, scripting-language interpreters, and build/package
- * tools that themselves run arbitrary scripts (`cargo run`, `npm run`, …).
- * Mirrors and extends ClaudeCode's `DANGEROUS_BASH_PATTERNS`.
+ * Unix and Windows shell interpreters, scripting-language interpreters,
+ * remote shells, and build/package tools that themselves run arbitrary
+ * scripts (`cargo run`, `npm run`, …). The exact token set is intentionally
+ * self-contained so AUTO-mode stripping does not depend on an external
+ * upstream identifier.
  */
 const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
-  // Shells
+  // Unix shells
   'bash',
   'sh',
   'zsh',
@@ -32,6 +34,8 @@ const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   'tcsh',
   'dash',
   'ksh',
+  // Windows shells
+  'cmd',
   'pwsh',
   'powershell',
   // Scripting-language interpreters
@@ -40,6 +44,7 @@ const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   'python2',
   'node',
   'deno',
+  'tsx',
   'bun',
   'ruby',
   'perl',
@@ -69,15 +74,41 @@ const DANGEROUS_BASH_INTERPRETERS: readonly string[] = Object.freeze([
   // that without this list would be the cleanest way to bypass the
   // classifier in AUTO mode.
   'npx',
+  'bunx',
   'pnpx',
   'uvx',
   'pipx',
   'dlx',
+  // Remote shells
+  'ssh',
   // Generic eval-y commands
   'eval',
   'exec',
   'source',
 ]);
+
+function stripWindowsExecutableSuffix(token: string): string {
+  return token.endsWith('.exe') ? token.slice(0, -'.exe'.length) : token;
+}
+
+function matcherColonIndex(content: string): number {
+  const firstColon = content.indexOf(':');
+  if (firstColon < 0) return -1;
+  if (/^[a-z]:[\\/]/i.test(content)) {
+    return content.indexOf(':', 2);
+  }
+  return firstColon;
+}
+
+function leadingCommandToken(content: string): string {
+  if (/^[a-z]:[\\/]/i.test(content)) {
+    const exeIndex = content.indexOf('.exe');
+    if (exeIndex >= 0) {
+      return content.slice(0, exeIndex + '.exe'.length);
+    }
+  }
+  return content.split(/\s/)[0] ?? '';
+}
 
 /**
  * Tools whose allow rules carry shell-like risk. `monitor` is a long-running
@@ -96,6 +127,7 @@ const SHELL_LIKE_TOOLS: readonly string[] = Object.freeze([
  *   - absolute-path forms (`/usr/bin/python3` → trailing segment `python3`)
  *   - trailing-wildcard forms (`python3*`)
  *   - colon form (`python:`)
+ *   - Windows executable suffixes (`python.exe`)
  */
 function isInterpreterToken(rawToken: string): boolean {
   if (!rawToken) return false;
@@ -108,10 +140,16 @@ function isInterpreterToken(rawToken: string): boolean {
     end--;
   }
   const noWildcard = rawToken.slice(0, end);
-  const beforeColon = noWildcard.split(':')[0];
+  const colonIndex = matcherColonIndex(noWildcard);
+  const beforeColon =
+    colonIndex >= 0 ? noWildcard.slice(0, colonIndex) : noWildcard;
   // Last path segment so `/usr/bin/python3` → `python3`
-  const lastSegment = (beforeColon ?? '').split('/').pop() ?? '';
-  return DANGEROUS_BASH_INTERPRETERS.includes(lastSegment);
+  const lastSegment = (beforeColon ?? '').split(/[\\/]/).pop() ?? '';
+  const normalizedSegment = stripWindowsExecutableSuffix(lastSegment);
+  return DANGEROUS_BASH_INTERPRETERS.some(
+    (interpreter) =>
+      stripWindowsExecutableSuffix(interpreter) === normalizedSegment,
+  );
 }
 
 /**
@@ -136,16 +174,20 @@ export function isDangerousBashRule(rule: PermissionRule): boolean {
   const content = rule.specifier.trim().toLowerCase();
   if (content === '' || content === '*') return true;
 
-  // Treat both whitespace and `:` as token delimiters: an interpreter is
-  // dangerous when it appears as the first token of either form
+  // Treat whitespace as the first-token delimiter; matcher-colon form is
+  // handled separately below because Windows drive letters also contain `:`.
+  // An interpreter is dangerous when it appears as the first token of either
+  // form
   // (`python -c *` or `python:*`). For colon-form, the part after `:` is
   // the specifier — we'll separately check whether it's concrete below.
-  const firstToken = content.split(/[\s:]/)[0] ?? '';
+  const firstToken = leadingCommandToken(content);
   if (!isInterpreterToken(firstToken)) return false;
+  const colonIndex = matcherColonIndex(content);
+  const hasMatcherColon = colonIndex >= 0;
 
   // Bare interpreter name (`python`, `/usr/bin/python3`) — caller decides
   // what to do, classifier never sees it. Dangerous.
-  if (firstToken === content) return true;
+  if (firstToken === content && !hasMatcherColon) return true;
 
   // Wildcard anywhere paired with an interpreter defeats the classifier:
   // `python *`, `python -c *`, `bun run *`, `/usr/bin/python3 *`,
@@ -159,8 +201,8 @@ export function isDangerousBashRule(rule: PermissionRule): boolean {
   // rules — same shape as `Bash(npm run test)`, which the docstring above
   // commits to NOT flagging. Strip them and we'd silently disable
   // intentional user allow lists in AUTO.
-  if (content.includes(':')) {
-    const afterColon = content.slice(content.indexOf(':') + 1).trim();
+  if (hasMatcherColon) {
+    const afterColon = content.slice(colonIndex + 1).trim();
     return afterColon === '';
   }
 

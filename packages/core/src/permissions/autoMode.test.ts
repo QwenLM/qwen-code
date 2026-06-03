@@ -7,9 +7,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   SAFE_TOOL_ALLOWLIST,
+  applyAutoModeDecision,
   evaluateAutoMode,
   formatClassifierBlockMessage,
+  getAutoModePermissionDeniedReason,
   isInSafeToolAllowlist,
+  shouldFirePermissionDeniedForAutoMode,
   passesAcceptEditsFastPath,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
@@ -282,18 +285,17 @@ describe('evaluateAutoMode — fast-path gating', () => {
       config: baseConfig,
       signal: new AbortController().signal,
     });
-    expect(decision.via).toBe('fallback');
+    expect(decision).toEqual({ via: 'fallback', reason: 'ask_rule' });
   });
 
-  it('routes to fallback when skipClassifier=true (denialTracking armed)', async () => {
+  it('routes to fallback with the denialTracking reason when armed', async () => {
     // Regression guard: when denialTracking has already armed a fallback
     // (3 consecutive blocks / 2 consecutive unavailables), the scheduler
-    // passes `skipClassifier: true` so the in-progress call drops to
-    // manual approval without burning another classifier request. Fast
-    // paths still fire — only the classifier dispatch is suppressed.
-    // Tool here is SHELL (not on the allowlist, not an edit), so neither
-    // fast-path applies; without skipClassifier this would dispatch the
-    // classifier.
+    // passes the specific reason so the in-progress call drops to manual
+    // approval without burning another classifier request. Fast paths still
+    // fire — only the classifier dispatch is suppressed. Tool here is SHELL
+    // (not on the allowlist, not an edit), so neither fast-path applies;
+    // without skipClassifierReason this would dispatch the classifier.
     const decision = await evaluateAutoMode({
       ctx: { toolName: ToolNames.SHELL, command: 'rm -rf /' },
       pmForcedAsk: false,
@@ -301,9 +303,115 @@ describe('evaluateAutoMode — fast-path gating', () => {
       messages: [],
       config: baseConfig,
       signal: new AbortController().signal,
-      skipClassifier: true,
+      skipClassifierReason: 'total_denial',
     });
-    expect(decision.via).toBe('fallback');
+    expect(decision).toEqual({ via: 'fallback', reason: 'total_denial' });
+  });
+});
+
+// ─── applyAutoModeDecision reason mapping ────────────────────────────────
+
+describe('applyAutoModeDecision — blocked reason mapping', () => {
+  const denialState = {
+    consecutiveBlock: 0,
+    consecutiveUnavailable: 0,
+    totalBlock: 0,
+    totalUnavailable: 0,
+  };
+
+  it('maps classifier policy blocks to classifier_blocked', () => {
+    const setAutoModeDenialState = vi.fn();
+    const result = applyAutoModeDecision(
+      {
+        via: 'classifier',
+        shouldBlock: true,
+        reason: 'unsafe command',
+        unavailable: false,
+        stage: 'fast',
+        durationMs: 10,
+      },
+      { setAutoModeDenialState } as unknown as Config,
+      denialState,
+    );
+
+    expect(result).toMatchObject({
+      kind: 'blocked',
+      reason: 'classifier_blocked',
+    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 1,
+      consecutiveUnavailable: 0,
+      totalBlock: 1,
+      totalUnavailable: 0,
+    });
+  });
+
+  it('maps classifier infrastructure failures to classifier_unavailable', () => {
+    const setAutoModeDenialState = vi.fn();
+    const result = applyAutoModeDecision(
+      {
+        via: 'classifier',
+        shouldBlock: true,
+        reason: 'timeout',
+        unavailable: true,
+        stage: 'thinking',
+        durationMs: 10,
+      },
+      { setAutoModeDenialState } as unknown as Config,
+      denialState,
+    );
+
+    expect(result).toMatchObject({
+      kind: 'blocked',
+      reason: 'classifier_unavailable',
+    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 1,
+      totalBlock: 0,
+      totalUnavailable: 1,
+    });
+  });
+
+  it('allows classifier approvals and resets consecutive counters', () => {
+    const setAutoModeDenialState = vi.fn();
+    const result = applyAutoModeDecision(
+      {
+        via: 'classifier',
+        shouldBlock: false,
+        reason: 'safe command',
+        unavailable: false,
+        stage: 'fast',
+        durationMs: 10,
+      },
+      { setAutoModeDenialState } as unknown as Config,
+      {
+        consecutiveBlock: 1,
+        consecutiveUnavailable: 2,
+        totalBlock: 3,
+        totalUnavailable: 4,
+      },
+    );
+
+    expect(result).toEqual({ kind: 'approved' });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 3,
+      totalUnavailable: 4,
+    });
+  });
+
+  it('passes through fallback reason without mutating denial state', () => {
+    const setAutoModeDenialState = vi.fn();
+    const result = applyAutoModeDecision(
+      { via: 'fallback', reason: 'consecutive_block' },
+      { setAutoModeDenialState } as unknown as Config,
+      denialState,
+    );
+
+    expect(result).toEqual({ kind: 'fallback', reason: 'consecutive_block' });
+    expect(setAutoModeDenialState).not.toHaveBeenCalled();
   });
 });
 
@@ -350,6 +458,56 @@ describe('formatClassifierBlockMessage', () => {
         unavailable: true,
       }),
     ).toBe('Auto mode classifier unavailable; action blocked for safety');
+  });
+});
+
+// ─── PermissionDenied hook gating ────────────────────────────────────────
+
+describe('PermissionDenied hook gating', () => {
+  const classifierBlock = {
+    via: 'classifier' as const,
+    shouldBlock: true,
+    reason: 'Dangerous shell command',
+    unavailable: false,
+    stage: 'fast' as const,
+    durationMs: 20,
+  };
+
+  it('fires only for classifier blocks that produce a blocked outcome', () => {
+    expect(
+      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
+        kind: 'blocked',
+        errorMessage: 'blocked',
+        reason: 'classifier_blocked',
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(
+        { ...classifierBlock, shouldBlock: false },
+        { kind: 'approved' },
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(
+        { via: 'fallback', reason: 'safety_check' },
+        { kind: 'fallback', reason: 'safety_check' },
+      ),
+    ).toBe(false);
+  });
+
+  it('maps classifier blocks to stable PermissionDenied reasons', () => {
+    expect(getAutoModePermissionDeniedReason(classifierBlock)).toBe(
+      'classifier_blocked',
+    );
+
+    expect(
+      getAutoModePermissionDeniedReason({
+        ...classifierBlock,
+        unavailable: true,
+      }),
+    ).toBe('classifier_unavailable');
   });
 });
 

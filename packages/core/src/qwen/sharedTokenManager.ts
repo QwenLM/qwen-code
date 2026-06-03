@@ -17,6 +17,7 @@ import {
   CredentialsClearRequiredError,
 } from './qwenOAuth2.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { Storage } from '../config/storage.js';
 
 const debugLogger = createDebugLogger('QWEN_OAUTH');
@@ -614,7 +615,6 @@ export class SharedTokenManager {
   ): Promise<void> {
     const filePath = this.getCredentialFilePath();
     const dirPath = path.dirname(filePath);
-    const tempPath = `${filePath}.tmp.${randomUUID()}`;
 
     // Create directory with restricted permissions
     try {
@@ -634,19 +634,16 @@ export class SharedTokenManager {
     const credString = JSON.stringify(credentials, null, 2);
 
     try {
-      // Write to temporary file first with restricted permissions
-      await this.withTimeout(
-        fs.writeFile(tempPath, credString, { mode: 0o600 }),
-        5000,
-        'File operation',
-      );
-
-      // Atomic move to final location
-      await this.withTimeout(
-        fs.rename(tempPath, filePath),
-        5000,
-        'File operation',
-      );
+      // Don't wrap atomicWriteFile in withTimeout: a timeout would reject
+      // our caller while the rename can still complete after the lock is
+      // released, potentially overwriting another process's newer
+      // credentials. Atomic write is durable by design — accept whatever
+      // latency the I/O takes. (See PR #4095 Phase 2 Codex review round 3.)
+      await atomicWriteFile(filePath, credString, {
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      });
 
       // Update cached file modification time atomically after successful write
       const stats = await this.withTimeout(
@@ -656,13 +653,6 @@ export class SharedTokenManager {
       );
       this.memoryCache.fileModTime = stats.mtimeMs;
     } catch (error) {
-      // Clean up temp file if it exists
-      try {
-        await this.withTimeout(fs.unlink(tempPath), 1000, 'File operation');
-      } catch (_cleanupError) {
-        // Ignore cleanup errors - temp file might not exist
-      }
-
       throw new TokenManagerError(
         TokenError.FILE_ACCESS_ERROR,
         `Failed to write credentials file: ${error instanceof Error ? error.message : String(error)}`,

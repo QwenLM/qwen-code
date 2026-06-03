@@ -158,6 +158,63 @@ describe('isDangerousBashRule', () => {
       expect(isDangerousBashRule(bashRule(interp))).toBe(true);
     });
 
+    it.each(['tsx -e *', 'ssh prod-host -- *', 'bunx -p dangerous-pkg *'])(
+      'flags new interpreter, remote shell, or runner wildcard %s',
+      (s) => {
+        expect(isDangerousBashRule(bashRule(s))).toBe(true);
+      },
+    );
+
+    it.each([
+      'tsx',
+      'ssh',
+      'bunx',
+      'bash.exe',
+      'cmd',
+      'cmd.exe',
+      'pwsh.exe',
+      'powershell.exe',
+    ])('flags new interpreter, remote shell, or runner bare name %s', (s) => {
+      expect(isDangerousBashRule(bashRule(s))).toBe(true);
+    });
+
+    it.each([
+      'python.exe -c *',
+      'node.exe -e *',
+      'tsx.exe -e *',
+      'bunx.exe -p dangerous-pkg *',
+      'C:\\Python\\python.exe -c *',
+      'C:\\Python\\python.exe:*',
+      'C:\\Python\\python:*',
+      'C:\\Program Files\\Python\\python.exe -c *',
+    ])('flags Windows executable suffix wildcard %s', (s) => {
+      expect(isDangerousBashRule(bashRule(s))).toBe(true);
+    });
+
+    it.each([
+      'C:\\Python\\python.exe',
+      'C:\\nodejs\\node.exe',
+      'C:\\Users\\me\\bin\\tsx.exe',
+      'C:\\Program Files\\Python\\python.exe',
+    ])('flags bare Windows interpreter path %s', (s) => {
+      expect(isDangerousBashRule(bashRule(s))).toBe(true);
+    });
+
+    it('normalizes Windows executable suffixes in both directions', () => {
+      expect(isDangerousBashRule(bashRule('cmd *'))).toBe(true);
+      expect(isDangerousBashRule(bashRule('cmd.exe *'))).toBe(true);
+    });
+
+    it.each([
+      'cmd /c *',
+      'cmd.exe /c *',
+      'bash.exe -c *',
+      'powershell.exe -Command *',
+      'pwsh.exe -Command *',
+    ])('flags Windows shell wildcard %s', (s) => {
+      expect(isDangerousBashRule(bashRule(s))).toBe(true);
+    });
+
     it.each([
       'bun run *',
       'deno run *',
@@ -174,6 +231,22 @@ describe('isDangerousBashRule', () => {
       '/bin/bash -c *',
     ])('flags absolute-path interpreter form %s', (s) => {
       expect(isDangerousBashRule(bashRule(s))).toBe(true);
+    });
+
+    it.each([
+      'tsx script.tsx',
+      'ssh prod-host -- ls',
+      'cmd /c script.bat',
+      'cmd.exe /c script.bat',
+      'pwsh.exe -File script.ps1',
+      'powershell.exe -File script.ps1',
+      'python.exe script.py',
+      'node.exe script.js',
+      'bunx eslint .',
+      'C:\\Python\\python.exe script.py',
+      'C:\\Program Files\\Python\\python.exe script.py',
+    ])('does NOT flag concrete commands using new tokens %s', (s) => {
+      expect(isDangerousBashRule(bashRule(s))).toBe(false);
     });
 
     it('flags Monitor allow rules with the same interpreter logic', () => {

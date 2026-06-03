@@ -308,16 +308,20 @@ export function useProviderSetupFlow(
     setModelIdsError(null);
   }, []);
 
-  const submitModelIds = useCallback((): boolean => {
-    const normalized = normalizeModelIds(modelIds);
-    if (normalized.length === 0) {
-      setModelIdsError(t('Model IDs cannot be empty.'));
-      return false;
-    }
-    setModelIdsError(null);
-    submitOrNext({ modelIds: normalized });
-    return true;
-  }, [modelIds, submitOrNext]);
+  const submitModelIds = useCallback(
+    (overrides?: Partial<ProviderSetupInputs>): boolean => {
+      const normalized = overrides?.modelIds ?? normalizeModelIds(modelIds);
+      if (normalized.length === 0) {
+        setModelIdsError(t('Model IDs cannot be empty.'));
+        return false;
+      }
+      setModelIds(normalized.join(', '));
+      setModelIdsError(null);
+      submitOrNext({ ...overrides, modelIds: normalized });
+      return true;
+    },
+    [modelIds, submitOrNext],
+  );
 
   const advancedOptionCount = modalityEnabled ? 7 : 3;
 

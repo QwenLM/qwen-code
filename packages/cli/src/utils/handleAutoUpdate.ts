@@ -8,7 +8,7 @@ import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { getInstallationInfo } from './installationInfo.js';
 import { updateEventEmitter } from './updateEventEmitter.js';
-import type { HistoryItem } from '../ui/types.js';
+import type { HistoryItemWithoutId } from '../ui/types.js';
 import { MessageType } from '../ui/types.js';
 import { spawnWrapper } from './spawnWrapper.js';
 import type { spawn } from 'node:child_process';
@@ -84,14 +84,14 @@ export function handleAutoUpdate(
 }
 
 export function setUpdateHandler(
-  addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+  addItem: (item: HistoryItemWithoutId, timestamp: number) => void,
   setUpdateInfo: (info: UpdateObject | null) => void,
   isIdleRef: { current: boolean } = { current: true },
 ) {
   let successfullyInstalled = false;
-  const pendingNotifications: Array<Omit<HistoryItem, 'id'>> = [];
+  const pendingNotifications: HistoryItemWithoutId[] = [];
 
-  const addItemOrDefer = (item: Omit<HistoryItem, 'id'>) => {
+  const addItemOrDefer = (item: HistoryItemWithoutId) => {
     if (isIdleRef.current) {
       addItem(item, Date.now());
     } else {

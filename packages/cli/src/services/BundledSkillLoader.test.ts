@@ -103,6 +103,20 @@ describe('BundledSkillLoader', () => {
     });
   });
 
+  it('does not propagate skill.priority to completionPriority', async () => {
+    // Priority is intentionally scoped to the `/skills` listing (sorted in
+    // SkillManager.listSkills) and must NOT leak into the slash-completion
+    // menu / `/help` ordering — typing `/` should keep its prior behavior
+    // regardless of any skill's priority value.
+    const skill = makeSkill({ priority: 42 });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0].completionPriority).toBeUndefined();
+  });
+
   it('should submit skill body as prompt without args', async () => {
     const skill = makeSkill();
     mockSkillManager.listSkills.mockResolvedValue([skill]);
@@ -162,6 +176,26 @@ describe('BundledSkillLoader', () => {
 
     expect(commands).toHaveLength(2);
     expect(commands.map((c) => c.name)).toEqual(['review', 'deploy']);
+  });
+
+  it('should load simplify bundled skill like other slash commands', async () => {
+    const skills = [
+      makeSkill({
+        name: 'simplify',
+        description: 'Simplify recent changes',
+        filePath: '/bundled/simplify/SKILL.md',
+        body: 'Simplify body',
+      }),
+    ];
+    mockSkillManager.listSkills.mockResolvedValue(skills);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0].name).toBe('simplify');
+    expect(commands[0].description).toBe('Simplify recent changes');
+    expect(commands[0].kind).toBe(CommandKind.SKILL);
   });
 
   it('should resolve {{model}} template variable in skill body', async () => {

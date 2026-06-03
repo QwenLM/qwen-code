@@ -176,22 +176,6 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // half of the bundle without the other.
     const useProxyIdentity = !isAnthropicNativeBaseUrl(contentGeneratorConfig);
     const defaultHeaders = this.buildHeaders(useProxyIdentity);
-    // On the proxy branch the SDK is constructed with `authToken` so it
-    // emits `Authorization: Bearer <key>` natively, but some
-    // Anthropic-compatible servers (OpenCode-Go, Claude proxy products —
-    // see #4323) authenticate only on the canonical `x-api-key` header.
-    // Ship both shapes side-by-side so either family accepts us. We add
-    // `x-api-key` here (post-buildHeaders) so customHeaders can't override
-    // it and the SDK-level env back-fill suppression (apiKey: null on the
-    // SDK side, suppressing the SDK's own ANTHROPIC_API_KEY destructuring
-    // default) is preserved. `contentGeneratorConfig.apiKey` itself may
-    // have been env-resolved upstream by `resolveCredentialField`, but
-    // that's the same value already shipped as `Authorization: Bearer`
-    // via `authToken` on this very request — adding it as `x-api-key`
-    // doesn't widen the #4020 leak surface.
-    if (useProxyIdentity && contentGeneratorConfig.apiKey) {
-      defaultHeaders['x-api-key'] = contentGeneratorConfig.apiKey;
-    }
     const baseURL = contentGeneratorConfig.baseUrl;
     // Configure fetch options for proxy support and timeout handling.
     // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
@@ -282,7 +266,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
       throw redactProxyError(error);
     }
 
-    return this.processStream(this.redactStreamErrors(stream));
+    return this.processStreamWithEmptyFallback(
+      this.redactStreamErrors(stream),
+      anthropicRequest,
+      request.config?.abortSignal,
+      headers,
+    );
   }
 
   async countTokens(
@@ -981,6 +970,59 @@ export class AnthropicContentGenerator implements ContentGenerator {
         default:
           break;
       }
+    }
+  }
+
+  // Some Anthropic-compatible gateways close the SSE stream with HTTP 200
+  // but emit no assistant content or stop reason (e.g. billing / quota
+  // limits hit mid-proxy). When that happens we probe once with the same
+  // request in non-streaming mode so the real provider error surfaces
+  // instead of the generic "stream ended without a finish reason".
+  private async *processStreamWithEmptyFallback(
+    stream: AsyncIterable<RawMessageStreamEvent>,
+    fallbackRequest: MessageCreateParamsWithThinking,
+    abortSignal: AbortSignal | undefined,
+    headers: Record<string, string> | undefined,
+  ): AsyncGenerator<GenerateContentResponse> {
+    let hasAssistantPayload = false;
+    let hasFinishReason = false;
+
+    for await (const chunk of this.processStream(stream)) {
+      const candidates = chunk.candidates ?? [];
+      hasFinishReason ||= candidates.some(
+        (candidate) => candidate.finishReason !== undefined,
+      );
+      hasAssistantPayload ||= candidates.some((candidate) =>
+        candidate.content?.parts?.some(
+          (part) =>
+            part.text ||
+            part.thought ||
+            part.thoughtSignature ||
+            part.functionCall,
+        ),
+      );
+      yield chunk;
+    }
+
+    if (hasAssistantPayload || hasFinishReason) {
+      return;
+    }
+
+    debugLogger.warn(
+      'Anthropic stream ended without assistant payload or finish reason; ' +
+        'probing once with a non-streaming request to surface provider errors.',
+    );
+
+    let response: Message;
+    try {
+      runtimeDiagnostics.recordAnthropicWireRequest(fallbackRequest);
+      response = (await this.client.messages.create(fallbackRequest, {
+        signal: abortSignal,
+        ...(headers ? { headers } : {}),
+      })) as Message;
+      yield this.converter.convertAnthropicResponseToGemini(response);
+    } catch (error) {
+      throw redactProxyError(error);
     }
   }
 

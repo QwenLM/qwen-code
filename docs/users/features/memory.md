@@ -24,14 +24,31 @@ Don't include things Qwen can figure out by reading your code. QWEN.md works bes
 
 ### Where to create QWEN.md
 
-| File                          | Who it applies to                             |
-| ----------------------------- | --------------------------------------------- |
-| `~/.qwen/QWEN.md`             | You, across all your projects                 |
-| `QWEN.md` in the project root | Your whole team (commit it to source control) |
+| File                          | Who it applies to                                |
+| ----------------------------- | ------------------------------------------------ |
+| `~/.qwen/QWEN.md`             | You, across all your projects                    |
+| `QWEN.md` in the project root | Your whole team (commit it to source control)    |
+| `.qwen/QWEN.local.md`         | Only you, only in this project (keep out of git) |
 
-You can have both. Qwen loads all QWEN.md files it finds when you start a session — your personal one plus any in the project.
+You can have any combination of these. Qwen loads all of them when you start a session.
 
 If your repository already has an `AGENTS.md` file for other AI tools, Qwen reads that too. No need to duplicate instructions.
+
+#### When to use `.qwen/QWEN.local.md`
+
+Use it for **project-specific but personal** instructions — things that belong to this project but shouldn't be shared with the team:
+
+- Your own cluster ID, container registry namespace, or cloud account
+- A personal debug command that hardcodes your local environment
+- Notes you want Qwen to know about your work-in-progress, but not commit
+
+It loads **after** the shared project `QWEN.md`, so your local instructions can supplement or override the team's.
+
+**You must gitignore it yourself.** Although `.qwen/` is often treated as a local directory, qwen-code does not generate a `.gitignore` for you, and some projects commit `.qwen/settings.json`. Add this line to your `.gitignore` (or to your global git ignore):
+
+```
+.qwen/QWEN.local.md
+```
 
 ### Generate one automatically with `/init`
 
