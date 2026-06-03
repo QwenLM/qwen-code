@@ -615,14 +615,8 @@ export function useStatusLine(): {
     updatePullRequestNumber,
   ]);
 
-  // Reload the statusLine setting from disk when a model turn finishes
-  // (streamingState → Idle). The statusline-setup agent edits settings.json
-  // via file tools, but the in-memory LoadedSettings is never updated. We
-  // snapshot the raw statusLine value before reloading; if the on-disk value
-  // differs, we bump `settingsReloadKey` to trigger a re-render + doUpdate().
-  // This avoids unnecessary work on turns that didn't touch the statusline.
-  // The reload intentionally refreshes the whole user scope, matching startup
-  // settings semantics for file edits made during the turn.
+  // File edits made during a turn bypass in-memory settings; reload the user
+  // scope on idle, then re-render only if ui.statusLine changed.
   const [settingsReloadKey, setSettingsReloadKey] = useState(0);
   const prevStreamingForReloadRef = useRef(streamingState);
   useEffect(() => {
