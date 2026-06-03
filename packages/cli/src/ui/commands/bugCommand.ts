@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import open from 'open';
+import { openBrowserSecurely } from '@qwen-code/qwen-code-core';
 import {
   type CommandContext,
   type SlashCommand,
@@ -55,7 +55,7 @@ export const bugCommand: SlashCommand = {
     context.ui.addItem(bugReportItem, Date.now());
 
     try {
-      await open(bugReportUrl);
+      await openBrowserSecurely(bugReportUrl);
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);

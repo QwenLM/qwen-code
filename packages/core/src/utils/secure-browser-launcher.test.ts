@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { openBrowserSecurely } from './secure-browser-launcher.js';
+import {
+  openBrowserSecurely,
+  openFilePathSecurely,
+} from './secure-browser-launcher.js';
 
 // Create mock function using vi.hoisted
 const mockExecFile = vi.hoisted(() => vi.fn());
@@ -29,6 +32,7 @@ describe('secure-browser-launcher', () => {
     if (originalPlatform) {
       Object.defineProperty(process, 'platform', originalPlatform);
     }
+    vi.unstubAllEnvs();
   });
 
   function setPlatform(platform: string) {
@@ -192,6 +196,19 @@ describe('secure-browser-launcher', () => {
       );
     });
 
+    it('should honor BROWSER on Linux', async () => {
+      setPlatform('linux');
+      vi.stubEnv('BROWSER', 'wslview');
+
+      await openBrowserSecurely('https://example.com');
+
+      expect(mockExecFile).toHaveBeenCalledWith(
+        'wslview',
+        ['https://example.com'],
+        expect.any(Object),
+      );
+    });
+
     it('should throw on unsupported platforms', async () => {
       setPlatform('aix');
       await expect(openBrowserSecurely('https://example.com')).rejects.toThrow(
@@ -241,6 +258,25 @@ describe('secure-browser-launcher', () => {
         ['https://example.com'],
         expect.any(Object),
       );
+    });
+  });
+
+  describe('File path launching', () => {
+    it('should open a local file path on macOS', async () => {
+      setPlatform('darwin');
+      await openFilePathSecurely('/tmp/qwen-insight.html');
+
+      expect(mockExecFile).toHaveBeenCalledWith(
+        'open',
+        ['/tmp/qwen-insight.html'],
+        expect.any(Object),
+      );
+    });
+
+    it('should reject file paths with control characters', async () => {
+      await expect(
+        openFilePathSecurely('/tmp/qwen\ninsight.html'),
+      ).rejects.toThrow('invalid characters');
     });
   });
 });

@@ -15,9 +15,9 @@ import {
   createDebugLogger,
   encodeInsightProgressMessage,
   encodeInsightReadyMessage,
+  openFilePathSecurely,
   Storage,
 } from '@qwen-code/qwen-code-core';
-import open from 'open';
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -216,8 +216,6 @@ export const insightCommand: SlashCommand = {
       );
 
       try {
-        await open(outputPath);
-
         context.ui.addItem(
           {
             type: MessageType.INFO,
@@ -227,6 +225,8 @@ export const insightCommand: SlashCommand = {
           },
           Date.now(),
         );
+
+        await openFilePathSecurely(outputPath);
       } catch (browserError) {
         logger.error('Failed to open browser automatically:', browserError);
 

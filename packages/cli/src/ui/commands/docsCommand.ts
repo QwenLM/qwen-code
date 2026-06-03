@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import open from 'open';
 import process from 'node:process';
+import { openBrowserSecurely } from '@qwen-code/qwen-code-core';
 import {
   type CommandContext,
   type SlashCommand,
@@ -57,7 +57,21 @@ export const docsCommand: SlashCommand = {
         },
         Date.now(),
       );
-      await open(docsUrl);
+      try {
+        await openBrowserSecurely(docsUrl);
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: t('Could not open documentation in browser: {{error}}', {
+              error: errorMessage,
+            }),
+          },
+          Date.now(),
+        );
+      }
     }
     return;
   },

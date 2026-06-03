@@ -41,6 +41,111 @@ function validateUrl(url: string): void {
   }
 }
 
+function validateFilePath(filePath: string): void {
+  if (!filePath.trim()) {
+    throw new Error('Invalid file path');
+  }
+
+  // eslint-disable-next-line no-control-regex
+  if (/[\r\n\x00-\x1f]/.test(filePath)) {
+    throw new Error('File path contains invalid characters');
+  }
+}
+
+function getLinuxBrowserCommands(): string[] {
+  const browserEnv = process.env['BROWSER']?.trim();
+  const commands = [
+    ...(browserEnv && browserEnv !== 'www-browser' ? [browserEnv] : []),
+    'xdg-open',
+    'gnome-open',
+    'kde-open',
+    'firefox',
+    'chromium',
+    'google-chrome',
+    'microsoft-edge',
+  ];
+
+  return [...new Set(commands)];
+}
+
+async function launchTarget(
+  target: string,
+  manualTargetLabel: 'URL' | 'file',
+): Promise<void> {
+  const platformName = platform();
+  const options: Record<string, unknown> = {
+    // Don't inherit parent's environment to avoid potential issues
+    env: {
+      ...process.env,
+      // Ensure we're not in a shell that might interpret special characters
+      SHELL: undefined,
+    },
+    // Detach the browser process so it doesn't block
+    detached: true,
+    stdio: 'ignore',
+  };
+
+  if (
+    platformName === 'linux' ||
+    platformName === 'freebsd' ||
+    platformName === 'openbsd'
+  ) {
+    for (const command of getLinuxBrowserCommands()) {
+      try {
+        await execFileAsync(command, [target], options);
+        return;
+      } catch {
+        continue;
+      }
+    }
+
+    /* eslint-disable no-console */
+    console.warn(
+      `Failed to open browser automatically. Please open this ${manualTargetLabel} manually: ${target}`,
+    );
+    /* eslint-enable no-console */
+    return;
+  }
+
+  let command: string;
+  let args: string[];
+
+  switch (platformName) {
+    case 'darwin':
+      // macOS
+      command = 'open';
+      args = [target];
+      break;
+
+    case 'win32':
+      // Windows - use PowerShell with Start-Process
+      // This avoids the cmd.exe shell which is vulnerable to injection
+      command = 'powershell.exe';
+      args = [
+        '-NoProfile',
+        '-NonInteractive',
+        '-WindowStyle',
+        'Hidden',
+        '-Command',
+        `Start-Process '${target.replace(/'/g, "''")}'`,
+      ];
+      break;
+
+    default:
+      throw new Error(`Unsupported platform: ${platformName}`);
+  }
+
+  try {
+    await execFileAsync(command, args, options);
+  } catch (_error) {
+    /* eslint-disable no-console */
+    console.warn(
+      `Failed to open browser automatically. Please open this ${manualTargetLabel} manually: ${target}`,
+    );
+    /* eslint-enable no-console */
+  }
+}
+
 /**
  * Opens a URL in the user's default browser securely.
  *
@@ -54,95 +159,12 @@ function validateUrl(url: string): void {
 export async function openBrowserSecurely(url: string): Promise<void> {
   // Validate the URL first
   validateUrl(url);
+  await launchTarget(url, 'URL');
+}
 
-  const platformName = platform();
-  let command: string;
-  let args: string[];
-
-  switch (platformName) {
-    case 'darwin':
-      // macOS
-      command = 'open';
-      args = [url];
-      break;
-
-    case 'win32':
-      // Windows - use PowerShell with Start-Process
-      // This avoids the cmd.exe shell which is vulnerable to injection
-      command = 'powershell.exe';
-      args = [
-        '-NoProfile',
-        '-NonInteractive',
-        '-WindowStyle',
-        'Hidden',
-        '-Command',
-        `Start-Process '${url.replace(/'/g, "''")}'`,
-      ];
-      break;
-
-    case 'linux':
-    case 'freebsd':
-    case 'openbsd':
-      // Linux and BSD variants
-      // Try xdg-open first, fall back to other options
-      command = 'xdg-open';
-      args = [url];
-      break;
-
-    default:
-      throw new Error(`Unsupported platform: ${platformName}`);
-  }
-
-  const options: Record<string, unknown> = {
-    // Don't inherit parent's environment to avoid potential issues
-    env: {
-      ...process.env,
-      // Ensure we're not in a shell that might interpret special characters
-      SHELL: undefined,
-    },
-    // Detach the browser process so it doesn't block
-    detached: true,
-    stdio: 'ignore',
-  };
-
-  try {
-    await execFileAsync(command, args, options);
-  } catch (_error) {
-    // For Linux, try fallback commands if xdg-open fails
-    if (
-      (platformName === 'linux' ||
-        platformName === 'freebsd' ||
-        platformName === 'openbsd') &&
-      command === 'xdg-open'
-    ) {
-      const fallbackCommands = [
-        'gnome-open',
-        'kde-open',
-        'firefox',
-        'chromium',
-        'google-chrome',
-        'microsoft-edge',
-      ];
-
-      for (const fallbackCommand of fallbackCommands) {
-        try {
-          await execFileAsync(fallbackCommand, [url], options);
-          return; // Success!
-        } catch {
-          // Try next command
-          continue;
-        }
-      }
-    }
-
-    // Log the URL so the user can open it manually instead of crashing.
-    /* eslint-disable no-console */
-    console.warn(
-      `Failed to open browser automatically. Please open this URL manually: ${url}`,
-    );
-    /* eslint-enable no-console */
-    return;
-  }
+export async function openFilePathSecurely(filePath: string): Promise<void> {
+  validateFilePath(filePath);
+  await launchTarget(filePath, 'file');
 }
 
 /**
