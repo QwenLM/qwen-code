@@ -236,7 +236,7 @@ function writeClipboard(text: string): void {
     }
     if (linuxWriteCmd) {
       const [bin, ...args] = linuxWriteCmd;
-      const child = execFile(bin, args, cb);
+      const child = execFile(bin, args, { timeout: 500 }, cb);
       child.stdin?.end(text);
       child.unref();
     }
