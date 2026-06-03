@@ -1495,8 +1495,7 @@ export default {
     '回滾僅適用於獨立安裝。',
   'Rollback successful. Restart your terminal to use the previous version.':
     '回滾成功。請重啟終端以使用上一個版本。',
-  'Rollback failed: no previous version found (.old directory missing).':
-    '回滾失敗：未找到上一個版本（.old 目錄缺失）。',
+  'Rollback failed:': '回滾失敗：',
   'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
     '在 Windows 上回滾需要手動操作。請將安裝目錄中的 qwen-code.old 重新命名為 qwen-code。',
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',

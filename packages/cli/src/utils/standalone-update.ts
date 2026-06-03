@@ -61,18 +61,22 @@ function escapePS(s: string): string {
 async function tryFetch(
   url: string,
   timeoutMs = FETCH_TIMEOUT_MS,
-): Promise<UndiciResponse | null> {
+): Promise<
+  | { response: UndiciResponse; error?: undefined }
+  | { response?: undefined; error: Error }
+> {
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (res.ok) return res;
-    // Consume body to release the socket back to the connection pool
+    if (res.ok) return { response: res };
     await res.body?.cancel().catch(() => {});
+    return { error: new Error(`HTTP ${res.status} ${res.statusText}`) };
   } catch (err) {
-    debugLogger.debug(`Fetch failed for ${url}: ${err}`);
+    const error = err instanceof Error ? err : new Error(String(err));
+    debugLogger.debug(`Fetch failed for ${url}: ${error.message}`);
+    return { error };
   }
-  return null;
 }
 
 async function downloadWithFallback(
@@ -81,20 +85,20 @@ async function downloadWithFallback(
   timeoutMs = FETCH_TIMEOUT_MS,
 ): Promise<UndiciResponse> {
   const ossUrl = `${OSS_BASE}/${versionPath}/${filename}`;
-  const ossRes = await tryFetch(ossUrl, timeoutMs);
-  if (ossRes) return ossRes;
+  const ossResult = await tryFetch(ossUrl, timeoutMs);
+  if (ossResult.response) return ossResult.response;
 
   const ghUrl = `${GITHUB_BASE}/${versionPath}/${filename}`;
-  const ghRes = await tryFetch(ghUrl, timeoutMs);
-  if (ghRes) return ghRes;
+  const ghResult = await tryFetch(ghUrl, timeoutMs);
+  if (ghResult.response) return ghResult.response;
 
   throw new Error(
-    `Failed to download ${filename} from both OSS and GitHub mirrors`,
+    `Failed to download ${filename}: OSS (${ossResult.error?.message ?? 'unknown'}), GitHub (${ghResult.error?.message ?? 'unknown'})`,
   );
 }
 
 async function verifyChecksum(
-  filePath: string,
+  actualHash: string,
   filename: string,
   versionPath: string,
 ): Promise<void> {
@@ -106,11 +110,11 @@ async function verifyChecksum(
   // key and publishes SHA256SUMS.sig, set QWEN_REQUIRE_SIGNATURE=1 to enforce.
   // Until then, verification is best-effort (passes when .sig exists, warns when not).
   const requireSig = process.env['QWEN_REQUIRE_SIGNATURE'] === '1';
-  let sigResponse = await tryFetch(`${OSS_BASE}/${versionPath}/SHA256SUMS.sig`);
-  if (!sigResponse) {
-    sigResponse = await tryFetch(
-      `${GITHUB_BASE}/${versionPath}/SHA256SUMS.sig`,
-    );
+  let sigResponse: UndiciResponse | undefined;
+  try {
+    sigResponse = await downloadWithFallback(versionPath, 'SHA256SUMS.sig');
+  } catch {
+    // .sig not available from any mirror
   }
   if (sigResponse) {
     const sigContent = await sigResponse.text();
@@ -121,8 +125,9 @@ async function verifyChecksum(
       'SHA256SUMS.sig not found and QWEN_REQUIRE_SIGNATURE=1 is set',
     );
   } else {
-    debugLogger.info(
-      'SHA256SUMS.sig not available — update integrity relies on SHA256 checksum only.',
+    debugLogger.warn(
+      'SHA256SUMS.sig not available — update integrity relies on SHA256 checksum only. ' +
+        'Set QWEN_REQUIRE_SIGNATURE=1 to enforce signature verification.',
     );
   }
 
@@ -138,13 +143,6 @@ async function verifyChecksum(
   }
   const expectedHash = expectedLine.trim().split(/\s+/)[0]!;
 
-  const hash = createHash('sha256');
-  const stream = fs.createReadStream(filePath);
-  for await (const chunk of stream) {
-    hash.update(chunk);
-  }
-  const actualHash = hash.digest('hex');
-
   if (actualHash !== expectedHash) {
     throw new Error(
       `Checksum mismatch: expected ${expectedHash}, got ${actualHash}`,
@@ -158,7 +156,7 @@ async function downloadToFile(
   versionPath: string,
   filename: string,
   destPath: string,
-): Promise<void> {
+): Promise<string> {
   const response = await downloadWithFallback(
     versionPath,
     filename,
@@ -175,6 +173,7 @@ async function downloadToFile(
     );
   }
 
+  const hash = createHash('sha256');
   let bytesWritten = 0;
   const dest = fs.createWriteStream(destPath);
   const sizeGuard = new Transform({
@@ -185,11 +184,36 @@ async function downloadToFile(
           new Error(`Download exceeded ${MAX_DOWNLOAD_BYTES} byte limit`),
         );
       } else {
+        hash.update(chunk);
         callback(null, chunk);
       }
     },
   });
   await pipeline(Readable.fromWeb(body), sizeGuard, dest);
+  return hash.digest('hex');
+}
+
+function validateExtractedPaths(resolvedDest: string): void {
+  const entries = fs.readdirSync(resolvedDest, {
+    recursive: true,
+    withFileTypes: true,
+  });
+  for (const entry of entries) {
+    const fullPath = path.join(
+      String(entry.parentPath || entry.path),
+      entry.name,
+    );
+    const resolved = fs.realpathSync(fullPath);
+    if (
+      !resolved.startsWith(resolvedDest + path.sep) &&
+      resolved !== resolvedDest
+    ) {
+      fs.rmSync(resolvedDest, { recursive: true, force: true });
+      throw new Error(
+        `Path traversal detected in archive: ${entry.name} resolves to ${resolved}`,
+      );
+    }
+  }
 }
 
 async function extractArchive(
@@ -217,12 +241,35 @@ async function extractArchive(
       );
       ps.on('error', reject);
     });
+    const resolvedDest = fs.realpathSync(destDir);
+    validateExtractedPaths(resolvedDest);
   } else {
+    const resolvedDest = path.resolve(destDir);
     await tar.extract({
       file: archivePath,
       cwd: destDir,
       preservePaths: false,
-      filter: (p) => !p.startsWith('/') && !p.includes('..'),
+      filter: (p, entry) => {
+        if (p.startsWith('/') || p.includes('..')) return false;
+        if (
+          'type' in entry &&
+          entry.type === 'SymbolicLink' &&
+          'linkpath' in entry
+        ) {
+          const linkTarget = path.resolve(
+            resolvedDest,
+            path.dirname(p),
+            String(entry.linkpath),
+          );
+          if (
+            !linkTarget.startsWith(resolvedDest + path.sep) &&
+            linkTarget !== resolvedDest
+          ) {
+            return false;
+          }
+        }
+        return true;
+      },
     });
   }
 }
@@ -251,9 +298,13 @@ function spawnAndCapture(
           reject(new Error('Smoke test timed out'));
           return;
         }
-        const exitCode =
-          err && 'code' in err && typeof err.code === 'number' ? err.code : 0;
-        resolve({ exitCode, stdout: out || '', stderr: stderr || '' });
+        if (err) {
+          const exitCode =
+            'code' in err && typeof err.code === 'number' ? err.code : 1;
+          resolve({ exitCode, stdout: out || '', stderr: stderr || '' });
+          return;
+        }
+        resolve({ exitCode: 0, stdout: out || '', stderr: stderr || '' });
       },
     );
     child.on('error', (e) => {
@@ -344,6 +395,17 @@ function cleanupEmptyStandaloneDir(standaloneDir: string): void {
   }
 }
 
+const UNSAFE_SHELL_CHARS = /["`$\\;\n\r]/;
+const UNSAFE_CMD_CHARS = /[&|<>^%!"`\n\r]/;
+
+function assertSafeForShellEmbed(p: string, context: string): void {
+  if (UNSAFE_SHELL_CHARS.test(p)) {
+    throw new Error(
+      `${context} contains characters unsafe for shell embedding: ${p}`,
+    );
+  }
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -369,22 +431,20 @@ function atomicReplace(
     // On Windows, the running node.exe holds file locks. Stage the new dir
     // as a sibling, then spawn a helper script that waits for this process
     // to exit before completing the swap.
-    if (fs.existsSync(pendingDir)) {
-      fs.rmSync(pendingDir, { recursive: true, force: true });
-    }
-    fs.renameSync(newDir, pendingDir);
-
-    // Validate paths don't contain cmd.exe metacharacters that could break the script
-    const unsafeCmdChars = /[&|<>^%!"`\n\r]/;
+    // Validate paths BEFORE any filesystem mutations
     if (
-      unsafeCmdChars.test(standaloneDir) ||
-      unsafeCmdChars.test(oldDir) ||
-      unsafeCmdChars.test(pendingDir)
+      UNSAFE_CMD_CHARS.test(standaloneDir) ||
+      UNSAFE_CMD_CHARS.test(oldDir) ||
+      UNSAFE_CMD_CHARS.test(pendingDir)
     ) {
       throw new Error(
         'Installation path contains characters unsafe for deferred update script',
       );
     }
+    if (fs.existsSync(pendingDir)) {
+      fs.rmSync(pendingDir, { recursive: true, force: true });
+    }
+    fs.renameSync(newDir, pendingDir);
 
     const lockFile = lockPath;
     const logFile = path.join(path.dirname(standaloneDir), 'qwen-update.log');
@@ -470,8 +530,14 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
   const binDir = path.join(path.dirname(standaloneDir), '..', 'bin');
 
   try {
+    assertSafeForShellEmbed(standaloneDir, 'standaloneDir');
     fs.mkdirSync(binDir, { recursive: true });
     if (target.startsWith('win')) {
+      if (UNSAFE_CMD_CHARS.test(standaloneDir)) {
+        throw new Error(
+          'standaloneDir contains characters unsafe for cmd.exe wrapper',
+        );
+      }
       const wrapperPath = path.join(binDir, 'qwen.cmd');
       if (!fs.existsSync(wrapperPath)) {
         const content = `@echo off\r\ncall "${standaloneDir}\\bin\\qwen.cmd" %*\r\n`;
@@ -495,6 +561,8 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
  * Mirrors the logic in install-qwen-standalone.sh maybe_update_shell_path.
  */
 export function ensurePathInShellRc(binDir: string): void {
+  assertSafeForShellEmbed(binDir, 'binDir');
+
   const shell = process.env['SHELL'] || '';
   let rcFile: string | null = null;
   const home = process.env['HOME'] || os.homedir();
@@ -502,10 +570,13 @@ export function ensurePathInShellRc(binDir: string): void {
   if (shell.endsWith('/zsh')) {
     rcFile = path.join(home, '.zshrc');
   } else if (shell.endsWith('/bash')) {
-    // Prefer .bashrc; fall back to .bash_profile on macOS
     const bashrc = path.join(home, '.bashrc');
     const profile = path.join(home, '.bash_profile');
-    rcFile = fs.existsSync(bashrc) ? bashrc : profile;
+    if (os.platform() === 'darwin') {
+      rcFile = fs.existsSync(profile) ? profile : bashrc;
+    } else {
+      rcFile = fs.existsSync(bashrc) ? bashrc : profile;
+    }
   } else if (shell.endsWith('/fish')) {
     rcFile = path.join(home, '.config', 'fish', 'config.fish');
   }
@@ -537,10 +608,15 @@ export function ensurePathInShellRc(binDir: string): void {
 function detectTarget(): string {
   const platform = os.platform();
   const arch = os.arch();
-  if (platform === 'darwin')
+  if (platform === 'darwin') {
     return arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64';
+  }
   if (platform === 'win32') return 'win-x64';
-  return arch === 'arm64' ? 'linux-arm64' : 'linux-x64';
+  if (platform === 'linux') {
+    if (arch === 'arm64') return 'linux-arm64';
+    if (arch === 'x64') return 'linux-x64';
+  }
+  throw new Error(`Unsupported platform: ${platform}-${arch}`);
 }
 
 export async function performStandaloneUpdate(
@@ -589,16 +665,21 @@ export async function performStandaloneUpdate(
     extractDir = fs.mkdtempSync(path.join(parentDir, '.qwen-code-update-'));
   } catch (err) {
     fs.rmSync(tempDir, { recursive: true, force: true });
+    releaseLock(lockPath);
     throw err;
   }
 
   try {
     const archivePath = path.join(tempDir, filename);
     debugLogger.info(`Downloading ${filename} (${versionPath})...`);
-    await downloadToFile(versionPath, filename, archivePath);
+    const archiveHash = await downloadToFile(
+      versionPath,
+      filename,
+      archivePath,
+    );
 
     debugLogger.info('Verifying checksum...');
-    await verifyChecksum(archivePath, filename, versionPath);
+    await verifyChecksum(archiveHash, filename, versionPath);
 
     debugLogger.info('Extracting archive...');
     await extractArchive(archivePath, extractDir, target);
@@ -689,6 +770,22 @@ export type RollbackResult =
 export function rollbackStandaloneUpdate(
   standaloneDir: string,
 ): RollbackResult {
+  const lockPath = path.join(path.dirname(standaloneDir), '.qwen-update.lock');
+  try {
+    const pidStr = fs.readFileSync(lockPath, 'utf-8').trim();
+    const pid = parseInt(pidStr, 10);
+    if (!Number.isNaN(pid) && isProcessAlive(pid)) {
+      return {
+        ok: false,
+        reason: 'rename-failed',
+        detail:
+          'An auto-update is currently in progress. Wait for it to finish before rolling back.',
+      };
+    }
+  } catch {
+    // No lock file — safe to proceed
+  }
+
   const oldDir = `${standaloneDir}.old`;
 
   if (!fs.existsSync(oldDir)) {
@@ -725,6 +822,11 @@ export function rollbackStandaloneUpdate(
     if (!fs.existsSync(standaloneDir) && fs.existsSync(failedDir)) {
       try {
         fs.renameSync(failedDir, standaloneDir);
+        return {
+          ok: false,
+          reason: 'rename-failed',
+          detail: `Filesystem error: ${(err as Error).message}. Current installation was restored automatically.`,
+        };
       } catch {
         // Critical failure — both dirs are in bad state
       }

@@ -1730,8 +1730,7 @@ export default {
     '回滚仅适用于独立安装。',
   'Rollback successful. Restart your terminal to use the previous version.':
     '回滚成功。请重启终端以使用上一个版本。',
-  'Rollback failed: no previous version found (.old directory missing).':
-    '回滚失败：未找到上一个版本（.old 目录缺失）。',
+  'Rollback failed:': '回滚失败：',
   'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
     '在 Windows 上回滚需要手动操作。请将安装目录中的 qwen-code.old 重命名为 qwen-code。',
   'Save a durable memory to the memory system.':

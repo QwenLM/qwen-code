@@ -644,7 +644,7 @@ function rollbackDoctorAction(context: CommandContext) {
     );
     messageType = 'info';
   } else {
-    msg = t(`Rollback failed: ${result.detail}`);
+    msg = `${t('Rollback failed:')} ${result.detail}`;
     messageType = 'error';
   }
 

@@ -1909,8 +1909,7 @@ export default {
     'Rollback is only available for standalone installations.',
   'Rollback successful. Restart your terminal to use the previous version.':
     'Rollback successful. Restart your terminal to use the previous version.',
-  'Rollback failed: no previous version found (.old directory missing).':
-    'Rollback failed: no previous version found (.old directory missing).',
+  'Rollback failed:': 'Rollback failed:',
   'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
     'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.',
   'Save a durable memory to the memory system.':

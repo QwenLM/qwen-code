@@ -38,9 +38,12 @@ export interface InstallationInfo {
   updateMessage?: string;
 }
 
+// CLI entry → dist → package root: walk up at most 3 levels to find manifest.json
+const MAX_MANIFEST_SEARCH_DEPTH = 3;
+
 function findStandaloneDir(realPath: string): string | null {
   let dir = path.dirname(realPath);
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < MAX_MANIFEST_SEARCH_DEPTH; i++) {
     const manifestPath = path.join(dir, 'manifest.json');
     try {
       if (fs.existsSync(manifestPath)) {
@@ -216,11 +219,11 @@ export function getInstallationInfo(
       };
     }
 
-    // Assume global npm — check if prefix is writable before offering npm update
-    const npmPrefixDir = path.dirname(path.dirname(realPath));
+    // Check if the package directory is writable to determine whether npm update requires sudo
+    const npmPackageDir = path.dirname(path.dirname(realPath));
     let npmPrefixWritable = false;
     try {
-      fs.accessSync(npmPrefixDir, fs.constants.W_OK);
+      fs.accessSync(npmPackageDir, fs.constants.W_OK);
       npmPrefixWritable = true;
     } catch {
       // Not writable (e.g., /usr/local/lib/node_modules owned by root)
