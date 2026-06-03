@@ -31,6 +31,13 @@ interface ApprovalModeDialogProps {
   availableTerminalHeight?: number;
 }
 
+const formatModeName = (mode: ApprovalMode): string => {
+  if (mode === ApprovalMode.DEFAULT) {
+    return t('Ask permissions');
+  }
+  return mode;
+};
+
 const formatModeDescription = (mode: ApprovalMode): string => {
   switch (mode) {
     case ApprovalMode.PLAN:
@@ -64,7 +71,7 @@ export function ApprovalModeDialog({
 
   // Generate approval mode items with inline descriptions
   const modeItems = APPROVAL_MODES.map((mode) => ({
-    label: `${mode} - ${formatModeDescription(mode)}`,
+    label: `${formatModeName(mode)} - ${formatModeDescription(mode)}`,
     value: mode,
     key: mode,
   }));
