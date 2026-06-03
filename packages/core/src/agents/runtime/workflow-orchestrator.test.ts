@@ -1,5 +1,8 @@
 import { describe, it, expect, vi as vitest } from 'vitest';
-import { WorkflowOrchestrator } from './workflow-orchestrator.js';
+import {
+  WorkflowOrchestrator,
+  createProductionDispatch,
+} from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
 
 const created: Array<{ name: string; prompt: string }> = [];
@@ -41,16 +44,17 @@ vitest.mock('./agent-headless.js', () => ({
 }));
 
 function fakeConfig(): Config {
-  // Orchestrator uses Config only when constructing the real dispatch. In
-  // tests we always inject a mock dispatch, so an empty object cast is safe.
+  // createProductionDispatch uses Config only when constructing a real subagent.
+  // In tests we either inject a mock dispatch or test createProductionDispatch
+  // directly against the vi.mock above. An empty object cast is safe.
   return {} as unknown as Config;
 }
 
 describe('WorkflowOrchestrator', () => {
   it('runs a script with injected mock dispatch and returns the script value', async () => {
-    const orchestrator = new WorkflowOrchestrator(fakeConfig(), {
-      dispatch: async (prompt) => `mock:${prompt}`,
-    });
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `mock:${prompt}`,
+    );
     const outcome = await orchestrator.run({
       script: `phase("plan");
                const x = await agent("hi", { label: "a" });
@@ -63,9 +67,7 @@ describe('WorkflowOrchestrator', () => {
   });
 
   it('passes args through to the script', async () => {
-    const orchestrator = new WorkflowOrchestrator(fakeConfig(), {
-      dispatch: async () => 'unused',
-    });
+    const orchestrator = new WorkflowOrchestrator(async () => 'unused');
     const outcome = await orchestrator.run({
       script: `return args.who`,
       args: { who: 'world' },
@@ -74,9 +76,7 @@ describe('WorkflowOrchestrator', () => {
   });
 
   it('surfaces a thrown error from the script', async () => {
-    const orchestrator = new WorkflowOrchestrator(fakeConfig(), {
-      dispatch: async () => 'unused',
-    });
+    const orchestrator = new WorkflowOrchestrator(async () => 'unused');
     await expect(
       orchestrator.run({
         script: `throw new Error("boom")`,
@@ -87,11 +87,9 @@ describe('WorkflowOrchestrator', () => {
 
   it('runId is stable for the lifetime of a single run call', async () => {
     const captured: string[] = [];
-    const orchestrator = new WorkflowOrchestrator(fakeConfig(), {
-      dispatch: async (prompt) => {
-        captured.push(prompt);
-        return 'ok';
-      },
+    const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+      captured.push(prompt);
+      return 'ok';
     });
     const outcome = await orchestrator.run({
       script: `await agent("first"); await agent("second"); return 0;`,
@@ -103,9 +101,7 @@ describe('WorkflowOrchestrator', () => {
 
   // TST-C1: concurrent runs must produce distinct runIds.
   it('runId is unique across concurrent runs', async () => {
-    const orchestrator = new WorkflowOrchestrator(fakeConfig(), {
-      dispatch: async () => 'ok',
-    });
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
     const [a, b, c] = await Promise.all([
       orchestrator.run({ script: 'return 1', args: undefined }),
       orchestrator.run({ script: 'return 2', args: undefined }),
@@ -118,10 +114,8 @@ describe('WorkflowOrchestrator', () => {
 
   // TST-C2: a dispatch rejection must propagate out through the sandbox.
   it('propagates dispatch rejection through the script', async () => {
-    const orchestrator = new WorkflowOrchestrator(fakeConfig(), {
-      dispatch: async () => {
-        throw new Error('agent-crashed');
-      },
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      throw new Error('agent-crashed');
     });
     await expect(
       orchestrator.run({
@@ -132,14 +126,17 @@ describe('WorkflowOrchestrator', () => {
   });
 });
 
-describe('WorkflowOrchestrator production dispatch', () => {
-  it('routes agent() calls through AgentHeadless and returns getFinalText', async () => {
-    const orchestrator = new WorkflowOrchestrator(fakeConfig());
-    const outcome = await orchestrator.run({
-      script: `const r = await agent("hello", { label: "h1" });
-               return r;`,
-      args: undefined,
-    });
-    expect(outcome.result).toBe('headless-said:hello');
+describe('createProductionDispatch', () => {
+  it('routes calls through AgentHeadless and returns getFinalText', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    const result = await dispatch('hello', { label: 'h1' });
+    expect(result).toBe('headless-said:hello');
+  });
+
+  it('threads abort signal through to subagent.execute (no crash)', async () => {
+    const signal = new AbortController().signal;
+    const dispatch = createProductionDispatch(fakeConfig(), signal);
+    const result = await dispatch('hello', { label: 'h1' });
+    expect(result).toBe('headless-said:hello');
   });
 });

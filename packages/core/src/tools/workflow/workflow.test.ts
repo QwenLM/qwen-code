@@ -41,9 +41,7 @@ describe('WorkflowTool', () => {
 
   it('execute() runs the script via WorkflowOrchestrator with injected dispatch and returns a ToolResult', async () => {
     const tool = new WorkflowTool(fakeConfig(), {
-      orchestratorOverrides: {
-        dispatch: async (prompt) => `T:${prompt}`,
-      },
+      dispatch: async (prompt) => `T:${prompt}`,
     });
     const invocation = tool.build({
       script: `phase("plan");
@@ -63,7 +61,7 @@ describe('WorkflowTool', () => {
   // TST-C3: execute() should return an error result (not throw) when the script throws.
   it('execute() returns an error result when the script throws', async () => {
     const tool = new WorkflowTool(fakeConfig(), {
-      orchestratorOverrides: { dispatch: async () => 'unused' },
+      dispatch: async () => 'unused',
     });
     const invocation = tool.build({
       script: 'throw new Error("scripted failure")',
@@ -77,7 +75,7 @@ describe('WorkflowTool', () => {
   // TST-C3: llmContent must be the unwrapped script return value (FIX-7).
   it('execute() strips the JSON wrapper from llmContent (script return is verbatim)', async () => {
     const tool = new WorkflowTool(fakeConfig(), {
-      orchestratorOverrides: { dispatch: async () => 'ignored' },
+      dispatch: async () => 'ignored',
     });
     const invocation = tool.build({
       script: 'return { kind: "report", body: "hello" };',

@@ -26,7 +26,8 @@ import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
 import {
   WorkflowOrchestrator,
-  type WorkflowOrchestratorOptions,
+  createProductionDispatch,
+  type WorkflowAgentDispatch,
 } from '../../agents/runtime/workflow-orchestrator.js';
 
 export interface WorkflowParams {
@@ -38,10 +39,10 @@ export interface WorkflowParams {
 
 export interface WorkflowToolOptions {
   /**
-   * Test-only orchestrator overrides (dispatch injection). Production callers
-   * should leave this undefined so the orchestrator wires real AgentHeadless.
+   * Test-only dispatch injection. Production callers should leave this
+   * undefined so createProductionDispatch wires real AgentHeadless.
    */
-  orchestratorOverrides?: WorkflowOrchestratorOptions;
+  dispatch?: WorkflowAgentDispatch;
 }
 
 const WORKFLOW_PARAM_SCHEMA = {
@@ -93,10 +94,10 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     _updateOutput?: (output: ToolResultDisplay) => void,
     _shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<ToolResult> {
-    const orchestrator = new WorkflowOrchestrator(
-      this.config,
-      this.toolOptions.orchestratorOverrides,
-    );
+    const dispatch =
+      this.toolOptions.dispatch ??
+      createProductionDispatch(this.config, signal);
+    const orchestrator = new WorkflowOrchestrator(dispatch);
     try {
       const outcome = await orchestrator.run({
         script: this.params.script,
