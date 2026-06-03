@@ -264,8 +264,8 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.InstructionsLoaded);
     });
 
-    it('should have 18 events', () => {
-      expect(DISPLAY_HOOK_EVENTS).toHaveLength(18);
+    it('should have 19 events', () => {
+      expect(DISPLAY_HOOK_EVENTS).toHaveLength(19);
     });
   });
 
