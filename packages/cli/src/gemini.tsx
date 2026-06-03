@@ -40,6 +40,7 @@ import {
   initializeApp,
   type InitializationResult,
 } from './core/initializer.js';
+import { handleList as handleListExtensions } from './commands/extensions/list.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import {
   setupStartupWorktree,
@@ -466,6 +467,11 @@ export async function main() {
     );
   }
 
+  if (argv.listExtensions) {
+    await handleListExtensions();
+    process.exit(0);
+  }
+
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
     writeStderrLine(
@@ -840,15 +846,6 @@ export async function main() {
         `Preconnect skipped due to error getting authType: ${error}`,
       );
     }
-
-    // FIXME: list extensions after the config initialize
-    // if (config.getListExtensions()) {
-    //   console.log('Installed extensions:');
-    //   for (const extension of extensions) {
-    //     console.log(`- ${extension.config.name}`);
-    //   }
-    //   process.exit(0);
-    // }
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
