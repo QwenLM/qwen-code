@@ -195,7 +195,8 @@ function readClipboard(): string {
       }).toString();
     }
     return '';
-  } catch {
+  } catch (e) {
+    debugLogger.warn('readClipboard failed:', e);
     return '';
   }
 }
@@ -247,8 +248,8 @@ function writeClipboard(text: string): void {
       child.stdin?.end(text);
       child.unref();
     }
-  } catch {
-    // Clipboard not available — silently ignore
+  } catch (e) {
+    debugLogger.warn('writeClipboard failed:', e);
   }
 }
 
