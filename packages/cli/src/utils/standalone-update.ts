@@ -530,7 +530,6 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
   const binDir = path.join(path.dirname(standaloneDir), '..', 'bin');
 
   try {
-    assertSafeForShellEmbed(standaloneDir, 'standaloneDir');
     fs.mkdirSync(binDir, { recursive: true });
     if (target.startsWith('win')) {
       if (UNSAFE_CMD_CHARS.test(standaloneDir)) {
@@ -544,6 +543,7 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
         fs.writeFileSync(wrapperPath, content);
       }
     } else {
+      assertSafeForShellEmbed(standaloneDir, 'standaloneDir');
       const wrapperPath = path.join(binDir, 'qwen');
       if (!fs.existsSync(wrapperPath)) {
         const content = `#!/bin/sh\nexec "${standaloneDir}/bin/qwen" "$@"\n`;
