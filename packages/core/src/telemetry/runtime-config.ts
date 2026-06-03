@@ -21,4 +21,6 @@ export interface TelemetryRuntimeConfig {
   getTelemetryResourceAttributeWarnings(): readonly string[];
   getCliVersion(): string | undefined;
   getSessionId(): string;
+  isInteractive(): boolean;
+  getOutboundCorrelationPropagateTraceContext(): boolean;
 }
