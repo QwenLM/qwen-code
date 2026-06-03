@@ -12,16 +12,17 @@ import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { DefaultHookOutput } from './types.js';
-import { createHookOutput } from './types.js';
+import type { DefaultHookOutput, HookPhase } from './types.js';
+import { createHookOutput, PermissionMode } from './types.js';
 import type {
   SessionStartSource,
   SessionEndReason,
   AgentType,
-  PermissionMode,
+  PostToolBatchToolCall,
   PreCompactTrigger,
   PostCompactTrigger,
   NotificationType,
+  PermissionDeniedReason,
   PermissionSuggestion,
   HookEventName,
   FunctionHookCallback,
@@ -32,6 +33,8 @@ import type {
   PendingAsyncOutput,
   MessagesProvider,
   StopFailureErrorType,
+  TodoItem,
+  TodoStatus,
 } from './types.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
 import type { AsyncHookRegistry } from './asyncHookRegistry.js';
@@ -64,7 +67,7 @@ export class HookSystem {
 
     // Initialize components
     this.hookRegistry = new HookRegistry(config);
-    this.hookRunner = new HookRunner(allowedHttpUrls, config);
+    this.hookRunner = new HookRunner(allowedHttpUrls, config); // Pass config for agent + prompt hooks
     this.hookAggregator = new HookAggregator();
     this.hookPlanner = new HookPlanner(this.hookRegistry);
     this.sessionHooksManager = new SessionHooksManager();
@@ -134,22 +137,11 @@ export class HookSystem {
    * This is a fast-path check to avoid expensive MessageBus round-trips
    * when no hooks are configured for a given event.
    */
-  hasHooksForEvent(eventName: string): boolean {
-    const typedEvent = eventName as HookEventName;
-    if (this.hookRegistry.getHooksForEvent(typedEvent).length > 0) {
-      return true;
-    }
-    // Also check session hooks so that programmatically registered hooks
-    // (e.g. agent hook enforcement) are discoverable by client.ts's
-    // pre-flight guard before firing Stop events.
-    const sessionId = this.rootConfig.getSessionId();
-    if (
-      this.sessionHooksManager.getHooksForEvent(sessionId, typedEvent).length >
-      0
-    ) {
-      return true;
-    }
-    return false;
+  hasHooksForEvent(eventName: string, sessionId?: string): boolean {
+    const event = eventName as HookEventName;
+    if (this.hookRegistry.getHooksForEvent(event).length > 0) return true;
+    const resolvedSessionId = sessionId ?? this.rootConfig.getSessionId();
+    return this.sessionHooksManager.hasHooksForEvent(event, resolvedSessionId);
   }
 
   async fireUserPromptSubmitEvent(
@@ -278,6 +270,24 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('PostToolUseFailure', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PostToolBatch event - called once after a tool-call batch resolves
+   */
+  async firePostToolBatchEvent(
+    toolCalls: PostToolBatchToolCall[],
+    permissionMode: PermissionMode = PermissionMode.Default,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePostToolBatchEvent(
+      toolCalls,
+      permissionMode,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PostToolBatch', result.finalOutput)
       : undefined;
   }
 
@@ -421,6 +431,72 @@ export class HookSystem {
     return result.finalOutput
       ? createHookOutput('PermissionRequest', result.finalOutput)
       : undefined;
+  }
+
+  /**
+   * Fire a PermissionDenied event
+   */
+  async firePermissionDeniedEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolUseId: string,
+    reason: PermissionDeniedReason,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePermissionDeniedEvent(
+      toolName,
+      toolInput,
+      toolUseId,
+      reason,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PermissionDenied', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a TodoCreated event
+   * Called when a new todo item is added to the list
+   */
+  async fireTodoCreatedEvent(
+    todoId: string,
+    todoContent: string,
+    todoStatus: TodoStatus,
+    allTodos: TodoItem[],
+    phase: HookPhase,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireTodoCreatedEvent(
+      todoId,
+      todoContent,
+      todoStatus,
+      allTodos,
+      phase,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a TodoCompleted event
+   * Called when a todo item's status changes to 'completed'
+   */
+  async fireTodoCompletedEvent(
+    todoId: string,
+    todoContent: string,
+    previousStatus: 'pending' | 'in_progress',
+    allTodos: TodoItem[],
+    phase: HookPhase,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireTodoCompletedEvent(
+      todoId,
+      todoContent,
+      previousStatus,
+      allTodos,
+      phase,
+      signal,
+    );
   }
 
   // ==================== Session Hooks API ====================

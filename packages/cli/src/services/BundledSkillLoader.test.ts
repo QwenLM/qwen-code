@@ -7,7 +7,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { BundledSkillLoader } from './BundledSkillLoader.js';
 import { CommandKind } from '../ui/commands/types.js';
-import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
+import {
+  buildSkillLlmContent,
+  type Config,
+  type SkillConfig,
+} from '@qwen-code/qwen-code-core';
 
 function makeSkill(overrides: Partial<SkillConfig> = {}): SkillConfig {
   return {
@@ -18,6 +22,10 @@ function makeSkill(overrides: Partial<SkillConfig> = {}): SkillConfig {
     body: 'You are an expert code reviewer.',
     ...overrides,
   };
+}
+
+function makeSkillPrompt(body: string): string {
+  return buildSkillLlmContent('/bundled/review', body);
 }
 
 describe('BundledSkillLoader', () => {
@@ -95,6 +103,20 @@ describe('BundledSkillLoader', () => {
     });
   });
 
+  it('does not propagate skill.priority to completionPriority', async () => {
+    // Priority is intentionally scoped to the `/skills` listing (sorted in
+    // SkillManager.listSkills) and must NOT leak into the slash-completion
+    // menu / `/help` ordering — typing `/` should keep its prior behavior
+    // regardless of any skill's priority value.
+    const skill = makeSkill({ priority: 42 });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0].completionPriority).toBeUndefined();
+  });
+
   it('should submit skill body as prompt without args', async () => {
     const skill = makeSkill();
     mockSkillManager.listSkills.mockResolvedValue([skill]);
@@ -108,7 +130,7 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'You are an expert code reviewer.' }],
+      content: [{ text: makeSkillPrompt('You are an expert code reviewer.') }],
     });
   });
 
@@ -125,7 +147,11 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'You are an expert code reviewer.\n\n/review 123' }],
+      content: [
+        {
+          text: `${makeSkillPrompt('You are an expert code reviewer.')}\n\n/review 123`,
+        },
+      ],
     });
   });
 
@@ -152,6 +178,26 @@ describe('BundledSkillLoader', () => {
     expect(commands.map((c) => c.name)).toEqual(['review', 'deploy']);
   });
 
+  it('should load simplify bundled skill like other slash commands', async () => {
+    const skills = [
+      makeSkill({
+        name: 'simplify',
+        description: 'Simplify recent changes',
+        filePath: '/bundled/simplify/SKILL.md',
+        body: 'Simplify body',
+      }),
+    ];
+    mockSkillManager.listSkills.mockResolvedValue(skills);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0].name).toBe('simplify');
+    expect(commands[0].description).toBe('Simplify recent changes');
+    expect(commands[0].kind).toBe(CommandKind.SKILL);
+  });
+
   it('should resolve {{model}} template variable in skill body', async () => {
     const skill = makeSkill({
       body: 'Review by {{model}} via Qwen Code',
@@ -172,7 +218,9 @@ describe('BundledSkillLoader', () => {
       type: 'submit_prompt',
       content: [
         {
-          text: 'YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder via Qwen Code',
+          text: makeSkillPrompt(
+            'YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder via Qwen Code',
+          ),
         },
       ],
     });
@@ -194,7 +242,7 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'Review by ' }],
+      content: [{ text: makeSkillPrompt('Review by ') }],
     });
   });
 
@@ -218,7 +266,7 @@ describe('BundledSkillLoader', () => {
       type: 'submit_prompt',
       content: [
         {
-          text: 'YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder\n\n/review 123',
+          text: `${makeSkillPrompt('YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder')}\n\n/review 123`,
         },
       ],
     });
@@ -240,7 +288,7 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'Review by ' }],
+      content: [{ text: makeSkillPrompt('Review by ') }],
     });
   });
 
@@ -257,7 +305,7 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'No template here' }],
+      content: [{ text: makeSkillPrompt('No template here') }],
     });
   });
 

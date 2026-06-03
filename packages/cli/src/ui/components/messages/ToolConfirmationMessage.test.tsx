@@ -68,6 +68,116 @@ describe('ToolConfirmationMessage', () => {
     );
   });
 
+  // Regression coverage for issue #4093: exec confirmations carry a
+  // user-facing warning for command substitution. Previously such
+  // commands were hard-denied at L4 with an opaque "denied by
+  // permission rules" message; we now ask for confirmation and surface
+  // the substitution clearly.
+  it('renders warnings on exec confirmations when provided', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'python3 -c "print($(echo hello))"',
+      rootCommand: 'python3',
+      warnings: [
+        'Contains command substitution ($(...), backticks, <(...), or >(...)).',
+      ],
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('command substitution');
+  });
+
+  it('omits the warning region when no warnings are provided on exec confirmations', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'echo hello',
+      rootCommand: 'echo',
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    expect(lastFrame() ?? '').not.toContain('command substitution');
+  });
+
+  // Regression coverage for the round-1 review on PR #4386 (PR #4386 round-2
+  // self-review SR-1): the warnings block sits outside the MaxSizedBox
+  // cap, so its footprint has to be reserved from `bodyContentHeight`
+  // up-front; otherwise the options list can be pushed off-screen on
+  // small terminals. The original round-1 test used a single-line
+  // command, which made the `MaxSizedBox` clamp `min(content_lines,
+  // maxHeight)` reduce to `min(1, X) = 1` regardless of the
+  // reservation — i.e. the test was vacuous. Replaced here with a
+  // multi-line command so the clamp is actually exercised, and the
+  // assertion checks for the `... N lines hidden ...` truncation
+  // footer that MaxSizedBox emits ONLY when its cap is active. Without
+  // the warnings reservation, the cap is loose enough that the whole
+  // command fits and the footer never appears.
+  it('clamps the multi-line command body to make room for the warning on a tight compactMode layout', () => {
+    // Four-line command: forces MaxSizedBox to clamp once the warnings
+    // footprint is reserved. With the reservation: cap is tight enough
+    // that the body is truncated and shows a "... N lines hidden ..."
+    // footer. Without it: the whole 4-line command renders and the
+    // footer is absent.
+    const command = [
+      'cmd-line-1',
+      'cmd-line-2',
+      'cmd-line-3',
+      'cmd-line-4',
+    ].join('\n');
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command,
+      rootCommand: 'cmd-line-1',
+      warnings: [
+        'Contains command substitution ($(...), backticks, <(...), or >(...)).',
+      ],
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={10}
+        contentWidth={80}
+        compactMode={true}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    // MaxSizedBox emits this footer when it clamps; its presence proves
+    // the reservation actually narrowed the body cap below the command
+    // height. Without `bodyContentHeight -= warningsHeight`, the cap is
+    // loose and the footer doesn't appear.
+    expect(frame).toMatch(/lines hidden/);
+    // Warning + all three compactMode options must still be on-screen.
+    expect(frame).toContain('command substitution');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain('Allow always');
+    expect(frame).toContain('No');
+  });
+
   it('should render plan confirmation with markdown plan content', () => {
     const confirmationDetails: ToolCallConfirmationDetails = {
       type: 'plan',

@@ -56,6 +56,9 @@ bundle
 junit.xml
 packages/*/coverage/
 
+# PR body draft
+pr_body.md
+
 # Generated files
 packages/cli/src/generated/
 packages/core/src/generated/
@@ -64,6 +67,7 @@ packages/web-templates/src/generated/
 packages/vscode-ide-companion/*.vsix
 
 logs/
+.repro-runs/
 # GHA credentials
 gha-creds-*.json
 
@@ -90,3 +94,7 @@ storybook-static
 # Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
 packages/core/src/skills/bundled/qc-helper/docs
 tmp/
+
+# code graph skills
+.venv
+.codegraph

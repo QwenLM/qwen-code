@@ -51,6 +51,8 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
 
   // Qwen coder / text models: text-only
   [/^qwen3-coder-/, {}],
+  // Qwen3.6-35B-A3B (local quant variants) — image + video
+  [/^qwen3\.6-35b/, { image: true, video: true }],
   [/^qwen/, {}],
 
   // -------------------
@@ -66,8 +68,9 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^glm-/, {}],
 
   // -------------------
-  // MiniMax — text-only
+  // MiniMax — M3 supports image + video input; older models default to text-only
   // -------------------
+  [/^minimax-m3/i, { image: true, video: true }],
   [/^minimax-/, {}],
 
   // -------------------

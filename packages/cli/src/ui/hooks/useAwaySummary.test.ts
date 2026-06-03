@@ -54,10 +54,7 @@ describe('useAwaySummary', () => {
     const recordSlashCommand = vi.fn();
     const config = makeConfig(recordSlashCommand);
     const addItem = vi.fn();
-    generateSessionRecapMock.mockResolvedValue({
-      text: 'recap text',
-      modelUsed: 'fast',
-    });
+    generateSessionRecapMock.mockResolvedValue('recap text');
 
     // Mount blurred to set the away-start timestamp.
     const { rerender } = renderHook(
@@ -104,10 +101,7 @@ describe('useAwaySummary', () => {
     const recordSlashCommand = vi.fn();
     const config = makeConfig(recordSlashCommand);
     const addItem = vi.fn();
-    generateSessionRecapMock.mockResolvedValue({
-      text: 'should not appear',
-      modelUsed: 'fast',
-    });
+    generateSessionRecapMock.mockResolvedValue('should not appear');
 
     const historyWithRecentRecap: HistoryItem[] = [
       ...THREE_USER_HISTORY,

@@ -125,6 +125,7 @@ describe('BuiltinCommandLoader', () => {
       getUseModelRouter: () => false,
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      isLspEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     restoreCommandMock.mockReturnValue({
@@ -208,6 +209,22 @@ describe('BuiltinCommandLoader', () => {
     const modelCmd = commands.find((c) => c.name === 'model');
     expect(modelCmd).toBeDefined();
     expect(modelCmd?.name).toBe('model');
+  });
+
+  it('should include lsp command only when LSP is enabled', async () => {
+    const disabledLoader = new BuiltinCommandLoader(mockConfig);
+    const disabledCommands = await disabledLoader.loadCommands(
+      new AbortController().signal,
+    );
+    expect(disabledCommands.find((c) => c.name === 'lsp')).toBeUndefined();
+
+    (mockConfig.isLspEnabled as Mock).mockReturnValue(true);
+    const enabledLoader = new BuiltinCommandLoader(mockConfig);
+    const enabledCommands = await enabledLoader.loadCommands(
+      new AbortController().signal,
+    );
+
+    expect(enabledCommands.find((c) => c.name === 'lsp')).toBeDefined();
   });
 
   it('should still load all other commands when ideCommand() throws', async () => {

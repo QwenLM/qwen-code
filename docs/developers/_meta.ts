@@ -20,6 +20,7 @@ export default {
 
   'channel-plugins': 'Channel Plugin Guide',
   tools: 'Tools',
+  'qwen-serve-protocol': 'qwen serve HTTP protocol',
 
   examples: {
     display: 'hidden',

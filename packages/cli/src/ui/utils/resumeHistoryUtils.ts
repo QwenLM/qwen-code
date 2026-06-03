@@ -237,7 +237,15 @@ function convertToHistoryItems(
           | undefined;
         if (!payload) continue;
         if (payload.phase === 'invocation' && payload.rawCommand) {
-          items.push({ type: 'user', text: payload.rawCommand });
+          const sentToModel =
+            typeof payload.sentToModel === 'boolean'
+              ? payload.sentToModel
+              : undefined;
+          items.push({
+            type: 'user',
+            text: payload.rawCommand,
+            ...(sentToModel === undefined ? {} : { sentToModel }),
+          });
         }
         if (payload.phase === 'result') {
           const outputs = payload.outputHistoryItems ?? [];
@@ -277,6 +285,18 @@ function convertToHistoryItems(
             extractTextFromParts(record.message?.parts as Part[]) ||
             fallback;
           items.push({ type: 'notification', text });
+          break;
+        }
+        if (record.subtype === 'mid_turn_user_message') {
+          const payload = record.systemPayload as
+            | { displayText?: string }
+            | undefined;
+          const text =
+            payload?.displayText ||
+            extractTextFromParts(record.message?.parts as Part[]);
+          if (text) {
+            items.push({ type: 'notification', text });
+          }
           break;
         }
         if (pendingAtCommands.length > 0) {

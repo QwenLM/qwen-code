@@ -18,11 +18,13 @@ import {
   type NotificationType,
   type PermissionRequestHookOutput,
   type PermissionSuggestion,
+  type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { Part, PartListUnion } from '@google/genai';
 
 const debugLogger = createDebugLogger('TOOL_HOOKS');
+const POST_TOOL_BATCH_HOOK_TIMEOUT_MS = 15_000;
 
 /**
  * Generate a unique tool_use_id for tracking tool executions
@@ -43,6 +45,14 @@ export interface PreToolUseHookResult {
   blockType?: 'denied' | 'ask' | 'stop';
   /** Additional context to add */
   additionalContext?: string;
+  /**
+   * Set when the hook helper caught and absorbed a transport / dispatch
+   * error. The tool execution still proceeds (existing non-blocking
+   * contract), but observers (telemetry spans, debug logs) can detect
+   * that the hook itself failed instead of treating the safe-default
+   * response as a successful "allow" decision (#4321 review).
+   */
+  hookError?: string;
 }
 
 /**
@@ -55,6 +65,8 @@ export interface PostToolUseHookResult {
   stopReason?: string;
   /** Additional context to append to tool response */
   additionalContext?: string;
+  /** See PreToolUseHookResult.hookError. */
+  hookError?: string;
 }
 
 /**
@@ -63,6 +75,22 @@ export interface PostToolUseHookResult {
 export interface PostToolUseFailureHookResult {
   /** Additional context about the failure */
   additionalContext?: string;
+  /** See PreToolUseHookResult.hookError. */
+  hookError?: string;
+}
+
+/**
+ * Result of PostToolBatch hook execution
+ */
+export interface PostToolBatchHookResult {
+  /** Whether execution should stop before the next model request */
+  shouldStop: boolean;
+  /** Stop reason if applicable */
+  stopReason?: string;
+  /** Additional context to append once for the whole batch */
+  additionalContext?: string;
+  /** See PreToolUseHookResult.hookError. */
+  hookError?: string;
 }
 
 /**
@@ -107,7 +135,27 @@ export async function firePreToolUseHook(
     );
 
     if (!response.success || !response.output) {
-      return { shouldProceed: true };
+      // Hook runner reported failure (URL validation, fn exception,
+      // prompt-runner crash, ...). The `response.error` from the runner
+      // is the canonical cause — forward it so telemetry and operators
+      // see the actual failure instead of a fake "allow" success
+      // (#4321 review silent-failure-hunter HIGH).
+      //
+      // If runner returned `{ success: false }` (or missing output) with no
+      // `error.message`, synthesize a sentinel so the contract violation is
+      // still visible on the span instead of silently degrading to an allow
+      // with empty telemetry (#4321 review-7 silent-failure-hunter HIGH-1).
+      // `||` (revert from `??`): downstream consumers in
+      // coreToolScheduler.ts gate on `r.hookError ? ...`, so an
+      // empty-string message would be silently dropped — the previous
+      // `??` change defeated its own intent. Empty-string error
+      // messages carry no operator value; the sentinel is more
+      // actionable. (#4321 review-9 wenshao Suggestion refines
+      // review-8.)
+      const message =
+        response.error?.message ||
+        `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
+      return { shouldProceed: true, hookError: message };
     }
 
     const preToolOutput = createHookOutput(
@@ -155,10 +203,9 @@ export async function firePreToolUseHook(
     };
   } catch (error) {
     // Hook errors should not block tool execution
-    debugLogger.warn(
-      `PreToolUse hook error for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return { shouldProceed: true };
+    const message = error instanceof Error ? error.message : String(error);
+    debugLogger.warn(`PreToolUse hook error for ${toolName}: ${message}`);
+    return { shouldProceed: true, hookError: message };
   }
 }
 
@@ -207,7 +254,18 @@ export async function firePostToolUseHook(
     );
 
     if (!response.success || !response.output) {
-      return { shouldStop: false };
+      // See firePreToolUseHook for the rationale.
+      // `||` (revert from `??`): downstream consumers in
+      // coreToolScheduler.ts gate on `r.hookError ? ...`, so an
+      // empty-string message would be silently dropped — the previous
+      // `??` change defeated its own intent. Empty-string error
+      // messages carry no operator value; the sentinel is more
+      // actionable. (#4321 review-9 wenshao Suggestion refines
+      // review-8.)
+      const message =
+        response.error?.message ||
+        `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
+      return { shouldStop: false, hookError: message };
     }
 
     const postToolOutput = createHookOutput(
@@ -232,10 +290,9 @@ export async function firePostToolUseHook(
     };
   } catch (error) {
     // Hook errors should not affect tool result
-    debugLogger.warn(
-      `PostToolUse hook error for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return { shouldStop: false };
+    const message = error instanceof Error ? error.message : String(error);
+    debugLogger.warn(`PostToolUse hook error for ${toolName}: ${message}`);
+    return { shouldStop: false, hookError: message };
   }
 }
 
@@ -287,7 +344,18 @@ export async function firePostToolUseFailureHook(
     );
 
     if (!response.success || !response.output) {
-      return {};
+      // See firePreToolUseHook for the rationale.
+      // `||` (revert from `??`): downstream consumers in
+      // coreToolScheduler.ts gate on `r.hookError ? ...`, so an
+      // empty-string message would be silently dropped — the previous
+      // `??` change defeated its own intent. Empty-string error
+      // messages carry no operator value; the sentinel is more
+      // actionable. (#4321 review-9 wenshao Suggestion refines
+      // review-8.)
+      const message =
+        response.error?.message ||
+        `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
+      return { hookError: message };
     }
 
     const failureOutput = createHookOutput(
@@ -301,10 +369,70 @@ export async function firePostToolUseFailureHook(
     };
   } catch (error) {
     // Hook errors should not affect error handling
+    const message = error instanceof Error ? error.message : String(error);
     debugLogger.warn(
-      `PostToolUseFailure hook error for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+      `PostToolUseFailure hook error for ${toolName}: ${message}`,
     );
-    return {};
+    return { hookError: message };
+  }
+}
+
+/**
+ * Fire PostToolBatch hook via MessageBus and process the result
+ *
+ * @param messageBus - The message bus instance
+ * @param toolCalls - Resolved tool calls in the batch
+ * @returns PostToolBatchHookResult with stop/additional-context decisions
+ */
+export async function firePostToolBatchHook(
+  messageBus: MessageBus | undefined,
+  toolCalls: PostToolBatchToolCall[],
+  permissionMode = 'default',
+  signal?: AbortSignal,
+): Promise<PostToolBatchHookResult> {
+  if (!messageBus) {
+    return { shouldStop: false };
+  }
+
+  try {
+    const response = await messageBus.request<
+      HookExecutionRequest,
+      HookExecutionResponse
+    >(
+      {
+        type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        eventName: 'PostToolBatch',
+        input: {
+          permission_mode: permissionMode,
+          tool_calls: toolCalls,
+        },
+        signal,
+      },
+      MessageBusType.HOOK_EXECUTION_RESPONSE,
+      POST_TOOL_BATCH_HOOK_TIMEOUT_MS,
+      signal,
+    );
+
+    if (!response.success || !response.output) {
+      const message =
+        response.error?.message ||
+        `hook runner returned ${response.success ? 'no output' : 'success: false'} without error detail`;
+      debugLogger.warn(`PostToolBatch hook returned failure: ${message}`);
+      return { shouldStop: false, hookError: message };
+    }
+
+    const batchOutput = createHookOutput('PostToolBatch', response.output);
+    const shouldStop = batchOutput.shouldStopExecution();
+
+    return {
+      shouldStop,
+      stopReason: shouldStop ? batchOutput.getEffectiveReason() : undefined,
+      additionalContext: batchOutput.getAdditionalContext(),
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    debugLogger.warn(`PostToolBatch hook error: ${message}`);
+    return { shouldStop: false, hookError: message };
   }
 }
 

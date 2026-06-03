@@ -5,7 +5,11 @@
  */
 
 import * as osActual from 'node:os';
-import { FatalConfigError, ideContextStore } from '@qwen-code/qwen-code-core';
+import {
+  atomicWriteFileSync,
+  FatalConfigError,
+  ideContextStore,
+} from '@qwen-code/qwen-code-core';
 import {
   describe,
   it,
@@ -50,17 +54,24 @@ vi.mock('strip-json-comments', () => ({
   default: vi.fn((content) => content),
 }));
 
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    atomicWriteFileSync: vi.fn(),
+  };
+});
+
 describe('Trusted Folders Loading', () => {
   let mockFsExistsSync: Mocked<typeof fs.existsSync>;
   let mockStripJsonComments: Mocked<typeof stripJsonComments>;
-  let mockFsWriteFileSync: Mocked<typeof fs.writeFileSync>;
 
   beforeEach(() => {
     resetTrustedFoldersForTesting();
     vi.resetAllMocks();
     mockFsExistsSync = vi.mocked(fs.existsSync);
     mockStripJsonComments = vi.mocked(stripJsonComments);
-    mockFsWriteFileSync = vi.mocked(fs.writeFileSync);
     vi.mocked(osActual.homedir).mockReturnValue('/mock/home/user');
     (mockStripJsonComments as unknown as Mock).mockImplementation(
       (jsonString: string) => jsonString,
@@ -190,10 +201,18 @@ describe('Trusted Folders Loading', () => {
     expect(loadedFolders.user.config['/new/path']).toBe(
       TrustLevel.TRUST_FOLDER,
     );
-    expect(mockFsWriteFileSync).toHaveBeenCalledWith(
+    expect(atomicWriteFileSync).toHaveBeenCalledWith(
       getTrustedFoldersPath(),
       JSON.stringify({ '/new/path': TrustLevel.TRUST_FOLDER }, null, 2),
-      { encoding: 'utf-8', mode: 0o600 },
+      // noFollow:true mirrors the credential write sites' security
+      // posture — a pre-placed symlink at the config path could leak
+      // the trusted-folder list or leave the user's real config stale.
+      {
+        encoding: 'utf-8',
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+      },
     );
   });
 });

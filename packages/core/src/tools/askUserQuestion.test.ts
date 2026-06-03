@@ -27,6 +27,15 @@ describe('AskUserQuestionTool', () => {
     tool = new AskUserQuestionTool(mockConfig);
   });
 
+  describe('tool registration flags', () => {
+    it('is not deferred — must remain visible in the initial tool list', () => {
+      // shouldDefer=true would hide the schema behind ToolSearch and force the
+      // model to discover the tool by name before using it. The model then
+      // tends to skip the structured clarification UX and ask in plain prose.
+      expect(tool.shouldDefer).toBe(false);
+    });
+  });
+
   describe('validateToolParams', () => {
     it('should accept valid params with single question', () => {
       const params = {

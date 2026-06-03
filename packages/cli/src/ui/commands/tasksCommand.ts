@@ -6,9 +6,9 @@
 
 import {
   buildBackgroundEntryLabel,
-  type BackgroundShellEntry,
-  type BackgroundTaskEntry,
-  type MonitorEntry,
+  type AgentTask,
+  type MonitorTask,
+  type ShellTask,
 } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
@@ -16,15 +16,7 @@ import { t } from '../../i18n/index.js';
 import { formatDuration } from '../utils/formatters.js';
 import { stripUnsafeCharacters } from '../utils/textUtils.js';
 
-type AgentTaskEntry = BackgroundTaskEntry & {
-  kind: 'agent';
-  resumeBlockedReason?: string;
-};
-
-type ShellTaskEntry = BackgroundShellEntry & { kind: 'shell' };
-type MonitorTaskEntry = MonitorEntry & { kind: 'monitor' };
-
-type TaskEntry = AgentTaskEntry | ShellTaskEntry | MonitorTaskEntry;
+type TaskEntry = AgentTask | ShellTask | MonitorTask;
 
 function statusLabel(entry: TaskEntry): string {
   switch (entry.kind) {
@@ -144,9 +136,8 @@ function taskId(entry: TaskEntry): string {
 function taskOutputPath(entry: TaskEntry): string | undefined {
   switch (entry.kind) {
     case 'agent':
-      return entry.outputFile;
     case 'shell':
-      return entry.outputPath;
+      return entry.outputFile;
     case 'monitor':
       // Monitors stream to the agent via task_notification rather than a
       // file on disk — no output path to surface here.
@@ -185,21 +176,22 @@ export const tasksCommand: SlashCommand = {
       };
     }
 
-    const agentEntries: AgentTaskEntry[] = config
-      .getBackgroundTaskRegistry()
-      .getAll()
-      .map((entry) => ({ ...entry, kind: 'agent' as const }));
-    const shellEntries: ShellTaskEntry[] = config
-      .getBackgroundShellRegistry()
-      .getAll()
-      .map((entry) => ({ ...entry, kind: 'shell' as const }));
-    const monitorEntries: MonitorTaskEntry[] = config
-      .getMonitorRegistry()
-      .getAll()
-      .map((entry) => ({ ...entry, kind: 'monitor' as const }));
-    const entries = [...agentEntries, ...shellEntries, ...monitorEntries].sort(
-      (a, b) => a.startTime - b.startTime,
-    );
+    // Each registry already tags entries with `kind`, so no per-entry
+    // mapping is needed here — just spread into a single sorted list.
+    const agentEntries: AgentTask[] = [
+      ...config.getBackgroundTaskRegistry().getAll(),
+    ];
+    const shellEntries: ShellTask[] = [
+      ...config.getBackgroundShellRegistry().getAll(),
+    ];
+    const monitorEntries: MonitorTask[] = [
+      ...config.getMonitorRegistry().getAll(),
+    ];
+    const entries: TaskEntry[] = [
+      ...agentEntries,
+      ...shellEntries,
+      ...monitorEntries,
+    ].sort((a, b) => a.startTime - b.startTime);
 
     if (entries.length === 0) {
       return {

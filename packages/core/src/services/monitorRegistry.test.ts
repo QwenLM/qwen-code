@@ -8,10 +8,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   MAX_RETAINED_TERMINAL_MONITORS,
   MonitorRegistry,
-  type MonitorEntry,
+  type MonitorTaskRegistration,
 } from './monitorRegistry.js';
 
-function createEntry(overrides: Partial<MonitorEntry> = {}): MonitorEntry {
+function createEntry(
+  overrides: Partial<MonitorTaskRegistration> = {},
+): MonitorTaskRegistration {
   return {
     monitorId: 'mon-1',
     command: 'tail -f /var/log/app.log',
@@ -24,6 +26,7 @@ function createEntry(overrides: Partial<MonitorEntry> = {}): MonitorEntry {
     maxEvents: 1000,
     idleTimeoutMs: 300_000,
     droppedLines: 0,
+    outputFile: '/tmp/monitor-mon-1.log',
     ...overrides,
   };
 }

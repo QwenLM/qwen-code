@@ -48,6 +48,7 @@ export class MessageRouter {
       conversationStore,
       currentConversationId,
       sendToWebView,
+      (id) => this.setCurrentConversationId(id),
     );
 
     this.fileHandler = new FileMessageHandler(
@@ -171,12 +172,8 @@ export class MessageRouter {
    */
   setAuthInteractiveHandler(
     handler: (
-      provider: string,
-      region?: string,
-      apiKey?: string,
-      baseUrl?: string,
-      model?: string,
-      modelIds?: string,
+      config: import('@qwen-code/qwen-code-core').ProviderConfig,
+      inputs: import('@qwen-code/qwen-code-core').ProviderSetupInputs,
     ) => Promise<void>,
   ): void {
     this.authHandler.setAuthInteractiveHandler(handler);

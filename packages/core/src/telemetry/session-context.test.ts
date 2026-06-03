@@ -6,7 +6,11 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { ROOT_CONTEXT, createContextKey } from '@opentelemetry/api';
-import { getSessionContext, setSessionContext } from './session-context.js';
+import {
+  getSessionContext,
+  setSessionContext,
+  getCurrentSessionId,
+} from './session-context.js';
 
 describe('session-context', () => {
   afterEach(() => {
@@ -40,5 +44,38 @@ describe('session-context', () => {
     setSessionContext(undefined);
 
     expect(getSessionContext()).toBeUndefined();
+  });
+});
+
+describe('getCurrentSessionId', () => {
+  afterEach(() => {
+    setSessionContext(undefined);
+  });
+
+  it('returns undefined when no session has been set', () => {
+    expect(getCurrentSessionId()).toBeUndefined();
+  });
+
+  it('returns the session ID passed to setSessionContext', () => {
+    const key = createContextKey('sid-test-key');
+    setSessionContext(ROOT_CONTEXT.setValue(key, 'ctx'), 'session-abc');
+
+    expect(getCurrentSessionId()).toBe('session-abc');
+  });
+
+  it('updates when setSessionContext is called with a new session ID', () => {
+    const key = createContextKey('sid-update-key');
+    setSessionContext(ROOT_CONTEXT.setValue(key, 'first'), 'session-1');
+    setSessionContext(ROOT_CONTEXT.setValue(key, 'second'), 'session-2');
+
+    expect(getCurrentSessionId()).toBe('session-2');
+  });
+
+  it('clears when setSessionContext is called without a session ID', () => {
+    const key = createContextKey('sid-clear-key');
+    setSessionContext(ROOT_CONTEXT.setValue(key, 'ctx'), 'session-xyz');
+    setSessionContext(undefined);
+
+    expect(getCurrentSessionId()).toBeUndefined();
   });
 });

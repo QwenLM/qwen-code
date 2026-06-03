@@ -14,7 +14,7 @@ npm install @qwen-code/sdk
 
 ## Requirements
 
-- Node.js >= 20.0.0
+- Node.js >= 22.0.0
 - [Qwen Code](https://github.com/QwenLM/qwen-code) >= 0.4.0 (stable) installed and accessible in PATH
 
 > **Note for nvm users**: If you use nvm to manage Node.js versions, the SDK may not be able to auto-detect the Qwen Code executable. You should explicitly set the `pathToQwenExecutable` option to the full path of the `qwen` binary.
@@ -158,7 +158,7 @@ The SDK supports different permission modes for controlling tool execution:
 
 - **`default`**: Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`. Read-only tools execute without confirmation.
 - **`plan`**: Blocks all write tools, instructing AI to present a plan first.
-- **`auto-edit`**: Auto-approve edit tools (edit, write_file) while other tools require confirmation.
+- **`auto-edit`**: Auto-approve edit tools (`edit`, `write_file`, `notebook_edit`) while other tools require confirmation.
 - **`yolo`**: All tools execute automatically without confirmation.
 
 ### Permission Priority Chain

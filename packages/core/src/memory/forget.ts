@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import {
   buildAutoMemoryEntrySearchText,
@@ -137,6 +138,10 @@ async function selectByModel(
       },
     ] as Content[],
     schema: FORGET_SELECTION_RESPONSE_SCHEMA,
+    // /forget acts on the selection without confirmation, so pin selection to
+    // the main model rather than the runSideQuery fast-model default — a
+    // weaker fast model could pick the wrong entries and silently delete.
+    model: config.getModel(),
     abortSignal: AbortSignal.timeout(8_000),
     config: {
       temperature: 0,
@@ -218,10 +223,10 @@ async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
     );
     const metadata = JSON.parse(content) as AutoMemoryMetadata;
     metadata.updatedAt = now.toISOString();
-    await fs.writeFile(
+    await atomicWriteFile(
       getAutoMemoryMetadataPath(projectRoot),
       `${JSON.stringify(metadata, null, 2)}\n`,
-      'utf-8',
+      { encoding: 'utf-8' },
     );
   } catch {
     // Best-effort metadata bump.
@@ -283,10 +288,10 @@ export async function forgetManagedAutoMemoryMatches(
       } else {
         const heading = getAutoMemoryBodyHeading(rawBody);
         const newBody = renderAutoMemoryBody(heading, kept);
-        await fs.writeFile(
+        await atomicWriteFile(
           filePath,
           `---\n${frontmatter}\n---\n\n${newBody}\n`,
-          'utf-8',
+          { encoding: 'utf-8' },
         );
       }
 

@@ -31,6 +31,10 @@ export enum Command {
   NAVIGATION_UP = 'navigationUp',
   NAVIGATION_DOWN = 'navigationDown',
 
+  // Selection list navigation (dialogs, menus)
+  SELECTION_UP = 'selectionUp',
+  SELECTION_DOWN = 'selectionDown',
+
   // Auto-completion
   ACCEPT_SUGGESTION = 'acceptSuggestion',
   COMPLETION_UP = 'completionUp',
@@ -71,6 +75,14 @@ export enum Command {
   // Suggestion expansion
   EXPAND_SUGGESTION = 'expandSuggestion',
   COLLAPSE_SUGGESTION = 'collapseSuggestion',
+
+  // Scroll commands
+  SCROLL_UP = 'scrollUp',
+  SCROLL_DOWN = 'scrollDown',
+  PAGE_UP = 'pageUp',
+  PAGE_DOWN = 'pageDown',
+  SCROLL_HOME = 'scrollHome',
+  SCROLL_END = 'scrollEnd',
 }
 
 /**
@@ -120,6 +132,14 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.DELETE_WORD_BACKWARD]: [
     { key: 'backspace', ctrl: true },
     { key: 'backspace', command: true },
+    // MinTTY (Git Bash on Windows) emits the byte \x1f (ASCII Unit
+    // Separator, rendered as "^_" by `cat -v`) for Ctrl+Backspace under
+    // its standard Ctrl-modifies-meta-keys convention. The same byte is
+    // the historical Ctrl-mapping of the Unit Separator on traditional
+    // ANSI/VT terminals (Ctrl+_ and Ctrl+/ also emit it), but qwen-code
+    // doesn't bind those keystrokes elsewhere so this entry is additive
+    // and non-conflicting on every platform.
+    { sequence: '\x1f' },
   ],
 
   // Screen control
@@ -131,10 +151,22 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.NAVIGATION_UP]: [{ key: 'up' }],
   [Command.NAVIGATION_DOWN]: [{ key: 'down' }],
 
+  // Selection-list nav: arrows + k/j + Ctrl+P/Ctrl+N
+  // ctrl: false on bare k/j skips Ctrl+K and Ctrl+J
+  [Command.SELECTION_UP]: [
+    { key: 'up' },
+    { key: 'k', ctrl: false },
+    { key: 'p', ctrl: true },
+  ],
+  [Command.SELECTION_DOWN]: [
+    { key: 'down' },
+    { key: 'j', ctrl: false },
+    { key: 'n', ctrl: true },
+  ],
+
   // Auto-completion
   [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
   // Completion navigation uses only arrow keys
-  // Ctrl+P/N are reserved for history navigation (HISTORY_UP/DOWN)
   [Command.COMPLETION_UP]: [{ key: 'up' }],
   [Command.COMPLETION_DOWN]: [{ key: 'down' }],
 
@@ -196,4 +228,12 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Suggestion expansion
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
+
+  // Scroll commands
+  [Command.SCROLL_UP]: [{ key: 'up', shift: true }],
+  [Command.SCROLL_DOWN]: [{ key: 'down', shift: true }],
+  [Command.PAGE_UP]: [{ key: 'pageup' }],
+  [Command.PAGE_DOWN]: [{ key: 'pagedown' }],
+  [Command.SCROLL_HOME]: [{ key: 'home', ctrl: true }],
+  [Command.SCROLL_END]: [{ key: 'end', ctrl: true }],
 };

@@ -16,6 +16,7 @@ import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { isAbortError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 
 const debugLogger = createDebugLogger('OPENAI');
 
@@ -155,9 +156,10 @@ export class OpenAIContentGenerator implements ContentGenerator {
         ],
       };
     } catch (error) {
-      debugLogger.error('OpenAI API Embedding Error:', error);
+      const redactedError = redactProxyError(error);
+      debugLogger.error('OpenAI API Embedding Error:', redactedError);
       throw new Error(
-        `OpenAI API error: ${error instanceof Error ? error.message : String(error)}`,
+        `OpenAI API error: ${redactedError instanceof Error ? redactedError.message : String(redactedError)}`,
       );
     }
   }

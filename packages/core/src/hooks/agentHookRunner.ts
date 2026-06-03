@@ -52,7 +52,6 @@ import {
 import type { VerdictPayload } from './reportVerdictTool.js';
 import { AGENT_HOOK_DISALLOWED_TOOLS } from './agentHookDisallowedTools.js';
 import { substituteHookArguments } from './hookPromptUtils.js';
-import { createCombinedAbortSignal } from './combinedAbortSignal.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('AGENT_HOOK_RUNNER');
@@ -259,8 +258,10 @@ export class AgentHookRunner {
     const rawTimeout = hookConfig.timeout ?? DEFAULT_TIMEOUT_SECONDS;
     const timeoutSeconds = Math.max(1, Math.min(rawTimeout, 86400));
     const timeoutMs = timeoutSeconds * 1000;
-    const { signal: combinedSignal, cleanup: cleanupSignal } =
-      createCombinedAbortSignal(signal, { timeoutMs });
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, timeoutSignal])
+      : timeoutSignal;
 
     // ── Step G: Create YOLO-mode Config override (Gap 4: dontAsk) ──
     // Mirrors Claude Code's `mode: 'dontAsk'` — the hook subagent should
@@ -305,119 +306,105 @@ CRITICAL INSTRUCTIONS:
 
 IMPORTANT: If you do not call ${VERDICT_TOOL_NAME}, your verification will be considered FAILED.`;
 
-    try {
-      // ── Step J: Create and execute the headless subagent ─────
-      const maxTurns = hookConfig.maxTurns ?? MAX_AGENT_HOOK_TURNS;
-      const modelConfigOverrides = hookConfig.model
-        ? { model: hookConfig.model }
-        : undefined;
+    // ── Step J: Create and execute the headless subagent ─────
+    const maxTurns = hookConfig.maxTurns ?? MAX_AGENT_HOOK_TURNS;
+    const modelConfigOverrides = hookConfig.model
+      ? { model: hookConfig.model }
+      : undefined;
 
-      const headless = await subagentManager.createAgentHeadless(
-        subagentConfig,
-        hookAgentConfig,
-        {
-          hooks: agentHooks,
-          promptConfigOverrides: {
-            // Use renderedSystemPrompt to bypass buildChatSystemPrompt's
-            // non-interactive append, which contradicts the hook's instruction
-            // that the model MUST call report_verdict (not respond with text).
-            renderedSystemPrompt: systemPromptOverride,
-          },
-          runConfigOverrides: {
-            max_turns: maxTurns,
-          },
-          toolConfigOverride,
-          ...(modelConfigOverrides ? { modelConfigOverrides } : {}),
+    const headless = await subagentManager.createAgentHeadless(
+      subagentConfig,
+      hookAgentConfig,
+      {
+        hooks: agentHooks,
+        promptConfigOverrides: {
+          // Use renderedSystemPrompt to bypass buildChatSystemPrompt's
+          // non-interactive append, which contradicts the hook's instruction
+          // that the model MUST call report_verdict (not respond with text).
+          renderedSystemPrompt: systemPromptOverride,
         },
-      );
+        runConfigOverrides: {
+          max_turns: maxTurns,
+        },
+        toolConfigOverride,
+        ...(modelConfigOverrides ? { modelConfigOverrides } : {}),
+      },
+    );
 
-      const context = new ContextState();
-      context.set('task_prompt', processedPrompt);
+    const context = new ContextState();
+    context.set('task_prompt', processedPrompt);
 
-      await headless.execute(context, combinedSignal);
+    await headless.execute(context, combinedSignal);
 
-      // ── Step K: Text-based verdict fallback ─────────────────
-      // Many models finish with a plain text conclusion instead of calling
-      // the report_verdict tool. When that happens, we parse the final text
-      // to infer the verdict rather than failing outright.
-      const terminateMode = headless.getTerminateMode();
+    // ── Step K: Text-based verdict fallback ─────────────────
+    // Many models finish with a plain text conclusion instead of calling
+    // the report_verdict tool. When that happens, we parse the final text
+    // to infer the verdict rather than failing outright.
+    const terminateMode = headless.getTerminateMode();
 
-      if (!captured.verdict && terminateMode === AgentTerminateMode.GOAL) {
-        const finalText = headless.getFinalText();
-        const inferredVerdict = parseVerdictFromText(finalText);
-        if (inferredVerdict) {
-          captured.verdict = inferredVerdict;
-          debugLogger.debug(
-            `Agent hook "${hookName}": inferred verdict from text (ok=${inferredVerdict.ok})`,
-          );
-        } else {
-          debugLogger.warn(
-            `Agent hook "${hookName}": could not infer verdict from text, defaulting to ok=${hookConfig.defaultVerdict ?? false}`,
-          );
-          // Default to blocking when the verdict cannot be inferred —
-          // failing safe is better than silently allowing an action
-          // that the model may have intended to block.
-          // Users can override via `defaultVerdict: true` in AgentHookConfig
-          // if they prefer lenient behavior.
-          const fallbackOk = hookConfig.defaultVerdict ?? false;
-          captured.verdict = {
-            ok: fallbackOk,
-            reason: fallbackOk
-              ? 'Verdict could not be inferred from model output; defaulted to ok=true via defaultVerdict config'
-              : 'Verdict could not be inferred from model output',
-          };
-        }
-      }
-
-      // ── Step L: Map verdict to HookExecutionResult ───────────
-      const duration = Date.now() - startTime;
-
-      if (!captured.verdict) {
-        const reason =
-          terminateMode === AgentTerminateMode.TIMEOUT
-            ? `Agent hook timed out after ${timeoutSeconds}s`
-            : terminateMode === AgentTerminateMode.MAX_TURNS
-              ? `Agent hook exceeded max turns (${hookConfig.maxTurns ?? MAX_AGENT_HOOK_TURNS})`
-              : `Agent hook cancelled (terminate=${terminateMode})`;
-        debugLogger.warn(`Agent hook "${hookName}": ${reason}`);
-        return {
-          hookConfig,
-          eventName,
-          success: false,
-          outcome: 'cancelled',
-          error: new Error(reason),
-          duration,
+    if (!captured.verdict && terminateMode === AgentTerminateMode.GOAL) {
+      const finalText = headless.getFinalText();
+      const inferredVerdict = parseVerdictFromText(finalText);
+      if (inferredVerdict) {
+        captured.verdict = inferredVerdict;
+        debugLogger.debug(
+          `Agent hook "${hookName}": inferred verdict from text (ok=${inferredVerdict.ok})`,
+        );
+      } else {
+        debugLogger.warn(
+          `Agent hook "${hookName}": could not infer verdict from text, defaulting to ok=${hookConfig.defaultVerdict ?? false}`,
+        );
+        // Default to blocking when the verdict cannot be inferred —
+        // failing safe is better than silently allowing an action
+        // that the model may have intended to block.
+        // Users can override via `defaultVerdict: true` in AgentHookConfig
+        // if they prefer lenient behavior.
+        const fallbackOk = hookConfig.defaultVerdict ?? false;
+        captured.verdict = {
+          ok: fallbackOk,
+          reason: fallbackOk
+            ? 'Verdict could not be inferred from model output; defaulted to ok=true via defaultVerdict config'
+            : 'Verdict could not be inferred from model output',
         };
       }
+    }
 
-      // Verdict was captured
-      if (!captured.verdict.ok) {
-        debugLogger.debug(
-          `Agent hook "${hookName}": verdict NOT OK — ${captured.verdict.reason}`,
+    // ── Step L: Map verdict to HookExecutionResult ───────────
+    const duration = Date.now() - startTime;
+
+    if (!captured.verdict) {
+      const reason =
+        terminateMode === AgentTerminateMode.TIMEOUT
+          ? `Agent hook timed out after ${timeoutSeconds}s`
+          : terminateMode === AgentTerminateMode.MAX_TURNS
+            ? `Agent hook exceeded max turns (${hookConfig.maxTurns ?? MAX_AGENT_HOOK_TURNS})`
+            : `Agent hook cancelled (terminate=${terminateMode})`;
+      debugLogger.warn(`Agent hook "${hookName}": ${reason}`);
+      return {
+        hookConfig,
+        eventName,
+        success: false,
+        outcome: 'cancelled',
+        error: new Error(reason),
+        duration,
+      };
+    }
+
+    // Verdict was captured
+    if (!captured.verdict.ok) {
+      debugLogger.debug(
+        `Agent hook "${hookName}": verdict NOT OK — ${captured.verdict.reason}`,
+      );
+
+      if (hookConfig.advisoryOnly) {
+        debugLogger.warn(
+          `Agent hook "${hookName}": advisoryOnly=true, treating blocking verdict as non-blocking`,
         );
-
-        if (hookConfig.advisoryOnly) {
-          debugLogger.warn(
-            `Agent hook "${hookName}": advisoryOnly=true, treating blocking verdict as non-blocking`,
-          );
-          return {
-            hookConfig,
-            eventName,
-            success: false,
-            outcome: 'non_blocking_error',
-            output: {
-              continue: false,
-              stopReason: `Agent hook condition was not met: ${captured.verdict.reason ?? 'no reason provided'}`,
-            },
-            duration: Date.now() - startTime,
-          };
-        }
-
         return {
           hookConfig,
           eventName,
           success: false,
-          outcome: 'blocking',
+          outcome: 'non_blocking_error',
           output: {
             continue: false,
             stopReason: `Agent hook condition was not met: ${captured.verdict.reason ?? 'no reason provided'}`,
@@ -426,18 +413,28 @@ IMPORTANT: If you do not call ${VERDICT_TOOL_NAME}, your verification will be co
         };
       }
 
-      // ok: true
-      debugLogger.debug(`Agent hook "${hookName}": verdict OK`);
       return {
         hookConfig,
         eventName,
-        success: true,
-        outcome: 'success',
-        output: { continue: true },
+        success: false,
+        outcome: 'blocking',
+        output: {
+          continue: false,
+          stopReason: `Agent hook condition was not met: ${captured.verdict.reason ?? 'no reason provided'}`,
+        },
         duration: Date.now() - startTime,
       };
-    } finally {
-      cleanupSignal();
     }
+
+    // ok: true
+    debugLogger.debug(`Agent hook "${hookName}": verdict OK`);
+    return {
+      hookConfig,
+      eventName,
+      success: true,
+      outcome: 'success',
+      output: { continue: true },
+      duration: Date.now() - startTime,
+    };
   }
 }

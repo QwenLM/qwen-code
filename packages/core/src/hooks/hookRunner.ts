@@ -16,6 +16,7 @@ import type {
   CommandHookConfig,
   AgentHookConfig,
   FunctionHookContext,
+  PromptHookConfig,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -28,7 +29,9 @@ import {
 import { HttpHookRunner } from './httpHookRunner.js';
 import { FunctionHookRunner } from './functionHookRunner.js';
 import { AgentHookRunner } from './agentHookRunner.js';
+import { PromptHookRunner } from './promptHookRunner.js';
 import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
+import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -50,18 +53,20 @@ const EXIT_CODE_SUCCESS = 0;
 const EXIT_CODE_NON_BLOCKING_ERROR = 1;
 
 /**
- * Hook runner that executes command, HTTP, and function hooks
+ * Hook runner that executes command, HTTP, function, and prompt hooks
  */
 export class HookRunner {
   private readonly httpRunner: HttpHookRunner;
   private readonly functionRunner: FunctionHookRunner;
   private readonly agentHookRunner: AgentHookRunner | null;
+  private readonly promptRunner: PromptHookRunner | null;
   private readonly asyncRegistry: AsyncHookRegistry;
 
   constructor(allowedHttpUrls?: string[], config?: Config) {
     this.httpRunner = new HttpHookRunner(allowedHttpUrls);
     this.functionRunner = new FunctionHookRunner();
     this.agentHookRunner = config ? new AgentHookRunner(config) : null;
+    this.promptRunner = config ? new PromptHookRunner(config) : null;
     this.asyncRegistry = new AsyncHookRegistry();
   }
 
@@ -167,6 +172,19 @@ export class HookRunner {
             signal,
           );
         }
+        case HookType.Prompt: {
+          if (!this.promptRunner) {
+            throw new Error(
+              'Prompt hook requires Config to be provided to HookRunner',
+            );
+          }
+          return await this.promptRunner.execute(
+            hookConfig as PromptHookConfig,
+            eventName,
+            input,
+            signal,
+          );
+        }
         default:
           throw new Error(
             `Unknown hook type: ${(hookConfig as HookConfig).type}`,
@@ -211,6 +229,8 @@ export class HookRunner {
         return hookConfig.id || 'unknown-function';
       case HookType.Agent:
         return `agent:${hookConfig.agent ?? 'general-purpose'}`;
+      case HookType.Prompt:
+        return 'prompt-hook';
       default:
         return 'unknown';
     }
@@ -572,6 +592,7 @@ export class HookRunner {
         GEMINI_PROJECT_DIR: input.cwd,
         CLAUDE_PROJECT_DIR: input.cwd, // For compatibility
         QWEN_PROJECT_DIR: input.cwd, // For Qwen Code compatibility
+        ...getShellContextEnvVars(),
         ...hookConfig.env,
       };
 
@@ -613,7 +634,7 @@ export class HookRunner {
       };
 
       if (signal) {
-        signal.addEventListener('abort', abortHandler);
+        signal.addEventListener('abort', abortHandler, { once: true });
       }
 
       // Send input to stdin

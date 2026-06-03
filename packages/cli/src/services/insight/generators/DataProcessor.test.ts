@@ -12,6 +12,14 @@ import type {
   SessionFacets,
 } from '../types/StaticInsightTypes.js';
 
+const mockLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  error: vi.fn(),
+  warn: vi.fn(),
+  debug: vi.fn(),
+}));
+const mockRunSideQuery = vi.hoisted(() => vi.fn());
+
 // Mock dependencies
 vi.mock('@qwen-code/qwen-code-core', async () => {
   const actual = await vi.importActual<
@@ -20,12 +28,8 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
   return {
     ...actual,
     read: vi.fn(),
-    createDebugLogger: vi.fn(() => ({
-      info: vi.fn(),
-      error: vi.fn(),
-      warn: vi.fn(),
-      debug: vi.fn(),
-    })),
+    createDebugLogger: vi.fn(() => mockLogger),
+    runSideQuery: mockRunSideQuery,
   };
 });
 
@@ -53,6 +57,9 @@ describe('DataProcessor', () => {
     vi.clearAllMocks();
 
     mockGenerateJson = vi.fn();
+    mockRunSideQuery.mockImplementation((_config, request) =>
+      mockGenerateJson(request),
+    );
     mockConfig = {
       getBaseLlmClient: vi.fn(() => ({
         generateJson: mockGenerateJson,
@@ -375,6 +382,76 @@ describe('DataProcessor', () => {
       });
     });
 
+    it('should ignore zero and non-finite count values', () => {
+      const facets = [
+        {
+          session_id: 's1',
+          underlying_goal: 'test',
+          goal_categories: { coding: 0, debugging: Number.NaN, testing: 2 },
+          outcome: 'fully_achieved',
+          user_satisfaction_counts: { satisfied: 0, happy: 1 },
+          Qwen_helpfulness: 'very_helpful',
+          session_type: 'single_task',
+          friction_counts: { slow_response: Number.POSITIVE_INFINITY },
+          friction_detail: '',
+          primary_success: 'none',
+          brief_summary: 'Test summary',
+        },
+      ] as unknown as SessionFacets[];
+
+      const result = (
+        dataProcessor as unknown as {
+          aggregateFacetsData(facets: SessionFacets[]): {
+            satisfactionAgg: Record<string, number>;
+            frictionAgg: Record<string, number>;
+            goalsAgg: Record<string, number>;
+          };
+        }
+      ).aggregateFacetsData(facets);
+
+      expect(result.satisfactionAgg).toEqual({ happy: 1 });
+      expect(result.frictionAgg).toEqual({});
+      expect(result.goalsAgg).toEqual({ testing: 2 });
+    });
+
+    it('should ignore malformed count objects when aggregating facets', () => {
+      const facets = [
+        {
+          session_id: 's1',
+          underlying_goal: 'test',
+          goal_categories: null,
+          outcome: null,
+          user_satisfaction_counts: null,
+          Qwen_helpfulness: 'very_helpful',
+          session_type: 'single_task',
+          friction_counts: null,
+          friction_detail: '',
+          primary_success: null,
+          brief_summary: 'Test summary',
+        },
+      ] as unknown as SessionFacets[];
+
+      const result = (
+        dataProcessor as unknown as {
+          aggregateFacetsData(facets: SessionFacets[]): {
+            satisfactionAgg: Record<string, number>;
+            frictionAgg: Record<string, number>;
+            primarySuccessAgg: Record<string, number>;
+            outcomesAgg: Record<string, number>;
+            goalsAgg: Record<string, number>;
+          };
+        }
+      ).aggregateFacetsData(facets);
+
+      expect(result.satisfactionAgg).toEqual({});
+      expect(result.frictionAgg).toEqual({});
+      expect(result.primarySuccessAgg).toEqual({});
+      expect(result.goalsAgg).toEqual({});
+      expect(result.outcomesAgg).toEqual({
+        unclear_from_transcript: 1,
+      });
+    });
+
     it('should aggregate friction counts', () => {
       const facets: SessionFacets[] = [
         {
@@ -629,6 +706,111 @@ describe('DataProcessor', () => {
           schema: expect.any(Object),
         }),
       );
+    });
+
+    it('should normalize malformed LLM facet fields', async () => {
+      mockGenerateJson.mockResolvedValue({
+        underlying_goal: ' Test goal ',
+        goal_categories: { coding: 1 },
+        outcome: null,
+        user_satisfaction_counts: null,
+        Qwen_helpfulness: 'invalid',
+        session_type: null,
+        friction_counts: null,
+        friction_detail: null,
+        primary_success: null,
+        brief_summary: ' Test summary ',
+      });
+
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Help me with code' }],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      const result = await (
+        dataProcessor as unknown as {
+          analyzeSession(records: ChatRecord[]): Promise<SessionFacets | null>;
+        }
+      ).analyzeSession(records);
+
+      expect(result).toEqual({
+        session_id: 'test-session',
+        underlying_goal: 'Test goal',
+        goal_categories: { coding: 1 },
+        outcome: 'unclear_from_transcript',
+        user_satisfaction_counts: {},
+        Qwen_helpfulness: 'moderately_helpful',
+        session_type: 'single_task',
+        friction_counts: {},
+        friction_detail: '',
+        primary_success: 'none',
+        brief_summary: 'Test summary',
+      });
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'Normalized unknown insight enum value "invalid" to fallback "moderately_helpful"',
+      );
+    });
+
+    it('should normalize case-variant LLM facet fields to canonical values', async () => {
+      mockGenerateJson.mockResolvedValue({
+        underlying_goal: 'Test goal',
+        goal_categories: { coding: 1 },
+        outcome: 'FULLY_ACHIEVED',
+        user_satisfaction_counts: null,
+        Qwen_helpfulness: 'Very_Helpful',
+        session_type: 'Multi_Task',
+        friction_counts: null,
+        friction_detail: null,
+        primary_success: null,
+        brief_summary: 'Test summary',
+      });
+
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Help me with code' }],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      const result = await (
+        dataProcessor as unknown as {
+          analyzeSession(records: ChatRecord[]): Promise<SessionFacets | null>;
+        }
+      ).analyzeSession(records);
+
+      expect(result).toEqual({
+        session_id: 'test-session',
+        underlying_goal: 'Test goal',
+        goal_categories: { coding: 1 },
+        outcome: 'fully_achieved',
+        user_satisfaction_counts: {},
+        Qwen_helpfulness: 'very_helpful',
+        session_type: 'multi_task',
+        friction_counts: {},
+        friction_detail: '',
+        primary_success: 'none',
+        brief_summary: 'Test summary',
+      });
     });
 
     it('should return null when LLM returns empty result', async () => {
@@ -1170,13 +1352,32 @@ describe('DataProcessor', () => {
     ];
 
     it('should return partial qualitative data when some LLM calls fail', async () => {
+      // Schema validation rejects partial objects, so build a fully-populated
+      // response — only the explicitly-rejected calls should land as undefined.
       let callIndex = 0;
       mockGenerateJson.mockImplementation(() => {
         callIndex++;
         if (callIndex % 2 === 0) {
           return Promise.reject(new Error('LLM timeout'));
         }
-        return Promise.resolve({ intro: 'test', areas: [], opportunities: [] });
+        return Promise.resolve({
+          intro: 'test',
+          impressive_workflows: [],
+          areas: [],
+          opportunities: [],
+          friction_points: [],
+          memorable_moments: [],
+          improvements: [],
+          interaction_style: {
+            archetype: 'collaborative',
+            description: 'test',
+            traits: [],
+          },
+          at_a_glance: {
+            top_strengths: [],
+            common_pitfalls: [],
+          },
+        });
       });
 
       const result = await (
@@ -1212,6 +1413,25 @@ describe('DataProcessor', () => {
       ).generateQualitativeInsights(mockMetrics, []);
 
       expect(result).toBeUndefined();
+    });
+
+    it('should return undefined when all qualitative sections are empty', async () => {
+      mockGenerateJson.mockResolvedValue({});
+
+      const result = await (
+        dataProcessor as unknown as {
+          generateQualitativeInsights(
+            metrics: Omit<InsightData, 'facets' | 'qualitative'>,
+            facets: SessionFacets[],
+          ): Promise<
+            | import('../types/QualitativeInsightTypes.js').QualitativeInsights
+            | undefined
+          >;
+        }
+      ).generateQualitativeInsights(mockMetrics, mockFacets);
+
+      expect(result).toBeUndefined();
+      expect(mockGenerateJson).toHaveBeenCalledTimes(8);
     });
 
     it('should return full qualitative data when all LLM calls succeed', async () => {
@@ -1309,6 +1529,139 @@ describe('DataProcessor', () => {
       expect(mockGenerateJson).toHaveBeenCalledTimes(1);
       expect(result).toHaveLength(1);
       expect(result[0].session_id).toBe('conversational');
+    });
+
+    it('should normalize cached facets before reusing them', async () => {
+      const conversationalRecords: ChatRecord[] = [
+        {
+          sessionId: 'cached-session',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'cached-session',
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'Hi' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      mockedReadJsonlFile.mockResolvedValue(conversationalRecords);
+      mockedFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          underlying_goal: ' Cached goal ',
+          goal_categories: null,
+          outcome: null,
+          user_satisfaction_counts: null,
+          Qwen_helpfulness: 'very_helpful',
+          session_type: 'single_task',
+          friction_counts: null,
+          friction_detail: null,
+          primary_success: null,
+          brief_summary: ' Cached summary ',
+        }),
+      );
+
+      const files = [{ path: '/test/cached-session.jsonl', mtime: 1000 }];
+
+      const result = await (
+        dataProcessor as unknown as {
+          generateFacets(
+            files: Array<{ path: string; mtime: number }>,
+            facetsOutputDir?: string,
+          ): Promise<SessionFacets[]>;
+        }
+      ).generateFacets(files, '/facets');
+
+      expect(mockGenerateJson).not.toHaveBeenCalled();
+      expect(result).toEqual([
+        {
+          session_id: 'cached-session',
+          underlying_goal: 'Cached goal',
+          goal_categories: {},
+          outcome: 'unclear_from_transcript',
+          user_satisfaction_counts: {},
+          Qwen_helpfulness: 'very_helpful',
+          session_type: 'single_task',
+          friction_counts: {},
+          friction_detail: '',
+          primary_success: 'none',
+          brief_summary: 'Cached summary',
+        },
+      ]);
+      expect(mockedFs.writeFile).toHaveBeenCalledWith(
+        expect.stringMatching(/[\\/]facets[\\/]cached-session\.json$/),
+        JSON.stringify(result[0], null, 2),
+        'utf-8',
+      );
+    });
+
+    it('should reuse normalized cached facets when writeback fails', async () => {
+      const conversationalRecords: ChatRecord[] = [
+        {
+          sessionId: 'cached-session',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'cached-session',
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'Hi' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const writeError = new Error('disk full');
+
+      mockedReadJsonlFile.mockResolvedValue(conversationalRecords);
+      mockedFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          underlying_goal: 'Cached goal',
+          brief_summary: 'Cached summary',
+        }),
+      );
+      mockedFs.writeFile.mockRejectedValueOnce(writeError);
+
+      const files = [{ path: '/test/cached-session.jsonl', mtime: 1000 }];
+
+      const result = await (
+        dataProcessor as unknown as {
+          generateFacets(
+            files: Array<{ path: string; mtime: number }>,
+            facetsOutputDir?: string,
+          ): Promise<SessionFacets[]>;
+        }
+      ).generateFacets(files, '/facets');
+
+      expect(mockGenerateJson).not.toHaveBeenCalled();
+      expect(result).toEqual([
+        expect.objectContaining({
+          session_id: 'cached-session',
+          underlying_goal: 'Cached goal',
+          brief_summary: 'Cached summary',
+        }),
+      ]);
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        'Failed to write back normalized facet for cached-session:',
+        writeError,
+      );
     });
   });
 });

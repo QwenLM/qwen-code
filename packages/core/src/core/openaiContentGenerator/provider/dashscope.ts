@@ -7,6 +7,7 @@ import {
   DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
   DEFAULT_DASHSCOPE_BASE_URL,
+  DASHSCOPE_PROXY_BASE_URL,
 } from '../constants.js';
 import type {
   DashScopeRequestMetadata,
@@ -15,7 +16,10 @@ import type {
   ChatCompletionToolWithCache,
 } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
+
+const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
@@ -25,6 +29,17 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     super(contentGeneratorConfig, cliConfig);
   }
 
+  /**
+   * Determines whether to use the DashScope-compatible provider.
+   * Covers dashscope.aliyuncs.com, dashscope-intl.aliyuncs.com,
+   * Token Plan endpoints under token-plan.<region>.maas.aliyuncs.com,
+   * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
+   * and proxy matches.
+   *
+   * Note: any *.alibaba-inc.com / *.aliyun-inc.com host is treated as a
+   * DashScope-compatible endpoint by design. Keep this generic and avoid
+   * embedding individual private gateway hostnames in provider detection.
+   */
   static isDashScopeProvider(
     contentGeneratorConfig: ContentGeneratorConfig,
   ): boolean {
@@ -33,8 +48,72 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (authType === AuthType.QWEN_OAUTH) return true;
     if (!baseUrl) return true;
 
-    // Matches: dashscope.aliyuncs.com, *.dashscope.aliyuncs.com, or *.dashscope-intl.aliyuncs.com
-    return /([\w-]+\.)?dashscope(-intl)?\.aliyuncs\.com/i.test(baseUrl);
+    const normalizedBaseUrl = baseUrl.endsWith('/')
+      ? baseUrl.slice(0, -1)
+      : baseUrl;
+
+    // Parse the URL and check hostname instead of regex to avoid ReDoS on
+    // attacker-controlled baseUrl and to reject path-only matches like
+    // https://evil.example/dashscope.aliyuncs.com/...
+    let hostname: string | null = null;
+    try {
+      hostname = new URL(normalizedBaseUrl).hostname.toLowerCase();
+    } catch {
+      hostname = null;
+    }
+
+    // Matches: dashscope.aliyuncs.com, *.dashscope.aliyuncs.com,
+    // dashscope-intl.aliyuncs.com, or *.dashscope-intl.aliyuncs.com
+    const isDashscopeOrigin =
+      hostname !== null &&
+      (hostname === 'dashscope.aliyuncs.com' ||
+        hostname === 'dashscope-intl.aliyuncs.com' ||
+        hostname.endsWith('.dashscope.aliyuncs.com') ||
+        hostname.endsWith('.dashscope-intl.aliyuncs.com'));
+
+    const isTokenPlanOrigin =
+      hostname !== null &&
+      hostname.startsWith('token-plan.') &&
+      hostname.endsWith('.maas.aliyuncs.com');
+
+    // Internal Alibaba domains proxying to DashScope-compatible APIs.
+    // Covers *.alibaba-inc.com and *.aliyun-inc.com.
+    const isInternalOrigin =
+      hostname !== null &&
+      (hostname.endsWith('.alibaba-inc.com') ||
+        hostname.endsWith('.aliyun-inc.com'));
+
+    // Check if proxy is configured and matches
+    const normalizedProxyUrl = DASHSCOPE_PROXY_BASE_URL?.endsWith('/')
+      ? DASHSCOPE_PROXY_BASE_URL.slice(0, -1)
+      : DASHSCOPE_PROXY_BASE_URL;
+
+    const isProxyMatch = Boolean(
+      normalizedProxyUrl &&
+        normalizedBaseUrl.toLowerCase() === normalizedProxyUrl.toLowerCase(),
+    );
+
+    if (
+      normalizedProxyUrl &&
+      !isDashscopeOrigin &&
+      !isTokenPlanOrigin &&
+      !isInternalOrigin &&
+      !isProxyMatch
+    ) {
+      debugLogger.debug(
+        `DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match. DashScope headers/cache control will be skipped.`,
+      );
+    }
+
+    if (isInternalOrigin) {
+      debugLogger.debug(
+        `DashScope provider activated via internal origin: ${hostname}`,
+      );
+    }
+
+    return (
+      isDashscopeOrigin || isTokenPlanOrigin || isInternalOrigin || isProxyMatch
+    );
   }
 
   override buildHeaders(): Record<string, string | undefined> {
@@ -61,8 +140,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
     const defaultHeaders = this.buildHeaders();
-    // Configure fetch options to ensure user-configured timeout works as expected
-    // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
+    // Configure fetch options for proxy support and timeout handling.
+    // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
+    // request; without proxy, no custom dispatcher is installed.
     const runtimeOptions = buildRuntimeFetchOptions(
       'openai',
       this.cliConfig.getProxy(),

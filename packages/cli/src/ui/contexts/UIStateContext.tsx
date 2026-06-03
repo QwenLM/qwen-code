@@ -38,6 +38,7 @@ import { type HelpTab } from './UIActionsContext.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 
 export interface UIState {
   history: HistoryItem[];
@@ -51,10 +52,12 @@ export interface UIState {
   debugMessage: string;
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
+  isStatusLineDialogOpen: boolean;
+  statusLineSettingsVersion?: number;
+  statusLineConfigOverride?: StatusLinePresetConfig;
   isMemoryDialogOpen: boolean;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
-  isManageModelsDialogOpen: boolean;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
@@ -106,6 +109,7 @@ export interface UIState {
   currentModel: string;
   contextFileNames: string[];
   availableTerminalHeight: number | undefined;
+  useTerminalBuffer: boolean;
   mainAreaWidth: number;
   staticAreaMaxItemHeight: number;
   staticExtraHeight: number;
@@ -117,6 +121,22 @@ export interface UIState {
   cancelBtw: () => void;
   nightly: boolean;
   branchName: string | undefined;
+  /**
+   * Active worktree session (from the `<sessionId>.worktree.json` sidecar).
+   * Set when `enter_worktree` has been called, cleared when `exit_worktree`
+   * removes the sidecar. Used by the Footer to display the worktree
+   * indicator and by WorktreeExitDialog to know what to operate on.
+   */
+  activeWorktree: {
+    slug: string;
+    branch: string;
+    path: string;
+    originalCwd: string;
+    originalBranch: string;
+    originalHeadCommit: string;
+  } | null;
+  /** Visibility of WorktreeExitDialog (only shown when activeWorktree != null). */
+  showWorktreeExitDialog: boolean;
   sessionStats: SessionStatsState;
   terminalWidth: number;
   terminalHeight: number;
@@ -163,6 +183,8 @@ export interface UIState {
   // Rewind selector
   isRewindSelectorOpen: boolean;
   rewindEscPending: boolean;
+  // Diff dialog
+  isDiffDialogOpen: boolean;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

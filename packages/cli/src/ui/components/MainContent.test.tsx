@@ -22,6 +22,7 @@ const staticPropsSpy = vi.fn();
 const staticItemsSpy = vi.fn();
 const historyItemDisplayPropsSpy = vi.fn();
 const appHeaderSpy = vi.fn();
+const scrollableListPropsSpy = vi.fn();
 
 vi.mock('ink', async () => {
   const actual = await vi.importActual<typeof import('ink')>('ink');
@@ -54,9 +55,28 @@ vi.mock('./HistoryItemDisplay.js', () => ({
   },
 }));
 
-vi.mock('./ShowMoreLines.js', () => ({
-  ShowMoreLines: () => <Text>SHOW_MORE</Text>,
-}));
+// Context-aware mock — `useOverflowState()` returns undefined when the
+// component is not nested under <OverflowProvider>. We render different
+// markers for the two outcomes so the VP-mode "ShowMoreLines reachable"
+// test can distinguish between "mounted but disconnected from overflow
+// state" and "mounted with a live overflow context".
+vi.mock('./ShowMoreLines.js', async () => {
+  const { useOverflowState } = await vi.importActual<
+    typeof import('../contexts/OverflowContext.js')
+  >('../contexts/OverflowContext.js');
+  return {
+    ShowMoreLines: () => {
+      const overflow = useOverflowState();
+      // Non-overlapping markers so a `toContain('SHOW_MORE')` substring
+      // assertion can't accidentally match the disconnected case.
+      return (
+        <Text>
+          {overflow === undefined ? 'OVERFLOW_DISCONNECTED' : 'SHOW_MORE'}
+        </Text>
+      );
+    },
+  };
+});
 
 vi.mock('./Notifications.js', () => ({
   Notifications: () => <Text>NOTIFICATIONS</Text>,
@@ -65,6 +85,31 @@ vi.mock('./Notifications.js', () => ({
 vi.mock('./DebugModeNotification.js', () => ({
   DebugModeNotification: () => <Text>DEBUG_NOTIFICATION</Text>,
 }));
+
+vi.mock('./shared/ScrollableList.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('./shared/ScrollableList.js')
+  >('./shared/ScrollableList.js');
+  return {
+    ...actual,
+    ScrollableList: (props: {
+      data: Array<{ id: number }>;
+      renderItem: (info: { item: { id: number }; index: number }) => unknown;
+    }) => {
+      scrollableListPropsSpy(props);
+      // Drive renderItem once per item so historyItemDisplayPropsSpy fires —
+      // mirrors what the real VirtualizedList does for the visible window.
+      return (
+        <>
+          {props.data.map((item) => (
+            <Text key={item.id}>{`VP_ITEM:${item.id}`}</Text>
+          ))}
+          {props.data.map((item, index) => props.renderItem({ item, index }))}
+        </>
+      );
+    },
+  };
+});
 
 const createUIState = (overrides: Partial<UIState> = {}): UIState =>
   ({
@@ -90,10 +135,10 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     debugMessage: '',
     quittingMessages: null,
     isSettingsDialogOpen: false,
+    isStatusLineDialogOpen: false,
     isMemoryDialogOpen: false,
     isModelDialogOpen: false,
     isFastModelMode: false,
-    isManageModelsDialogOpen: false,
     isTrustDialogOpen: false,
     activeArenaDialog: null,
     isPermissionsDialogOpen: false,
@@ -455,5 +500,222 @@ describe('<MainContent />', () => {
     );
 
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(53);
+  });
+
+  it('does NOT reset progressive replay when only currentModel changes (PR #4119 regression guard)', async () => {
+    // Wenshao's review on PR #4119: if AppContainer splits the model-change
+    // wiring into two separate effects (setCurrentModel first, refreshStatic
+    // -> historyRemountKey bump second), there is a render where currentModel
+    // is new but historyRemountKey is still the old value. <Static>'s key is
+    // `${historyRemountKey}-${currentModel}`, so the key changes (Ink remounts
+    // Static), but the render-phase reset (lastRemountKey !== historyRemountKey)
+    // does NOT fire — so the new <Static> is mounted with the full pre-catch-up
+    // replayCount, and Ink does the synchronous full-history layout the PR is
+    // meant to avoid.
+    //
+    // This test reproduces only the dangerous half of that interleaving:
+    // currentModel flips while historyRemountKey is held constant. Under the
+    // correct (single-batch) AppContainer wiring this combination never
+    // appears in practice, but the test pins the MainContent invariant —
+    // currentModel alone must not trigger progressive-replay reset, which
+    // makes any future "two-effect" regression visible here as a freeze.
+    staticItemsSpy.mockClear();
+    const history = Array.from({ length: 200 }, (_, i) => ({
+      type: 'user' as const,
+      id: i,
+      text: `msg ${i}`,
+    }));
+    const TOTAL = 203;
+
+    const { rerender } = renderMainContent(
+      createUIState({
+        history,
+        historyRemountKey: 1,
+        currentModel: 'model-a',
+      }),
+    );
+
+    // Drive the chunked replay to completion (replayCount === TOTAL).
+    for (let i = 0; i < 50; i++) {
+      const len = staticItemsSpy.mock.calls.at(-1)?.[0].length ?? 0;
+      if (len === TOTAL) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(TOTAL);
+
+    // Re-render with a NEW currentModel but the SAME historyRemountKey.
+    // <Static>'s key will change (Ink remounts), but replayCount must stay
+    // at TOTAL — i.e. progressive replay must NOT re-trigger. Any future
+    // refactor that re-introduces a one-render gap between setCurrentModel
+    // and the historyRemountKey bump will trip this assertion the moment
+    // someone correctly drives the reset off the model dimension instead.
+    rerender(
+      <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+        <CompactModeProvider value={{ compactMode: false }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                history,
+                historyRemountKey: 1,
+                currentModel: 'model-b',
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </CompactModeProvider>
+      </AppContext.Provider>,
+    );
+
+    // No reset means the LAST staticItemsSpy call still received TOTAL.
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(TOTAL);
+  });
+
+  describe('virtual viewport path (ui.useTerminalBuffer)', () => {
+    it('renders ScrollableList and skips <Static> entirely when useTerminalBuffer is true', () => {
+      staticPropsSpy.mockClear();
+      scrollableListPropsSpy.mockClear();
+
+      const { lastFrame } = renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [
+            { id: 1, type: 'user', text: 'hello' },
+            { id: 2, type: 'gemini', text: 'world' },
+          ],
+        }),
+      );
+
+      expect(scrollableListPropsSpy).toHaveBeenCalled();
+      expect(staticPropsSpy).not.toHaveBeenCalled();
+      expect(lastFrame()).toContain('APP_HEADER:1.2.3');
+      // Items reach VP via renderItem
+      expect(lastFrame()).toMatch(/VP_ITEM:1[\s\S]*VP_ITEM:2/);
+    });
+
+    it('keeps ShowMoreLines reachable in VP mode (regression of OverflowProvider misplacement)', () => {
+      const { lastFrame } = renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          constrainHeight: true,
+          // Build pending content tall enough that ShowMoreLines would announce
+          // hidden lines if it sees the overflow context. We don't assert the
+          // hidden-line count here (depends on OverflowContext internals); the
+          // smoke check is that <ShowMoreLines> mounts at all, which the
+          // previous OverflowProvider-misplacement bug suppressed.
+          pendingHistoryItems: [
+            {
+              type: 'gemini',
+              text: Array.from({ length: 200 }, (_, i) => `line ${i}`).join(
+                '\n',
+              ),
+            },
+          ],
+        }),
+      );
+
+      // SHOW_MORE = live overflow context; OVERFLOW_DISCONNECTED = mounted
+      // but the OverflowProvider does not wrap it (the previous bug).
+      expect(lastFrame()).toContain('SHOW_MORE');
+      expect(lastFrame()).not.toContain('OVERFLOW_DISCONNECTED');
+    });
+
+    it('threads source-copy index offsets into renderItem for static history', () => {
+      historyItemDisplayPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [
+            {
+              id: 1,
+              type: 'gemini_content',
+              text: ['```mermaid', 'flowchart TD', '  A --> B', '```'].join(
+                '\n',
+              ),
+            },
+            {
+              id: 2,
+              type: 'gemini_content',
+              text: ['```mermaid', 'flowchart TD', '  C --> D', '```'].join(
+                '\n',
+              ),
+            },
+          ],
+        }),
+      );
+
+      // Both items routed through renderItem; the SECOND one's offsets must
+      // include the mermaid block from item #1 — i.e. mermaidBlockCount > 0
+      // for the second call. This is the legacy contract; VP path was missing
+      // it until the audit follow-up.
+      const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+      const item2Call = calls.find((p) => p?.item?.id === 2);
+      expect(item2Call).toBeDefined();
+      expect(item2Call.sourceCopyIndexOffsets).toBeDefined();
+    });
+
+    it('reads pending-only UI state via refs (renderItem callback identity stable across activePtyId flips)', () => {
+      scrollableListPropsSpy.mockClear();
+
+      // History / pending / slashCommands arrays MUST be reused across the two
+      // renders — otherwise their new references invalidate
+      // `mergedHistory` / `allVirtualItems` / renderItem's own slashCommands
+      // dep and cascade independently of the activePtyId field we're testing.
+      // The test fixture defaults create fresh `[]` literals on each call;
+      // pin them to stable refs here to isolate the flip.
+      const stableHistory: UIState['history'] = [
+        { id: 1, type: 'user', text: 'hello' },
+      ];
+      const stablePending: UIState['pendingHistoryItems'] = [];
+      const stableSlashCommands: UIState['slashCommands'] = [];
+
+      // Render once without an active shell.
+      const { rerender } = renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          activePtyId: undefined,
+          history: stableHistory,
+          pendingHistoryItems: stablePending,
+          slashCommands: stableSlashCommands,
+        }),
+      );
+
+      const firstRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
+
+      // Flip activePtyId; identical re-render except this one streaming-state field.
+      rerender(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <CompactModeProvider value={{ compactMode: false }}>
+            <UIActionsContext.Provider value={createUIActions()}>
+              <UIStateContext.Provider
+                value={createUIState({
+                  useTerminalBuffer: true,
+                  activePtyId: 1,
+                  history: stableHistory,
+                  pendingHistoryItems: stablePending,
+                  slashCommands: stableSlashCommands,
+                })}
+              >
+                <OverflowProvider>
+                  <MainContent />
+                </OverflowProvider>
+              </UIStateContext.Provider>
+            </UIActionsContext.Provider>
+          </CompactModeProvider>
+        </AppContext.Provider>,
+      );
+
+      const secondRenderItem =
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].renderItem;
+
+      // If activePtyId were still a useCallback dep, the identity would
+      // change here and static items would re-render on every shell tick.
+      // The ref-based read keeps identity stable.
+      expect(secondRenderItem).toBe(firstRenderItem);
+    });
   });
 });

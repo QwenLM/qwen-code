@@ -205,10 +205,28 @@ export class ToolRegistry {
   }
 
   /**
+   * Returns true when `name` is in the Config's `disabledTools` set, in
+   * which case `registerTool` / `registerFactory` will skip it. This is
+   * the chokepoint for the daemon mutation route at `POST /workspace/
+   * tools/:name/enable {enabled:false}` (#4175 Wave 4 PR 17); both
+   * built-ins and MCP-discovered tools flow through `registerTool`, so
+   * gating here covers every registration path.
+   */
+  private isToolDisabled(name: string): boolean {
+    return this.config.getDisabledTools().has(name);
+  }
+
+  /**
    * Registers a tool definition.
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
+    if (this.isToolDisabled(tool.name)) {
+      debugLogger.info(
+        `Tool "${tool.name}" skipped: present in disabledTools set.`,
+      );
+      return;
+    }
     // A name collision can happen against either the eager `tools` map
     // (already-instantiated tools) or the lazy `factories` map (registered
     // but not yet constructed — `structured_output` lives here when
@@ -232,6 +250,20 @@ export class ToolRegistry {
         );
       }
     }
+    // #4282 fold-in 2 (gpt-5.5 CV3): re-check the disabled set against
+    // the FINAL registration name. Without this, an MCP tool that
+    // collides with a lazy factory and gets renamed via
+    // `asFullyQualifiedTool()` (e.g. `structured_output` →
+    // `mcp__server__structured_output`) would slip past the up-front
+    // `isToolDisabled(tool.name)` gate above when the operator
+    // disabled the renamed-and-exposed name. Re-evaluating after the
+    // rename closes that hole.
+    if (this.isToolDisabled(tool.name)) {
+      debugLogger.info(
+        `Tool "${tool.name}" skipped (post-rename): present in disabledTools set.`,
+      );
+      return;
+    }
     this.tools.set(tool.name, tool);
   }
 
@@ -240,6 +272,12 @@ export class ToolRegistry {
    * is not instantiated until {@link ensureTool} or {@link warmAll} is called.
    */
   registerFactory(name: string, factory: ToolFactory): void {
+    if (this.isToolDisabled(name)) {
+      debugLogger.info(
+        `Tool factory "${name}" skipped: present in disabledTools set.`,
+      );
+      return;
+    }
     this.factories.set(name, factory);
   }
 
@@ -403,6 +441,16 @@ export class ToolRegistry {
         removeMCPServerStatus(serverName);
       }
     }
+  }
+
+  /**
+   * Returns the manager that owns MCP client lifecycles. Exposed so
+   * `Config.initialize()`'s background discovery path can call
+   * `discoverAllMcpToolsIncremental` directly without going through
+   * `discoverMcpTools` (which would wipe already-registered tools).
+   */
+  getMcpClientManager(): McpClientManager {
+    return this.mcpClientManager;
   }
 
   /**

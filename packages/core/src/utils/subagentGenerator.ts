@@ -132,6 +132,13 @@ export async function subagentGenerator(
       abortSignal,
       systemInstruction: SYSTEM_PROMPT,
       purpose: 'subagent-generator',
+      // Subagent specs are user-facing artifacts that get reused indefinitely.
+      // Pin to the main model and keep reasoning on — quality matters more
+      // than the cost of a one-shot generation.
+      model: config.getModel(),
+      config: {
+        thinkingConfig: { includeThoughts: true },
+      },
       validate: (response) =>
         !response.name || !response.description || !response.systemPrompt
           ? 'Invalid response from LLM: missing required fields'

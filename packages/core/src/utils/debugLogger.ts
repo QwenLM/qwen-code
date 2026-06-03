@@ -148,6 +148,14 @@ function writeLog(
   const line = buildLogLine(level, message, tag, traceCtx);
 
   void ensureDebugDirExists()
+    // Debug logs are best-effort diagnostic output: 1050+ call sites,
+    // default-enabled, fire-and-forget. Per-line fsync would force
+    // continuous I/O pressure / SSD wear without user benefit — losing
+    // the last few hundred ms of debug output on crash is acceptable
+    // and the module already tracks `hasWriteFailure` for the
+    // degraded-mode UI. Kernel page-cache flush is sufficient here.
+    // (JSONL session writes via writeLine/writeLineSync DO use
+    // flush:true — those are the actual #3681 closure target.)
     .then(() => fs.appendFile(logFilePath, line, 'utf8'))
     .catch(() => {
       hasWriteFailure = true;

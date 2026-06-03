@@ -11,6 +11,7 @@ import type {
   HookExecutionResult,
   HookOutput,
   PermissionRequestHookOutput,
+  PostToolBatchHookOutput,
 } from './types.js';
 
 describe('HookAggregator', () => {
@@ -206,6 +207,60 @@ describe('HookAggregator', () => {
       expect(
         result.finalOutput?.hookSpecificOutput?.['additionalContext'],
       ).toBe('ctx\nctx2');
+    });
+
+    it('should preserve PostToolBatch stop decisions across multiple hooks', () => {
+      const outputs: HookOutput[] = [
+        { continue: false, stopReason: 'first hook stopped' },
+        { continue: true },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.PostToolBatch,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PostToolBatch,
+      );
+
+      const hookOutput = createHookOutput(
+        HookEventName.PostToolBatch,
+        result.finalOutput ?? {},
+      ) as PostToolBatchHookOutput;
+      expect(hookOutput.shouldStopExecution()).toBe(true);
+      expect(hookOutput.getEffectiveReason()).toBe('first hook stopped');
+    });
+
+    it('should preserve PostToolBatch deny decisions after aggregation', () => {
+      const outputs: HookOutput[] = [
+        { decision: 'deny', reason: 'blocked' },
+        { decision: 'allow' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.PostToolBatch,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PostToolBatch,
+      );
+
+      const hookOutput = createHookOutput(
+        HookEventName.PostToolBatch,
+        result.finalOutput ?? {},
+      ) as PostToolBatchHookOutput;
+      expect(hookOutput.shouldStopExecution()).toBe(true);
+      expect(hookOutput.getEffectiveReason()).toBe('blocked');
     });
   });
 
@@ -792,6 +847,54 @@ describe('HookAggregator', () => {
         result.finalOutput ?? {},
       );
       expect(hookOutput.isBlockingDecision()).toBe(false);
+    });
+  });
+
+  describe('Todo events - mergeWithOrLogic', () => {
+    it('should block TodoCreated when any hook blocks', () => {
+      const outputs: HookOutput[] = [
+        { reason: 'policy violation', decision: 'block' },
+        { reason: 'looks fine', decision: 'allow' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.TodoCreated,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.TodoCreated,
+      );
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe('policy violation\nlooks fine');
+    });
+
+    it('should block TodoCompleted when a later hook allows', () => {
+      const outputs: HookOutput[] = [
+        { reason: 'already completed elsewhere', decision: 'block' },
+        { reason: 'completion approved', decision: 'allow' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.TodoCompleted,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.TodoCompleted,
+      );
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe(
+        'already completed elsewhere\ncompletion approved',
+      );
     });
   });
 

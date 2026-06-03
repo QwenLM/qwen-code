@@ -328,6 +328,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         const promise = new Promise<void>((resolve, reject) => {
           resolveFn = () => {
             if (timer !== undefined) clearTimeout(timer);
+            timer = undefined;
             resolve();
           };
           pendingReject = reject;
@@ -335,10 +336,17 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         const startTimer = () => {
           if (timer !== undefined) return;
           timer = setTimeout(() => {
+            timer = undefined;
             pendingReject(new Error(`${label} timeout after ${ms}ms`));
           }, ms);
         };
-        return { promise, resolve: () => resolveFn(), startTimer };
+        const clear = () => {
+          if (timer !== undefined) {
+            clearTimeout(timer);
+            timer = undefined;
+          }
+        };
+        return { promise, resolve: () => resolveFn(), startTimer, clear };
       };
 
       const canUseToolCalled = boundedPromise(
@@ -348,6 +356,12 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       const inputStreamDone = boundedPromise('inputStreamDone', 15000);
       const firstResult = boundedPromise('firstResult', 30000);
       const secondResult = boundedPromise('secondResult', 30000);
+      const pendingTimers = [
+        canUseToolCalled,
+        inputStreamDone,
+        firstResult,
+        secondResult,
+      ];
 
       // firstResult begins as soon as the query starts.
       firstResult.startTimer();
@@ -454,6 +468,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         const content = await helper.readFile('test.txt');
         expect(content).toBe('original content');
       } finally {
+        for (const t of pendingTimers) t.clear();
         await q.close();
       }
     });

@@ -31,7 +31,8 @@ describe('keyMatchers', () => {
     [Command.KILL_LINE_LEFT]: (key: Key) => key.ctrl && key.name === 'u',
     [Command.CLEAR_INPUT]: (key: Key) => key.ctrl && key.name === 'c',
     [Command.DELETE_WORD_BACKWARD]: (key: Key) =>
-      (key.ctrl || key.meta) && key.name === 'backspace',
+      ((key.ctrl || key.meta) && key.name === 'backspace') ||
+      key.sequence === '\x1f',
     [Command.CLEAR_SCREEN]: (key: Key) => key.ctrl && key.name === 'l',
     [Command.HISTORY_UP]: (key: Key) => key.ctrl && key.name === 'p',
     [Command.HISTORY_DOWN]: (key: Key) => key.ctrl && key.name === 'n',
@@ -73,6 +74,21 @@ describe('keyMatchers', () => {
       key.ctrl && key.name === 'f',
     [Command.EXPAND_SUGGESTION]: (key: Key) => key.name === 'right',
     [Command.COLLAPSE_SUGGESTION]: (key: Key) => key.name === 'left',
+    // Selection list navigation: up/k (ctrl=false)/Ctrl+P move up; down/j (ctrl=false)/Ctrl+N move down
+    [Command.SELECTION_UP]: (key: Key) =>
+      key.name === 'up' ||
+      (key.name === 'k' && !key.ctrl) ||
+      (key.ctrl && key.name === 'p'),
+    [Command.SELECTION_DOWN]: (key: Key) =>
+      key.name === 'down' ||
+      (key.name === 'j' && !key.ctrl) ||
+      (key.ctrl && key.name === 'n'),
+    [Command.SCROLL_UP]: (key: Key) => key.shift && key.name === 'up',
+    [Command.SCROLL_DOWN]: (key: Key) => key.shift && key.name === 'down',
+    [Command.PAGE_UP]: (key: Key) => key.name === 'pageup',
+    [Command.PAGE_DOWN]: (key: Key) => key.name === 'pagedown',
+    [Command.SCROLL_HOME]: (key: Key) => key.ctrl && key.name === 'home',
+    [Command.SCROLL_END]: (key: Key) => key.ctrl && key.name === 'end',
   };
 
   // Test data for each command with positive and negative test cases
@@ -130,6 +146,10 @@ describe('keyMatchers', () => {
       positive: [
         createKey('backspace', { ctrl: true }),
         createKey('backspace', { meta: true }),
+        // MinTTY (Git Bash on Windows) emits a bare \x1f byte for
+        // Ctrl+Backspace — see the matching comment in keyBindings.ts
+        // on the DELETE_WORD_BACKWARD default-binding array.
+        createKey('', { sequence: '\x1f' }),
       ],
       negative: [createKey('backspace'), createKey('delete', { ctrl: true })],
     },
@@ -268,6 +288,38 @@ describe('keyMatchers', () => {
       negative: [createKey('o'), createKey('p', { ctrl: true })],
     },
 
+    // Selection list navigation
+    {
+      command: Command.SELECTION_UP,
+      positive: [
+        createKey('up'),
+        createKey('k'),
+        createKey('p', { ctrl: true }),
+      ],
+      negative: [
+        createKey('p'),
+        createKey('n', { ctrl: true }),
+        createKey('u'),
+        // ctrl: false on k — Ctrl+K must NOT match (would conflict with KILL_LINE_RIGHT)
+        createKey('k', { ctrl: true }),
+      ],
+    },
+    {
+      command: Command.SELECTION_DOWN,
+      positive: [
+        createKey('down'),
+        createKey('j'),
+        createKey('n', { ctrl: true }),
+      ],
+      negative: [
+        createKey('n'),
+        createKey('p', { ctrl: true }),
+        createKey('d'),
+        // ctrl: false on j — Ctrl+J must NOT match (preserves Ctrl+J = newline in some terminals)
+        createKey('j', { ctrl: true }),
+      ],
+    },
+
     // Shell commands
     {
       command: Command.REVERSE_SEARCH,
@@ -309,6 +361,38 @@ describe('keyMatchers', () => {
         createKey('b', { meta: true }),
         createKey('a', { ctrl: true }),
       ],
+    },
+
+    // Viewport scroll commands
+    {
+      command: Command.SCROLL_UP,
+      positive: [createKey('up', { shift: true })],
+      negative: [createKey('up'), createKey('up', { ctrl: true })],
+    },
+    {
+      command: Command.SCROLL_DOWN,
+      positive: [createKey('down', { shift: true })],
+      negative: [createKey('down'), createKey('down', { ctrl: true })],
+    },
+    {
+      command: Command.PAGE_UP,
+      positive: [createKey('pageup'), createKey('pageup', { ctrl: true })],
+      negative: [createKey('pagedown'), createKey('up')],
+    },
+    {
+      command: Command.PAGE_DOWN,
+      positive: [createKey('pagedown'), createKey('pagedown', { ctrl: true })],
+      negative: [createKey('pageup'), createKey('down')],
+    },
+    {
+      command: Command.SCROLL_HOME,
+      positive: [createKey('home', { ctrl: true })],
+      negative: [createKey('home'), createKey('home', { shift: true })],
+    },
+    {
+      command: Command.SCROLL_END,
+      positive: [createKey('end', { ctrl: true })],
+      negative: [createKey('end'), createKey('end', { shift: true })],
     },
   ];
 

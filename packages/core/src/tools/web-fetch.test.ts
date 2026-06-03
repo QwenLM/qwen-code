@@ -12,9 +12,11 @@ import { ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import * as fetchUtils from '../utils/fetch.js';
 
+// Mocks the underlying call BaseLlmClient.generateText makes; web-fetch's
+// `runSideQuery` text-mode path lands on this mock.
 const mockGenerateContent = vi.fn();
-const mockGetGeminiClient = vi.fn(() => ({
-  generateContent: mockGenerateContent,
+const mockGetBaseLlmClient = vi.fn(() => ({
+  generateText: mockGenerateContent,
 }));
 
 vi.mock('../utils/fetch.js', async (importOriginal) => {
@@ -35,7 +37,8 @@ describe('WebFetchTool', () => {
       getApprovalMode: vi.fn(),
       setApprovalMode: vi.fn(),
       getProxy: vi.fn(),
-      getGeminiClient: mockGetGeminiClient,
+      getBaseLlmClient: mockGetBaseLlmClient,
+      getFastModel: vi.fn(() => undefined),
       getSessionId: vi.fn(() => 'test-session-id'),
       getModel: vi.fn(() => 'qwen-coder'),
     } as unknown as Config;
@@ -203,9 +206,9 @@ describe('WebFetchTool', () => {
           Promise.resolve('# Hello World\n\nThis is markdown content.'),
       } as Response);
 
-      mockGenerateContent.mockImplementation((messages) => {
-        receivedContent = messages[0].parts[0].text;
-        return Promise.resolve({ response: { text: () => 'Processed' } });
+      mockGenerateContent.mockImplementation((options) => {
+        receivedContent = options.contents[0].parts[0].text;
+        return Promise.resolve({ text: 'Processed', usage: undefined });
       });
 
       const tool = new WebFetchTool(mockConfig);
@@ -224,9 +227,9 @@ describe('WebFetchTool', () => {
         text: () => Promise.resolve('Plain text content here'),
       } as Response);
 
-      mockGenerateContent.mockImplementation((messages) => {
-        receivedContent = messages[0].parts[0].text;
-        return Promise.resolve({ response: { text: () => 'Processed' } });
+      mockGenerateContent.mockImplementation((options) => {
+        receivedContent = options.contents[0].parts[0].text;
+        return Promise.resolve({ text: 'Processed', usage: undefined });
       });
 
       const tool = new WebFetchTool(mockConfig);

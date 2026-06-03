@@ -1397,6 +1397,54 @@ System prompt 3`);
         );
         expect(runtimeConfig.modelConfig.model).toBe('gpt-4');
       });
+
+      it('should resolve "fast" to the configured current-auth fast model', async () => {
+        const fastConfig: SubagentConfig = { ...validConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue('fast-model-id');
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          fastConfig,
+          mockConfig,
+        );
+
+        expect(runtimeConfig.modelConfig.model).toBe('fast-model-id');
+      });
+
+      it('should resolve "fast" to authType-qualified fast model selectors', async () => {
+        const fastConfig: SubagentConfig = { ...validConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue(
+          'openai:fast-model-id',
+        );
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          fastConfig,
+          mockConfig,
+        );
+
+        expect(runtimeConfig.modelConfig.model).toBe('fast-model-id');
+      });
+
+      it('should leave modelConfig empty for "fast" when getFastModel returns undefined', async () => {
+        // Mirrors the unset / invalid-for-authType cases — AgentCore then
+        // falls back to runtimeContext.getModel() (the parent model).
+        const fastConfig: SubagentConfig = { ...validConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue(undefined);
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          fastConfig,
+          mockConfig,
+        );
+
+        expect(runtimeConfig.modelConfig).toEqual({});
+      });
+
+      it('should leave modelConfig empty for "fast" when no runtimeContext is provided', async () => {
+        const fastConfig: SubagentConfig = { ...validConfig, model: 'fast' };
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(fastConfig);
+
+        expect(runtimeConfig.modelConfig).toEqual({});
+      });
     });
 
     describe('mergeConfigurations', () => {
@@ -1524,6 +1572,91 @@ System prompt 3`);
         expect(runtimeView).toBeDefined();
         expect(runtimeView!.contentGenerator).toBe(fakeGenerator);
         expect(runtimeView!.contentGeneratorConfig.model).toBe('custom-model');
+      });
+
+      it('should build a ContentGenerator with the resolved fastModel when model is "fast"', async () => {
+        const config = { ...agentConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue('fast-model-id');
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'fast-model-id',
+            authType: AuthType.USE_OPENAI,
+          }),
+          mockConfig,
+        );
+      });
+
+      it('should build a cross-auth ContentGenerator when "fast" resolves to an authType-qualified selector', async () => {
+        const config = { ...agentConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getContentGeneratorConfig').mockReturnValue({
+          model: 'parent-model',
+          authType: AuthType.USE_ANTHROPIC,
+          apiKey: 'parent-key',
+        });
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue(
+          'openai:deepseek-v4-flash',
+        );
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'deepseek-v4-flash',
+            authType: AuthType.USE_OPENAI,
+          }),
+          mockConfig,
+        );
+      });
+
+      it('should resolve bare fast models to their configured auth type when current auth does not own them', async () => {
+        const config = { ...agentConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getContentGeneratorConfig').mockReturnValue({
+          model: 'claude-opus',
+          authType: AuthType.USE_ANTHROPIC,
+          apiKey: 'parent-key',
+        });
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue(
+          'deepseek-v4-flash',
+        );
+        vi.spyOn(mockConfig, 'getAllConfiguredModels').mockImplementation(
+          (authTypes) =>
+            authTypes?.includes(AuthType.USE_ANTHROPIC)
+              ? []
+              : [
+                  {
+                    id: 'deepseek-v4-flash',
+                    label: 'deepseek-v4-flash',
+                    authType: AuthType.USE_OPENAI,
+                  },
+                ],
+        );
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'deepseek-v4-flash',
+            authType: AuthType.USE_OPENAI,
+          }),
+          mockConfig,
+        );
+      });
+
+      it('should NOT build a new ContentGenerator for "fast" when getFastModel returns undefined', async () => {
+        const config = { ...agentConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue(undefined);
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        // Falls back to inheriting the parent — no override, no runtimeView.
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+        const { runtimeView } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        expect(runtimeView).toBeUndefined();
       });
     });
   });

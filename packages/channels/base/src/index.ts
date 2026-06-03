@@ -1,10 +1,21 @@
-export { getGlobalQwenDir } from './paths.js';
+export { getGlobalQwenDir, resolvePath } from './paths.js';
 export { AcpBridge } from './AcpBridge.js';
 export type {
   AcpBridgeOptions,
   AvailableCommand,
   ToolCallEvent,
 } from './AcpBridge.js';
+export { DaemonChannelBridge } from './DaemonChannelBridge.js';
+export type {
+  DaemonChannelBridgeOptions,
+  DaemonChannelEvent,
+  DaemonChannelSessionClient,
+  DaemonChannelSessionFactory,
+  DaemonChannelSessionFactoryRequest,
+  DaemonPromptCompleteEvent,
+  DaemonPermissionRequestEvent,
+  DaemonPermissionResolvedEvent,
+} from './DaemonChannelBridge.js';
 export { BlockStreamer } from './BlockStreamer.js';
 export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase } from './ChannelBase.js';

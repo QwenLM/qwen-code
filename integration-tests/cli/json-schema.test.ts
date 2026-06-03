@@ -154,13 +154,17 @@ describe('--json-schema headless structured output', () => {
     rig = new TestRig();
     await rig.setup('json-schema-bad-schema');
 
-    // Ajv strict-compile will reject `type: "this-is-not-a-real-type"`.
+    // Root type is `object` so the root-accepts-object precheck passes;
+    // Ajv strict-compile then rejects the unknown nested `type`.
     let thrown: Error | undefined;
     try {
       await rig.run(
         'hi',
         '--json-schema',
-        JSON.stringify({ type: 'this-is-not-a-real-type' }),
+        JSON.stringify({
+          type: 'object',
+          properties: { x: { type: 'this-is-not-a-real-type' } },
+        }),
       );
       expect.fail('expected non-zero exit on invalid schema');
     } catch (e) {

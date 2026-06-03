@@ -100,6 +100,15 @@ export interface ListSessionsResult {
 }
 
 /**
+ * Result of removing multiple sessions.
+ */
+export interface RemoveSessionsResult {
+  removed: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: Error }>;
+}
+
+/**
  * Complete conversation reconstructed from ChatRecords.
  * Used for resuming sessions and API compatibility.
  */
@@ -170,6 +179,15 @@ export class SessionService {
 
   private getChatsDir(): string {
     return path.join(this.storage.getProjectDir(), 'chats');
+  }
+
+  /**
+   * Returns the absolute path to the sidecar JSON file that stores
+   * worktree session state for the given session id. The file may not
+   * exist yet — consumers must handle ENOENT as "no active worktree".
+   */
+  getWorktreeSessionPath(sessionId: string): string {
+    return path.join(this.getChatsDir(), `${sessionId}.worktree.json`);
   }
 
   /**
@@ -741,6 +759,48 @@ export class SessionService {
   }
 
   /**
+   * Removes multiple sessions in one call.
+   *
+   * Each session is processed independently — a failure on one does not
+   * abort the rest. Sessions that don't exist (or belong to a different
+   * project) are reported in {@link notFound}; thrown filesystem
+   * errors are surfaced per-id in {@link errors} so callers can decide
+   * whether to retry.
+   *
+   * @param sessionIds IDs to remove. Duplicates are de-duplicated.
+   * @returns Per-id outcomes: which were removed, which were not found,
+   *   and which threw an error.
+   */
+  async removeSessions(sessionIds: string[]): Promise<RemoveSessionsResult> {
+    const removed: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: Error }> = [];
+
+    const uniqueSessionIds = [...new Set(sessionIds)];
+    const results = await Promise.allSettled(
+      uniqueSessionIds.map((sessionId) => this.removeSession(sessionId)),
+    );
+
+    for (let i = 0; i < results.length; i++) {
+      const sessionId = uniqueSessionIds[i];
+      if (sessionId === undefined) continue;
+
+      const result = results[i];
+      if (result.status === 'fulfilled') {
+        if (result.value) {
+          removed.push(sessionId);
+        } else {
+          notFound.push(sessionId);
+        }
+      } else {
+        errors.push({ sessionId, error: result.reason as Error });
+      }
+    }
+
+    return { removed, notFound, errors };
+  }
+
+  /**
    * Renames a session by appending a custom_title system record to its JSONL file.
    *
    * @param sessionId The session ID to rename
@@ -1131,6 +1191,49 @@ function stripThoughtsFromContent(content: Content): Content | null {
   };
 }
 
+function copyContentForApiHistory(content: Content): Content {
+  return {
+    ...content,
+    parts: content.parts?.map((part) => {
+      if ('functionCall' in part && part.functionCall) {
+        return {
+          ...part,
+          functionCall: {
+            ...part.functionCall,
+            args: part.functionCall.args
+              ? { ...part.functionCall.args }
+              : part.functionCall.args,
+          },
+        };
+      }
+      if ('functionResponse' in part && part.functionResponse) {
+        return {
+          ...part,
+          functionResponse: {
+            ...part.functionResponse,
+          },
+        };
+      }
+      return { ...part };
+    }),
+  };
+}
+
+function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
+  if (!record.message) return;
+
+  const message = copyContentForApiHistory(record.message as Content);
+  if (record.subtype === 'mid_turn_user_message') {
+    const previous = history.at(-1);
+    if (previous?.role === 'user') {
+      previous.parts = [...(previous.parts ?? []), ...(message.parts ?? [])];
+      return;
+    }
+  }
+
+  history.push(message);
+}
+
 /**
  * Builds the model-facing chat history (Content[]) from a reconstructed
  * conversation. This keeps UI history intact while applying chat compression
@@ -1165,15 +1268,15 @@ export function buildApiHistoryFromConversation(
   });
 
   if (compressedHistory && lastCompressionIndex >= 0) {
-    const baseHistory: Content[] = structuredClone(compressedHistory);
+    const baseHistory: Content[] = compressedHistory.map(
+      copyContentForApiHistory,
+    );
 
     // Append everything after the compression record (newer turns)
     for (let i = lastCompressionIndex + 1; i < messages.length; i++) {
       const record = messages[i];
       if (record.type === 'system') continue;
-      if (record.message) {
-        baseHistory.push(structuredClone(record.message as Content));
-      }
+      appendApiHistoryRecord(baseHistory, record);
     }
 
     if (stripThoughtsFromHistory) {
@@ -1185,10 +1288,10 @@ export function buildApiHistoryFromConversation(
   }
 
   // Fallback: return linear messages as Content[]
-  const result = messages
-    .map((record) => record.message)
-    .filter((message): message is Content => message !== undefined)
-    .map((message) => structuredClone(message));
+  const result: Content[] = [];
+  for (const record of messages) {
+    appendApiHistoryRecord(result, record);
+  }
 
   if (stripThoughtsFromHistory) {
     return result
@@ -1229,7 +1332,7 @@ export function replayUiTelemetryFromConversation(
 /**
  * Returns the best available prompt token count for resuming telemetry.
  * Walks backward through messages and returns the first valid value:
- * - The latest assistant's non-zero usage (totalTokenCount ?? promptTokenCount).
+ * - The latest assistant's non-zero usage (promptTokenCount ?? totalTokenCount).
  * - The most recent chat compression checkpoint's newTokenCount.
  */
 export function getResumePromptTokenCount(
@@ -1240,7 +1343,7 @@ export function getResumePromptTokenCount(
 
     if (record.type === 'assistant') {
       const usage = record.usageMetadata;
-      const candidate = usage?.totalTokenCount ?? usage?.promptTokenCount;
+      const candidate = usage?.promptTokenCount ?? usage?.totalTokenCount;
       if (candidate) {
         return candidate;
       }

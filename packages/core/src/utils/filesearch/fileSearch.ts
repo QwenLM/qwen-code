@@ -114,6 +114,7 @@ class RecursiveFileSearch implements FileSearch {
       crawlDirectory: this.options.projectRoot,
       cwd: this.options.projectRoot,
       ignore: this.ignore,
+      useGitignore: this.options.useGitignore,
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
       maxDepth: this.options.maxDepth,
@@ -222,11 +223,16 @@ class DirectoryFileSearch implements FileSearch {
     pattern = pattern || '*';
 
     const dir = pattern.endsWith('/') ? pattern : path.dirname(pattern);
+    const crawlDirectory = path.join(this.options.projectRoot, dir);
+    const listingProjectRoot =
+      path.resolve(crawlDirectory) === path.resolve(this.options.projectRoot);
+
     const results = await crawl({
-      crawlDirectory: path.join(this.options.projectRoot, dir),
+      crawlDirectory,
       cwd: this.options.projectRoot,
       maxDepth: 0,
       ignore: this.ignore,
+      useGitignore: this.options.useGitignore,
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
     });
@@ -240,6 +246,9 @@ class DirectoryFileSearch implements FileSearch {
         break;
       }
       if (candidate === '.') {
+        continue;
+      }
+      if (candidate.endsWith('/') && !listingProjectRoot) {
         continue;
       }
       if (!fileFilter(candidate)) {

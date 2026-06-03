@@ -62,8 +62,8 @@ This section guides contributors on how to build, modify, and understand the dev
 **Prerequisites:**
 
 1.  **Node.js**:
-    - **Development:** Please use Node.js `~20.19.0`. This specific version is required due to an upstream development dependency issue. You can use a tool like [nvm](https://github.com/nvm-sh/nvm) to manage Node.js versions.
-    - **Production:** For running the CLI in a production environment, any version of Node.js `>=20` is acceptable.
+    - **Development:** Please use Node.js `>=22`. Ink 7 (used by the TUI) requires Node 22, and `react@^19.2.0` is the matching peer. You can use a tool like [nvm](https://github.com/nvm-sh/nvm) to manage Node.js versions.
+    - **Production:** For running the CLI in a production environment, any version of Node.js `>=22` is acceptable.
 2.  **Git**
 
 ### Build Process

@@ -29,16 +29,16 @@
  *   keeps running while no longer serving the recorded session
  *   (e.g. a hypothetical future mode-switch). Not currently invoked.
  *
- * The file is written atomically (tmp-file + rename) and contains a
- * small, stable schema. External consumers should treat unknown fields
- * as forward-compatible additions.
+ * The file is written via `atomicWriteJSON` (write-to-temp + rename,
+ * with in-place fallback when ownership differs).
+ * The schema is small and stable; external consumers should treat
+ * unknown fields as forward-compatible additions.
  */
 
-import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { isNodeError } from './errors.js';
+import { atomicWriteJSON } from './atomicFileWrite.js';
 
 export const RUNTIME_STATUS_SCHEMA_VERSION = 1;
 
@@ -79,17 +79,11 @@ export interface WriteRuntimeStatusFields {
 }
 
 /**
- * Atomically write the runtime status file at `filePath`.
+ * Write the runtime status file at `filePath`.
  *
- * Writes via tmp-file + rename so an external observer never sees a
- * partially written file: it sees either the previous contents or the
- * fully committed new contents.
- *
- * The parent directory of `filePath` is created on demand. Exceptions
- * from the underlying I/O propagate to the caller; this function does
- * not log or swallow them. Callers that want best-effort semantics
- * should wrap the call in a try/catch. On failure no leftover `.tmp`
- * file is kept on disk.
+ * The parent directory is created on demand. Exceptions propagate to
+ * the caller; callers that want best-effort semantics should wrap in
+ * a try/catch.
  */
 export async function writeRuntimeStatus(
   filePath: string,
@@ -106,19 +100,7 @@ export async function writeRuntimeStatus(
   };
 
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-
-  const tmpPath = `${filePath}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-  try {
-    await fs.writeFile(tmpPath, JSON.stringify(payload, null, 2), 'utf-8');
-    await renameWithRetry(tmpPath, filePath, 3, 50);
-  } catch (err) {
-    try {
-      await fs.unlink(tmpPath);
-    } catch {
-      // ignore cleanup errors
-    }
-    throw err;
-  }
+  await atomicWriteJSON(filePath, payload);
   return filePath;
 }
 
@@ -142,13 +124,7 @@ export async function readRuntimeStatus(
   let raw: string;
   try {
     raw = await fs.readFile(filePath, 'utf-8');
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') {
-      return null;
-    }
-    if (err instanceof Error && err.message.includes('utf-8')) {
-      return null;
-    }
+  } catch {
     return null;
   }
 
@@ -177,8 +153,8 @@ export async function readRuntimeStatus(
   const startedAt = obj['started_at'];
   const qwenVersion = obj['qwen_version'];
 
-  if (!isFiniteIntegerNotBool(schemaVersion)) return null;
-  if (!isFiniteIntegerNotBool(pid)) return null;
+  if (!isFiniteInteger(schemaVersion)) return null;
+  if (!isFiniteInteger(pid)) return null;
   if (typeof sessionId !== 'string') return null;
   if (typeof workDir !== 'string') return null;
   if (typeof hostname !== 'string') return null;
@@ -219,32 +195,6 @@ export async function clearRuntimeStatus(filePath: string): Promise<void> {
   }
 }
 
-function isFiniteIntegerNotBool(v: unknown): v is number {
-  return (
-    typeof v === 'number' &&
-    Number.isInteger(v) &&
-    Number.isFinite(v) &&
-    typeof v !== 'boolean'
-  );
-}
-
-async function renameWithRetry(
-  src: string,
-  dest: string,
-  retries: number,
-  delayMs: number,
-): Promise<void> {
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      await fs.rename(src, dest);
-      return;
-    } catch (err) {
-      const retryable =
-        isNodeError(err) && (err.code === 'EPERM' || err.code === 'EACCES');
-      if (!retryable || attempt === retries) {
-        throw err;
-      }
-      await new Promise((r) => setTimeout(r, delayMs * 2 ** attempt));
-    }
-  }
+function isFiniteInteger(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v);
 }

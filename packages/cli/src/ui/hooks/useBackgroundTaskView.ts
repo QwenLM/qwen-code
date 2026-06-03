@@ -27,11 +27,12 @@
 
 import { useState, useEffect } from 'react';
 import {
-  type BackgroundTaskEntry,
-  type BackgroundShellEntry,
+  type AgentTask,
   type Config,
   type MemoryTaskRecord,
-  type MonitorEntry,
+  type MonitorTask,
+  type ShellTask,
+  type TaskState,
 } from '@qwen-code/qwen-code-core';
 
 // Cap on retained terminal dream entries surfaced via the dialog.
@@ -42,10 +43,11 @@ import {
 // dialog right after two dreams completed).
 const MAX_RETAINED_TERMINAL_DREAMS = 3;
 
-export type AgentDialogEntry = BackgroundTaskEntry & {
-  kind: 'agent';
-  resumeBlockedReason?: string;
-};
+/**
+ * @deprecated Use {@link AgentTask} from `@qwen-code/qwen-code-core`
+ * directly. Kept as a one-release alias while UI consumers migrate.
+ */
+export type AgentDialogEntry = AgentTask;
 
 /**
  * Dream-task adapter. MemoryManager owns its own task records
@@ -93,12 +95,13 @@ export type DreamDialogEntry = {
  * Discriminated by `kind`; per-kind fields are inlined verbatim so
  * renderer code can stay mechanical (`entry.kind === 'agent'` /
  * `'shell'` / `'monitor'` / `'dream'` guard, then access fields directly).
+ *
+ * The `agent`/`shell`/`monitor` arms are the core `TaskState` union
+ * member — `kind` lives on the core entry, so the merge step here no
+ * longer tags it. `dream` remains adapted from `MemoryManager` and is
+ * unioned in here while the dream task placement is decided in PR 2.
  */
-export type DialogEntry =
-  | AgentDialogEntry
-  | (BackgroundShellEntry & { kind: 'shell' })
-  | (MonitorEntry & { kind: 'monitor' })
-  | DreamDialogEntry;
+export type DialogEntry = TaskState | DreamDialogEntry;
 
 export interface UseBackgroundTaskViewResult {
   entries: readonly DialogEntry[];
@@ -155,15 +158,9 @@ export function useBackgroundTaskView(
     // race window where the listener's gate sig and the entries it
     // builds would otherwise come from two separate snapshots.
     const refresh = (dreamSnapshot?: readonly MemoryTaskRecord[]) => {
-      const agentEntries: DialogEntry[] = agentRegistry
-        .getAll()
-        .map((e) => ({ ...e, kind: 'agent' as const }));
-      const shellEntries: DialogEntry[] = shellRegistry
-        .getAll()
-        .map((e) => ({ ...e, kind: 'shell' as const }));
-      const monitorEntries: DialogEntry[] = monitorRegistry
-        .getAll()
-        .map((e) => ({ ...e, kind: 'monitor' as const }));
+      const agentEntries: AgentTask[] = [...agentRegistry.getAll()];
+      const shellEntries: ShellTask[] = [...shellRegistry.getAll()];
+      const monitorEntries: MonitorTask[] = [...monitorRegistry.getAll()];
       // Dream entries: only surface tasks that actually fired.
       // `pending` is a sub-second transition state and `skipped`
       // records arise from the rare race where the schedule-time
@@ -223,15 +220,44 @@ export function useBackgroundTaskView(
               : undefined,
         };
       });
-      // Merge by startTime so the order matches launch order across all
-      // sources (matters when an agent, shell, monitor, and dream are
-      // launched alternately).
+      // Two-bucket merge so "new OR running tasks should appear at the
+      // top" (the literal phrasing of the issue this view-model serves).
+      // A pure startTime DESC sort surfaces the newest LAUNCH but lets
+      // an older long-running / paused entry fall below a batch of
+      // newer terminal entries — the user opens the dialog wanting to
+      // check the running work, and finds it buried under noise.
+      //
+      //   bucket 1 — active (running + paused), sorted by startTime DESC
+      //              so the most recent launch sits at the very top.
+      //   bucket 2 — terminal (completed / failed / cancelled), sorted
+      //              by endTime DESC so the most recently FINISHED entry
+      //              is the first terminal row (matches "what changed
+      //              while I wasn't looking" intuition; startTime would
+      //              put a long-running task that just settled below an
+      //              old quick task that finished hours ago).
+      //
+      // Entries falling out the bottom of bucket 2 are eventually
+      // pruned by each registry's terminal-entry cap (see
+      // `MAX_RETAINED_TERMINAL_AGENTS` / `MAX_RETAINED_TERMINAL_SHELLS`
+      // / `MAX_RETAINED_TERMINAL_MONITORS`).
+      const isActive = (entry: DialogEntry): boolean =>
+        entry.status === 'running' || entry.status === 'paused';
       const merged = [
         ...agentEntries,
         ...shellEntries,
         ...monitorEntries,
         ...dreamEntries,
-      ].sort((a, b) => a.startTime - b.startTime);
+      ].sort((a, b) => {
+        const aActive = isActive(a);
+        const bActive = isActive(b);
+        if (aActive !== bActive) return aActive ? -1 : 1;
+        if (aActive) return b.startTime - a.startTime;
+        // Terminal bucket: fall back to startTime when an entry has no
+        // endTime yet (defensive — the registries stamp endTime on
+        // every running → terminal transition, so this only matters
+        // for synthetic / partially-restored entries).
+        return (b.endTime ?? b.startTime) - (a.endTime ?? a.startTime);
+      });
       // Cache the dream signature derived from the freshly-built
       // entries — the memory listener uses this to skip redundant
       // setEntries calls when an extract notify fires (extract has no

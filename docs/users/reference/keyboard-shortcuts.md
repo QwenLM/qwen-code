@@ -24,11 +24,11 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `!`                                                | Toggle shell mode when the input is empty.                                                                                          |
 | `?`                                                | Toggle keyboard shortcuts display when the input is empty.                                                                          |
 | `\` (at end of line) + `Enter`                     | Insert a newline.                                                                                                                   |
-| `Down Arrow`                                       | Navigate down through the input history.                                                                                            |
+| `Down Arrow`                                       | Row down, then snap to end, then history next.                                                                                      |
 | `Enter`                                            | Submit the current prompt.                                                                                                          |
 | `Meta+Delete` / `Ctrl+Delete`                      | Delete the word to the right of the cursor.                                                                                         |
 | `Tab`                                              | Autocomplete the current suggestion if one exists.                                                                                  |
-| `Up Arrow`                                         | Navigate up through the input history.                                                                                              |
+| `Up Arrow`                                         | Row up, then snap to start, then history prev.                                                                                      |
 | `Ctrl+A` / `Home`                                  | Move the cursor to the beginning of the line.                                                                                       |
 | `Ctrl+B` / `Left Arrow`                            | Move the cursor one character to the left.                                                                                          |
 | `Ctrl+C`                                           | Clear the input prompt                                                                                                              |
@@ -39,8 +39,8 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+H` / `Backspace`                             | Delete the character to the left of the cursor.                                                                                     |
 | `Ctrl+K`                                           | Delete from the cursor to the end of the line.                                                                                      |
 | `Ctrl+Left Arrow` / `Meta+Left Arrow` / `Meta+B`   | Move the cursor one word to the left.                                                                                               |
-| `Ctrl+N`                                           | Navigate down through the input history.                                                                                            |
-| `Ctrl+P`                                           | Navigate up through the input history.                                                                                              |
+| `Ctrl+N`                                           | Row down, then snap to end, then history next.                                                                                      |
+| `Ctrl+P`                                           | Row up, then snap to start, then history prev.                                                                                      |
 | `Ctrl+R`                                           | Reverse search through input/shell history.                                                                                         |
 | `Ctrl+Y`                                           | Retry the last failed request.                                                                                                      |
 | `Ctrl+Right Arrow` / `Meta+Right Arrow` / `Meta+F` | Move the cursor one word to the right.                                                                                              |
@@ -59,13 +59,29 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 ## Radio Button Select
 
-| Shortcut           | Description                                                                                                   |
-| ------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `Down Arrow` / `j` | Move selection down.                                                                                          |
-| `Enter`            | Confirm selection.                                                                                            |
-| `Up Arrow` / `k`   | Move selection up.                                                                                            |
-| `1-9`              | Select an item by its number.                                                                                 |
-| (multi-digit)      | For items with numbers greater than 9, press the digits in quick succession to select the corresponding item. |
+| Shortcut                      | Description                                                                                                   |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `Down Arrow` / `j` / `Ctrl+N` | Move selection down.                                                                                          |
+| `Enter`                       | Confirm selection.                                                                                            |
+| `Up Arrow` / `k` / `Ctrl+P`   | Move selection up.                                                                                            |
+| `1-9`                         | Select an item by its number.                                                                                 |
+| (multi-digit)                 | For items with numbers greater than 9, press the digits in quick succession to select the corresponding item. |
+
+## History scrollback
+
+Active only when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized History). In that mode conversation history is rendered inside an in-app viewport instead of the host terminal scrollback, so the keys below replace the terminal's native scroll.
+
+| Shortcut        | Description                                          |
+| --------------- | ---------------------------------------------------- |
+| `Shift+Up`      | Scroll history up one line.                          |
+| `Shift+Down`    | Scroll history down one line.                        |
+| `PgUp`          | Scroll history up one page (viewport height).        |
+| `PgDn`          | Scroll history down one page (viewport height).      |
+| `Ctrl+Home`     | Jump to the top of the conversation.                 |
+| `Ctrl+End`      | Jump to the bottom (and re-engage live auto-follow). |
+| **Mouse wheel** | Scroll history (3 lines per tick).                   |
+
+When `ui.useTerminalBuffer` is on, the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, **native click-and-drag text selection is consumed by the program** — hold `Shift` (or `Option` on macOS Terminal / iTerm) while dragging to bypass mouse capture and select text the usual way.
 
 ## IDE Integration
 

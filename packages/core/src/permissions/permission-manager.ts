@@ -16,11 +16,12 @@ import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperations } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import {
-  detectCommandSubstitution,
-  normalizeMonitorCommand,
-} from '../utils/shell-utils.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  findDangerousAllowRules,
+  isDangerousAllowRule,
+} from './dangerousRules.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -118,6 +119,18 @@ export class PermissionManager {
   };
 
   /**
+   * Allow rules temporarily removed while the user is in AUTO mode.
+   * Populated by `stripDangerousRulesForAutoMode` (called from
+   * `Config.setApprovalMode` on AUTO entry) and drained by
+   * `restoreDangerousRules` (called on AUTO exit). `undefined` means
+   * "not currently in AUTO mode" — distinct from "no rules stripped".
+   */
+  private strippedAllowRules?: {
+    persistent: PermissionRule[];
+    session: PermissionRule[];
+  };
+
+  /**
    * Canonical tool names from the legacy `coreTools` allowlist.
    * When non-null, `isToolEnabled()` rejects any tool not in this set.
    * Populated during `initialize()` from `config.getCoreTools()`.
@@ -149,6 +162,15 @@ export class PermissionManager {
       this.coreToolsAllowList = new Set(
         rawCoreTools.map((t) => parseRule(t).toolName),
       );
+    }
+
+    // When the session starts in AUTO (via `tools.approvalMode: 'auto'` in
+    // settings.json or `--approval-mode auto` on the CLI), the constructor
+    // sets approvalMode before PermissionManager is wired up. Catch that
+    // case here so AUTO-on-startup sessions get dangerous allow rules
+    // stripped, same as sessions that switch to AUTO via Shift+Tab.
+    if (this.config.getApprovalMode?.() === 'auto') {
+      this.stripDangerousRulesForAutoMode();
     }
   }
 
@@ -323,9 +345,8 @@ export class PermissionManager {
    *
    * When a sub-command returns 'default' (no rule matches), it is resolved to
    * the actual default permission using AST analysis:
-   *   - Command substitution detected → 'deny'
    *   - Read-only command (cd, ls, git status, etc.) → 'allow'
-   *   - Otherwise → 'ask'
+   *   - Otherwise (including command substitution) → 'ask'
    *
    * Example: with rules `allow: [git checkout *]`
    *   - "cd /path && git checkout -b feature" → allow (cd) + allow (rule) → allow
@@ -377,25 +398,41 @@ export class PermissionManager {
    * Resolve 'default' permission to actual permission using AST analysis.
    * This mirrors the logic in ShellToolInvocation.getDefaultPermission().
    *
+   * Command substitution ($(), ``, <(), >()) is NOT a hard deny here — it
+   * falls through to 'ask' along with every other non-read-only command, so
+   * the user (or YOLO mode) can decide. The user-facing warning is surfaced
+   * by ShellToolInvocation.getConfirmationDetails so the confirmation prompt
+   * still flags the substitution clearly. See issue #4093 for why a hard
+   * deny here is wrong: it (a) cannot be overridden by YOLO mode and (b)
+   * fires inconsistently based on whether the PermissionManager has
+   * "relevant" rules for the surrounding compound command.
+   *
    * @param command - The shell command to analyze.
-   * @returns 'deny' for command substitution, 'allow' for read-only, 'ask' otherwise.
+   * @returns 'allow' for read-only, 'ask' otherwise.
    */
   private async resolveDefaultPermission(
     command: string,
-  ): Promise<'allow' | 'ask' | 'deny'> {
-    // Security: command substitution ($(), ``, <(), >()) → deny
-    if (detectCommandSubstitution(command)) {
-      return 'deny';
-    }
-
-    // AST-based read-only detection
+  ): Promise<'allow' | 'ask'> {
+    // AST-based read-only detection. Commands containing command
+    // substitution are never read-only — `evaluateStatementReadOnly`
+    // (shellAstParser.ts) guards on `containsCommandSubstitutionAST` at
+    // the top so every node type inherits the check, including
+    // `variable_assignment` (`FOO=$(curl ...)`) and `redirected_statement`
+    // (`cat < $(curl ...)`) where earlier versions had blind spots. See
+    // PR #4386 round 4. So substitution-bearing commands fall through
+    // to 'ask' on the line below.
     try {
       const isReadOnly = await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {
         return 'allow';
       }
-    } catch {
-      // AST check failed, fall back to 'ask'
+    } catch (e) {
+      // Mirror the equivalent logging in `ShellToolInvocation.getDefaultPermission`
+      // (shell.ts) and `MonitorToolInvocation.getDefaultPermission` (monitor.ts).
+      // Pre-#4386 we had a regex `detectCommandSubstitution` safety net here;
+      // with that gone, the AST check is the sole gatekeeper, so a silent
+      // catch makes parser regressions invisible.
+      debugLogger.warn('AST read-only check failed, falling back to ask:', e);
     }
 
     return 'ask';
@@ -443,6 +480,7 @@ export class PermissionManager {
     'read_file',
     'write_file',
     'edit',
+    'notebook_edit',
     'glob',
     'grep_search',
     'run_shell_command',
@@ -735,6 +773,28 @@ export class PermissionManager {
         );
         return;
       }
+      // AUTO mode invariant: while dangerous allow rules are stripped,
+      // any newly added allow rule that is itself dangerous must be
+      // stashed alongside the strip rather than made active. Without
+      // this, a user clicking "Always allow" on a fallback prompt for
+      // a Bash invocation could persist `Bash` or `Bash(python *)` and
+      // every subsequent AUTO call would bypass the classifier. See
+      // dangerousRules.ts for the classifier-bypass criteria.
+      if (this.strippedAllowRules && isDangerousAllowRule(rule)) {
+        // Deduplicate on raw string — matches the persistent-stash branch
+        // in addPersistentRule. A repeated "Always allow" choice for the
+        // same rule must not pile copies into the session stash.
+        const exists = this.strippedAllowRules.session.some(
+          (r) => r.raw === rule.raw,
+        );
+        if (!exists) {
+          this.strippedAllowRules.session.push(rule);
+        }
+        debugLogger.info(
+          `Stashed newly added dangerous allow rule while in AUTO mode: ${rule.raw}`,
+        );
+        return;
+      }
       this.sessionRules.allow.push(rule);
     }
   }
@@ -789,6 +849,29 @@ export class PermissionManager {
     if (rule.invalid) {
       debugLogger.warn(
         `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
+      );
+      return rule;
+    }
+    // AUTO mode invariant: see addSessionAllowRule above. A dangerous
+    // allow rule persisted while in AUTO must not become active until
+    // the user exits AUTO — otherwise an "Always allow" choice on a
+    // fallback prompt would bypass the classifier from that point on.
+    // The settings.json write is still performed by the caller (this
+    // method only manages the in-memory ruleset), so the rule reaches
+    // disk and will activate normally on the next non-AUTO start.
+    if (
+      type === 'allow' &&
+      this.strippedAllowRules &&
+      isDangerousAllowRule(rule)
+    ) {
+      const exists = this.strippedAllowRules.persistent.some(
+        (r) => r.raw === rule.raw,
+      );
+      if (!exists) {
+        this.strippedAllowRules.persistent.push(rule);
+      }
+      debugLogger.info(
+        `Stashed newly added dangerous persistent allow rule while in AUTO mode: ${rule.raw}`,
       );
       return rule;
     }
@@ -887,5 +970,87 @@ export class PermissionManager {
       ...this.sessionRules.allow.map((r) => r.raw),
       ...this.persistentRules.allow.map((r) => r.raw),
     ];
+  }
+
+  // ---------------------------------------------------------------------------
+  // AUTO mode dangerous-rule stash
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Remove any allow rules whose breadth would defeat the AUTO classifier
+   * (see {@link findDangerousAllowRules}) and stash them for restore.
+   * Idempotent — calling twice while in AUTO is a no-op. Deny rules are
+   * never stripped; users intend deny rules as hard blocks regardless of
+   * mode.
+   */
+  stripDangerousRulesForAutoMode(): {
+    persistent: PermissionRule[];
+    session: PermissionRule[];
+  } {
+    if (this.strippedAllowRules) {
+      return this.strippedAllowRules;
+    }
+
+    const persistentDangerous = findDangerousAllowRules(
+      this.persistentRules.allow,
+    );
+    const sessionDangerous = findDangerousAllowRules(this.sessionRules.allow);
+
+    if (persistentDangerous.length === 0 && sessionDangerous.length === 0) {
+      this.strippedAllowRules = { persistent: [], session: [] };
+      return this.strippedAllowRules;
+    }
+
+    const persistentDangerousSet = new Set(persistentDangerous);
+    const sessionDangerousSet = new Set(sessionDangerous);
+
+    this.persistentRules.allow = this.persistentRules.allow.filter(
+      (r) => !persistentDangerousSet.has(r),
+    );
+    this.sessionRules.allow = this.sessionRules.allow.filter(
+      (r) => !sessionDangerousSet.has(r),
+    );
+
+    this.strippedAllowRules = {
+      persistent: persistentDangerous,
+      session: sessionDangerous,
+    };
+    return this.strippedAllowRules;
+  }
+
+  /**
+   * Reverse of {@link stripDangerousRulesForAutoMode}: re-attach previously
+   * stripped allow rules to their original scope. Idempotent when not
+   * currently in AUTO.
+   */
+  restoreDangerousRules(): void {
+    if (!this.strippedAllowRules) return;
+    if (this.strippedAllowRules.persistent.length > 0) {
+      this.persistentRules.allow = [
+        ...this.persistentRules.allow,
+        ...this.strippedAllowRules.persistent,
+      ];
+    }
+    if (this.strippedAllowRules.session.length > 0) {
+      this.sessionRules.allow = [
+        ...this.sessionRules.allow,
+        ...this.strippedAllowRules.session,
+      ];
+    }
+    this.strippedAllowRules = undefined;
+  }
+
+  /**
+   * Return a snapshot of currently-stashed dangerous allow rules.
+   * Used by the UI to surface a "the following rules are disabled in AUTO
+   * mode" notice. Returns `undefined` when not currently in AUTO.
+   */
+  getStrippedDangerousRules():
+    | {
+        persistent: readonly PermissionRule[];
+        session: readonly PermissionRule[];
+      }
+    | undefined {
+    return this.strippedAllowRules;
   }
 }

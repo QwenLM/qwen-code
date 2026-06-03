@@ -7,8 +7,13 @@
 import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import * as childProcess from 'node:child_process';
 import * as cache from './crawlCache.js';
-import { crawl } from './crawler.js';
+import {
+  crawl,
+  __setCommandRunnerForTests,
+  __resetCrawlerStateForTests,
+} from './crawler.js';
 import {
   createTmpDir,
   cleanupTmpDir,
@@ -16,12 +21,54 @@ import {
 import type { Ignore } from './ignore.js';
 import { loadIgnoreRules } from './ignore.js';
 
+async function runExecFile(
+  command: string,
+  args: string[],
+  cwd: string,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    childProcess.execFile(
+      command,
+      args,
+      { cwd, windowsHide: true },
+      (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      },
+    );
+  });
+}
+
+async function initGitRepo(dir: string): Promise<void> {
+  await runExecFile('git', ['init'], dir);
+  await runExecFile('git', ['add', '.'], dir);
+  await runExecFile(
+    'git',
+    [
+      '-c',
+      'user.name=Qwen Test',
+      '-c',
+      'user.email=qwen-test@example.com',
+      'commit',
+      '--no-gpg-sign',
+      '-m',
+      'init',
+    ],
+    dir,
+  );
+}
+
 describe('crawler', () => {
   let tmpDir: string;
   afterEach(async () => {
     if (tmpDir) {
       await cleanupTmpDir(tmpDir);
     }
+    __setCommandRunnerForTests();
+    __resetCrawlerStateForTests();
     vi.restoreAllMocks();
   });
 
@@ -377,8 +424,12 @@ describe('crawler', () => {
       expect(crawlSpy).toHaveBeenCalledTimes(2);
       // fdir should not have been called a second time.
       // We can't spy on it directly, but we can check the cache was hit.
+      const canonicalDir = path
+        .resolve(options.crawlDirectory)
+        .split(path.sep)
+        .join('/');
       const cacheKey = cache.getCacheKey(
-        options.crawlDirectory,
+        canonicalDir,
         options.ignore.getFingerprint(),
         undefined,
       );
@@ -490,6 +541,64 @@ describe('crawler', () => {
       expect(readSpy).toHaveBeenCalledTimes(3);
       expect(writeSpy).toHaveBeenCalledTimes(2); // No new write
     });
+
+    it('should hit cache when crawling a git repo twice', async () => {
+      tmpDir = await createTmpDir({ 'tracked.js': '' });
+      await initGitRepo(tmpDir);
+
+      cache.clear();
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: true,
+        cacheTtl: 3600,
+      };
+
+      const writeSpy = vi.spyOn(cache, 'write');
+
+      const first = await crawl(options);
+      expect(first.length).toBeGreaterThan(0);
+      expect(first).toContain('tracked.js');
+
+      const second = await crawl(options);
+      expect(second).toEqual(first);
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should hit cache for ripgrep path when not a git repo', async () => {
+      tmpDir = await createTmpDir({ 'only.js': '' });
+
+      cache.clear();
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: true,
+        cacheTtl: 3600,
+      };
+
+      const writeSpy = vi.spyOn(cache, 'write');
+
+      const first = await crawl(options);
+      expect(first).toContain('only.js');
+
+      await crawl(options);
+
+      expect(writeSpy).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('with maxDepth', () => {
@@ -574,6 +683,38 @@ describe('crawler', () => {
           'level1/level2/level3/file-level3.txt',
         ]),
       );
+    });
+
+    it('should treat maxDepth as relative to the crawl directory', async () => {
+      await initGitRepo(tmpDir);
+      tmpDir = await fs.realpath(tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: path.join(tmpDir, 'level1'),
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+        maxDepth: 0,
+      });
+
+      expect(results).toEqual(
+        expect.arrayContaining([
+          '.',
+          'level1/',
+          'level1/file-level1.txt',
+          'level1/level2/',
+        ]),
+      );
+      expect(results).not.toContain('level1/level2/file-level2.txt');
+      expect(results).not.toContain('level1/level2/level3/');
     });
   });
 
@@ -676,6 +817,830 @@ describe('crawler', () => {
 
       expect(results.length).toBeLessThanOrEqual(1000);
       expect(results).toEqual(expect.arrayContaining(['.', 'a.txt', 'b.txt']));
+    });
+  });
+
+  describe('two-tier strategy: git ls-files + ripgrep fallback', () => {
+    it('should use git ls-files in a git repo', async () => {
+      tmpDir = await createTmpDir({
+        'file1.js': '',
+        src: ['file2.js'],
+      });
+      await initGitRepo(tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toEqual(
+        expect.arrayContaining(['.', 'src/', 'file1.js', 'src/file2.js']),
+      );
+    });
+
+    it('should resolve the git root from a subdirectory crawl', async () => {
+      tmpDir = await createTmpDir({
+        src: ['file2.js'],
+      });
+      await initGitRepo(tmpDir);
+      tmpDir = await fs.realpath(tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: path.join(tmpDir, 'src'),
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('src/file2.js');
+      expect(results).toContain('src/');
+    });
+
+    it('should not include tracked files deleted from the working tree', async () => {
+      tmpDir = await createTmpDir({
+        'alive.txt': '',
+        'deleted.txt': '',
+      });
+      await initGitRepo(tmpDir);
+      await fs.unlink(path.join(tmpDir, 'deleted.txt'));
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('alive.txt');
+      expect(results).not.toContain('deleted.txt');
+    });
+
+    it('should ignore sparse-checkout skip-worktree tracked entries', async () => {
+      tmpDir = await createTmpDir({ 'keep.txt': '', 'skip.txt': '' });
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command !== 'git') {
+          return { success: false, lines: [] };
+        }
+        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+          return { success: true, lines: [tmpDir] };
+        }
+        if (args.includes('ls-files') && args.includes('--others')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--deleted')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--cached')) {
+          return { success: true, lines: ['S skip.txt', 'H keep.txt'] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('keep.txt');
+      expect(results).not.toContain('skip.txt');
+    });
+
+    it('should preserve leading and trailing spaces in tracked filenames', async () => {
+      tmpDir = await createTmpDir({
+        ' leading.txt': '',
+        'trailing.txt ': '',
+      });
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command !== 'git') {
+          return { success: false, lines: [] };
+        }
+        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+          return { success: true, lines: [tmpDir] };
+        }
+        if (args.includes('ls-files') && args.includes('--others')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--deleted')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--cached')) {
+          return {
+            success: true,
+            lines: ['H  leading.txt', 'H trailing.txt '],
+          };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain(' leading.txt');
+      expect(results).toContain('trailing.txt ');
+    });
+
+    it('should fall back to fdir when not in a git repo and ripgrep unavailable', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      __setCommandRunnerForTests(async (command) => {
+        if (command === 'git' || command === 'rg') {
+          return { success: false, lines: [] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      tmpDir = await createTmpDir({
+        'index.js': '',
+        lib: ['util.js'],
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toEqual(
+        expect.arrayContaining(['.', 'lib/', 'index.js', 'lib/util.js']),
+      );
+      const degradationWarns = warnSpy.mock.calls.filter(
+        (c) =>
+          typeof c[0] === 'string' &&
+          (c[0] as string).startsWith('[crawler] falling back to'),
+      );
+      expect(degradationWarns.map((c) => c[0])).toEqual([
+        '[crawler] falling back to fdir (ripgrep unavailable)',
+      ]);
+      warnSpy.mockRestore();
+    });
+
+    it('should respect maxDepth on git ls-files path', async () => {
+      tmpDir = await createTmpDir({
+        root: ['top.js'],
+        nested: {
+          deep: ['file.js'],
+        },
+      });
+      await initGitRepo(tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+        maxDepth: 0,
+      });
+
+      expect(results).toEqual(
+        expect.arrayContaining(['.', 'root/', 'nested/']),
+      );
+      expect(results).not.toContain('root/top.js');
+      expect(results).not.toContain('nested/deep/');
+      expect(results).not.toContain('nested/deep/file.js');
+    });
+
+    it('should avoid enumerating gitignored untracked files on git path', async () => {
+      tmpDir = await createTmpDir({
+        '.gitignore': '*.log',
+        'keep.log': '',
+        'keep.txt': '',
+      });
+      await initGitRepo(tmpDir);
+
+      const withoutGitignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const withoutGitignoreResults = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore: withoutGitignore,
+        useGitignore: false,
+        cache: false,
+        cacheTtl: 0,
+      });
+      expect(withoutGitignoreResults).toContain('keep.log');
+      expect(withoutGitignoreResults).toContain('keep.txt');
+
+      const withGitignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: true,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const withGitignoreResults = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore: withGitignore,
+        useGitignore: true,
+        cache: false,
+        cacheTtl: 0,
+      });
+      expect(withGitignoreResults).not.toContain('keep.log');
+      expect(withGitignoreResults).toContain('keep.txt');
+    });
+
+    it('should not drop files after directory expansion when maxFiles is small', async () => {
+      tmpDir = await createTmpDir({
+        nested: ['deep.txt'],
+      });
+      await initGitRepo(tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        useGitignore: false,
+        cache: false,
+        cacheTtl: 0,
+        maxFiles: 1,
+      });
+
+      expect(results).toContain('nested/deep.txt');
+    });
+
+    it('should include gitignored files in non-git rg fallback when useGitignore is false', async () => {
+      const rgArgsSeen: string[][] = [];
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command === 'git') {
+          return { success: false, lines: [] };
+        }
+
+        if (command === 'rg') {
+          rgArgsSeen.push(args);
+          if (args.includes('--no-ignore')) {
+            return { success: true, lines: ['keep.log', 'keep.txt'] };
+          }
+          return { success: true, lines: ['keep.txt'] };
+        }
+
+        return { success: false, lines: [] };
+      });
+
+      tmpDir = await createTmpDir({
+        '.gitignore': '*.log',
+        'keep.log': '',
+        'keep.txt': '',
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        useGitignore: false,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('keep.log');
+      expect(results).toContain('keep.txt');
+      expect(rgArgsSeen).toHaveLength(1);
+      expect(rgArgsSeen[0]).toContain('--no-ignore');
+    });
+
+    it('should omit --no-ignore on ripgrep when useGitignore is true (default)', async () => {
+      const rgArgsSeen: string[][] = [];
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command === 'git') {
+          return { success: false, lines: [] };
+        }
+
+        if (command === 'rg') {
+          rgArgsSeen.push(args);
+          return { success: true, lines: ['keep.txt'] };
+        }
+
+        return { success: false, lines: [] };
+      });
+
+      tmpDir = await createTmpDir({
+        '.gitignore': '*.log',
+        'keep.log': '',
+        'keep.txt': '',
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: true,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+        useGitignore: true,
+      });
+
+      expect(rgArgsSeen).toHaveLength(1);
+      expect(rgArgsSeen[0]).not.toContain('--no-ignore');
+    });
+
+    it('should not run git ls-files --cached on second crawl when throttled and working tree unchanged', async () => {
+      tmpDir = await createTmpDir({ 'tracked.js': '' });
+
+      const gitCalls: string[][] = [];
+
+      __setCommandRunnerForTests(async (command, args) => {
+        gitCalls.push(args);
+        if (command !== 'git') {
+          return { success: false, lines: [] };
+        }
+        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+          return { success: true, lines: [tmpDir] };
+        }
+        if (args.includes('ls-files') && args.includes('--others')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--deleted')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--cached')) {
+          return { success: true, lines: ['tracked.js'] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      await crawl(options);
+      const callsAfterFirst = gitCalls.length;
+      expect(gitCalls.filter((a) => a.includes('--cached'))).toHaveLength(1);
+      expect(
+        gitCalls.some(
+          (a) =>
+            a.includes('-z') &&
+            a.includes('ls-files') &&
+            (a.includes('--others') || a.includes('--deleted')),
+        ),
+      ).toBe(true);
+
+      await crawl(options);
+
+      const newCalls = gitCalls.slice(callsAfterFirst);
+      expect(newCalls.some((a) => a.includes('--cached'))).toBe(false);
+    });
+
+    it('should fall back to ripgrep when git ls-files --cached fails inside a git repo', async () => {
+      tmpDir = await createTmpDir({ 'via-rg.js': '' });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command === 'git') {
+          if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+            return { success: true, lines: [tmpDir] };
+          }
+          if (args.includes('ls-files') && args.includes('--others')) {
+            return { success: true, lines: [] };
+          }
+          if (args.includes('ls-files') && args.includes('--deleted')) {
+            return { success: true, lines: [] };
+          }
+          if (args.includes('ls-files') && args.includes('--cached')) {
+            return { success: false, lines: [] };
+          }
+        }
+        if (command === 'rg') {
+          return { success: true, lines: ['via-rg.js'] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('via-rg.js');
+      const degradationCalls = warnSpy.mock.calls
+        .map((c) => c[0])
+        .filter(
+          (m): m is string =>
+            typeof m === 'string' && m.startsWith('[crawler] falling back to'),
+        );
+      expect(degradationCalls).toContain(
+        '[crawler] falling back to ripgrep (git ls-files unavailable)',
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('should warn on git→rg→fdir degradation when git listing then rg fail', async () => {
+      tmpDir = await createTmpDir({ 'only-fdir.js': '' });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command === 'git') {
+          if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+            return { success: true, lines: [tmpDir] };
+          }
+          if (args.includes('ls-files') && args.includes('--others')) {
+            return { success: true, lines: [] };
+          }
+          if (args.includes('ls-files') && args.includes('--deleted')) {
+            return { success: true, lines: [] };
+          }
+          if (args.includes('ls-files') && args.includes('--cached')) {
+            return { success: false, lines: [] };
+          }
+        }
+        if (command === 'rg') {
+          return { success: false, lines: [] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('only-fdir.js');
+      const degradationCalls = warnSpy.mock.calls
+        .map((c) => c[0])
+        .filter(
+          (m): m is string =>
+            typeof m === 'string' && m.startsWith('[crawler] falling back to'),
+        );
+      expect(degradationCalls).toEqual([
+        '[crawler] falling back to ripgrep (git ls-files unavailable)',
+        '[crawler] falling back to fdir (ripgrep unavailable)',
+      ]);
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('throttling', () => {
+    beforeEach(() => {
+      cache.clear();
+    });
+
+    it('should not re-crawl within throttle window', async () => {
+      tmpDir = await createTmpDir({ 'file1.js': '' });
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      const results1 = await crawl(options);
+      expect(results1).toContain('file1.js');
+
+      const results2 = await crawl(options);
+      expect(results2).toContain('file1.js');
+    });
+
+    it('should refresh untracked files before reusing throttled git results', async () => {
+      tmpDir = await createTmpDir({
+        'tracked.js': '',
+      });
+      await initGitRepo(tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      const first = await crawl(options);
+      expect(first).toContain('tracked.js');
+      expect(first).not.toContain('new-untracked.js');
+
+      await fs.writeFile(path.join(tmpDir, 'new-untracked.js'), '');
+
+      const second = await crawl(options);
+      expect(second).toContain('tracked.js');
+      expect(second).toContain('new-untracked.js');
+    });
+
+    it('should throttle re-crawl on non-git fallback paths until the window expires', async () => {
+      __setCommandRunnerForTests(async (command) => {
+        if (command === 'git' || command === 'rg') {
+          return { success: false, lines: [] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      tmpDir = await createTmpDir({ 'file1.js': '' });
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      vi.useFakeTimers();
+      try {
+        const first = await crawl(options);
+        expect(first).toContain('file1.js');
+
+        await fs.writeFile(path.join(tmpDir, 'file2.js'), '');
+
+        const second = await crawl(options);
+        expect(second).toContain('file1.js');
+        expect(second).not.toContain('file2.js');
+
+        await vi.advanceTimersByTimeAsync(6000);
+
+        const third = await crawl(options);
+        expect(third).toContain('file1.js');
+        expect(third).toContain('file2.js');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should preserve maxFiles cap on throttled non-git fallback reads', async () => {
+      __setCommandRunnerForTests(async (command) => {
+        if (command === 'git' || command === 'rg') {
+          return { success: false, lines: [] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      tmpDir = await createTmpDir({
+        'file1.js': '',
+        'file2.js': '',
+        'file3.js': '',
+      });
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+        maxFiles: 1,
+      };
+
+      const first = await crawl(options);
+      expect(first).toHaveLength(2);
+      expect(first).toEqual(expect.arrayContaining(['.', 'file1.js']));
+
+      await fs.writeFile(path.join(tmpDir, 'file4.js'), '');
+
+      const second = await crawl(options);
+      expect(second).toHaveLength(2);
+      expect(second).toEqual(first);
+    });
+  });
+
+  describe('mtime-based change detection', () => {
+    beforeEach(() => {
+      cache.clear();
+    });
+
+    it('should re-crawl when git index mtime changes', async () => {
+      tmpDir = await createTmpDir({ 'file1.js': '' });
+      await initGitRepo(tmpDir);
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      const results1 = await crawl(options);
+      expect(results1.length).toBeGreaterThan(0);
+
+      await fs.writeFile(path.join(tmpDir, 'file2.js'), '');
+      const futureTime = new Date(Date.now() + 60_000);
+      await fs.utimes(
+        path.join(tmpDir, '.git', 'index'),
+        futureTime,
+        futureTime,
+      );
+
+      const results2 = await crawl(options);
+      expect(results2).toContain('file2.js');
+      expect(results2).not.toEqual(results1);
+    });
+
+    it('should re-crawl git worktrees when the gitdir index changes', async () => {
+      tmpDir = await createTmpDir({});
+      const worktreeDir = path.join(tmpDir, 'worktree');
+      const gitDir = path.join(tmpDir, 'gitdir');
+
+      await fs.mkdir(worktreeDir, { recursive: true });
+      await fs.mkdir(gitDir, { recursive: true });
+      await fs.writeFile(path.join(gitDir, 'index'), 'initial');
+      await fs.writeFile(path.join(worktreeDir, '.git'), 'gitdir: ../gitdir\n');
+      await fs.writeFile(path.join(worktreeDir, 'tracked.txt'), '');
+
+      let includeExtraFile = false;
+      __setCommandRunnerForTests(
+        async (
+          command: string,
+          args: string[],
+          cwd: string,
+        ): Promise<{ success: boolean; lines: string[] }> => {
+          if (command !== 'git') {
+            return { success: false, lines: [] };
+          }
+
+          if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+            expect(cwd).toBe(worktreeDir);
+            return { success: true, lines: [worktreeDir] };
+          }
+
+          if (args.includes('ls-files') && args.includes('--cached')) {
+            return {
+              success: true,
+              lines: includeExtraFile
+                ? ['tracked.txt', 'new-file.txt']
+                : ['tracked.txt'],
+            };
+          }
+
+          if (args.includes('ls-files') && args.includes('--others')) {
+            return { success: true, lines: [] };
+          }
+
+          return { success: false, lines: [] };
+        },
+      );
+
+      const ignore = loadIgnoreRules({
+        projectRoot: worktreeDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: worktreeDir,
+        cwd: worktreeDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      const first = await crawl(options);
+      expect(first).toEqual(expect.arrayContaining(['.', 'tracked.txt']));
+      expect(first).not.toContain('new-file.txt');
+
+      includeExtraFile = true;
+      await fs.writeFile(path.join(worktreeDir, 'new-file.txt'), '');
+      const futureTime = new Date(Date.now() + 60_000);
+      await fs.utimes(path.join(gitDir, 'index'), futureTime, futureTime);
+
+      const second = await crawl(options);
+      expect(second).toEqual(
+        expect.arrayContaining(['.', 'tracked.txt', 'new-file.txt']),
+      );
     });
   });
 });

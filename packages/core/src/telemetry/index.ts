@@ -7,7 +7,6 @@
 export enum TelemetryTarget {
   GCP = 'gcp',
   LOCAL = 'local',
-  QWEN = 'qwen',
 }
 
 const DEFAULT_TELEMETRY_TARGET = TelemetryTarget.LOCAL;
@@ -137,3 +136,41 @@ export {
 } from './metrics.js';
 export { QwenLogger } from './qwen-logger/qwen-logger.js';
 export { sanitizeHookName } from './sanitize.js';
+export {
+  startInteractionSpan,
+  endInteractionSpan,
+  startLLMRequestSpan,
+  endLLMRequestSpan,
+  startToolSpan,
+  endToolSpan,
+  runInToolSpanContext,
+  startToolExecutionSpan,
+  endToolExecutionSpan,
+  startToolBlockedOnUserSpan,
+  endToolBlockedOnUserSpan,
+  startHookSpan,
+  endHookSpan,
+  getActiveInteractionSpan,
+  truncateSpanError,
+} from './session-tracing.js';
+export type {
+  StartInteractionOptions,
+  EndInteractionOptions,
+  LLMRequestMetadata,
+  ToolSpanMetadata,
+  ToolBlockedDecision,
+  ToolBlockedSource,
+  HookEvent,
+  StartHookSpanOptions,
+  HookSpanMetadata,
+} from './session-tracing.js';
+export {
+  addUserPromptAttributes,
+  addSystemPromptAttributes,
+  addToolSchemaAttributes,
+  addModelOutputAttributes,
+  addToolInputAttributes,
+  addToolResultAttributes,
+  truncateContent,
+  clearDetailedSpanState,
+} from './detailed-span-attributes.js';

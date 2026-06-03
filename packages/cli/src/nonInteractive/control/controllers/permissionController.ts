@@ -36,6 +36,8 @@ import { BaseController } from './baseController.js';
 // Import ToolCallConfirmationDetails types for type alignment
 type ToolConfirmationType = 'edit' | 'exec' | 'mcp' | 'info' | 'plan';
 
+const DEFAULT_CAN_USE_TOOL_TIMEOUT_MS = 60_000;
+
 export class PermissionController extends BaseController {
   private pendingOutgoingRequests = new Set<string>();
 
@@ -146,6 +148,7 @@ export class PermissionController extends BaseController {
     switch (mode) {
       case 'yolo': // Allow all tools
       case 'auto-edit': // Auto-approve edit operations
+      case 'auto': // Auto-approve via LLM classifier — coreToolScheduler enforces the gate
       case 'plan': // Auto-approve planning operations
         return { allowed: true };
 
@@ -216,6 +219,7 @@ export class PermissionController extends BaseController {
       'default',
       'plan',
       'auto-edit',
+      'auto',
       'yolo',
     ];
 
@@ -425,7 +429,7 @@ export class PermissionController extends BaseController {
           permission_suggestions: permissionSuggestions,
           blocked_path: null,
         } as CLIControlPermissionRequest,
-        undefined, // use default timeout
+        this.context.sdkCanUseToolTimeoutMs ?? DEFAULT_CAN_USE_TOOL_TIMEOUT_MS,
         this.context.abortSignal,
       );
 

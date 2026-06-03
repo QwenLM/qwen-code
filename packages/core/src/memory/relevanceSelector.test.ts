@@ -129,7 +129,7 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     );
   });
 
-  it('passes the fast model to runSideQuery when configured', async () => {
+  it('lets runSideQuery choose the default side-query model when fast model is configured', async () => {
     vi.mocked(mockConfig.getFastModel).mockReturnValue('fast-flash-model');
     vi.mocked(runSideQuery).mockResolvedValue({
       selected_memories: ['reference.md'],
@@ -146,13 +146,15 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        model: 'fast-flash-model',
         config: { temperature: 0 },
       }),
     );
+    expect(
+      'model' in (vi.mocked(runSideQuery).mock.calls[0]![1] as object),
+    ).toBe(false);
   });
 
-  it('passes undefined model when no fast model is configured', async () => {
+  it('lets runSideQuery fall back to its default when no fast model is configured', async () => {
     vi.mocked(mockConfig.getFastModel).mockReturnValue(undefined);
     vi.mocked(runSideQuery).mockResolvedValue({
       selected_memories: ['reference.md'],
@@ -169,10 +171,12 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-recall',
-        model: undefined,
         config: { temperature: 0 },
       }),
     );
+    expect(
+      'model' in (vi.mocked(runSideQuery).mock.calls[0]![1] as object),
+    ).toBe(false);
   });
 
   it('throws when selector returns unknown relative paths', async () => {

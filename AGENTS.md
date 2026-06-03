@@ -3,6 +3,24 @@
 This file provides guidance to Qwen Code when working with code in this
 repository.
 
+## Working Principles
+
+### Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+**(This is the principle we care about most.)**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes,
+simplify.
+
+_Adapted from Andrej Karpathy's [CLAUDE.md](https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md)._
+
 ## Common Commands
 
 ### Building
@@ -101,8 +119,11 @@ npm run preflight  # Full check: clean → install → format → lint → build
   between packages
 - **Tests**: Collocated with source (`file.test.ts` next to `file.ts`),
   vitest framework
+- **File naming**: `PascalCase.tsx` for React components, `kebab-case.ts` for
+  new non-component files. Leave existing `camelCase` files alone — renaming breaks `git blame` and imports.
+- **Comments**: Default to none. Add only when _why_ is non-obvious; don't delete existing ones as cleanup.
 - **Commits**: Conventional Commits (e.g., `feat(cli): Add --json flag`)
-- **Node.js**: Development requires `~20.19.0`; production requires `>=20`
+- **Node.js**: Development and production both require `>=22` (Ink 7 + React 19.2 requirement)
 
 ## Development Guidelines
 
@@ -158,8 +179,13 @@ applicable.
 
 - **PR description**: explain the motivation and changes in prose. Avoid
   referencing file names or function names.
-- **Reviewer Test Plan**: describe behaviors a reviewer should verify and what
-  to expect, not scripted test commands.
+- **Reviewer Test Plan** (template section): describe behaviors a reviewer
+  should verify and what to expect, not scripted test commands. Use **How to
+  verify** for reproduction steps; Before/After for TUI evidence when
+  applicable.
+- **Line wrapping**: do not hard-wrap the PR body at a fixed column width.
+  GitHub renders single newlines as `<br>`, so a wrapped description displays
+  as a narrow column. Write each paragraph or list item as one long line.
 
 ## Project Directories
 

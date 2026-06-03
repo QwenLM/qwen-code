@@ -91,13 +91,13 @@ jobs:
     runs-on: 'ubuntu-latest'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
         with:
           ref: '${{ github.event.inputs.branch_ref || github.ref }}'
           fetch-depth: 0
 
       - name: 'Set up Node.js 22.x'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4.4.0
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
         with:
           node-version: '22.x'
           cache: 'npm'
@@ -173,10 +173,10 @@ jobs:
             upload-coverage: 'false'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
 
       - name: 'Set up Node.js ${{ matrix.node-version }}'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e'  # v6.4.0
         with:
           node-version: '${{ matrix.node-version }}'
           cache: 'npm'
@@ -212,7 +212,7 @@ jobs:
       - name: 'Upload Test Results Artifact (for forks)'
         if: |-
           ${{ always() && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
-        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # ratchet:actions/upload-artifact@v4
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'  # v7.0.1
         with:
           name: 'test-results-fork-${{ matrix.node-version }}-${{ matrix.os }}'
           path: 'packages/*/junit.xml'
@@ -220,7 +220,7 @@ jobs:
       - name: 'Upload coverage reports'
         if: |-
           ${{ always() && matrix.upload-coverage == 'true' }}
-        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # ratchet:actions/upload-artifact@v4
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'  # v7.0.1
         with:
           name: 'coverage-reports-${{ matrix.node-version }}-${{ matrix.os }}'
           path: 'packages/*/coverage'
@@ -251,10 +251,10 @@ jobs:
           - '22.x'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
 
       - name: 'Download coverage reports artifact'
-        uses: 'actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0' # ratchet:actions/download-artifact@v5
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c'  # v8.0.1
         with:
           name: 'coverage-reports-${{ matrix.node-version }}-${{ matrix.os }}'
           path: 'coverage_artifact' # Download to a specific directory
@@ -281,7 +281,7 @@ jobs:
       security-events: 'write'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
 
       - name: 'Initialize CodeQL'
         uses: 'github/codeql-action/init@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/init@v3

@@ -18,6 +18,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Modo shell',
   'YOLO mode': 'Modo YOLO',
+  'Auto mode': 'Modo auto',
   'plan mode': 'modo planejamento',
   'auto-accept edits': 'aceitar edições automaticamente',
   'Accepting edits': 'Aceitando edições',
@@ -125,6 +126,45 @@ export default {
     'Renomear a conversa atual. --auto permite que o modelo rápido escolha um título.',
   'Rewind conversation to a previous turn':
     'Voltar a conversa para um turno anterior',
+  'Rewind Conversation': 'Rebobinar conversa',
+  'No user turns to rewind to.': 'Nenhum turno de usuário para rebobinar.',
+  'Rewind to: ': 'Rebobinar para: ',
+  'Restore code and conversation': 'Restaurar código e conversa',
+  'Restore conversation only': 'Restaurar apenas a conversa',
+  'Restore code only': 'Restaurar apenas o código',
+  'Never mind': 'Deixa pra lá',
+  'Computing file changes...': 'Calculando alterações de arquivo...',
+  'Restoring...': 'Restaurando...',
+  'Restored {{count}} file(s).': '{{count}} arquivo(s) restaurado(s).',
+  'Failed to restore files: {{error}}':
+    'Falha ao restaurar arquivos: {{error}}',
+  'Rewind failed: {{error}}': 'Falha ao retroceder: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Não é possível retroceder a conversa: nenhum cliente de modelo ativo.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Código restaurado, mas a conversa não pôde ser retrocedida (sem cliente ativo).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Conversa retrocedida. Edite seu prompt e pressione Enter para continuar.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'O retrocesso não afeta arquivos editados manualmente ou por meio de comandos shell.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Não é possível retroceder para um turno que foi compactado. Tente um turno mais recente.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'A restauração de arquivos não está disponível para este turno (sem alterações capturadas, ou o turno é anterior à sessão atual).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} em {{count}} arquivo)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} em {{count}} arquivos)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Falha ao restaurar {{count}} arquivo(s): {{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'Não é possível restaurar arquivos: este turno foi criado antes do checkpoint de arquivos ser ativado.',
+  'No files needed to be restored.': 'Nenhum arquivo precisou ser restaurado.',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ navegar · Enter selecionar · Esc voltar',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ navegar · Enter selecionar · Esc cancelar',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y confirmar · Esc/N voltar',
   'change the theme': 'alterar o tema',
   'Select Theme': 'Selecionar Tema',
   Preview: 'Visualizar',
@@ -144,8 +184,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'abrir documentação completa do Qwen Code no seu navegador',
   'Configuration not available.': 'Configuração não disponível.',
-  'Configure authentication information for login':
-    'Configurar informações de autenticação para login',
+  'Connect an LLM provider': 'Conectar a um provedor LLM',
   'Copy the last result or code snippet to clipboard':
     'Copiar o último resultado ou trecho de código para a área de transferência',
 
@@ -365,7 +404,7 @@ export default {
   Text: 'Texto',
   JSON: 'JSON',
   Plan: 'Planejamento',
-  Default: 'Padrão',
+  'Ask permissions': 'Pedir permissão',
   'Auto Edit': 'Edição Automática',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'alternar modo vim ligado/desligado',
@@ -632,6 +671,9 @@ export default {
   'When a session is ending': 'Quando uma sessão está terminando',
   'When a permission dialog is displayed':
     'Quando um diálogo de permissão é exibido',
+  'When a new todo item is created': 'Quando um novo item todo é criado',
+  'When a todo item is marked as completed':
+    'Quando um item todo é marcado como concluído',
   // Hooks - Event Descriptions (detailed)
   'Input to command is JSON of tool call arguments.':
     'A entrada para o comando é JSON dos argumentos da chamada da ferramenta.',
@@ -655,6 +697,10 @@ export default {
     'A entrada para o comando é JSON com detalhes da compactação.',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'A entrada para o comando é JSON com tool_name, tool_input e tool_use_id. Saída é JSON com hookSpecificOutput contendo decisão de permitir ou negar.',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'A entrada para o comando é JSON com todo_id, todo_content, todo_status, all_todos e phase. Em validation, saída é JSON com decision (allow/block/deny) e reason. Em postWrite, block/deny é ignorado.',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'A entrada para o comando é JSON com todo_id, todo_content, previous_status, all_todos e phase. Em validation, saída é JSON com decision (allow/block/deny) e reason. Em postWrite, block/deny é ignorado.',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr não exibido',
   'show stderr to model and continue conversation':
@@ -680,6 +726,12 @@ export default {
   'show stderr to user only but continue with compaction':
     'mostrar stderr apenas ao usuário mas continuar com compactação',
   'use hook decision if provided': 'usar decisão do hook se fornecida',
+  'allow todo creation': 'permitir criação de todo',
+  'block todo creation and show reason to model':
+    'bloquear criação de todo e mostrar motivo ao modelo',
+  'allow todo completion': 'permitir conclusão de todo',
+  'block todo completion and show reason to model':
+    'bloquear conclusão de todo e mostrar motivo ao modelo',
   // Hooks - Messages
   'Config not loaded.': 'Configuração não carregada.',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
@@ -772,6 +824,7 @@ export default {
   'Auto-memory: {{status}}': 'Memória automática: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Consolidação automática: {{status}} · {{lastDream}} · /dream para executar',
+  'Auto-skill: {{status}}': 'Habilidade automática: {{status}}',
   never: 'nunca',
   on: 'ativado',
   off: 'desativado',
@@ -1028,9 +1081,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Bem-vindo de volta! (Última atualização: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Objetivo Geral:',
-  'Select Authentication Method': 'Selecionar Método de Autenticação',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'Você deve selecionar um método de autenticação para prosseguir. Pressione Ctrl+C novamente para sair.',
+  'Connect a Provider': 'Conectar um provedor',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'Você deve conectar um provedor para prosseguir. Pressione Ctrl+C novamente para sair.',
   'Terms of Services and Privacy Notice':
     'Termos de Serviço e Aviso de Privacidade',
   'Qwen OAuth': 'Qwen OAuth',
@@ -1693,7 +1746,6 @@ export default {
   'Save a durable memory to the memory system.':
     'Salvar uma memória durável no sistema de memória.',
   prompts: 'Prompts (sugestões)',
-  'Manage dynamic translation cache': 'Gerenciar cache de tradução dinâmica',
   'Open MCP management dialog': 'Abrir diálogo de gerenciamento MCP',
   'Manage extension settings': 'Gerenciar configurações da extensão',
   'Manage Extensions': 'Gerenciar extensões',
@@ -1730,24 +1782,6 @@ export default {
   'update available': 'atualização disponível',
   'checking...': 'verificando...',
   'not updatable': 'não atualizável',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    'Retraduzir as descrições de comandos de barra dinâmicos carregados para o idioma atual da interface',
-  'Clear cached translations for the current UI language':
-    'Limpar traduções em cache para o idioma atual da interface',
-  'Manage AI translation for dynamic slash command descriptions':
-    'Gerenciar tradução por IA para descrições dinâmicas de comandos slash',
-  'Enable AI translation for dynamic slash command descriptions':
-    'Ativar tradução por IA para descrições dinâmicas de comandos slash',
-  'Disable AI translation for dynamic slash command descriptions':
-    'Desativar tradução por IA para descrições dinâmicas de comandos slash',
-  'Show AI translation status for dynamic slash command descriptions':
-    'Mostrar status da tradução por IA para descrições dinâmicas de comandos slash',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    'A tradução por IA para descrições dinâmicas de comandos slash está {{status}}.',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    'A tradução por IA para descrições dinâmicas de comandos slash agora está ativada.',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    'A tradução por IA para descrições dinâmicas de comandos slash agora está desativada.',
   'Ask a quick side question without affecting the main conversation':
     'Fazer uma pergunta rápida paralela sem afetar a conversa principal',
   'Manage Arena sessions': 'Gerenciar sessões da Arena',

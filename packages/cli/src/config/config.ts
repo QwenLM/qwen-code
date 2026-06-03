@@ -47,6 +47,7 @@ import { hideBin } from 'yargs/helpers';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import stripJsonComments from 'strip-json-comments';
 
 import { resolvePath } from '../utils/resolvePath.js';
@@ -57,6 +58,7 @@ import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
+import { serveCommand } from '../commands/serve.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -73,6 +75,11 @@ export function isValidSessionId(value: string): boolean {
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import {
+  parseDurationSeconds,
+  validateMaxToolCalls,
+  validateMaxWallTimeSetting,
+} from '../utils/runBudget.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -80,6 +87,7 @@ const VALID_APPROVAL_MODE_VALUES = [
   'plan',
   'default',
   'auto-edit',
+  'auto',
   'yolo',
 ] as const;
 
@@ -104,6 +112,8 @@ function parseApprovalModeValue(value: string): ApprovalMode {
     case 'autoedit':
     case 'auto-edit':
       return ApprovalMode.AUTO_EDIT;
+    case 'auto':
+      return ApprovalMode.AUTO;
     default:
       throw formatApprovalModeError(value);
   }
@@ -158,7 +168,27 @@ export interface CliArgs {
   resume: string | undefined;
   /** Specify a session ID without session resumption */
   sessionId: string | undefined;
+  /**
+   * Create a new forked session from the resumed session. Must be used with
+   * --resume or --continue.
+   */
+  forkSession?: boolean | undefined;
+  /** Internal: preserve the outer session ID when relaunching in a sandbox */
+  sandboxSessionId?: string | undefined;
+  /**
+   * Start the session inside a git worktree. Accepted forms:
+   * - bare `--worktree` (empty string from yargs) → auto-generated slug
+   * - `--worktree foo` / `--worktree=foo` → explicit slug
+   * - `--worktree=#123` / `--worktree https://github.com/o/r/pull/123` → PR ref
+   *
+   * Consumed by `setupStartupWorktree()` before `loadCliConfig()`. When set,
+   * the CLI chdirs into `<repoRoot>/.qwen/worktrees/<slug>/` and the entire
+   * session runs inside that worktree.
+   */
+  worktree?: string | undefined;
   maxSessionTurns: number | undefined;
+  maxWallTime: string | undefined;
+  maxToolCalls: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   disabledSlashCommands: string[] | undefined;
@@ -632,9 +662,9 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('approval-mode', {
           type: 'string',
-          choices: ['plan', 'default', 'auto-edit', 'yolo'],
+          choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
           description:
-            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), yolo (auto-approve all tools)',
+            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
         })
         .option('checkpointing', {
           type: 'boolean',
@@ -802,9 +832,37 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'Specify a session ID for this run.',
         })
+        .option('fork-session', {
+          type: 'boolean',
+          description:
+            'Create a new forked session from the resumed session. Must be used with --resume or --continue.',
+          default: false,
+        })
+        .option('sandbox-session-id', {
+          type: 'string',
+          hidden: true,
+        })
+        .option('worktree', {
+          type: 'string',
+          description:
+            'Start the session inside a git worktree at <repoRoot>/.qwen/worktrees/<slug>/. ' +
+            'Pass a slug (`--worktree my-feature`), a PR reference (`--worktree=#123` or a full ' +
+            'GitHub pull-request URL), or use bare `--worktree` to auto-generate a slug. ' +
+            'On exit, the WorktreeExitDialog prompts to keep or remove the worktree.',
+        })
         .option('max-session-turns', {
           type: 'number',
           description: 'Maximum number of session turns',
+        })
+        .option('max-wall-time', {
+          type: 'string',
+          description:
+            'Run-level wall-clock budget for headless / unattended runs. Accepts seconds (e.g. `90`), or a duration string with unit (e.g. `30s`, `5m`, `1h`, `1.5h`). Minimum 1s — sub-second values (`500ms`, `0.5`) are rejected as typos; max ~24 days. Aborts the run with exit code 55 when exceeded.',
+        })
+        .option('max-tool-calls', {
+          type: 'number',
+          description:
+            'Maximum cumulative tool calls executed during the run (success or failure; `structured_output` under --json-schema is exempt). Aborts with exit code 55 when exceeded. -1 / unset means no limit; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos.',
         })
         .option('core-tools', {
           type: 'array',
@@ -899,14 +957,30 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['continue'] && argv['resume']) {
             return 'Cannot use both --continue and --resume together. Use --continue to resume the latest session, or --resume <sessionId> to resume a specific session.';
           }
-          if (argv['sessionId'] && (argv['continue'] || argv['resume'])) {
+          const hasResume = argv['resume'] !== undefined;
+          if (argv['sessionId'] && (argv['continue'] || hasResume)) {
             return 'Cannot use --session-id with --continue or --resume. Use --session-id to start a new session with a specific ID, or use --continue/--resume to resume an existing session.';
+          }
+          if (argv['forkSession'] && !(argv['continue'] || hasResume)) {
+            return '--fork-session must be used with --resume or --continue.';
+          }
+          if (
+            argv['sandboxSessionId'] &&
+            (argv['sessionId'] || argv['continue'] || argv['resume'])
+          ) {
+            return 'Cannot use internal --sandbox-session-id with --session-id, --continue, or --resume.';
           }
           if (
             argv['sessionId'] &&
             !isValidSessionId(argv['sessionId'] as string)
           ) {
             return `Invalid --session-id: "${argv['sessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
+          }
+          if (
+            argv['sandboxSessionId'] &&
+            !isValidSessionId(argv['sandboxSessionId'] as string)
+          ) {
+            return `Invalid --sandbox-session-id: "${argv['sandboxSessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
           // --resume accepts either a session UUID or a custom title
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
@@ -965,7 +1039,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Channel subcommands
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
-    .command(reviewCommand);
+    .command(reviewCommand)
+    // Register `qwen serve` (Stage 1 daemon — see issue #3803)
+    .command(serveCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -991,6 +1067,9 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review')
   ) {
+    // Note: `serve` is intentionally NOT in this list. Its handler blocks
+    // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
+    // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
     // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
@@ -1071,6 +1150,65 @@ export async function loadHierarchicalGeminiMemory(
     memoryImportFormat,
     contextRuleExcludes,
   );
+}
+
+/**
+ * Resolves the wall-clock budget for a run. Returns seconds (`-1` =
+ * unlimited). Order of precedence: `--max-wall-time` flag, then
+ * `model.maxWallTimeSeconds` from settings, else unlimited.
+ *
+ * The CLI flag is a duration string (`30s` / `5m` / `1h` / `90`); the
+ * settings entry is a plain number of seconds (parity with
+ * `model.maxSessionTurns`). Both layers reject `0` and out-of-range
+ * values up front — a typo in a CI guardrail should fail loud at startup,
+ * not silently disable the budget.
+ */
+function resolveMaxWallTimeSeconds(argv: CliArgs, settings: Settings): number {
+  if (argv.maxWallTime !== undefined && argv.maxWallTime !== null) {
+    try {
+      return parseDurationSeconds(String(argv.maxWallTime));
+    } catch (err) {
+      throw new Error(`--max-wall-time: ${(err as Error).message}`);
+    }
+  }
+  const fromSettings = settings.model?.maxWallTimeSeconds;
+  if (typeof fromSettings === 'number') {
+    try {
+      return validateMaxWallTimeSetting(fromSettings);
+    } catch (err) {
+      throw new Error(`settings.json: ${(err as Error).message}`);
+    }
+  }
+  return -1;
+}
+
+/**
+ * Resolves the tool-call budget for a run. Returns the validated count
+ * (`-1` = unlimited). Order of precedence: `--max-tool-calls` flag, then
+ * `model.maxToolCalls` from settings, else unlimited.
+ *
+ * Symmetric with `resolveMaxWallTimeSeconds`: yargs accepts `NaN` from
+ * non-numeric flag values, and the enforcer's `>= 0` gate would silently
+ * disable the budget for `NaN` / negatives. Validate up front so a typo
+ * in a CI guardrail fails loudly.
+ */
+function resolveMaxToolCalls(argv: CliArgs, settings: Settings): number {
+  if (argv.maxToolCalls !== undefined && argv.maxToolCalls !== null) {
+    try {
+      return validateMaxToolCalls(argv.maxToolCalls);
+    } catch (err) {
+      throw new Error(`--max-tool-calls: ${(err as Error).message}`);
+    }
+  }
+  const fromSettings = settings.model?.maxToolCalls;
+  if (typeof fromSettings === 'number') {
+    try {
+      return validateMaxToolCalls(fromSettings);
+    } catch (err) {
+      throw new Error(`settings.json: ${(err as Error).message}`);
+    }
+  }
+  return -1;
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
@@ -1379,6 +1517,20 @@ export async function loadCliConfig(
     addDisabled(name);
   }
 
+  // Resolve the per-workspace tool denylist (#4175 Wave 4 PR 17). De-duplicate
+  // while preserving original casing; downstream lookups go through
+  // `Config.getDisabledTools()` which materializes a Set, so the order here
+  // is only meaningful for diagnostic output.
+  const disabledTools: string[] = [];
+  const seenDisabledTools = new Set<string>();
+  for (const raw of settings.tools?.disabled ?? []) {
+    if (typeof raw !== 'string') continue;
+    const trimmed = raw.trim();
+    if (!trimmed || seenDisabledTools.has(trimmed)) continue;
+    seenDisabledTools.add(trimmed);
+    disabledTools.push(trimmed);
+  }
+
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
   // to preserve the original behaviour where "ShellTool", "Shell", and
@@ -1418,6 +1570,17 @@ export async function loadCliConfig(
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:
         // Deny all write/execute tools unless explicitly allowed.
+        denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.MONITOR as ToolName);
+        denyUnlessAllowed(ToolNames.EDIT as ToolName);
+        denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
+        break;
+      case ApprovalMode.AUTO:
+        // AUTO uses an LLM classifier to gate Shell/Monitor/Edit/WriteFile at
+        // call time; but non-interactive mode has no UI for the classifier's
+        // fallback path, so apply the same denylist as DEFAULT to keep parity
+        // with the interactive AUTO safety guarantees (no zero-denial drift
+        // toward YOLO behavior).
         denyUnlessAllowed(ToolNames.SHELL as ToolName);
         denyUnlessAllowed(ToolNames.MONITOR as ToolName);
         denyUnlessAllowed(ToolNames.EDIT as ToolName);
@@ -1472,6 +1635,27 @@ export async function loadCliConfig(
 
   const { model: resolvedModel } = resolvedCliConfig;
 
+  // Disable ToolSearch when explicitly configured or for models that benefit
+  // from prefix-based KV caching. DeepSeek models (v3, v4, deepseek-chat)
+  // all use prefix-based disk KV caching with heavily discounted cached
+  // token pricing (up to 1/120 for v4). When tool_search is in the deny
+  // list, client.ts eagerly reveals all deferred tools so every MCP tool
+  // schema is in the initial declaration list, keeping the prompt prefix
+  // stable and maximizing cache hit rates.
+  // Note: no `^` anchor — model names may include a provider prefix
+  // (e.g. "openrouter/deepseek/deepseek-v4-flash").
+  const toolSearchExplicitlyEnabled = settings.tools?.toolSearch?.enabled;
+  const shouldDisableToolSearch =
+    toolSearchExplicitlyEnabled === false ||
+    (toolSearchExplicitlyEnabled === undefined &&
+      resolvedModel !== undefined &&
+      /deepseek-(v3|v4|chat)/i.test(resolvedModel));
+  if (shouldDisableToolSearch) {
+    if (!mergedDeny.includes('tool_search')) {
+      mergedDeny.push('tool_search');
+    }
+  }
+
   const sandboxConfig = await loadSandboxConfig(
     bareMode ? ({} as Settings) : settings,
     argv,
@@ -1490,6 +1674,11 @@ export async function loadCliConfig(
       sessionData = await sessionService.loadLastSession();
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;
+      } else if (argv.forkSession) {
+        writeStderrLine(
+          'Cannot use --fork-session with --continue: no saved session found to fork.',
+        );
+        process.exit(1);
       }
     }
 
@@ -1505,6 +1694,31 @@ export async function loadCliConfig(
         process.exit(1);
       }
     }
+
+    if (argv.forkSession && sessionId) {
+      const sourceSessionId = sessionId;
+      const forkedSessionId = randomUUID();
+      try {
+        await sessionService.forkSession(sourceSessionId, forkedSessionId);
+      } catch (err) {
+        writeStderrLine(
+          `Failed to fork session ${sourceSessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        process.exit(1);
+      }
+      sessionId = forkedSessionId;
+      sessionData = await sessionService.loadSession(forkedSessionId);
+      if (!sessionData) {
+        writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
+        process.exit(1);
+      }
+    }
+  } else if (argv.sandboxSessionId) {
+    if (!process.env['SANDBOX']) {
+      writeStderrLine('--sandbox-session-id is for internal sandbox use only.');
+      process.exit(1);
+    }
+    sessionId = argv.sandboxSessionId;
   } else if (argv['sessionId']) {
     // Use provided session ID without session resumption
     // Check if session ID is already in use
@@ -1545,11 +1759,13 @@ export async function loadCliConfig(
     excludeTools: mergedDeny,
     disabledSlashCommands:
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
+    disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
+      autoMode: settings.permissions?.autoMode,
     },
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
@@ -1589,11 +1805,13 @@ export async function loadCliConfig(
       screenReader,
     },
     telemetry: telemetrySettings,
+    outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
     checkpointing:
       argv.checkpointing || settings.general?.checkpointing?.enabled,
+    plansDirectory: settings.plansDirectory,
     proxy:
       argv.proxy ||
       settings.proxy ||
@@ -1609,8 +1827,11 @@ export async function loadCliConfig(
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
+    maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
+    maxToolCalls: resolveMaxToolCalls(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? false,
+    computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
@@ -1649,10 +1870,12 @@ export async function loadCliConfig(
     enableManagedAutoMemory: bareMode
       ? false
       : (settings.memory?.enableManagedAutoMemory ?? true),
-    enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    enableManagedAutoDream: bareMode
+      ? false
+      : (settings.memory?.enableManagedAutoDream ?? true),
     enableAutoSkill: bareMode
       ? false
-      : (settings.memory?.enableAutoSkill ?? false),
+      : (settings.memory?.enableAutoSkill ?? true),
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: bareMode
@@ -1661,6 +1884,7 @@ export async function loadCliConfig(
     projectHooks: bareMode ? undefined : hooksConfig?.projectHooks,
     hooks: bareMode ? undefined : settings.hooks, // Keep for backward compatibility
     disableAllHooks: bareMode ? true : (settings.disableAllHooks ?? false),
+    stopHookBlockingCap: bareMode ? undefined : settings.stopHookBlockingCap,
     channel: argv.channel,
     // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
     // equivalent — fd passing is a spawn-time concern). `--json-file` and
@@ -1691,6 +1915,11 @@ export async function loadCliConfig(
             : undefined,
         }
       : undefined,
+    worktree: settings.worktree
+      ? {
+          symlinkDirectories: settings.worktree.symlinkDirectories,
+        }
+      : undefined,
   };
 
   const config = new Config(configParams);
@@ -1709,10 +1938,36 @@ export async function loadCliConfig(
       );
 
       await lspService.discoverAndPrepare();
+      if (config.getDebugMode()) {
+        debugLogger.debug(
+          'Native LSP status after discovery:',
+          lspService.getStatusSnapshot(),
+        );
+      }
       await lspService.start();
+      if (config.getDebugMode()) {
+        debugLogger.debug(
+          'Native LSP status after startup:',
+          lspService.getStatusSnapshot(),
+        );
+      }
       lspClient = new NativeLspClient(lspService);
       config.setLspClient(lspClient);
+      try {
+        config.setLspInitializationError(undefined);
+      } catch {
+        debugLogger.warn(
+          'Failed to clear LSP initialization error after initialization',
+        );
+      }
     } catch (err) {
+      try {
+        config.setLspInitializationError(
+          err instanceof Error ? err : String(err),
+        );
+      } catch {
+        debugLogger.warn('LSP init error occurred after initialization:', err);
+      }
       debugLogger.warn('Failed to initialize native LSP service:', err);
     }
   }

@@ -395,7 +395,108 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should reject unavailable fast models for the current auth type', async () => {
+  it('should set fast models configured under another auth type', async () => {
+    const setValue = vi.fn();
+    const setFastModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --fast deepseek-v4-flash',
+        name: 'model',
+        args: '--fast deepseek-v4-flash',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'deepseek-v4-flash',
+              label: 'deepseek-v4-flash',
+              authType: AuthType.USE_OPENAI,
+            },
+            {
+              id: 'claude-opus-4-7',
+              label: 'claude-opus-4-7',
+              authType: AuthType.USE_ANTHROPIC,
+            },
+          ]),
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--fast deepseek-v4-flash',
+    );
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'fastModel',
+      'deepseek-v4-flash',
+    );
+    expect(setFastModel).toHaveBeenCalledWith('deepseek-v4-flash');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Fast Model: deepseek-v4-flash',
+    });
+  });
+
+  it('should set authType-qualified fast model selectors', async () => {
+    const setValue = vi.fn();
+    const setFastModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --fast openai:deepseek-v4-flash',
+        name: 'model',
+        args: '--fast openai:deepseek-v4-flash',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          }),
+          getAvailableModelsForAuthType: vi.fn((authType: AuthType) =>
+            authType === AuthType.USE_OPENAI
+              ? [
+                  {
+                    id: 'deepseek-v4-flash',
+                    label: 'deepseek-v4-flash',
+                    authType: AuthType.USE_OPENAI,
+                  },
+                ]
+              : [],
+          ),
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--fast openai:deepseek-v4-flash',
+    );
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'fastModel',
+      'openai:deepseek-v4-flash',
+    );
+    expect(setFastModel).toHaveBeenCalledWith('openai:deepseek-v4-flash');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Fast Model: openai:deepseek-v4-flash',
+    });
+  });
+
+  it('should reject unavailable fast models across all auth types', async () => {
     const setValue = vi.fn();
     const setFastModel = vi.fn();
     mockContext = createMockCommandContext({
@@ -410,9 +511,13 @@ describe('modelCommand', () => {
             model: 'qwen-plus',
             authType: AuthType.USE_OPENAI,
           }),
-          getAvailableModelsForAuthType: vi
-            .fn()
-            .mockReturnValue([{ id: 'qwen-turbo', label: 'Qwen Turbo' }]),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-turbo',
+              label: 'Qwen Turbo',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
           setFastModel,
         },
         settings: createMockSettings(setValue),
@@ -430,8 +535,8 @@ describe('modelCommand', () => {
       type: 'message',
       messageType: 'error',
       content:
-        "Fast model 'missing-model' is not available for auth type 'openai'.\n" +
-        "Available models for 'openai': qwen-turbo.\n" +
+        "Fast model 'missing-model' is not configured for any auth type.\n" +
+        'Configured models: qwen-turbo.\n' +
         'Configure models in settings.modelProviders or run /model to select an available model.',
     });
   });

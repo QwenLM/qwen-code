@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import process from 'node:process';
 import { useCallback, useContext, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
@@ -12,6 +13,7 @@ import {
   ModelSlashCommandEvent,
   logModelSlashCommand,
   MAINLINE_CODER_MODEL,
+  resolveModelId,
   type AvailableModel as CoreAvailableModel,
   type ContentGeneratorConfig,
   type InputModalities,
@@ -104,6 +106,24 @@ function persistAuthTypeSelection(
 ): void {
   const scope = getPersistScopeForModelSelection(settings);
   settings.setValue(scope, 'security.auth.selectedType', authType);
+}
+
+function hydrateApiKeyEnvFromSettings(
+  settings: ReturnType<typeof useSettings>,
+  envKey: string | undefined,
+): void {
+  if (!envKey || process.env[envKey]) {
+    return;
+  }
+  const settingsEnvValue = (
+    settings?.merged?.env as Record<string, unknown> | undefined
+  )?.[envKey];
+  if (
+    typeof settingsEnvValue === 'string' &&
+    settingsEnvValue.trim().length > 0
+  ) {
+    process.env[envKey] = settingsEnvValue;
+  }
 }
 
 interface HandleModelSwitchSuccessParams {
@@ -303,9 +323,17 @@ export function ModelDialog({
 
   // In fast model mode, default to the currently configured fast model
   const fastModelSetting = settings?.merged?.fastModel as string | undefined;
+  const parsedFastModelSetting = useMemo(() => {
+    if (!isFastModelMode) return undefined;
+    try {
+      return resolveModelId(fastModelSetting);
+    } catch {
+      return undefined;
+    }
+  }, [fastModelSetting, isFastModelMode]);
   const preferredModelId =
-    isFastModelMode && fastModelSetting
-      ? fastModelSetting
+    isFastModelMode && parsedFastModelSetting
+      ? parsedFastModelSetting.modelId
       : config?.getModel() || MAINLINE_CODER_MODEL;
   // Check if current model is a runtime model
   // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
@@ -315,11 +343,35 @@ export function ModelDialog({
   const currentBaseUrl = config
     ?.getModelsConfig()
     .getGenerationConfig()?.baseUrl;
+  // When `/model --fast <bare-id>` validated the model across all providers,
+  // the setting persists as a bare model ID (no authType prefix) so that
+  // runtime cross-auth lookups still work. Highlight the row that owns it
+  // regardless of which provider that turns out to be — otherwise the
+  // dialog would default to the current auth's first row and Enter would
+  // silently overwrite the user's fast-model setting.
+  const preferredFastModelEntry =
+    isFastModelMode && parsedFastModelSetting
+      ? parsedFastModelSetting.authType
+        ? availableModelEntries.find(
+            ({ authType: t2, model }) =>
+              t2 === parsedFastModelSetting.authType &&
+              model.id === parsedFastModelSetting.modelId,
+          )
+        : availableModelEntries.find(
+            ({ model }) => model.id === parsedFastModelSetting.modelId,
+          )
+      : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
-    : authType
-      ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
-      : '';
+    : preferredFastModelEntry
+      ? buildModelSelectionKey(
+          preferredFastModelEntry.authType,
+          preferredFastModelEntry.model.id,
+          preferredFastModelEntry.model.baseUrl,
+        )
+      : authType
+        ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
+        : '';
 
   useKeypress(
     (key) => {
@@ -357,28 +409,39 @@ export function ModelDialog({
   const handleSelect = useCallback(
     async (selected: string) => {
       setErrorMessage(null);
+      const selectedEntry = availableModelEntries.find(
+        ({ authType: t2, model, isRuntime, snapshotId }) => {
+          const value =
+            isRuntime && snapshotId
+              ? snapshotId
+              : buildModelSelectionKey(t2, model.id, model.baseUrl);
+          return value === selected;
+        },
+      );
+      hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model.envKey);
 
-      // Fast model mode: save the model ID only (baseUrl is intentionally
-      // discarded — getFastModel resolves via the first registry match).
+      // Fast model mode: save authType:modelId so duplicate model ids across
+      // providers remain unambiguous. baseUrl is intentionally discarded.
       if (isFastModelMode) {
-        let modelId: string;
+        let fastModel: string;
         if (selected.includes('::')) {
           const parsed = parseModelSelectionKey(selected);
-          modelId = parsed.modelId;
+          fastModel = `${parsed.authType}:${parsed.modelId}`;
         } else if (selected.startsWith('$runtime|')) {
           const parts = selected.split('|');
-          modelId = parts[2] ?? selected;
+          fastModel =
+            parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
         } else {
-          modelId = selected;
+          fastModel = selected;
         }
         const scope = getPersistScopeForModelSelection(settings);
-        settings.setValue(scope, 'fastModel', modelId);
+        settings.setValue(scope, 'fastModel', fastModel);
         // Sync the runtime Config so forked agents pick up the change immediately.
-        config?.setFastModel(modelId);
+        config?.setFastModel(fastModel);
         uiState?.historyManager.addItem(
           {
             type: 'success',
-            text: `${t('Fast Model')}: ${modelId}`,
+            text: `${t('Fast Model')}: ${fastModel}`,
           },
           Date.now(),
         );
@@ -486,6 +549,7 @@ export function ModelDialog({
       uiState,
       setErrorMessage,
       isFastModelMode,
+      availableModelEntries,
     ],
   );
 

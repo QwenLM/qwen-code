@@ -18,6 +18,7 @@ import type {
   ToolListUnion,
 } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
+import { buildAnthropicUsageMetadata } from './usage.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import {
@@ -26,8 +27,18 @@ import {
 } from '../../utils/schemaConverter.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
+// `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
+// to extend prompt caching across sessions (rather than the default
+// per-session ephemeral scope). The Anthropic SDK types we depend on still
+// model `cache_control` as `{ type: 'ephemeral' }` only, so we widen the
+// shape here for the fields where we actually attach it (tool params and
+// the system text block).
+type AnthropicCacheControl = { type: 'ephemeral'; scope?: 'global' };
 type AnthropicToolParam = Anthropic.Tool & {
-  cache_control?: { type: 'ephemeral' };
+  cache_control?: AnthropicCacheControl;
+};
+type AnthropicTextBlockParam = Anthropic.TextBlockParam & {
+  cache_control?: AnthropicCacheControl;
 };
 type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
@@ -67,6 +78,28 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * spawned with `thinkingConfig.includeThoughts: false`).
    */
   stripAssistantThinking?: boolean;
+  /**
+   * Per-call override for `enableCacheControl`. Falls back to the value
+   * captured at construction. The generator passes the live
+   * `contentGeneratorConfig.enableCacheControl` here so a hot
+   * `Config.setModel()` flip is reflected on the next request — otherwise
+   * the converter's body-side `cache_control` and the generator's
+   * per-request `prompt-caching-scope-2026-01-05` beta header (which reads
+   * the live config directly) can disagree.
+   */
+  enableCacheControl?: boolean;
+  /**
+   * When `true`, emit `cache_control: { type: 'ephemeral', scope: 'global' }`
+   * on the system text and last tool entry so prefixes cache across
+   * sessions; when `false` (or omitted), emit the SDK-standard per-session
+   * shape `{ type: 'ephemeral' }`. Must be a strict subset of
+   * `enableCacheControl` (no scope without a cache_control entry to
+   * attach it to) and should mirror the generator's
+   * `prompt-caching-scope-2026-01-05` beta-header gate — both ship
+   * together or neither, so anthropic-compatible backends without
+   * cross-session caching support don't see an unrecognized scope field.
+   */
+  useGlobalCacheScope?: boolean;
 }
 
 export class AnthropicContentConverter {
@@ -88,7 +121,7 @@ export class AnthropicContentConverter {
     request: GenerateContentParameters,
     options: ConvertGeminiRequestToAnthropicOptions = {},
   ): {
-    system?: Anthropic.TextBlockParam[] | string;
+    system?: AnthropicTextBlockParam[] | string;
     messages: AnthropicMessageParam[];
   } {
     const messages: AnthropicMessageParam[] = [];
@@ -111,11 +144,22 @@ export class AnthropicContentConverter {
       this.injectEmptyThinkingOnToolUseTurns(messages);
     }
 
-    // Add cache_control to enable prompt caching (if enabled)
-    const system = this.enableCacheControl
-      ? this.buildSystemWithCacheControl(systemText)
+    // Add cache_control to enable prompt caching (if enabled). Prefer the
+    // per-call override when the caller (typically the generator) passes
+    // one — that path latches the live config value alongside the
+    // per-request beta-header decision so the two stay in sync after
+    // `Config.setModel()` mutates `enableCacheControl` mid-session.
+    // `useGlobalCacheScope` is independent of (and a strict subset of)
+    // `enableCacheControl`: it only controls whether the emitted
+    // cache_control carries `scope: 'global'`, not whether the
+    // cache_control itself is emitted.
+    const enableCacheControl =
+      options.enableCacheControl ?? this.enableCacheControl;
+    const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
+    const system = enableCacheControl
+      ? this.buildSystemWithCacheControl(systemText, useGlobalCacheScope)
       : systemText;
-    if (this.enableCacheControl) {
+    if (enableCacheControl) {
       this.addCacheControlToMessages(messages);
     }
 
@@ -127,6 +171,10 @@ export class AnthropicContentConverter {
 
   async convertGeminiToolsToAnthropic(
     geminiTools: ToolListUnion,
+    options: {
+      enableCacheControl?: boolean;
+      useGlobalCacheScope?: boolean;
+    } = {},
   ): Promise<AnthropicToolParam[]> {
     const tools: AnthropicToolParam[] = [];
 
@@ -173,12 +221,31 @@ export class AnthropicContentConverter {
       }
     }
 
-    // Add cache_control to the last tool for prompt caching (if enabled)
-    if (this.enableCacheControl && tools.length > 0) {
+    // Add cache_control to the last tool for prompt caching (if enabled).
+    // When `useGlobalCacheScope` is set, attach `scope: 'global'` so
+    // identical tool prefixes are cached across sessions — tools tend to
+    // be the largest, slowest-changing prefix (often 5K+ tokens), so
+    // cross-session reuse is where most of the hit-rate improvement under
+    // `prompt-caching-scope-2026-01-05` shows up. Non-Anthropic baseURLs
+    // ship the standard per-session shape so they don't see a scope
+    // extension they may not recognize.
+    // Per-call overrides mirror the request-shape gates in
+    // `convertGeminiRequestToAnthropic` so a qwen-oauth-style hot flip of
+    // `enableCacheControl` (the only field `Config.handleModelChange()`
+    // mutates in place without recreating the generator) doesn't leave
+    // the tool body and the beta header out of sync. `baseUrl` isn't
+    // hot-mutated — non-qwen-oauth providers recreate the generator on
+    // refresh — but the same per-call plumbing covers it for free.
+    const enableCacheControl =
+      options.enableCacheControl ?? this.enableCacheControl;
+    const useGlobalCacheScope = options.useGlobalCacheScope ?? false;
+    if (enableCacheControl && tools.length > 0) {
       const lastToolIndex = tools.length - 1;
       tools[lastToolIndex] = {
         ...tools[lastToolIndex],
-        cache_control: { type: 'ephemeral' },
+        cache_control: useGlobalCacheScope
+          ? { type: 'ephemeral', scope: 'global' }
+          : { type: 'ephemeral' },
       };
     }
 
@@ -259,13 +326,12 @@ export class AnthropicContentConverter {
     geminiResponse.promptFeedback = { safetyRatings: [] };
 
     if (response.usage) {
-      const promptTokens = response.usage.input_tokens || 0;
-      const completionTokens = response.usage.output_tokens || 0;
-      geminiResponse.usageMetadata = {
-        promptTokenCount: promptTokens,
-        candidatesTokenCount: completionTokens,
-        totalTokenCount: promptTokens + completionTokens,
-      };
+      geminiResponse.usageMetadata = buildAnthropicUsageMetadata({
+        inputTokens: response.usage.input_tokens || 0,
+        cacheReadTokens: response.usage.cache_read_input_tokens || 0,
+        cacheCreationTokens: response.usage.cache_creation_input_tokens || 0,
+        outputTokens: response.usage.output_tokens || 0,
+      });
     }
 
     return geminiResponse;
@@ -580,10 +646,16 @@ export class AnthropicContentConverter {
   /**
    * Build system content blocks with cache_control.
    * Anthropic prompt caching requires cache_control on system content.
+   * When `useGlobalCacheScope` is set, attach `scope: 'global'` so the
+   * system prefix participates in cross-session caching under the
+   * `prompt-caching-scope-2026-01-05` beta. Otherwise emit the standard
+   * per-session shape so non-Anthropic baseURLs aren't sent a scope
+   * extension they may not recognize.
    */
   private buildSystemWithCacheControl(
     systemText: string,
-  ): Anthropic.TextBlockParam[] | string {
+    useGlobalCacheScope: boolean,
+  ): AnthropicTextBlockParam[] | string {
     if (!systemText) {
       return systemText;
     }
@@ -592,7 +664,9 @@ export class AnthropicContentConverter {
       {
         type: 'text',
         text: systemText,
-        cache_control: { type: 'ephemeral' },
+        cache_control: useGlobalCacheScope
+          ? { type: 'ephemeral', scope: 'global' }
+          : { type: 'ephemeral' },
       },
     ];
   }
@@ -723,9 +797,24 @@ export class AnthropicContentConverter {
   /**
    * Add cache_control to the last user message's content.
    * This enables prompt caching for the conversation context.
+   *
+   * Deliberately emits the per-session `{ type: 'ephemeral' }` shape only —
+   * no `scope: 'global'`. The last user message changes every turn (it's
+   * the live prompt and any tool_result blocks from the immediately prior
+   * round), so cross-session reuse here has effectively zero hit rate and
+   * paying the global-scope overhead would just churn cache. System text
+   * and tool prefixes (which DO repeat across sessions) carry
+   * `scope: 'global'` instead.
    */
   private addCacheControlToMessages(messages: Anthropic.MessageParam[]): void {
-    // Find the last user message to add cache_control
+    // Find the last user message to add cache_control. The Anthropic docs
+    // (https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
+    // explicitly list both `text` and `tool_result` blocks as cacheable in
+    // `messages.content`. In agentic loops the last user message after
+    // turn 1 is typically a tool_result-only message, so accepting both
+    // types keeps the per-turn breakpoint moving forward as the
+    // conversation grows (otherwise the cacheable region collapses back
+    // to system+tools and turn-over-turn history never gets cached).
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       if (msg.role === 'user') {
@@ -735,19 +824,18 @@ export class AnthropicContentConverter {
 
         if (content.length > 0) {
           const lastContent = content[content.length - 1];
-          // Only add cache_control if the last block is a non-empty text block
-          if (
-            typeof lastContent === 'object' &&
-            'type' in lastContent &&
-            lastContent.type === 'text' &&
-            'text' in lastContent &&
-            lastContent.text
-          ) {
-            lastContent.cache_control = {
-              type: 'ephemeral',
-            };
+          if (typeof lastContent === 'object' && 'type' in lastContent) {
+            const type = lastContent.type;
+            // Empty text blocks cannot be cached (per Anthropic docs).
+            const isEmptyText =
+              type === 'text' &&
+              (!('text' in lastContent) || !lastContent.text);
+            if ((type === 'text' || type === 'tool_result') && !isEmptyText) {
+              lastContent.cache_control = {
+                type: 'ephemeral',
+              };
+            }
           }
-          // If last block is not text or is empty, don't add cache_control
           msg.content = content;
         }
         break;
