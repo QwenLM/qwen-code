@@ -67,7 +67,10 @@ import type {
   AgentApprovalRequestEvent,
   AgentUsageEvent,
 } from '../../agents/runtime/agent-events.js';
-import { BuiltinAgentRegistry } from '../../subagents/builtin-agents.js';
+import {
+  BuiltinAgentRegistry,
+  DEFAULT_BUILTIN_SUBAGENT_TYPE,
+} from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import type { StopHookOutput } from '../../hooks/types.js';
@@ -528,7 +531,11 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
+${
+  isForkSubagentEnabled(this.config)
+    ? `When using the Agent tool, specify a subagent_type to use a specialized agent, or omit it to fork yourself — a fork inherits your full conversation context.`
+    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.`
+}
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
@@ -579,6 +586,7 @@ ${isForkSubagentEnabled(this.config) ? 'When spawning a fresh agent (with a `sub
 ${isForkSubagentEnabled(this.config) ? 'For fresh agents, terse' : 'Terse'} command-style prompts produce shallow, generic work.
 
 **Never delegate understanding.** Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.
+
 Example usage:
 
 <example_agent_descriptions>
@@ -1416,29 +1424,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     let restoreParentPM: () => void = () => {};
 
     try {
-      const isFork = !this.params.subagent_type;
+      // When subagent_type is omitted and fork is enabled (opt-in +
+      // interactive), use fork. Otherwise fall back to general-purpose.
+      const isFork =
+        !this.params.subagent_type && isForkSubagentEnabled(this.config);
+      const effectiveSubagentType =
+        this.params.subagent_type ??
+        (isFork ? undefined : DEFAULT_BUILTIN_SUBAGENT_TYPE);
       let subagentConfig: SubagentConfig;
 
       if (isFork) {
-        // Gate: fork is only available in interactive sessions.
-        // Non-interactive sessions (qwen -p, SDK headless, CI/CD) lack a
-        // terminal UI for fork progress display and permission bubble-up.
-        if (!isForkSubagentEnabled(this.config)) {
-          return {
-            llmContent:
-              'Error: Fork subagent is not available in non-interactive mode. Use an explicit subagent_type instead.',
-            returnDisplay: {
-              type: 'task_execution' as const,
-              subagentName: FORK_AGENT.name,
-              taskDescription: this.params.description,
-              taskPrompt: this.params.prompt,
-              status: 'failed' as const,
-              terminateReason:
-                'Fork subagent is not available in non-interactive mode',
-            },
-          };
-        }
-
         subagentConfig = FORK_AGENT;
 
         // Recursive-fork guard. A fork child's reasoning loop runs inside
@@ -1461,18 +1456,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
       } else {
         const loadedConfig = await this.subagentManager.loadSubagent(
-          this.params.subagent_type!,
+          effectiveSubagentType!,
         );
         if (!loadedConfig) {
           return {
-            llmContent: `Subagent "${this.params.subagent_type}" not found`,
+            llmContent: `Subagent "${effectiveSubagentType}" not found`,
             returnDisplay: {
               type: 'task_execution' as const,
-              subagentName: this.params.subagent_type!,
+              subagentName: effectiveSubagentType!,
               taskDescription: this.params.description,
               taskPrompt: this.params.prompt,
               status: 'failed' as const,
-              terminateReason: `Subagent "${this.params.subagent_type}" not found`,
+              terminateReason: `Subagent "${effectiveSubagentType}" not found`,
             },
           };
         }

@@ -667,6 +667,7 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  forkSubagentEnabled?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -982,6 +983,7 @@ export class Config {
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
+  private readonly forkSubagentEnabled: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -1153,6 +1155,7 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
+    this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -3043,6 +3046,11 @@ export class Config {
     // Cron is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
     return this.cronEnabled;
+  }
+
+  isForkSubagentEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
+    return this.forkSubagentEnabled;
   }
 
   /**

@@ -144,6 +144,7 @@ describe('AgentTool', () => {
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
+      isForkSubagentEnabled: vi.fn().mockReturnValue(false),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue(stubRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(stubMonitorRegistry),
       getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
@@ -237,10 +238,13 @@ describe('AgentTool', () => {
       expect(failedAgentTool.description).toContain('Explore');
     });
 
-    it('includes "When to fork" section in description when interactive', async () => {
+    it('includes "When to fork" section in description when fork enabled + interactive', async () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)[
+        'isForkSubagentEnabled'
+      ] = vi.fn().mockReturnValue(true);
 
       const interactiveTool = new AgentTool(config);
       await vi.runAllTimersAsync();
@@ -255,6 +259,9 @@ describe('AgentTool', () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(false);
+      (config as unknown as Record<string, unknown>)[
+        'isForkSubagentEnabled'
+      ] = vi.fn().mockReturnValue(false);
 
       const nonInteractiveTool = new AgentTool(config);
       await vi.runAllTimersAsync();
@@ -272,6 +279,21 @@ describe('AgentTool', () => {
       expect(nonInteractiveTool.description).toContain(
         'Never delegate understanding',
       );
+    });
+
+    it('omits fork discipline when interactive but fork flag is off', async () => {
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)[
+        'isForkSubagentEnabled'
+      ] = vi.fn().mockReturnValue(false);
+
+      const tool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).not.toContain('When to fork');
+      expect(tool.description).toContain('If omitted, the general-purpose agent is used');
     });
   });
 
@@ -821,16 +843,66 @@ describe('AgentTool', () => {
 
       vi.mocked(AgentHeadless.create).mockResolvedValue(mockAgent);
 
-      // Fork requires interactive mode — gate added by isForkSubagentEnabled().
+      // Fork requires interactive mode + feature flag — gate from isForkSubagentEnabled().
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)[
+        'isForkSubagentEnabled'
+      ] = vi.fn().mockReturnValue(true);
     });
 
-    it('rejects fork in non-interactive mode', async () => {
+    it('falls back to general-purpose when fork flag is off', async () => {
+      // Fork flag off — even though interactive
+      vi.mocked(
+        config.isForkSubagentEnabled as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(false);
+
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const params: AgentParams = {
+        description: 'some task',
+        prompt: 'do the thing',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      // Should load general-purpose, not fork
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
+      );
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
+    });
+
+    it('falls back to general-purpose when non-interactive (even with fork flag on)', async () => {
       vi.mocked(
         config.isInteractive as ReturnType<typeof vi.fn>,
       ).mockReturnValue(false);
+      // Fork flag is on, but non-interactive → isForkSubagentEnabled() returns false
+      // because it requires both flag + interactive.
+
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
 
       const params: AgentParams = {
         description: 'fork task',
@@ -840,10 +912,12 @@ describe('AgentTool', () => {
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
-      const result = await invocation.execute();
+      await invocation.execute();
 
-      const llmText = partToString(result.llmContent);
-      expect(llmText).toContain('not available in non-interactive mode');
+      // Should fall back to general-purpose
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
+      );
       expect(AgentHeadless.create).not.toHaveBeenCalled();
     });
 

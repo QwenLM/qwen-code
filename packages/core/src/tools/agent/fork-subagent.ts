@@ -7,12 +7,18 @@ export const FORK_SUBAGENT_TYPE = 'fork';
 /**
  * Fork subagent feature gate.
  *
- * Fork is only available in interactive sessions. Non-interactive sessions
- * (e.g. `qwen -p`, SDK headless, CI/CD) lack a terminal UI for fork progress
- * display and permission bubble-up, which can cause hangs or silent failures.
+ * Fork requires two conditions:
+ * 1. Explicit opt-in via QWEN_CODE_ENABLE_FORK_SUBAGENT=1 env var
+ *    or programmatic `forkSubagentEnabled: true` (defaults to off).
+ * 2. An interactive session — non-interactive sessions (e.g. `qwen -p`,
+ *    SDK headless, CI/CD) lack a terminal UI for fork progress display
+ *    and permission bubble-up, which can cause hangs or silent failures.
+ *
+ * When fork is disabled, omitting `subagent_type` falls back to a
+ * general-purpose subagent instead of forking.
  */
 export function isForkSubagentEnabled(config: Config): boolean {
-  return config.isInteractive();
+  return config.isForkSubagentEnabled() && config.isInteractive();
 }
 
 export const FORK_BOILERPLATE_TAG = 'fork-boilerplate';
