@@ -2162,15 +2162,15 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('y')));
         act(() => result.current.handleInput(makeKey('y')));
 
-        // Paste should insert the yanked line below current line
+        // Paste on last line should append at line end
         act(() => result.current.handleInput(makeKey('p')));
 
         expect(buffer.replaceRange).toHaveBeenCalledWith(
-          1,
           0,
-          1,
+          11,
           0,
-          'hello world\n',
+          11,
+          '\nhello world',
         );
       });
     });

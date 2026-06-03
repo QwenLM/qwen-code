@@ -1390,7 +1390,19 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               const line = buffer.lines[row] ?? '';
               if (state.yankLinewise) {
                 const repeated = preparePasteText(text, repeatCount);
-                buffer.replaceRange(row + 1, 0, row + 1, 0, repeated);
+                if (row + 1 >= buffer.lines.length) {
+                  const lastRow = buffer.lines.length - 1;
+                  const lastLineLen = (buffer.lines[lastRow] ?? '').length;
+                  buffer.replaceRange(
+                    lastRow,
+                    lastLineLen,
+                    lastRow,
+                    lastLineLen,
+                    '\n' + repeated.replace(/\n$/, ''),
+                  );
+                } else {
+                  buffer.replaceRange(row + 1, 0, row + 1, 0, repeated);
+                }
                 buffer.vimMoveDown(1);
                 buffer.vimMoveToLineStart();
               } else {
