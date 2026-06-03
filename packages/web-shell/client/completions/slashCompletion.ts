@@ -110,10 +110,7 @@ const IMPLICIT_SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
   ],
   mcp: [
     { name: 'desc', description: 'Show MCP server and tool descriptions' },
-    { name: 'nodesc', description: 'Hide MCP descriptions' },
     { name: 'schema', description: 'Show tool parameter schemas' },
-    { name: 'auth', description: 'Authenticate OAuth MCP servers' },
-    { name: 'noauth', description: 'Hide OAuth authentication status' },
   ],
   memory: [
     { name: 'show', description: 'Show memory files' },

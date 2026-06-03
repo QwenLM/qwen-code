@@ -83,7 +83,7 @@ export const MessageItem = memo(function MessageItem({
       return <InsightReady path={message.path} />;
     case 'insight_error':
       return (
-        <div style={{ color: 'var(--color-error, #e06c75)' }}>
+        <div style={{ color: 'var(--error-color, #e06c75)' }}>
           {message.error}
         </div>
       );

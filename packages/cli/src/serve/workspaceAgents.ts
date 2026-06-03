@@ -301,9 +301,9 @@ export function mountWorkspaceAgentsRoutes(
         });
         return;
       }
-      if (description.length > 4096) {
+      if (Buffer.byteLength(description, 'utf8') > 4096) {
         res.status(400).json({
-          error: '`description` exceeds the 4096-character limit',
+          error: '`description` exceeds the 4096-byte limit',
           code: 'invalid_description',
         });
         return;

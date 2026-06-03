@@ -97,12 +97,13 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(
         client.restartMcpServer(serverName),
         'Restart MCP server timed out',
+        5 * 60_000,
       );
     },
 
     async manageMcpServer(serverName, action) {
       const client = requireClient(getClient, 'Manage MCP server failed');
-      const timeoutMs = action === 'authenticate' ? 10 * 60_000 : undefined;
+      const timeoutMs = action === 'authenticate' ? 10 * 60_000 : 5 * 60_000;
       return withActionTimeout(
         client.manageMcpServer(serverName, action),
         'Manage MCP server timed out',

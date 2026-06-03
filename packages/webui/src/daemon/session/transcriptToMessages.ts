@@ -80,6 +80,7 @@ export function transcriptBlocksToDaemonMessages(
           let lastProgress: ParsedInsight | null = null;
           let hasTerminal = false;
           let readyCount = 0;
+          let errorCount = 0;
           for (const seg of insightSegments) {
             if (seg.kind === 'insight') {
               if (seg.data.type === 'insight_progress') {
@@ -94,7 +95,7 @@ export function transcriptBlocksToDaemonMessages(
               } else if (seg.data.type === 'insight_error') {
                 hasTerminal = true;
                 messages.push({
-                  id: `${block.id}-ie`,
+                  id: `${block.id}-ie-${errorCount++}`,
                   role: 'insight_error',
                   error: seg.data.error,
                 });

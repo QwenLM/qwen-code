@@ -1441,7 +1441,6 @@ export function App({
             return true;
           }
           if (cmd === 'btw') {
-            store.appendLocalUserMessage(text);
             runVisibleBtw(text.slice(match[0].length));
             return true;
           }
@@ -1461,9 +1460,7 @@ export function App({
                   },
                 ]);
               })
-              .catch((error: unknown) => {
-                reportError(error, 'Failed to load stats');
-              });
+              .catch(() => {});
             return true;
           }
           if (cmd === 'status' || cmd === 'about') {
@@ -1566,8 +1563,9 @@ export function App({
                     `https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml` +
                     `&title=${encodeURIComponent(bugTitle)}` +
                     `&info=${encodeURIComponent('\n' + fields + '\n')}`;
-                  const win = window.open(url, '_blank', 'noopener,noreferrer');
+                  const win = window.open(url, '_blank');
                   if (win) {
+                    win.opener = null;
                     store.dispatch([
                       { type: 'status', text: t('bug.submitted') },
                     ]);
