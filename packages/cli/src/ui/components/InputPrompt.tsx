@@ -1590,7 +1590,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       : 2 // "! " = 2 chars
     : commandSearchActive
       ? 6 // "(r:) " (inner) + " " (outer) = 6 cols
-      : approvalMode === ApprovalMode.YOLO
+      : showYoloStyling
         ? 2 // "* " = 2 chars
         : 2; // "> " = 2 chars
 
