@@ -79,7 +79,7 @@ describe('approvalModeCommand', () => {
 
       expect(result.type).toBe('message');
       expect(result.messageType).toBe('info');
-      expect(result.content).toContain('yolo');
+      expect(result.content).toContain('YOLO');
       expect(mockSetApprovalMode).toHaveBeenCalledWith('yolo');
     });
 

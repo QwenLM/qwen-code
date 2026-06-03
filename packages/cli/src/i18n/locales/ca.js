@@ -846,13 +846,14 @@ export default {
   // Ordres - Mode d'aprovació
   // ============================================================================
   'Tool Approval Mode': "Mode d'aprovació d'eines",
-  '{{mode}} mode': 'Mode {{mode}}',
   'Analyze only, do not modify files or execute commands':
     'Analitzar només, sense modificar fitxers ni executar ordres',
   'Require approval for file edits or shell commands':
     'Requerir aprovació per a edicions de fitxers o ordres shell',
   'Automatically approve file edits':
     'Aprovar automàticament les edicions de fitxers',
+  'Use classifier to automatically approve safe tool calls':
+    'Utilitzar el classificador per aprovar automàticament les crides segures a eines',
   'Automatically approve all tools': 'Aprovar automàticament totes les eines',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     "Existeix un mode d'aprovació de l'espai de treball i té prioritat. El canvi a nivell d'usuari no tindrà cap efecte.",

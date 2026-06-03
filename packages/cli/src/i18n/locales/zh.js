@@ -838,12 +838,13 @@ export default {
   // Commands - Approval Mode
   // ============================================================================
   'Tool Approval Mode': '工具审批模式',
-  '{{mode}} mode': '{{mode}} 模式',
   'Analyze only, do not modify files or execute commands':
     '仅分析，不修改文件或执行命令',
   'Require approval for file edits or shell commands':
     '需要批准文件编辑或 shell 命令',
   'Automatically approve file edits': '自动批准文件编辑',
+  'Use classifier to automatically approve safe tool calls':
+    '使用分类器自动批准安全的工具调用',
   'Automatically approve all tools': '自动批准所有工具',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     '工作区审批模式已存在并具有优先级。用户级别的更改将无效。',

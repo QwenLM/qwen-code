@@ -18,6 +18,7 @@ import {
   ApprovalMode as ApprovalModeEnum,
 } from '@qwen-code/qwen-code-core';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
+import { formatApprovalModeName } from '../utils/approvalModeDisplay.js';
 
 /**
  * Parses the argument string and returns the corresponding ApprovalMode if valid.
@@ -101,7 +102,10 @@ export const approvalModeCommand: SlashCommand = {
     return {
       type: 'message',
       messageType: 'info',
-      content: t('Approval mode set to "{{mode}}"', { mode }),
+      content: t('Approval mode set to "{{mode}}"', {
+        mode:
+          mode === ApprovalModeEnum.YOLO ? formatApprovalModeName(mode) : mode,
+      }),
     };
   },
 };

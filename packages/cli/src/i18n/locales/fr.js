@@ -869,13 +869,14 @@ export default {
   // Commandes - Mode d'approbation
   // ============================================================================
   'Tool Approval Mode': "Mode d'approbation des outils",
-  '{{mode}} mode': 'Mode {{mode}}',
   'Analyze only, do not modify files or execute commands':
     'Analyser uniquement, ne pas modifier les fichiers ni exécuter des commandes',
   'Require approval for file edits or shell commands':
     "Demander l'approbation pour les modifications de fichiers ou les commandes shell",
   'Automatically approve file edits':
     'Approuver automatiquement les modifications de fichiers',
+  'Use classifier to automatically approve safe tool calls':
+    'Utiliser le classificateur pour approuver automatiquement les appels d’outils sûrs',
   'Automatically approve all tools':
     'Approuver automatiquement tous les outils',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':

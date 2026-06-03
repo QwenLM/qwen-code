@@ -803,13 +803,14 @@ export default {
   // Commands - Approval Mode
   // ============================================================================
   'Tool Approval Mode': 'Werkzeug-Genehmigungsmodus',
-  '{{mode}} mode': '{{mode}}-Modus',
   'Analyze only, do not modify files or execute commands':
     'Nur analysieren, keine Dateien ändern oder Befehle ausführen',
   'Require approval for file edits or shell commands':
     'Genehmigung für Dateibearbeitungen oder Shell-Befehle erforderlich',
   'Automatically approve file edits':
     'Dateibearbeitungen automatisch genehmigen',
+  'Use classifier to automatically approve safe tool calls':
+    'Klassifikator verwenden, um sichere Werkzeugaufrufe automatisch zu genehmigen',
   'Automatically approve all tools': 'Alle Werkzeuge automatisch genehmigen',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Arbeitsbereich-Genehmigungsmodus existiert und hat Vorrang. Benutzerebene-Änderung hat keine Wirkung.',
