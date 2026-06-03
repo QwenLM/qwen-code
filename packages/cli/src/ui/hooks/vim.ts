@@ -603,12 +603,14 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           const count = state.count || 1;
           if (col + count > line.length) {
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
           if (col < line.length) {
             buffer.replaceRange(row, col, row, col + count, char.repeat(count));
           }
           dispatch({ type: 'CLEAR_COUNT' });
+          dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
           return true;
         }
         case 'f':
@@ -1074,6 +1076,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               );
             }
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
           case ',': {
@@ -1092,6 +1095,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               );
             }
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
 
@@ -1108,6 +1112,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
 
           case 'r':
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             dispatch({ type: 'SET_PENDING_CHAR_READ', value: 'r' });
             return true;
 
@@ -1402,6 +1407,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               }
             }
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
           case 'P': {
@@ -1425,6 +1431,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               }
             }
             dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
 
