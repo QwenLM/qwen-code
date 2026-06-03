@@ -1784,14 +1784,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     const inFlight = inFlightRestores.get(req.sessionId);
     if (inFlight) {
       // Cross-action races BOTH ways must reject. A `resume` arriving
-      // while a `load` is in flight cannot quietly coalesce: the load
-      // is replaying full history through SSE on a shared EventBus,
-      // and `DaemonSessionClient.resume()` seeds `lastEventId: 0`,
-      // which means the resume client would receive every replayed
-      // frame — directly violating resume's "no UI replay" contract.
-      // The mirror direction (`load` onto `resume`) is rejected for
-      // the same reason: a load caller expects history but resume
-      // didn't replay any. Same-action coalescing is unaffected.
+      // while a `load` is in flight cannot quietly coalesce: load
+      // returns compacted replay + watermark while resume returns only
+      // a watermark — mixing the two on a shared EventBus would give
+      // the resume client unexpected replay data or the load client a
+      // missing snapshot. Same-action coalescing is unaffected.
       if (action !== inFlight.action) {
         throw new RestoreInProgressError(
           req.sessionId,

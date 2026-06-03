@@ -189,7 +189,7 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBe('0');
   });
 
-  it('loads an existing daemon session and seeds replay from the start', async () => {
+  it('loads an existing daemon session using server watermark and replay snapshot', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/load')) {
         return jsonResponse(200, {
