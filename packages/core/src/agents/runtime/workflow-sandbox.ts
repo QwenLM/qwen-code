@@ -117,27 +117,32 @@ function deepNullProto(val: unknown): unknown {
 }
 
 /**
- * FIX-3 (SEC-C1): Make a closure's .constructor opaque to sandbox scripts.
+ * FIX-3 (SEC-C1) + FIX-D (Round 3 SEC C1-C3): Sever the prototype chain of an
+ * injected host-realm object so sandbox scripts cannot walk it back to the
+ * host Function constructor.
  *
- * Injected host-realm functions are accessible as globals inside the vm
- * context. Without this guard, a script can call `fn.constructor.constructor`
- * to retrieve the host `Function` constructor and then execute arbitrary host
- * code — the classic realm-escape PoC:
- *   `phase.constructor.constructor("return process")()`
+ * Round 2 added `.constructor = undefined`, which blocked the direct path
+ * `fn.constructor.constructor`. Round 3 PoCs showed three remaining escapes:
+ *   - `fn.toString.constructor` — toString inherited from host Function.prototype
+ *   - `fn.__proto__.constructor` — direct prototype access
+ *   - `Math.abs.constructor` — inherited Math methods are host functions
  *
- * By redefining `.constructor` to `undefined` (non-writable, non-configurable),
- * the escape chain is severed before the script can traverse it.
+ * Fix: also call `Object.setPrototypeOf(obj, null)`. This makes:
+ *   - `obj.constructor` → undefined (per defineProperty above)
+ *   - `obj.toString` → undefined (no Function.prototype inherited)
+ *   - `obj.__proto__` → undefined (no Object.prototype inherited)
+ *   - `obj.bind/.call/.apply` → undefined (severed Function.prototype)
+ *
+ * The function is still callable (its [[Call]] internal slot is unaffected).
  */
-function hardenClosure<T extends (...a: never[]) => unknown>(fn: T): T {
-  // Make the closure's prototype chain opaque to scripts: `fn.constructor`
-  // returns undefined instead of host-realm Function, blocking the classic
-  // `fn.constructor.constructor("return process")()` realm-escape PoC.
-  Object.defineProperty(fn, 'constructor', {
+function hardenInjected<T extends object>(obj: T): T {
+  Object.defineProperty(obj, 'constructor', {
     value: undefined,
     writable: false,
     configurable: false,
   });
-  return fn;
+  Object.setPrototypeOf(obj, null);
+  return obj;
 }
 
 export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
@@ -187,58 +192,35 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     );
   }
 
+  // FIX-D (Round 3 SEC C1-C3, UP C1): Math and Date are NOT injected here.
+  // Round 3 PoCs proved that injecting host-realm Math (via Proxy) and Date
+  // (as a plain object) leaks the host Function constructor via three paths:
+  //   1. `Math.__proto__.constructor.constructor("return process")()`
+  //   2. `Math.toString.constructor("return process")()` (Math.toString
+  //      inherited from host Function.prototype)
+  //   3. `Date.constructor.constructor("return process")()` (Date stub is a
+  //      plain host Object, its constructor is the host Object).
+  // Instead, after vm.createContext, we evaluate an init script that
+  // constructs Math and Date IN-CONTEXT using vm-realm primordials. A
+  // vm-realm `Math.abs.constructor` is the vm-realm `Function`; invoking it
+  // runs code in the vm realm where `process` is undefined — escape blocked
+  // at the source.
   const sandboxGlobals = {
     // FIX-2 (SEC-C1): use JSON-roundtripped args instead of opts.args directly.
     args: safeArgs,
-    Date: {
-      // FIX-C6 (UP-2-I1): Date.now() throws instead of returning a placeholder.
-      // Binary statically rejects scripts that use Date.now; silently returning
-      // 0 produced wrong results in scripts that do `Date.now() - start` style
-      // duration math. Throwing matches the Math.random treatment.
-      now: () => {
-        throw new Error(
-          'Date.now() is unavailable in workflow scripts (breaks resume). ' +
-            'Pass timestamps via args or stamp results after the workflow returns.',
-        );
-      },
-    },
-    Math: new Proxy(Math, {
-      get(target, prop) {
-        // FIX-C1 (SEC-2-C1): block Math.constructor realm escape. PoC:
-        //   `Math.constructor.constructor("return process")()` reaches host
-        //   `process` because Math is the host realm's Math, and its
-        //   constructor chain points at host Function. Returning undefined
-        //   severs the chain.
-        if (prop === 'constructor') return undefined;
-        if (prop === 'random') {
-          return () => {
-            throw new Error(
-              'Math.random() is unavailable in workflow scripts (breaks resume). ' +
-                'For N independent samples, include the index in the agent label or prompt.',
-            );
-          };
-        }
-        return Reflect.get(target, prop);
-      },
-      // FIX-C1 (defense in depth): block `Object.getOwnPropertyDescriptor(Math, 'random').value()`
-      // which would otherwise bypass the get trap on `random`.
-      getOwnPropertyDescriptor(target, prop) {
-        if (prop === 'random' || prop === 'constructor') return undefined;
-        return Reflect.getOwnPropertyDescriptor(target, prop);
-      },
-    }),
-    // FIX-3 (SEC-C1): harden phase/log/agent closures so .constructor is
-    // undefined — blocking the fn.constructor.constructor realm-escape PoC.
+    // FIX-3 + FIX-D: harden phase/log/agent closures so .constructor AND
+    // .toString AND .__proto__ all return undefined — blocking every known
+    // closure-based realm-escape PoC.
     // FIX-C5: route phase through safePhase for the entries cap.
-    phase: hardenClosure((title: string): void => {
+    phase: hardenInjected((title: string): void => {
       safePhase(String(title));
     }),
-    log: hardenClosure((message: unknown): void => {
+    log: hardenInjected((message: unknown): void => {
       safeLog(message);
     }),
     // FIX-4 (UP-C1): agent() now validates opts fields and throws on any
     // unsupported option rather than silently discarding them.
-    agent: hardenClosure(
+    agent: hardenInjected(
       async (
         prompt: string,
         agentOpts: WorkflowAgentOpts = {},
@@ -276,22 +258,64 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         return opts.dispatch(prompt, agentOpts);
       },
     ),
-    // FIX-3 (SEC-C1) + FIX-9 (SEC-I2): console.* closures hardened and
-    // routed through safeLog for the log cap.
-    console: {
-      log: hardenClosure((...args: unknown[]) =>
+    // FIX-3 + FIX-D: console.* closures hardened (proto null) and routed
+    // through safeLog for the log cap. The `console` container object is
+    // ALSO hardened so `console.constructor.constructor` cannot escape.
+    console: hardenInjected({
+      log: hardenInjected((...args: unknown[]) =>
         safeLog(args.map(String).join(' ')),
       ),
-      warn: hardenClosure((...args: unknown[]) =>
+      warn: hardenInjected((...args: unknown[]) =>
         safeLog(args.map(String).join(' ')),
       ),
-      error: hardenClosure((...args: unknown[]) =>
+      error: hardenInjected((...args: unknown[]) =>
         safeLog(args.map(String).join(' ')),
       ),
-    },
+    }),
   };
 
   const ctx = vm.createContext(sandboxGlobals);
+
+  // FIX-D (Round 3 SEC C1-C3, UP C1): construct vm-realm Math and Date stubs.
+  // Evaluating this init script inside the vm context means:
+  //   - `Math` is now a vm-realm null-proto object
+  //   - `Math.abs.constructor` is vm-realm Function (cannot reach host process)
+  //   - `Math.__proto__` is null (no prototype chain to walk)
+  //   - `Date` is a vm-realm function whose [[Call]] throws our nice message
+  //   - `Date.constructor` is undefined (proto severed)
+  // Error messages are verbatim from claude-code 2.1.160 binary §axO and §sxO.
+  vm.runInContext(
+    `(() => {
+      const realMath = Math;
+      const safeMath = Object.create(null);
+      for (const k of Object.getOwnPropertyNames(realMath)) {
+        if (k === 'random' || k === 'constructor') continue;
+        safeMath[k] = realMath[k];
+      }
+      safeMath.random = () => {
+        throw new Error(
+          'Math.random() is unavailable in workflow scripts (breaks resume). ' +
+          'For N independent samples, include the index in the agent label or prompt.'
+        );
+      };
+      globalThis.Math = safeMath;
+
+      const dateMsg = 'Date.now() / new Date() are unavailable in workflow ' +
+        'scripts (breaks resume). Stamp results after the workflow returns, ' +
+        'or pass timestamps via args.';
+      const safeDate = function Date() { throw new Error(dateMsg); };
+      safeDate.now = () => { throw new Error(dateMsg); };
+      safeDate.UTC = () => { throw new Error(dateMsg); };
+      safeDate.parse = () => { throw new Error(dateMsg); };
+      Object.setPrototypeOf(safeDate, null);
+      Object.defineProperty(safeDate, 'constructor', {
+        value: undefined, writable: false, configurable: false,
+      });
+      globalThis.Date = safeDate;
+    })();`,
+    ctx,
+    { filename: 'workflow-sandbox-init.js' },
+  );
 
   return {
     async run(scriptSource: string): Promise<unknown> {

@@ -205,16 +205,123 @@ describe('createWorkflowSandbox security', () => {
     expect(result).toBe('blocked');
   });
 
-  // FIX-C1 (Round 1 Minor): defense in depth — getOwnPropertyDescriptor
-  // would otherwise bypass the Math Proxy's get trap on `random`.
-  it('blocks Object.getOwnPropertyDescriptor on Math.random', async () => {
+  // FIX-D (Round 3 SEC C1): Math is now constructed in vm realm as a
+  // null-proto object. getOwnPropertyDescriptor returns a real descriptor,
+  // but invoking `.value()` still throws the "Math.random unavailable"
+  // error — the original goal (preventing real-random leakage) is preserved.
+  it('Math.random descriptor.value() still throws the unavailable error', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`
+        const d = Object.getOwnPropertyDescriptor(Math, 'random');
+        return d.value();
+      `),
+    ).rejects.toThrow(/Math\.random/);
+  });
+
+  // FIX-D (Round 3 SEC-C1 PoC): Round 3 adversarial reviewer confirmed PoC
+  // that `Math.__proto__.constructor.constructor("return process")()` reached
+  // the host `process` object (returned darwin:pid). After Fix D, Math is
+  // a null-proto vm-realm object, so __proto__ is undefined.
+  it('Math.__proto__ is undefined (blocks proto-chain escape)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`return Math.__proto__`);
+    expect([null, undefined]).toContain(result);
+  });
+
+  // FIX-D (Round 3 SEC-C2): Math.toString used to reach host
+  // Function.prototype.toString, whose .constructor is host Function.
+  // After Fix D, Math has no inherited toString (null-proto).
+  it('Math.toString is undefined (blocks inherited-method escape)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`return typeof Math.toString`);
+    expect(result).toBe('undefined');
+  });
+
+  // FIX-D (Round 3 TST-C1): Math.abs.constructor used to reach host Function.
+  // After Fix D, Math.abs is a vm-realm function. Its constructor is vm-realm
+  // Function — invoking it cannot access host process (process is undefined
+  // in vm globals).
+  it('Math.abs.constructor cannot reach host process', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
     const result = await sandbox.run(`
-      return Object.getOwnPropertyDescriptor(Math, 'random');
+      try {
+        const v = Math.abs.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw'; }
     `);
+    // process is not in vm globals → typeof process === 'undefined'.
+    // Either way (caught or undefined), no host info leaks.
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(['undefined', 'threw']).toContain(result);
+  });
+
+  // FIX-D (Round 3 SEC-C3): Date.constructor used to reach host Object,
+  // whose .constructor is host Function. After Fix D, Date is a vm-realm
+  // function with null prototype; .constructor is undefined.
+  it('Date.constructor is undefined (blocks Date-object escape)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`return Date.constructor`);
+    expect(result).toBeUndefined();
+  });
+
+  // FIX-D (Round 3 UP-C1): new Date() previously fell through to the host
+  // Date constructor and leaked real wall-clock time. After Fix D, the Date
+  // stub is itself a throwing function; `new Date()` triggers [[Construct]]
+  // which invokes [[Call]] → throws.
+  it('new Date() throws inside sandbox', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(sandbox.run(`return new Date()`)).rejects.toThrow(
+      /unavailable in workflow scripts/i,
+    );
+  });
+
+  it('Date() (bare call) throws inside sandbox', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(sandbox.run(`return Date()`)).rejects.toThrow(
+      /unavailable in workflow scripts/i,
+    );
+  });
+
+  it('Date.UTC() throws inside sandbox', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(sandbox.run(`return Date.UTC(2026, 0, 1)`)).rejects.toThrow(
+      /unavailable in workflow scripts/i,
+    );
+  });
+
+  // FIX-D: console object itself is hardened (null proto + .constructor
+  // undefined), blocking `console.constructor.constructor` escape.
+  it('console.constructor is undefined (blocks container-object escape)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`return console.constructor`);
     expect(result).toBeUndefined();
   });
 

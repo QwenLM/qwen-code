@@ -7,7 +7,10 @@ import { WORKFLOW_SUBAGENT_SYSTEM_PROMPT } from './workflow-prompts.js';
 export interface WorkflowRunRequest {
   script: string;
   args: unknown;
-  signal?: AbortSignal;
+  // FIX-D (Round 3 ARCH-I1): `signal` was previously declared here but never
+  // read by `run()` — cancellation flows through `createProductionDispatch`'s
+  // closure-captured signal, not via per-run state. Removed to prevent
+  // P2 authors from extending the wrong field.
 }
 
 export interface WorkflowRunOutcome {
@@ -17,10 +20,19 @@ export interface WorkflowRunOutcome {
   logs: string[];
 }
 
+/**
+ * FIX-D (Round 3 ARCH-I2): forward-compatibility alias for the agent
+ * dispatch return type. P1: always `string`. P3 will widen this to
+ * `string | { schema: object; value: unknown }` (or similar) for the
+ * StructuredOutput contract. Wrapping the alias here lets P3 change one
+ * type in one place rather than touching every call site.
+ */
+export type WorkflowAgentResult = string;
+
 export type WorkflowAgentDispatch = (
   prompt: string,
   opts: WorkflowAgentOpts,
-) => Promise<string>;
+) => Promise<WorkflowAgentResult>;
 
 function generateRunId(): string {
   return `wf_${randomBytes(8).toString('hex')}`;
@@ -69,10 +81,11 @@ export class WorkflowOrchestrator {
   constructor(private readonly dispatch: WorkflowAgentDispatch) {}
 
   async run(req: WorkflowRunRequest): Promise<WorkflowRunOutcome> {
-    // FIX-C6 / Round 2 architecture C1: dropped `startTime` (Date.now throws
-    // instead of returning a sentinel) and `signal` from sandbox options
-    // (sandbox cannot honor signal in P1 — async-loop cancellation flows
-    // through dispatch's subagent.execute path, which already has signal).
+    // Signal threading lives in createProductionDispatch (closure-captured)
+    // rather than per-run state. Sandbox-level signal is intentionally not
+    // exposed in P1 — sync-loop protection is provided by the 30s vm
+    // timeout in workflow-sandbox.ts; async-loop cancellation flows
+    // through dispatch's subagent.execute path.
     const runId = generateRunId();
     const sandbox = createWorkflowSandbox({
       args: req.args,

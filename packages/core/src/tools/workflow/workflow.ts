@@ -54,7 +54,8 @@ const WORKFLOW_PARAM_SCHEMA = {
         'JavaScript source of the workflow. Wrapped as an async IIFE. ' +
         'May call the injected globals `phase(title)`, `log(msg)`, ' +
         '`agent(prompt, { label? })` (sequential only in P1), and read `args`. ' +
-        '`Date.now()` returns a fixed value; `Math.random()` throws. ' +
+        '`Date.now()` and `Math.random()` both throw — workflow scripts ' +
+        'must be deterministic for resume. ' +
         '`export const meta = {...}` declarations are stripped before execution.',
     },
     args: {
@@ -102,7 +103,6 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       const outcome = await orchestrator.run({
         script: this.params.script,
         args: this.params.args,
-        signal,
       });
 
       // FIX-7 (UP-C2): unwrap the script result so the LLM receives the
