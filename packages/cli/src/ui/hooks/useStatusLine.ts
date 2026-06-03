@@ -393,7 +393,7 @@ export function useStatusLine(): {
       const data = buildStatusLinePresetData({
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
-        modelDisplayName: ui.currentModel || cfg.getModel(),
+        modelDisplayName: cfg.getModelDisplayName(),
         reasoning: contentGeneratorConfig?.reasoning,
         currentDir,
         branch: ui.branchName,
@@ -444,7 +444,7 @@ export function useStatusLine(): {
       session_id: stats.sessionId,
       version: cfg.getCliVersion() || 'unknown',
       model: {
-        display_name: ui.currentModel || cfg.getModel() || 'unknown',
+        display_name: cfg.getModelDisplayName(),
       },
       context_window: {
         context_window_size: contextWindowSize,
