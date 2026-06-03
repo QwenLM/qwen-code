@@ -20,6 +20,9 @@ import {
 } from '../tools.js';
 import type { ShellExecutionConfig } from '../../services/shellExecutionService.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+// FIX-10 (REUSE-I1): import ToolErrorType to use the standard machine-readable
+// error code rather than an ad-hoc bare `{ message }` object.
+import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
 import {
   WorkflowOrchestrator,
@@ -100,23 +103,40 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         args: this.params.args,
         signal,
       });
-      const payload = {
+
+      // FIX-7 (UP-C2): unwrap the script result so the LLM receives the
+      // script's return value verbatim (or its JSON representation for
+      // non-strings). The full metadata (runId, phases, logs) is preserved in
+      // returnDisplay for the UI, but must not pad the LLM context window with
+      // bookkeeping noise the model did not ask for.
+      const llmText =
+        outcome.result === undefined
+          ? '(workflow returned no value)'
+          : typeof outcome.result === 'string'
+            ? outcome.result
+            : JSON.stringify(outcome.result, null, 2);
+
+      const displayPayload = {
         runId: outcome.runId,
-        result: outcome.result,
         phases: outcome.phases,
         logs: outcome.logs,
+        result: outcome.result,
       };
-      const json = JSON.stringify(payload, null, 2);
+      const displayJson = JSON.stringify(displayPayload, null, 2);
+
       return {
-        llmContent: [{ text: json }],
-        returnDisplay: '```json\n' + json + '\n```',
+        llmContent: [{ text: llmText }],
+        returnDisplay: '```json\n' + displayJson + '\n```',
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {
         llmContent: [{ text: `Workflow failed: ${message}` }],
         returnDisplay: `Workflow failed: ${message}`,
-        error: { message },
+        // FIX-10 (REUSE-I1): use the standard ToolErrorType.EXECUTION_FAILED
+        // code so error routing / dashboards can classify workflow failures the
+        // same way as other execution-time tool errors.
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
   }

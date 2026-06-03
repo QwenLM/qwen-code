@@ -96,6 +96,94 @@ describe('createWorkflowSandbox', () => {
   });
 });
 
+// TST-C1/C2/C3 security PoC tests (FIX-1 through FIX-4, FIX-9)
+describe('createWorkflowSandbox security', () => {
+  // SEC-C1: args JSON-roundtrip severs prototype chain → realm escape returns
+  // undefined or throws rather than reaching host process.
+  it('blocks args.constructor.constructor realm escape', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: { x: 1 },
+      startTime: 0,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`
+        const ctor = args.constructor && args.constructor.constructor;
+        if (ctor) {
+          try {
+            return ctor("return typeof process")();
+          } catch (e) { return 'blocked-via-throw'; }
+        }
+        return 'blocked-via-undefined';
+      `),
+    ).resolves.toMatch(/blocked-via-/);
+  });
+
+  // SEC-C1: hardenClosure on phase blocks fn.constructor.constructor escape.
+  it('hardens phase global against constructor escape', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 0,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`return phase.constructor`);
+    expect(result).toBeUndefined();
+  });
+
+  // SEC-C2: vm timeout kills a synchronous infinite loop within 30s.
+  it('synchronous infinite loop is aborted by vm timeout', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 0,
+      dispatch: async () => 'ignored',
+    });
+    await expect(sandbox.run(`while(true){}`)).rejects.toThrow(
+      /Script execution timed out/i,
+    );
+  }, 35_000); // wall clock for the test itself
+
+  // UP-C1: agent({schema}) must throw a clear error, not silently drop the opt.
+  it('agent() rejects unsupported schema opt with a clear error', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 0,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`
+        return agent("hi", { schema: { type: "object" } });
+      `),
+    ).rejects.toThrow(/schema.*P3/);
+  });
+
+  // UP-C1: agent({phase}) is honored — pushed to the phases array.
+  it('agent() honors opts.phase by appending to phases', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 0,
+      dispatch: async (_p, opts) => `done:${opts.phase ?? 'no-phase'}`,
+    });
+    const result = await sandbox.run(`
+      return await agent("x", { phase: "Search" });
+    `);
+    expect(result).toBe('done:Search');
+    expect(sandbox.getPhases()).toEqual(['Search']);
+  });
+
+  // SEC-I2: log() must cap at MAX_LOG_LINES and add a truncation marker.
+  it('log() caps at MAX_LOG_LINES with a truncation marker', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      startTime: 0,
+      dispatch: async () => 'ignored',
+    });
+    await sandbox.run(`for (let i = 0; i < 10100; i++) log(i); return 0;`);
+    const logs = sandbox.getLogs();
+    expect(logs.length).toBe(10_001); // 10_000 entries + 1 truncation marker
+    expect(logs[10_000]).toMatch(/truncated/);
+  });
+});
+
 describe('createWorkflowSandbox primitives', () => {
   it('phase() pushes titles in script order', async () => {
     const sandbox = createWorkflowSandbox({

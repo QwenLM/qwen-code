@@ -44,6 +44,32 @@ export function stripExportMeta(source: string): string {
 
 import * as vm from 'node:vm';
 
+// FIX-9 (SEC-I2): cap the number of log lines to prevent unbounded memory use.
+const MAX_LOG_LINES = 10_000;
+
+/**
+ * WorkflowAgentOpts — structured options for the `agent()` global.
+ *
+ * FIX-4 (UP-C1): extending the options type from `{ label? }` to a
+ * documented interface so that unsupported P1 fields produce a clean
+ * runtime error rather than silent semantic drift.
+ */
+export interface WorkflowAgentOpts {
+  label?: string;
+  phase?: string;
+  // The following are documented for future phases. P1 throws if any of them
+  // is set — silently ignoring them would produce hard-to-debug semantic drift
+  // (e.g. opts.schema set but no StructuredOutput → script gets a string and
+  // crashes on .field access).
+  schema?: object;
+  model?: string;
+  isolation?: 'worktree' | 'remote';
+  agentType?: string;
+  // Allow forward-compat extra keys without TS error; runtime throws on any
+  // explicitly-named unsupported field above.
+  [key: string]: unknown;
+}
+
 export interface SandboxOptions {
   /** Value bound to the `args` global inside the script. */
   args: unknown;
@@ -55,8 +81,10 @@ export interface SandboxOptions {
   /**
    * Function called by the script's `agent(prompt, opts)` global. Returns the
    * agent's final text. Injected so tests can mock without spawning an LLM.
+   *
+   * FIX-4 (UP-C1): opts type widened to WorkflowAgentOpts.
    */
-  dispatch: (prompt: string, opts: { label?: string }) => Promise<string>;
+  dispatch: (prompt: string, opts: WorkflowAgentOpts) => Promise<string>;
   /**
    * Optional abort signal. When aborted, in-flight script execution rejects.
    */
@@ -76,12 +104,87 @@ export interface WorkflowSandbox {
   getLogs(): string[];
 }
 
+/**
+ * FIX-2 (SEC-C1): Recursively replace every plain-object prototype with null
+ * so that `val.constructor` returns undefined in the vm context.
+ *
+ * Arrays are left as-is (their elements are recursed). Primitives and null
+ * pass through. This is applied after the JSON roundtrip so the shape is
+ * guaranteed to be JSON-safe (no cycles, no functions).
+ */
+function deepNullProto(val: unknown): unknown {
+  if (val === null || typeof val !== 'object') return val;
+  if (Array.isArray(val)) return val.map(deepNullProto);
+  const out: Record<string, unknown> = Object.create(null);
+  for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+    out[k] = deepNullProto(v);
+  }
+  return out;
+}
+
+/**
+ * FIX-3 (SEC-C1): Make a closure's .constructor opaque to sandbox scripts.
+ *
+ * Injected host-realm functions are accessible as globals inside the vm
+ * context. Without this guard, a script can call `fn.constructor.constructor`
+ * to retrieve the host `Function` constructor and then execute arbitrary host
+ * code — the classic realm-escape PoC:
+ *   `phase.constructor.constructor("return process")()`
+ *
+ * By redefining `.constructor` to `undefined` (non-writable, non-configurable),
+ * the escape chain is severed before the script can traverse it.
+ */
+function hardenClosure<T extends (...a: never[]) => unknown>(fn: T): T {
+  // Make the closure's prototype chain opaque to scripts: `fn.constructor`
+  // returns undefined instead of host-realm Function, blocking the classic
+  // `fn.constructor.constructor("return process")()` realm-escape PoC.
+  Object.defineProperty(fn, 'constructor', {
+    value: undefined,
+    writable: false,
+    configurable: false,
+  });
+  return fn;
+}
+
 export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   const phases: string[] = [];
   const logs: string[] = [];
 
+  // FIX-9 (SEC-I2): cap log lines to prevent unbounded memory growth.
+  const safeLog = (msg: unknown): void => {
+    if (logs.length < MAX_LOG_LINES) {
+      logs.push(String(msg));
+    } else if (logs.length === MAX_LOG_LINES) {
+      logs.push(`[workflow log truncated at ${MAX_LOG_LINES} lines]`);
+    }
+    // Beyond MAX_LOG_LINES + 1, additional entries are silently dropped.
+  };
+
+  // FIX-2 (SEC-C1): JSON-roundtrip args then strip all Object.prototype links
+  // via deepNullProto. Two-step rationale:
+  //
+  //   1. JSON.parse(JSON.stringify(x)) rejects non-serialisable values (functions,
+  //      circular refs) with a clear error, keeping the surface well-defined.
+  //   2. deepNullProto(x) replaces every plain-object's prototype with null so
+  //      that `args.constructor` returns undefined inside the vm context instead
+  //      of pointing at the host Object/Function constructor chain. Without this
+  //      step the classic PoC `args.constructor.constructor("return process")()`
+  //      still reaches the host realm even after JSON roundtrip.
+  let safeArgs: unknown;
+  try {
+    safeArgs =
+      opts.args === undefined
+        ? undefined
+        : deepNullProto(JSON.parse(JSON.stringify(opts.args)));
+  } catch (err) {
+    throw new Error(
+      `WorkflowSandbox: args must be JSON-serializable (no functions, no circular references). Got: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   const sandboxGlobals = {
-    args: opts.args,
+    // FIX-2 (SEC-C1): use JSON-roundtripped args instead of opts.args directly.
+    args: safeArgs,
     Date: {
       now: () => opts.startTime,
     },
@@ -98,20 +201,65 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         return Reflect.get(target, prop);
       },
     }),
-    phase: (title: string): void => {
+    // FIX-3 (SEC-C1): harden phase/log/agent closures so .constructor is
+    // undefined — blocking the fn.constructor.constructor realm-escape PoC.
+    phase: hardenClosure((title: string): void => {
       phases.push(String(title));
-    },
-    log: (message: unknown): void => {
-      logs.push(String(message));
-    },
-    agent: async (
-      prompt: string,
-      agentOpts: { label?: string } = {},
-    ): Promise<string> => opts.dispatch(prompt, agentOpts),
+    }),
+    log: hardenClosure((message: unknown): void => {
+      safeLog(message);
+    }),
+    // FIX-4 (UP-C1): agent() now validates opts fields and throws on any
+    // unsupported option rather than silently discarding them.
+    agent: hardenClosure(
+      async (
+        prompt: string,
+        agentOpts: WorkflowAgentOpts = {},
+      ): Promise<string> => {
+        // Reject opts that P1 cannot honor — silently dropping them produces
+        // semantic corruption rather than a clean error.
+        if (agentOpts.schema !== undefined) {
+          throw new Error(
+            'agent({schema}) is not supported in P1. ' +
+              'Schema enforcement / StructuredOutput contract is scheduled for P3.',
+          );
+        }
+        if (agentOpts.isolation !== undefined) {
+          throw new Error(
+            `agent({isolation: '${agentOpts.isolation}'}) is not supported in P1. ` +
+              'Worktree / remote isolation is scheduled for a later phase.',
+          );
+        }
+        if (agentOpts.model !== undefined) {
+          throw new Error(
+            'agent({model}) is not supported in P1. Model override is scheduled for a later phase.',
+          );
+        }
+        if (agentOpts.agentType !== undefined) {
+          throw new Error('agent({agentType}) is not supported in P1.');
+        }
+        // opts.phase IS honored — push it to the phases array if not duplicate.
+        if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
+          if (phases[phases.length - 1] !== agentOpts.phase) {
+            phases.push(agentOpts.phase);
+          }
+        }
+        // opts.label is harmless to dispatch as-is.
+        return opts.dispatch(prompt, agentOpts);
+      },
+    ),
+    // FIX-3 (SEC-C1) + FIX-9 (SEC-I2): console.* closures hardened and
+    // routed through safeLog for the log cap.
     console: {
-      log: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
-      warn: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
-      error: (...args: unknown[]) => logs.push(args.map(String).join(' ')),
+      log: hardenClosure((...args: unknown[]) =>
+        safeLog(args.map(String).join(' ')),
+      ),
+      warn: hardenClosure((...args: unknown[]) =>
+        safeLog(args.map(String).join(' ')),
+      ),
+      error: hardenClosure((...args: unknown[]) =>
+        safeLog(args.map(String).join(' ')),
+      ),
     },
   };
 
@@ -124,11 +272,17 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       const script = new vm.Script(wrapped, {
         filename: 'workflow.js',
       });
-      const runOpts: vm.RunningScriptOptions = {};
-      if (opts.signal) {
-        // P1: signal is observed only by dispatch (the long-running side); the
-        // sandbox itself runs to completion or throws naturally.
-      }
+      // FIX-1 (SEC-C2): add a 30s wall-clock timeout to protect the host
+      // from synchronous infinite loops (e.g. `while(true){}`).
+      //
+      // IMPORTANT: vm `timeout` only covers SYNCHRONOUS execution per the
+      // Node.js vm docs. An async infinite loop such as
+      //   `while(true) { await agent(...) }`
+      // is NOT killed by this timeout — that is the responsibility of the
+      // 1000-agent cap scheduled for P2.
+      const runOpts: vm.RunningScriptOptions = {
+        timeout: 30_000, // 30s wall-clock cap; protects host from sync infinite loops.
+      };
       const result = script.runInContext(ctx, runOpts) as Promise<unknown>;
       return result;
     },

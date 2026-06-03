@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Config } from '../../config/config.js';
 import { createWorkflowSandbox } from './workflow-sandbox.js';
+import type { WorkflowAgentOpts } from './workflow-sandbox.js';
 
 export interface WorkflowRunRequest {
   script: string;
@@ -17,7 +18,7 @@ export interface WorkflowRunOutcome {
 
 export type WorkflowAgentDispatch = (
   prompt: string,
-  opts: { label?: string },
+  opts: WorkflowAgentOpts,
 ) => Promise<string>;
 
 export interface WorkflowOrchestratorOptions {
@@ -31,6 +32,11 @@ export interface WorkflowOrchestratorOptions {
   dispatch?: WorkflowAgentDispatch;
 }
 
+// FIX-5 (UP-I1): verbatim from claude-code 2.1.160 binary §XmO constant.
+// The binary string begins at the segment "You are a subagent spawned by a
+// workflow" and covers the full instructional block. Retaining this verbatim
+// ensures subagents receive the same behavioural contract the upstream binary
+// ships with, rather than a paraphrase that may omit critical framing.
 const WORKFLOW_SUBAGENT_SYSTEM_PROMPT =
   'You are a subagent spawned by a workflow orchestration script. ' +
   'Use the tools available to complete the task.\n\n' +
@@ -52,7 +58,11 @@ export class WorkflowOrchestrator {
 
   async run(req: WorkflowRunRequest): Promise<WorkflowRunOutcome> {
     const runId = generateRunId();
-    const dispatch = this.options.dispatch ?? this.buildProductionDispatch();
+    // FIX-6 (ARCH-C1): thread req.signal into the production dispatch so that
+    // an AbortSignal raised by the caller propagates to the subagent.execute()
+    // call rather than being silently dropped.
+    const dispatch =
+      this.options.dispatch ?? this.buildProductionDispatch(req.signal);
     const sandbox = createWorkflowSandbox({
       args: req.args,
       startTime: 0, // P1: fixed sentinel; resume work in P6 will use real run-start time.
@@ -71,8 +81,12 @@ export class WorkflowOrchestrator {
   /**
    * Production dispatch — wraps AgentHeadless.create + execute + getFinalText.
    * Uses dynamic import so test mocks can swap the module via vi.mock.
+   *
+   * FIX-6 (ARCH-C1): accepts an optional AbortSignal and threads it into
+   * subagent.execute() so cancellation from the caller propagates correctly.
+   * When signal is undefined, subagent.execute() runs without external abort.
    */
-  private buildProductionDispatch(): WorkflowAgentDispatch {
+  private buildProductionDispatch(signal?: AbortSignal): WorkflowAgentDispatch {
     return async (prompt, opts) => {
       const { AgentHeadless, ContextState } = await import(
         './agent-headless.js'
@@ -91,7 +105,8 @@ export class WorkflowOrchestrator {
         {},
         { tools: ['*'] },
       );
-      await subagent.execute(ctx);
+      // FIX-6 (ARCH-C1): signal threaded — undefined is safe (optional param).
+      await subagent.execute(ctx, signal);
       return subagent.getFinalText();
     };
   }
