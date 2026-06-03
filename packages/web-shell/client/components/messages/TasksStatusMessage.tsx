@@ -7,12 +7,14 @@ import { useActions } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
+import { formatToolDisplayName } from './toolFormatting';
 import styles from './TasksStatusMessage.module.css';
 
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
-const REFRESH_INTERVAL_MS = 2000;
+const REFRESH_INTERVAL_MS = 3000;
+const LIST_MAX_ROWS = 8;
 
-interface SerializedTasksMessage {
+export interface SerializedTasksMessage {
   snapshot: DaemonSessionTasksStatus;
 }
 
@@ -70,21 +72,10 @@ function formatRuntime(ms: number): string {
   return `${hours}h ${minutes}m`;
 }
 
-function statusIcon(status: TaskStatus): string {
-  switch (status) {
-    case 'running':
-      return '●';
-    case 'paused':
-      return '⏸';
-    case 'completed':
-      return '✓';
-    case 'failed':
-      return '✗';
-    case 'cancelled':
-      return '✗';
-    default:
-      return '?';
-  }
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
+  return String(tokens);
 }
 
 function statusClassName(status: TaskStatus): string {
@@ -104,6 +95,22 @@ function statusClassName(status: TaskStatus): string {
   }
 }
 
+function terminalStatusIcon(status: TaskStatus): string | null {
+  switch (status) {
+    case 'paused':
+      return '⏸';
+    case 'completed':
+      return '✓';
+    case 'failed':
+    case 'cancelled':
+      return '✗';
+    case 'running':
+      return null;
+    default:
+      return null;
+  }
+}
+
 function rowLabel(task: DaemonSessionTaskStatus): string {
   switch (task.kind) {
     case 'agent':
@@ -115,10 +122,59 @@ function rowLabel(task: DaemonSessionTaskStatus): string {
   }
 }
 
+function windowTasks(
+  tasks: DaemonSessionTaskStatus[],
+  selectedIndex: number,
+): {
+  visible: DaemonSessionTaskStatus[];
+  windowStart: number;
+  hiddenAbove: number;
+  hiddenBelow: number;
+} {
+  if (tasks.length <= LIST_MAX_ROWS) {
+    return {
+      visible: tasks,
+      windowStart: 0,
+      hiddenAbove: 0,
+      hiddenBelow: 0,
+    };
+  }
+
+  const effectiveRows = Math.max(1, LIST_MAX_ROWS - 2);
+  const windowStart = Math.max(
+    0,
+    Math.min(
+      selectedIndex - Math.floor(effectiveRows / 2),
+      tasks.length - effectiveRows,
+    ),
+  );
+  const windowEnd = Math.min(tasks.length, windowStart + effectiveRows);
+  return {
+    visible: tasks.slice(windowStart, windowEnd),
+    windowStart,
+    hiddenAbove: windowStart,
+    hiddenBelow: tasks.length - windowEnd,
+  };
+}
+
+function formatActivityLabel(name: string, description: string | undefined) {
+  const display = formatToolDisplayName(name);
+  const singleLineDescription = description
+    ? description.replace(/\s*\n\s*/g, ' ').trim()
+    : '';
+  return singleLineDescription
+    ? `${display}(${singleLineDescription})`
+    : display;
+}
+
 export function TasksStatusMessage({
   message,
+  manageActiveEvent = true,
+  onClose,
 }: {
   message: SerializedTasksMessage;
+  manageActiveEvent?: boolean;
+  onClose?: () => void;
 }) {
   const { t } = useI18n();
   const actions = useActions();
@@ -129,6 +185,10 @@ export function TasksStatusMessage({
   const [pendingCancelId, setPendingCancelId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const panelIdRef = useRef(`tasks-${Math.random().toString(36).slice(2)}`);
+  const initialDetailStatusRef = useRef<{
+    taskId: string;
+    status: TaskStatus;
+  } | null>(null);
 
   const selectedTask = tasks[selectedIndex] ?? null;
 
@@ -153,12 +213,41 @@ export function TasksStatusMessage({
   }, [tasks.length, selectedIndex]);
 
   useEffect(() => {
+    if (!isOpen || step !== 'detail') {
+      initialDetailStatusRef.current = null;
+      return;
+    }
+
+    if (!selectedTask) {
+      initialDetailStatusRef.current = null;
+      setStep('list');
+      return;
+    }
+
+    const initial = initialDetailStatusRef.current;
+    if (!initial || initial.taskId !== selectedTask.id) {
+      initialDetailStatusRef.current = {
+        taskId: selectedTask.id,
+        status: selectedTask.status,
+      };
+      return;
+    }
+
+    if (initial.status === 'running' && selectedTask.status !== 'running') {
+      setPendingCancelId(null);
+      setStep('list');
+    }
+  }, [isOpen, step, selectedTask]);
+
+  useEffect(() => {
+    if (!manageActiveEvent) return undefined;
     const id = panelIdRef.current;
     dispatchActive(id, isOpen);
     return () => dispatchActive(id, false);
-  }, [isOpen]);
+  }, [isOpen, manageActiveEvent]);
 
   useEffect(() => {
+    if (!manageActiveEvent) return undefined;
     const onActiveChange = (event: Event) => {
       const detail = (event as CustomEvent<{ id?: string; active?: boolean }>)
         .detail;
@@ -168,7 +257,11 @@ export function TasksStatusMessage({
     };
     window.addEventListener(ACTIVE_EVENT, onActiveChange);
     return () => window.removeEventListener(ACTIVE_EVENT, onActiveChange);
-  }, []);
+  }, [manageActiveEvent]);
+
+  useEffect(() => {
+    if (!isOpen) onClose?.();
+  }, [isOpen, onClose]);
 
   const handleCancel = useCallback(
     async (task: DaemonSessionTaskStatus) => {
@@ -233,6 +326,7 @@ export function TasksStatusMessage({
       ) {
         event.preventDefault();
         event.stopPropagation();
+        if (tasks.length === 0) return;
         const delta = event.key === 'ArrowUp' ? -1 : 1;
         setSelectedIndex((current) =>
           Math.min(Math.max(current + delta, 0), tasks.length - 1),
@@ -318,6 +412,11 @@ export function TasksStatusMessage({
       <div className={styles.panel} data-keyboard-scope>
         <div className={styles.header}>
           <div className={styles.title}>{t('tasks.title')}</div>
+        </div>
+        <div>
+          <div className={styles.sectionTitle}>
+            {t('tasks.title')} <span className={styles.secondary}>(0)</span>
+          </div>
           <div className={styles.secondary}>{t('tasks.empty')}</div>
         </div>
         <div className={styles.shortcuts}>{t('tasks.shortcut.close')}</div>
@@ -325,18 +424,32 @@ export function TasksStatusMessage({
     );
   }
 
+  const { visible, windowStart, hiddenAbove, hiddenBelow } = windowTasks(
+    tasks,
+    selectedIndex,
+  );
+
   return (
     <div className={styles.panel} data-keyboard-scope>
-      <div className={styles.header}>
-        <div className={styles.title}>{t('tasks.title')}</div>
-        <div className={styles.secondary}>
-          {t('tasks.count', { count: tasks.length })}
+      {step === 'list' && (
+        <div className={styles.header}>
+          <div className={styles.title}>{t('tasks.title')}</div>
         </div>
-      </div>
+      )}
 
       {step === 'list' && (
         <div className={styles.list}>
-          {tasks.map((task, index) => {
+          <div className={styles.sectionTitle}>
+            {t('tasks.title')}{' '}
+            <span className={styles.secondary}>({tasks.length})</span>
+          </div>
+          {hiddenAbove > 0 && (
+            <div className={styles.overflowHint}>
+              {t('tasks.moreAbove', { count: hiddenAbove })}
+            </div>
+          )}
+          {visible.map((task, visibleIndex) => {
+            const index = windowStart + visibleIndex;
             const selected = index === selectedIndex;
             const stClass = statusClassName(task.status);
             return (
@@ -352,17 +465,23 @@ export function TasksStatusMessage({
                 onMouseEnter={() => setSelectedIndex(index)}
               >
                 <span className={styles.pointer}>{selected ? '❯' : ''}</span>
-                <span className={`${styles.statusBadge} ${stClass}`}>
-                  {statusIcon(task.status)}
-                </span>
-                <span className={styles.nameCell}>{rowLabel(task)}</span>
-                <span className={styles.separator}>·</span>
-                <span className={styles.secondary}>
-                  {formatRuntime(task.runtimeMs)}
+                <span
+                  className={
+                    task.status === 'running'
+                      ? styles.nameCell
+                      : `${styles.nameCell} ${stClass}`
+                  }
+                >
+                  {rowLabel(task)}
                 </span>
               </div>
             );
           })}
+          {hiddenBelow > 0 && (
+            <div className={styles.overflowHint}>
+              {t('tasks.moreBelow', { count: hiddenBelow })}
+            </div>
+          )}
         </div>
       )}
 
@@ -383,14 +502,17 @@ export function TasksStatusMessage({
   );
 }
 
-function detailTitle(task: DaemonSessionTaskStatus): string {
+function detailTitle(
+  task: DaemonSessionTaskStatus,
+  t: ReturnType<typeof useI18n>['t'],
+): string {
   switch (task.kind) {
     case 'agent':
       return `${task.subagentType ?? 'Agent'} › ${task.label}`;
     case 'shell':
-      return `Shell › ${task.command}`;
+      return `${t('tasks.kind.shell')} › ${task.command}`;
     case 'monitor':
-      return `Monitor › ${task.description}`;
+      return `${t('tasks.kind.monitor')} › ${task.description}`;
   }
 }
 
@@ -401,30 +523,63 @@ function TaskDetail({
   task: DaemonSessionTaskStatus;
   t: ReturnType<typeof useI18n>['t'];
 }) {
+  const terminalIcon = terminalStatusIcon(task.status);
   const stClass = statusClassName(task.status);
+  const subtitleParts = [formatRuntime(task.runtimeMs)];
+
+  if (task.kind === 'agent' && task.stats?.totalTokens) {
+    subtitleParts.push(
+      t('tasks.detail.tokens', {
+        count: formatTokenCount(task.stats.totalTokens),
+      }),
+    );
+  }
+
+  if (task.kind === 'agent' && task.stats?.toolUses !== undefined) {
+    subtitleParts.push(
+      t('tasks.detail.toolCalls', {
+        count: task.stats.toolUses,
+      }),
+    );
+  }
+
+  if (task.kind !== 'agent' && task.pid !== undefined) {
+    subtitleParts.push(`pid ${task.pid}`);
+  }
+
+  if (task.kind === 'shell' && task.exitCode !== undefined) {
+    subtitleParts.push(t('tasks.detail.exit', { exitCode: task.exitCode }));
+  }
+
+  if (task.kind === 'monitor') {
+    subtitleParts.push(t('tasks.detail.events', { count: task.eventCount }));
+    if (task.droppedLines > 0) {
+      subtitleParts.push(
+        t('tasks.detail.dropped', { count: task.droppedLines }),
+      );
+    }
+    if (task.exitCode !== undefined) {
+      subtitleParts.push(t('tasks.detail.exit', { exitCode: task.exitCode }));
+    }
+  }
 
   return (
     <div className={styles.detail}>
-      <div className={styles.title}>{detailTitle(task)}</div>
+      <div className={styles.title}>{detailTitle(task, t)}</div>
       <div className={styles.statusBadge}>
-        <span className={stClass}>
-          {statusIcon(task.status)} {t(`tasks.${task.status}`)}
-        </span>
-        <span className={styles.separator}>·</span>
-        <span className={styles.secondary}>
-          {formatRuntime(task.runtimeMs)}
-        </span>
-        {task.kind !== 'agent' && task.pid !== undefined && (
+        {terminalIcon && (
           <>
+            <span className={stClass}>
+              {terminalIcon} {t(`tasks.${task.status}`)}
+            </span>
             <span className={styles.separator}>·</span>
-            <span className={styles.secondary}>pid {task.pid}</span>
           </>
         )}
+        <span className={styles.secondary}>{subtitleParts.join(' · ')}</span>
       </div>
 
       {task.kind === 'shell' && (
         <>
-          <DetailField label={t('tasks.detail.command')} value={task.command} />
           <DetailField label={t('tasks.detail.workingDir')} value={task.cwd} />
           {task.outputFile && (
             <DetailField
@@ -432,24 +587,60 @@ function TaskDetail({
               value={task.outputFile}
             />
           )}
-          {task.exitCode !== undefined && (
-            <DetailField label="Exit code" value={String(task.exitCode)} />
-          )}
         </>
       )}
 
       {task.kind === 'monitor' && (
-        <>
-          <DetailField label={t('tasks.detail.command')} value={task.command} />
-          <DetailField
-            label={t('tasks.detail.events')}
-            value={String(task.eventCount)}
-          />
-        </>
+        <DetailField label={t('tasks.detail.command')} value={task.command} />
       )}
 
       {task.kind === 'agent' && task.subagentType && (
-        <DetailField label="Type" value={task.subagentType} />
+        <DetailField label={t('tasks.detail.type')} value={task.subagentType} />
+      )}
+
+      {task.kind === 'agent' &&
+        task.recentActivities &&
+        task.recentActivities.length > 0 && (
+          <div>
+            <div className={styles.detailFieldLabel}>
+              {t('tasks.detail.progress')}
+            </div>
+            {task.recentActivities.slice(-5).map((a, i, arr) => {
+              const isLast = i === arr.length - 1;
+              const desc = formatActivityLabel(a.name, a.description);
+              return (
+                <div
+                  key={`${a.at}-${i}`}
+                  className={
+                    isLast ? styles.activityCurrent : styles.activityPast
+                  }
+                >
+                  {isLast ? '> ' : '  '}
+                  {desc}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+      {task.kind === 'agent' && task.prompt && (
+        <div>
+          <div className={styles.detailFieldLabel}>
+            {t('tasks.detail.prompt')}
+          </div>
+          <div className={styles.promptContent}>
+            {task.prompt
+              .split('\n')
+              .slice(0, 5)
+              .map((line, i, arr) => (
+                <div key={i} className={styles.truncate}>
+                  {i === arr.length - 1 && task.prompt!.split('\n').length > 5
+                    ? `${line}…`
+                    : line || ' '}
+                </div>
+              ))}
+          </div>
+        </div>
       )}
 
       {task.kind === 'agent' && task.outputFile && (
@@ -472,10 +663,26 @@ function TaskDetail({
 
       {task.error && (
         <div>
-          <div className={`${styles.detailFieldLabel} ${styles.error}`}>
-            {t('tasks.detail.error')}
+          <div
+            className={`${styles.detailFieldLabel} ${
+              task.kind === 'monitor' && task.status !== 'failed'
+                ? styles.warning
+                : styles.error
+            }`}
+          >
+            {task.kind === 'monitor' && task.status !== 'failed'
+              ? t('tasks.detail.stoppedBecause')
+              : t('tasks.detail.error')}
           </div>
-          <div className={styles.error}>{task.error}</div>
+          <div
+            className={
+              task.kind === 'monitor' && task.status !== 'failed'
+                ? styles.warning
+                : styles.error
+            }
+          >
+            {task.error}
+          </div>
         </div>
       )}
     </div>

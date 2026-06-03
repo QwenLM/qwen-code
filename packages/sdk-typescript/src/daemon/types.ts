@@ -857,6 +857,9 @@ export interface DaemonSessionAgentTaskStatus {
   isBackgrounded: boolean;
   error?: string;
   resumeBlockedReason?: string;
+  stats?: { totalTokens: number; toolUses: number; durationMs: number };
+  recentActivities?: Array<{ name: string; description: string; at: number }>;
+  prompt?: string;
 }
 
 export interface DaemonSessionShellTaskStatus {

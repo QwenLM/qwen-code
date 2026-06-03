@@ -59,7 +59,7 @@
 }
 
 .themeLight {
-  --app-bg: #FFF;
+  --app-bg: #fff;
   --bg-primary: #ffffff;
   --bg-secondary: #f7f7f2;
   --bg-tertiary: #efeee8;
@@ -130,6 +130,14 @@
   flex-direction: column;
   gap: 4px;
   padding-bottom: 4px;
+}
+
+.tasksBottomPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding-bottom: 6px;
 }
 
 .btwPanel {

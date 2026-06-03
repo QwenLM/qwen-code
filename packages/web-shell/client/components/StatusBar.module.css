@@ -150,3 +150,29 @@
   font-size: 11px;
   color: var(--text-dimmed);
 }
+
+.separator {
+  color: var(--text-dimmed);
+}
+
+.taskPill {
+  border: 0;
+  border-radius: 0;
+  padding: 0 4px;
+  background: transparent;
+  color: var(--text-dimmed);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.taskPill:hover,
+.taskPill:focus-visible {
+  background: var(--text-dimmed);
+  color: var(--bg-primary);
+  outline: none;
+}
+
+.taskPill:disabled {
+  cursor: default;
+}

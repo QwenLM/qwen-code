@@ -75,10 +75,20 @@ function formatTaskStatus(task: DaemonSessionTaskStatus): string {
 
 export function formatTasksSnapshot(
   snapshot: DaemonSessionTasksStatus,
+  options: { interactiveHint?: string | boolean } = {},
 ): string {
   if (snapshot.tasks.length === 0) return 'No background tasks.';
 
-  const lines = [`Background tasks (${snapshot.tasks.length} total)`, ''];
+  const lines: string[] = [];
+  if (options.interactiveHint) {
+    lines.push(
+      typeof options.interactiveHint === 'string'
+        ? options.interactiveHint
+        : 'Tip: focus the Background tasks pill in the footer (use ↓ from an empty composer) and press Enter for the interactive dialog with detail view + live updates.',
+      '',
+    );
+  }
+  lines.push(`Background tasks (${snapshot.tasks.length} total)`, '');
   for (const task of snapshot.tasks) {
     const pidPart =
       task.kind !== 'agent' && task.pid !== undefined ? ` pid=${task.pid}` : '';
@@ -101,6 +111,7 @@ export function handleTasksSlashCommand(input: {
   getTasks: () => Promise<DaemonSessionTasksStatus>;
   dispatch: LocalStatusDispatcher;
   reportError: ErrorReporter;
+  interactiveHint?: string;
 }): boolean {
   if (input.cmd !== 'tasks') return false;
   void input
@@ -109,7 +120,11 @@ export function handleTasksSlashCommand(input: {
       input.dispatch([
         {
           type: 'status',
-          text: formatTasksSnapshot(snapshot),
+          text: formatTasksSnapshot(snapshot, {
+            interactiveHint:
+              input.interactiveHint ??
+              'Tip: focus the Background tasks pill in the footer (use ↓ from an empty composer) and press Enter for the interactive dialog with detail view + live updates.',
+          }),
         },
       ]);
     })

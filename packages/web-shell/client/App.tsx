@@ -23,7 +23,7 @@ import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList } from './components/MessageList';
 import { Editor, type EditorHandle } from './components/Editor';
 import type { PromptImage } from './adapters/promptTypes';
-import { StatusBar } from './components/StatusBar';
+import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { ShortcutsPanel } from './components/ShortcutsPanel';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
@@ -88,7 +88,11 @@ import {
 } from './utils/copyCommand';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
-import { serializeTasksStatusMessage } from './components/messages/TasksStatusMessage';
+import {
+  TasksStatusMessage,
+  type SerializedTasksMessage,
+} from './components/messages/TasksStatusMessage';
+import { handleTasksSlashCommand } from './utils/tasksCommand';
 import {
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
@@ -411,6 +415,33 @@ function isActiveTool(tool: ACPToolCall): boolean {
   return tool.status === 'pending' || tool.status === 'in_progress';
 }
 
+function isBackgroundShellToolCall(tool: ACPToolCall): boolean {
+  if (tool.args?.is_background !== true) return false;
+  const name = tool.toolName.toLowerCase();
+  return (
+    name === 'shell' ||
+    name === 'bash' ||
+    name === 'run_shell_command' ||
+    name === 'exec'
+  );
+}
+
+function getBackgroundTaskActivityKey(messages: readonly Message[]): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    if (message.role !== 'tool_group') continue;
+    for (const tool of message.tools) {
+      if (
+        isBackgroundSubAgentToolCall(tool) ||
+        isBackgroundShellToolCall(tool)
+      ) {
+        parts.push(`${tool.callId}:${tool.status}`);
+      }
+    }
+  }
+  return parts.join('|');
+}
+
 interface FloatingPanels {
   todos: TodoItem[];
   agents: ACPToolCall[];
@@ -676,7 +707,12 @@ export function App({
     (a) =>
       `${a.callId}:${a.status}:${a.subTools?.length ?? 0}:${getAgentPanelVersion(a)}`,
   );
+  const backgroundTaskActivityKey = useMemo(
+    () => getBackgroundTaskActivityKey(messages),
+    [messages],
+  );
   const activeAgentsPanelRef = useRef<HTMLDivElement>(null);
+  const statusBarRef = useRef<StatusBarHandle>(null);
   const editorRef = useRef<EditorHandle>(null);
   const {
     followupState,
@@ -746,6 +782,8 @@ export function App({
   const escPressCountRef = useRef(0);
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const approvalModePanelActive = usePanelActive(APPROVAL_MODE_ACTIVE_EVENT);
+  const [tasksPanelMessage, setTasksPanelMessage] =
+    useState<SerializedTasksMessage | null>(null);
   const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
   const tasksPanelActive = usePanelActive(TASKS_STATUS_ACTIVE_EVENT);
   const agentsPanelActive = usePanelActive(AGENTS_ACTIVE_EVENT);
@@ -826,6 +864,7 @@ export function App({
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
     setBtwMessage(null);
+    setTasksPanelMessage(null);
     lastRecapBlockCountRef.current = 0;
   }, [connection.sessionId]);
 
@@ -1225,6 +1264,17 @@ export function App({
     showContextUsage('/context detail', true);
   }, [showContextUsage]);
 
+  const openTasksPanel = useCallback(() => {
+    sessionActions
+      .getTasks()
+      .then((snapshot) => {
+        setTasksPanelMessage({ snapshot });
+      })
+      .catch((error: unknown) => {
+        reportError(error, 'Failed to load tasks');
+      });
+  }, [reportError, sessionActions]);
+
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
       const promptBlocked = streamingStateRef.current !== 'idle';
@@ -1238,19 +1288,14 @@ export function App({
           }
           if (cmd === 'tasks') {
             store.appendLocalUserMessage(text);
-            sessionActions
-              .getTasks()
-              .then((snapshot) => {
-                store.dispatch([
-                  {
-                    type: 'status',
-                    text: serializeTasksStatusMessage({ snapshot }),
-                  },
-                ]);
-              })
-              .catch((error: unknown) => {
-                reportError(error, 'Failed to load tasks');
-              });
+            handleTasksSlashCommand({
+              cmd,
+              promptBlocked,
+              getTasks: sessionActions.getTasks,
+              dispatch: (events) => store.dispatch(events),
+              reportError,
+              interactiveHint: t('tasks.dumpHint'),
+            });
             return true;
           }
           if (cmd === 'theme') {
@@ -1870,6 +1915,16 @@ export function App({
     return true;
   }, [floatingAgents.length]);
 
+  const handleFocusTaskPill = useCallback((): boolean => {
+    if (bottomHidden) return false;
+    return statusBarRef.current?.focusTaskPill() ?? false;
+  }, [bottomHidden]);
+
+  const handleFocusFooterFromEditor = useCallback((): boolean => {
+    if (handleFocusActiveAgents()) return true;
+    return handleFocusTaskPill();
+  }, [handleFocusActiveAgents, handleFocusTaskPill]);
+
   const handleReturnToEditor = useCallback((text?: string) => {
     if (text) {
       editorRef.current?.insertText(text);
@@ -2277,7 +2332,7 @@ export function App({
                 : styles.footer
             }
           >
-            {floatingTodos.length > 0 && (
+            {floatingTodos.length > 0 && !tasksPanelMessage && (
               <div className={styles.bottomPanels}>
                 <TodoPanel todos={floatingTodos} />
               </div>
@@ -2295,12 +2350,12 @@ export function App({
                   skills={loadedSkills}
                   slashCommandCategoryOrder={slashCommandCategoryOrder}
                   queuedMessages={queuedPrompts.map((prompt) => prompt.text)}
-                  onFocusActiveAgents={handleFocusActiveAgents}
+                  onFocusActiveAgents={handleFocusFooterFromEditor}
                   onPopQueuedMessages={popQueuedPromptsForEdit}
                   onClearQueuedMessages={clearQueuedPrompts}
                   currentMode={currentMode}
                   sessionName={sessionDisplayName}
-                  dialogOpen={bottomHidden}
+                  dialogOpen={bottomHidden || tasksPanelMessage !== null}
                   followupState={followupState}
                   onAcceptFollowup={onAcceptFollowup}
                   onDismissFollowup={onDismissFollowup}
@@ -2314,7 +2369,20 @@ export function App({
                 />
               </div>
             )}
+            {tasksPanelMessage && (
+              <div className={styles.tasksBottomPanel}>
+                <TasksStatusMessage
+                  message={tasksPanelMessage}
+                  manageActiveEvent={false}
+                  onClose={() => {
+                    setTasksPanelMessage(null);
+                    handleReturnToEditor();
+                  }}
+                />
+              </div>
+            )}
             {!shouldHideComposer &&
+              !tasksPanelMessage &&
               (showShortcuts ? (
                 <ShortcutsPanel />
               ) : (
@@ -2326,14 +2394,19 @@ export function App({
                   }
                   onShowContext={() => showContextUsage('/context', false)}
                   onOpenSettings={() => setSettingsInlineOpen((v) => !v)}
+                  ref={statusBarRef}
+                  onOpenTasks={() => openTasksPanel()}
+                  onReturnToInput={handleReturnToEditor}
+                  taskActivityKey={backgroundTaskActivityKey}
                 />
               ))}
 
-            {floatingAgents.length > 0 && (
+            {floatingAgents.length > 0 && !tasksPanelMessage && (
               <div className={styles.bottomPanels}>
                 <ActiveAgentsPanel
                   ref={activeAgentsPanelRef}
                   agents={floatingAgents}
+                  onFocusTaskPill={handleFocusTaskPill}
                   onReturnToInput={handleReturnToEditor}
                 />
               </div>

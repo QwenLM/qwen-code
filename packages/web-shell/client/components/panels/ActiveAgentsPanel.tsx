@@ -12,6 +12,7 @@ import styles from './ActiveAgentsPanel.module.css';
 
 interface ActiveAgentsPanelProps {
   agents: ACPToolCall[];
+  onFocusTaskPill?: () => boolean;
   onReturnToInput?: (text?: string) => void;
 }
 
@@ -111,7 +112,10 @@ function getAgentStatusIcon(status: ACPToolCall['status']): string {
 export const ActiveAgentsPanel = forwardRef<
   HTMLDivElement,
   ActiveAgentsPanelProps
->(function ActiveAgentsPanel({ agents, onReturnToInput }, ref) {
+>(function ActiveAgentsPanel(
+  { agents, onFocusTaskPill, onReturnToInput },
+  ref,
+) {
   const { t } = useI18n();
   const [, setTick] = useState(0);
   const [expanded, setExpanded] = useState(false);
@@ -143,6 +147,9 @@ export const ActiveAgentsPanel = forwardRef<
     if (event.key === 'ArrowDown') {
       event.preventDefault();
       event.stopPropagation();
+      if (selectedIndex >= agents.length - 1 && onFocusTaskPill?.()) {
+        return;
+      }
       setSelectedIndex((index) => Math.min(index + 1, agents.length - 1));
     } else if (event.key === 'ArrowUp') {
       event.preventDefault();

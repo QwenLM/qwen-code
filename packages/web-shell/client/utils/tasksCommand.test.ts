@@ -42,6 +42,28 @@ describe('formatTasksSnapshot', () => {
     expect(text).toContain('output: /tmp/out.log');
     expect(text).not.toContain('\u001b');
   });
+
+  it('can include the CLI interactive dialog hint', () => {
+    const text = formatTasksSnapshot(
+      makeSnapshot([
+        {
+          kind: 'shell',
+          id: 'sh-1',
+          label: 'npm test',
+          description: 'npm test',
+          status: 'running',
+          startTime: 1_000,
+          runtimeMs: 1_000,
+          command: 'npm test',
+          cwd: '/work',
+        },
+      ]),
+      { interactiveHint: true },
+    );
+
+    expect(text).toContain('use ↓ from an empty composer');
+    expect(text).toContain('Background tasks (1 total)');
+  });
 });
 
 describe('handleTasksSlashCommand', () => {

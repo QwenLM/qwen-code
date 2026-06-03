@@ -16,6 +16,15 @@
   color: var(--accent-color);
 }
 
+.sectionTitle {
+  font-weight: 700;
+}
+
+.overflowHint {
+  color: var(--text-dimmed);
+  padding-left: 2ch;
+}
+
 .header {
   display: flex;
   flex-direction: column;
@@ -83,6 +92,9 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: min(520px, 50vh);
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .detailField {
@@ -111,4 +123,23 @@
   display: inline-flex;
   gap: 4px;
   align-items: baseline;
+}
+
+.activityCurrent {
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activityPast {
+  color: var(--text-dimmed);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.promptContent {
+  color: var(--text-secondary);
+  font-size: 0.9em;
 }

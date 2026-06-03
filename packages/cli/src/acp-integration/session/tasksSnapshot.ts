@@ -55,6 +55,17 @@ function serializeAgentTask(
     isBackgrounded: entry.isBackgrounded,
     ...optionalField('error', entry.error),
     ...optionalField('resumeBlockedReason', entry.resumeBlockedReason),
+    ...optionalField('stats', entry.stats),
+    ...(entry.recentActivities && entry.recentActivities.length > 0
+      ? {
+          recentActivities: entry.recentActivities.map((a) => ({
+            name: a.name,
+            description: a.description,
+            at: a.at,
+          })),
+        }
+      : {}),
+    ...optionalField('prompt', entry.prompt),
   };
 }
 
