@@ -119,6 +119,8 @@ function createDaemonTelemetryRuntimeConfig(
       telemetry.resourceAttributeWarnings ?? [],
     getCliVersion: () => cliVersion,
     getSessionId: () => daemonSessionId,
+    isInteractive: () => false,
+    getOutboundCorrelationPropagateTraceContext: () => false,
   };
 }
 
