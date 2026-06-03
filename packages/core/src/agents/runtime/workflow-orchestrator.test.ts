@@ -1,6 +1,46 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi as vitest } from 'vitest';
 import { WorkflowOrchestrator } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
+
+const created: Array<{ name: string; prompt: string }> = [];
+
+vitest.mock('./agent-headless.js', () => ({
+    AgentHeadless: {
+      create: async (
+        name: string,
+        _runtimeContext: unknown,
+        promptConfig: { systemPrompt?: string },
+        _modelConfig: unknown,
+        _runConfig: unknown,
+        _toolConfig?: unknown,
+      ) => ({
+        execute: async (ctx: { get: (k: string) => unknown }) => {
+          created.push({ name, prompt: ctx.get('task_prompt') as string });
+          if (
+            !promptConfig.systemPrompt?.includes(
+              'subagent spawned by a workflow',
+            )
+          ) {
+            throw new Error(
+              'orchestrator did not pass workflow subagent system prompt',
+            );
+          }
+        },
+        getFinalText: () =>
+          `headless-said:${created[created.length - 1]!.prompt}`,
+      }),
+    },
+    ContextState: class ContextState {
+      private state: Record<string, unknown> = {};
+      get(key: string): unknown {
+        return this.state[key];
+      }
+      set(key: string, value: unknown): void {
+        this.state[key] = value;
+      }
+    },
+    __getCreated: () => created,
+  }));
 
 function fakeConfig(): Config {
   // Orchestrator uses Config only when constructing the real dispatch. In
@@ -61,5 +101,17 @@ describe('WorkflowOrchestrator', () => {
     });
     expect(captured).toEqual(['first', 'second']);
     expect(outcome.runId).toMatch(/^wf_[0-9a-f]{16}$/);
+  });
+});
+
+describe('WorkflowOrchestrator production dispatch', () => {
+  it('routes agent() calls through AgentHeadless and returns getFinalText', async () => {
+    const orchestrator = new WorkflowOrchestrator(fakeConfig());
+    const outcome = await orchestrator.run({
+      script: `const r = await agent("hello", { label: "h1" });
+               return r;`,
+      args: undefined,
+    });
+    expect(outcome.result).toBe('headless-said:hello');
   });
 });

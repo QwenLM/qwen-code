@@ -70,18 +70,29 @@ export class WorkflowOrchestrator {
 
   /**
    * Production dispatch — wraps AgentHeadless.create + execute + getFinalText.
-   * Implemented lazily in Task 7 so this file can be unit-tested without
-   * importing the entire agent runtime.
+   * Uses dynamic import so test mocks can swap the module via vi.mock.
    */
   private buildProductionDispatch(): WorkflowAgentDispatch {
-    // Task 7 will wire these into the real AgentHeadless dispatch path.
-    void this.config;
-    void WORKFLOW_SUBAGENT_SYSTEM_PROMPT;
-    return async (_prompt, _opts) => {
-      throw new Error(
-        'WorkflowOrchestrator: production dispatch not wired yet. ' +
-          'P1 step 7 wires AgentHeadless; until then tests must inject options.dispatch.',
+    return async (prompt, opts) => {
+      const { AgentHeadless, ContextState } = await import(
+        './agent-headless.js'
       );
+      const ctx = new ContextState();
+      ctx.set('task_prompt', prompt);
+
+      const subagent = await AgentHeadless.create(
+        opts.label ?? 'workflow-agent',
+        this.config,
+        {
+          systemPrompt: WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
+          initialMessages: [],
+        },
+        {},
+        {},
+        { tools: ['*'] },
+      );
+      await subagent.execute(ctx);
+      return subagent.getFinalText();
     };
   }
 }
