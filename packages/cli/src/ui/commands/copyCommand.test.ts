@@ -160,6 +160,32 @@ describe('copyCommand', () => {
     });
   });
 
+  it('should not copy thought parts from the last AI message', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    const historyWithThoughtPart = [
+      {
+        role: 'model',
+        parts: [
+          { text: 'internal reasoning', thought: true },
+          { text: 'Visible report' },
+        ],
+      },
+    ];
+
+    mockGetHistoryShallow.mockReturnValue(historyWithThoughtPart);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('Visible report');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Last output copied to the clipboard',
+    });
+  });
+
   it('should filter out non-text parts', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
