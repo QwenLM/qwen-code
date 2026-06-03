@@ -161,7 +161,7 @@ export function loadMcpApprovals(): LoadedMcpApprovals {
  * returned list is what the discovery layer skips
  * (`Config.isMcpServerPendingApproval`). See issue #4615.
  */
-export function getPendingProjectMcpServers(
+export function getPendingGatedMcpServers(
   mcpServers: Record<string, MCPServerConfig>,
   projectRoot: string,
 ): string[] {

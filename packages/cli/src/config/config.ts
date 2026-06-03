@@ -77,7 +77,7 @@ export function isValidSessionId(value: string): boolean {
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
-import { getPendingProjectMcpServers } from './mcpApprovals.js';
+import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   parseDurationSeconds,
@@ -1810,7 +1810,7 @@ export async function loadCliConfig(
   const pendingMcpServers =
     bareMode || !interactive
       ? undefined
-      : getPendingProjectMcpServers(mcpServers, cwd);
+      : getPendingGatedMcpServers(mcpServers, cwd);
 
   const configParams: ConfigParameters = {
     sessionId,

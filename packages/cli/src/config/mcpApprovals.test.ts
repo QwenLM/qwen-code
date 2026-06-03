@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import {
   loadMcpApprovals,
-  getPendingProjectMcpServers,
+  getPendingGatedMcpServers,
   resetMcpApprovalsForTesting,
   MCP_APPROVALS_FILENAME,
 } from './mcpApprovals.js';
@@ -127,7 +127,7 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     );
   });
 
-  describe('getPendingProjectMcpServers (gated-scope filter)', () => {
+  describe('getPendingGatedMcpServers (gated-scope filter)', () => {
     const workspaceServer: MCPServerConfig = {
       command: 'node',
       args: ['ws.js'],
@@ -141,7 +141,7 @@ describe('mcpApprovals (hash-bound approval store)', () => {
     const userServer: MCPServerConfig = { command: 'node', args: ['user.js'] };
 
     it('gates both project and workspace servers, ignores user/system', () => {
-      const pending = getPendingProjectMcpServers(
+      const pending = getPendingGatedMcpServers(
         {
           proj: server,
           ws: workspaceServer,
@@ -160,7 +160,7 @@ describe('mcpApprovals (hash-bound approval store)', () => {
         workspaceServer,
         'approved',
       );
-      const pending = getPendingProjectMcpServers(
+      const pending = getPendingGatedMcpServers(
         { ws: workspaceServer },
         projectRoot,
       );
@@ -174,7 +174,7 @@ describe('mcpApprovals (hash-bound approval store)', () => {
         workspaceServer,
         'rejected',
       );
-      const pending = getPendingProjectMcpServers(
+      const pending = getPendingGatedMcpServers(
         { ws: workspaceServer },
         projectRoot,
       );
