@@ -189,7 +189,7 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBe('0');
   });
 
-  it('loads an existing daemon session and seeds replay from the start', async () => {
+  it('loads an existing daemon session using server watermark and replay snapshot', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/load')) {
         return jsonResponse(200, {
@@ -198,6 +198,9 @@ describe('DaemonSessionClient', () => {
           attached: false,
           clientId: 'client-1',
           state: { configOptions: [] },
+          lastEventId: 42,
+          compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
+          liveJournal: [{ id: 42, v: 1, type: 'session_update', data: {} }],
         });
       }
       if (req.url.endsWith('/session/s-1/events')) {
@@ -214,15 +217,17 @@ describe('DaemonSessionClient', () => {
     expect(session.sessionId).toBe('s-1');
     expect(session.clientId).toBe('client-1');
     expect(session.state).toEqual({ configOptions: [] });
+    expect(session.replaySnapshot.compactedReplay).toHaveLength(1);
+    expect(session.replaySnapshot.liveJournal).toHaveLength(1);
     expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
 
     for await (const _event of session.events()) {
       /* empty */
     }
-    expect(calls[1]?.headers['last-event-id']).toBe('0');
+    expect(calls[1]?.headers['last-event-id']).toBe('42');
   });
 
-  it('resumes an existing daemon session and seeds replay from the start', async () => {
+  it('resumes an existing daemon session using server watermark', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/resume')) {
         return jsonResponse(200, {
@@ -231,6 +236,7 @@ describe('DaemonSessionClient', () => {
           attached: true,
           clientId: 'client-1',
           state: { modes: null },
+          lastEventId: 99,
         });
       }
       if (req.url.endsWith('/session/s-1/events')) {
@@ -245,13 +251,12 @@ describe('DaemonSessionClient', () => {
     expect(session.attached).toBe(true);
     expect(session.clientId).toBe('client-1');
     expect(session.state).toEqual({ modes: null });
+    expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
+    expect(session.replaySnapshot.liveJournal).toHaveLength(0);
     for await (const _event of session.events()) {
       /* empty */
     }
-    // Symmetric to load(): `unstable_resumeSession` schedules an
-    // `available_commands_update` via setTimeout(0) on the agent side,
-    // so the SDK seeds the subscription from the start of the ring.
-    expect(calls[1]?.headers['last-event-id']).toBe('0');
+    expect(calls[1]?.headers['last-event-id']).toBe('99');
   });
 
   it('replays from id 0 on freshly-created sessions so startup-window guardrail events are observable (codex review fix #1)', async () => {

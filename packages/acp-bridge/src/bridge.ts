@@ -29,6 +29,7 @@ import {
 import type { ShellCommandResult } from './bridgeTypes.js';
 import type { AcpChannel } from './channel.js';
 import { EventBus, DEFAULT_RING_SIZE, type BridgeEvent } from './eventBus.js';
+import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
@@ -1669,11 +1670,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     }
   };
 
+  const createSessionEventBus = (): EventBus =>
+    new EventBus(eventRingSize, undefined, new TurnBoundaryCompactionEngine());
+
   const createSessionEntry = (
     ci: ChannelInfo,
     sessionId: string,
     workspaceCwd: string,
-    events = new EventBus(eventRingSize),
+    events = createSessionEventBus(),
   ): SessionEntry => {
     const entry: SessionEntry = {
       sessionId,
@@ -1732,6 +1736,25 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     );
   };
 
+  const replayFieldsFor = (
+    entry: { events: EventBus },
+    action: 'load' | 'resume',
+  ): Pick<
+    BridgeRestoredSession,
+    'compactedReplay' | 'liveJournal' | 'lastEventId'
+  > => {
+    const snapshot = entry.events.snapshotReplay();
+    if (!snapshot) return { lastEventId: entry.events.lastEventId };
+    if (action === 'load') {
+      return {
+        compactedReplay: snapshot.compactedTurns,
+        liveJournal: snapshot.liveJournal,
+        lastEventId: snapshot.lastEventId,
+      };
+    }
+    return { lastEventId: snapshot.lastEventId };
+  };
+
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
@@ -1754,20 +1777,18 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
+        ...replayFieldsFor(existing, action),
       };
     }
 
     const inFlight = inFlightRestores.get(req.sessionId);
     if (inFlight) {
       // Cross-action races BOTH ways must reject. A `resume` arriving
-      // while a `load` is in flight cannot quietly coalesce: the load
-      // is replaying full history through SSE on a shared EventBus,
-      // and `DaemonSessionClient.resume()` seeds `lastEventId: 0`,
-      // which means the resume client would receive every replayed
-      // frame — directly violating resume's "no UI replay" contract.
-      // The mirror direction (`load` onto `resume`) is rejected for
-      // the same reason: a load caller expects history but resume
-      // didn't replay any. Same-action coalescing is unaffected.
+      // while a `load` is in flight cannot quietly coalesce: load
+      // returns compacted replay + watermark while resume returns only
+      // a watermark — mixing the two on a shared EventBus would give
+      // the resume client unexpected replay data or the load client a
+      // missing snapshot. Same-action coalescing is unaffected.
       if (action !== inFlight.action) {
         throw new RestoreInProgressError(
           req.sessionId,
@@ -1820,7 +1841,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       throw new SessionLimitExceededError(maxSessions);
     }
 
-    const restoreEvents = new EventBus(eventRingSize);
+    const restoreEvents = createSessionEventBus();
     let registeredEntry: SessionEntry | undefined;
     let ci: ChannelInfo | undefined;
     // Live counter shared with coalesced waiters (see InFlightRestore
@@ -1937,6 +1958,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           clientId,
           createdAt: racedEntry.createdAt,
           state: racedEntry.restoreState ?? {},
+          ...replayFieldsFor(racedEntry, action),
         };
       }
 
@@ -1970,6 +1992,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         clientId,
         createdAt: entry.createdAt,
         state,
+        ...replayFieldsFor(entry, action),
       };
     })().finally(() => {
       ci?.pendingRestoreIds.delete(req.sessionId);
