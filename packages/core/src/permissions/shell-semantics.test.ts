@@ -216,6 +216,33 @@ describe('extractShellOperations', () => {
     ]);
   });
 
+  it('cp/mv/install/ln -t forms emit target-directory writes', () => {
+    expect(
+      sorted(extractShellOperations('cp -t .qwen /tmp/payload', CWD)),
+    ).toEqual([
+      { virtualTool: 'read_file', filePath: '/tmp/payload' },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen` },
+    ]);
+    expect(
+      sorted(extractShellOperations('mv --target-directory=.qwen /tmp/a', CWD)),
+    ).toEqual([
+      { virtualTool: 'edit', filePath: '/tmp/a' },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen` },
+    ]);
+    expect(
+      sorted(extractShellOperations('install -t .qwen /tmp/tool', CWD)),
+    ).toEqual([
+      { virtualTool: 'read_file', filePath: '/tmp/tool' },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen` },
+    ]);
+    expect(
+      sorted(extractShellOperations('ln -t .qwen /tmp/target', CWD)),
+    ).toEqual([
+      { virtualTool: 'read_file', filePath: '/tmp/target' },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen` },
+    ]);
+  });
+
   // ── rm ─────────────────────────────────────────────────────────────────────
 
   it('rm: single file is edit', () => {
@@ -254,6 +281,11 @@ describe('extractShellOperations', () => {
     expect(ops).toEqual([{ virtualTool: 'edit', filePath: '/etc/hosts' }]);
   });
 
+  it('sed combined short flags containing i: edit', () => {
+    const ops = extractShellOperations("sed -nie 's/foo/bar/' /etc/hosts", CWD);
+    expect(ops).toEqual([{ virtualTool: 'edit', filePath: '/etc/hosts' }]);
+  });
+
   it('sed -e: all positionals are files', () => {
     const ops = extractShellOperations("sed -e 's/foo/bar/' /a /b", CWD);
     expect(sorted(ops)).toEqual([
@@ -286,6 +318,38 @@ describe('extractShellOperations', () => {
       { virtualTool: 'read_file', filePath: '/dev/sda' },
       { virtualTool: 'write_file', filePath: '/tmp/disk.img' },
     ]);
+  });
+
+  it('rsync destination is a write', () => {
+    const ops = extractShellOperations(
+      'rsync /tmp/payload .qwen/settings.json',
+      CWD,
+    );
+    expect(sorted(ops)).toEqual([
+      { virtualTool: 'read_file', filePath: '/tmp/payload' },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen/settings.json` },
+    ]);
+  });
+
+  it('perl -i edits file operands', () => {
+    const ops = extractShellOperations(
+      "perl -i -pe 's/x/y/' .qwen/settings.json",
+      CWD,
+    );
+    expect(ops).toEqual([
+      { virtualTool: 'edit', filePath: `${CWD}/.qwen/settings.json` },
+    ]);
+  });
+
+  it('patch edits positional target files', () => {
+    const ops = extractShellOperations(
+      'patch .qwen/settings.json fix.patch',
+      CWD,
+    );
+    expect(ops).toContainEqual({
+      virtualTool: 'edit',
+      filePath: `${CWD}/.qwen/settings.json`,
+    });
   });
 
   // ── Redirections ───────────────────────────────────────────────────────────

@@ -3722,7 +3722,9 @@ export class CoreToolScheduler {
               void _exhaustive;
             }
           }
-          continue;
+          if (outcome.kind === 'approved' || outcome.kind === 'blocked') {
+            continue;
+          }
         }
 
         if (finalPermission === 'allow') {

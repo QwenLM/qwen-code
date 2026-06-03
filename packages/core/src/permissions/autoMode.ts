@@ -284,6 +284,8 @@ export function shouldForceAutoModeReviewForAllow(
       : ctx.command;
   const cwd = ctx.cwd ?? cwdFallback;
 
+  if (hasRawProtectedRedirect(command, cwd)) return true;
+
   return extractShellOperationsAcrossCommand(command, cwd).some((op) => {
     if (
       op.virtualTool !== ToolNames.EDIT &&
@@ -296,6 +298,29 @@ export function shouldForceAutoModeReviewForAllow(
     }
     return Boolean(op.filePath && isAutoModeProtectedWritePath(op.filePath));
   });
+}
+
+function hasRawProtectedRedirect(command: string, cwd: string): boolean {
+  for (let i = 0; i < command.length; i++) {
+    if (command[i] !== '>') continue;
+    if (command[i - 1] === '<') continue;
+    while (command[i] === '>') i++;
+    while (command[i] === ' ' || command[i] === '\t') i++;
+
+    let token = '';
+    while (i < command.length) {
+      const ch = command[i]!;
+      if (/\s|[;&|]/.test(ch)) break;
+      token += ch;
+      i++;
+    }
+
+    const target = token.replace(/^['"]/, '').replace(/['")&]+$/, '');
+    if (!target || target.startsWith('&')) continue;
+    const resolved = path.isAbsolute(target) ? target : path.join(cwd, target);
+    if (isAutoModeProtectedWritePath(resolved)) return true;
+  }
+  return false;
 }
 
 /**

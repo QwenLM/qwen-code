@@ -334,6 +334,10 @@ function getPositionalArgs(
       positional.push(arg);
       continue;
     }
+    const equalsIndex = arg.indexOf('=');
+    if (equalsIndex > 0 && flagsWithValue.has(arg.slice(0, equalsIndex))) {
+      continue;
+    }
     // Flag: check if it consumes the next token
     if (flagsWithValue.has(arg)) {
       skipNext = true;
@@ -343,6 +347,38 @@ function getPositionalArgs(
   }
 
   return positional;
+}
+
+function getFlagValue(
+  args: string[],
+  shortName: string,
+  longName: string,
+): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === shortName || arg === longName) {
+      return args[i + 1];
+    }
+    if (arg.startsWith(`${longName}=`)) {
+      return arg.slice(longName.length + 1);
+    }
+  }
+  return undefined;
+}
+
+function targetDirectoryWrite(
+  args: string[],
+  cwd: string,
+): ShellOperation | undefined {
+  const target = getFlagValue(args, '-t', '--target-directory');
+  if (!target || !looksLikePath(target)) return undefined;
+  return { virtualTool: 'write_file', filePath: resolvePath(target, cwd) };
+}
+
+function hasCombinedShortFlag(arg: string, flag: string): boolean {
+  return (
+    arg.startsWith('-') && !arg.startsWith('--') && arg.slice(1).includes(flag)
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1097,6 +1133,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       })),
 
   cp: (args, cwd) => {
+    const targetDir = targetDirectoryWrite(args, cwd);
     const flagsWithValue = new Set([
       '-S',
       '--suffix',
@@ -1114,6 +1151,15 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       looksLikePath,
     );
     if (positional.length === 0) return [];
+    if (targetDir) {
+      return [
+        ...positional.map((p) => ({
+          virtualTool: 'read_file' as const,
+          filePath: resolvePath(p, cwd),
+        })),
+        targetDir,
+      ];
+    }
     if (positional.length === 1) {
       return [
         {
@@ -1134,6 +1180,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   },
 
   mv: (args, cwd) => {
+    const targetDir = targetDirectoryWrite(args, cwd);
     const flagsWithValue = new Set([
       '-S',
       '--suffix',
@@ -1146,6 +1193,15 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const positional = getPositionalArgs(args, flagsWithValue).filter(
       looksLikePath,
     );
+    if (targetDir && positional.length > 0) {
+      return [
+        ...positional.map((p) => ({
+          virtualTool: 'edit' as const,
+          filePath: resolvePath(p, cwd),
+        })),
+        targetDir,
+      ];
+    }
     if (positional.length < 2) return [];
     const srcs = positional.slice(0, -1);
     const dst = positional[positional.length - 1]!;
@@ -1160,6 +1216,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   },
 
   install: (args, cwd) => {
+    const targetDir = targetDirectoryWrite(args, cwd);
     const flagsWithValue = new Set([
       '-m',
       '--mode',
@@ -1181,9 +1238,25 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const positional = getPositionalArgs(args, flagsWithValue).filter(
       looksLikePath,
     );
+    if (targetDir && positional.length > 0) {
+      return [
+        ...positional.map((p) => ({
+          virtualTool: 'read_file' as const,
+          filePath: resolvePath(p, cwd),
+        })),
+        targetDir,
+      ];
+    }
     if (positional.length < 2) return [];
+    const srcs = positional.slice(0, -1);
     const dst = positional[positional.length - 1]!;
-    return [{ virtualTool: 'write_file', filePath: resolvePath(dst, cwd) }];
+    return [
+      ...srcs.map((p) => ({
+        virtualTool: 'read_file' as const,
+        filePath: resolvePath(p, cwd),
+      })),
+      { virtualTool: 'write_file', filePath: resolvePath(dst, cwd) },
+    ];
   },
 
   dd: (args, cwd) => {
@@ -1208,15 +1281,65 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     return ops;
   },
 
+  rsync: (args, cwd) => {
+    const positional = getPositionalArgs(
+      args,
+      new Set([
+        '-e',
+        '--rsh',
+        '--rsync-path',
+        '--backup-dir',
+        '--suffix',
+        '--files-from',
+        '--include-from',
+        '--exclude-from',
+        '--filter',
+      ]),
+    ).filter(looksLikePath);
+    if (positional.length === 0) return [];
+    if (positional.length === 1) {
+      return [
+        {
+          virtualTool: 'read_file',
+          filePath: resolvePath(positional[0]!, cwd),
+        },
+      ];
+    }
+    const srcs = positional.slice(0, -1);
+    const dst = positional[positional.length - 1]!;
+    return [
+      ...srcs.map((p) => ({
+        virtualTool: 'read_file' as const,
+        filePath: resolvePath(p, cwd),
+      })),
+      { virtualTool: 'write_file' as const, filePath: resolvePath(dst, cwd) },
+    ];
+  },
+
   ln: (args, cwd) => {
     // ln [-s] TARGET LINKNAME — the link being created is a write operation
+    const targetDir = targetDirectoryWrite(args, cwd);
     const positional = getPositionalArgs(
       args,
       new Set(['-S', '--suffix', '-t', '--target-directory', '-b', '--backup']),
     ).filter(looksLikePath);
+    if (targetDir && positional.length > 0) {
+      return [
+        ...positional.map((p) => ({
+          virtualTool: 'read_file' as const,
+          filePath: resolvePath(p, cwd),
+        })),
+        targetDir,
+      ];
+    }
     if (positional.length < 2) return [];
+    const targets = positional.slice(0, -1);
     const linkname = positional[positional.length - 1]!;
     return [
+      ...targets.map((p) => ({
+        virtualTool: 'read_file' as const,
+        filePath: resolvePath(p, cwd),
+      })),
       { virtualTool: 'write_file', filePath: resolvePath(linkname, cwd) },
     ];
   },
@@ -1334,10 +1457,36 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     }));
   },
 
+  patch: (args, cwd) =>
+    getPositionalArgs(args, new Set(['-i', '--input', '-d', '--directory']))
+      .filter(looksLikePath)
+      .map((p) => ({
+        virtualTool: 'edit' as const,
+        filePath: resolvePath(p, cwd),
+      })),
+
+  perl: (args, cwd) => {
+    const hasInPlace = args.some(
+      (a) => a === '-i' || a.startsWith('-i') || hasCombinedShortFlag(a, 'i'),
+    );
+    const positional = getPositionalArgs(
+      args,
+      new Set(['-e', '-f', '-I', '-M', '-m', '-0']),
+    ).filter(looksLikePath);
+    const files = positional.slice(1);
+    const tool: 'edit' | 'read_file' = hasInPlace ? 'edit' : 'read_file';
+    return files.map((p) => ({
+      virtualTool: tool,
+      filePath: resolvePath(p, cwd),
+    }));
+  },
+
   sed: (args, cwd) => {
     // sed [-i] SCRIPT file... or sed -e SCRIPT file...
     // With -i: in-place edit (virtualTool = 'edit'); otherwise read (virtualTool = 'read_file')
-    const hasInPlace = args.some((a) => a === '-i' || a.startsWith('-i'));
+    const hasInPlace = args.some(
+      (a) => a === '-i' || a.startsWith('-i') || hasCombinedShortFlag(a, 'i'),
+    );
     const hasExplicitScript = args.some(
       (a) => a === '-e' || a === '-f' || a.startsWith('-e'),
     );
