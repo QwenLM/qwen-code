@@ -10,6 +10,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -60,15 +61,18 @@ export const VimModeProvider = ({
     }
   }, [settings.merged.general?.vimMode]);
 
+  const vimEnabledRef = useRef(vimEnabled);
+  vimEnabledRef.current = vimEnabled;
+
   const toggleVimEnabled = useCallback(async () => {
-    const newValue = !vimEnabled;
+    const newValue = !vimEnabledRef.current;
     setVimEnabled(newValue);
     if (newValue) {
       setVimMode('NORMAL');
     }
     await settings.setValue(SettingScope.User, 'general.vimMode', newValue);
     return newValue;
-  }, [vimEnabled, settings]);
+  }, [settings]);
 
   const stateValue = useMemo(
     () => ({ vimEnabled, vimMode }),
