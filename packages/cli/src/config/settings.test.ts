@@ -3271,6 +3271,38 @@ describe('Settings Loading and Merging', () => {
       );
     });
 
+    it('strips a runtime snapshot prefix before persisting model.name', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      settings.setValue(
+        SettingScope.User,
+        'model.name',
+        '$runtime|openai|qwen3.6-27b-autoround',
+      );
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.model.name).toBe('qwen3.6-27b-autoround');
+    });
+
+    it('collapses stacked runtime snapshot prefixes before persisting model.name', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(() => '{}');
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      settings.setValue(
+        SettingScope.User,
+        'model.name',
+        '$runtime|openai|$runtime|openai|qwen3.6-27b-autoround',
+      );
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.model.name).toBe('qwen3.6-27b-autoround');
+    });
+
     it('persists removed MCP servers when replacing the top-level mcpServers object', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
 
