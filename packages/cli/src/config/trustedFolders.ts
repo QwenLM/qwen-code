@@ -15,7 +15,9 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
+import { parse, stringify } from 'comment-json';
 import stripJsonComments from 'strip-json-comments';
+import { applyUpdates } from '../utils/commentJson.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
@@ -180,9 +182,27 @@ export function saveTrustedFolders(
       fs.mkdirSync(dirPath, { recursive: true });
     }
 
+    let content: string;
+    if (fs.existsSync(trustedFoldersFile.path)) {
+      const originalContent = fs.readFileSync(trustedFoldersFile.path, 'utf-8');
+      const parsed = parse(originalContent) as Record<string, unknown>;
+      const updated = applyUpdates(
+        parsed,
+        trustedFoldersFile.config as Record<string, unknown>,
+        true,
+      );
+      content = stringify(updated, null, 2);
+
+      // Validate the serialized output before writing so a malformed
+      // formatting-preserving update never corrupts the trust file.
+      parse(content);
+    } else {
+      content = stringify(trustedFoldersFile.config, null, 2);
+    }
+
     atomicWriteFileSync(
       trustedFoldersFile.path,
-      JSON.stringify(trustedFoldersFile.config, null, 2),
+      content,
       // noFollow: refuse to follow any pre-placed symlink at the
       // config path — a redirected write could either leak the
       // trusted-folder list to an attacker target or leave the user's

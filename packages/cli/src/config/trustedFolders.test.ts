@@ -26,6 +26,7 @@ import * as path from 'node:path';
 import {
   loadTrustedFolders,
   getTrustedFoldersPath,
+  saveTrustedFolders,
   TrustLevel,
   isWorkspaceTrusted,
   resetTrustedFoldersForTesting,
@@ -214,6 +215,67 @@ describe('Trusted Folders Loading', () => {
         noFollow: true,
       },
     );
+  });
+
+  it('setValue should preserve existing comments when rewriting the trust file', () => {
+    const userPath = getTrustedFoldersPath();
+    const dirPath = path.dirname(userPath);
+    const originalContent = `{
+  // work repos
+  "/existing/path": "TRUST_FOLDER"
+}`;
+    const strippedContent = JSON.stringify({
+      '/existing/path': TrustLevel.TRUST_FOLDER,
+    });
+
+    (mockFsExistsSync as Mock).mockImplementation(
+      (p) => p === userPath || p === dirPath,
+    );
+    (mockStripJsonComments as unknown as Mock).mockReturnValue(strippedContent);
+    (fs.readFileSync as Mock).mockImplementation((p) => {
+      if (p === userPath) return originalContent;
+      return '{}';
+    });
+
+    const loadedFolders = loadTrustedFolders();
+    loadedFolders.setValue('/new/path', TrustLevel.TRUST_FOLDER);
+
+    expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
+    const writtenContent = vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1];
+    expect(writtenContent).toContain('// work repos');
+    expect(writtenContent).toContain('"/existing/path": "TRUST_FOLDER"');
+    expect(writtenContent).toContain('"/new/path": "TRUST_FOLDER"');
+  });
+
+  it('saveTrustedFolders should remove stale entries while preserving remaining comments', () => {
+    const userPath = getTrustedFoldersPath();
+    const dirPath = path.dirname(userPath);
+    const originalContent = `{
+  // keep this one
+  "/keep/path": "TRUST_FOLDER",
+  "/remove/path": "DO_NOT_TRUST"
+}`;
+
+    (mockFsExistsSync as Mock).mockImplementation(
+      (p) => p === userPath || p === dirPath,
+    );
+    (fs.readFileSync as Mock).mockImplementation((p) => {
+      if (p === userPath) return originalContent;
+      return '{}';
+    });
+
+    saveTrustedFolders({
+      path: userPath,
+      config: {
+        '/keep/path': TrustLevel.TRUST_FOLDER,
+      },
+    });
+
+    expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
+    const writtenContent = vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1];
+    expect(writtenContent).toContain('// keep this one');
+    expect(writtenContent).toContain('"/keep/path": "TRUST_FOLDER"');
+    expect(writtenContent).not.toContain('/remove/path');
   });
 });
 
