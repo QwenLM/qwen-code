@@ -2141,6 +2141,7 @@ export class GeminiClient {
     prompt_id: string,
     force: boolean = false,
     signal?: AbortSignal,
+    customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
@@ -2149,6 +2150,7 @@ export class GeminiClient {
       this.config.getModel(),
       force,
       signal,
+      customInstructions ? { customInstructions } : undefined,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const chat = this.getChat();

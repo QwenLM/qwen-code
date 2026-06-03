@@ -1930,7 +1930,38 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.tryCompressChat('p1', true, signal);
 
-      expect(tryCompress).toHaveBeenCalledWith('p1', 'the-model', true, signal);
+      // 5th arg is the `options` bag for `customInstructions` plumbing;
+      // omitted here means undefined which is the correct contract.
+      expect(tryCompress).toHaveBeenCalledWith(
+        'p1',
+        'the-model',
+        true,
+        signal,
+        undefined,
+      );
+    });
+
+    it('forwards customInstructions through the options bag when supplied', async () => {
+      const tryCompress = vi.fn().mockResolvedValue({
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: CompressionStatus.NOOP,
+      });
+      client['chat'] = {
+        tryCompress,
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getModel).mockReturnValue('the-model');
+
+      await client.tryCompressChat('p1', true, undefined, 'focus on auth bug');
+
+      expect(tryCompress).toHaveBeenCalledWith(
+        'p1',
+        'the-model',
+        true,
+        undefined,
+        { customInstructions: 'focus on auth bug' },
+      );
     });
 
     it('flips forceFullIdeContext on a successful compression', async () => {
