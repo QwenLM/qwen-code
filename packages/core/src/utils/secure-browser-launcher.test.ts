@@ -24,6 +24,9 @@ describe('secure-browser-launcher', () => {
     mockExecFile.mockResolvedValue({ stdout: '', stderr: '' });
     originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
     vi.stubEnv('BROWSER', '');
+    vi.stubEnv('CI', '');
+    vi.stubEnv('DEBIAN_FRONTEND', '');
+    vi.stubEnv('SSH_CONNECTION', '');
   });
 
   afterEach(() => {
