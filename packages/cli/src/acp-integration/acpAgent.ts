@@ -2559,7 +2559,7 @@ class QwenAgent implements Agent {
           this.settings.setValue(
             SettingScope.User,
             'general.language',
-            resolvedLanguage,
+            language,
           );
         } catch (err) {
           debugLogger.warn('Failed to persist UI language setting:', err);
