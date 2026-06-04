@@ -307,34 +307,40 @@ function touchedTopicsFromFilePaths(
   // also keeps the routing decision symmetric across both scopes.
   const projectRootDir = getAutoMemoryRoot(projectRoot);
   const userRootDir = getUserAutoMemoryRoot();
-  // Guard against `/foo/memory` colliding with `/foo/memory-other/x.md`:
-  // a file under the root must have a `/` or `\` immediately after the
-  // root string. Files always live INSIDE the root (never AT it), so the
-  // separator is guaranteed. Accept BOTH separators so the check works
-  // when an agent reports forward-slash paths on Windows (and vice versa).
-  const isUnderRoot = (p: string, root: string): boolean => {
-    if (!p.startsWith(root)) return false;
-    const next = p.charAt(root.length);
-    return next === '/' || next === '\\';
+  // Canonicalize separators to `/` on BOTH sides before the prefix check.
+  // On Windows the roots are backslash-native (`C:\Users\foo\...\memory`)
+  // while filesTouched (populated from raw model tool-call arguments)
+  // commonly comes back forward-slash-normalized — `startsWith` against
+  // the raw roots would miss those writes entirely. Also guards against
+  // the inverse direction and the historical `/foo/memory` vs
+  // `/foo/memory-other/...` collision: the character after the root must
+  // be `/` so files inside (never AT) the root match exactly one prefix.
+  const canon = (s: string): string => s.replace(/\\/g, '/');
+  const isUnderRoot = (canonP: string, canonRoot: string): boolean => {
+    if (!canonP.startsWith(canonRoot)) return false;
+    return canonP.charAt(canonRoot.length) === '/';
   };
+  const canonProject = canon(projectRootDir);
+  const canonUser = canon(userRootDir);
   const topicSet = new Set<AutoMemoryType>();
   let touchedProjectScope = false;
   let touchedUserScope = false;
 
   for (const p of filePaths) {
-    let root: string | undefined;
-    if (isUnderRoot(p, projectRootDir)) {
-      root = projectRootDir;
+    const canonP = canon(p);
+    let canonRoot: string | undefined;
+    if (isUnderRoot(canonP, canonProject)) {
+      canonRoot = canonProject;
       touchedProjectScope = true;
-    } else if (isUnderRoot(p, userRootDir)) {
-      root = userRootDir;
+    } else if (isUnderRoot(canonP, canonUser)) {
+      canonRoot = canonUser;
       touchedUserScope = true;
     } else {
       continue;
     }
-    // +1 to also strip the separator we just checked for.
-    const rel = p.slice(root.length + 1);
-    const segment = rel.split(/[/\\]/)[0] as AutoMemoryType;
+    // +1 to also strip the `/` we just checked for.
+    const rel = canonP.slice(canonRoot.length + 1);
+    const segment = rel.split('/')[0] as AutoMemoryType;
     if (
       segment === 'user' ||
       segment === 'feedback' ||

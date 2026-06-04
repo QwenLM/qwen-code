@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
+import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
 import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
 
 vi.mock('./scan.js', async (importOriginal) => {
@@ -15,6 +16,11 @@ vi.mock('./scan.js', async (importOriginal) => {
   return {
     ...actual,
     scanAutoMemoryTopicDocuments: vi.fn(),
+    // Explicit mock so the production scan does not silently fall through
+    // to the real filesystem (it would only "work" because /tmp/user-memory
+    // doesn't exist and listMarkdownFiles swallows ENOENT). Each test that
+    // cares about user docs sets a mockReturnValue.
+    scanUserAutoMemoryTopicDocuments: vi.fn().mockResolvedValue([]),
   };
 });
 
@@ -167,6 +173,46 @@ describe('runAutoMemoryExtractionByAgent', () => {
     );
     expect(result.touchedUserScope).toBe(true);
     expect(result.touchedProjectScope).toBe(false);
+  });
+
+  it('classifies file paths when the root is backslash-native (Windows) but agent reports forward slashes', async () => {
+    // On Windows the roots returned by getAutoMemoryRoot/getUserAutoMemoryRoot
+    // are backslash-separated (`C:\Users\foo\...\memory`). The model's tool
+    // calls (and the writes the agent reports as `filesTouched`) commonly
+    // come back forward-slash-normalized. The classification must succeed in
+    // that case — otherwise user-scope writes silently fail to rebuild the
+    // index on Windows.
+    //
+    // sticky mockReturnValue (not Once) — the production code calls each
+    // helper twice per extraction (prompt builder + touched-topics
+    // classifier) so a Once-mock only covers the first call. Restored
+    // below to keep subsequent tests on the suite's POSIX defaults.
+    vi.mocked(getAutoMemoryRoot).mockReturnValue(
+      'C:\\Users\\foo\\.qwen\\projects\\proj\\memory',
+    );
+    vi.mocked(getUserAutoMemoryRoot).mockReturnValue(
+      'C:\\Users\\foo\\.qwen\\memories',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [
+        'C:/Users/foo/.qwen/projects/proj/memory/project/release.md',
+        'C:/Users/foo/.qwen/memories/user/role.md',
+      ],
+    });
+
+    try {
+      const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+      expect(result.touchedTopics).toEqual(
+        expect.arrayContaining(['project', 'user']),
+      );
+      expect(result.touchedProjectScope).toBe(true);
+      expect(result.touchedUserScope).toBe(true);
+    } finally {
+      vi.mocked(getAutoMemoryRoot).mockReturnValue('/tmp/auto-memory');
+      vi.mocked(getUserAutoMemoryRoot).mockReturnValue('/tmp/user-memory');
+    }
   });
 
   it('classifies file paths regardless of which separator the agent reported', async () => {
