@@ -11,7 +11,9 @@ import { ndJsonStream } from '@agentclientprotocol/sdk';
 import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
 import { MissingCliEntryError } from './status.js';
 
+let cachedMemoryArgs: string[] | undefined;
 export function getAcpMemoryArgs(): string[] {
+  if (cachedMemoryArgs) return cachedMemoryArgs;
   const constrainedMemory = (process as { constrainedMemory?: () => number })
     .constrainedMemory;
   const constrained =
@@ -20,7 +22,9 @@ export function getAcpMemoryArgs(): string[] {
     constrained && constrained > 0 ? constrained : os.totalmem();
   const totalMB = Math.floor(totalBytes / (1024 * 1024));
   const targetMB = Math.min(Math.floor(totalMB * 0.5), 16_384);
-  return targetMB > 2048 ? [`--max-old-space-size=${targetMB}`] : [];
+  cachedMemoryArgs =
+    targetMB > 2048 ? [`--max-old-space-size=${targetMB}`] : [];
+  return cachedMemoryArgs;
 }
 
 // ──────────────────────────────────────────────────────────────────────
