@@ -12,6 +12,7 @@ import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js'
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
+import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -501,12 +502,6 @@ export class ModelsConfig {
   }
 
   /**
-   * Prefix used to identify RuntimeModelSnapshot IDs.
-   * Chosen to avoid conflicts with real model IDs which may contain `-` or `:`.
-   */
-  private static readonly RUNTIME_SNAPSHOT_PREFIX = '$runtime|';
-
-  /**
    * Build a RuntimeModelSnapshot ID from authType and modelId.
    * The format is: `$runtime|${authType}|${modelId}`
    *
@@ -521,7 +516,7 @@ export class ModelsConfig {
     authType: AuthType,
     modelId: string,
   ): string {
-    return `${ModelsConfig.RUNTIME_SNAPSHOT_PREFIX}${authType}|${modelId}`;
+    return `${RUNTIME_SNAPSHOT_PREFIX}${authType}|${modelId}`;
   }
 
   /**
@@ -540,7 +535,7 @@ export class ModelsConfig {
    */
   private extractRuntimeModelSnapshotId(modelId: string): string | undefined {
     // Check if modelId starts with the runtime snapshot prefix
-    if (modelId.startsWith(ModelsConfig.RUNTIME_SNAPSHOT_PREFIX)) {
+    if (modelId.startsWith(RUNTIME_SNAPSHOT_PREFIX)) {
       // Verify the snapshot exists
       if (this.runtimeModelSnapshots.has(modelId)) {
         return modelId;

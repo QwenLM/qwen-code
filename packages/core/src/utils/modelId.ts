@@ -41,20 +41,10 @@ type ModelIdSelector =
 
 const AUTH_TYPES = new Set<AuthType>(Object.values(AuthType));
 
-/** Runtime model snapshot ID prefix; format `$runtime|${authType}|${modelId}`. */
-export const RUNTIME_SNAPSHOT_PREFIX = '$runtime|';
-
-/**
- * Recover the bare model ID from a (possibly runtime-prefixed) model string.
- * Strips every layer so nested prefixes self-heal; bare IDs pass through.
- */
-export function stripRuntimeSnapshotPrefix(modelId: string): string {
-  let id = modelId;
-  while (id.startsWith(RUNTIME_SNAPSHOT_PREFIX)) {
-    id = id.split('|').slice(2).join('|');
-  }
-  return id;
-}
+export {
+  RUNTIME_SNAPSHOT_PREFIX,
+  stripRuntimeSnapshotPrefix,
+} from './runtimeModelPrefix.js';
 
 /**
  * Resolve a model selector to the concrete model ID a caller should use.

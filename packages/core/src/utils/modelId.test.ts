@@ -28,6 +28,13 @@ describe('stripRuntimeSnapshotPrefix', () => {
       ),
     ).toBe('qwen3.6-27b-autoround');
   });
+
+  it('returns the input unchanged for a malformed prefix with no model ID', () => {
+    expect(stripRuntimeSnapshotPrefix('$runtime|openai|')).toBe(
+      '$runtime|openai|',
+    );
+    expect(stripRuntimeSnapshotPrefix('$runtime|')).toBe('$runtime|');
+  });
 });
 
 describe('resolveModelId', () => {
