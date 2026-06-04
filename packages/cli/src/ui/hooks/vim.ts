@@ -615,6 +615,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             lines.length - 1,
           );
           if (row < endRow) {
+            const firstLineLen = (lines[row] ?? '').length;
             let joined = lines[row] ?? '';
             for (let r = row + 1; r <= endRow; r++) {
               joined += ' ' + (lines[r] ?? '').trimStart();
@@ -626,6 +627,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               (lines[endRow] ?? '').length,
               joined,
             );
+            buffer.vimMoveToLineStart();
+            buffer.vimMoveRight(firstLineLen);
           }
           break;
         }
@@ -1690,6 +1693,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               lines.length - 1,
             );
             if (row < endRow) {
+              const firstLineLen = (lines[row] ?? '').length;
               let joined = lines[row] ?? '';
               for (let r = row + 1; r <= endRow; r++) {
                 joined += ' ' + (lines[r] ?? '').trimStart();
@@ -1701,6 +1705,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                 (lines[endRow] ?? '').length,
                 joined,
               );
+              buffer.vimMoveToLineStart();
+              buffer.vimMoveRight(firstLineLen);
             }
             dispatch({
               type: 'SET_LAST_COMMAND',
