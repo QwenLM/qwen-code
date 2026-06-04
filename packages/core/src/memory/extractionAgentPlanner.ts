@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
@@ -301,8 +302,11 @@ function touchedTopicsFromFilePaths(
   touchedProjectScope: boolean;
   touchedUserScope: boolean;
 } {
-  const projectRootDir = getAutoMemoryRoot(projectRoot);
-  const userRootDir = getUserAutoMemoryRoot();
+  // Append a path separator so `/foo/memory` does not collide with
+  // `/foo/memory-other/x.md` under startsWith. Files always live INSIDE
+  // the root (never at the root itself), so the trailing separator is safe.
+  const projectRootPrefix = getAutoMemoryRoot(projectRoot) + path.sep;
+  const userRootPrefix = getUserAutoMemoryRoot() + path.sep;
   const topicSet = new Set<AutoMemoryType>();
   let touchedProjectScope = false;
   let touchedUserScope = false;
@@ -312,17 +316,17 @@ function touchedTopicsFromFilePaths(
     // isAutoMemPath helper, which calls into paths.ts internals and would
     // bypass module-level mocks in extractionAgentPlanner.test.ts). This
     // also keeps the routing decision symmetric across both scopes.
-    let root: string | undefined;
-    if (p.startsWith(projectRootDir)) {
-      root = projectRootDir;
+    let rootPrefix: string | undefined;
+    if (p.startsWith(projectRootPrefix)) {
+      rootPrefix = projectRootPrefix;
       touchedProjectScope = true;
-    } else if (p.startsWith(userRootDir)) {
-      root = userRootDir;
+    } else if (p.startsWith(userRootPrefix)) {
+      rootPrefix = userRootPrefix;
       touchedUserScope = true;
     } else {
       continue;
     }
-    const rel = p.slice(root.length).replace(/^[/\\]/, '');
+    const rel = p.slice(rootPrefix.length);
     const segment = rel.split(/[/\\]/)[0] as AutoMemoryType;
     if (
       segment === 'user' ||

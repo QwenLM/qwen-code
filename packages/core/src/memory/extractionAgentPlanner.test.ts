@@ -169,6 +169,26 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(result.touchedProjectScope).toBe(false);
   });
 
+  it('rejects sibling directories that share a root prefix (no startsWith collision)', async () => {
+    // getAutoMemoryRoot mocked → /tmp/auto-memory.
+    // A path inside /tmp/auto-memory-other/ shares the string prefix but is
+    // a different directory entirely; the trailing-separator guard must keep
+    // it out of both scopes.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [
+        '/tmp/auto-memory-other/user/x.md',
+        '/tmp/user-memory-backup/user/y.md',
+      ],
+    });
+
+    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    expect(result.touchedTopics).toEqual([]);
+    expect(result.touchedProjectScope).toBe(false);
+    expect(result.touchedUserScope).toBe(false);
+  });
+
   it('reports both scopes when the agent writes to both roots in one run', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
