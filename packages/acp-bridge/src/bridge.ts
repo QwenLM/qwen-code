@@ -837,28 +837,31 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     }
   }
 
-  const killWithLog = (ci: ChannelInfo): void => {
+  async function killChannelWithLog(ci: ChannelInfo): Promise<void> {
     ci.isDying = true;
-    void ci.channel.kill().catch((err) => {
+    await ci.channel.kill().catch((err) => {
       writeStderrLine(`qwen serve: channel kill failed: ${String(err)}`);
     });
-  };
+  }
 
-  function startIdleTimer(ci: ChannelInfo): void {
+  function resolvedChannelIdleTimeoutMs(): number {
     const raw = opts.channelIdleTimeoutMs;
-    const timeoutMs =
-      raw !== undefined && Number.isFinite(raw) && raw > 0
-        ? Math.min(raw, 2_147_483_647)
-        : 0;
-    if (!timeoutMs || timeoutMs <= 0) {
-      killWithLog(ci);
+    return raw !== undefined && Number.isFinite(raw) && raw > 0
+      ? Math.min(raw, 2_147_483_647)
+      : 0;
+  }
+
+  async function startIdleTimer(ci: ChannelInfo): Promise<void> {
+    const timeoutMs = resolvedChannelIdleTimeoutMs();
+    if (timeoutMs <= 0) {
+      await killChannelWithLog(ci);
       return;
     }
     cancelIdleTimer();
     idleTimer = setTimeout(() => {
       idleTimer = undefined;
       if (ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
-        killWithLog(ci);
+        void killChannelWithLog(ci);
       }
     }, timeoutMs);
     idleTimer.unref();
@@ -2863,7 +2866,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         /* no active prompt or session already torn down */
       }
       if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
-        startIdleTimer(ci);
+        await startIdleTimer(ci);
       }
     },
 
@@ -4491,7 +4494,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // SIGTERM the restore mid-flight and 500 the caller for a
       // failure orthogonal to their request.
       if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
-        startIdleTimer(ci);
+        await startIdleTimer(ci);
       }
     },
 
@@ -4648,7 +4651,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
 
     async preheat() {
       if (shuttingDown) return;
-      await ensureChannel();
+      const ci = await ensureChannel();
+      const idleMs = resolvedChannelIdleTimeoutMs();
+      if (
+        idleMs > 0 &&
+        ci.sessionIds.size === 0 &&
+        ci.pendingRestoreIds.size === 0
+      ) {
+        await startIdleTimer(ci);
+      }
     },
   };
 }

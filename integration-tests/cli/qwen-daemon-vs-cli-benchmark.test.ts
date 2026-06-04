@@ -23,10 +23,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { DaemonHttpError } from '@qwen-code/sdk';
 import {
   spawnDaemon,
@@ -1361,7 +1359,7 @@ async function spawnDaemonWithTime(
             if (err instanceof DaemonHttpError && err.status === 503) {
               limitEnforced = true;
               const body = err.body as Record<string, unknown> | undefined;
-              errorCode = String(body?.code ?? '');
+              errorCode = String(body?.['code'] ?? '');
             }
           }
 
@@ -1430,7 +1428,7 @@ async function spawnDaemonWithTime(
               try {
                 for await (const ev of daemon!.client.subscribeEvents(
                   sessionId,
-                  { signal: ac.signal, lastEventId: '0' },
+                  { signal: ac.signal, lastEventId: 0 },
                 )) {
                   if (ev.type === 'replay_complete') {
                     connectedCount++;
