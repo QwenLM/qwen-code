@@ -705,6 +705,49 @@ describe('shouldForceAutoModeReviewForAllow', () => {
         }),
       ),
     ).toBe(true);
+
+    for (const command of [
+      ["bash <<'SCRIPT'", "tee .qwen/settings.json <<< '{}'", 'SCRIPT'].join(
+        '\n',
+      ),
+      [
+        "bash <<'SCRIPT'",
+        'dd if=/tmp/payload of=.qwen/settings.json',
+        'SCRIPT',
+      ].join('\n'),
+      [
+        "bash <<'SCRIPT'",
+        'sort -o .qwen/settings.json /dev/null',
+        'SCRIPT',
+      ].join('\n'),
+      [
+        "bash <<'SCRIPT'",
+        "node -e \"require('fs').writeFileSync('.qwen/settings.json', '{}')\"",
+        'SCRIPT',
+      ].join('\n'),
+    ]) {
+      expect(
+        shouldForceAutoModeReviewForAllow(
+          ctx({
+            toolName: ToolNames.SHELL,
+            command,
+            cwd: '/repo',
+          }),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('returns true for protected write commands with variable destinations', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'D=.qwen/settings.json; cp payload "$D"',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
   });
 
   it('returns true for sort writing protected paths via output flags', () => {

@@ -44,7 +44,7 @@ import type { PermissionCheckContext } from './types.js';
 const autoModeDebugLogger = createDebugLogger('AUTO_MODE');
 
 const RAW_PROTECTED_WRITE_COMMANDS =
-  /\b(?:cp|mv|install|rsync|patch|perl|sed|sort)\b/;
+  /\b(?:cp|mv|install|rsync|patch|perl|sed|tee|dd|sort|awk|gawk|node|python3?|ruby|php)\b/;
 
 /**
  * Built-in tools whose any-parameter behavior is safe under the AUTO mode
@@ -331,17 +331,28 @@ function hasRawProtectedRedirect(command: string, cwd: string): boolean {
 function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {
   for (const line of command.split('\n')) {
     if (!RAW_PROTECTED_WRITE_COMMANDS.test(line)) continue;
+    if (/\b(?:sed|perl)\b/.test(line) && !/(?:^|\s)-[A-Za-z]*i/.test(line)) {
+      continue;
+    }
     for (const rawToken of line.split(/\s+/)) {
       const target = stripRawRedirectTargetToken(rawToken).replace(
         /^[({]+|[),;]+$/g,
         '',
       );
       if (!target || target.startsWith('-')) continue;
-      const resolved = path.isAbsolute(target)
-        ? target
-        : path.join(cwd, target);
-      if (isAutoModeProtectedWritePath(resolved)) return true;
+      if (target.includes('$')) return true;
+      if (containsProtectedPathFragment(target, cwd)) return true;
     }
+  }
+  return false;
+}
+
+function containsProtectedPathFragment(token: string, cwd: string): boolean {
+  for (const candidate of token.match(/[A-Za-z0-9_./~-]+/g) ?? []) {
+    const resolved = path.isAbsolute(candidate)
+      ? candidate
+      : path.join(cwd, candidate);
+    if (isAutoModeProtectedWritePath(resolved)) return true;
   }
   return false;
 }
@@ -360,7 +371,9 @@ function stripRawRedirectTargetToken(token: string): string {
 
   while (end > start) {
     const ch = token[end - 1];
-    if (ch !== "'" && ch !== '"' && ch !== ')' && ch !== '&') break;
+    if (ch !== "'" && ch !== '"' && ch !== ')' && ch !== '}' && ch !== '&') {
+      break;
+    }
     end--;
   }
 
