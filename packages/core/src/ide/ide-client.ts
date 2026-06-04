@@ -465,8 +465,7 @@ export class IdeClient {
         );
       }
     } catch (error) {
-      // It's okay if this fails, the IDE might not support it.
-      // Don't log an error if the method is not found, which is a common case.
+      // "Method not found" is expected for IDEs that don't support tool discovery.
       if (
         error instanceof Error &&
         !error.message?.includes('Method not found')
