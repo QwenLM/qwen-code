@@ -216,7 +216,7 @@ export function resolveCliGenerationConfig(
     settings: {
       model: settings.model?.name
         ? stripRuntimeSnapshotPrefix(settings.model.name)
-        : settings.model?.name,
+        : undefined,
       apiKey: settings.security?.auth?.apiKey,
       baseUrl: settings.security?.auth?.baseUrl,
       generationConfig: settings.model?.generationConfig as
