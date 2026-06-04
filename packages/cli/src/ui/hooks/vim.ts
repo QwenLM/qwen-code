@@ -13,6 +13,7 @@ import {
   useVimModeActions,
 } from '../contexts/VimModeContext.js';
 import { execFile, execFileSync } from 'child_process';
+import { cpLen, cpSlice } from '../utils/textUtils.js';
 
 export type VimMode = 'NORMAL' | 'INSERT';
 
@@ -335,14 +336,14 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       const lines = bufferRef.current.lines;
       let text = '';
       if (startRow === endRow) {
-        text = lines[startRow]?.slice(startCol, endCol) ?? '';
+        text = cpSlice(lines[startRow] ?? '', startCol, endCol);
       } else {
         const middleLines = lines.slice(startRow + 1, endRow);
         text =
-          (lines[startRow]?.slice(startCol) ?? '') +
+          cpSlice(lines[startRow] ?? '', startCol) +
           '\n' +
           (middleLines.length > 0 ? middleLines.join('\n') + '\n' : '') +
-          (lines[endRow]?.slice(0, endCol) ?? '');
+          cpSlice(lines[endRow] ?? '', 0, endCol);
       }
       dispatch({ type: 'SET_YANK_REGISTER', text, linewise });
       writeClipboard(text);
@@ -380,7 +381,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           const [row, col] = bufferRef.current.cursor;
           const lines = bufferRef.current.lines;
           const line = lines[row] ?? '';
-          const text = line.slice(col, col + count);
+          const text = cpSlice(line, col, col + count);
           dispatch({ type: 'SET_YANK_REGISTER', text, linewise: false });
           writeClipboard(text);
           buffer.vimDeleteChar(count);
@@ -428,7 +429,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           const [row, col] = bufferRef.current.cursor;
           const lines = bufferRef.current.lines;
           const line = lines[row] ?? '';
-          const text = line.slice(col);
+          const text = cpSlice(line, col);
           dispatch({ type: 'SET_YANK_REGISTER', text, linewise: false });
           writeClipboard(text);
           buffer.vimDeleteToEndOfLine();
@@ -438,7 +439,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           const [row, col] = bufferRef.current.cursor;
           const lines = bufferRef.current.lines;
           const line = lines[row] ?? '';
-          const text = line.slice(col);
+          const text = cpSlice(line, col);
           dispatch({ type: 'SET_YANK_REGISTER', text, linewise: false });
           writeClipboard(text);
           buffer.vimChangeToEndOfLine();
@@ -491,16 +492,16 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             switch (m) {
               case 'h': {
                 const startCol = Math.max(0, col - count);
-                text = (lines[row] ?? '').slice(startCol, col);
+                text = cpSlice(lines[row] ?? '', startCol, col);
                 break;
               }
               case 'l': {
-                const endCol = Math.min((lines[row] ?? '').length, col + count);
-                text = (lines[row] ?? '').slice(col, endCol);
+                const endCol = Math.min(cpLen(lines[row] ?? ''), col + count);
+                text = cpSlice(lines[row] ?? '', col, endCol);
                 break;
               }
               case 'j': {
-                const endRow = Math.min(lines.length - 1, row + count - 1);
+                const endRow = Math.min(lines.length - 1, row + count);
                 text = lines.slice(row, endRow + 1).join('\n');
                 break;
               }
@@ -540,16 +541,16 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             switch (m) {
               case 'h': {
                 const startCol = Math.max(0, col - count);
-                text = (lines[row] ?? '').slice(startCol, col);
+                text = cpSlice(lines[row] ?? '', startCol, col);
                 break;
               }
               case 'l': {
-                const endCol = Math.min((lines[row] ?? '').length, col + count);
-                text = (lines[row] ?? '').slice(col, endCol);
+                const endCol = Math.min(cpLen(lines[row] ?? ''), col + count);
+                text = cpSlice(lines[row] ?? '', col, endCol);
                 break;
               }
               case 'j': {
-                const endRow = Math.min(lines.length - 1, row + count - 1);
+                const endRow = Math.min(lines.length - 1, row + count);
                 text = lines.slice(row, endRow + 1).join('\n');
                 break;
               }
@@ -571,7 +572,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           break;
         }
         case CMD_TYPES.REPLACE_CHAR: {
-          const replaceChar = state.lastCommand?.char;
+          const replaceChar = stateRef.current.lastCommand?.char;
           if (replaceChar != null) {
             const [row, col] = bufferRef.current.cursor;
             const line = bufferRef.current.lines[row] ?? '';
@@ -590,9 +591,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         case CMD_TYPES.TOGGLE_CASE: {
           const [startRow, startCol] = buffer.cursor;
           const line = buffer.lines[startRow] ?? '';
-          const toggleCount = Math.min(count, line.length - startCol);
+          const toggleCount = Math.min(count, cpLen(line) - startCol);
           if (toggleCount > 0) {
-            const toggled = [...line.slice(startCol, startCol + toggleCount)]
+            const toggled = [...cpSlice(line, startCol, startCol + toggleCount)]
               .map((ch) =>
                 ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase(),
               )
@@ -615,10 +616,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             lines.length - 1,
           );
           if (row < endRow) {
-            const firstLineLen = (lines[row] ?? '').length;
             let joined = lines[row] ?? '';
+            let joinCol = joined.length;
             for (let r = row + 1; r <= endRow; r++) {
-              joined += ' ' + (lines[r] ?? '').trimStart();
+              const trimmed = (lines[r] ?? '').trimStart();
+              joinCol += 1 + trimmed.length;
+              joined += ' ' + trimmed;
             }
             buffer.replaceRange(
               row,
@@ -628,7 +631,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               joined,
             );
             buffer.vimMoveToLineStart();
-            buffer.vimMoveRight(firstLineLen);
+            buffer.vimMoveRight(joinCol);
           }
           break;
         }
@@ -688,7 +691,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       }
       return true;
     },
-    [buffer, updateMode, yankRange, state.lastCommand?.char],
+    [buffer, updateMode, yankRange],
   );
 
   // ── Word boundary helpers (for yank) ──
@@ -971,16 +974,16 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       switch (movement) {
         case 'h': {
           const startCol = Math.max(0, col - count);
-          text = (lines[row] ?? '').slice(startCol, col);
+          text = cpSlice(lines[row] ?? '', startCol, col);
           break;
         }
         case 'l': {
-          const endCol = Math.min((lines[row] ?? '').length, col + count);
-          text = (lines[row] ?? '').slice(col, endCol);
+          const endCol = Math.min(cpLen(lines[row] ?? ''), col + count);
+          text = cpSlice(lines[row] ?? '', col, endCol);
           break;
         }
         case 'j': {
-          const endRow = Math.min(lines.length - 1, row + count - 1);
+          const endRow = Math.min(lines.length - 1, row + count);
           text = lines.slice(row, endRow + 1).join('\n');
           break;
         }
@@ -1030,16 +1033,16 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       switch (movement) {
         case 'h': {
           const startCol = Math.max(0, col - count);
-          text = (lines[row] ?? '').slice(startCol, col);
+          text = cpSlice(lines[row] ?? '', startCol, col);
           break;
         }
         case 'l': {
-          const endCol = Math.min((lines[row] ?? '').length, col + count);
-          text = (lines[row] ?? '').slice(col, endCol);
+          const endCol = Math.min(cpLen(lines[row] ?? ''), col + count);
+          text = cpSlice(lines[row] ?? '', col, endCol);
           break;
         }
         case 'j': {
-          const endRow = Math.min(lines.length - 1, row + count - 1);
+          const endRow = Math.min(lines.length - 1, row + count);
           text = lines.slice(row, endRow + 1).join('\n');
           break;
         }
@@ -1487,9 +1490,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           case '~': {
             const [startRow, startCol] = buffer.cursor;
             const line = buffer.lines[startRow] ?? '';
-            const count = Math.min(repeatCount, line.length - startCol);
+            const count = Math.min(repeatCount, cpLen(line) - startCol);
             if (count > 0) {
-              const toggled = [...line.slice(startCol, startCol + count)]
+              const toggled = [...cpSlice(line, startCol, startCol + count)]
                 .map((ch) =>
                   ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase(),
                 )
@@ -1693,10 +1696,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               lines.length - 1,
             );
             if (row < endRow) {
-              const firstLineLen = (lines[row] ?? '').length;
               let joined = lines[row] ?? '';
+              let joinCol = joined.length;
               for (let r = row + 1; r <= endRow; r++) {
-                joined += ' ' + (lines[r] ?? '').trimStart();
+                const trimmed = (lines[r] ?? '').trimStart();
+                joinCol += 1 + trimmed.length;
+                joined += ' ' + trimmed;
               }
               buffer.replaceRange(
                 row,
@@ -1706,7 +1711,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                 joined,
               );
               buffer.vimMoveToLineStart();
-              buffer.vimMoveRight(firstLineLen);
+              buffer.vimMoveRight(joinCol);
             }
             dispatch({
               type: 'SET_LAST_COMMAND',
@@ -1816,12 +1821,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                     '\n' + repeated.replace(/\n$/, ''),
                   );
                   // Cursor on first line of pasted text (row + 1)
-                  buffer.vimMoveToLine(row + 1);
+                  buffer.vimMoveToLine(row + 2);
                   buffer.vimMoveToLineStart();
                 } else {
                   buffer.replaceRange(row + 1, 0, row + 1, 0, repeated);
                   // Cursor on first line of pasted text (row + 1)
-                  buffer.vimMoveToLine(row + 1);
+                  buffer.vimMoveToLine(row + 2);
                   buffer.vimMoveToLineStart();
                 }
               } else {
@@ -1853,6 +1858,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               if (isLinewise) {
                 const repeated = preparePasteText(text, repeatCount);
                 buffer.replaceRange(row, 0, row, 0, repeated);
+                buffer.vimMoveToLine(row + 1);
                 buffer.vimMoveToLineStart();
               } else {
                 // Paste before cursor
@@ -1864,7 +1870,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                   text.repeat(repeatCount),
                 );
                 // Cursor on first pasted character
-                buffer.vimMoveLeft(text.length * repeatCount);
+                buffer.vimMoveLeft(cpLen(text) * repeatCount);
               }
             }
             dispatch({ type: 'CLEAR_COUNT' });
