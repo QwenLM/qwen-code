@@ -17,7 +17,6 @@
  * - SystemController: initialize, interrupt, set_model, supported_commands, get_context_usage
  * - PermissionController: can_use_tool, set_permission_mode
  * - SdkMcpController: mcp_server_status (mcp_message handled via callback)
- * - HookController: hook_callback
  *
  * Note: mcp_message requests are NOT routed through the dispatcher. CLI MCP
  * clients send messages via SdkMcpController.createSendSdkMcpMessage() callback.
@@ -270,7 +269,6 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     this.systemController.cleanup();
     this.permissionController.cleanup();
     this.sdkMcpController.cleanup();
-    // this.hookController.cleanup();
   }
 
   /**
@@ -386,9 +384,6 @@ export class ControlDispatcher implements IPendingRequestRegistry {
 
       case 'mcp_server_status':
         return this.sdkMcpController;
-
-      // case 'hook_callback':
-      //   return this.hookController;
 
       default:
         throw new Error(`Unknown control request subtype: ${subtype}`);
