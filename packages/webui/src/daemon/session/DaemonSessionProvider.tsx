@@ -389,10 +389,13 @@ export function DaemonSessionProvider({
           }
 
           const pendingLoad = pendingSessionLoadRef.current;
+          const pendingLoadToResolve =
+            pendingLoad?.sessionId === activeSession.sessionId
+              ? pendingLoad
+              : undefined;
           if (pendingLoad?.sessionId === activeSession.sessionId) {
             pendingSessionLoadRef.current = undefined;
             clearTimeout(pendingLoad.timeout);
-            pendingLoad.resolve();
           }
 
           // Feed replay snapshot (compacted history + live journal) into
@@ -404,16 +407,14 @@ export function DaemonSessionProvider({
             const replayOpts = eventOptionsRef.current;
             const allUiEvents: DaemonUiEvent[] = [];
             for (const replayEvent of replayEvents) {
-              updateConnectionFromDaemonEvent(replayEvent, setConnection);
-              const normalized = normalizeDaemonEvent(replayEvent, {
-                clientId: activeSession.clientId,
-                suppressOwnUserEcho: replayOpts.suppressOwnUserEcho,
-                includeRawEvent: replayOpts.includeRawEvent,
-              });
-              const filtered = isPromptLifecycleTurnEvent(replayEvent)
-                ? []
-                : normalized;
-              allUiEvents.push(...filtered);
+              allUiEvents.push(
+                ...normalizeAndFilterEvent(
+                  replayEvent,
+                  activeSession.clientId,
+                  replayOpts,
+                  setConnection,
+                ),
+              );
             }
             if (allUiEvents.length > 0) {
               store.dispatch(allUiEvents);
@@ -432,6 +433,7 @@ export function DaemonSessionProvider({
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
+          pendingLoadToResolve?.resolve();
 
           let sawEvent = false;
           let resyncRequested = false;
@@ -450,16 +452,12 @@ export function DaemonSessionProvider({
                 publishSidechannelFollowupSuggestion(followupSuggestion);
                 continue;
               }
-              updateConnectionFromDaemonEvent(event, setConnection);
-              const eventOptions = eventOptionsRef.current;
-              const normalizedUiEvents = normalizeDaemonEvent(event, {
-                clientId: activeSession.clientId,
-                suppressOwnUserEcho: eventOptions.suppressOwnUserEcho,
-                includeRawEvent: eventOptions.includeRawEvent,
-              });
-              const uiEvents = isPromptLifecycleTurnEvent(event)
-                ? []
-                : normalizedUiEvents;
+              const uiEvents = normalizeAndFilterEvent(
+                event,
+                activeSession.clientId,
+                eventOptionsRef.current,
+                setConnection,
+              );
               bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
               if (uiEvents.length > 0) {
                 setPromptStatus((current) =>
@@ -864,6 +862,21 @@ function settleActivePromptFromTurnEvent(
 
 function isPromptLifecycleTurnEvent(event: DaemonEvent): boolean {
   return event.type === 'turn_complete' || event.type === 'turn_error';
+}
+
+function normalizeAndFilterEvent(
+  event: DaemonEvent,
+  clientId: string | undefined,
+  opts: { suppressOwnUserEcho: boolean; includeRawEvent: boolean },
+  setConnection: Dispatch<SetStateAction<DaemonConnectionState>>,
+): DaemonUiEvent[] {
+  updateConnectionFromDaemonEvent(event, setConnection);
+  const normalized = normalizeDaemonEvent(event, {
+    clientId,
+    suppressOwnUserEcho: opts.suppressOwnUserEcho,
+    includeRawEvent: opts.includeRawEvent,
+  });
+  return isPromptLifecycleTurnEvent(event) ? [] : normalized;
 }
 
 export function useDaemonSession(): DaemonSessionContextValue {

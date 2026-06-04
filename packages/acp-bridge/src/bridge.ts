@@ -556,15 +556,17 @@ function broadcastTurnComplete(
 /**
  * Extract a human-readable message from an unknown error value.
  * Handles Error instances, JSON-RPC error objects (`{ code, message,
- * data: { details } }`), and plain objects with a `message` property.
+ * data: { details } }` or string `data`), and plain objects with a `message`
+ * property.
  * JSON-RPC internal errors carry the generic `"Internal error"` as
  * `message`; the actual detail lives in `data.details`.
  */
-function extractErrorMessage(err: unknown): string {
+export function extractErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === 'object' && err !== null) {
     const obj = err as Record<string, unknown>;
     const data = obj['data'];
+    if (typeof data === 'string' && data.length > 0) return data;
     if (typeof data === 'object' && data !== null) {
       const details = (data as Record<string, unknown>)['details'];
       if (typeof details === 'string' && details.length > 0) return details;
@@ -575,7 +577,7 @@ function extractErrorMessage(err: unknown): string {
   return String(err);
 }
 
-function extractErrorCode(err: unknown): string | undefined {
+export function extractErrorCode(err: unknown): string | undefined {
   if (typeof err !== 'object' || err === null || !('code' in err))
     return undefined;
   const raw = (err as Record<string, unknown>)['code'];

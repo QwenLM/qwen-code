@@ -2038,6 +2038,99 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('retries when ring-evicted reload fails once', async () => {
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-ring-retry',
+      lastEventId: 10,
+      events: async function* ringEvictedEvents() {
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 10,
+            earliestAvailableId: 12,
+          },
+        };
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'session-ring-retry',
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 12,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'history after retry' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* reloadedIdleEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        reloaded.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+        yield* [];
+      },
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+    sdkMocks.MockDaemonSessionClient.load
+      .mockRejectedValueOnce(new Error('temporary load failure'))
+      .mockImplementation(
+        async (client: unknown, _sessionId: string): Promise<MockSession> => {
+          const session = sdkMocks.sessions.shift();
+          if (!session) throw new Error('No mock daemon session queued');
+          session.client = client as MockClient;
+          return session;
+        },
+      );
+
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let awaitingResync = false;
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    expect(sdkMocks.MockDaemonSessionClient.load).toHaveBeenCalledTimes(2);
+    expect(awaitingResync).toBe(false);
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'history after retry',
+        }),
+      ]),
+    );
+  });
+
   it('accepts live events after ring-evicted reload reconnects', async () => {
     const reattachDelivered = createDeferred<void>();
     const firstSession = createMockSession({
@@ -2101,7 +2194,7 @@ describe('DaemonSessionProvider', () => {
       maxReconnectDelayMs: 1,
     });
     await act(async () => {
-      await wait(20);
+      await reattachDelivered.promise;
       await flushPromises();
     });
     expect(blocks).not.toEqual(
@@ -2112,11 +2205,6 @@ describe('DaemonSessionProvider', () => {
         }),
       ]),
     );
-
-    await act(async () => {
-      await reattachDelivered.promise;
-      await flushPromises();
-    });
 
     expect(awaitingResync).toBe(false);
     expect(blocks).toEqual(

@@ -216,6 +216,22 @@ function formatError(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+interface AlreadyDispatchedError extends Error {
+  _alreadyDispatched: true;
+}
+
+function markAlreadyDispatched(error: Error): AlreadyDispatchedError {
+  return Object.assign(error, { _alreadyDispatched: true as const });
+}
+
+function isAlreadyDispatched(error: unknown): error is AlreadyDispatchedError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as AlreadyDispatchedError)._alreadyDispatched === true
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -592,9 +608,8 @@ export function App({
           optimisticUserMessage: opts?.optimisticUserMessage,
         })
         .catch((error: unknown) => {
-          throw Object.assign(
+          throw markAlreadyDispatched(
             error instanceof Error ? error : new Error(String(error)),
-            { _alreadyDispatched: true },
           );
         });
     },
@@ -672,11 +687,8 @@ export function App({
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
-      if (
-        typeof error === 'object' &&
-        error !== null &&
-        (error as { _alreadyDispatched?: boolean })._alreadyDispatched
-      ) {
+      if (isAlreadyDispatched(error)) {
+        console.warn('[web-shell] error already dispatched', error);
         return;
       }
       store.dispatch([{ type: 'error', text: formatError(error, fallback) }]);

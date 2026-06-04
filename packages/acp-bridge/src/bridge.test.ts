@@ -41,7 +41,11 @@ import {
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
-import { createHttpAcpBridge } from './bridge.js';
+import {
+  createHttpAcpBridge,
+  extractErrorMessage,
+  extractErrorCode,
+} from './bridge.js';
 import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
@@ -8387,5 +8391,95 @@ describe('onDiagnosticLine', () => {
 
     subAbort.abort();
     await bridge.shutdown();
+  });
+});
+
+describe('extractErrorMessage', () => {
+  it('extracts message from Error instance', () => {
+    expect(extractErrorMessage(new Error('boom'))).toBe('boom');
+  });
+
+  it('extracts details from JSON-RPC error object', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { details: 'session not found' },
+      }),
+    ).toBe('session not found');
+  });
+
+  it('extracts string data from JSON-RPC error object', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: 'session not found',
+      }),
+    ).toBe('session not found');
+  });
+
+  it('falls back to message when data.details is missing', () => {
+    expect(
+      extractErrorMessage({ code: -32600, message: 'Invalid Request' }),
+    ).toBe('Invalid Request');
+  });
+
+  it('falls back to message when data.details is empty string', () => {
+    expect(
+      extractErrorMessage({
+        code: -32603,
+        message: 'Internal error',
+        data: { details: '' },
+      }),
+    ).toBe('Internal error');
+  });
+
+  it('converts string to itself', () => {
+    expect(extractErrorMessage('plain string')).toBe('plain string');
+  });
+
+  it('converts null via String()', () => {
+    expect(extractErrorMessage(null)).toBe('null');
+  });
+
+  it('converts undefined via String()', () => {
+    expect(extractErrorMessage(undefined)).toBe('undefined');
+  });
+
+  it('extracts message from plain object with message property', () => {
+    expect(extractErrorMessage({ message: 'custom error' })).toBe(
+      'custom error',
+    );
+  });
+
+  it('converts object without message via String()', () => {
+    expect(extractErrorMessage({ foo: 'bar' })).toBe('[object Object]');
+  });
+});
+
+describe('extractErrorCode', () => {
+  it('returns string code as-is', () => {
+    expect(extractErrorCode({ code: 'NETWORK_ERROR' })).toBe('NETWORK_ERROR');
+  });
+
+  it('converts numeric code to string', () => {
+    expect(extractErrorCode({ code: -32603 })).toBe('-32603');
+  });
+
+  it('returns undefined for non-object', () => {
+    expect(extractErrorCode('not an object')).toBeUndefined();
+  });
+
+  it('returns undefined for null', () => {
+    expect(extractErrorCode(null)).toBeUndefined();
+  });
+
+  it('returns undefined when code is missing', () => {
+    expect(extractErrorCode({ message: 'no code' })).toBeUndefined();
+  });
+
+  it('returns undefined when code is not string or number', () => {
+    expect(extractErrorCode({ code: true })).toBeUndefined();
   });
 });
