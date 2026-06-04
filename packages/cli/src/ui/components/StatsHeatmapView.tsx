@@ -77,7 +77,7 @@ export const HeatmapView: React.FC<{
             <Text
               key={ci}
               backgroundColor={
-                cell.intensity > 0 ? HEATMAP_COLORS[cell.intensity] : '#fafafa'
+                cell.intensity > 0 ? HEATMAP_COLORS[cell.intensity] : undefined
               }
               underline={cell.isToday}
             >
@@ -95,7 +95,7 @@ export const HeatmapView: React.FC<{
         {([0, 1, 2, 3, 4] as const).map((level) => (
           <Text
             key={level}
-            backgroundColor={level > 0 ? HEATMAP_COLORS[level] : '#fafafa'}
+            backgroundColor={level > 0 ? HEATMAP_COLORS[level] : undefined}
           >
             {'  '}
           </Text>

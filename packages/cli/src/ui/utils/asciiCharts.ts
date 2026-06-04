@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const HEATMAP_CHARS = ['  ', '  ', '  ', '  ', '  '] as const;
+const HEATMAP_CHARS = ['··', '  ', '  ', '  ', '  '] as const;
 export const MONTH_LABELS = [
   'Jan',
   'Feb',
