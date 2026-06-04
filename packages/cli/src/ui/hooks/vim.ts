@@ -1062,7 +1062,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           dispatch({ type: 'CLEAR_PENDING_STATES' });
           return true;
         }
-        if (normalizedKey.sequence) {
+        if (
+          normalizedKey.sequence &&
+          normalizedKey.sequence.length === 1 &&
+          normalizedKey.sequence.charCodeAt(0) >= 32
+        ) {
           return handleCharRead(normalizedKey.sequence);
         }
         return true;
