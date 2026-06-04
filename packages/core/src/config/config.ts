@@ -1885,22 +1885,20 @@ export class Config {
         readAutoMemoryIndex(this.getProjectRoot()),
         readUserAutoMemoryIndex(),
       ]);
-      // Only surface the user-level section when it has actually been
-      // populated. Until the extraction agent writes a user-level memory,
-      // there is nothing to teach the model about — keep the prompt lean.
-      const userSection =
-        userAutoMemoryIndex && userAutoMemoryIndex.trim().length > 0
-          ? {
-              memoryDir: getUserAutoMemoryRoot(),
-              indexContent: userAutoMemoryIndex,
-            }
-          : undefined;
+      // Always surface the user-level section so the main assistant knows the
+      // dir exists and can route ad-hoc "remember this cross-project" saves
+      // there. When empty the prompt builder emits a "MEMORY.md is currently
+      // empty" placeholder — the same shape the per-project layer has used
+      // since day one — so the cost is one extra index header.
       this.setUserMemory(
         this.memoryManager.appendToUserMemory(
           memoryContent,
           getAutoMemoryRoot(this.getProjectRoot()),
           managedAutoMemoryIndex,
-          userSection,
+          {
+            memoryDir: getUserAutoMemoryRoot(),
+            indexContent: userAutoMemoryIndex,
+          },
         ),
       );
     } else {

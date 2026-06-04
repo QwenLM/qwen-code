@@ -140,10 +140,18 @@ export async function runAutoMemoryExtract(params: {
   config?: Config;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
-  await Promise.all([
-    ensureAutoMemoryScaffold(params.projectRoot, now),
-    ensureUserAutoMemoryScaffold(),
-  ]);
+  // Per-project scaffold is required (extraction cursor + metadata live
+  // there). User-level scaffold is optional — a brand-new user without
+  // write access to `~/.qwen/memories/` should still be able to use
+  // project-level memory, so swallow the failure and continue.
+  await ensureAutoMemoryScaffold(params.projectRoot, now);
+  try {
+    await ensureUserAutoMemoryScaffold();
+  } catch (error) {
+    debugLogger.warn(
+      `User-level auto-memory scaffold failed (non-critical, will skip user-level writes this run): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   const transcript = buildTranscriptMessages(params.history);
   const currentCursor = await readExtractCursor(params.projectRoot);

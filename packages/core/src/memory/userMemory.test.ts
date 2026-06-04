@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   USER_AUTO_MEMORY_DIRNAME,
+  clearAutoMemoryRootCache,
   getAutoMemoryRoot,
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
@@ -41,6 +42,11 @@ describe('user-level auto-memory', () => {
     await fs.mkdir(projectRoot, { recursive: true });
     previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     process.env['QWEN_CODE_MEMORY_BASE_DIR'] = tempDir;
+    // Defensive: paths.ts memoizes getAutoMemoryRoot by projectRoot.
+    // Each test uses a fresh mkdtemp dir so collisions are impossible
+    // today, but clearing keeps the suite robust if a future test reuses
+    // a projectRoot string.
+    clearAutoMemoryRootCache();
   });
 
   afterEach(async () => {
