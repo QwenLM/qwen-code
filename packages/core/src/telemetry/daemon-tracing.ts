@@ -317,7 +317,7 @@ export function extractDaemonTraceContext(
   );
 }
 
-interface DaemonBridgeTelemetryMetrics {
+export interface DaemonBridgeTelemetryMetrics {
   sessionLifecycle(action: 'spawn' | 'close' | 'die'): void;
   channelLifecycle(action: 'spawn' | 'exit', expected?: boolean): void;
   promptQueueWait(durationMs: number): void;

@@ -4332,6 +4332,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `byId` (above), so the handler's `byId.get(...)` is undefined
       // and the automatic publish wouldn't fire.
       for (const e of entries) {
+        telemetry.metrics?.sessionLifecycle('die');
         try {
           e.events.publish({
             type: 'session_died',

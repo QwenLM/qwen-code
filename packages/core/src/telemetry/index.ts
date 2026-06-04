@@ -184,6 +184,7 @@ export {
   withDaemonBridgeSpan,
   withDaemonRequestSpan,
   withDaemonSpan,
+  type DaemonBridgeTelemetryMetrics,
 } from './daemon-tracing.js';
 export {
   initializeDaemonMetrics,
