@@ -475,13 +475,13 @@ export class DaemonChannelBridge extends EventEmitter {
       case 'client_evicted':
         this.dropSession(
           session.sessionId,
-          this.getReason(event.data, 'client_evicted'),
+          this.getStringField(event.data, 'reason', 'client_evicted'),
         );
         break;
       case 'stream_error':
         this.dropSession(
           session.sessionId,
-          this.getError(event.data, 'stream_error'),
+          this.getStringField(event.data, 'error', 'stream_error'),
         );
         break;
       default:
@@ -659,7 +659,10 @@ export class DaemonChannelBridge extends EventEmitter {
   }
 
   private handleSessionDied(sessionId: string, data: unknown): void {
-    this.dropSession(sessionId, this.getReason(data, 'session_died'));
+    this.dropSession(
+      sessionId,
+      this.getStringField(data, 'reason', 'session_died'),
+    );
   }
 
   private dropSession(sessionId: string, reason: string): void {
@@ -690,15 +693,13 @@ export class DaemonChannelBridge extends EventEmitter {
     this.emit('sessionDied', { sessionId, reason });
   }
 
-  private getReason(data: unknown, fallback: string): string {
-    return isRecord(data) && typeof data['reason'] === 'string'
-      ? data['reason']
-      : fallback;
-  }
-
-  private getError(data: unknown, fallback: string): string {
-    return isRecord(data) && typeof data['error'] === 'string'
-      ? data['error']
+  private getStringField(
+    data: unknown,
+    field: string,
+    fallback: string,
+  ): string {
+    return isRecord(data) && typeof data[field] === 'string'
+      ? (data[field] as string)
       : fallback;
   }
 

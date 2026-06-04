@@ -72,14 +72,14 @@ export function daemonBlockToMarkdown(
     case 'assistant':
       return text(block.text);
     case 'thought':
-      // wenshao R3 (claude-opus-4-7): blockquote each line so multi-line
+      // Blockquote each line so multi-line
       // reasoning traces don't escape the `>` indent on newline.
       return blockquote(`*thought:* ${text(block.text)}`);
     case 'tool': {
       const header = renderToolHeader(block, opts);
       const previewMd = daemonToolPreviewToMarkdown(block.preview, opts);
       const status = `_status: ${escapeMarkdownText(block.status, opts)}_`;
-      // wenshao R7 verification finding: `block.details` is the
+      // Note: `block.details` is the
       // serialized `rawInput` JSON. When `rawInput.url` contains
       // credentials (Basic Auth in userinfo / OAuth in `#fragment` /
       // signed-URL query params), the preview path correctly sanitizes
@@ -136,7 +136,7 @@ function renderToolHeader(
   block: Extract<DaemonTranscriptBlock, { kind: 'tool' }>,
   opts: DaemonRenderOptions = {},
 ): string {
-  // doudouOUC review: forward `opts` so `maxFieldLength` is honored for
+  // Forward `opts` so `maxFieldLength` is honored for
   // tool titles / kinds (previously bypassed — a 20KB title would render
   // uncapped while every other text field hit the 8192 default).
   // `escapeMarkdownText` / `inlineCode` apply `capLength` internally when
@@ -280,7 +280,7 @@ export function daemonToolPreviewToMarkdown(
           ? `_model: ${escapeMarkdownText(preview.model, opts)}_`
           : null,
         preview.thumbnailUrl
-          ? // wenshao R2 (qwen3.7-max): always protocol-validate image
+          ? // Always protocol-validate image
             // URLs regardless of `sanitizeUrls` opt-in. `javascript:` /
             // `vbscript:` in `<img src>` is never legitimate; the markdown
             // pipeline will convert `![image](javascript:...)` into an
@@ -382,7 +382,7 @@ export function daemonBlockToPlainText(
   block: DaemonTranscriptBlock,
   opts: DaemonRenderOptions = {},
 ): string {
-  // wenshao R5 (qwen3.7-max): sanitize ANSI / bidi controls in plain text
+  // Sanitize ANSI / bidi controls in plain text
   // for parity with markdown (which calls sanitizeTerminalText via `text()`)
   // and HTML (via defaultEscapeHtml). Without this, terminal escapes and
   // bidi overrides survived into plaintext output — contradicting the
@@ -397,7 +397,7 @@ export function daemonBlockToPlainText(
     case 'thought':
       return `(thought: ${clean(block.text)})`;
     case 'tool': {
-      // wenshao R3 (qwen3.7-max): cap header fields. Markdown + HTML
+      // Cap header fields. Markdown + HTML
       // paths cap; plainText path previously rendered uncapped titles.
       const header = [
         clean(block.title),
@@ -406,11 +406,11 @@ export function daemonBlockToPlainText(
       ]
         .filter(Boolean)
         .join(' ');
-      // wenshao review (review 4350741340): forward `opts` so
+      // Forward `opts` so
       // `sanitizeUrls` + `maxFieldLength` reach the preview's URL fields
       // (web_fetch URL, image_generation thumbnailUrl). The HTML path at
       // line 509 already did this; plainText was missed in the prior
-      // doudouOUC fix.
+      // Fix:
       const preview = daemonToolPreviewToPlainText(block.preview, opts);
       const status = `status: ${block.status}`;
       return [header, preview, status].filter(Boolean).join('\n');
@@ -418,7 +418,7 @@ export function daemonBlockToPlainText(
     case 'shell':
       return `[shell ${block.stream ?? 'stdout'}]\n${clean(block.text)}`;
     case 'permission': {
-      // wenshao R3 (qwen3.7-max): cap permission fields for parity.
+      // Cap permission fields for parity.
       const optionList = block.options
         .map(
           (opt) =>
@@ -445,13 +445,13 @@ function daemonToolPreviewToPlainText(
   preview: DaemonToolPreview,
   opts: DaemonRenderOptions = {},
 ): string {
-  // doudouOUC review (Important): thread `sanitizeUrls` through. The HTML
+  // Thread `sanitizeUrls` through. The HTML
   // path calls this helper to render the tool preview inside the `<pre>`
   // block, but previously the helper took no opts — so even when the
   // caller set `sanitizeUrls: true` to strip auth tokens from URLs, the
   // HTML path leaked tokens into the DOM (markdown path was already safe).
   //
-  // wenshao R3 + doudouOUC R3 (qwen3.7-max): apply `maxFieldLength` for
+  // Apply `maxFieldLength` for
   // parity with markdown's `text()` wrapper. Previously plaintext /
   // HTML preview content was uncapped while every other field hit the
   // 8192 default.
@@ -586,7 +586,7 @@ export function daemonBlockToHtml(
     case 'shell':
       return `<pre class="daemon-block daemon-shell" data-stream="${sanitizer(block.stream ?? 'stdout')}">${sanitizer(cap(block.text))}</pre>`;
     case 'permission': {
-      // wenshao R3 (qwen3.7-max): apply `cap()` for parity with every
+      // Apply `cap()` for parity with every
       // other block kind in this function. The tool block's `cap(title)`
       // was added in the prior round; permission was overlooked.
       const optionList = block.options
@@ -626,7 +626,7 @@ function escapeMarkdownText(
   opts: DaemonRenderOptions = {},
 ): string {
   const capped = capLength(opts)(sanitizeTerminalText(raw));
-  // wenshao R7 (qwen3.7-max): include `<` so consumers piping the
+  // Include `<` so consumers piping the
   // markdown output through markdown-it (with `html: true`) or any
   // HTML-backed renderer don't see raw `<script>` / `<img onerror>` /
   // etc. survive through to the DOM. The HTML render path already
@@ -688,14 +688,14 @@ function sanitizeUrl(url: string): string {
     ) {
       return '#';
     }
-    // wenshao R2 (qwen3.7-max): clear HTTP Basic Auth credentials.
+    // Clear HTTP Basic Auth credentials.
     // URLs like `https://admin:sk-abc123@api.example.com/v1/models`
     // previously passed through with `userinfo` intact, leaking secrets
     // into rendered markdown / HTML / plaintext output. Sanitization
     // must cover both query-param tokens AND the userinfo component.
     u.username = '';
     u.password = '';
-    // wenshao R4 (qwen3.7-max): widen regex to catch additional cloud
+    // Widen regex to catch additional cloud
     // provider credential / signed-URL params:
     //   - AWS S3 presigned: `AWSAccessKeyId` (case-insensitive starts
     //     with `aws`), `X-Amz-*` (already covered)
@@ -733,7 +733,7 @@ function sanitizeUrl(url: string): string {
         u.searchParams.delete(key);
       }
     }
-    // wenshao R5 (qwen3.7-max) Critical: clear the URL fragment. OAuth
+    // Clear the URL fragment. OAuth
     // 2.0 implicit-grant flow places `access_token` directly in
     // `#fragment` (e.g., `https://app/#access_token=gho_xxx&token_type=bearer`),
     // and some Azure SAS variants similarly use the fragment. The
@@ -754,7 +754,7 @@ function sanitizeUrl(url: string): string {
  * `block.details`). Bounded by URL-shaped substrings; non-URL text is
  * passed through verbatim.
  *
- * wenshao R7 verification: when `rawInput.url` carries credentials in
+ * When `rawInput.url` carries credentials in
  * userinfo / `#fragment` / signed-URL query params, the preview path
  * sanitizes correctly but the details dump in markdown leaked through.
  * Apply this helper when `sanitizeUrls: true`.
@@ -773,7 +773,7 @@ function sanitizeUrlsInText(text: string): string {
  * allow-list to `data:image/*` removes a defense-in-depth gap flagged
  * in the post-merge audit.
  *
- * wenshao R2 (qwen3.7-max): added because `sanitizeUrls` is opt-in and
+ * Added because `sanitizeUrls` is opt-in and
  * defaults to false, but image-URL XSS exposure has no legitimate
  * use-case that would justify opt-in. Always run for image renderings.
  */

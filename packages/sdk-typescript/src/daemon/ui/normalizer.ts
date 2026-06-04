@@ -98,7 +98,7 @@ export function normalizeDaemonEvent(
         },
       ];
     case 'session_died': {
-      // doudouOUC review: hoist `asDaemonErrorKind` to a const — original
+      // Hoist `asDaemonErrorKind` to a const — original
       // double-eval walked the record + Set twice per event.
       const errorKind = asDaemonErrorKind(getString(event.data, 'errorKind'));
       return [
@@ -220,7 +220,7 @@ export function normalizeDaemonEvent(
     case 'approval_mode_changed':
       return normalizeApprovalModeChanged(event, base);
 
-    // ── Workspace events (Wave 3-4) ──────────────────────────────────────
+    // ── Workspace events ──────────────────────────────────────
     case 'memory_changed':
       return normalizeMemoryChanged(event, base);
 
@@ -245,7 +245,7 @@ export function normalizeDaemonEvent(
     case 'mcp_server_restart_refused':
       return normalizeMcpServerRestartRefused(event, base);
 
-    // ── Auth device-flow events (Wave 4 OAuth, RFC 8628) ─────────────────
+    // ── Auth device-flow events (RFC 8628) ─────────────────
     case 'auth_device_flow_started':
       return normalizeAuthDeviceFlowStarted(event, base);
 
@@ -262,7 +262,7 @@ export function normalizeDaemonEvent(
       return normalizeAuthDeviceFlowCancelled(event, base);
 
     default:
-      // wenshao R5 (qwen3.7-max): emit a single `debug` block instead
+      // Emit a single `debug` block instead
       // of `status + debug`. In long sessions where the daemon adds
       // unknown event types, the doubled block-consumption rate
       // accelerated `maxBlocks` trimming of real content. The `debug`
@@ -823,7 +823,7 @@ function getSource(value: unknown): string | undefined {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
- * Session-meta + workspace + auth normalizers (Wave 3-4 coverage)
+ * Session-meta + workspace + auth normalizers
  *
  * Each daemon event with a closed-shape `data` interface in `events.ts` gets
  * its own normalizer that validates required fields and emits a typed UI
@@ -896,7 +896,7 @@ function normalizeMemoryChanged(
   const scope = getString(event.data, 'scope');
   const filePath = getString(event.data, 'filePath');
   const mode = getString(event.data, 'mode');
-  // wenshao R3 (claude-opus-4-7): use the `numberField` helper so NaN /
+  // Use the `numberField` helper so NaN /
   // Infinity are rejected — every other numeric field in the normalizer
   // already routes through it. A daemon emitting `bytesWritten: NaN`
   // would otherwise propagate to renderers as `+NaNb`.
@@ -1237,7 +1237,7 @@ function normalizeAuthDeviceFlowFailed(
  * Known closed-set of `DaemonAuthDeviceFlowErrorKind` values, exported as
  * documentation of the canonical kinds the daemon emits today.
  *
- * Reviewers (wenshao + doudouOUC, PR #4353 round 2026-05-23): both
+ * Both reviewers noted that the
  * suggested strict validation against this set. We intentionally keep
  * lenient pass-through — the public type
  * `DaemonAuthDeviceFlowSdkErrorKind` explicitly includes `(string & {})`

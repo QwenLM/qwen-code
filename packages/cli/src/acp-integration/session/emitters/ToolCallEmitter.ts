@@ -22,6 +22,18 @@ import type { Part } from '@google/genai';
 import { ToolNames, Kind } from '@qwen-code/qwen-code-core';
 import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
 
+const KIND_MAP: Record<Kind, ToolKind> = {
+  [Kind.Read]: 'read',
+  [Kind.Edit]: 'edit',
+  [Kind.Delete]: 'delete',
+  [Kind.Move]: 'move',
+  [Kind.Search]: 'search',
+  [Kind.Execute]: 'execute',
+  [Kind.Think]: 'think',
+  [Kind.Fetch]: 'fetch',
+  [Kind.Other]: 'other',
+};
+
 /**
  * Unified tool call event emitter.
  *
@@ -194,8 +206,8 @@ export class ToolCallEmitter extends BaseEmitter {
   }
 
   /**
-   * Resolve a tool's provenance for UI dispatch on tool_call events
-   * (#4175 F4 prereq, chiga0 issue #19 P0). The SDK reads `_meta.
+   * Resolve a tool's provenance for UI dispatch on tool_call events.
+   * The SDK reads `_meta.
    * provenance` + `_meta.serverId` to render builtin / MCP-server-badge /
    * subagent-block differently. Without this stamping, the SDK falls
    * back to string-matching the toolName which can't reliably
@@ -303,23 +315,10 @@ export class ToolCallEmitter extends BaseEmitter {
    * @param toolName - Optional tool name to handle special cases like exit_plan_mode
    */
   mapToolKind(kind: Kind, toolName?: string): ToolKind {
-    // Special case: exit_plan_mode uses 'switch_mode' kind per ACP spec
     if (toolName && this.isExitPlanModeTool(toolName)) {
       return 'switch_mode';
     }
-
-    const kindMap: Record<Kind, ToolKind> = {
-      [Kind.Read]: 'read',
-      [Kind.Edit]: 'edit',
-      [Kind.Delete]: 'delete',
-      [Kind.Move]: 'move',
-      [Kind.Search]: 'search',
-      [Kind.Execute]: 'execute',
-      [Kind.Think]: 'think',
-      [Kind.Fetch]: 'fetch',
-      [Kind.Other]: 'other',
-    };
-    return kindMap[kind] ?? 'other';
+    return KIND_MAP[kind] ?? 'other';
   }
 
   // ==================== Private Helpers ====================

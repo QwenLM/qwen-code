@@ -34,18 +34,7 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/**
- * Method names whose responses ride the CONNECTION-scoped stream (the
- * session stream may not exist yet / ownership not granted on failure).
- * Error frames must route the same way as their success path.
- */
-const CONN_ROUTED_METHODS = new Set<string>([
-  'authenticate',
-  'session/new',
-  'session/load',
-  'session/resume',
-  'session/list',
-  'session/close',
+const QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/heartbeat`,
   `${QWEN_METHOD_NS}session/context`,
   `${QWEN_METHOD_NS}session/supported_commands`,
@@ -58,6 +47,21 @@ const CONN_ROUTED_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}workspace/init`,
   `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
   `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
+];
+
+/**
+ * Method names whose responses ride the CONNECTION-scoped stream (the
+ * session stream may not exist yet / ownership not granted on failure).
+ * Error frames must route the same way as their success path.
+ */
+const CONN_ROUTED_METHODS = new Set<string>([
+  'authenticate',
+  'session/new',
+  'session/load',
+  'session/resume',
+  'session/list',
+  'session/close',
+  ...QWEN_VENDOR_METHODS,
 ]);
 
 // SYNC: server.ts MAX_TOOL_NAME_LENGTH / MAX_SERVER_NAME_LENGTH (both 256).
@@ -159,6 +163,16 @@ export class AcpDispatcher {
     private readonly bridge: HttpAcpBridge,
     private readonly boundWorkspace: string,
   ) {}
+
+  private killOrphanSession(sessionId: string): void {
+    void this.bridge
+      .killSession(sessionId, { requireZeroAttaches: true })
+      .catch((err) =>
+        writeStderrLine(
+          `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
+        ),
+      );
+  }
 
   /**
    * Build the bridge context for a per-session call. Echoes the clientId the
@@ -279,20 +293,7 @@ export class AcpDispatcher {
           [QWEN_META_KEY]: {
             connectionId,
             workspaceCwd: this.boundWorkspace,
-            methods: [
-              `${QWEN_METHOD_NS}session/heartbeat`,
-              `${QWEN_METHOD_NS}session/context`,
-              `${QWEN_METHOD_NS}session/supported_commands`,
-              `${QWEN_METHOD_NS}session/update_metadata`,
-              `${QWEN_METHOD_NS}workspace/mcp`,
-              `${QWEN_METHOD_NS}workspace/skills`,
-              `${QWEN_METHOD_NS}workspace/providers`,
-              `${QWEN_METHOD_NS}workspace/env`,
-              `${QWEN_METHOD_NS}workspace/preflight`,
-              `${QWEN_METHOD_NS}workspace/init`,
-              `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
-              `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
-            ],
+            methods: [...QWEN_VENDOR_METHODS],
           },
         },
       },
@@ -428,32 +429,15 @@ export class AcpDispatcher {
           // bridge call was in flight, so nothing will tear this session down.
           // Kill the orphan (no other client could have attached yet).
           if (conn.destroyed) {
-            void this.bridge
-              .killSession(session.sessionId, { requireZeroAttaches: true })
-              .catch((err) =>
-                writeStderrLine(
-                  `qwen serve: /acp orphan killSession(${logSafe(session.sessionId)}) failed: ${logSafe(errMsg(err))}`,
-                ),
-              );
+            this.killOrphanSession(session.sessionId);
             return;
           }
-          // Record the clientId the bridge actually stamped — later
-          // per-session calls MUST echo it (see SessionBinding.clientId).
           conn.getOrCreateSession(session.sessionId).clientId =
             session.clientId;
           conn.ownSession(session.sessionId);
-          // Advertise the session's config options (model/mode/…) so a
-          // standard client can drive `session/set_config_option`. Sourced
-          // from the child's own session state (already ACP-shaped).
           const configOptions = await this.configOptionsFor(session.sessionId);
           if (conn.destroyed) {
-            void this.bridge
-              .killSession(session.sessionId, { requireZeroAttaches: true })
-              .catch((err) =>
-                writeStderrLine(
-                  `qwen serve: /acp orphan killSession(${logSafe(session.sessionId)}) failed: ${logSafe(errMsg(err))}`,
-                ),
-              );
+            this.killOrphanSession(session.sessionId);
             return;
           }
           this.replyConn(conn, id, {
@@ -581,7 +565,7 @@ export class AcpDispatcher {
               conn.closeSessionStream(sessionId);
             } catch (teardownErr) {
               writeStderrLine(
-                `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(teardownErr instanceof Error ? teardownErr.message : String(teardownErr))}`,
+                `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
               );
             }
             conn.closingSessions.delete(sessionId);
@@ -647,18 +631,16 @@ export class AcpDispatcher {
             }
             return;
           }
-          const value = rawValue;
           if (configId === 'model') {
             await this.bridge.setSessionModel(
               sessionId,
-              { modelId: value } as unknown as Parameters<
+              { modelId: rawValue } as unknown as Parameters<
                 HttpAcpBridge['setSessionModel']
               >[1],
               ctx,
             );
           } else if (configId === 'mode') {
-            // Validate against the closed approval-mode set, like REST.
-            if (!APPROVAL_MODES.includes(value as ApprovalMode)) {
+            if (!APPROVAL_MODES.includes(rawValue as ApprovalMode)) {
               if (id !== undefined) {
                 this.replySession(
                   conn,
@@ -668,7 +650,7 @@ export class AcpDispatcher {
                   error(
                     id,
                     RPC.INVALID_PARAMS,
-                    `invalid mode "${value}" (expected one of: ${APPROVAL_MODES.join(', ')})`,
+                    `invalid mode "${rawValue}" (expected one of: ${APPROVAL_MODES.join(', ')})`,
                   ),
                 );
               }
@@ -676,8 +658,7 @@ export class AcpDispatcher {
             }
             await this.bridge.setSessionApprovalMode(
               sessionId,
-              value as ApprovalMode,
-              // Forward the optional persist flag like REST.
+              rawValue as ApprovalMode,
               { persist: params['persist'] === true },
               ctx,
             );

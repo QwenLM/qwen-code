@@ -35,7 +35,7 @@ export {
   createDaemonSessionViewState,
   isDaemonEventType,
   isKnownDaemonEvent,
-  // F2 (#4175 commit 6 review fix — claude-opus-4-7 W121): re-export
+  // Re-export
   // the workspace-scoped budget event helper. Pre-fix the PR
   // description and event JSDoc told consumers to use this helper to
   // branch on `scope === 'workspace'`, but the function lived in
@@ -164,7 +164,7 @@ export type {
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonControlEvent,
-  // #4175 F4 prereq (Ilya0527 issue #15) — daemon-emitted resync
+  // Daemon-emitted resync
   // signal for SSE reconnects past the ring eviction boundary.
   DaemonStateResyncRequiredData,
   DaemonStateResyncRequiredEvent,
@@ -182,7 +182,7 @@ export type {
   DaemonWorkspaceInitializedEvent,
   DaemonEventEnvelope,
   DaemonKnownEventType,
-  // PR 14b — MCP guardrail push-event types. See `mcp_guardrail_events`
+  // MCP guardrail push-event types. See `mcp_guardrail_events`
   // capability tag and the `DaemonMcpGuardrailEvent` union below.
   DaemonMcpBudgetWarningData,
   DaemonMcpBudgetWarningEvent,
@@ -199,7 +199,7 @@ export type {
   DaemonPermissionOption,
   DaemonPermissionAlreadyResolvedData,
   DaemonPermissionAlreadyResolvedEvent,
-  // #4175 F3 Commit 7 — multi-client permission coordination push events.
+  // Multi-client permission coordination push events.
   DaemonPermissionForbiddenData,
   DaemonPermissionForbiddenEvent,
   DaemonPermissionPartialVoteData,

@@ -8,10 +8,10 @@
  * `PermissionMediator` — type-only interface contract for daemon
  * permission flow. **No implementation lives here.** Permission voting
  * still runs inside `BridgeClient.requestPermission`
- * (`@qwen-code/acp-bridge/bridgeClient` after #4175 F1 step 2) and
+ * (`@qwen-code/acp-bridge/bridgeClient` after ) and
  * `respondToPermission` (inside `createHttpAcpBridge` factory closure
  * at `@qwen-code/acp-bridge/bridge` after F1 step 3), hard-coded to
- * `first-responder`. F3 PR 24 will move that code behind this
+ * `first-responder`. A future change will move that code behind this
  * interface and add the other three policies.
  *
  * The four policies are ordered from cheapest to strongest:
@@ -34,7 +34,7 @@
  *
  * See `bridgeClient.ts BridgeClient.requestPermission` for the
  * current first-responder implementation; the `FIXME(stage-1.5,
- * chiga0 finding 3)` block above that method scoped this contract.
+ * )` block above that method scoped this contract.
  */
 export type PermissionPolicy =
   | 'first-responder'
@@ -45,8 +45,8 @@ export type PermissionPolicy =
 /**
  * One pending permission tracked by a `PermissionMediator`. The
  * shape mirrors the current `PendingPermission` record in
- * `@qwen-code/acp-bridge/bridgeClient` (lifted in #4175 F1 step 2)
- * so F3 PR 24's lift is a structural rename rather than a redesign.
+ * `@qwen-code/acp-bridge/bridgeClient` (lifted in )
+ * so the mediation implementation's lift is a structural rename rather than a redesign.
  */
 export interface PermissionRequestRecord {
   /** ACP `RequestPermission` request id, unique per session. */
@@ -82,7 +82,7 @@ export interface PermissionVote {
   readonly requestId: string;
   readonly sessionId: string;
   /**
-   * Daemon-stamped (PR 7 / #4231) — never client self-declared.
+   * Daemon-stamped (the daemon) — never client self-declared.
    * `local-only` rejects votes whose remote address is not
    * loopback regardless of `clientId`.
    */
@@ -129,7 +129,7 @@ export type PermissionVoteOutcome =
   | { readonly kind: 'unknown_request' };
 
 /**
- * Final resolution shape. PR 24 will produce one per request once
+ * Final resolution shape. The implementation will produce one per request once
  * either a quorum is reached, the originator votes (designated), or
  * a timeout expires.
  */
@@ -147,12 +147,12 @@ export type PermissionResolution =
 /**
  * The contract `qwen serve`'s permission route layer talks to.
  * Today there is one implementation (first-responder) wired
- * inline in `BridgeClient`; PR 24 will provide all four behind
+ * inline in `BridgeClient`; The implementation will provide all four behind
  * this surface plus pair-token authentication and an audit log.
  */
 export interface PermissionMediator {
   /** Active policy. May be reconfigured per session in future
-   * versions, but PR 24 ships with daemon-wide policy only. */
+   * versions, but the current version ships with daemon-wide policy only. */
   readonly policy: PermissionPolicy;
 
   /**

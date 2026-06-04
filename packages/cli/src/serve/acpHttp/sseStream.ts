@@ -135,21 +135,21 @@ export class SseStream {
         resolve();
         return;
       }
-      // Await drain, but also bail on close/error so a socket failure during
-      // the drain window rejects promptly instead of hanging until 'close'.
-      const onDrain = () => {
+      const cleanup = () => {
+        this.res.off('drain', onDrain);
         this.res.off('close', onCloseEv);
         this.res.off('error', onErrorEv);
+      };
+      const onDrain = () => {
+        cleanup();
         resolve();
       };
       const onCloseEv = () => {
-        this.res.off('drain', onDrain);
-        this.res.off('error', onErrorEv);
+        cleanup();
         resolve();
       };
       const onErrorEv = (err: Error) => {
-        this.res.off('drain', onDrain);
-        this.res.off('close', onCloseEv);
+        cleanup();
         reject(err);
       };
       this.res.once('drain', onDrain);

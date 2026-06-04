@@ -9,7 +9,7 @@
  *
  * Shared bridge test fixtures used by `bridge.test.ts` (acp-bridge
  * package) and `daemonStatusProvider.test.ts` (cli package). Extracted
- * during #4175 F1 test split so both suites can exercise the same
+ * so both suites can exercise the same
  * `FakeAgent` / `makeChannel` / `makeBridge` helpers without
  * cross-package duplication.
  *
@@ -78,13 +78,13 @@ export const SESS_A = `sess:${WS_A}`;
 
 /**
  * Convenience wrapper: `createHttpAcpBridge` requires `boundWorkspace`
- * (per #3803 §02 — 1 daemon = 1 workspace). Tests that only ever talk
+ * (1 daemon = 1 workspace). Tests that only ever talk
  * to `WS_A` would otherwise repeat `boundWorkspace: WS_A` everywhere;
  * this helper defaults it. Tests that need a different bind path (e.g.
  * the mismatch test) pass `boundWorkspace` explicitly.
  *
  * Unlike the pre-split cli-side helper, this version does NOT default
- * `statusProvider` — that's a daemon-host-specific seam (PR 22b/2) and
+ * `statusProvider` — that's a daemon-host-specific seam and
  * the acp-bridge tests exercise the no-provider fallback paths. The
  * cli-side `daemonStatusProvider.test.ts` defines its own wrapper that
  * wires `createDaemonStatusProvider()` for the 4 daemon-host

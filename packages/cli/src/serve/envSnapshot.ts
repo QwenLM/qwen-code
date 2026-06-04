@@ -118,7 +118,7 @@ function safeProxyValue(name: string, raw: string): string {
  * Build the daemon's environment snapshot from `process.*` state. Pure
  * function — no I/O, no ACP roundtrip, no globals beyond `process.env`.
  *
- * The daemon owns runtime locality (#4175): all checks reflect the daemon
+ * The daemon owns runtime locality: all checks reflect the daemon
  * process, not a client-side environment.
  */
 export function buildEnvStatusFromProcess(

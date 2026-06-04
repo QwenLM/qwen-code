@@ -24,8 +24,7 @@ import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarning
  * listener is up so yargs `parse()` never resolves — if it did, the
  * top-level CLI would fall through to the interactive (TUI) entry point
  * in `gemini.tsx`. SIGINT / SIGTERM in `runQwenServe` is the sole exit
- * route. Named so a future maintainer doesn't read the bare
- * `new Promise<never>(() => {})` as a bug (BRQQZ).
+ * route.
  */
 function blockForever(): Promise<never> {
   return new Promise<never>(() => {});
@@ -112,13 +111,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('event-ring-size', {
         type: 'number',
-        // Single source of truth — `DEFAULT_RING_SIZE` (currently 8000,
-        // #3803 §02) is also what the bridge falls back to when the
+        // Single source of truth — `DEFAULT_RING_SIZE` is also what
+        // the bridge falls back to when the
         // option is undefined. Importing here keeps a future bump in
         // one place rather than drifting between CLI and bus.
         default: DEFAULT_RING_SIZE,
         description:
-          'Per-session SSE replay ring depth (#3803 §02 target). Sets the ' +
+          'Per-session SSE replay ring depth. Sets the ' +
           'replay backlog available to `GET /session/:id/events` reconnects ' +
           'that send a `Last-Event-ID: N` header. Larger = more reconnect ' +
           'headroom at the cost of a few hundred KB extra RAM per session. ' +
@@ -137,7 +136,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'number',
         description:
           'Cap on live MCP clients spawned inside the ACP child for the bound ' +
-          'workspace (issue #4175 PR 14). Positive integer. Combine with ' +
+          'workspace. Positive integer. Combine with ' +
           '--mcp-budget-mode to control behavior at the cap. When unset, ' +
           'mode defaults to off (no accounting-driven enforcement, but ' +
           'GET /workspace/mcp still reports `clientCount`). Distinct from ' +
@@ -147,7 +146,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('mcp-budget-mode', {
         choices: ['enforce', 'warn', 'off'] as const,
         description:
-          'How --mcp-client-budget is enforced (issue #4175 PR 14). ' +
+          'How --mcp-client-budget is enforced. ' +
           '`warn` (default when budget set): no refusal, snapshot surfaces ' +
           'warning at >=75% of budget. `enforce`: connects past the cap are ' +
           'refused (`disabledReason: "budget"`, deterministic by mcpServers ' +
@@ -157,19 +156,18 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('allow-origin', {
         type: 'string',
         array: true,
-        description:
-          'T2.4 (#4514). Cross-origin allowlist for browser webui clients.',
+        description: 'Cross-origin allowlist for browser webui clients.',
       })
       .option('prompt-deadline-ms', {
         type: 'number',
         description:
-          'T2.9 (#4514). Server-side wallclock cap on POST /session/:id/prompt (ms). ' +
+          'Server-side wallclock cap on POST /session/:id/prompt (ms). ' +
           'Falls back to QWEN_SERVE_PROMPT_DEADLINE_MS. Positive integer.',
       })
       .option('writer-idle-timeout-ms', {
         type: 'number',
         description:
-          'T2.9 (#4514). Per-SSE-connection idle deadline (ms). ' +
+          'Per-SSE-connection idle deadline (ms). ' +
           'Falls back to QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS. Positive integer.',
       })
       .option('channel-idle-timeout-ms', {
@@ -196,7 +194,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'deployment.',
       );
     }
-    // PR 14: validate budget + mode combination at boot, before we
+    // Validate budget + mode combination at boot, before we
     // lazy-load the serve module. Yargs already constrains `choices`
     // for mcp-budget-mode, so we only have to police the budget value
     // and the `enforce` ⇒ budget invariant.
@@ -223,7 +221,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const resolvedMcpMode: 'enforce' | 'warn' | 'off' =
       mcpBudgetMode ?? (mcpClientBudget !== undefined ? 'warn' : 'off');
     if (mcpClientBudget !== undefined) {
-      // Mirror PR 15's `--require-auth` breadcrumb: surface the active
+      // Mirror the `--require-auth` breadcrumb: surface the active
       // policy in stderr (journald / docker logs) so operators don't
       // have to parse /capabilities or /workspace/mcp to confirm it.
       writeStderrLine(

@@ -16,7 +16,7 @@
  * `vote()`. Per-policy logic stays small (5–15 lines each); strategy
  * sub-classes would be more boilerplate than substance.
  *
- * Per #4175 F3 plan. Companion to PR 22a's frozen contract.
+ *
  */
 
 import {
@@ -65,11 +65,11 @@ export const CANCEL_VOTE_SENTINEL = '__cancelled__' as const;
 
 /**
  * Bounded FIFO size for the `resolved` map (duplicate-vote dedup +
- * `permission_already_resolved` source). DeepSeek review #4335 /
- * 3271627446 — the eviction in `rememberResolved` uses
+ * `permission_already_resolved` source).
+ * The eviction in `rememberResolved` uses
  * `resolvedOrder.shift()` (drop oldest), not LRU; mirrors the FIFO
  * `PermissionAuditRing` correction in commit b0242ddec. Mirrors the
- * `MAX_RESOLVED_PERMISSION_RECORDS` constant from the pre-F3 inline
+ * `MAX_RESOLVED_PERMISSION_RECORDS` constant from the previous inline
  * implementation in `httpAcpBridge.ts` (512 entries). Stores only
  * requestId / sessionId / outcome, so 512 records stays well under
  * 100 KB across normal UI reconnect/race windows.
@@ -86,7 +86,7 @@ const MAX_RESOLVED_PERMISSION_RECORDS = 512;
  * (`PermissionResolution { kind:'cancelled', reason:'agent_cancelled' }`)
  * because the ACP protocol doesn't distinguish them. The discrimination
  * lives only in the audit log — useful for forensics, invisible on the
- * bus. F3 deliberately preserves this overload to avoid breaking the
+ * bus. Deliberately preserves this overload to avoid breaking the
  * frozen `permission.ts` contract.
  *
  * `resolverClientId: string | undefined` on `'first-responder'`,
@@ -139,7 +139,7 @@ export type PermissionDecisionReason =
  * `packages/cli/src/serve/permissionAudit.ts` and writes into an
  * in-memory bounded ring on the bridge — NOT onto the SSE bus
  * (audit records and SSE wire events are intentionally separate
- * channels per the F3 plan).
+ * channels by design).
  *
  * The mediator depends only on this interface, so unit tests can
  * substitute a no-op or a recording stub without dragging the host
@@ -194,7 +194,7 @@ function stringifyError(err: unknown): string {
  * `qwen serve` provides a ring-backed publisher; embedded callers and
  * unit tests that don't care about audit can let the bridge fall back
  * here. Single canonical fallback prevents stub-vs-prod divergence
- * (Commit 2 review note).
+ * ((single canonical fallback).
  */
 export function createNoOpPermissionAuditPublisher(): PermissionAuditPublisher {
   return {
@@ -250,8 +250,8 @@ export interface MediatorDeps {
    * **Forward-compat trap**: when the session was torn down between
    * the bridge's `publish` and the mediator's `request` (extremely
    * narrow race), the implementation should return an empty Set
-   * rather than throw. F3 v1's `first-responder` policy ignores the
-   * snapshot, so an empty set is harmless. Once Commit 4 lands
+   * rather than throw. The `first-responder` policy ignores the
+   * snapshot, so an empty set is harmless. If
    * `voteConsensus`, an empty `votersAtIssue` means EVERY vote on
    * the request gets rejected for "not in voter set" — the request
    * can only resolve via `forgetSession` cleanup or `permissionTimeoutMs`.
@@ -259,13 +259,13 @@ export interface MediatorDeps {
    * acceptable; document if a longer-window source of empty-voter
    * snapshots emerges.
    *
-   * **Late-joiner timing window** (wenshao review #4335 / 3271041469).
+   * **Late-joiner timing window** (voter snapshot timing).
    * The bridge sequence is `entry.events.publish(...)` →
    * (synchronous) → `await mediator.request(record, ...)`. The
    * publish is synchronous (`EventBus.publish` returns after fanning
    * to in-memory subscriber queues, no event-loop yield) and the
    * mediator's Promise executor is also synchronous through this
-   * call (N1 invariant), so a NEW HTTP client cannot register its
+   * call (synchronous-register invariant), so a NEW HTTP client cannot register its
    * `clientId` on `entry.clientIds` between publish and snapshot.
    * However, an SSE subscriber that connected BEFORE the publish but
    * has NOT yet hit any session route (no `X-Qwen-Client-Id` known
@@ -273,7 +273,7 @@ export interface MediatorDeps {
    * silently rejects its later vote as `forbidden`. UIs that surface
    * the active voter set (eligible-voters chip) should treat
    * `permission_request` as the authoritative cutoff, not subsequent
-   * client-identity registrations. F3 v1 does not surface
+   * client-identity registrations. This version does not surface
    * `votersAtIssue` to the wire; future PRs that add an
    * `eligibleVoters[]` field on `permission_request.data` should
    * source it from the same snapshot to keep client-side and
@@ -308,7 +308,7 @@ interface MediatorPending {
   /** Mediator-internal — do not read or write from outside the class. */
   timer: ReturnType<typeof setTimeout> | undefined;
   /**
-   * Wenshao review #4335 / 3271185594 — set to `true` once the
+   * Set to `true` once the
    * `consensusQuorum` override cap has emitted its stderr
    * breadcrumb for this pending so we don't repeat the line every
    * time `consensusQuorumFor` is called within the same request.
@@ -323,7 +323,7 @@ interface PermissionResolutionRecord {
   /** Voter's clientId (or undefined for timeout / session-closed paths)
    *  — replayed onto `permission_already_resolved` so late SSE
    *  subscribers see the same `originatorClientId` the original
-   *  `permission_resolved` carried (O8 wire compat). */
+   *  `permission_resolved` carried (wire compat). */
   readonly resolverClientId: string | undefined;
 }
 
@@ -333,7 +333,7 @@ interface PermissionResolutionRecord {
  * Lifecycle:
  *   - `request(record, timeoutMs)` synchronously registers a pending
  *     entry inside the returned Promise's executor (no `await` before
- *     register — see N1 invariant in F3 plan) and arms the timeout.
+ *     register — see synchronous-register invariant in F3 plan) and arms the timeout.
  *   - `vote(vote)` dispatches by `entry.policy` and either resolves,
  *     records, rejects, or reports unknown.
  *   - `forgetSession(sessionId)` cancels every pending matching the
@@ -352,7 +352,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
   private readonly resolved = new Map<string, PermissionResolutionRecord>();
   private readonly resolvedOrder: string[] = [];
   /**
-   * Wenshao review #4335 / 3272493829 — dedup flag for the
+   * Dedup flag for the
    * unanimity-required stderr breadcrumb. Without this, every
    * permission request on a 2-client consensus session would emit
    * an identical line (the unanimity condition is the NORMAL
@@ -379,8 +379,8 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * Consumers can `await` the returned Promise and forward the
    * result without a `.catch()` block.
    *
-   * **Synchronous-throw exception** (DeepSeek review #4335 /
-   * 3271627444): when the agent's `allowedOptionIds` contains the
+   * **Synchronous-throw exception** (
+   * Note: when the agent's `allowedOptionIds` contains the
    * cancel-vote sentinel string, this method throws
    * `CancelSentinelCollisionError` synchronously BEFORE constructing
    * the Promise. The synchronous shape is intentional — a
@@ -391,7 +391,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * `bridgeClient.ts` currently has its own pre-check at the bridge
    * layer; embedded callers must do the same. See `@throws` below.
    *
-   * **N1 synchronous-register invariant**: pending entry, audit
+   * **Synchronous-register invariant**: pending entry, audit
    * record, and timer setup all happen inside the Promise executor
    * without `await`. The bridge's `publish → mediator.request → await`
    * sequence relies on this — a `forgetSession` between publish and
@@ -443,7 +443,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       this.safeAudit(() =>
         this.deps.audit.recordRequested(record, policy, votersAtIssue),
       );
-      // Wenshao review #4335 / 3271185594 — when consensus is in
+      // When consensus is in
       // force but the bridge captured zero eligible voters at
       // issue time, the request can ONLY resolve via timeout (no
       // vote will ever pass `votersAtIssue.has(clientId)`). Emit
@@ -463,14 +463,14 @@ export class MultiClientPermissionMediator implements PermissionMediator {
           // Stderr unavailable — silent drop.
         }
       }
-      // Wenshao review #4335 / 3271978356 — for even-sized voter
+      // For even-sized voter
       // sets the default formula `floor(M/2)+1` requires unanimity
       // ONLY when M=2 (the practical surprise case); M=4 → quorum=3
       // is supermajority; M=6 → quorum=4 is supermajority too. The
       // condition `floor(M/2)+1 === M` is true only for M=1
       // (single-voter; quorum=1 = M trivially) and M=2.
       //
-      // Wenshao review #4335 / 3272493829 — dedup to one emit per
+      // Dedup to one emit per
       // mediator lifetime via `unanimityBreadcrumbEmitted`. Without
       // this, a 2-client consensus session emits the line on EVERY
       // permission request (unanimity is the M=2 normal operating
@@ -511,9 +511,9 @@ export class MultiClientPermissionMediator implements PermissionMediator {
           // a fresh request for a stale-timer fire on the old one.
           if (this.pending.get(record.requestId) !== pending) return;
           const firedAtMs = this.deps.now();
-          // F3 Commit 2 — restore pre-F3 stderr breadcrumb (wenshao
-          // review #4335 / 3270622304). Pre-F3 wrote "timed out
-          // after Xms" directly to daemon stderr; F3 delegated to
+          // Restore stderr breadcrumb (
+          // Pre-extraction wrote "timed out
+          // after Xms" directly to daemon stderr; The mediator delegates to
           // the audit publisher, but production audit can still be
           // a no-op for embedded callers, so emit the breadcrumb
           // here unconditionally. Wrapped in try/catch because
@@ -541,16 +541,9 @@ export class MultiClientPermissionMediator implements PermissionMediator {
             undefined,
           );
         }, timeoutMs);
-        // Use a `'unref' in` guard rather than `as { unref?: ... }`
-        // so the type narrowing is enforced rather than asserted.
         const t = pending.timer;
-        if (
-          t !== undefined &&
-          typeof t === 'object' &&
-          'unref' in t &&
-          typeof (t as { unref: unknown }).unref === 'function'
-        ) {
-          (t as { unref: () => void }).unref();
+        if (t && typeof t === 'object' && 'unref' in t) {
+          (t as { unref(): void }).unref();
         }
       }
       // === END SYNCHRONOUS REGISTER ===
@@ -564,8 +557,8 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       const prior = this.resolved.get(vote.requestId);
       if (prior && prior.sessionId === vote.sessionId) {
         // Re-emit `permission_already_resolved` so late SSE
-        // subscribers see the conclusion. C2 (Commit 3 review):
-        // pre-F3 `publishPermissionAlreadyResolved` did NOT stamp
+        // subscribers see the conclusion. Note:
+        // the previous `publishPermissionAlreadyResolved` did NOT stamp
         // `originatorClientId` on this event. Preserve byte-for-byte
         // — `httpAcpBridge.test.ts:2880` asserts
         // `originatorClientId: undefined`. Resolver attribution lives
@@ -701,161 +694,49 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     pending: MediatorPending,
     vote: PermissionVote,
   ): PermissionVoteOutcome {
-    // Bit-for-bit preservation of pre-F3 behavior: any validated voter
-    // (the route layer already enforced clientId / optionId / session
-    // ownership) wins immediately.
-    const outcome: PermissionVoteOutcome = {
-      kind: 'resolved',
-      resolvedOptionId: vote.optionId,
-    };
-    // Ordering invariant: `voted` audit record fires BEFORE `resolved`
-    // (resolveEntry triggers `resolved`).
-    this.safeAudit(() =>
-      this.deps.audit.recordVoted(this.toRecord(pending), vote, outcome),
-    );
-    this.resolveEntry(
-      pending,
-      {
-        kind: 'option',
-        optionId: vote.optionId,
-        ...(vote.metadata ? { metadata: vote.metadata } : {}),
-      },
-      {
-        type: 'first-responder',
-        resolverClientId: vote.clientId,
-      },
-      vote.clientId,
-    );
-    return outcome;
+    return this.resolveWithVote(pending, vote, {
+      type: 'first-responder',
+      resolverClientId: vote.clientId,
+    });
   }
 
   private voteDesignated(
     pending: MediatorPending,
     vote: PermissionVote,
   ): PermissionVoteOutcome {
-    // Anonymous prompt (originator undefined): fall back to
-    // first-responder. Documented relaxation — strict deployments
-    // must mandate `X-Qwen-Client-Id` on the prompt route. F3 plan
-    // §"Designated fallback" explains the rationale.
     if (pending.originatorClientId === undefined) {
       return this.voteFirstResponder(pending, vote);
     }
     if (vote.clientId !== pending.originatorClientId) {
-      // Reject — voter is not the prompt originator.
-      this.safeAudit(() =>
-        this.deps.audit.recordForbidden(
-          this.toRecord(pending),
-          vote,
-          'designated_mismatch',
-        ),
-      );
-      this.safeEmit(pending.sessionId, {
-        type: 'permission_forbidden',
-        data: {
-          requestId: pending.requestId,
-          sessionId: pending.sessionId,
-          ...(vote.clientId !== undefined ? { clientId: vote.clientId } : {}),
-          reason: 'designated_mismatch',
-        },
-        // N3 — new events stamp prompt originator (NOT voter).
-        ...(pending.originatorClientId !== undefined
-          ? { originatorClientId: pending.originatorClientId }
-          : {}),
-      });
-      this.writeForbiddenStderr(
+      return this.rejectForbidden(
         pending,
         vote,
+        'designated_mismatch',
         'designated_mismatch (voter is not the prompt originator)',
       );
-      return { kind: 'forbidden', reason: 'designated_mismatch' };
     }
-    // Originator's vote — resolve immediately (semantically a
-    // first-responder for the designated voter).
-    const outcome: PermissionVoteOutcome = {
-      kind: 'resolved',
-      resolvedOptionId: vote.optionId,
-    };
-    this.safeAudit(() =>
-      this.deps.audit.recordVoted(this.toRecord(pending), vote, outcome),
-    );
-    this.resolveEntry(
-      pending,
-      {
-        kind: 'option',
-        optionId: vote.optionId,
-        ...(vote.metadata ? { metadata: vote.metadata } : {}),
-      },
-      {
-        type: 'designated-originator',
-        originatorClientId: pending.originatorClientId,
-      },
-      vote.clientId,
-    );
-    return outcome;
+    return this.resolveWithVote(pending, vote, {
+      type: 'designated-originator',
+      originatorClientId: pending.originatorClientId,
+    });
   }
 
   private voteConsensus(
     pending: MediatorPending,
     vote: PermissionVote,
   ): PermissionVoteOutcome {
-    // Voter must be in the issue-time snapshot. Anonymous voters
-    // and clients that connected AFTER the prompt issued are
-    // rejected.
-    //
-    // TODO(forward-compat): DeepSeek review #4335 / 3271627459 — the
-    // `designated_mismatch` reason code is overloaded here for "not
-    // in voter set" (consensus-specific) AND for "voter is not the
-    // prompt originator" (designated-policy semantics). Both cases
-    // surface the same string on the wire (`permission_forbidden`
-    // SSE) and the same audit reason. A future PR can split these
-    // into distinct reason codes (e.g. `voter_not_eligible`,
-    // `not_originator`) once an SDK consumer needs to disambiguate
-    // them — until then, F3 v1 keeps the overload to avoid
-    // protocol churn while semantics stabilize.
     if (
       vote.clientId === undefined ||
       !pending.votersAtIssue.has(vote.clientId)
     ) {
-      this.safeAudit(() =>
-        this.deps.audit.recordForbidden(
-          this.toRecord(pending),
-          vote,
-          'designated_mismatch',
-        ),
-      );
-      this.safeEmit(pending.sessionId, {
-        type: 'permission_forbidden',
-        data: {
-          requestId: pending.requestId,
-          sessionId: pending.sessionId,
-          ...(vote.clientId !== undefined ? { clientId: vote.clientId } : {}),
-          reason: 'designated_mismatch',
-        },
-        ...(pending.originatorClientId !== undefined
-          ? { originatorClientId: pending.originatorClientId }
-          : {}),
-      });
-      this.writeForbiddenStderr(
+      return this.rejectForbidden(
         pending,
         vote,
+        'designated_mismatch',
         'designated_mismatch (voter not in consensus votersAtIssue snapshot)',
       );
-      return { kind: 'forbidden', reason: 'designated_mismatch' };
     }
 
-    // Idempotent re-vote: if this clientId already cast a vote (any
-    // option), keep the original. Return `recorded` with the current
-    // votesNeeded; do NOT emit a partial_vote frame (the tally hasn't
-    // changed).
-    //
-    // Wenshao review #4335 / 3271041464 — the audit entry must
-    // reflect the ORIGINALLY-recorded optionId (the one in the
-    // tally), not the new attempt. Otherwise the audit ring shows
-    // `client_X voted for option_B` while the tally has client_X in
-    // option_A's bucket; an operator reading the ring would see a
-    // vote that never counted toward quorum. Look up the original
-    // option from the tally and substitute it into the audit
-    // record.
     for (const [originalOptionId, set] of pending.tallies.entries()) {
       if (vote.clientId !== undefined && set.has(vote.clientId)) {
         const outcome: PermissionVoteOutcome = {
@@ -873,7 +754,6 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       }
     }
 
-    // Record the vote.
     let bucket = pending.tallies.get(vote.optionId);
     if (!bucket) {
       bucket = new Set<string>();
@@ -883,32 +763,14 @@ export class MultiClientPermissionMediator implements PermissionMediator {
 
     const quorum = this.consensusQuorumFor(pending);
     if (bucket.size >= quorum) {
-      const outcome: PermissionVoteOutcome = {
-        kind: 'resolved',
+      return this.resolveWithVote(pending, vote, {
+        type: 'consensus-quorum',
         resolvedOptionId: vote.optionId,
-      };
-      this.safeAudit(() =>
-        this.deps.audit.recordVoted(this.toRecord(pending), vote, outcome),
-      );
-      this.resolveEntry(
-        pending,
-        {
-          kind: 'option',
-          optionId: vote.optionId,
-          ...(vote.metadata ? { metadata: vote.metadata } : {}),
-        },
-        {
-          type: 'consensus-quorum',
-          resolvedOptionId: vote.optionId,
-          quorum,
-          tally: bucket.size,
-        },
-        vote.clientId,
-      );
-      return outcome;
+        quorum,
+        tally: bucket.size,
+      });
     }
 
-    // Recorded — emit partial_vote progress + return votesNeeded.
     const outcome: PermissionVoteOutcome = {
       kind: 'recorded',
       votesNeeded: this.votesNeededFor(pending),
@@ -937,17 +799,17 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * Vote dispatch for `local-only` policy: only `fromLoopback: true`
    * voters can resolve a permission.
    *
-   * **Cancel-sentinel asymmetry** (wenshao review #4335 / 3271978336).
+   * **Cancel-sentinel asymmetry** (cancel-sentinel note).
    * `vote()` recognizes the cancel sentinel BEFORE calling this
    * method (cross-policy escape hatch — see the
    * `CANCEL_VOTE_SENTINEL` JSDoc for the rationale), so a remote
    * voter under `local-only` CAN abort a pending permission via
    * `{outcome:'cancelled'}` even though they cannot RESOLVE one. The
-   * settings-side description for `local-only` and the F3 plan call
+   * settings-side description for `local-only` and the design doc call
    * out this gap explicitly. Operators who want strict-cancel-too
    * semantics must (a) deploy a dedicated daemon process at
    * loopback bind, OR (b) wait for the follow-up PR that lifts
-   * cancel into per-policy gating; F3 v1 keeps the current
+   * cancel into per-policy gating; This version keeps the current
    * cross-policy cancel for consistency with first-responder /
    * designated / consensus.
    */
@@ -956,32 +818,28 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     vote: PermissionVote,
   ): PermissionVoteOutcome {
     if (!vote.fromLoopback) {
-      this.safeAudit(() =>
-        this.deps.audit.recordForbidden(
-          this.toRecord(pending),
-          vote,
-          'remote_not_allowed',
-        ),
-      );
-      this.safeEmit(pending.sessionId, {
-        type: 'permission_forbidden',
-        data: {
-          requestId: pending.requestId,
-          sessionId: pending.sessionId,
-          ...(vote.clientId !== undefined ? { clientId: vote.clientId } : {}),
-          reason: 'remote_not_allowed',
-        },
-        ...(pending.originatorClientId !== undefined
-          ? { originatorClientId: pending.originatorClientId }
-          : {}),
-      });
-      this.writeForbiddenStderr(
+      return this.rejectForbidden(
         pending,
         vote,
+        'remote_not_allowed',
         'remote_not_allowed (local-only policy; vote not from loopback)',
       );
-      return { kind: 'forbidden', reason: 'remote_not_allowed' };
     }
+    return this.resolveWithVote(pending, vote, {
+      type: 'local-only-loopback',
+      resolverClientId: vote.clientId,
+    });
+  }
+
+  // ===========================================================
+  // Shared vote-resolution helpers
+  // ===========================================================
+
+  private resolveWithVote(
+    pending: MediatorPending,
+    vote: PermissionVote,
+    decisionReason: PermissionDecisionReason,
+  ): PermissionVoteOutcome {
     const outcome: PermissionVoteOutcome = {
       kind: 'resolved',
       resolvedOptionId: vote.optionId,
@@ -996,13 +854,35 @@ export class MultiClientPermissionMediator implements PermissionMediator {
         optionId: vote.optionId,
         ...(vote.metadata ? { metadata: vote.metadata } : {}),
       },
-      {
-        type: 'local-only-loopback',
-        resolverClientId: vote.clientId,
-      },
+      decisionReason,
       vote.clientId,
     );
     return outcome;
+  }
+
+  private rejectForbidden(
+    pending: MediatorPending,
+    vote: PermissionVote,
+    reason: 'designated_mismatch' | 'remote_not_allowed',
+    stderrDetail: string,
+  ): PermissionVoteOutcome {
+    this.safeAudit(() =>
+      this.deps.audit.recordForbidden(this.toRecord(pending), vote, reason),
+    );
+    this.safeEmit(pending.sessionId, {
+      type: 'permission_forbidden',
+      data: {
+        requestId: pending.requestId,
+        sessionId: pending.sessionId,
+        ...(vote.clientId !== undefined ? { clientId: vote.clientId } : {}),
+        reason,
+      },
+      ...(pending.originatorClientId !== undefined
+        ? { originatorClientId: pending.originatorClientId }
+        : {}),
+    });
+    this.writeForbiddenStderr(pending, vote, stderrDetail);
+    return { kind: 'forbidden', reason };
   }
 
   // ===========================================================
@@ -1015,7 +895,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * `deps.consensusQuorum` when set, capped to `M` so an operator
    * misconfig (N > M) can't deadlock.
    *
-   * Wenshao review #4335 / 3271185594 — when the cap fires, write
+   * When the cap fires, write
    * a one-time stderr breadcrumb per request so operators don't
    * have to diff their `policy.consensusQuorum` against
    * `votersAtIssue.size` manually to understand why a quorum
@@ -1082,7 +962,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
   // ===========================================================
 
   /**
-   * Settle a pending entry. Cleanup order is hardened (N2 invariant):
+   * Settle a pending entry. Cleanup order is hardened (cleanup-order invariant):
    *   1. clearTimeout (so a timer can never fire on a half-cleaned entry).
    *   2. Delete from `pending` (state-first half — entry no longer
    *      reachable for new votes).
@@ -1090,23 +970,23 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    *      do not block the Promise settle). MUST come before step 4
    *      so a re-entrant subscriber synchronously casting another
    *      vote during emit sees `pending === undefined && resolved
-   *      === undefined` (silent false), matching pre-F3 ordering.
-   *      See I5 (Commit 3 review) inline comment below.
+   *      === undefined` (silent false), matching the previous ordering.
+   *
    *   4. write to `resolved` (the second half of state move — late
    *      voters arriving after this see `permission_already_resolved`).
    *   5. audit.recordResolved (best-effort, same).
    *   6. Settle the Promise (LAST — callbacks running re-entrantly
    *      see consistent state).
    *
-   * Wenshao review #4335 / 3272581553 — pre-fix the spec bundled
+   * Pre-fix the spec bundled
    * "delete pending + write resolved" into step 2 ahead of emit,
    * which contradicted the code (and the I5 comment). The fix
    * splits the two halves of the state move around the emit so
    * the spec faithfully describes the ordering invariant.
    *
-   * @param resolverClientId  pre-F3 wire compat (O8 invariant): the
+   * @param resolverClientId  wire compat: the
    *   `permission_resolved` SSE frame stamps this as
-   *   `originatorClientId`. Pre-F3 `resolvePending` in
+   *   `originatorClientId`. The previous `resolvePending` in
    *   `httpAcpBridge.ts:1518-1523` filled it from the voter's
    *   trusted clientId. We preserve byte-for-byte; vote-driven
    *   paths pass `vote.clientId` (which may be undefined for
@@ -1129,22 +1009,22 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       pending.timer = undefined;
     }
     this.pending.delete(pending.requestId);
-    // I5 (Commit 3 review) — emit the SSE `permission_resolved` BEFORE
-    // writing to the resolved-LRU. Pre-F3 ordered emit-then-LRU and a
+    // Note: emit the SSE `permission_resolved` BEFORE
+    // writing to the resolved-LRU. Previously ordered emit-then-LRU and a
     // re-entrant subscriber synchronously casting another vote during
     // emit would have seen `pending === undefined && resolved ===
     // undefined` (silent false). Reversing that order would let the
     // re-entrant vote find the new LRU record and emit a redundant
-    // `permission_already_resolved`. Match pre-F3 ordering for
+    // `permission_already_resolved`. Match the previous ordering for
     // wire-shape preservation.
     this.safeEmit(pending.sessionId, {
       type: 'permission_resolved',
       data: {
         requestId: pending.requestId,
         outcome: this.toAcpOutcome(resolution),
-        // A4 (doudouOUC #4484 follow-up): `voterClientId` is the canonical,
+        // Note: `voterClientId` is the canonical,
         // unambiguous name for "who cast the resolving vote". The envelope
-        // `originatorClientId` below carries the SAME value for pre-F3 wire
+        // `originatorClientId` below carries the SAME value for wire
         // compat (it is semantically the voter on `permission_resolved`,
         // unlike on `permission_request` where it is the prompt originator).
         // Both are optional and omitted together for no-voter resolutions
@@ -1153,10 +1033,10 @@ export class MultiClientPermissionMediator implements PermissionMediator {
           ? { voterClientId: resolverClientId }
           : {}),
       },
-      // O8 — preserve pre-F3 behavior: voter's clientId is stamped
+      // Preserve pre-extraction behavior: voter's clientId is stamped
       // here (not the prompt originator's). Documented inconsistency
       // with `permission_request.originatorClientId` (which IS the
-      // prompt originator); F3 does not fix the inconsistency to
+      // prompt originator); we do not fix the inconsistency to
       // avoid breaking the wire shape. A4 keeps it as a deprecated
       // alias of `data.voterClientId`.
       ...(resolverClientId !== undefined
@@ -1200,12 +1080,12 @@ export class MultiClientPermissionMediator implements PermissionMediator {
       this.deps.emit(sessionId, event);
     } catch (err) {
       // Emit failures (bus closed mid-shutdown) never block settle.
-      // I4 (Commit 3 review) — surface as a stderr breadcrumb so
+      // Note: surface as a stderr breadcrumb so
       // silent regressions in the host's emit path (e.g. a future
       // contract violation that throws instead of returning
       // undefined) don't disappear unnoticed.
       //
-      // Wenshao review #4335 / 3271041461 — the breadcrumb itself
+      // Stderr safety — the breadcrumb itself
       // must be defensive. `process.stderr.write` can synchronously
       // throw on EPIPE during daemon shutdown; if it does, the
       // exception escapes `safeEmit` and propagates out of
@@ -1225,7 +1105,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
   }
 
   /**
-   * DeepSeek review #4335 / 3271627457 — emit a stderr breadcrumb
+   * The 3271627457 — emit a stderr breadcrumb
    * for every vote rejection (the three forbidden paths in
    * voteDesignated / voteConsensus / voteLocalOnly). Mirrors the
    * timeout breadcrumb pattern: audit ring + SSE event are
@@ -1237,8 +1117,8 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * synchronously throw on EPIPE during shutdown — a stderr
    * unavailability must not propagate up through `safeEmit` /
    * `safeAudit` and break the resolveEntry cleanup ladder. Mirrors
-   * the safeEmit/safeAudit defensive posture (see wenshao review
-   * #4335 / 3271041461 for the matching hang scenario).
+   * the safeEmit/safeAudit defensive posture (see the
+   * matching hang scenario in safeEmit).
    */
   private writeForbiddenStderr(
     pending: MediatorPending,
@@ -1271,9 +1151,9 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * Single helper used at all five audit call sites so the
    * "audit is best-effort" invariant is uniformly enforced (the
    * pre-fix asymmetric `try/catch` at 2 of 5 sites was a real
-   * silent-failure hole; see Commit 1 review notes).
+   * silent-failure hole; see ).
    *
-   * Wenshao review #4335 / 3272567323 — JSDoc was previously
+   * doc placement — JSDoc was previously
    * stacked above `writeForbiddenStderr` so IDE hover and API
    * doc generation showed the wrong attribution. Moved adjacent
    * to its actual definition.
@@ -1282,7 +1162,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
     try {
       fn();
     } catch (err) {
-      // Wenshao review #4335 / 3271041461 — see the matching
+      // Stderr safety — see the matching
       // try/catch on the breadcrumb in `safeEmit`. The audit-failure
       // breadcrumb must not itself crash the safe wrapper, or the
       // `resolveEntry` cleanup ladder could leave the pending

@@ -53,7 +53,7 @@ import {
  * Stat snapshot returned by `WorkspaceFileSystem.stat`. We
  * deliberately avoid passing through `fs.Stats` directly — the
  * boundary should not leak Node-specific bigint quirks or
- * platform-specific fields to PR 19/20 SDK consumers.
+ * platform-specific fields to SDK consumers.
  */
 export interface FsStat {
   kind: 'file' | 'directory' | 'symlink' | 'other';
@@ -183,7 +183,7 @@ export interface RequestContext extends AuditContext {
 }
 
 /**
- * Public boundary type. PR 19/20 routes consume this via the
+ * Public boundary type. Routes consume this via the
  * factory's `forRequest(ctx)` so audit context is automatically
  * threaded through every operation.
  */
@@ -215,7 +215,7 @@ export interface WorkspaceFileSystem {
    * sessionId}` so the CAS-gated `writeTextAtomic` doesn't fit.
    *
    * Symlinks at the target are rejected (`symlink_escape`) consistent
-   * with `writeTextAtomic` and HTTP `POST /file` from PR 20.
+   * with `writeTextAtomic` and HTTP `POST /file`.
    */
   writeTextOverwrite(
     p: ResolvedPath,
@@ -517,8 +517,8 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         // `path.join(p, d.name)` is a shallow extension of an
         // already-canonical workspace path. Symlinked dirents are
         // tagged as `kind: 'symlink'` rather than auto-followed —
-        // PR 19/20 callers that want the target's containment can
-        // call `resolve()` separately. Treating each child as
+        // callers that want the target's containment can call
+        // `resolve()` separately. Treating each child as
         // implicitly-resolved here would be a brand-cast bypass.
         const childAbs = path.join(p as string, d.name);
         const kind = kindFromStatLike(d);
@@ -759,12 +759,9 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       }
       // `absolute: boundWorkspace` (rather than `cwd`) ties every
       // glob audit row's `pathHash` to the workspace itself.
-      // Hashing `cwd` made each per-subdirectory glob produce a
-      // distinct hash with no operator-actionable difference (the
-      // raw path is privacy-gated). The literal `pattern` field is
-      // the per-call signal; `pathHash` is the workspace marker
-      // operators correlate across audit rows. Follow-up #4 from
-      // PR #4250.
+      // The literal `pattern` field is the per-call signal;
+      // `pathHash` is the workspace marker operators correlate
+      // across audit rows.
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'glob',
         absolute: this.deps.boundWorkspace,
@@ -1125,7 +1122,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // `current.slice(0, 0) + newText + current.slice(0)` would
       // silently prepend `newText` to the entire file and emit a
       // success audit event — a textbook silent data corruption
-      // bug. PR 20 routes that pass user-supplied `oldText`
+      // bug. Routes that pass user-supplied `oldText`
       // through verbatim must not be able to trigger it.
       if (oldText.length === 0) {
         throw new FsError(
@@ -1153,15 +1150,9 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       const current = readResult.content;
       // Post-read TOCTOU guard — catches the swap-during-read
       // attack where `p` is replaced with a symlink between
-      // `fsp.stat` above and the read here. The full
-      // read-modify-write race window (between this check and
-      // `lowFs.writeTextFile` below) is the deferred PR 20
-      // follow-up that adds atomic-via-temp + `expectedHash`.
+      // `fsp.stat` above and the read here.
       await assertInodeStableAfterRead(p as string, st.ino);
       // Single replacement to preserve atomic write-once semantics.
-      // Multi-occurrence handling lives in PR 20's edit endpoint
-      // where the route can decide policy; the boundary stays
-      // mechanical.
       const idx = current.indexOf(oldText);
       if (idx === -1) {
         // Include a snippet of `oldText` in the hint so an operator
@@ -1180,11 +1171,8 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         current.slice(0, idx) + newText + current.slice(idx + oldText.length);
       const writtenBytes = Buffer.byteLength(next, 'utf-8');
       enforceWriteSize(writtenBytes);
-      // Pre-write TOCTOU guard — same shape as writeText. The
-      // read-modify-write race window between the post-read
-      // inode check above and this call is the deferred PR 20
-      // atomic-via-temp follow-up; this guard is the
-      // defense-in-depth layer.
+      // Pre-write TOCTOU guard — same shape as writeText.
+      // Defense-in-depth layer.
       await assertNotSymlinkBeforeWrite(p as string);
       // Forward the encoding/BOM/lineEnding metadata captured
       // during the read so the write-back preserves the file's
@@ -1231,7 +1219,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
    *   - the audit log records every failure (the prior helper
    *     early-returned for non-`FsError`s and silently lost the
    *     event), and
-   *   - PR 19/20 routes can still rely on `instanceof FsError`
+   *   - routes can still rely on `instanceof FsError`
    *     for their `sendFsError` serializer.
    */
   private recordAndWrap(err: unknown, intent: Intent, input: string): FsError {
@@ -1978,7 +1966,7 @@ function safeUtf8Truncate(buf: Buffer, maxBytes: number): Buffer {
  * followed the swap to wherever the attacker pointed. There's a
  * residual race where the attacker swaps back after our read but
  * before this check; that window is much smaller than the swap-
- * and-leave attack and outside PR 18's threat model. The proper
+ * and-leave attack and outside this module's threat model. The proper
  * fix is fd-based reading (`fsp.open` + `fileHandle.read`) so the
  * fd binds to the inode at open time; that's a follow-up since it
  * requires a new variant of `lowFs.readTextFile` that takes a
@@ -1996,11 +1984,8 @@ async function assertInodeStableAfterRead(
       { hint: 'TOCTOU swap detected via post-read lstat' },
     );
   }
-  // ino can be 0 on virtual filesystems (procfs etc.) — only compare
-  // when both sides report a meaningful value.
-  const preNum = typeof preIno === 'bigint' ? preIno : BigInt(preIno as number);
-  const postNum =
-    typeof post.ino === 'bigint' ? post.ino : BigInt(post.ino as number);
+  const preNum = toBigInt(preIno);
+  const postNum = toBigInt(post.ino);
   if (preNum !== 0n && postNum !== 0n && preNum !== postNum) {
     throw new FsError(
       'symlink_escape',
@@ -2020,7 +2005,7 @@ async function assertInodeStableAfterRead(
  *
  * Catches:
  * - the path is now a symlink (`isSymbolicLink()`) — reject
- *   with `symlink_escape` regardless of where it points; PR 19/20
+ *   with `symlink_escape` regardless of where it points; callers
  *   should re-`resolve` after a swap rather than blindly writing
  *   through the rename.
  *
@@ -2028,15 +2013,12 @@ async function assertInodeStableAfterRead(
  * - swap-back AFTER this guard but BEFORE `lowFs.writeTextFile`
  *   completes — the residual race window. The proper fix is
  *   fd-based atomic write (`fsp.open(O_NOFOLLOW)` + temp + rename
- *   tied to the parent dir), which is the deferred PR 20
- *   atomic-via-temp follow-up. This guard is the defense-in-depth
+ *   tied to the parent dir). This guard is the defense-in-depth
  *   layer that closes the wide window.
  *
  * Used by `writeText` and `edit()` immediately before
- * `lowFs.writeTextFile`. ENOENT (the file doesn't exist yet) is
- * fine — that's the legitimate ahead-of-mkdir flow already
- * sanctioned by `resolveWithinWorkspace`'s ENOENT-tolerant
- * branch for write intents; only an actual symlink is rejected.
+ * `lowFs.writeTextFile`. ENOENT is fine (ahead-of-create flow);
+ * only an actual symlink is rejected.
  */
 async function assertNotSymlinkBeforeWrite(p: string): Promise<void> {
   let pre: Awaited<ReturnType<typeof fsp.lstat>>;
@@ -2086,6 +2068,6 @@ function buildWriteMeta(
   return Object.keys(meta).length > 0 ? meta : undefined;
 }
 
-// Re-export so PR 19/20 routes can access the orchestrator surface
-// from a single `serve/fs/index.js` import.
+// Re-export so routes can access the orchestrator surface from a
+// single `serve/fs/index.js` import.
 export { MAX_READ_BYTES };

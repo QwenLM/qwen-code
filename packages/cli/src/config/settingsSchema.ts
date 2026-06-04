@@ -1891,10 +1891,10 @@ const SETTINGS_SCHEMA = {
           'For M=2 specifically, split votes resolve only via permissionTimeoutMs. ' +
           '`local-only` = only loopback clients can RESOLVE; remote clients ' +
           'can still ABORT a pending permission via the cancel sentinel ' +
-          '({outcome:"cancelled"}) — F3 v1 keeps cancel cross-policy for ' +
+          '({outcome:"cancelled"}) — cancel stays cross-policy for ' +
           'consistency. Strict-cancel-too deployments need a dedicated ' +
           'loopback-bound daemon. ' +
-          'Requires daemon restart — F3 v1 reads this once at boot.',
+          'Requires daemon restart — read once at boot.',
         showInDialog: true,
         options: [
           { value: 'first-responder', label: 'First Responder' },
@@ -1913,11 +1913,10 @@ const SETTINGS_SCHEMA = {
           'Optional fixed quorum size for consensus policy. Capped at M ' +
           '(count of registered voters at request issue time) to prevent ' +
           'unreachable quorum. Unset = floor(M/2)+1. ' +
-          'Requires daemon restart — F3 v1 reads this once at boot.',
+          'Requires daemon restart — read once at boot.',
         showInDialog: false,
-        // Wenshao review #4335 / 3271185604 — runQwenServe.ts validates
-        // `Number.isInteger(n) && n >= 1` and refuses to boot otherwise.
-        // Override the generated schema so IDE inline validation
+        // runQwenServe.ts validates `Number.isInteger(n) && n >= 1` and
+        // refuses to boot otherwise. Override the generated schema so IDE
         // (VSCode, JetBrains via JSON Schema) flags `0`, `-1`, `1.5`
         // BEFORE the user restarts the daemon. The bare `type:'number'`
         // mapping accepts all of these.
@@ -1928,7 +1927,7 @@ const SETTINGS_SCHEMA = {
             'Optional fixed quorum size for consensus policy. Capped at M ' +
             '(count of registered voters at request issue time) to prevent ' +
             'unreachable quorum. Unset = floor(M/2)+1. ' +
-            'Requires daemon restart — F3 v1 reads this once at boot.',
+            'Requires daemon restart — read once at boot.',
         },
       },
     },

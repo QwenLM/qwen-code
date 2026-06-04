@@ -1041,7 +1041,7 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
     .command(reviewCommand)
-    // Register `qwen serve` (Stage 1 daemon — see issue #3803)
+    // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand);
 
   yargsInstance
@@ -1213,11 +1213,14 @@ function resolveMaxToolCalls(argv: CliArgs, settings: Settings): number {
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
+  if (argv.debug) return true;
+  const debugVal = process.env['DEBUG'];
+  const debugModeVal = process.env['DEBUG_MODE'];
   return (
-    argv.debug ||
-    [process.env['DEBUG'], process.env['DEBUG_MODE']].some(
-      (v) => v === 'true' || v === '1',
-    )
+    debugVal === 'true' ||
+    debugVal === '1' ||
+    debugModeVal === 'true' ||
+    debugModeVal === '1'
   );
 }
 
@@ -1518,12 +1521,9 @@ export async function loadCliConfig(
     addDisabled(name);
   }
 
-  // Resolve the per-workspace tool denylist (#4175 Wave 4 PR 17). De-duplicate
-  // while preserving original casing; downstream lookups go through
-  // `Config.getDisabledTools()` which materializes a Set, so the order here
-  // is only meaningful for diagnostic output. Shared helper since the MCP
-  // restart refresh path (`cli/src/acp-integration/acpAgent.ts`) MUST agree
-  // byte-for-byte with this — #4175 F1 (#4319) fold-in for #4329.
+  // Resolve the per-workspace tool denylist. De-duplicate while preserving
+  // original casing; shared helper since the MCP restart refresh path
+  // must agree byte-for-byte with this.
   const disabledTools = normalizeDisabledToolList(settings.tools?.disabled);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the

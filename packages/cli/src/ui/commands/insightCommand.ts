@@ -39,8 +39,8 @@ export const insightCommand: SlashCommand = {
       if (!context.services.config) {
         if (context.executionMode !== 'interactive') {
           return {
-            type: 'message' as const,
-            messageType: 'error' as const,
+            type: 'message',
+            messageType: 'error',
             content: 'Config service is not available.',
           };
         }
@@ -60,16 +60,16 @@ export const insightCommand: SlashCommand = {
             },
           );
           return {
-            type: 'message' as const,
-            messageType: 'info' as const,
+            type: 'message',
+            messageType: 'info',
             content: t('Insight report generated at: {{path}}', {
               path: outputPath,
             }),
           };
         } catch (error) {
           return {
-            type: 'message' as const,
-            messageType: 'error' as const,
+            type: 'message',
+            messageType: 'error',
             content: t('Failed to generate insights: {{error}}', {
               error: (error as Error).message,
             }),
@@ -257,8 +257,8 @@ export const insightCommand: SlashCommand = {
 
       if (context.executionMode !== 'interactive') {
         return {
-          type: 'message' as const,
-          messageType: 'error' as const,
+          type: 'message',
+          messageType: 'error',
           content: `Failed to generate insights: ${(error as Error).message}`,
         };
       }
@@ -276,6 +276,5 @@ export const insightCommand: SlashCommand = {
       logger.error('Insight generation error:', error);
       return;
     }
-    return;
   },
 };

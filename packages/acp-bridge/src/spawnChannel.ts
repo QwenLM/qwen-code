@@ -139,8 +139,8 @@ export function createSpawnChannelFactory(
         onDiagnosticLine: options.onDiagnosticLine,
       });
       child.stderr.setEncoding('utf8');
-      child.stderr.on('data', (chunk: string) => forwarder.onData(chunk));
-      child.stderr.on('end', () => forwarder.onEnd());
+      child.stderr.on('data', forwarder.onData);
+      child.stderr.on('end', forwarder.onEnd);
       child.stderr.on('error', () => {
         // Don't crash the daemon if the pipe breaks; the child is
         // already gone or about to be.
@@ -199,10 +199,10 @@ export function createSpawnChannelFactory(
  * client) is treated as an extension of the operator. The agent already
  * runs as the same UID with shell-tool access, so restricting the spawn
  * cwd to a sandbox here would be theatre. Stage 4+ remote-sandbox swaps
- * this factory for a sandbox-aware variant; see issue #3803 §11.
+ * this factory for a sandbox-aware variant; see the remote-sandbox plan.
  *
  * Lifted from `cli/src/serve/httpAcpBridge.ts` to `@qwen-code/acp-bridge`
- * in #4175 PR F1 so `channels/base/AcpBridge.ts` and the VSCode IDE
+ * so `channels/base/AcpBridge.ts` and the VSCode IDE
  * companion can share one spawn implementation instead of each
  * reimplementing the child lifecycle (the current divergence noted in
  * `channel.ts`'s top-of-file comment).
@@ -235,7 +235,7 @@ const KILL_HARD_DEADLINE_MS = 10_000;
  * allowlist OR significantly expand the denylist to cover common
  * provider/CI/cloud secret prefixes (`OPENAI_*`, `ANTHROPIC_*`,
  * `AWS_*`, `GITHUB_TOKEN`, `CI_*`, `*_API_KEY`, `*_SECRET`, …).
- * See issue #3803 §11 for the Stage 4+ remote-sandbox plan.
+ * See the remote-sandbox plan for Stage 4+.
  *
  * Defined at module scope so the Set is allocated once at load.
  */
@@ -325,7 +325,7 @@ function killChild(child: ChildProcess): Promise<void> {
     // kernel call we can't cancel, and `process.exit(0)` will reap it
     // when the daemon returns to its caller.
     //
-    // #4319 wenshao round 5 fold-in: emit a stderr line BEFORE we
+    // Emit a stderr line BEFORE we
     // abandon the child so operators see a signal that a zombie
     // exists. Without this, `shutdown()` returns "graceful" while a
     // wedged `qwen --acp` process keeps holding FDs / memory / locks;
