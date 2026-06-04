@@ -12,10 +12,10 @@ import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
 import { MissingCliEntryError } from './status.js';
 
 function getAcpMemoryArgs(): string[] {
+  const constrainedMemory = (process as { constrainedMemory?: () => number })
+    .constrainedMemory;
   const constrained =
-    typeof process.constrainedMemory === 'function'
-      ? process.constrainedMemory()
-      : 0;
+    typeof constrainedMemory === 'function' ? constrainedMemory() : 0;
   const totalBytes =
     constrained && constrained > 0 ? constrained : os.totalmem();
   const totalMB = Math.floor(totalBytes / (1024 * 1024));
