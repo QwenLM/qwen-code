@@ -66,7 +66,8 @@ export function handleAutoUpdate(
     if (code === 0) {
       updateEventEmitter.emit('update-success', {
         message:
-          'Update successful! The new version will be used on your next run.',
+          'Update successful! Please restart Qwen Code to use the new version. ' +
+          'Switching model providers before restarting may not work correctly.',
       });
     } else {
       updateEventEmitter.emit('update-failed', {
