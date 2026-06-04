@@ -772,8 +772,8 @@ export class PoolEntry {
     // `forceShutdown` AND `doRestart` (both pre- and failure-
     // paths) so future changes to either step happen in one place.
     await this.sweepAndDisconnect(reason);
-    // state + localStatus already set synchronously above (
-    // C4 + fixes). Just propagate the now-stable status into
+    // state + localStatus already set synchronously above.
+    // Just propagate the now-stable status into
     // the module-global map for cross-name aggregators.
     this.updateGlobalStatus();
     this.onClosed(this.id);

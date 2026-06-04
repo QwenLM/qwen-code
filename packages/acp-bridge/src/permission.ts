@@ -33,8 +33,8 @@
  *   privilege escalation.
  *
  * See `bridgeClient.ts BridgeClient.requestPermission` for the
- * current first-responder implementation; the `FIXME(stage-1.5,
- * )` block above that method scoped this contract.
+ * current first-responder implementation; the `FIXME(stage-1.5)`
+ * block above that method scoped this contract.
  */
 export type PermissionPolicy =
   | 'first-responder'

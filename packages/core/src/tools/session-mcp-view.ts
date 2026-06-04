@@ -138,7 +138,7 @@ export function passesSessionPromptFilter(
  *   - Filters by per-session `includeTools` / `excludeTools` (cfg)
  *   - Decorates tools with per-session `trust` via `tool.withTrust(...)`
  *     so two sessions on the same pool entry can have different
- *     trust values without cross-contamination (see / )
+ *     trust values without cross-contamination
  *   - Registers into the session's own registries (does NOT touch
  *     the pool's snapshot)
  *   - `teardown()` removes all this view's registrations, used on

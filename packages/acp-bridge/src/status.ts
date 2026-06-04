@@ -223,7 +223,7 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
   }>;
 }
 
-/** Budget mode for the MCP client guardrails . */
+/** Budget mode for the MCP client guardrails. */
 export type ServeMcpBudgetMode = 'enforce' | 'warn' | 'off';
 
 /**

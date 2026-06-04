@@ -572,7 +572,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       // it with a "success" api_response log or model-output span attributes.
       // The OpenAI interaction log is also skipped — telemetry already carries
       // the timeout signal and a parallel "success" record would be confusing
-      // during incident response .
+      // during incident response.
       if (!spanEndedByTimeout) {
         runInSpan(() =>
           this.safelyLogApiResponse(

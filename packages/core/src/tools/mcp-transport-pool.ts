@@ -623,8 +623,8 @@ export class McpTransportPool {
    * `GET /workspace/mcp` status route. Returns a plain object so the
    * caller can serialize directly.
    *
-   * `entryCount` per server name + `entrySummary` array (
-   * opaque `entryIndex`, NOT raw fingerprint) for multi-entry name
+   * `entryCount` per server name + `entrySummary` array
+   * (opaque `entryIndex`, NOT raw fingerprint) for multi-entry name
    * collisions.
    */
   getSnapshot(): McpPoolSnapshot {
@@ -1005,12 +1005,11 @@ export class McpTransportPool {
       // `spawnInFlight` unresolved forever — every session sharing
       // this `ConnectionId` waited indefinitely AND the budget slot
       // was never rolled back. The timeout's `reject` triggers the
-      // catch path which forces shutdown + budget rollback (
-      // ).
+      // catch path which forces shutdown + budget rollback.
       //
-      //  (commit 6 review round 6): `entries.set(id, entry)` +
-      // `entry.markActive(...)` MUST live OUTSIDE the
-      // timeout-wrapped IIFE. Pre-fix they were inside; if the
+      // `entries.set(id, entry)` + `entry.markActive(...)` MUST
+      // live OUTSIDE the timeout-wrapped IIFE. Previously they
+      // were inside; if the
       // timeout fired, the catch removed the entry and
       // forceShutdown'd it, but the IIFE kept running. When
       // connect/discover settled later, the IIFE's late `entries.set`
@@ -1074,7 +1073,7 @@ export class McpTransportPool {
           `(id=${id}, transport=${transport}): ${String(err)}`,
       );
       // Don't leak the entry. McpClient self-flips status to
-      // DISCONNECTED on discoverAndReturn error .
+      // DISCONNECTED on discoverAndReturn error.
       // `entries.delete` is idempotent — covers the race where the
       // error came from `markActive` AFTER `entries.set` ran (rare;
       // markActive is mostly assignment + updateGlobalStatus, but
@@ -1352,7 +1351,7 @@ export interface McpPoolSnapshot {
    * Live local-subprocess count — stdio entries that are CONNECTED.
    * Websocket transports dial a (potentially remote) MCP server over
    * the network and don't spawn a local OS child, so they're
-   * deliberately excluded .
+   * deliberately excluded.
    */
   subprocessCount: number;
   /** Per-server entry details. */

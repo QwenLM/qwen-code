@@ -86,7 +86,7 @@ export const MCP_BUDGET_WARN_FRACTION = 0.75 as const;
 export const MCP_BUDGET_REARM_FRACTION = 0.375 as const;
 
 /**
- * Budget enforcement mode for MCP client guardrails .
+ * Budget enforcement mode for MCP client guardrails.
  *
  * `off` — no accounting-driven enforcement (default when no budget is
  *   configured). `getMcpClientAccounting()` still works as pure
@@ -127,10 +127,10 @@ export interface McpBudgetConfig {
 }
 
 /**
- * One refused-server entry in a `'refused_batch'` event payload .
+ * One refused-server entry in a `'refused_batch'` event payload.
  * `transport` is the family resolved at refusal time via `mcpTransportOf`;
  * `reason` is `'budget_exhausted'` until additional refusal causes are
- * defined .
+ * defined.
  */
 export interface McpRefusedServer {
   name: string;
@@ -1525,7 +1525,7 @@ export class McpClientManager {
             );
             return;
           }
-          // commit 4 self-review fix): SDK MCP servers MUST
+          // SDK MCP servers MUST
           // stay on the legacy McpClientManager path because their
           // `sendSdkMcpMessage` callback is bound per-session in this
           // manager's ctor, but the workspace-shared pool was
@@ -1696,8 +1696,7 @@ export class McpClientManager {
       // the loop open — it does NOT prevent the callback from
       // executing if other refs keep the loop alive.
       let graceTimer: ReturnType<typeof setTimeout> | undefined;
-      // —;
-      // doc fix): the `stopTimedOut` flag is set synchronously inside
+      // The `stopTimedOut` flag is set synchronously inside
       // the grace-timer callback below — i.e. the instant the timer
       // fires (when `Promise.race` resolves via the timeout branch)
       // and BEFORE `stop()` proceeds to `releaseAllPooledConnections`.
