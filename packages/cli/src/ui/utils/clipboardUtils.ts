@@ -405,6 +405,11 @@ async function saveFileWithWlPaste(
         } catch {
           /* ignore */
         }
+        try {
+          await fs.unlink(tempFilePath);
+        } catch {
+          /* ignore */
+        }
         // Return false to report clean failure — downstream expects .png
         return false;
       }
