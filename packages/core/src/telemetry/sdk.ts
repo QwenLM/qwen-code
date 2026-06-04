@@ -644,7 +644,22 @@ export async function shutdownTelemetry(): Promise<void> {
   return telemetryShutdownPromise;
 }
 
+const FORCE_FLUSH_TIMEOUT_MS = 5_000;
+
 export async function forceFlushMetrics(): Promise<void> {
   if (!telemetryInitialized || !activeMetricReader) return;
-  await activeMetricReader.forceFlush();
+  const flush = activeMetricReader.forceFlush();
+  const timeout = new Promise<void>((_, reject) => {
+    const timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `forceFlushMetrics timed out after ${FORCE_FLUSH_TIMEOUT_MS}ms`,
+          ),
+        ),
+      FORCE_FLUSH_TIMEOUT_MS,
+    );
+    timer.unref?.();
+  });
+  await Promise.race([flush, timeout]);
 }

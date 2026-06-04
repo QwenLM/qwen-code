@@ -1091,68 +1091,71 @@ export async function runQwenServe(
                 );
               }
             }
-            await forceFlushMetrics().catch((flushErr) => {
-              daemonLog.warn(
-                `pre-shutdown metrics flush failed: ${
-                  flushErr instanceof Error
-                    ? flushErr.message
-                    : String(flushErr)
-                }`,
-              );
-            });
-            bridge
-              .shutdown()
-              .catch((err) => {
-                daemonLog.error(
-                  'bridge shutdown error',
-                  err instanceof Error ? err : null,
+            forceFlushMetrics()
+              .catch((flushErr) => {
+                daemonLog.warn(
+                  `pre-shutdown metrics flush failed: ${
+                    flushErr instanceof Error
+                      ? flushErr.message
+                      : String(flushErr)
+                  }`,
                 );
-                bridgeShutdownError =
-                  err instanceof Error ? err : new Error(String(err));
               })
-              .finally(() => {
-                // Phase 2: arm the force timer NOW so it only races
-                // server.close, not the bridge tear-down above.
-                // `RunHandle.close()` contract says "fully
-                // closed and bridge drained" — the previous code
-                // resolved on a 100ms shortcut AFTER
-                // `closeAllConnections()` without waiting for
-                // `server.close`'s callback, so embedders/tests
-                // could observe a "closed" handle while the server
-                // was still finalizing. Now: force-close just
-                // accelerates `server.close` by killing the
-                // sockets, but we still wait for `server.close`'s
-                // callback to fire. A secondary deadline catches
-                // the pathological case where `server.close` never
-                // resolves at all (kernel-stuck socket etc.) so
-                // shutdown is still bounded.
-                const SECONDARY_DEADLINE_MS = 2_000;
-                let secondaryTimer: NodeJS.Timeout | undefined;
-                const forceTimer = setTimeout(() => {
-                  daemonLog.warn(
-                    `${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
-                  );
-                  server.closeAllConnections();
-                  // After force-close, server.close's callback
-                  // SHOULD fire promptly. Give it `SECONDARY_DEADLINE_MS`
-                  // before we resolve anyway with a warning — much
-                  // longer than the previous 100ms shortcut, and
-                  // logged so the operator knows the contract was
-                  // bent.
-                  secondaryTimer = setTimeout(() => {
-                    daemonLog.warn(
-                      `server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
+              .then(() => {
+                bridge
+                  .shutdown()
+                  .catch((err) => {
+                    daemonLog.error(
+                      'bridge shutdown error',
+                      err instanceof Error ? err : null,
                     );
-                    finish();
-                  }, SECONDARY_DEADLINE_MS);
-                  secondaryTimer.unref();
-                }, SHUTDOWN_FORCE_CLOSE_MS);
-                forceTimer.unref();
-                server.close((err) => {
-                  clearTimeout(forceTimer);
-                  if (secondaryTimer) clearTimeout(secondaryTimer);
-                  finish(err);
-                });
+                    bridgeShutdownError =
+                      err instanceof Error ? err : new Error(String(err));
+                  })
+                  .finally(() => {
+                    // Phase 2: arm the force timer NOW so it only races
+                    // server.close, not the bridge tear-down above.
+                    // `RunHandle.close()` contract says "fully
+                    // closed and bridge drained" — the previous code
+                    // resolved on a 100ms shortcut AFTER
+                    // `closeAllConnections()` without waiting for
+                    // `server.close`'s callback, so embedders/tests
+                    // could observe a "closed" handle while the server
+                    // was still finalizing. Now: force-close just
+                    // accelerates `server.close` by killing the
+                    // sockets, but we still wait for `server.close`'s
+                    // callback to fire. A secondary deadline catches
+                    // the pathological case where `server.close` never
+                    // resolves at all (kernel-stuck socket etc.) so
+                    // shutdown is still bounded.
+                    const SECONDARY_DEADLINE_MS = 2_000;
+                    let secondaryTimer: NodeJS.Timeout | undefined;
+                    const forceTimer = setTimeout(() => {
+                      daemonLog.warn(
+                        `${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
+                      );
+                      server.closeAllConnections();
+                      // After force-close, server.close's callback
+                      // SHOULD fire promptly. Give it `SECONDARY_DEADLINE_MS`
+                      // before we resolve anyway with a warning — much
+                      // longer than the previous 100ms shortcut, and
+                      // logged so the operator knows the contract was
+                      // bent.
+                      secondaryTimer = setTimeout(() => {
+                        daemonLog.warn(
+                          `server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
+                        );
+                        finish();
+                      }, SECONDARY_DEADLINE_MS);
+                      secondaryTimer.unref();
+                    }, SHUTDOWN_FORCE_CLOSE_MS);
+                    forceTimer.unref();
+                    server.close((err) => {
+                      clearTimeout(forceTimer);
+                      if (secondaryTimer) clearTimeout(secondaryTimer);
+                      finish(err);
+                    });
+                  });
               });
           });
           return closePromise;

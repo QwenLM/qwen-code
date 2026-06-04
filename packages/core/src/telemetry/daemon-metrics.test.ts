@@ -322,6 +322,21 @@ describe('Daemon Metrics', () => {
       expect(mockResult.observe).toHaveBeenCalledWith(50_000_000);
     });
 
+    it('does not re-register on second call', () => {
+      registerDaemonGaugeCallbacks({
+        sessionCount: () => 1,
+        sseCount: () => 0,
+        heapUsed: () => 0,
+      });
+      const callCount = mockCreateObservableGaugeFn.mock.calls.length;
+      registerDaemonGaugeCallbacks({
+        sessionCount: () => 2,
+        sseCount: () => 0,
+        heapUsed: () => 0,
+      });
+      expect(mockCreateObservableGaugeFn.mock.calls.length).toBe(callCount);
+    });
+
     it('gauge callbacks swallow exceptions', () => {
       registerDaemonGaugeCallbacks({
         sessionCount: () => {
