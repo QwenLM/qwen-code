@@ -261,17 +261,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     for (const slot of this.slots) {
       switch (slot.kind) {
         case 'text':
-        case 'thought': {
-          let meta = slot.lastMeta;
-          if (
-            slot.parentToolCallId &&
-            extractParentToolCallIdFromMeta(meta) !== slot.parentToolCallId
-          ) {
-            meta = {
-              ...(typeof meta === 'object' && meta !== null ? meta : {}),
-              parentToolCallId: slot.parentToolCallId,
-            };
-          }
+        case 'thought':
           compacted.push(
             makeMergedSessionUpdateEvent(
               slot.kind === 'text'
@@ -279,11 +269,10 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
                 : 'agent_thought_chunk',
               slot.chunks.join(''),
               slot.lastEventId,
-              meta,
+              slot.lastMeta,
             ),
           );
           break;
-        }
         case 'tool':
         case 'misc':
         case 'latestWins':

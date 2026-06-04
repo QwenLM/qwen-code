@@ -1083,10 +1083,9 @@ describe('parentToolCallId-aware text merging', () => {
     expect(getUpdate(textEvents[1]!).content.text).toBe('part2 part3');
   });
 
-  it('meta backfill: parentToolCallId preserved when last chunk _meta overwritten', () => {
+  it('parentToolCallId survives in lastMeta through multi-chunk merge', () => {
     const engine = new TurnBoundaryCompactionEngine();
     engine.ingest(makeTextChunkWithParent(1, 'hello ', 'task-A'));
-    // Second chunk has _meta with usage that overwrites lastMeta but keeps parentToolCallId
     engine.ingest({
       id: 2,
       v: 1,
@@ -1114,14 +1113,9 @@ describe('parentToolCallId-aware text merging', () => {
     );
   });
 
-  it('meta backfill: parentToolCallId injected when last chunk _meta lacks it', () => {
+  it('single subagent chunk preserves parentToolCallId in output', () => {
     const engine = new TurnBoundaryCompactionEngine();
-    engine.ingest(makeTextChunkWithParent(1, 'hello ', 'task-A'));
-    // Simulate a chunk routed to subagent path (has parentToolCallId)
-    // followed by the same slot receiving a chunk whose _meta lost it
-    // This requires manually tweaking — in practice the indexing ensures
-    // same-parent routing, but we test the defensive backfill by checking
-    // that even when lastMeta has no parentToolCallId, the output still has it
+    engine.ingest(makeTextChunkWithParent(1, 'hello', 'task-A'));
     engine.ingest(makeTurnComplete(2));
 
     const snap = engine.snapshot();
