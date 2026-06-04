@@ -79,8 +79,6 @@ function getRealPath(path: string): string {
   try {
     return fs.realpathSync(path);
   } catch (_e) {
-    // If realpathSync fails, it might be because the path doesn't exist.
-    // In that case, we can fall back to the original path.
     return path;
   }
 }
@@ -452,7 +450,6 @@ export class IdeClient {
         ListToolsResultSchema,
       );
 
-      // Map the array of tool objects to an array of tool names (strings)
       this.availableTools = response.tools.map((tool) => tool.name);
 
       if (this.availableTools.length > 0) {
