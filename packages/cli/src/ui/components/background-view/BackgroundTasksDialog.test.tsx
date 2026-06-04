@@ -368,6 +368,26 @@ describe('BackgroundTasksDialog', () => {
     expect(h.cancel).not.toHaveBeenCalled();
   });
 
+  it('sanitizes ANSI/control sequences in an entry label (terminal-injection guard)', () => {
+    // A /fork directive is user-controlled and flows verbatim into the entry
+    // description; a raw escape sequence must not reach the terminal when the
+    // dialog renders the row.
+    const ESC = '';
+    const malicious = entry({
+      agentId: 'fork-evil',
+      subagentType: 'fork',
+      description: `r${ESC}[2Jx`,
+    });
+    const h = setup([malicious]);
+    h.call(() => h.probe.current!.actions.openDialog());
+
+    const frame = h.lastFrame() ?? '';
+    // The raw clear-screen escape (ESC + "[2J") never reaches the frame...
+    expect(frame).not.toContain(`${ESC}[2J`);
+    // ...it survives only as inert, escaped text.
+    expect(frame).toContain('[2J');
+  });
+
   it('detail-mode left clears any armed foreground cancel before exiting', () => {
     // Detail-mode `x` arms the foreground confirm step on the focused
     // entry. If the user presses `left` to back out without confirming,
