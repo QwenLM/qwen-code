@@ -327,10 +327,6 @@ describe('Trusted Folders Loading', () => {
       if (p === userPath) return originalContent;
       return '{}';
     });
-    parseSpy.mockImplementationOnce(
-      (content: string) =>
-        JSON.parse(content) as ReturnType<typeof commentJson.parse>,
-    );
     parseSpy.mockImplementationOnce(() => {
       throw new Error('invalid preserved output');
     });
