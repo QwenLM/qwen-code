@@ -2199,6 +2199,15 @@ export class Config {
     );
   }
 
+  /**
+   * Get the human-readable display name for the currently selected model.
+   * Resolves the model id to its name from the model registry.
+   * Falls back to the raw model id when the model is not found.
+   */
+  getModelDisplayName(): string {
+    return this.modelsConfig.getModelDisplayName(this.getModel());
+  }
+
   onModelChange(listener: (model: string) => void): () => void {
     this.modelChangeListeners.add(listener);
     return () => {
