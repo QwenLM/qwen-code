@@ -50,7 +50,11 @@ vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
   isUnattendedMode: vi.fn(() => false),
 }));
-import { getCoreSystemPrompt, getCustomSystemPrompt } from './prompts.js';
+import {
+  getCoreSystemPrompt,
+  getCustomSystemPrompt,
+  getDeferredToolsSystemReminder,
+} from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
@@ -865,13 +869,11 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('re-applies SessionStart additionalContext after refreshing the system instruction', async () => {
-      // startChat() now calls getCoreSystemPrompt twice: once for the
-      // initial GeminiChat construction and once via the trailing
-      // `setTools()` (which rebuilds the system instruction so progressive
-      // MCP tools land in the prompt). The third call is the
-      // refreshSystemInstruction under test.
+      // startChat() calls getCoreSystemPrompt once for the initial GeminiChat
+      // construction. (The trailing setTools() no longer rebuilds the system
+      // instruction — deferred tools ride the per-turn reminder now.) The
+      // second call is the refreshSystemInstruction under test.
       vi.mocked(getCoreSystemPrompt)
-        .mockReturnValueOnce('Base instruction')
         .mockReturnValueOnce('Base instruction')
         .mockReturnValueOnce('Updated instruction');
       const hookSystem = {
@@ -994,21 +996,13 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
-  describe('setTools — system instruction refresh', () => {
-    // Regression coverage for the progressive-MCP wiring bug: when MCP
-    // discovery completes AFTER startChat() (the new default), `setTools()`
-    // is the only hook that can teach the model about the freshly-registered
-    // MCP tools. Because MCP tools are `shouldDefer=true`, they never appear
-    // in `tools` declarations — the model only learns of them via the
-    // system prompt's "Deferred Tools" listing. So `setTools()` MUST
-    // rebuild the system instruction with the up-to-date deferred summary,
-    // not just update `chat.tools`.
-    //
-    // `prompts.ts` is auto-mocked at module scope (line ~99), so the
-    // assertions below inspect the `deferredTools` argument passed to
-    // `getCoreSystemPrompt` rather than the rendered string. The contract
-    // "freshly-registered MCP tool reaches the prompt" reduces to "it
-    // appears in the deferredTools arg".
+  describe('setTools — tool declarations (cache-stable prefix)', () => {
+    // The deferred-tools listing no longer lives in the cached system
+    // instruction. `setTools()` refreshes the tool declarations and runs the
+    // reveal side-effect, but must NOT rewrite the system prefix — doing so
+    // dropped the prompt-cache hit on every progressive-MCP discovery. Deferred
+    // tools instead surface via the per-turn reminder (covered separately in
+    // 'deferred-tools reminder (per-turn)' below).
     function getRegistryMock() {
       return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
         getFunctionDeclarations: ReturnType<typeof vi.fn>;
@@ -1020,22 +1014,11 @@ describe('Gemini Client (client.ts)', () => {
       };
     }
 
-    function lastDeferredArg():
-      | Array<{ name: string; description: string }>
-      | undefined {
-      const mock = vi.mocked(getCoreSystemPrompt);
-      const lastCall = mock.mock.calls[mock.mock.calls.length - 1];
-      // signature: (userMemory, model, appendInstruction, deferredTools)
-      return lastCall?.[3] as
-        | Array<{ name: string; description: string }>
-        | undefined;
-    }
-
-    it('rebuilds systemInstruction so newly-registered MCP tools land in the prompt', async () => {
+    it('updates tool declarations without rewriting the cached system instruction', async () => {
+      // Deferred tools no longer live in the system prefix, so setTools must
+      // update chat.tools but leave the cached system instruction untouched —
+      // otherwise every progressive-MCP discovery would drop the cache hit.
       const reg = getRegistryMock();
-      // ToolSearch IS available — this is the standard case (the only
-      // path that fails before this fix). MCP discovery has now finished,
-      // so a freshly-arrived MCP tool appears in the deferred summary.
       reg.getTool.mockImplementation((n: string) =>
         n === 'tool_search' ? ({} as never) : null,
       );
@@ -1046,46 +1029,14 @@ describe('Gemini Client (client.ts)', () => {
       const setSystemInstructionSpy = vi
         .spyOn(client.getChat(), 'setSystemInstruction')
         .mockImplementation(() => {});
-      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
-      vi.mocked(getCoreSystemPrompt).mockClear();
+      const setToolsSpy = vi
+        .spyOn(client.getChat(), 'setTools')
+        .mockImplementation(() => {});
 
       await client.setTools();
 
-      expect(setSystemInstructionSpy).toHaveBeenCalledTimes(1);
-      const passedDeferred = lastDeferredArg();
-      expect(passedDeferred).toEqual([
-        { name: 'mcp__addition-server__add', description: 'Add two numbers' },
-      ]);
-    });
-
-    it('omits already-revealed deferred tools from the rendered listing', async () => {
-      // Tools the model has already revealed via ToolSearch are in the
-      // declaration list; advertising them again as "reachable via
-      // ToolSearch" would invite redundant lookup calls.
-      const reg = getRegistryMock();
-      reg.getTool.mockImplementation((n: string) =>
-        n === 'tool_search' ? ({} as never) : null,
-      );
-      reg.getDeferredToolSummary.mockReturnValue([
-        { name: 'mcp__server__alpha', description: 'a' },
-        { name: 'mcp__server__beta', description: 'b' },
-      ]);
-      reg.isDeferredToolRevealed.mockImplementation(
-        (n: string) => n === 'mcp__server__alpha',
-      );
-
-      vi.spyOn(client.getChat(), 'setSystemInstruction').mockImplementation(
-        () => {},
-      );
-      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
-      vi.mocked(getCoreSystemPrompt).mockClear();
-
-      await client.setTools();
-
-      const passedDeferred = lastDeferredArg();
-      expect(passedDeferred).toEqual([
-        { name: 'mcp__server__beta', description: 'b' },
-      ]);
+      expect(setToolsSpy).toHaveBeenCalled();
+      expect(setSystemInstructionSpy).not.toHaveBeenCalled();
     });
 
     it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
@@ -1103,40 +1054,20 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       reg.revealDeferredTool.mockClear();
 
-      vi.spyOn(client.getChat(), 'setSystemInstruction').mockImplementation(
-        () => {},
-      );
       vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
-      vi.mocked(getCoreSystemPrompt).mockClear();
 
       await client.setTools();
 
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__alpha');
       expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__beta');
-      // When ToolSearch is absent we render the prompt WITHOUT the
-      // deferred-tools listing (those tools are now in `tools`), so the
-      // deferredTools arg must be `undefined`, not an empty array.
-      expect(lastDeferredArg()).toBeUndefined();
     });
 
-    it('preserves SessionStart additionalContext when refreshing via setTools', async () => {
-      // Regression for #4166 review (chiga0 P1): setTools's
-      // setSystemInstruction rewrites the chat's systemInstruction wholesale.
-      // A SessionStart hook's additionalContext applied by startChat (or a
-      // prior Compact) lives inside that systemInstruction, so a naive
-      // rewrite would silently drop it on every progressive-MCP refresh
-      // (which fires once per MCP server completion via AppContainer's
-      // batch-flush, plus a trailing call after waitForMcpReady). setTools
-      // MUST re-apply lastSessionStartContext after the rewrite, mirroring
-      // refreshSystemInstruction's contract.
-      //
-      // Three mockReturnValueOnce because startChat invokes
-      // getCoreSystemPrompt twice (initial chat + trailing setTools), and
-      // the explicit setTools call below is the third invocation.
-      vi.mocked(getCoreSystemPrompt)
-        .mockReturnValueOnce('Base instruction')
-        .mockReturnValueOnce('Base instruction')
-        .mockReturnValueOnce('Refreshed instruction');
+    it('leaves SessionStart additionalContext intact (no prefix rewrite)', async () => {
+      // setTools no longer rewrites the system instruction, so a SessionStart
+      // hook's additionalContext applied by startChat survives untouched —
+      // without needing a re-apply step inside setTools. A progressive-MCP
+      // refresh (which calls setTools) therefore can't drop it.
+      vi.mocked(getCoreSystemPrompt).mockReturnValue('Base instruction');
       const hookSystem = {
         fireSessionStartEvent: vi.fn().mockResolvedValue(
           createHookOutput('SessionStart', {
@@ -1153,11 +1084,160 @@ describe('Gemini Client (client.ts)', () => {
       );
 
       await client.startChat(undefined, SessionStartSource.Startup);
+      const before = client.getChat()['generationConfig'].systemInstruction;
       await client.setTools();
+      const after = client.getChat()['generationConfig'].systemInstruction;
 
-      expect(client.getChat()['generationConfig'].systemInstruction).toBe(
-        'Refreshed instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nHookCtx\n</qwen:session-start-context>',
+      expect(before).toContain('HookCtx');
+      expect(after).toBe(before);
+    });
+  });
+
+  describe('deferred-tools reminder (per-turn)', () => {
+    // The deferred-tools listing rides in the per-turn message tail (via
+    // getDeferredToolsSystemReminder) instead of the cached system prefix, so
+    // progressively-discovered MCP tools surface without busting prompt cache.
+    function getRegistryMock() {
+      return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getDeferredToolSummary: ReturnType<typeof vi.fn>;
+        getTool: ReturnType<typeof vi.fn>;
+        isDeferredToolRevealed: ReturnType<typeof vi.fn>;
+        revealDeferredTool: ReturnType<typeof vi.fn>;
+      };
+    }
+
+    async function runUserTurn(
+      type: SendMessageType = SendMessageType.UserQuery,
+    ) {
+      vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'ok' };
+        })(),
       );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+      const stream = client.sendMessageStream(
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+        'prompt-id-deferred',
+        { type },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+    }
+
+    it('injects a deferred-tools reminder built from the live filtered summary', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a' },
+        { name: 'mcp__server__beta', description: 'b' },
+      ]);
+      reg.isDeferredToolRevealed.mockReturnValue(false);
+      vi.mocked(getDeferredToolsSystemReminder).mockReturnValue(
+        '<system-reminder>DEFERRED</system-reminder>',
+      );
+
+      await runUserTurn();
+
+      expect(getDeferredToolsSystemReminder).toHaveBeenCalledWith([
+        { name: 'mcp__server__alpha', description: 'a' },
+        { name: 'mcp__server__beta', description: 'b' },
+      ]);
+      const lastCall = mockTurnRunFn.mock.calls.at(-1)!;
+      const parts = lastCall[1];
+      expect(parts).toContain('<system-reminder>DEFERRED</system-reminder>');
+    });
+
+    it('omits already-revealed deferred tools from the reminder', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a' },
+        { name: 'mcp__server__beta', description: 'b' },
+      ]);
+      reg.isDeferredToolRevealed.mockImplementation(
+        (n: string) => n === 'mcp__server__alpha',
+      );
+      vi.mocked(getDeferredToolsSystemReminder).mockReturnValue(
+        '<system-reminder>DEFERRED</system-reminder>',
+      );
+
+      await runUserTurn();
+
+      expect(getDeferredToolsSystemReminder).toHaveBeenCalledWith([
+        { name: 'mcp__server__beta', description: 'b' },
+      ]);
+    });
+
+    it('skips the reminder when ToolSearch is unavailable', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null); // ToolSearch absent
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a' },
+      ]);
+      vi.mocked(getDeferredToolsSystemReminder).mockClear();
+
+      await runUserTurn();
+
+      // getDeferredToolsForReminder returns undefined when ToolSearch is absent
+      // (deferred tools already revealed into declarations), so no reminder is
+      // built.
+      expect(getDeferredToolsSystemReminder).not.toHaveBeenCalled();
+    });
+
+    it('skips the reminder when every deferred tool is already revealed', async () => {
+      // ToolSearch is available but the model has already revealed all deferred
+      // tools, so getDeferredToolsForReminder returns []. The `length > 0` guard
+      // must suppress the push — otherwise the model gets an empty
+      // <system-reminder> wrapper on every turn.
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a' },
+        { name: 'mcp__server__beta', description: 'b' },
+      ]);
+      reg.isDeferredToolRevealed.mockReturnValue(true); // every tool revealed
+      vi.mocked(getDeferredToolsSystemReminder).mockClear();
+
+      await runUserTurn();
+
+      expect(getDeferredToolsSystemReminder).not.toHaveBeenCalled();
+    });
+
+    it('does NOT inject the reminder on a ToolResult turn', async () => {
+      // The reminder is gated to UserQuery/Cron turns. A ToolResult turn leads
+      // with functionResponse parts that must immediately follow the model's
+      // functionCall, so prepending reminders there would break the call/
+      // response pairing. Guards against moving the push outside that gate.
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a' },
+      ]);
+      reg.isDeferredToolRevealed.mockReturnValue(false);
+      vi.mocked(getDeferredToolsSystemReminder).mockClear();
+
+      // Same registry state that WOULD inject on a UserQuery turn.
+      await runUserTurn(SendMessageType.ToolResult);
+
+      expect(getDeferredToolsSystemReminder).not.toHaveBeenCalled();
     });
   });
 
@@ -5502,7 +5582,6 @@ Other open files:
         'Override prompt',
         'Saved memory',
         undefined,
-        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -5534,7 +5613,6 @@ Other open files:
         '',
         'test-model',
         'Be extra concise.',
-        undefined,
       );
     });
 
@@ -5566,7 +5644,6 @@ Other open files:
         'Override prompt',
         'Saved memory',
         'Focus on findings only.',
-        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({

@@ -79,7 +79,6 @@ export function getCustomSystemPrompt(
   customInstruction: GenerateContentConfig['systemInstruction'],
   userMemory?: string,
   appendInstruction?: string,
-  deferredTools?: Array<{ name: string; description: string }>,
 ): string {
   // Extract text from custom instruction
   let instructionText = '';
@@ -104,11 +103,8 @@ export function getCustomSystemPrompt(
 
   // Append user memory using the same pattern as getCoreSystemPrompt
   const memorySuffix = buildSystemPromptSuffix(userMemory);
-  const deferredSuffix = deferredTools
-    ? buildDeferredToolsSection(deferredTools)
-    : '';
 
-  return `${instructionText}${deferredSuffix}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
+  return `${instructionText}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
 }
 
 function buildSystemPromptSuffix(text?: string): string {
@@ -180,11 +176,33 @@ If you expect to use several related tools (e.g. \`get_app_state\` then \`click\
 ${lines.join('\n')}`;
 }
 
+/**
+ * Wraps the deferred-tools listing as an internal `<system-reminder>` so it can
+ * ride in the per-turn message tail instead of the cached system-prompt prefix.
+ *
+ * Keeping this OUT of the system instruction means revealing or progressively
+ * discovering a deferred tool mid-session no longer rewrites the cacheable
+ * prefix — which would otherwise drop the prompt-cache hit for the whole
+ * conversation. The reminder is rebuilt from live registry state each UserQuery
+ * turn, so late-discovered MCP tools still surface, just without busting cache.
+ *
+ * Returns '' when there are no (unrevealed) deferred tools, so callers can skip
+ * pushing an empty reminder.
+ */
+export function getDeferredToolsSystemReminder(
+  deferredTools: Array<{ name: string; description: string }>,
+): string {
+  const section = buildDeferredToolsSection(deferredTools);
+  if (!section) return '';
+  // buildDeferredToolsSection returns a leading-blank-line markdown block;
+  // trim the surrounding whitespace before wrapping it as a reminder.
+  return `<system-reminder>\n${section.trim()}\n</system-reminder>`;
+}
+
 export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
   appendInstruction?: string,
-  deferredTools?: Array<{ name: string; description: string }>,
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
@@ -413,11 +431,8 @@ Your core function is efficient and safe assistance. Balance extreme conciseness
       ? buildSystemPromptSuffix(userMemory)
       : '';
   const appendSuffix = buildSystemPromptSuffix(appendInstruction);
-  const deferredSuffix = deferredTools
-    ? buildDeferredToolsSection(deferredTools)
-    : '';
 
-  return `${basePrompt}${deferredSuffix}${memorySuffix}${appendSuffix}`;
+  return `${basePrompt}${memorySuffix}${appendSuffix}`;
 }
 
 /**
