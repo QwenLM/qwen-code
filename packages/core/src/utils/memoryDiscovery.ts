@@ -266,6 +266,7 @@ async function readGeminiMdFiles(
                 const parentFilePath = notification.parentFilePath;
                 await notifyInstructionsLoaded({
                   filePath: notification.filePath,
+                  // Included files inherit the root instruction file's memory type.
                   memoryType: getMemoryType(filePath),
                   loadReason: 'include',
                   triggerFilePath: filePath,
