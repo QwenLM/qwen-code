@@ -43,6 +43,8 @@ export interface BrandConfig {
     winIcon: string;
     /** Linux AppImage icon */
     linuxIcon: string;
+    /** Optional macOS development Dock icon PNG */
+    devDockIcon?: string;
     /** Optional SVG source icon for regeneration workflows */
     iconSvg?: string;
     /** Optional macOS 26+ Liquid Glass compiled icon asset */
@@ -83,6 +85,7 @@ const QWEN_CODE_BRAND: BrandConfig = {
     macIcon: 'resources/brands/qwen-code/icon.icns',
     winIcon: 'resources/brands/qwen-code/icon.ico',
     linuxIcon: 'resources/brands/qwen-code/icon.png',
+    devDockIcon: 'resources/brands/qwen-code/dock.png',
     iconSvg: 'resources/brands/qwen-code/icon.svg',
     liquidGlassAssetsCar: 'resources/brands/qwen-code/Assets.car',
   },
@@ -116,6 +119,7 @@ const BRANDS: Record<string, BrandConfig> = {
       macIcon: 'resources/brands/modelstudio/icon.icns',
       winIcon: 'resources/brands/modelstudio/icon.png',
       linuxIcon: 'resources/brands/modelstudio/icon.png',
+      devDockIcon: 'resources/brands/modelstudio/dock.png',
       liquidGlassAssetsCar: 'resources/brands/modelstudio/Assets.car',
     },
     credits: 'Architecture: craft-agents-oss | Agent: Qwen Code',
