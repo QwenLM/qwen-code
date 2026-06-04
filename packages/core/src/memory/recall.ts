@@ -9,6 +9,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   scanAutoMemoryTopicDocuments,
+  scanUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
 import { memoryAge, memoryFreshnessText } from './memoryAge.js';
@@ -163,8 +164,12 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   options: ResolveRelevantAutoMemoryPromptOptions = {},
 ): Promise<RelevantAutoMemoryPromptResult> {
   const t0 = Date.now();
+  const [projectDocs, userDocs] = await Promise.all([
+    scanAutoMemoryTopicDocuments(projectRoot),
+    scanUserAutoMemoryTopicDocuments(),
+  ]);
   const docs = filterExcludedAutoMemoryDocuments(
-    await scanAutoMemoryTopicDocuments(projectRoot),
+    [...userDocs, ...projectDocs],
     options.excludedFilePaths,
   );
   const limit = options.limit ?? MAX_RELEVANT_DOCS;

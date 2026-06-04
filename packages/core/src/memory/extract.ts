@@ -14,9 +14,15 @@ import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryMetadataPath,
 } from './paths.js';
-import { ensureAutoMemoryScaffold } from './store.js';
+import {
+  ensureAutoMemoryScaffold,
+  ensureUserAutoMemoryScaffold,
+} from './store.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
-import { rebuildManagedAutoMemoryIndex } from './indexer.js';
+import {
+  rebuildManagedAutoMemoryIndex,
+  rebuildUserAutoMemoryIndex,
+} from './indexer.js';
 import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
@@ -134,7 +140,10 @@ export async function runAutoMemoryExtract(params: {
   config?: Config;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
-  await ensureAutoMemoryScaffold(params.projectRoot, now);
+  await Promise.all([
+    ensureAutoMemoryScaffold(params.projectRoot, now),
+    ensureUserAutoMemoryScaffold(),
+  ]);
 
   const transcript = buildTranscriptMessages(params.history);
   const currentCursor = await readExtractCursor(params.projectRoot);
@@ -174,7 +183,20 @@ export async function runAutoMemoryExtract(params: {
       params.sessionId,
       agentResult.touchedTopics,
     );
-    await rebuildManagedAutoMemoryIndex(params.projectRoot);
+    const rebuilds: Array<Promise<unknown>> = [];
+    if (agentResult.touchedProjectScope) {
+      rebuilds.push(rebuildManagedAutoMemoryIndex(params.projectRoot));
+    }
+    if (agentResult.touchedUserScope) {
+      rebuilds.push(rebuildUserAutoMemoryIndex());
+    }
+    // Defensive: if neither flag was set (e.g. an older planner that did not
+    // populate the scope booleans), still refresh the project-level index so
+    // the old behavior is preserved.
+    if (rebuilds.length === 0) {
+      rebuilds.push(rebuildManagedAutoMemoryIndex(params.projectRoot));
+    }
+    await Promise.all(rebuilds);
   }
 
   const cursor: AutoMemoryExtractCursor = {

@@ -157,8 +157,11 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
-import { getAutoMemoryRoot } from '../memory/paths.js';
-import { readAutoMemoryIndex } from '../memory/store.js';
+import { getAutoMemoryRoot, getUserAutoMemoryRoot } from '../memory/paths.js';
+import {
+  readAutoMemoryIndex,
+  readUserAutoMemoryIndex,
+} from '../memory/store.js';
 import { MemoryManager } from '../memory/manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -1878,14 +1881,26 @@ export class Config {
         { explicitOnly: this.getBareMode() },
       );
     if (this.getManagedAutoMemoryEnabled()) {
-      const managedAutoMemoryIndex = await readAutoMemoryIndex(
-        this.getProjectRoot(),
-      );
+      const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
+        readAutoMemoryIndex(this.getProjectRoot()),
+        readUserAutoMemoryIndex(),
+      ]);
+      // Only surface the user-level section when it has actually been
+      // populated. Until the extraction agent writes a user-level memory,
+      // there is nothing to teach the model about — keep the prompt lean.
+      const userSection =
+        userAutoMemoryIndex && userAutoMemoryIndex.trim().length > 0
+          ? {
+              memoryDir: getUserAutoMemoryRoot(),
+              indexContent: userAutoMemoryIndex,
+            }
+          : undefined;
       this.setUserMemory(
         this.memoryManager.appendToUserMemory(
           memoryContent,
           getAutoMemoryRoot(this.getProjectRoot()),
           managedAutoMemoryIndex,
+          userSection,
         ),
       );
     } else {

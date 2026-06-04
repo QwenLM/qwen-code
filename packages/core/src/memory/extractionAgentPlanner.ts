@@ -18,13 +18,20 @@ import {
   TYPES_SECTION_INDIVIDUAL,
   WHAT_NOT_TO_SAVE_SECTION,
 } from './prompt.js';
-import { AUTO_MEMORY_INDEX_FILENAME, getAutoMemoryRoot } from './paths.js';
+import {
+  AUTO_MEMORY_INDEX_FILENAME,
+  getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
+  isAnyAutoMemPath,
+} from './paths.js';
 import type { AutoMemoryType } from './types.js';
-import { scanAutoMemoryTopicDocuments } from './scan.js';
+import {
+  scanAutoMemoryTopicDocuments,
+  scanUserAutoMemoryTopicDocuments,
+} from './scan.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
-import { isAutoMemPath } from './paths.js';
 
 const MAX_TOPIC_SUMMARY_CHARS = 280;
 
@@ -76,7 +83,7 @@ async function evaluateScopedDecision(
     }
     case ToolNames.EDIT:
     case ToolNames.WRITE_FILE:
-      return ctx.filePath && isAutoMemPath(ctx.filePath, projectRoot)
+      return ctx.filePath && isAnyAutoMemPath(ctx.filePath, projectRoot)
         ? 'allow'
         : 'deny';
     default:
@@ -92,9 +99,9 @@ function getScopedDenyRule(
     case ToolNames.SHELL:
       return 'ManagedAutoMemory(run_shell_command: read-only only)';
     case ToolNames.EDIT:
-      return `ManagedAutoMemory(edit: only within ${getAutoMemoryRoot(projectRoot)})`;
+      return `ManagedAutoMemory(edit: only within ${getAutoMemoryRoot(projectRoot)} or ${getUserAutoMemoryRoot()})`;
     case ToolNames.WRITE_FILE:
-      return `ManagedAutoMemory(write_file: only within ${getAutoMemoryRoot(projectRoot)})`;
+      return `ManagedAutoMemory(write_file: only within ${getAutoMemoryRoot(projectRoot)} or ${getUserAutoMemoryRoot()})`;
     default:
       return undefined;
   }
@@ -174,6 +181,10 @@ const EXTRACTION_AGENT_SYSTEM_PROMPT = [
 
 export interface AutoMemoryExtractionExecutionResult {
   touchedTopics: AutoMemoryType[];
+  /** True when at least one file inside the project-level memory root was written/edited. */
+  touchedProjectScope: boolean;
+  /** True when at least one file inside the user-level memory root was written/edited. */
+  touchedUserScope: boolean;
   systemMessage?: string;
 }
 
@@ -217,67 +228,102 @@ function truncate(text: string, maxChars: number): string {
 }
 
 async function buildTopicSummaryBlock(projectRoot: string): Promise<string> {
-  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
-  if (docs.length === 0) {
-    return '';
-  }
-  return docs
-    .map((doc) => {
-      const body = truncate(
-        doc.body === '_No entries yet._' ? '' : doc.body,
-        MAX_TOPIC_SUMMARY_CHARS,
-      );
-      return [
-        `- [${doc.title}](${doc.relativePath}) — ${doc.description || '(no description)'}`,
-        `  topic=${doc.type}`,
-        `  path=${doc.filePath}`,
-        `  current=${body || '(empty)'}`,
-      ].join('\n');
-    })
-    .join('\n\n');
+  const [projectDocs, userDocs] = await Promise.all([
+    scanAutoMemoryTopicDocuments(projectRoot),
+    scanUserAutoMemoryTopicDocuments(),
+  ]);
+
+  const renderDoc = (doc: (typeof projectDocs)[number], scope: string) => {
+    const body = truncate(
+      doc.body === '_No entries yet._' ? '' : doc.body,
+      MAX_TOPIC_SUMMARY_CHARS,
+    );
+    return [
+      `- [${doc.title}](${doc.relativePath}) — ${doc.description || '(no description)'}`,
+      `  scope=${scope}`,
+      `  topic=${doc.type}`,
+      `  path=${doc.filePath}`,
+      `  current=${body || '(empty)'}`,
+    ].join('\n');
+  };
+
+  const blocks = [
+    ...userDocs.map((doc) => renderDoc(doc, 'user')),
+    ...projectDocs.map((doc) => renderDoc(doc, 'project')),
+  ];
+
+  return blocks.join('\n\n');
 }
 
-function buildTaskPrompt(memoryRoot: string, topicSummaries: string): string {
+function buildTaskPrompt(
+  projectMemoryRoot: string,
+  userMemoryRoot: string,
+  topicSummaries: string,
+): string {
   return [
-    `Managed memory directory: \`${memoryRoot}\``,
+    'Managed memory has TWO directories. Choose which one to write each memory into using the per-type `<scope>` guidance in your system instructions:',
+    `- USER memory (cross-project, durable knowledge about who the user is): \`${userMemoryRoot}\``,
+    `- PROJECT memory (this project only): \`${projectMemoryRoot}\``,
     '',
-    'Scan the recent conversation history in your context and update durable managed memory.',
+    'Scan the recent conversation history in your context and update durable managed memory in whichever directory each memory belongs.',
     '',
-    'Available tools in this run: `read_file`, `grep_search`, `glob`, `list_directory`, read-only `run_shell_command`, and `write_file`/`edit` for paths inside the managed memory directory only.',
+    'Available tools in this run: `read_file`, `grep_search`, `glob`, `list_directory`, read-only `run_shell_command`, and `write_file`/`edit` for paths inside EITHER managed memory directory above.',
     '- Do not use any other tools.',
     '- You have a limited turn budget. `edit` requires a prior `read_file` of the same file, so the efficient strategy is: first issue all reads in parallel for every file you might update; then issue all `write_file`/`edit` calls in parallel. Do not interleave reads and writes across multiple turns.',
     '- You MUST only use content from the recent conversation history in your context plus the current managed memory files.',
     '- Do not inspect repository code, git history, or unrelated files.',
-    '- Prefer updating an existing memory file over creating a duplicate.',
-    '- Keep one durable memory per file under `user/`, `feedback/`, `project/`, or `reference/`.',
+    '- Prefer updating an existing memory file over creating a duplicate. Check both directories for an existing entry before creating a new one.',
+    '- Keep one durable memory per file under `user/`, `feedback/`, `project/`, or `reference/` inside the chosen directory.',
     '',
     '## How to save memories',
     '',
-    '**Step 1** — write or update the memory file itself using the required frontmatter format.',
-    `**Step 2** — update \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\`. It is an index, not a memory: each entry must be one line in the form \`- [Title](relative/path.md) — one-line hook\`. Never write memory content directly into the index.`,
-    '- If you create or delete a memory file, also update the managed memory index.',
+    '**Step 1** — write or update the memory file itself, in the directory chosen by the type `<scope>`, using the required frontmatter format.',
+    `**Step 2** — update the \`${AUTO_MEMORY_INDEX_FILENAME}\` in the SAME directory where you wrote the file (\`${userMemoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` for USER memory, \`${projectMemoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` for PROJECT memory). The index is one line per entry: \`- [Title](relative/path.md) — one-line hook\`. Never write memory content directly into the index.`,
+    '- If you create or delete a memory file, also update the managed memory index in the SAME directory.',
     '- If nothing durable should be saved, make no file changes.',
     '',
-    '## Existing memory files',
+    '## Existing memory files (across both directories)',
     '',
     topicSummaries || '(none yet)',
   ].join('\n');
 }
 
 /**
- * Derive which memory topics were touched from the list of file paths written
- * during the agent run. Avoids requiring JSON output from the agent.
+ * Derive which memory topics + scopes were touched from the list of file
+ * paths written during the agent run. Avoids requiring JSON output from
+ * the agent.
  */
 function touchedTopicsFromFilePaths(
   filePaths: string[],
   projectRoot: string,
-): AutoMemoryType[] {
-  const memoryRoot = getAutoMemoryRoot(projectRoot);
+): {
+  topics: AutoMemoryType[];
+  touchedProjectScope: boolean;
+  touchedUserScope: boolean;
+} {
+  const projectRootDir = getAutoMemoryRoot(projectRoot);
+  const userRootDir = getUserAutoMemoryRoot();
   const topicSet = new Set<AutoMemoryType>();
+  let touchedProjectScope = false;
+  let touchedUserScope = false;
+
   for (const p of filePaths) {
-    if (!p.startsWith(memoryRoot)) continue;
-    const rel = p.slice(memoryRoot.length).replace(/^\//, '');
-    const segment = rel.split('/')[0] as AutoMemoryType;
+    // Use startsWith against the directly-retrieved roots (rather than the
+    // isAutoMemPath helper, which calls into paths.ts internals and would
+    // bypass module-level mocks in extractionAgentPlanner.test.ts). This
+    // also keeps the routing decision symmetric across both scopes.
+    let root: string | undefined;
+    if (p.startsWith(projectRootDir)) {
+      root = projectRootDir;
+      touchedProjectScope = true;
+    } else if (p.startsWith(userRootDir)) {
+      root = userRootDir;
+      touchedUserScope = true;
+    } else {
+      continue;
+    }
+    const rel = p.slice(root.length).replace(/^[/\\]/, '');
+    const segment = rel.split(/[/\\]/)[0] as AutoMemoryType;
     if (
       segment === 'user' ||
       segment === 'feedback' ||
@@ -287,7 +333,11 @@ function touchedTopicsFromFilePaths(
       topicSet.add(segment);
     }
   }
-  return [...topicSet];
+  return {
+    topics: [...topicSet],
+    touchedProjectScope,
+    touchedUserScope,
+  };
 }
 
 export async function runAutoMemoryExtractionByAgent(
@@ -304,13 +354,18 @@ export async function runAutoMemoryExtractionByAgent(
   const extraHistory = buildAgentHistory(cacheSafe.history);
 
   const topicSummaries = await buildTopicSummaryBlock(projectRoot);
-  const memoryRoot = getAutoMemoryRoot(projectRoot);
+  const projectMemoryRoot = getAutoMemoryRoot(projectRoot);
+  const userMemoryRoot = getUserAutoMemoryRoot();
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot);
 
   const result = await runForkedAgent({
     name: 'managed-auto-memory-extractor',
     config: scopedConfig,
-    taskPrompt: buildTaskPrompt(memoryRoot, topicSummaries),
+    taskPrompt: buildTaskPrompt(
+      projectMemoryRoot,
+      userMemoryRoot,
+      topicSummaries,
+    ),
     systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
     maxTurns: 5,
     maxTimeMinutes: 2,
@@ -333,16 +388,16 @@ export async function runAutoMemoryExtractionByAgent(
     );
   }
 
-  const touchedTopics = touchedTopicsFromFilePaths(
-    result.filesTouched,
-    projectRoot,
-  );
+  const { topics, touchedProjectScope, touchedUserScope } =
+    touchedTopicsFromFilePaths(result.filesTouched, projectRoot);
 
   return {
-    touchedTopics,
+    touchedTopics: topics,
+    touchedProjectScope,
+    touchedUserScope,
     systemMessage:
-      touchedTopics.length > 0
-        ? `Managed auto-memory updated: ${touchedTopics.map((t) => `${t}.md`).join(', ')}`
+      topics.length > 0
+        ? `Managed auto-memory updated: ${topics.map((t) => `${t}.md`).join(', ')}`
         : undefined,
   };
 }

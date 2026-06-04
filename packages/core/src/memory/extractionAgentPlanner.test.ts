@@ -23,6 +23,7 @@ vi.mock('./paths.js', async (importOriginal) => {
   return {
     ...actual,
     getAutoMemoryRoot: vi.fn().mockReturnValue('/tmp/auto-memory'),
+    getUserAutoMemoryRoot: vi.fn().mockReturnValue('/tmp/user-memory'),
   };
 });
 
@@ -74,6 +75,8 @@ describe('runAutoMemoryExtractionByAgent', () => {
 
     expect(result).toEqual({
       touchedTopics: ['user'],
+      touchedProjectScope: true,
+      touchedUserScope: false,
       systemMessage: 'Managed auto-memory updated: user.md',
     });
     expect(runForkedAgent).toHaveBeenCalledWith(
@@ -101,7 +104,12 @@ describe('runAutoMemoryExtractionByAgent', () => {
     });
 
     const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-    expect(result).toEqual({ touchedTopics: [] });
+    expect(result).toEqual({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      systemMessage: undefined,
+    });
   });
 
   it('throws when getCacheSafeParams returns null', async () => {
@@ -139,5 +147,43 @@ describe('runAutoMemoryExtractionByAgent', () => {
       expect.arrayContaining(['project', 'reference']),
     );
     expect(result.touchedTopics).not.toContain('user');
+    expect(result.touchedProjectScope).toBe(true);
+    expect(result.touchedUserScope).toBe(false);
+  });
+
+  it('attributes user-rooted writes to the user scope (not project)', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [
+        '/tmp/user-memory/user/role.md',
+        '/tmp/user-memory/feedback/terse.md',
+      ],
+    });
+
+    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    expect(result.touchedTopics).toEqual(
+      expect.arrayContaining(['user', 'feedback']),
+    );
+    expect(result.touchedUserScope).toBe(true);
+    expect(result.touchedProjectScope).toBe(false);
+  });
+
+  it('reports both scopes when the agent writes to both roots in one run', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [
+        '/tmp/user-memory/user/role.md',
+        '/tmp/auto-memory/project/release.md',
+      ],
+    });
+
+    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    expect(result.touchedTopics).toEqual(
+      expect.arrayContaining(['user', 'project']),
+    );
+    expect(result.touchedProjectScope).toBe(true);
+    expect(result.touchedUserScope).toBe(true);
   });
 });

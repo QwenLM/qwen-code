@@ -69,6 +69,8 @@ describe('auto-memory extraction', () => {
   it('updates cursor and avoids duplicate writes for repeated extraction', async () => {
     vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
       touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
       systemMessage: undefined,
     });
 
