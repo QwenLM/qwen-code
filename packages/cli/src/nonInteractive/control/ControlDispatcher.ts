@@ -31,7 +31,6 @@ import type { IPendingRequestRegistry } from './controllers/baseController.js';
 import { SystemController } from './controllers/systemController.js';
 import { PermissionController } from './controllers/permissionController.js';
 import { SdkMcpController } from './controllers/sdkMcpController.js';
-// import { HookController } from './controllers/hookController.js';
 import type {
   CLIControlRequest,
   CLIControlResponse,
@@ -72,7 +71,6 @@ export class ControlDispatcher implements IPendingRequestRegistry {
   readonly systemController: SystemController;
   readonly permissionController: PermissionController;
   readonly sdkMcpController: SdkMcpController;
-  // readonly hookController: HookController;
 
   // Central pending request registries
   private pendingIncomingRequests: Map<string, PendingIncomingRequest> =
@@ -101,7 +99,6 @@ export class ControlDispatcher implements IPendingRequestRegistry {
       this,
       'SdkMcpController',
     );
-    // this.hookController = new HookController(context, this, 'HookController');
 
     // Listen for main abort signal
     this.abortHandler = () => {
