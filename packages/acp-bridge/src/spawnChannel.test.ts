@@ -30,8 +30,13 @@
  * Each branch listed below is now regression-guarded by an assertion.
  */
 
+import * as os from 'node:os';
 import { describe, expect, it, vi } from 'vitest';
-import { createStderrForwarder, scrubChildEnv } from './spawnChannel.js';
+import {
+  createStderrForwarder,
+  getAcpMemoryArgs,
+  scrubChildEnv,
+} from './spawnChannel.js';
 
 describe('createStderrForwarder', () => {
   it('calls onDiagnosticLine for each complete line', () => {
@@ -239,5 +244,29 @@ describe('scrubChildEnv (defaultSpawnChannelFactory env policy)', () => {
     expect(result).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
     expect(result).not.toHaveProperty('OPENAI_API_KEY');
     expect(result['PATH']).toBe('/usr/bin');
+  });
+});
+
+describe('getAcpMemoryArgs', () => {
+  it('returns --max-old-space-size on machines with > 4GB RAM', () => {
+    const args = getAcpMemoryArgs();
+    const totalGB = os.totalmem() / (1024 * 1024 * 1024);
+    if (totalGB > 4) {
+      expect(args).toHaveLength(1);
+      expect(args[0]).toMatch(/^--max-old-space-size=\d+$/);
+      const sizeMB = Number(args[0]!.split('=')[1]);
+      expect(sizeMB).toBeGreaterThan(2048);
+      expect(sizeMB).toBeLessThanOrEqual(16_384);
+    } else {
+      expect(args).toEqual([]);
+    }
+  });
+
+  it('respects the 16GB cap', () => {
+    const args = getAcpMemoryArgs();
+    if (args.length > 0) {
+      const sizeMB = Number(args[0]!.split('=')[1]);
+      expect(sizeMB).toBeLessThanOrEqual(16_384);
+    }
   });
 });

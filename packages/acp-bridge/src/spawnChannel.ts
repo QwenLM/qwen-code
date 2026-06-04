@@ -11,7 +11,7 @@ import { ndJsonStream } from '@agentclientprotocol/sdk';
 import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
 import { MissingCliEntryError } from './status.js';
 
-function getAcpMemoryArgs(): string[] {
+export function getAcpMemoryArgs(): string[] {
   const constrainedMemory = (process as { constrainedMemory?: () => number })
     .constrainedMemory;
   const constrained =

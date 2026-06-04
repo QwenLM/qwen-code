@@ -8501,3 +8501,67 @@ describe('extractErrorCode', () => {
     expect(extractErrorCode({ code: true })).toBeUndefined();
   });
 });
+
+describe('channelIdleTimeoutMs', () => {
+  it('kills the channel immediately when timeout is 0 (default)', async () => {
+    const factory: ChannelFactory = async () => makeChannel().channel;
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    expect(bridge.sessionCount).toBe(1);
+    await bridge.closeSession(session.sessionId);
+    expect(bridge.sessionCount).toBe(0);
+    await bridge.shutdown();
+  });
+
+  it('reuses warm channel during idle window when timeout > 0', async () => {
+    const factory: ChannelFactory = async () => makeChannel().channel;
+    const bridge = makeBridge({
+      channelFactory: factory,
+      channelIdleTimeoutMs: 60_000,
+    });
+    const session = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+
+    await bridge.closeSession(session.sessionId);
+
+    // Channel should still be usable during idle window
+    const session2 = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    expect(bridge.sessionCount).toBe(1);
+
+    await bridge.closeSession(session2.sessionId);
+    await bridge.shutdown();
+  });
+});
+
+describe('preheat', () => {
+  it('spawns channel that is reused by first session', async () => {
+    const factory: ChannelFactory = async () => makeChannel().channel;
+    const bridge = makeBridge({ channelFactory: factory });
+    await bridge.preheat();
+
+    const session = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    expect(session.sessionId).toBeDefined();
+    expect(bridge.sessionCount).toBe(1);
+
+    await bridge.closeSession(session.sessionId);
+    await bridge.shutdown();
+  });
+
+  it('is a no-op after shutdown', async () => {
+    const factory: ChannelFactory = async () => makeChannel().channel;
+    const bridge = makeBridge({ channelFactory: factory });
+    await bridge.shutdown();
+    await bridge.preheat();
+  });
+});

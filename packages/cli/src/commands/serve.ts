@@ -174,10 +174,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('channel-idle-timeout-ms', {
         type: 'number',
-        default: 0,
         description:
           'Milliseconds to keep ACP child alive after last session closes. ' +
-          '0 = immediate kill (default).',
+          '0 or unset = immediate kill (default).',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
     if (!argv['http-bridge']) {
