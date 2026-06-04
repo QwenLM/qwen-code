@@ -623,9 +623,33 @@ describe('EventBus + CompactionEngine integration', () => {
     const engine = new TurnBoundaryCompactionEngine();
     const bus = new EventBus(100, undefined, engine);
 
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'hello' } } } });
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Hi' } } } });
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' there' } } } });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Hi' },
+        },
+      },
+    });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: ' there' },
+        },
+      },
+    });
     bus.publish({ type: 'turn_complete', data: { stopReason: 'end_turn' } });
 
     const snapshot = bus.snapshotReplay();
@@ -650,8 +674,24 @@ describe('EventBus + CompactionEngine integration', () => {
     const engine = new TurnBoundaryCompactionEngine();
     const bus = new EventBus(100, undefined, engine);
 
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'streaming' } } } });
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '...' } } } });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'streaming' },
+        },
+      },
+    });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '...' },
+        },
+      },
+    });
 
     const snapshot = bus.snapshotReplay()!;
     expect(snapshot.compactedTurns).toHaveLength(0);
@@ -663,7 +703,15 @@ describe('EventBus + CompactionEngine integration', () => {
     const engine = new TurnBoundaryCompactionEngine();
     const bus = new EventBus(100, undefined, engine);
 
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'test' } } } });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'test' },
+        },
+      },
+    });
     bus.close();
 
     const snapshot = engine.snapshot();
@@ -695,13 +743,19 @@ describe('parentToolCallId-aware text merging', () => {
 
     const snap = engine.snapshot();
     const textEvents = snap.compactedTurns.filter(
-      (e) => e.type === 'session_update' && getUpdate(e).sessionUpdate === 'agent_message_chunk',
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
     );
     expect(textEvents).toHaveLength(2);
     expect(getUpdate(textEvents[0]!).content.text).toBe('Agent A says hello');
     expect(getUpdate(textEvents[1]!).content.text).toBe('Agent B says world');
-    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe('task-A');
-    expect(getUpdate(textEvents[1]!)._meta?.['parentToolCallId']).toBe('task-B');
+    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+    expect(getUpdate(textEvents[1]!)._meta?.['parentToolCallId']).toBe(
+      'task-B',
+    );
   });
 
   it('merges interleaved thought chunks with the same parentToolCallId', () => {
@@ -714,13 +768,19 @@ describe('parentToolCallId-aware text merging', () => {
 
     const snap = engine.snapshot();
     const thoughtEvents = snap.compactedTurns.filter(
-      (e) => e.type === 'session_update' && getUpdate(e).sessionUpdate === 'agent_thought_chunk',
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_thought_chunk',
     );
     expect(thoughtEvents).toHaveLength(2);
     expect(getUpdate(thoughtEvents[0]!).content.text).toBe('A thinks more');
     expect(getUpdate(thoughtEvents[1]!).content.text).toBe('B thinks more');
-    expect(getUpdate(thoughtEvents[0]!)._meta?.['parentToolCallId']).toBe('task-A');
-    expect(getUpdate(thoughtEvents[1]!)._meta?.['parentToolCallId']).toBe('task-B');
+    expect(getUpdate(thoughtEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+    expect(getUpdate(thoughtEvents[1]!)._meta?.['parentToolCallId']).toBe(
+      'task-B',
+    );
   });
 
   it('does not merge top-level text with subagent text', () => {
@@ -732,14 +792,18 @@ describe('parentToolCallId-aware text merging', () => {
 
     const snap = engine.snapshot();
     const textEvents = snap.compactedTurns.filter(
-      (e) => e.type === 'session_update' && getUpdate(e).sessionUpdate === 'agent_message_chunk',
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
     );
     expect(textEvents).toHaveLength(3);
     expect(getUpdate(textEvents[0]!).content.text).toBe('Top-level ');
     expect(getUpdate(textEvents[1]!).content.text).toBe('subagent ');
     expect(getUpdate(textEvents[2]!).content.text).toBe('more top');
     expect(getUpdate(textEvents[0]!)._meta).toBeUndefined();
-    expect(getUpdate(textEvents[1]!)._meta?.['parentToolCallId']).toBe('task-A');
+    expect(getUpdate(textEvents[1]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
     expect(getUpdate(textEvents[2]!)._meta).toBeUndefined();
   });
 
@@ -752,11 +816,17 @@ describe('parentToolCallId-aware text merging', () => {
     engine.ingest(makeTurnComplete(5));
 
     const snap = engine.snapshot();
-    const sessionUpdates = snap.compactedTurns.filter((e) => e.type === 'session_update');
+    const sessionUpdates = snap.compactedTurns.filter(
+      (e) => e.type === 'session_update',
+    );
     expect(sessionUpdates).toHaveLength(2);
 
-    const thought = sessionUpdates.find((e) => getUpdate(e).sessionUpdate === 'agent_thought_chunk')!;
-    const text = sessionUpdates.find((e) => getUpdate(e).sessionUpdate === 'agent_message_chunk')!;
+    const thought = sessionUpdates.find(
+      (e) => getUpdate(e).sessionUpdate === 'agent_thought_chunk',
+    )!;
+    const text = sessionUpdates.find(
+      (e) => getUpdate(e).sessionUpdate === 'agent_message_chunk',
+    )!;
     expect(getUpdate(thought).content.text).toBe('thinking... deeply');
     expect(getUpdate(text).content.text).toBe('Answer: yes');
     expect(getUpdate(thought)._meta?.['parentToolCallId']).toBe('task-A');
@@ -787,15 +857,21 @@ describe('parentToolCallId-aware text merging', () => {
 
     const snap = engine.snapshot();
     const textEvents = snap.compactedTurns.filter(
-      (e) => e.type === 'session_update' && getUpdate(e).sessionUpdate === 'agent_message_chunk',
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
     );
     expect(textEvents).toHaveLength(4);
     expect(getUpdate(textEvents[0]!).content.text).toBe('Before');
     expect(getUpdate(textEvents[1]!).content.text).toBe('sub-A part1');
     expect(getUpdate(textEvents[2]!).content.text).toBe('sub-A part2');
     expect(getUpdate(textEvents[3]!).content.text).toBe('After');
-    expect(getUpdate(textEvents[1]!)._meta?.['parentToolCallId']).toBe('task-A');
-    expect(getUpdate(textEvents[2]!)._meta?.['parentToolCallId']).toBe('task-A');
+    expect(getUpdate(textEvents[1]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+    expect(getUpdate(textEvents[2]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
   });
 
   it('non-parent tool call does not evict subagent text slots', () => {
@@ -808,11 +884,15 @@ describe('parentToolCallId-aware text merging', () => {
 
     const snap = engine.snapshot();
     const textEvents = snap.compactedTurns.filter(
-      (e) => e.type === 'session_update' && getUpdate(e).sessionUpdate === 'agent_message_chunk',
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
     );
     expect(textEvents).toHaveLength(1);
     expect(getUpdate(textEvents[0]!).content.text).toBe('sub-A more');
-    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe('task-A');
+    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
   });
 
   it('[subA, main, main, subA] produces two merged events', () => {
@@ -825,12 +905,16 @@ describe('parentToolCallId-aware text merging', () => {
 
     const snap = engine.snapshot();
     const textEvents = snap.compactedTurns.filter(
-      (e) => e.type === 'session_update' && getUpdate(e).sessionUpdate === 'agent_message_chunk',
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
     );
     expect(textEvents).toHaveLength(2);
     expect(getUpdate(textEvents[0]!).content.text).toBe('A-start A-end');
     expect(getUpdate(textEvents[1]!).content.text).toBe('main-1 main-2');
-    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe('task-A');
+    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
     expect(getUpdate(textEvents[1]!)._meta).toBeUndefined();
   });
 
@@ -850,22 +934,24 @@ describe('parentToolCallId-aware text merging', () => {
 
     const snap = engine.snapshot();
     const thoughtEvents = snap.compactedTurns.filter(
-      (e) => e.type === 'session_update' && getUpdate(e).sessionUpdate === 'agent_thought_chunk',
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_thought_chunk',
     );
     expect(thoughtEvents).toHaveLength(9);
     for (let i = 0; i < 9; i++) {
       const taskId = `task-${i}`;
       const update = getUpdate(thoughtEvents[i]!);
-      expect(update.content.text).toBe(`[${taskId}:0][${taskId}:1][${taskId}:2]`);
+      expect(update.content.text).toBe(
+        `[${taskId}:0][${taskId}:1][${taskId}:2]`,
+      );
       expect(update._meta?.['parentToolCallId']).toBe(taskId);
     }
   });
 
-  it('defensive backfill: parentToolCallId in output even if last chunk _meta lost it', () => {
+  it('chunk without parentToolCallId separates from subagent chunk into top-level path', () => {
     const engine = new TurnBoundaryCompactionEngine();
-    // First chunk has parentToolCallId in _meta
     engine.ingest(makeTextChunkWithParent(1, 'hello ', 'task-A'));
-    // Second chunk has _meta with usage but WITHOUT parentToolCallId
     engine.ingest({
       id: 2,
       v: 1,
@@ -882,13 +968,17 @@ describe('parentToolCallId-aware text merging', () => {
 
     const snap = engine.snapshot();
     const textEvents = snap.compactedTurns.filter(
-      (e) => e.type === 'session_update' && getUpdate(e).sessionUpdate === 'agent_message_chunk',
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
     );
     // The chunk without parentToolCallId goes to the top-level path,
     // so we get two separate events
     expect(textEvents).toHaveLength(2);
     expect(getUpdate(textEvents[0]!).content.text).toBe('hello ');
-    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe('task-A');
+    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
     expect(getUpdate(textEvents[1]!).content.text).toBe('world');
   });
 });
