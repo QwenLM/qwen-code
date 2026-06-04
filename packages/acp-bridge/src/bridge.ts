@@ -872,7 +872,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         writeStderrLine(
           `qwen serve: idle timeout (${timeoutMs}ms) expired, killing channel`,
         );
-        void killChannelWithLog(ci, context ?? 'idle timeout');
+        void killChannelWithLog(ci, 'idle timeout');
       }
     }, timeoutMs);
     idleTimer.unref();
