@@ -393,10 +393,6 @@ export function DaemonSessionProvider({
             pendingLoad?.sessionId === activeSession.sessionId
               ? pendingLoad
               : undefined;
-          if (pendingLoad?.sessionId === activeSession.sessionId) {
-            pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoad.timeout);
-          }
 
           // Feed replay snapshot (compacted history + live journal) into
           // the store before starting the SSE loop. The SSE stream begins
@@ -433,7 +429,11 @@ export function DaemonSessionProvider({
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
-          pendingLoadToResolve?.resolve();
+          if (pendingLoadToResolve) {
+            pendingSessionLoadRef.current = undefined;
+            clearTimeout(pendingLoadToResolve.timeout);
+            pendingLoadToResolve.resolve();
+          }
 
           let sawEvent = false;
           let resyncRequested = false;

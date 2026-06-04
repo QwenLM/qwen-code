@@ -5831,6 +5831,49 @@ describe('parallel subAgent text interleaving fix', () => {
     expect(after[1]!.streaming).toBe(false);
   });
 
+  it('T3b: finishAssistant sets streaming=false on keyed thought blocks', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [
+        {
+          type: 'thought.text.delta',
+          text: 'A thinking',
+          parentToolCallId: 'task-A',
+        },
+        {
+          type: 'thought.text.delta',
+          text: 'B thinking',
+          parentToolCallId: 'task-B',
+        },
+      ],
+      { now: 2 },
+    );
+
+    const before = state.blocks.filter((b) => b.kind === 'thought') as Array<{
+      streaming?: boolean;
+    }>;
+    expect(before[0]!.streaming).toBeUndefined();
+    expect(before[1]!.streaming).toBeUndefined();
+
+    state = reduceDaemonTranscriptEvents(
+      state,
+      [{ type: 'assistant.done', reason: 'stop' }],
+      { now: 3 },
+    );
+
+    const after = state.blocks.filter((b) => b.kind === 'thought') as Array<{
+      streaming?: boolean;
+      updatedAt?: number;
+    }>;
+    expect(after[0]!.streaming).toBe(false);
+    expect(after[1]!.streaming).toBe(false);
+    expect(after[0]!.updatedAt).toBe(3);
+    expect(after[1]!.updatedAt).toBe(3);
+    expect(state.activeThoughtBlockByParent).toEqual({});
+  });
+
   it('T4: regression — text without parentToolCallId uses scalar path', () => {
     let state = createDaemonTranscriptState({ now: 1 });
 
