@@ -41,6 +41,11 @@ const CMD_TYPES = {
   YANK_WORD_FORWARD: 'yw',
   YANK_WORD_BACKWARD: 'yb',
   YANK_WORD_END: 'ye',
+  REPLACE_CHAR: 'r',
+  TOGGLE_CASE: '~',
+  JOIN_LINES: 'J',
+  INDENT_LINE: '>>',
+  OUTDENT_LINE: '<<',
   CHANGE_MOVEMENT: {
     LEFT: 'ch',
     DOWN: 'cj',
@@ -71,7 +76,7 @@ type VimState = {
   mode: VimMode;
   count: number;
   pendingOperator: PendingOperator;
-  lastCommand: { type: string; count: number } | null;
+  lastCommand: { type: string; count: number; char?: string } | null;
   pendingCharRead: PendingCharRead;
   lastFind: FindInfo;
   yankRegister: string;
@@ -86,7 +91,7 @@ type VimAction =
   | { type: 'SET_PENDING_OPERATOR'; operator: PendingOperator }
   | {
       type: 'SET_LAST_COMMAND';
-      command: { type: string; count: number } | null;
+      command: { type: string; count: number; char?: string } | null;
     }
   | { type: 'CLEAR_PENDING_STATES' }
   | { type: 'ESCAPE_TO_NORMAL' }
@@ -489,12 +494,98 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           // Yank movement doesn't modify buffer, just returns true
           break;
         }
+        case CMD_TYPES.REPLACE_CHAR: {
+          const replaceChar = state.lastCommand?.char;
+          if (replaceChar != null) {
+            const [row, col] = bufferRef.current.cursor;
+            const line = bufferRef.current.lines[row] ?? '';
+            if (col + count <= line.length && col < line.length) {
+              buffer.replaceRange(
+                row,
+                col,
+                row,
+                col + count,
+                replaceChar.repeat(count),
+              );
+            }
+          }
+          break;
+        }
+        case CMD_TYPES.TOGGLE_CASE: {
+          const [startRow, startCol] = buffer.cursor;
+          const line = buffer.lines[startRow] ?? '';
+          const toggleCount = Math.min(count, line.length - startCol);
+          if (toggleCount > 0) {
+            const toggled = [...line.slice(startCol, startCol + toggleCount)]
+              .map((ch) =>
+                ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase(),
+              )
+              .join('');
+            buffer.replaceRange(
+              startRow,
+              startCol,
+              startRow,
+              startCol + toggleCount,
+              toggled,
+            );
+          }
+          break;
+        }
+        case CMD_TYPES.JOIN_LINES: {
+          const [row] = buffer.cursor;
+          const lines = buffer.lines;
+          const endRow = Math.min(
+            row + Math.max(count - 1, 1),
+            lines.length - 1,
+          );
+          if (row < endRow) {
+            let joined = lines[row] ?? '';
+            for (let r = row + 1; r <= endRow; r++) {
+              joined += ' ' + (lines[r] ?? '').trimStart();
+            }
+            buffer.replaceRange(
+              row,
+              0,
+              endRow,
+              (lines[endRow] ?? '').length,
+              joined,
+            );
+          }
+          break;
+        }
+        case CMD_TYPES.INDENT_LINE: {
+          const [startRow] = buffer.cursor;
+          const endRow = Math.min(
+            startRow + count - 1,
+            buffer.lines.length - 1,
+          );
+          for (let r = startRow; r <= endRow; r++) {
+            buffer.replaceRange(r, 0, r, 0, '  ');
+          }
+          break;
+        }
+        case CMD_TYPES.OUTDENT_LINE: {
+          const [startRow] = buffer.cursor;
+          const endRow = Math.min(
+            startRow + count - 1,
+            buffer.lines.length - 1,
+          );
+          for (let r = startRow; r <= endRow; r++) {
+            const line = buffer.lines[r] ?? '';
+            if (line.startsWith('  ')) {
+              buffer.replaceRange(r, 0, r, 2, '');
+            } else if (line.startsWith(' ')) {
+              buffer.replaceRange(r, 0, r, 1, '');
+            }
+          }
+          break;
+        }
         default:
           return false;
       }
       return true;
     },
-    [buffer, updateMode, yankRange],
+    [buffer, updateMode, yankRange, state.lastCommand?.char],
   );
 
   // ── Word boundary helpers (for yank) ──
@@ -652,6 +743,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           if (col < line.length) {
             buffer.replaceRange(row, col, row, col + count, char.repeat(count));
           }
+          dispatch({
+            type: 'SET_LAST_COMMAND',
+            command: { type: CMD_TYPES.REPLACE_CHAR, count, char },
+          });
           dispatch({ type: 'CLEAR_COUNT' });
           dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
           return true;
@@ -1302,6 +1397,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                 toggled,
               );
             }
+            dispatch({
+              type: 'SET_LAST_COMMAND',
+              command: { type: CMD_TYPES.TOGGLE_CASE, count },
+            });
             dispatch({ type: 'CLEAR_COUNT' });
             dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
@@ -1501,6 +1600,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                 joined,
               );
             }
+            dispatch({
+              type: 'SET_LAST_COMMAND',
+              command: { type: CMD_TYPES.JOIN_LINES, count: repeatCount },
+            });
             dispatch({ type: 'CLEAR_COUNT' });
             dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
@@ -1516,6 +1619,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               for (let r = startRow; r <= endRow; r++) {
                 buffer.replaceRange(r, 0, r, 0, '  ');
               }
+              dispatch({
+                type: 'SET_LAST_COMMAND',
+                command: { type: CMD_TYPES.INDENT_LINE, count: repeatCount },
+              });
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
               dispatch({ type: 'CLEAR_COUNT' });
             } else {
@@ -1540,6 +1647,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                   buffer.replaceRange(r, 0, r, 1, '');
                 }
               }
+              dispatch({
+                type: 'SET_LAST_COMMAND',
+                command: { type: CMD_TYPES.OUTDENT_LINE, count: repeatCount },
+              });
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
               dispatch({ type: 'CLEAR_COUNT' });
             } else {
