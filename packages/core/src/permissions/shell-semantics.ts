@@ -1508,7 +1508,12 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 
   perl: (args, cwd) => {
     const hasInPlace = args.some(
-      (a) => a === '-i' || a.startsWith('-i') || hasCombinedShortFlag(a, 'i'),
+      (a) =>
+        a === '-i' ||
+        a.startsWith('-i') ||
+        a === '--in-place' ||
+        a.startsWith('--in-place=') ||
+        hasCombinedShortFlag(a, 'i'),
     );
     const hasExplicitScript = args.some(
       (a) =>
@@ -1533,7 +1538,12 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     // sed [-i] SCRIPT file... or sed -e SCRIPT file...
     // With -i: in-place edit (virtualTool = 'edit'); otherwise read (virtualTool = 'read_file')
     const hasInPlace = args.some(
-      (a) => a === '-i' || a.startsWith('-i') || hasCombinedShortFlag(a, 'i'),
+      (a) =>
+        a === '-i' ||
+        a.startsWith('-i') ||
+        a === '--in-place' ||
+        a.startsWith('--in-place=') ||
+        hasCombinedShortFlag(a, 'i'),
     );
     const hasExplicitScript = args.some(
       (a) =>
@@ -1613,7 +1623,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 
   // ── WebFetch commands ─────────────────────────────────────────────────────
 
-  curl: (args) => {
+  curl: (args, cwd) => {
     const flagsWithValue = new Set([
       '-o',
       '-O',
@@ -1674,18 +1684,22 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--cert-type',
       '--key-type',
     ]);
-    return getPositionalArgs(args, flagsWithValue)
-      .filter(
-        (p) =>
-          p.includes('://') || /^https?:\/\//.test(p) || /^ftp:\/\//.test(p),
-      )
-      .flatMap((url) => {
-        const op = webOp(url);
-        return op ? [op] : [];
-      });
+    const output = writeOpForFlag(args, cwd, '-o', '--output');
+    return [
+      ...(output ? [output] : []),
+      ...getPositionalArgs(args, flagsWithValue)
+        .filter(
+          (p) =>
+            p.includes('://') || /^https?:\/\//.test(p) || /^ftp:\/\//.test(p),
+        )
+        .flatMap((url) => {
+          const op = webOp(url);
+          return op ? [op] : [];
+        }),
+    ];
   },
 
-  wget: (args) => {
+  wget: (args, cwd) => {
     const flagsWithValue = new Set([
       '-O',
       '--output-document',
@@ -1737,12 +1751,16 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--certificate',
       '--private-key',
     ]);
-    return getPositionalArgs(args, flagsWithValue)
-      .filter((p) => p.includes('://') || /^https?:\/\//.test(p))
-      .flatMap((url) => {
-        const op = webOp(url);
-        return op ? [op] : [];
-      });
+    const output = writeOpForFlag(args, cwd, '-O', '--output-document');
+    return [
+      ...(output ? [output] : []),
+      ...getPositionalArgs(args, flagsWithValue)
+        .filter((p) => p.includes('://') || /^https?:\/\//.test(p))
+        .flatMap((url) => {
+          const op = webOp(url);
+          return op ? [op] : [];
+        }),
+    ];
   },
 
   fetch: (args) => {

@@ -442,13 +442,14 @@ describe('extractShellOperations', () => {
     ]);
   });
 
-  it('curl: -o flag value not treated as URL', () => {
+  it('curl: -o flag value emits write op and is not treated as URL', () => {
     const ops = extractShellOperations(
       'curl -o /tmp/out.json https://api.example.com',
       CWD,
     );
-    expect(ops).toEqual([
+    expect(sorted(ops)).toEqual([
       { virtualTool: 'web_fetch', domain: 'api.example.com' },
+      { virtualTool: 'write_file', filePath: '/tmp/out.json' },
     ]);
   });
 
@@ -460,12 +461,15 @@ describe('extractShellOperations', () => {
     expect(ops).toEqual([{ virtualTool: 'web_fetch', domain: 'example.com' }]);
   });
 
-  it('wget: -O flag value not treated as URL', () => {
+  it('wget: -O flag value emits write op and is not treated as URL', () => {
     const ops = extractShellOperations(
       'wget -O /tmp/file.gz https://example.com/f.gz',
       CWD,
     );
-    expect(ops).toEqual([{ virtualTool: 'web_fetch', domain: 'example.com' }]);
+    expect(sorted(ops)).toEqual([
+      { virtualTool: 'web_fetch', domain: 'example.com' },
+      { virtualTool: 'write_file', filePath: '/tmp/file.gz' },
+    ]);
   });
 
   // ── sudo / prefix commands ─────────────────────────────────────────────────

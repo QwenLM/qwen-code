@@ -750,6 +750,18 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ).toBe(true);
   });
 
+  it('does not force review for awk field references', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: "awk '{print $1}' data.csv",
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(false);
+  });
+
   it('returns true for sort writing protected paths via output flags', () => {
     for (const command of [
       'sort -o .qwen/settings.json /dev/null',
@@ -834,6 +846,59 @@ describe('shouldForceAutoModeReviewForAllow', () => {
         }),
       ),
     ).toBe(true);
+  });
+
+  it('returns true for downloader output flags targeting protected paths', () => {
+    for (const command of [
+      'curl -o .qwen/settings.json https://example.com/payload',
+      'wget -O .qwen/settings.json https://example.com/payload',
+    ]) {
+      expect(
+        shouldForceAutoModeReviewForAllow(
+          ctx({
+            toolName: ToolNames.SHELL,
+            command,
+            cwd: '/repo',
+          }),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('returns true for long in-place sed/perl writes to protected paths', () => {
+    for (const command of [
+      "sed --in-place 's/x/y/' .qwen/settings.json",
+      "sed --in-place=.bak 's/x/y/' .qwen/settings.json",
+      "perl --in-place -e 's/x/y/' .qwen/settings.json",
+    ]) {
+      expect(
+        shouldForceAutoModeReviewForAllow(
+          ctx({
+            toolName: ToolNames.SHELL,
+            command,
+            cwd: '/repo',
+          }),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('returns false for read-only sed/perl commands', () => {
+    for (const command of [
+      "sed 's/a/b/' /tmp/file",
+      "perl -e 'print $_' /tmp/file",
+      "sed -n '1,10p' .qwen/settings.json",
+    ]) {
+      expect(
+        shouldForceAutoModeReviewForAllow(
+          ctx({
+            toolName: ToolNames.SHELL,
+            command,
+            cwd: '/repo',
+          }),
+        ),
+      ).toBe(false);
+    }
   });
 
   it('uses the provided cwd fallback when ctx.cwd is absent', () => {

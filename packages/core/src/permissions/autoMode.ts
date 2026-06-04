@@ -44,7 +44,7 @@ import type { PermissionCheckContext } from './types.js';
 const autoModeDebugLogger = createDebugLogger('AUTO_MODE');
 
 const RAW_PROTECTED_WRITE_COMMANDS =
-  /\b(?:cp|mv|install|rsync|patch|perl|sed|tee|dd|sort|awk|gawk|node|python3?|ruby|php)\b/;
+  /\b(?:cp|mv|install|rsync|patch|perl|sed|tee|dd|sort|awk|gawk|node|python3?|ruby|php|curl|wget|tar|unzip|cpio)\b/;
 
 /**
  * Built-in tools whose any-parameter behavior is safe under the AUTO mode
@@ -331,7 +331,10 @@ function hasRawProtectedRedirect(command: string, cwd: string): boolean {
 function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {
   for (const line of command.split('\n')) {
     if (!RAW_PROTECTED_WRITE_COMMANDS.test(line)) continue;
-    if (/\b(?:sed|perl)\b/.test(line) && !/(?:^|\s)-[A-Za-z]*i/.test(line)) {
+    if (
+      /\b(?:sed|perl)\b/.test(line) &&
+      !/(?:^|\s)(?:-[A-Za-z]*i|--in-place(?:=|\s|$))/.test(line)
+    ) {
       continue;
     }
     for (const rawToken of line.split(/\s+/)) {
@@ -340,7 +343,7 @@ function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {
         '',
       );
       if (!target || target.startsWith('-')) continue;
-      if (target.includes('$')) return true;
+      if (/\$[{(A-Za-z_]/.test(target)) return true;
       if (containsProtectedPathFragment(target, cwd)) return true;
     }
   }
