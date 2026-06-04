@@ -470,7 +470,7 @@
   "menu.file": "Datei",
   "menu.forceReload": "Neu laden erzwingen",
   "menu.help": "Hilfe",
-  "menu.helpAndDocs": "Hilfe & Dokumentation",
+  "menu.homepage": "Startseite",
   "menu.hideCraftAgents": "{{appName}} ausblenden",
   "menu.installUpdate": "Update installieren",
   "menu.installUpdateVersion": "Update installieren (v{{version}})…",

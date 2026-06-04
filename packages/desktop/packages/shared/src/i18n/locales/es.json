@@ -470,7 +470,7 @@
   "menu.file": "Archivo",
   "menu.forceReload": "Forzar recarga",
   "menu.help": "Ayuda",
-  "menu.helpAndDocs": "Ayuda y documentación",
+  "menu.homepage": "Página principal",
   "menu.hideCraftAgents": "Ocultar {{appName}}",
   "menu.installUpdate": "Instalar actualización",
   "menu.installUpdateVersion": "Instalar actualización (v{{version}})…",

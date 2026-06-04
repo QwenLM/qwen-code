@@ -470,7 +470,7 @@
   "menu.file": "文件",
   "menu.forceReload": "强制重新加载",
   "menu.help": "帮助",
-  "menu.helpAndDocs": "帮助和文档",
+  "menu.homepage": "主页",
   "menu.hideCraftAgents": "隐藏 {{appName}}",
   "menu.installUpdate": "安装更新",
   "menu.installUpdateVersion": "安装更新 (v{{version}})…",

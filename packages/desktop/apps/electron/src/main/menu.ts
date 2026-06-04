@@ -48,6 +48,11 @@ export async function rebuildMenu(): Promise<void> {
 
   const windowManager = cachedWindowManager
   const isMac = process.platform === 'darwin'
+  const helpMenuLinks: Electron.MenuItemConstructorOptions[] =
+    BRAND.helpMenuLinks.map((link) => ({
+      label: i18n.t(link.labelKey),
+      click: () => shell.openExternal(link.url),
+    }))
 
   // On Windows/Linux, hide the native menu entirely
   // Users access menu via the Craft logo dropdown in the app
@@ -191,10 +196,8 @@ export async function rebuildMenu(): Promise<void> {
     {
       label: i18n.t("menu.help"),
       submenu: [
-        {
-          label: i18n.t("menu.helpAndDocs"),
-          click: () => shell.openExternal('https://agents.craft.do/docs')
-        },
+        ...helpMenuLinks,
+        ...(helpMenuLinks.length > 0 ? [{ type: 'separator' as const }] : []),
         {
           label: i18n.t("menu.keyboardShortcuts"),
           accelerator: 'CmdOrCtrl+/',

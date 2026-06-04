@@ -470,7 +470,7 @@
   "menu.file": "Fájl",
   "menu.forceReload": "Kényszerített újratöltés",
   "menu.help": "Súgó",
-  "menu.helpAndDocs": "Súgó és dokumentáció",
+  "menu.homepage": "Kezdőlap",
   "menu.hideCraftAgents": "{{appName}} elrejtése",
   "menu.installUpdate": "Frissítés telepítése",
   "menu.installUpdateVersion": "Frissítés telepítése (v{{version}})…",

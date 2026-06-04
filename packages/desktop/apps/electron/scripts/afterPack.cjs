@@ -5,7 +5,8 @@
  * into the app bundle when present. Without it, macOS falls back to icon.icns.
  *
  * If a future Icon Composer workflow produces Assets.car for the current app
- * icon, place it at resources/Assets.car and this hook will bundle it.
+ * icon, place it at resources/brands/<brand>/Assets.car and this hook will
+ * bundle it.
  *
  * For older macOS versions, or builds without Assets.car, the app falls back
  * to icon.icns which is included separately by electron-builder.
@@ -24,14 +25,21 @@ module.exports = async function afterPack(context) {
   const appPath = context.appOutDir;
   const productName = context.packager.appInfo.productName;
   const resourcesDir = path.join(appPath, `${productName}.app`, 'Contents', 'Resources');
-  const precompiledAssets = path.join(context.packager.projectDir, 'resources', 'Assets.car');
+  const brandId = process.env.CRAFT_BRAND || 'qwen-code';
+  const precompiledAssets = path.join(
+    context.packager.projectDir,
+    'resources',
+    'brands',
+    brandId,
+    'Assets.car',
+  );
 
   console.log(`afterPack: projectDir=${context.packager.projectDir}`);
   console.log(`afterPack: looking for Assets.car at ${precompiledAssets}`);
 
   // Check if pre-compiled Assets.car exists
   if (!fs.existsSync(precompiledAssets)) {
-    console.log('Warning: Pre-compiled Assets.car not found in resources/');
+    console.log(`Warning: Pre-compiled Assets.car not found for brand ${brandId}`);
     console.log('The app will use the fallback icon.icns on all macOS versions');
     return;
   }

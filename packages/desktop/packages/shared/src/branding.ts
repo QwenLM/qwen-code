@@ -29,6 +29,25 @@ export interface BrandConfig {
   selfReferName: string;
   /** Session viewer base URL */
   viewerUrl: string;
+  /** Brand-owned external links shown in the Help menu */
+  helpMenuLinks: Array<{ labelKey: string; url: string; icon: string }>;
+  /** Brand-specific Electron resource paths, relative to apps/electron/ */
+  assets: {
+    /** Folder containing app icons and other brand-owned assets */
+    resourceDir: string;
+    /** Renderer logo/symbol asset */
+    rendererSymbol: string;
+    /** macOS app and DMG icon */
+    macIcon: string;
+    /** Windows installer/app icon */
+    winIcon: string;
+    /** Linux AppImage icon */
+    linuxIcon: string;
+    /** Optional SVG source icon for regeneration workflows */
+    iconSvg?: string;
+    /** Optional macOS 26+ Liquid Glass compiled icon asset */
+    liquidGlassAssetsCar?: string;
+  };
   /** Multi-line credits text shown in the About panel */
   credits: string;
   /** One-line credits summary */
@@ -51,6 +70,22 @@ const QWEN_CODE_BRAND: BrandConfig = {
   coAuthorLine: 'Co-Authored-By: Qwen Code <agents-noreply@craft.do>',
   selfReferName: 'Qwen Code',
   viewerUrl: 'https://agents.craft.do',
+  helpMenuLinks: [
+    {
+      labelKey: 'menu.homepage',
+      url: 'https://qwen.ai/qwencode',
+      icon: 'House',
+    },
+  ],
+  assets: {
+    resourceDir: 'resources/brands/qwen-code',
+    rendererSymbol: 'resources/brands/qwen-code/icon.svg',
+    macIcon: 'resources/brands/qwen-code/icon.icns',
+    winIcon: 'resources/brands/qwen-code/icon.ico',
+    linuxIcon: 'resources/brands/qwen-code/icon.png',
+    iconSvg: 'resources/brands/qwen-code/icon.svg',
+    liquidGlassAssetsCar: 'resources/brands/qwen-code/Assets.car',
+  },
   credits: '',
   creditsShort: '',
   creditsEntries: [],
@@ -68,6 +103,21 @@ const BRANDS: Record<string, BrandConfig> = {
     coAuthorLine: 'Co-Authored-By: ModelStudio Desktop <noreply@alibaba.com>',
     selfReferName: 'ModelStudio Desktop',
     viewerUrl: 'https://agents.craft.do',
+    helpMenuLinks: [
+      {
+        labelKey: 'menu.homepage',
+        url: 'https://github.com/modelstudioai',
+        icon: 'House',
+      },
+    ],
+    assets: {
+      resourceDir: 'resources/brands/modelstudio',
+      rendererSymbol: 'resources/brands/modelstudio/symbol.png',
+      macIcon: 'resources/brands/modelstudio/icon.icns',
+      winIcon: 'resources/brands/modelstudio/icon.png',
+      linuxIcon: 'resources/brands/modelstudio/icon.png',
+      liquidGlassAssetsCar: 'resources/brands/modelstudio/Assets.car',
+    },
     credits: 'Architecture: craft-agents-oss | Agent: Qwen Code',
     creditsShort: 'Based on craft-agents-oss & Qwen Code',
     creditsEntries: [

@@ -4,6 +4,7 @@ import { join } from 'path'
 import { existsSync } from 'fs'
 import { release } from 'os'
 import { RPC_CHANNELS, type WindowCloseRequestSource } from '../shared/types'
+import { BRAND } from '@craft-agent/shared/branding'
 import type { SavedWindow } from './window-state'
 import {
   getPetWindowBounds,
@@ -114,13 +115,13 @@ export class WindowManager {
     // In packaged app, resources are at dist/resources/ (same level as __dirname)
     // In dev, resources are at ../resources/ (sibling of dist/)
     const getIconPath = () => {
-      const iconName = process.platform === 'darwin' ? 'icon.icns'
-        : process.platform === 'win32' ? 'icon.ico'
-        : 'icon.png'
+      const iconPath = process.platform === 'darwin' ? BRAND.assets.macIcon
+        : process.platform === 'win32' ? BRAND.assets.winIcon
+        : BRAND.assets.linuxIcon
       return [
-        join(__dirname, 'resources', iconName),
-        join(__dirname, '../resources', iconName),
-      ].find(p => existsSync(p)) ?? join(__dirname, '../resources', iconName)
+        join(__dirname, iconPath),
+        join(__dirname, '..', iconPath),
+      ].find(p => existsSync(p)) ?? join(__dirname, '..', iconPath)
     }
 
     const iconPath = getIconPath()

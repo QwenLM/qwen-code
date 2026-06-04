@@ -27,7 +27,7 @@ import {
 } from "../../shared/menu-schema"
 import type { MenuItem, MenuSection, SettingsMenuItem } from "../../shared/menu-schema"
 import { SETTINGS_ICONS } from "./icons/SettingsIcons"
-import { getDocUrl } from '@craft-agent/shared/docs/doc-links'
+import { BRAND } from '@craft-agent/shared/branding'
 
 // Map of action handlers for menu items that need custom behavior
 type MenuActionHandlers = {
@@ -180,6 +180,7 @@ export function AppMenu({
 }: AppMenuProps) {
   const { t } = useTranslation()
   const [isDebugMode, setIsDebugMode] = useState(false)
+  const hasHelpMenuLinks = BRAND.helpMenuLinks.length > 0
 
   // Get hotkey labels from centralized action registry
   const newChatHotkey = useActionLabel('app.newChat').hotkey
@@ -271,17 +272,20 @@ export function AppMenu({
               Help
             </StyledDropdownMenuSubTrigger>
             <StyledDropdownMenuSubContent>
-              <StyledDropdownMenuItem onClick={() => window.electronAPI.openUrl('https://agents.craft.do/docs')}>
-                <Icons.HelpCircle className="h-3.5 w-3.5" />
-                Help & Documentation
-                <Icons.ExternalLink className="h-3 w-3 ml-auto text-muted-foreground" />
-              </StyledDropdownMenuItem>
-              <StyledDropdownMenuItem onClick={() => window.electronAPI.openUrl(getDocUrl('automations'))}>
-                <Icons.Webhook className="h-3.5 w-3.5" />
-                Automations
-                <Icons.ExternalLink className="h-3 w-3 ml-auto text-muted-foreground" />
-              </StyledDropdownMenuItem>
-              <StyledDropdownMenuSeparator />
+              {BRAND.helpMenuLinks.map((link) => {
+                const Icon = getIcon(link.icon) ?? Icons.ExternalLink
+                return (
+                  <StyledDropdownMenuItem
+                    key={link.url}
+                    onClick={() => window.electronAPI.openUrl(link.url)}
+                  >
+                    <Icon className="h-3.5 w-3.5" />
+                    {t(link.labelKey)}
+                    <Icons.ExternalLink className="h-3 w-3 ml-auto text-muted-foreground" />
+                  </StyledDropdownMenuItem>
+                )
+              })}
+              {hasHelpMenuLinks && <StyledDropdownMenuSeparator />}
               <StyledDropdownMenuItem onClick={onOpenKeyboardShortcuts}>
                 <Icons.Keyboard className="h-3.5 w-3.5" />
                 Keyboard Shortcuts

@@ -470,7 +470,7 @@
   "menu.file": "ファイル",
   "menu.forceReload": "強制再読み込み",
   "menu.help": "ヘルプ",
-  "menu.helpAndDocs": "ヘルプとドキュメント",
+  "menu.homepage": "ホームページ",
   "menu.hideCraftAgents": "{{appName}}を隠す",
   "menu.installUpdate": "アップデートをインストール",
   "menu.installUpdateVersion": "アップデートをインストール (v{{version}})…",

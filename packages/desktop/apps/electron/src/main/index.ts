@@ -413,20 +413,19 @@ app.whenReady().then(async () => {
   // Set dock icon on macOS in dev mode; packaged apps use Info.plist/.icns.
   if (process.platform === 'darwin' && app.dock && !app.isPackaged) {
     // In dev, resources are at ../resources/ (sibling of dist/)
-    // Brand-aware: use brand-specific icon when available, fall back to default
-    const brandIconRelPath = BRAND.id === 'qwen-code' ? 'resources/icon.png' : `resources/brands/${BRAND.id}/icon.png`
+    const brandIconRelPath = BRAND.assets.macIcon
     const dockIconPath = [
       join(__dirname, brandIconRelPath),
       join(__dirname, '..', brandIconRelPath),
-      // Fallback to default icon if brand-specific one is missing
-      join(__dirname, 'resources/icon.png'),
-      join(__dirname, '../resources/icon.png'),
     ].find(p => existsSync(p))
 
     if (dockIconPath) {
-      app.dock.setIcon(dockIconPath)
-      // Initialize badge icon for canvas-based badge overlay
-      initBadgeIcon(dockIconPath)
+      const dockIcon = nativeImage.createFromPath(dockIconPath)
+      if (!dockIcon.isEmpty()) {
+        app.dock.setIcon(dockIcon)
+        // Initialize badge icon for canvas-based badge overlay
+        initBadgeIcon(dockIconPath)
+      }
     }
 
     // Multi-instance dev: show instance number badge on dock icon
