@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
 import { StreamingState } from '../types.js';
+import type { StatusLinePresetReasoning } from '../statusLinePresets.js';
 
 const debugLogMock = vi.hoisted(() => ({
   log: vi.fn(),
@@ -22,6 +23,7 @@ vi.mock('child_process');
 
 const mockSettings = {
   merged: {} as Record<string, unknown>,
+  reloadScopeFromDisk: vi.fn(),
 };
 vi.mock('../contexts/SettingsContext.js', () => ({
   useSettings: () => mockSettings,
@@ -42,18 +44,32 @@ const mockUIState = {
   streamingState: StreamingState.Idle,
   statusLineSettingsVersion: 0,
   statusLineConfigOverride: undefined as
-    | { type: 'preset'; items: string[]; useThemeColors?: boolean }
+    | {
+        type: 'preset';
+        items: string[];
+        useThemeColors?: boolean;
+        hideContextIndicator?: boolean;
+      }
     | undefined,
 };
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: () => mockUIState,
 }));
 
+type MockContentGeneratorConfig = {
+  contextWindowSize: number;
+  reasoning?: StatusLinePresetReasoning;
+};
+
+const getMockContentGeneratorConfig = (): MockContentGeneratorConfig => ({
+  contextWindowSize: 131072,
+});
+
 const mockConfig = {
   getTargetDir: vi.fn(() => '/test/dir'),
   getModel: vi.fn(() => 'test-model'),
   getCliVersion: vi.fn(() => '1.0.0'),
-  getContentGeneratorConfig: vi.fn(() => ({ contextWindowSize: 131072 })),
+  getContentGeneratorConfig: vi.fn(getMockContentGeneratorConfig),
 };
 vi.mock('../contexts/ConfigContext.js', () => ({
   useConfig: () => mockConfig,
@@ -92,8 +108,19 @@ let mockKill: ReturnType<typeof vi.fn>;
 
 function setStatusLineConfig(
   config:
-    | { type: string; command: string; refreshInterval?: number }
-    | { type: 'preset'; items: string[]; useThemeColors?: boolean }
+    | {
+        type: string;
+        command: string;
+        refreshInterval?: number;
+        respectUserColors?: boolean;
+        hideContextIndicator?: boolean;
+      }
+    | {
+        type: 'preset';
+        items: string[];
+        useThemeColors?: boolean;
+        hideContextIndicator?: boolean;
+      }
     | undefined,
 ) {
   mockSettings.merged = config ? { ui: { statusLine: config } } : {};
@@ -110,6 +137,7 @@ describe('useStatusLine', () => {
     stdinWrittenData = '';
     stdinErrorHandler = undefined;
     mockKill = vi.fn();
+    mockSettings.reloadScopeFromDisk.mockImplementation(() => undefined);
 
     // Set up exec mock implementation
     vi.mocked(child_process.exec).mockImplementation(((
@@ -149,6 +177,9 @@ describe('useStatusLine', () => {
     mockUIState.sessionStats.metrics.files.totalLinesRemoved = 0;
     mockVimMode.vimEnabled = false;
     mockVimMode.vimMode = 'INSERT';
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      contextWindowSize: 131072,
+    });
 
     // Dynamic import to get fresh module after mocks
     const mod = await import('./useStatusLine.js');
@@ -187,6 +218,57 @@ describe('useStatusLine', () => {
       const { result } = renderHook(() => useStatusLine());
       expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
+    });
+
+    it('returns respectUserColors false by default for command type', () => {
+      setStatusLineConfig({ type: 'command', command: 'echo hello' });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.respectUserColors).toBe(false);
+    });
+
+    it('returns respectUserColors true when set in config', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo hello',
+        respectUserColors: true,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.respectUserColors).toBe(true);
+    });
+
+    it('returns respectUserColors false for preset type', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.respectUserColors).toBe(false);
+    });
+
+    it('returns hideContextIndicator false by default', () => {
+      setStatusLineConfig({ type: 'command', command: 'echo hello' });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(false);
+    });
+
+    it('returns hideContextIndicator true when set in command config', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo hello',
+        hideContextIndicator: true,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(true);
+    });
+
+    it('returns hideContextIndicator true when set in preset config', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+        hideContextIndicator: true,
+      });
+      const { result } = renderHook(() => useStatusLine());
+      expect(result.current.hideContextIndicator).toBe(true);
     });
   });
 
@@ -236,6 +318,21 @@ describe('useStatusLine', () => {
       expect(result.current.lines).toEqual(['test-model']);
     });
 
+    it('renders model-with-reasoning and model-only together', () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model', 'model-with-reasoning'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual(['test-model high | test-model']);
+    });
+
     it('refreshes when status line settings are saved in the same process', async () => {
       mockUIState.branchName = 'dragon/feat-reproduce-skill';
       setStatusLineConfig({
@@ -269,6 +366,38 @@ describe('useStatusLine', () => {
       });
 
       expect(result.current.lines).toEqual(['test-model | #4118']);
+    });
+
+    it('reloads status line settings from disk when streaming becomes idle', async () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+      });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual(['test-model']);
+
+      mockSettings.reloadScopeFromDisk.mockImplementationOnce(() => {
+        setStatusLineConfig({
+          type: 'preset',
+          items: ['model-with-reasoning'],
+        });
+      });
+
+      mockUIState.streamingState = StreamingState.Responding;
+      rerender();
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      mockUIState.streamingState = StreamingState.Idle;
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(mockSettings.reloadScopeFromDisk).toHaveBeenCalledOnce();
+      expect(result.current.lines).toEqual(['test-model high']);
     });
 
     it('uses command settings when a stale preset override no longer matches the settings type', () => {

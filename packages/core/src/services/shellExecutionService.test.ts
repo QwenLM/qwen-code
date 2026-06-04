@@ -1700,7 +1700,15 @@ describe('ShellExecutionService child_process fallback', () => {
       );
     });
 
-    it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 'abc', undefined])(
+    it.each([
+      0,
+      0.5,
+      -1,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      'abc',
+      undefined,
+    ])(
       'falls back to the default capture limit for invalid maxBufferedOutputBytes: %s',
       async (configuredValue) => {
         const { result } = await simulateExecutionWithConfig(

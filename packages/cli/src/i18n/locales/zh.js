@@ -22,6 +22,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
+  'Auto mode': 'Auto 模式',
   'plan mode': '规划模式',
   'auto-accept edits': '自动接受编辑',
   'Accepting edits': '接受编辑',
@@ -451,7 +452,7 @@ export default {
   Text: '文本',
   JSON: 'JSON',
   Plan: '规划',
-  Default: '默认',
+  'Ask permissions': '请求授权',
   'Auto Edit': '自动编辑',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切换 vim 模式开关',
@@ -852,6 +853,7 @@ export default {
   'Auto-memory: {{status}}': '自动记忆：{{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     '自动整理：{{status}} · {{lastDream}} · /dream 立即运行',
+  'Auto-skill: {{status}}': '自动技能：{{status}}',
   never: '从未',
   on: '开',
   off: '关',
@@ -1719,6 +1721,8 @@ export default {
   'Loading suggestions...': '正在加载建议...',
   'Open the memory manager.': '打开记忆管理器。',
   'Show current process memory diagnostics': '显示当前进程的内存诊断。',
+  'Record a CPU profile for Chrome DevTools analysis':
+    '录制 CPU 性能分析文件，用于 Chrome DevTools 分析',
   'Save a durable memory to the memory system.':
     '将一条持久记忆保存到记忆系统。',
   'Show per-item context usage breakdown.': '显示按项目划分的上下文使用详情。',

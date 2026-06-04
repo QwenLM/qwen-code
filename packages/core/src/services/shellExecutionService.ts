@@ -22,6 +22,7 @@ import {
 } from '../utils/terminalSerializer.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
+import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 const { Terminal } = pkg;
 
@@ -194,10 +195,12 @@ export interface ShellExecutionConfig {
 
 function getMaxBufferedOutputBytes(config: ShellExecutionConfig): number {
   const configured = config.maxBufferedOutputBytes;
-  return typeof configured === 'number' &&
-    Number.isFinite(configured) &&
-    configured > 0
-    ? Math.min(Math.floor(configured), MAX_BUFFERED_OUTPUT_BYTES_CEILING)
+  const floored =
+    typeof configured === 'number' && Number.isFinite(configured)
+      ? Math.floor(configured)
+      : 0;
+  return floored > 0
+    ? Math.min(floored, MAX_BUFFERED_OUTPUT_BYTES_CEILING)
     : DEFAULT_MAX_BUFFERED_OUTPUT_BYTES;
 }
 
@@ -601,6 +604,7 @@ export class ShellExecutionService {
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           PAGER: 'cat',
+          ...getShellContextEnvVars(),
         },
       });
 
@@ -1267,6 +1271,7 @@ export class ShellExecutionService {
           TERM: 'xterm-256color',
           PAGER: shellExecutionConfig.pager ?? 'cat',
           GIT_PAGER: shellExecutionConfig.pager ?? 'cat',
+          ...getShellContextEnvVars(),
         },
         handleFlowControl: true,
       });

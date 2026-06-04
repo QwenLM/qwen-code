@@ -20,7 +20,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
 import { AuthState, MessageType } from '../types.js';
-import type { HistoryItem } from '../types.js';
+import type { HistoryItemWithoutId } from '../types.js';
 import { t } from '../../i18n/index.js';
 
 /**
@@ -81,7 +81,7 @@ export type AuthController = {
 export const useAuthCommand = (
   settings: LoadedSettings,
   config: Config,
-  addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+  addItem: (item: HistoryItemWithoutId, timestamp: number) => void,
   onAuthChange?: () => void,
 ) => {
   const unAuthenticated = config.getAuthType() === undefined;

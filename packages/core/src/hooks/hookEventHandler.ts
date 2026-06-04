@@ -25,12 +25,16 @@ import type {
   PreToolUseInput,
   PostToolUseInput,
   PostToolUseFailureInput,
+  PostToolBatchInput,
+  PostToolBatchToolCall,
   PreCompactInput,
   PreCompactTrigger,
   PostCompactInput,
   PostCompactTrigger,
   NotificationInput,
   NotificationType,
+  PermissionDeniedInput,
+  PermissionDeniedReason,
   PermissionRequestInput,
   PermissionSuggestion,
   SubagentStartInput,
@@ -309,6 +313,29 @@ export class HookEventHandler {
   }
 
   /**
+   * Fire a PostToolBatch event
+   * Called once after every tool call in a batch has resolved
+   */
+  async firePostToolBatchEvent(
+    toolCalls: PostToolBatchToolCall[],
+    permissionMode: PermissionMode = PermissionMode.Default,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: PostToolBatchInput = {
+      ...this.createBaseInput(HookEventName.PostToolBatch),
+      permission_mode: permissionMode,
+      tool_calls: toolCalls,
+    };
+
+    return this.executeHooks(
+      HookEventName.PostToolBatch,
+      input,
+      undefined,
+      signal,
+    );
+  }
+
+  /**
    * Fire a Notification event
    */
   async fireNotificationEvent(
@@ -357,6 +384,37 @@ export class HookEventHandler {
     // Pass tool name as context for matcher filtering
     return this.executeHooks(
       HookEventName.PermissionRequest,
+      input,
+      {
+        toolName,
+      },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a PermissionDenied event for tool calls rejected before manual
+   * permission handling starts. Unlike PermissionRequest, this event does not
+   * ask hooks to approve or modify the call; it reports AUTO-mode denials that
+   * happen before any permission dialog would be shown.
+   */
+  async firePermissionDeniedEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolUseId: string,
+    reason: PermissionDeniedReason,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: PermissionDeniedInput = {
+      ...this.createBaseInput(HookEventName.PermissionDenied),
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_use_id: toolUseId,
+      reason,
+    };
+
+    return this.executeHooks(
+      HookEventName.PermissionDenied,
       input,
       {
         toolName,

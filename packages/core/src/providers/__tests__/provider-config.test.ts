@@ -74,6 +74,32 @@ describe('buildInstallPlan', () => {
     expect(models?.[1]?.generationConfig).toBeUndefined();
   });
 
+  it('applies advancedConfig to editable unknown model IDs only', () => {
+    const config = makeConfig({ modelsEditable: true });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'unknown-model'],
+      advancedConfig: {
+        contextWindowSize: 1000000,
+        multimodal: { image: true, video: true },
+      },
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models?.[0]?.generationConfig).toMatchObject({
+      contextWindowSize: 8192,
+    });
+    expect(models?.[1]).toMatchObject({
+      id: 'unknown-model',
+      name: '[Test] unknown-model',
+      generationConfig: {
+        contextWindowSize: 1000000,
+        modalities: { image: true, video: true },
+      },
+    });
+  });
+
   it('builds a plan with no predefined models (custom provider path)', () => {
     const config = makeConfig({
       models: undefined,

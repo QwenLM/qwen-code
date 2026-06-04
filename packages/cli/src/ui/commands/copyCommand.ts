@@ -346,7 +346,7 @@ export const copyCommand: SlashCommand = {
   supportedModes: ['interactive'] as const,
   action: async (context, _args): Promise<SlashCommandActionReturn | void> => {
     const chat = await context.services.config?.getGeminiClient()?.getChat();
-    const history = chat?.getHistory();
+    const history = chat?.getHistoryShallow();
 
     // Get the last message from the AI (model role)
     const lastAiMessage = history
@@ -362,7 +362,7 @@ export const copyCommand: SlashCommand = {
     }
     // Extract text from the parts
     const lastAiOutput = lastAiMessage.parts
-      ?.filter((part) => part.text)
+      ?.filter((part) => part.text && !part.thought)
       .map((part) => part.text)
       .join('');
 

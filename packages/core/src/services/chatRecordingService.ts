@@ -358,6 +358,8 @@ export interface SlashCommandRecordPayload {
   phase: 'invocation' | 'result';
   /** Raw user-entered slash command (e.g., "/about"). */
   rawCommand: string;
+  /** Whether the visible slash-command invocation reached model history. */
+  sentToModel?: boolean;
   /**
    * History items the UI displayed for this command, in the same shape used by
    * the CLI (without IDs). Stored as plain objects for replay on resume.

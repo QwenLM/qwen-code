@@ -38,6 +38,8 @@ import type {
 import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import {
   createHttpAcpBridge,
+  detachSessionIdFromEntryChannel,
+  findChannelInfoForEntry,
   InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
@@ -299,6 +301,56 @@ function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
 }
 
 describe('createHttpAcpBridge', () => {
+  it('selects a session entry channel when the current attach channel has changed', () => {
+    // Model the channel-overlap window directly: old channel A still has
+    // an entry, while new channel B is the current attach target.
+    const channelA = { name: 'A' };
+    const channelB = { name: 'B' };
+    const infoA = { channel: channelA, label: 'old-dying-channel' };
+    const infoB = { channel: channelB, label: 'fresh-attach-channel' };
+
+    expect(
+      findChannelInfoForEntry(infoB, [infoA, infoB], {
+        channel: channelA,
+      }),
+    ).toBe(infoA);
+    expect(
+      findChannelInfoForEntry(infoB, [infoB], {
+        channel: channelA,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('detaches a session from its entry channel during channel overlap', () => {
+    // Model the close/kill overlap window directly: old channel A still owns
+    // the session entry while fresh channel B is the current attach target.
+    // The detach helper used by closeSession/killSession must decrement A,
+    // not the current B channel.
+    const channelA = { name: 'A' };
+    const channelB = { name: 'B' };
+    const infoA = {
+      channel: channelA,
+      sessionIds: new Set(['session-a']),
+      label: 'old-dying-channel',
+    };
+    const infoB = {
+      channel: channelB,
+      sessionIds: new Set(['session-b']),
+      label: 'fresh-attach-channel',
+    };
+
+    const selected = detachSessionIdFromEntryChannel(
+      infoB,
+      [infoA, infoB],
+      { channel: channelA },
+      'session-a',
+    );
+
+    expect(selected).toBe(infoA);
+    expect(infoA.sessionIds.has('session-a')).toBe(false);
+    expect(Array.from(infoB.sessionIds)).toEqual(['session-b']);
+  });
+
   it('accepts a valid BridgeOptions.eventRingSize at construction time', () => {
     // Smoke: positive finite integers are accepted; the underlying
     // EventBus ring-size threading is exercised end-to-end in
@@ -5836,6 +5888,37 @@ describe('createHttpAcpBridge', () => {
       expect((closedEvent?.data as { reason: string }).reason).toBe(
         'client_close',
       );
+
+      await bridge.shutdown();
+    });
+
+    it('keeps a shared ACP channel alive while closing one of several sessions', async () => {
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({ sessionIdPrefix: `s${handles.length}` });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'thread',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const c = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(handles).toHaveLength(1);
+
+      await bridge.closeSession(b.sessionId);
+      expect(bridge.sessionCount).toBe(2);
+      expect(handles[0]?.killed).toBe(false);
+
+      await bridge.closeSession(a.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+      expect(handles[0]?.killed).toBe(false);
+
+      await bridge.closeSession(c.sessionId);
+      expect(bridge.sessionCount).toBe(0);
+      expect(handles[0]?.killed).toBe(true);
 
       await bridge.shutdown();
     });

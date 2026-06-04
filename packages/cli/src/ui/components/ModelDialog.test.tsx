@@ -5,6 +5,7 @@
  */
 
 import { render, cleanup } from '@testing-library/react';
+import process from 'node:process';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ModelDialog } from './ModelDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -43,6 +44,7 @@ const mockedSelect = vi.mocked(DescriptiveRadioButtonSelect);
 const renderComponent = (
   props: Partial<React.ComponentProps<typeof ModelDialog>> = {},
   contextValue: Partial<Config> | undefined = undefined,
+  settingsValue: Partial<LoadedSettings> | undefined = undefined,
 ) => {
   const defaultProps = {
     onClose: vi.fn(),
@@ -54,6 +56,7 @@ const renderComponent = (
     user: { settings: {} },
     workspace: { settings: {} },
     setValue: vi.fn(),
+    ...(settingsValue ?? {}),
   } as unknown as LoadedSettings;
 
   const mockConfig = {
@@ -286,6 +289,98 @@ describe('<ModelDialog />', () => {
       AuthType.USE_OPENAI,
     );
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows MiniMax-M3 image + video modality and 1M context details', () => {
+    const { getByText } = renderComponent({}, {
+      getModel: vi.fn(() => 'MiniMax-M3'),
+      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'MiniMax-M3',
+          label: '[MiniMax] MiniMax-M3',
+          description: '',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://api.minimaxi.com/v1',
+          envKey: 'MINIMAX_API_KEY',
+          modalities: { image: true, video: true },
+          contextWindowSize: 1000000,
+        },
+      ]),
+      getModelsConfig: vi.fn(() => ({
+        getGenerationConfig: vi.fn(() => ({
+          baseUrl: 'https://api.minimaxi.com/v1',
+        })),
+      })),
+    } as unknown as Partial<Config>);
+
+    expect(getByText('Modality:')).toBeDefined();
+    expect(getByText('text · image · video')).toBeDefined();
+    expect(getByText('Context Window:')).toBeDefined();
+    expect(getByText('1,000,000 tokens')).toBeDefined();
+  });
+
+  it('hydrates provider API key env from settings.env before switching', async () => {
+    const previousMinimaxKey = process.env['MINIMAX_API_KEY'];
+    delete process.env['MINIMAX_API_KEY'];
+
+    try {
+      const switchModel = vi.fn().mockImplementation(async () => {
+        expect(process.env['MINIMAX_API_KEY']).toBe('sk-minimax-from-settings');
+      });
+
+      renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'MiniMax-M2.7'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          switchModel,
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'MiniMax-M3',
+              label: '[MiniMax] MiniMax-M3',
+              description: '',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://api.minimaxi.com/v1',
+              envKey: 'MINIMAX_API_KEY',
+              modalities: { image: true, video: true },
+              contextWindowSize: 1000000,
+            },
+          ]),
+          getModelsConfig: vi.fn(() => ({
+            getGenerationConfig: vi.fn(() => ({
+              baseUrl: 'https://api.minimaxi.com/v1',
+            })),
+          })),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'MiniMax-M3',
+            apiKey: 'sk-minimax-from-settings',
+            baseUrl: 'https://api.minimaxi.com/v1',
+          })),
+        } as unknown as Partial<Config>,
+        {
+          merged: {
+            env: { MINIMAX_API_KEY: 'sk-minimax-from-settings' },
+          },
+        } as unknown as Partial<LoadedSettings>,
+      );
+
+      const selected = mockedSelect.mock.calls[0][0].items[0].value;
+      await mockedSelect.mock.calls[0][0].onSelect(selected);
+
+      expect(switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'MiniMax-M3',
+        { baseUrl: 'https://api.minimaxi.com/v1' },
+      );
+    } finally {
+      if (previousMinimaxKey === undefined) {
+        delete process.env['MINIMAX_API_KEY'];
+      } else {
+        process.env['MINIMAX_API_KEY'] = previousMinimaxKey;
+      }
+    }
   });
 
   it('stores authType-qualified selectors in fast model mode', async () => {
