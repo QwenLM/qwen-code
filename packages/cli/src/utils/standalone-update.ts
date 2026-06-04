@@ -271,6 +271,9 @@ async function extractArchive(
         return true;
       },
     });
+    // Post-extraction defense-in-depth: detect chained symlink attacks that
+    // bypass the string-level filter (e.g. symlink A → ".", then A/payload → "../../etc")
+    validateExtractedPaths(fs.realpathSync(destDir));
   }
 }
 
