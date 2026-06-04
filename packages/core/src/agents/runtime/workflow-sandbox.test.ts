@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { describe, it, expect } from 'vitest';
 import { stripExportMeta, createWorkflowSandbox } from './workflow-sandbox.js';
 
@@ -658,6 +664,24 @@ describe('createWorkflowSandbox security', () => {
       return { total: budget.total, spent: budget.spent(), remaining: budget.remaining() };
     `);
     expect(result).toEqual({ total: 500_000, spent: 123, remaining: 499_877 });
+  });
+
+  // T15 (PR #4732 R1): when opts.budget IS provided, the wrapper functions
+  // must also block the budget.spent.constructor host-Function escape. The
+  // existing constructor-escape tests only run against the default stub.
+  it('opts.budget: spent/remaining constructors stay vm-realm-safe', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+      budget: { total: 100, spent: () => 10, remaining: () => 90 },
+    });
+    const result = await sandbox.run(`
+      try {
+        const v = budget.spent.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
   });
 
   it('budget.total is null in P1 (matches upstream "no target" sentinel)', async () => {

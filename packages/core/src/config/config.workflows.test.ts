@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 
-// Shared mocks needed by Config constructor — mirrors config-session-env.test.ts
+// Shared mocks needed by Config constructor.
 vi.mock('node:fs');
 vi.mock('node:fs/promises');
 vi.mock('../telemetry/index.js', () => ({

@@ -1,4 +1,10 @@
 /**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
  * System prompts for workflow subagents.
  *
  * Verbatim from claude-code 2.1.160 binary's §XmO constant (confirmed via
