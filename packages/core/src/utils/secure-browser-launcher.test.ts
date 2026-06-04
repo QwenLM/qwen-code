@@ -75,10 +75,11 @@ describe('secure-browser-launcher', () => {
 
     it('should allow file URLs only when explicitly requested', async () => {
       setPlatform('linux');
+      vi.stubEnv('DISPLAY', ':1');
 
-      await expect(openBrowserSecurely('file:///tmp/report.html')).rejects.toThrow(
-        'Unsafe protocol',
-      );
+      await expect(
+        openBrowserSecurely('file:///tmp/report.html'),
+      ).rejects.toThrow('Unsafe protocol');
 
       await openBrowserSecurely('file:///tmp/report.html', {
         allowFile: true,
@@ -204,6 +205,7 @@ describe('secure-browser-launcher', () => {
 
     it('should use xdg-open on Linux', async () => {
       setPlatform('linux');
+      vi.stubEnv('DISPLAY', ':1');
       await openBrowserSecurely('https://example.com');
       expect(mockExecFile).toHaveBeenCalledWith(
         'xdg-open',
@@ -221,6 +223,7 @@ describe('secure-browser-launcher', () => {
 
     it('should prefer BROWSER when it is configured', async () => {
       setPlatform('linux');
+      vi.stubEnv('DISPLAY', ':1');
       vi.stubEnv('BROWSER', 'firefox --new-tab');
 
       await openBrowserSecurely('https://example.com');
@@ -230,6 +233,23 @@ describe('secure-browser-launcher', () => {
         ['--new-tab', 'https://example.com'],
         expect.any(Object),
       );
+    });
+
+    it('should skip browser launch in headless Linux', async () => {
+      setPlatform('linux');
+      vi.stubEnv('DISPLAY', '');
+      vi.stubEnv('WAYLAND_DISPLAY', '');
+      vi.stubEnv('MIR_SOCKET', '');
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await openBrowserSecurely('https://example.com');
+
+      expect(mockExecFile).not.toHaveBeenCalled();
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Please open this URL manually'),
+      );
+
+      consoleSpy.mockRestore();
     });
   });
 
@@ -255,6 +275,7 @@ describe('secure-browser-launcher', () => {
   describe('Linux Fallback', () => {
     it('should try fallback browsers on Linux', async () => {
       setPlatform('linux');
+      vi.stubEnv('DISPLAY', ':1');
 
       mockExecFile.mockRejectedValueOnce(new Error('Command not found'));
       mockExecFile.mockResolvedValueOnce({ stdout: '', stderr: '' });

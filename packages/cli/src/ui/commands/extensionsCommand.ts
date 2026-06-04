@@ -14,11 +14,11 @@ import {
 import { t } from '../../i18n/index.js';
 import {
   ExtensionManager,
+  openBrowserSecurely,
   parseInstallSource,
   createDebugLogger,
   redactUrlCredentials,
 } from '@qwen-code/qwen-code-core';
-import open from 'open';
 
 const debugLogger = createDebugLogger('EXTENSIONS_COMMAND');
 const EXTENSION_EXPLORE_URL = {
@@ -85,7 +85,7 @@ async function exploreAction(context: CommandContext, args: string) {
       Date.now(),
     );
     try {
-      await open(extensionsUrl);
+      await openBrowserSecurely(extensionsUrl);
     } catch (_error) {
       context.ui.addItem(
         {
