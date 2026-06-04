@@ -3946,7 +3946,10 @@ describe('createServeApp', () => {
 
     it('200 with the typed result on success (disable)', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        persistDisabledTools: async () => {},
+      });
       const res = await auth(
         request(app).post('/workspace/tools/Bash/enable'),
       ).send({ enabled: false });
@@ -3956,7 +3959,10 @@ describe('createServeApp', () => {
 
     it('200 on enable=true (re-enable a previously disabled tool)', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        persistDisabledTools: async () => {},
+      });
       const res = await auth(
         request(app).post('/workspace/tools/Bash/enable'),
       ).send({ enabled: true });
@@ -3969,7 +3975,10 @@ describe('createServeApp', () => {
       // The workspace service receives the originator via the request
       // context; verify the request succeeds when the client-id is valid.
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
-      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        persistDisabledTools: async () => {},
+      });
       const res = await auth(request(app).post('/workspace/tools/Bash/enable'))
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ enabled: false });
@@ -4008,7 +4017,10 @@ describe('createServeApp', () => {
 
     it('accepts URL-encoded MCP-qualified tool names', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        persistDisabledTools: async () => {},
+      });
       // The SDK helper `encodeURIComponent`s the tool name; the route
       // path must round-trip the underscored MCP-qualified form
       // (`mcp__github__create_issue`) without mangling it.
@@ -4020,15 +4032,11 @@ describe('createServeApp', () => {
     });
 
     it('trims surrounding whitespace before persisting (#4282 fold-in 4 C3)', async () => {
-      // The disk read path (`loadCliConfig` → `Set` of trimmed strings)
-      // applies `.trim()` when consuming `tools.disabled`. Without
-      // matching the route's write path, disabling URL-encoded
-      // `%20Bash%20` would persist `" Bash "` verbatim and the next
-      // ACP child spawn would key on `"Bash"` — leaving the entry
-      // permanently stuck because re-enable for `"Bash"` would
-      // `.delete("Bash")` on a Set containing `" Bash "`.
       const bridge = fakeBridge();
-      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        persistDisabledTools: async () => {},
+      });
       const res = await auth(
         request(app).post('/workspace/tools/%20Bash%20/enable'),
       ).send({ enabled: false });
