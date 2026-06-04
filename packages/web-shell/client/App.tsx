@@ -9,7 +9,6 @@ import {
 import {
   useActions,
   useConnection,
-  useMessages,
   useDaemonFollowupSuggestion,
   useStreamingState,
   useTranscriptBlocks,
@@ -57,6 +56,7 @@ import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog'
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
+import { useMessages } from './hooks/useMessages';
 import { usePanelActive } from './hooks/usePanelActive';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {

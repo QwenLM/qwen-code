@@ -12,7 +12,6 @@ export {
   useDaemonActiveTodoList,
   useDaemonConnection,
   useDaemonLatestTodoList,
-  useDaemonMessages,
   useDaemonPendingPermissionRequest,
   useDaemonPendingPermissions,
   useDaemonPromptStatus,
@@ -59,22 +58,3 @@ export {
 } from './selectors.js';
 export type { DaemonStreamingState } from './selectors.js';
 export { toDaemonPromptContent } from './promptContent.js';
-export { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
-export type {
-  DaemonMessage,
-  DaemonAssistantMessage,
-  DaemonInsightErrorMessage,
-  DaemonInsightProgressMessage,
-  DaemonInsightReadyMessage,
-  DaemonMessageToolCall,
-  DaemonMessageToolCallContent,
-  DaemonMessageToolCallStatus,
-  DaemonMessageToolKind,
-  DaemonMessageToolCallLocation,
-  DaemonMessageTodoItem,
-  DaemonPlanMessage,
-  DaemonSystemMessage,
-  DaemonToolGroupMessage,
-  DaemonUserMessage,
-  DaemonUserShellMessage,
-} from './messageTypes.js';

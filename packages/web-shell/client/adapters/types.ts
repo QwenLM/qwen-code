@@ -6,8 +6,17 @@ import type {
   DaemonMessageToolKind,
   DaemonMessageToolCallLocation,
   DaemonMessageTodoItem,
-  DaemonStreamingState,
-} from '@qwen-code/webui/daemon-react-sdk';
+  DaemonAssistantMessage,
+  DaemonInsightErrorMessage,
+  DaemonInsightProgressMessage,
+  DaemonInsightReadyMessage,
+  DaemonPlanMessage,
+  DaemonSystemMessage,
+  DaemonToolGroupMessage,
+  DaemonUserMessage,
+  DaemonUserShellMessage,
+} from './messageTypes';
+import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 
 export type Message = DaemonMessage;
 export type ACPToolCall = DaemonMessageToolCall;
@@ -18,16 +27,15 @@ export type ToolCallLocation = DaemonMessageToolCallLocation;
 export type TodoItem = DaemonMessageTodoItem;
 export type StreamingState = DaemonStreamingState;
 
-export type {
-  DaemonUserMessage as UserMessage,
-  DaemonAssistantMessage as AssistantMessage,
-  DaemonInsightErrorMessage as InsightErrorMessage,
-  DaemonInsightProgressMessage as InsightProgressMessage,
-  DaemonInsightReadyMessage as InsightReadyMessage,
-  DaemonToolGroupMessage as ToolGroupMessage,
-  DaemonPlanMessage as PlanMessage,
-  DaemonSystemMessage as SystemMessage,
-} from '@qwen-code/webui/daemon-react-sdk';
+export type UserMessage = DaemonUserMessage;
+export type AssistantMessage = DaemonAssistantMessage;
+export type InsightErrorMessage = DaemonInsightErrorMessage;
+export type InsightProgressMessage = DaemonInsightProgressMessage;
+export type InsightReadyMessage = DaemonInsightReadyMessage;
+export type ToolGroupMessage = DaemonToolGroupMessage;
+export type PlanMessage = DaemonPlanMessage;
+export type SystemMessage = DaemonSystemMessage;
+export type UserShellMessage = DaemonUserShellMessage;
 
 export interface ContentBlock {
   type: 'text' | 'image';

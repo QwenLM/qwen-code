@@ -47,8 +47,6 @@ import {
   selectDaemonStreamingState,
   selectDaemonTodoLists,
 } from './selectors.js';
-import { transcriptBlocksToDaemonMessages } from './transcriptToMessages.js';
-import type { DaemonMessage } from './messageTypes.js';
 import {
   clearPassiveAssistantDoneTimer,
   delay,
@@ -1006,11 +1004,6 @@ export function useDaemonStreamingState() {
     () => selectDaemonStreamingState(blocks, promptStatus),
     [blocks, promptStatus],
   );
-}
-
-export function useDaemonMessages(): DaemonMessage[] {
-  const blocks = useDaemonTranscriptBlocks();
-  return useMemo(() => transcriptBlocksToDaemonMessages(blocks), [blocks]);
 }
 
 export function useDaemonActions(): DaemonSessionActions {

@@ -12,7 +12,6 @@ import type {
   DaemonStatusTranscriptBlock,
   DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
-import { parseDaemonTodoItemsFromEntries } from './selectors.js';
 import type {
   DaemonMessage,
   DaemonMessageToolCall,
@@ -30,6 +29,28 @@ type DaemonPermissionTranscriptBlock = Extract<
   DaemonTranscriptBlock,
   { kind: 'permission' }
 >;
+
+function parseDaemonTodoItemsFromEntries(
+  entries: readonly unknown[],
+): DaemonMessageTodoItem[] | undefined {
+  const todos = entries.flatMap((entry, index): DaemonMessageTodoItem[] => {
+    const item = getRecord(entry);
+    const content = getString(item, 'content');
+    if (!content) return [];
+    const id = getString(item, 'id') ?? `plan-${index}`;
+    return [
+      {
+        id,
+        content,
+        status: getTodoStatus(getString(item, 'status')),
+        ...(getTodoPriority(getString(item, 'priority'))
+          ? { priority: getTodoPriority(getString(item, 'priority')) }
+          : {}),
+      },
+    ];
+  });
+  return todos.length > 0 ? todos : undefined;
+}
 
 export function transcriptBlocksToDaemonMessages(
   blocks: readonly DaemonTranscriptBlock[],
@@ -652,6 +673,22 @@ function getString(
 ): string | undefined {
   const value = record?.[key];
   return typeof value === 'string' ? value : undefined;
+}
+
+function getTodoStatus(
+  value: string | undefined,
+): DaemonMessageTodoItem['status'] {
+  return value === 'completed' || value === 'in_progress' || value === 'pending'
+    ? value
+    : 'pending';
+}
+
+function getTodoPriority(
+  value: string | undefined,
+): DaemonMessageTodoItem['priority'] | undefined {
+  return value === 'high' || value === 'medium' || value === 'low'
+    ? value
+    : undefined;
 }
 
 function daemonToolBlockToToolCall(

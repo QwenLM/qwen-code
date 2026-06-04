@@ -178,11 +178,10 @@ All daemon-related React bindings (Providers, hooks, types) are published under 
 import {
   DaemonSessionProvider,
   DaemonWorkspaceProvider,
-  useMessages,
+  useTranscriptBlocks,
   useConnection,
   useActions,
   useStreamingState,
-  type DaemonMessage,
 } from '@qwen-code/webui/daemon-react-sdk';
 ```
 
@@ -197,7 +196,7 @@ Two providers, split by lifecycle axis:
 <DaemonWorkspaceProvider>          ← owns DaemonClient + capabilities
   useMcp / useAgents / useMemory / useTools / ...
   ├── <DaemonSessionProvider>      ← owns session + SSE + transcript store
-  │     useMessages / useActions / useConnection / useStreamingState / ...
+  │     useTranscriptBlocks / useActions / useConnection / useStreamingState / ...
   │     ├── <ChatPanel />
   │     └── <TerminalPanel />
 ```
@@ -250,7 +249,6 @@ Do NOT nest multiple `<DaemonSessionProvider>` for the same session — that cre
 
 | Hook                            | Returns                                                                                                 |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `useMessages()`                 | Pre-converted `DaemonMessage[]` (user, assistant, tool groups, plans)                                   |
 | `useTranscriptBlocks()`         | `readonly DaemonTranscriptBlock[]` (raw blocks)                                                         |
 | `useTranscriptState()`          | Full `DaemonTranscriptState` (blocks + metadata)                                                        |
 | `useActions()`                  | `{ sendPrompt, cancel, setModel, setApprovalMode, respondToPermission, loadSession, newSession, ... }`  |
