@@ -1032,6 +1032,7 @@ export function detectBlockedSleepPattern(command: string): string | null {
 
 type BlockedSleepPatternDetails = {
   description: string;
+  isStandalone: boolean;
   intentionalSleepRejection?: string;
 };
 
@@ -1072,14 +1073,20 @@ function detectBlockedSleepPatternDetails(
   if (separator === null) return null;
 
   const rest = separator.rest.trim();
+  const isStandalone = !rest;
   const description = rest
     ? `sleep ${durationToken} followed by: ${rest}`
     : `standalone sleep ${durationToken}`;
-  if (!rest && hasIntentionalSleepCommentPrefix(comment)) {
-    const reason = getIntentionalSleepReason(comment);
+  const trimmedComment = comment?.trim();
+  if (
+    isStandalone &&
+    trimmedComment?.startsWith(INTENTIONAL_SLEEP_COMMENT_PREFIX)
+  ) {
+    const reason = getIntentionalSleepReason(trimmedComment);
     if (reason === null) {
       return {
         description,
+        isStandalone,
         intentionalSleepRejection:
           'The intentional-sleep comment was recognized, but the reason is too short; explain why the delay is needed after `intentional-sleep:`.',
       };
@@ -1087,6 +1094,7 @@ function detectBlockedSleepPatternDetails(
     if (secs > MAX_INTENTIONAL_SLEEP_SECONDS) {
       return {
         description,
+        isStandalone,
         intentionalSleepRejection:
           'The intentional-sleep comment was recognized, but foreground sleeps over 10 minutes are not allowed; use is_background: true or Monitor for longer waits.',
       };
@@ -1097,7 +1105,7 @@ function detectBlockedSleepPatternDetails(
     });
     return null;
   }
-  return { description };
+  return { description, isStandalone };
 }
 
 const INTENTIONAL_SLEEP_COMMENT_PREFIX = 'intentional-sleep:';
@@ -1105,19 +1113,10 @@ const MAX_INTENTIONAL_SLEEP_SECONDS = 10 * 60;
 // Require a real reason, not a trivial opt-out like "wait".
 const MIN_INTENTIONAL_SLEEP_REASON_LENGTH = 8;
 
-function hasIntentionalSleepCommentPrefix(comment: string | null): boolean {
-  if (comment === null) return false;
-
-  return comment.trim().startsWith(INTENTIONAL_SLEEP_COMMENT_PREFIX);
-}
-
-function getIntentionalSleepReason(comment: string | null): string | null {
-  if (comment === null) return null;
-
-  const trimmed = comment.trim();
-  if (!trimmed.startsWith(INTENTIONAL_SLEEP_COMMENT_PREFIX)) return null;
-
-  const reason = trimmed.slice(INTENTIONAL_SLEEP_COMMENT_PREFIX.length).trim();
+function getIntentionalSleepReason(trimmedComment: string): string | null {
+  const reason = trimmedComment
+    .slice(INTENTIONAL_SLEEP_COMMENT_PREFIX.length)
+    .trim();
   return reason.length >= MIN_INTENTIONAL_SLEEP_REASON_LENGTH ? reason : null;
 }
 
@@ -1187,7 +1186,10 @@ function getSleepSequentialSeparator(suffix: string): { rest: string } | null {
   return null;
 }
 
-function splitTrailingShellComment(command: string): {
+function splitTrailingShellComment(
+  command: string,
+  keepCommandsAfterCommentNewline = true,
+): {
   command: string;
   comment: string | null;
 } {
@@ -1279,7 +1281,7 @@ function splitTrailingShellComment(command: string): {
       const newlineIndex = command.indexOf('\n', i + 1);
       return {
         command:
-          newlineIndex === -1
+          newlineIndex === -1 || !keepCommandsAfterCommentNewline
             ? command.slice(0, i)
             : command.slice(0, i) + command.slice(newlineIndex),
         comment:
@@ -1294,7 +1296,7 @@ function splitTrailingShellComment(command: string): {
 }
 
 function trimTrailingShellComment(command: string): string {
-  return splitTrailingShellComment(command).command;
+  return splitTrailingShellComment(command, false).command;
 }
 
 function hasTopLevelTrailingBackgroundOperator(command: string): boolean {
@@ -4365,8 +4367,10 @@ export class ShellTool extends BaseDeclarativeTool<
       if (sleepPattern !== null) {
         const intentionalSleepGuidance =
           sleepPattern.intentionalSleepRejection ??
-          'If you genuinely need a standalone delay (rate limiting, deliberate pacing), ' +
-            'add a trailing comment like `# intentional-sleep: wait for MCP rate limit reset` (up to 10 minutes).';
+          (sleepPattern.isStandalone
+            ? 'If you genuinely need a standalone delay (rate limiting, deliberate pacing), ' +
+              'add a trailing comment like `# intentional-sleep: wait for MCP rate limit reset` (up to 10 minutes).'
+            : 'The intentional-sleep escape hatch only applies to standalone sleep commands; split follow-up commands into a separate invocation.');
         return (
           `Blocked: ${sleepPattern.description}. ` +
           'Run blocking commands in the background with is_background: true. ' +

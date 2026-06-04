@@ -186,6 +186,27 @@ describe('ShellTool', () => {
       expect(overCapError).not.toContain('add a trailing comment like');
     });
 
+    it('should allow sleep with a valid intentional sleep comment', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5 # intentional-sleep: wait for MCP rate limit reset',
+        is_background: false,
+      });
+
+      expect(error).toBeNull();
+    });
+
+    it('should not suggest the intentional sleep comment for sleep chains', async () => {
+      const error = shellTool.validateToolParams({
+        command: 'sleep 5 && echo ok',
+        is_background: false,
+      });
+
+      expect(error).toContain(
+        'intentional-sleep escape hatch only applies to standalone sleep commands',
+      );
+      expect(error).not.toContain('# intentional-sleep:');
+    });
+
     it('should throw an error for a relative directory path', async () => {
       expect(() =>
         shellTool.build({
@@ -495,6 +516,15 @@ describe('ShellTool', () => {
         'Background shell commands must not end with a bare "&". Remove the trailing "&" and rely on is_background: true instead.',
       );
       expect(mockShellExecutionService).not.toHaveBeenCalled();
+    });
+
+    it('keeps pre-existing comment trimming behavior for managed background validation', async () => {
+      const invocation = shellTool.build({
+        command: 'echo ok # note\nsleep 5 &',
+        is_background: true,
+      });
+
+      expect(invocation).toBeDefined();
     });
 
     it('preserves a trailing && (logical AND would be syntactically broken otherwise)', async () => {
