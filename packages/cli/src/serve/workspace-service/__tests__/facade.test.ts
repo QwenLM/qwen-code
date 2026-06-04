@@ -25,6 +25,7 @@ vi.mock('@qwen-code/qwen-code-core', () => {
 });
 
 const { createDaemonWorkspaceService } = await import('../index.js');
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
   DaemonWorkspaceServiceDeps,
   WorkspaceRequestContext,
@@ -472,9 +473,7 @@ describe('createDaemonWorkspaceService', () => {
     });
 
     it('translates SessionNotFoundError to McpServerRestartFailedError preserving serverName', async () => {
-      const err = Object.assign(new Error('no session'), {
-        name: 'SessionNotFoundError',
-      });
+      const err = new SessionNotFoundError('some-session-id');
       const invokeWorkspaceCommand = vi.fn().mockRejectedValue(err);
       const svc = createDaemonWorkspaceService(
         makeDeps({ invokeWorkspaceCommand }),
