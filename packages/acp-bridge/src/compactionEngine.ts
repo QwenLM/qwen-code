@@ -161,18 +161,19 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
             toolCallId,
             event: normalizedEvent,
           });
-        }
-        // Evict text/thought slots for this tool's parent so subsequent
-        // chunks from the same subagent create new slots — mirrors the
-        // transcript reducer's clearActiveText(parentToolCallId) behavior.
-        const toolParent =
-          extractParentToolCallIdFromMeta(data?.update?._meta) ??
-          (typeof data?.update?.['parentToolCallId'] === 'string'
-            ? data.update['parentToolCallId']
-            : undefined);
-        if (toolParent) {
-          this.textSlotIndex.delete(`text::${toolParent}`);
-          this.textSlotIndex.delete(`thought::${toolParent}`);
+          // Evict text/thought slots for this tool's parent so subsequent
+          // chunks from the same subagent create new slots — mirrors the
+          // transcript reducer's clearActiveText(parentToolCallId) which
+          // only fires on new tool block creation, not on status updates.
+          const toolParent =
+            extractParentToolCallIdFromMeta(data?.update?._meta) ??
+            (typeof data?.update?.['parentToolCallId'] === 'string'
+              ? data.update['parentToolCallId']
+              : undefined);
+          if (toolParent) {
+            this.textSlotIndex.delete(`text::${toolParent}`);
+            this.textSlotIndex.delete(`thought::${toolParent}`);
+          }
         }
         break;
       }
