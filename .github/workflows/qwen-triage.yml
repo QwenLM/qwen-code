@@ -34,8 +34,7 @@ jobs:
         github.event_name == 'pull_request_target' ||
         github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'issue_comment' &&
-         contains(github.event.comment.body, '@qwen-code /triage') &&
-         github.event.comment.user.login != 'github-actions[bot]' &&
+         startsWith(github.event.comment.body, '@qwen-code /triage') &&
          (github.event.comment.author_association == 'OWNER' ||
           github.event.comment.author_association == 'MEMBER' ||
           github.event.comment.author_association == 'COLLABORATOR'))
@@ -60,13 +59,13 @@ jobs:
       - name: 'Run Qwen Triage'
         uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           TARGET_NUMBER: '${{ steps.resolve.outputs.number }}'
           REPOSITORY: '${{ github.repository }}'
         with:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+          OPENAI_MODEL: '${{ secrets.QWEN_PR_REVIEW_MODEL }}'
           settings_json: |-
             {
               "maxSessionTurns": 25,
@@ -79,7 +78,7 @@ jobs:
           prompt: |-
             You are a triage assistant for the QwenLM/qwen-code repository.
 
-            Run `/triage ${TARGET_NUMBER}` to triage this issue or PR.
+            Run `/triage ${{ steps.resolve.outputs.number }}` to triage this issue or PR.
 
             Use the available shell commands (`gh`) to gather information and
             execute the triage workflow. The triage skill is available at
