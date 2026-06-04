@@ -38,34 +38,6 @@ export interface InstallationInfo {
   updateMessage?: string;
 }
 
-// CLI entry → dist → package root: walk up at most 3 levels to find manifest.json
-const MAX_MANIFEST_SEARCH_DEPTH = 3;
-
-function findStandaloneDir(realPath: string): string | null {
-  let dir = path.dirname(realPath);
-  for (let i = 0; i < MAX_MANIFEST_SEARCH_DEPTH; i++) {
-    const manifestPath = path.join(dir, 'manifest.json');
-    try {
-      if (fs.existsSync(manifestPath)) {
-        const raw = fs.readFileSync(manifestPath, 'utf-8');
-        const manifest = JSON.parse(raw) as {
-          name?: string;
-          target?: string;
-        };
-        if (manifest.name === '@qwen-code/qwen-code' && manifest.target) {
-          return dir;
-        }
-      }
-    } catch {
-      // ignore parse errors
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return null;
-}
-
 export function getInstallationInfo(
   projectRoot: string,
   isAutoUpdateEnabled: boolean,
@@ -205,20 +177,6 @@ export function getInstallationInfo(
       };
     }
 
-    // Check for standalone install (manifest.json with @qwen-code/qwen-code)
-    const standaloneDir = findStandaloneDir(realPath);
-    if (standaloneDir) {
-      return {
-        packageManager: PackageManager.UNKNOWN,
-        isGlobal: true,
-        isStandalone: true,
-        standaloneDir,
-        updateMessage: isAutoUpdateEnabled
-          ? 'Standalone install detected. Attempting to automatically update now...'
-          : 'Standalone install detected. Re-run the installer to update.',
-      };
-    }
-
     // Check if the package directory is writable to determine whether npm update requires sudo
     const npmPackageDir = path.dirname(path.dirname(realPath));
     let npmPrefixWritable = false;
@@ -286,14 +244,15 @@ function getStandaloneInstallInfo(
     process.platform === 'win32'
       ? `powershell -ExecutionPolicy Bypass -c "irm ${STANDALONE_WINDOWS_INSTALLER} | iex"`
       : `curl -fsSL ${STANDALONE_UNIX_INSTALLER} | bash`;
-  const updatePrefix = isAutoUpdateEnabled
-    ? 'Standalone install detected. Automatic in-place updates are not supported yet.'
-    : 'Standalone install detected.';
 
   return {
     packageManager: PackageManager.STANDALONE,
     isGlobal: true,
-    updateMessage: `${updatePrefix} Please rerun the standalone installer to update: ${updateCommand}`,
+    isStandalone: true,
+    standaloneDir: installDir,
+    updateMessage: isAutoUpdateEnabled
+      ? 'Standalone install detected. Attempting to automatically update now...'
+      : `Standalone install detected. Please rerun the standalone installer to update: ${updateCommand}`,
   };
 }
 

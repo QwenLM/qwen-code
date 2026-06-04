@@ -113,8 +113,8 @@ async function verifyChecksum(
   let sigResponse: UndiciResponse | undefined;
   try {
     sigResponse = await downloadWithFallback(versionPath, 'SHA256SUMS.sig');
-  } catch {
-    // .sig not available from any mirror
+  } catch (err) {
+    debugLogger.debug('SHA256SUMS.sig not available:', err);
   }
   if (sigResponse) {
     const sigContent = await sigResponse.text();
@@ -555,7 +555,7 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
       ensurePathInShellRc(binDir);
     }
   } catch (err) {
-    debugLogger.debug('Failed to create bin wrapper:', err);
+    debugLogger.warn('Failed to create bin wrapper:', err);
   }
 }
 
@@ -575,10 +575,12 @@ export function ensurePathInShellRc(binDir: string): void {
   } else if (shell.endsWith('/bash')) {
     const bashrc = path.join(home, '.bashrc');
     const profile = path.join(home, '.bash_profile');
+    // macOS bash reads .bash_profile for login shells; Linux reads .bashrc.
+    // Match install-qwen-standalone.sh's maybe_update_shell_path logic.
     if (os.platform() === 'darwin') {
       rcFile = fs.existsSync(profile) ? profile : bashrc;
     } else {
-      rcFile = fs.existsSync(bashrc) ? bashrc : profile;
+      rcFile = bashrc;
     }
   } else if (shell.endsWith('/fish')) {
     rcFile = path.join(home, '.config', 'fish', 'config.fish');
@@ -629,11 +631,12 @@ export async function performStandaloneUpdate(
   const versionPath = normalizeVersion(newVersion);
 
   let target: string;
+  let isFirstTimeMigration = false;
   const manifestPath = path.join(standaloneDir, 'manifest.json');
   if (fs.existsSync(manifestPath)) {
     const manifestRaw = fs.readFileSync(manifestPath, 'utf-8');
     const manifest = JSON.parse(manifestRaw) as { target?: string };
-    target = manifest.target || detectTarget();
+    target = manifest.target ?? detectTarget();
   } else if (fs.existsSync(standaloneDir)) {
     // Directory exists but has no manifest — not a managed Qwen install.
     // Refuse to overwrite to avoid data loss.
@@ -641,20 +644,29 @@ export async function performStandaloneUpdate(
       `${standaloneDir} exists but is not a Qwen Code standalone install. Remove it manually to proceed.`,
     );
   } else {
-    // First-time migration from npm — directory does not exist yet
+    // First-time migration from npm — directory will be created after lock
     target = detectTarget();
-    fs.mkdirSync(standaloneDir, { recursive: true });
+    isFirstTimeMigration = true;
   }
   validateTarget(target);
 
   const filename = archiveFilename(target);
   const parentDir = path.dirname(standaloneDir);
 
-  // Use a lockfile to prevent concurrent updates
+  // Ensure the parent directory exists so the lock file can be created.
+  // On first-time migration, standaloneDir (and its parent) may not exist yet.
+  fs.mkdirSync(parentDir, { recursive: true });
+
+  // Use a lockfile to prevent concurrent updates.
+  // Acquire lock BEFORE creating standaloneDir to prevent a concurrent
+  // process from seeing the empty directory and throwing a misleading error.
   const lockPath = path.join(parentDir, '.qwen-update.lock');
   if (!acquireLock(lockPath)) {
-    cleanupEmptyStandaloneDir(standaloneDir);
     throw new Error('Another update is already in progress');
+  }
+
+  if (isFirstTimeMigration) {
+    fs.mkdirSync(standaloneDir, { recursive: true });
   }
 
   // Download to a temp dir in os.tmpdir(), then extract to a sibling dir
@@ -700,31 +712,36 @@ export async function performStandaloneUpdate(
     debugLogger.info('Replacing installation...');
     updateResult = atomicReplace(standaloneDir, newInstallDir, lockPath);
 
-    // Write rollback metadata so /doctor rollback knows what version is preserved
+    // Write rollback metadata so /doctor rollback knows what version is preserved.
+    // For first-time migrations, the .old dir is the empty seed directory —
+    // remove it since there is no meaningful version to roll back to.
     const oldDir = `${standaloneDir}.old`;
     if (fs.existsSync(oldDir)) {
-      try {
-        // Read the old manifest to capture its version
-        const oldManifestPath = path.join(oldDir, 'manifest.json');
-        let oldVersion = 'unknown';
-        if (fs.existsSync(oldManifestPath)) {
-          const oldManifest = JSON.parse(
-            fs.readFileSync(oldManifestPath, 'utf-8'),
-          ) as { version?: string };
-          oldVersion = oldManifest.version || 'unknown';
+      if (isFirstTimeMigration) {
+        fs.rmSync(oldDir, { recursive: true, force: true });
+      } else {
+        try {
+          const oldManifestPath = path.join(oldDir, 'manifest.json');
+          let oldVersion = 'unknown';
+          if (fs.existsSync(oldManifestPath)) {
+            const oldManifest = JSON.parse(
+              fs.readFileSync(oldManifestPath, 'utf-8'),
+            ) as { version?: string };
+            oldVersion = oldManifest.version || 'unknown';
+          }
+          const rollbackInfo = {
+            preservedVersion: oldVersion,
+            updatedTo: versionPath,
+            timestamp: new Date().toISOString(),
+            reason: 'auto-update',
+          };
+          fs.writeFileSync(
+            path.join(oldDir, '.qwen-rollback-info.json'),
+            JSON.stringify(rollbackInfo, null, 2),
+          );
+        } catch {
+          // Non-critical — rollback still works without metadata
         }
-        const rollbackInfo = {
-          preservedVersion: oldVersion,
-          updatedTo: versionPath,
-          timestamp: new Date().toISOString(),
-          reason: 'auto-update',
-        };
-        fs.writeFileSync(
-          path.join(oldDir, '.qwen-rollback-info.json'),
-          JSON.stringify(rollbackInfo, null, 2),
-        );
-      } catch {
-        // Non-critical — rollback still works without metadata
       }
     }
 
