@@ -25,7 +25,9 @@ import type {
   ChatCompressionInfo,
   AutoModeDecision,
   AutoModeOutcome,
-
+  GoalTerminalEvent,
+} from '@qwen-code/qwen-code-core';
+import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
