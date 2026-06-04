@@ -1278,6 +1278,56 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('finishes replayed assistant streaming when replay ends with turn_error', async () => {
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'partial replay' },
+              },
+            },
+          },
+          {
+            id: 2,
+            v: 1,
+            type: 'turn_error',
+            data: { message: 'model overloaded' },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      streamingState = useDaemonStreamingState();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(streamingState).toBe('idle');
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'partial replay', streaming: false },
+    ]);
+  });
+
   it('does not let replay state events overwrite fresh connection status', async () => {
     const session = createMockSession({
       context: vi.fn(async () => ({
@@ -2437,6 +2487,128 @@ describe('DaemonSessionProvider', () => {
         expect.objectContaining({
           kind: 'assistant',
           text: 'replayed answer',
+          streaming: false,
+        }),
+      ]),
+    );
+  });
+
+  it('rejects active prompts from replay turn_error after ring eviction', async () => {
+    const ringEvicted = createDeferred<void>();
+    const reloaded = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-ring-active-error',
+      lastEventId: 10,
+      prompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 10,
+      })),
+      events: async function* ringEvictedEvents() {
+        await ringEvicted.promise;
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 10,
+            earliestAvailableId: 12,
+          },
+        };
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'session-ring-active-error',
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 12,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'partial error replay' },
+              },
+            },
+          },
+          {
+            id: 13,
+            v: 1,
+            type: 'turn_error',
+            data: {
+              promptId: 'prompt-1',
+              message: 'model overloaded',
+              code: 'overloaded',
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* reloadedIdleEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        reloaded.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) {
+            resolve();
+            return;
+          }
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+        yield* [];
+      },
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+
+    let actions: DaemonUiSessionActions | undefined;
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      actions = useDaemonActions();
+      streamingState = useDaemonStreamingState();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    const providerActions = requireActions(actions);
+
+    let promptResult: Promise<unknown> | undefined;
+    let promptError: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = providerActions.sendPrompt('ring prompt');
+      promptError = promptResult.catch((error: unknown) => error);
+      await flushPromises();
+    });
+    expect(streamingState).toBe('waiting');
+
+    await act(async () => {
+      ringEvicted.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+
+    const pendingPrompt = promptResult;
+    const observedPromptError = promptError;
+    if (!pendingPrompt) throw new Error('prompt was not started');
+    if (!observedPromptError) throw new Error('prompt was not observed');
+    await act(async () => {
+      await expect(observedPromptError).resolves.toMatchObject({
+        message: 'model overloaded',
+      });
+    });
+    expect(streamingState).toBe('idle');
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'partial error replay',
           streaming: false,
         }),
       ]),

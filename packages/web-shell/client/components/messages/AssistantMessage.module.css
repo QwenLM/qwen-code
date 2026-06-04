@@ -33,12 +33,6 @@
   line-height: 1.5;
 }
 
-.thinkingBody > div {
-  font-size: 13px;
-  color: var(--thinking-pre-color);
-  line-height: 1.5;
-}
-
 .thinkingBody p,
 .thinkingBody ul,
 .thinkingBody ol,

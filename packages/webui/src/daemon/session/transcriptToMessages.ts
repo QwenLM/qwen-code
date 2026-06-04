@@ -70,7 +70,11 @@ export function transcriptBlocksToDaemonMessages(
         const textBlock = block as DaemonTextTranscriptBlock;
 
         const parentSubAgent = textBlock.parentToolCallId
-          ? subAgentsByCallId.get(textBlock.parentToolCallId)
+          ? findIndexedSubAgent(
+              subAgentsByCallId,
+              subAgentStack,
+              textBlock.parentToolCallId,
+            )
           : undefined;
         if (parentSubAgent) {
           appendSubContent(parentSubAgent, textBlock.text);
@@ -160,7 +164,11 @@ export function transcriptBlocksToDaemonMessages(
       case 'thought': {
         const textBlock = block as DaemonTextTranscriptBlock;
         const parentSubAgent = textBlock.parentToolCallId
-          ? subAgentsByCallId.get(textBlock.parentToolCallId)
+          ? findIndexedSubAgent(
+              subAgentsByCallId,
+              subAgentStack,
+              textBlock.parentToolCallId,
+            )
           : undefined;
         if (parentSubAgent) {
           appendSubContent(parentSubAgent, textBlock.text);
@@ -209,8 +217,11 @@ export function transcriptBlocksToDaemonMessages(
         const toolBlock = block as DaemonToolTranscriptBlock;
         const toolCall = daemonToolBlockToToolCall(toolBlock);
         const parentSubAgent = toolCall.parentToolCallId
-          ? (subAgentsByCallId.get(toolCall.parentToolCallId) ??
-            findSubAgent(subAgentStack, toolCall.parentToolCallId))
+          ? findIndexedSubAgent(
+              subAgentsByCallId,
+              subAgentStack,
+              toolCall.parentToolCallId,
+            )
           : undefined;
         const existingTopLevelTool = topLevelToolsByCallId.get(toolCall.callId);
 
@@ -221,10 +232,6 @@ export function transcriptBlocksToDaemonMessages(
           );
           if (matchingSubAgentIndex >= 0) {
             mergeToolCall(subAgentStack[matchingSubAgentIndex].tool, toolCall);
-            subAgentsByCallId.set(
-              toolCall.callId,
-              subAgentStack[matchingSubAgentIndex].tool,
-            );
             if (
               isAgentCompletion(toolCall) ||
               isBackgroundAgentLaunch(toolCall)
@@ -511,6 +518,14 @@ function findSubAgent(
 ): DaemonMessageToolCall | undefined {
   const index = findSubAgentIndex(stack, toolCallId);
   return index >= 0 ? stack[index]?.tool : undefined;
+}
+
+function findIndexedSubAgent(
+  index: Map<string, DaemonMessageToolCall>,
+  stack: ActiveSubAgent[],
+  toolCallId: string,
+): DaemonMessageToolCall | undefined {
+  return index.get(toolCallId) ?? findSubAgent(stack, toolCallId);
 }
 
 function appendSubTool(
