@@ -511,6 +511,30 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.compactedTurns).toHaveLength(4); // 2 seeded + 2 new
       expect(snap.lastEventId).toBe(13);
     });
+
+    it('seed clears in-flight slots so stale data does not corrupt post-seed output', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      // Populate in-flight state (no turn_complete to compact them)
+      engine.ingest(makeTextChunkWithParent(1, 'stale-sub', 'old-task'));
+      engine.ingest(makeTextChunk(2, 'stale-top'));
+      engine.ingest(makeToolCall(3, 'tc-stale', 'running'));
+
+      // Seed replaces history — should also clear in-flight slots
+      engine.seed({
+        compactedTurns: [makeTextChunk(100, 'seeded'), makeTurnComplete(101)],
+        lastEventId: 101,
+      });
+
+      // Ingest fresh events and complete the turn
+      engine.ingest(makeTextChunk(102, 'fresh'));
+      engine.ingest(makeTurnComplete(103));
+
+      const snap = engine.snapshot();
+      const texts = extractTexts(snap.compactedTurns);
+      // Should contain only seeded + fresh, not the stale pre-seed events
+      expect(texts).toEqual(['seeded', 'fresh']);
+      expect(snap.compactedTurns).toHaveLength(4); // seeded text + seeded tc + fresh text + fresh tc
+    });
   });
 
   describe('close', () => {
