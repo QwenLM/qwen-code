@@ -1410,6 +1410,21 @@ export default {
     "No s'ha realitzat cap crida a eines en aquesta sessió.",
   'Session start time is unavailable, cannot calculate stats.':
     "L'hora d'inici de la sessió no està disponible, no es poden calcular les estadístiques.",
+  Activity: 'Activitat',
+  Efficiency: 'Eficiència',
+  Today: 'Avui',
+  'Token Trend': 'Tendència de Tokens',
+  'Cache Hit Rate': "Taxa d'encert de cache",
+  'Tool Success': "Èxit d'eines",
+  'Tool Leaderboard': "Classificació d'eines",
+  Time: 'Temps',
+  Success: 'Èxit',
+  Cache: 'Cache',
+  Latency: 'Latència',
+  'Code Impact': 'Impacte al codi',
+  net: 'net',
+  streak: 'ratxa',
+  best: 'rècord',
 
   // ============================================================================
   // Migració del format d'ordres
@@ -1860,4 +1875,40 @@ export default {
   'Ref:': 'Referència:',
   '中国 (China)': 'Xina',
   '中国 (China) - 阿里云百炼': 'Xina - 阿里云百炼',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': "Mapa d'activitat",
+  Less: 'Menys',
+  More: 'Més',
+  Sessions: 'Sessions',
+  Duration: 'Durada',
+  Projects: 'Projectes',
+  'Loading stats...': 'Carregant estadístiques...',
+  '(no data)': '(sense dades)',
+  d: 'd',
+  h: 'h',
+  m: 'm',
+  Input: 'Entrada',
+  Models: 'Models',
+  'All time': 'Tot el temps',
+  'Last 7 days': 'Últims 7 dies',
+  'Last 30 days': 'Últims 30 dies',
+  'Show usage statistics dashboard.': "Mostra el tauler d'estadístiques d'ús.",
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': "Sol·licituds d'API",
+  'Tool Calls': "Crides d'eines",
+  'Success rate': "Taxa d'èxit",
+  'Code Changes': 'Canvis de codi',
+  Tool: 'Eina',
+  reqs: 'sol.',
+  in: 'ent.',
+  out: 'sort.',
+  'In/Out': 'Ent/Sort',
 };
