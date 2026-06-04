@@ -307,6 +307,21 @@ describe('createDaemonWorkspaceService', () => {
 
       expect(result).toEqual({ toolName: 'WebSearch', enabled: false });
     });
+
+    it('does not publish toggle event when persistDisabledTools rejects', async () => {
+      const persistDisabledTools = vi
+        .fn()
+        .mockRejectedValue(new Error('disk full'));
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ persistDisabledTools, publishWorkspaceEvent }),
+      );
+
+      await expect(
+        svc.setWorkspaceToolEnabled(makeCtx(), 'Bash', false),
+      ).rejects.toThrow('disk full');
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
   });
 
   describe('restartMcpServer', () => {
@@ -454,6 +469,20 @@ describe('createDaemonWorkspaceService', () => {
       await expect(svc.restartMcpServer(makeCtx(), 'srv')).rejects.toThrow(
         'generic boom',
       );
+    });
+
+    it('translates SessionNotFoundError to McpServerRestartFailedError preserving serverName', async () => {
+      const err = Object.assign(new Error('no session'), {
+        name: 'SessionNotFoundError',
+      });
+      const invokeWorkspaceCommand = vi.fn().mockRejectedValue(err);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+
+      await expect(
+        svc.restartMcpServer(makeCtx(), 'my-mcp-server'),
+      ).rejects.toThrow(/my-mcp-server/);
     });
 
     it('fans out per-entry events in pool-mode', async () => {
@@ -688,6 +717,36 @@ describe('createDaemonWorkspaceService', () => {
       await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
         /already exists/,
       );
+    });
+
+    it('throws WorkspaceInitRaceError when fs.open hits EEXIST', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      const origOpen = fs.open;
+      vi.spyOn(fs, 'open').mockImplementation(
+        async (
+          filePath: Parameters<typeof origOpen>[0],
+          flags?: Parameters<typeof origOpen>[1],
+        ) => {
+          if (String(flags) === 'wx' && String(filePath).endsWith('QWEN.md')) {
+            const err = new Error('EEXIST') as NodeJS.ErrnoException;
+            err.code = 'EEXIST';
+            throw err;
+          }
+          return origOpen(filePath, flags as string);
+        },
+      );
+
+      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+        /appeared.*between/,
+      );
+
+      vi.restoreAllMocks();
     });
 
     it('parent symlink outside workspace is rejected', async () => {
