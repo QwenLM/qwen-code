@@ -511,7 +511,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
           // a fresh request for a stale-timer fire on the old one.
           if (this.pending.get(record.requestId) !== pending) return;
           const firedAtMs = this.deps.now();
-          // Restore stderr breadcrumb (
+          // Restore stderr breadcrumb.
           // Pre-extraction wrote "timed out
           // after Xms" directly to daemon stderr; The mediator delegates to
           // the audit publisher, but production audit can still be

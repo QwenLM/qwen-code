@@ -2657,15 +2657,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         'session.id': sessionId,
       });
       if (defaultEntry === entry) defaultEntry = undefined;
-      // Resolve the channel via `channelInfoForEntry(entry)` (search
+      // HAZARD: Resolve the channel via `channelInfoForEntry(entry)` (search
       // `aliveChannels` for the entry's actual channel) instead of the
       // module-scoped `channelInfo` (the CURRENT attach target). The two
       // diverge during the channel-overlap window — A dying, B freshly
       // spawned as `channelInfo` — where capturing `channelInfo` would
       // (1) skip the `sessionIds.delete()` since `B.channel !==
       // entry.channel`, and (2) call `markSessionClosed` on B's client
-      // instead of A's. Don't refactor away the helper call without a
-      // deterministic overlap test covering the race.
+      // instead of A's. The regression test is single-channel smoke only
+      // and WILL NOT fail if this reverts to module-scoped channelInfo.
+      // Keep `channelInfoForEntry(entry)` until a deterministic overlap
+      // test lands.
       const ci = channelInfoForEntry(entry);
       if (!ci) {
         // When the entry's channel has already been torn down out-of-band,

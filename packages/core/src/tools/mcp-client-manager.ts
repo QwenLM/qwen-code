@@ -1534,7 +1534,7 @@ export class McpClientManager {
           // `sendSdkMcpMessage: undefined`, breaking SDK MCP server
           // tool calls. The legacy path below preserves the
           // per-session callback wiring and SDK servers continue to
-          // work bit-for-bit identically to previously daemon mode.
+          // work bit-for-bit identically to the legacy daemon mode.
           if (isSdkMcpServerConfig(config)) {
             await this.discoverMcpToolsForServer(name, cliConfig);
             return;
@@ -1601,7 +1601,7 @@ export class McpClientManager {
             this.pooledConnections.set(name, conn);
           } catch (err) {
             // Pool acquire failure for one server is non-fatal for
-            // siblings (matches the previously `discoverMcpToolsForServer`
+            // siblings (matches the legacy `discoverMcpToolsForServer`
             // catch behavior). Operator visibility through standard
             // error logger; status snapshot reflects reality via the
             // global `serverStatuses` Map (pool's
