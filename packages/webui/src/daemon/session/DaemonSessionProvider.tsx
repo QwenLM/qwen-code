@@ -108,6 +108,7 @@ const DaemonWorkspaceEventSignalsContext = createContext<
   DaemonWorkspaceEventSignals | undefined
 >(undefined);
 const TERMINAL_SESSION_HTTP_STATUSES = new Set([401, 403, 404, 410]);
+const MAX_REPLAY_EVENTS = 50_000;
 // Keep enough transcript history for large daemon replay streams so event order
 // and subagent grouping survive replay. Rendering is virtualized, but message
 // normalization still rebuilds from retained blocks today, so this high default
@@ -416,6 +417,15 @@ export function DaemonSessionProvider({
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
           if (shouldInjectReplaySnapshot && replayEvents.length > 0) {
+            const totalReplayEventCount = replayEvents.length;
+            if (replayEvents.length > MAX_REPLAY_EVENTS) {
+              replayEvents.length = MAX_REPLAY_EVENTS;
+              store.dispatch({
+                type: 'error',
+                text: `Replay snapshot truncated: ${totalReplayEventCount} events exceeds limit`,
+                recoverable: true,
+              });
+            }
             const replayOpts = {
               ...eventOptionsRef.current,
               suppressOwnUserEcho: false,
@@ -444,9 +454,23 @@ export function DaemonSessionProvider({
             }
             if (allUiEvents.length > 0) {
               store.dispatch(allUiEvents);
+              bumpWorkspaceEventSignals(allUiEvents, setWorkspaceEventSignals);
+            }
+            let activePromptSettled = false;
+            for (const replayEvent of replayEvents) {
+              activePromptSettled =
+                settleActivePromptFromTurnEvent(
+                  activePromptsRef.current,
+                  activeSession.sessionId,
+                  replayEvent,
+                  store,
+                  setPromptStatus,
+                  passiveAssistantDoneTimerRef,
+                ) || activePromptSettled;
             }
             const lastReplayEvent = replayEvents[replayEvents.length - 1];
             if (
+              !activePromptSettled &&
               lastReplayEvent &&
               (lastReplayEvent.type === 'turn_complete' ||
                 lastReplayEvent.type === 'turn_error') &&

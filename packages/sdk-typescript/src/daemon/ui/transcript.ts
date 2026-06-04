@@ -475,6 +475,12 @@ function finishAssistant(state: DaemonTranscriptState): void {
     }
   }
   state.activeThoughtBlockByParent = {};
+  const scalarThought = getWritableBlockById(state, state.activeThoughtBlockId);
+  if (scalarThought?.kind === 'thought') {
+    scalarThought.streaming = false;
+    scalarThought.updatedAt = state.now;
+  }
+  state.activeThoughtBlockId = undefined;
 }
 
 function upsertToolBlock(

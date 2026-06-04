@@ -271,6 +271,8 @@ export function MessageList({
   const prevLastUserMsgId = useRef<string | null>(null);
   const prevCatchingUp: MutableRefObject<boolean | undefined> =
     useRef(catchingUp);
+  const catchingUpRef = useRef(catchingUp);
+  catchingUpRef.current = catchingUp;
 
   const hasTailApproval = useMemo(() => {
     if (!pendingApproval) return false;
@@ -369,9 +371,10 @@ export function MessageList({
     const el = containerRef.current;
     if (!el) return;
     const observer = new ResizeObserver(() => {
+      if (catchingUpRef.current) return;
       if (!shouldFollow.current) return;
       requestAnimationFrame(() => {
-        if (shouldFollow.current) {
+        if (!catchingUpRef.current && shouldFollow.current) {
           scrollToBottom();
         }
       });

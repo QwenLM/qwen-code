@@ -125,6 +125,35 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('finalizes scalar thought blocks when the assistant turn finishes', () => {
+    const streaming = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100 }),
+      [{ type: 'thought.text.delta', text: 'thinking' }],
+      { now: 100 },
+    );
+
+    expect(streaming.blocks).toMatchObject([
+      { kind: 'thought', text: 'thinking' },
+    ]);
+    expect(streaming.blocks[0]).not.toHaveProperty('streaming', false);
+
+    const finished = reduceDaemonTranscriptEvents(
+      streaming,
+      [{ type: 'assistant.done', reason: 'end_turn' }],
+      { now: 200 },
+    );
+
+    expect(finished.blocks).toMatchObject([
+      {
+        kind: 'thought',
+        text: 'thinking',
+        streaming: false,
+        updatedAt: 200,
+      },
+    ]);
+    expect(finished.activeThoughtBlockId).toBeUndefined();
+  });
+
   it('surfaces missing toolCallId as a recoverable error', () => {
     const events = normalizeDaemonEvent({
       id: 21,
