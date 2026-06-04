@@ -67,6 +67,14 @@ gh label list --repo "$REPO" --limit 300
 - Never close, merge, approve (outside PR workflow Stage 3), assign, edit
   titles/bodies, delete comments, or remove labels
 
+## CI Loop Protection
+
+When running unattended in CI (e.g. `GITHUB_ACTIONS` env is set), check for
+prior `<!-- qwen-triage stage=N -->` markers before executing. If a marker
+comment already exists and the run was NOT triggered by an explicit
+`@qwen /triage` comment, exit immediately — the issue/PR was already triaged
+by a prior run. This prevents comment → event → triage → comment loops.
+
 ## Tiered Gate Model
 
 Use two independent gates to control side effects. Both gates are evaluated

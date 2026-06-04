@@ -1,0 +1,94 @@
+name: 'Qwen Triage'
+
+on:
+  issues:
+    types: ['opened']
+  pull_request_target:
+    types: ['opened']
+  issue_comment:
+    types: ['created']
+  workflow_dispatch:
+    inputs:
+      number:
+        description: 'Issue or PR number to triage'
+        required: true
+        type: 'number'
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
+  cancel-in-progress: true
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+  pull-requests: 'write'
+  actions: 'write'
+
+jobs:
+  triage:
+    timeout-minutes: 10
+    runs-on: 'ubuntu-latest'
+    if: >-
+      github.repository == 'QwenLM/qwen-code' && (
+        github.event_name == 'issues' ||
+        github.event_name == 'pull_request_target' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'issue_comment' &&
+         contains(github.event.comment.body, '@qwen /triage') &&
+         github.event.comment.user.login != 'github-actions[bot]' &&
+         (github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'COLLABORATOR'))
+      )
+    steps:
+      - name: 'Checkout repo'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
+        with:
+          token: '${{ secrets.GITHUB_TOKEN }}'
+
+      - name: 'Resolve target number'
+        id: 'resolve'
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "number=${{ github.event.inputs.number }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Run Qwen Triage'
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          TARGET_NUMBER: '${{ steps.resolve.outputs.number }}'
+          REPOSITORY: '${{ github.repository }}'
+        with:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+          settings_json: |-
+            {
+              "maxSessionTurns": 25,
+              "coreTools": [
+                "run_shell_command",
+                "write_file"
+              ],
+              "sandbox": false
+            }
+          prompt: |-
+            You are a triage assistant for the QwenLM/qwen-code repository.
+
+            Run `/triage ${TARGET_NUMBER}` to triage this issue or PR.
+
+            Use the available shell commands (`gh`) to gather information and
+            execute the triage workflow. The triage skill is available at
+            `.qwen/skills/triage/SKILL.md` — follow its rules exactly.
+
+            Key rules:
+            - Only target QwenLM/qwen-code with `--repo QwenLM/qwen-code`
+            - Labels: apply existing only, verify with `gh label list`
+            - Comments: use `--body-file` with heredoc for multi-line content
+            - Include both stage markers and bot-coordination markers
+            - Never close, merge, approve, assign, or remove labels
+            - Evaluate the tiered gate model before any `gh` write call
