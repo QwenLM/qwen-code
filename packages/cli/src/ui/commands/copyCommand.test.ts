@@ -753,8 +753,50 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Last output copied to the clipboard',
+      content: 'AI message 2 copied to the clipboard',
     });
+  });
+
+  it('should label the error with AI message N when /copy N has no text', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    const history = [
+      { role: 'model', parts: [{ image: 'base64data' }] },
+      { role: 'user', parts: [{ text: 'user' }] },
+      { role: 'model', parts: [{ text: 'newest reply with text' }] },
+    ];
+
+    mockGetHistoryShallow.mockReturnValue(history);
+
+    const result = await copyCommand.action(mockContext, '2');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'AI message 2 contains no text to copy.',
+    });
+    expect(mockCopyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it('should label the error with AI message N when /copy N <selector> misses', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    const history = [
+      { role: 'model', parts: [{ text: 'no code blocks here' }] },
+      { role: 'user', parts: [{ text: 'user' }] },
+      { role: 'model', parts: [{ text: 'newest reply' }] },
+    ];
+
+    mockGetHistoryShallow.mockReturnValue(history);
+
+    const result = await copyCommand.action(mockContext, '2 code');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'No matching code block found in AI message 2.',
+    });
+    expect(mockCopyToClipboard).not.toHaveBeenCalled();
   });
 
   it('should treat /copy 1 the same as /copy (last AI message)', async () => {

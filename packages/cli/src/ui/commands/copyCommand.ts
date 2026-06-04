@@ -366,7 +366,7 @@ export const copyCommand: SlashCommand = {
   argumentHint: '[N]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
-  action: async (context, _args): Promise<SlashCommandActionReturn | void> => {
+  action: async (context, args): Promise<SlashCommandActionReturn | void> => {
     const chat = await context.services.config?.getGeminiClient()?.getChat();
     const history = chat?.getHistoryShallow();
     const aiMessages = history?.filter((item) => item.role === 'model') ?? [];
@@ -379,7 +379,7 @@ export const copyCommand: SlashCommand = {
       };
     }
 
-    const { messageIndex, subArgs } = parseLeadingMessageIndex(_args);
+    const { messageIndex, subArgs } = parseLeadingMessageIndex(args);
 
     let selectedAiMessage;
     if (messageIndex !== null) {
@@ -405,6 +405,14 @@ export const copyCommand: SlashCommand = {
       selectedAiMessage = aiMessages[aiMessages.length - 1];
     }
 
+    const isIndexed = messageIndex !== null && messageIndex > 1;
+    const sourceLabel = isIndexed
+      ? `AI message ${messageIndex}`
+      : 'the last AI output';
+    const sourceLabelCapitalized = isIndexed
+      ? `AI message ${messageIndex}`
+      : 'Last AI output';
+
     // Extract text from the parts
     const aiOutput = selectedAiMessage.parts
       ?.filter((part) => part.text && !part.thought)
@@ -424,8 +432,8 @@ export const copyCommand: SlashCommand = {
                 .split(/\s+/)
                 .some((token) => token === 'inline') ||
               subArgs.trim().toLowerCase().startsWith('inline-latex')
-                ? 'No matching inline LaTeX expression found in the last AI output.'
-                : 'No matching LaTeX block found in the last AI output.',
+                ? `No matching inline LaTeX expression found in ${sourceLabel}.`
+                : `No matching LaTeX block found in ${sourceLabel}.`,
           };
         }
         if (selectedLatexBlock !== undefined) {
@@ -447,7 +455,7 @@ export const copyCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'info',
-            content: 'No matching code block found in the last AI output.',
+            content: `No matching code block found in ${sourceLabel}.`,
           };
         }
 
@@ -459,7 +467,9 @@ export const copyCommand: SlashCommand = {
           messageType: 'info',
           content: selectedCodeBlock
             ? `${selectedCodeBlock.label} copied to the clipboard`
-            : 'Last output copied to the clipboard',
+            : isIndexed
+              ? `AI message ${messageIndex} copied to the clipboard`
+              : 'Last output copied to the clipboard',
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -475,7 +485,7 @@ export const copyCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: 'Last AI output contains no text to copy.',
+        content: `${sourceLabelCapitalized} contains no text to copy.`,
       };
     }
   },

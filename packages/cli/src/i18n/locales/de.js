@@ -172,7 +172,7 @@ export default {
   'Configuration not available.': 'Konfiguration nicht verfügbar.',
   'Connect an LLM provider': 'LLM-Anbieter verbinden',
   'Copy the last AI response to clipboard (/copy N for Nth-latest)':
-    'Letzte KI-Antwort in die Zwischenablage kopieren (/copy N für N-letzte)',
+    'Letzte KI-Antwort in die Zwischenablage kopieren (/copy N für die N-letzte)',
 
   // ============================================================================
   // Commands - Agents
