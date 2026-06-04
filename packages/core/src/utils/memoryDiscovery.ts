@@ -266,7 +266,7 @@ async function readGeminiMdFiles(
                 const parentFilePath = notification.parentFilePath;
                 await notifyInstructionsLoaded({
                   filePath: notification.filePath,
-                  memoryType: getMemoryType(parentFilePath),
+                  memoryType: getMemoryType(filePath),
                   loadReason: 'include',
                   triggerFilePath: filePath,
                   parentFilePath,

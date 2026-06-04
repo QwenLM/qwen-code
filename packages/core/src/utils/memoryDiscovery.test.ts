@@ -629,6 +629,49 @@ describe('loadServerHierarchicalMemory', () => {
     );
   });
 
+  it('inherits memory type from the root instruction file for nested imports', async () => {
+    const nestedFile = await createTestFile(
+      path.join(homedir, 'rules', 'nested.md'),
+      'nested included content',
+    );
+    const importedFile = await createTestFile(
+      path.join(homedir, 'rules', 'personal.md'),
+      'personal included content @./nested.md',
+    );
+    const userFile = await createTestFile(
+      path.join(homedir, DEFAULT_CONTEXT_FILENAME),
+      'user context @./rules/personal.md',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      homedir,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          filePath: nestedFile,
+          memoryType: 'user',
+          loadReason: 'include',
+          triggerFilePath: userFile,
+          parentFilePath: importedFile,
+        }),
+      ]),
+    );
+  });
+
   it('reports the root trigger and immediate parent for nested imports', async () => {
     await createEmptyDir(path.join(projectRoot, '.git'));
     const grandchildFile = await createTestFile(
