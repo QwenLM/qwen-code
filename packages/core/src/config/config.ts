@@ -4135,7 +4135,7 @@ export class Config {
       const { registerComputerUseTools } = await import(
         '../tools/computer-use/index.js'
       );
-      await registerComputerUseTools(registerLazy);
+      await registerComputerUseTools(registerLazy, this);
     }
 
     // Register monitor tool

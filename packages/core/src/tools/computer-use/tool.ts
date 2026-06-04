@@ -23,6 +23,7 @@ import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { runBootstrap } from './bootstrap.js';
 import { isPackageSpecApproved, saveInstallState } from './install-state.js';
 import { resolveComputerUsePackageSpec } from './constants.js';
+import { ApprovalMode, type Config } from '../../config/config.js';
 import { homedir } from 'node:os';
 
 type ComputerUseParams = Record<string, unknown>;
@@ -39,6 +40,7 @@ class ComputerUseInvocation extends BaseToolInvocation<
   constructor(
     private readonly upstreamName: ComputerUseToolName,
     params: ComputerUseParams,
+    private readonly config?: Config,
   ) {
     super(params);
   }
@@ -134,9 +136,16 @@ class ComputerUseInvocation extends BaseToolInvocation<
 
     // If the user confirmed through the pre-execution dialog, the install state
     // was already written by onConfirm — runBootstrap will skip promptInstallApproval.
-    // For headless / SDK contexts (no dialog), fall back to the env-var path
-    // already built into bootstrap's default promptInstallApproval.
-    await runBootstrap(client, { signal, updateOutput });
+    // In YOLO mode the scheduler auto-approves the tool call WITHOUT showing
+    // that dialog (onConfirm never runs), so pass autoApproveInstall to honor
+    // the auto-approve intent instead of letting bootstrap refuse. For headless
+    // / SDK contexts (no dialog, no YOLO), it falls back to the env-var path in
+    // bootstrap's default promptInstallApproval.
+    await runBootstrap(client, {
+      signal,
+      updateOutput,
+      autoApproveInstall: this.config?.getApprovalMode() === ApprovalMode.YOLO,
+    });
 
     let mcpResult: CallToolResult;
     try {
@@ -182,6 +191,7 @@ export class ComputerUseTool extends BaseDeclarativeTool<
   constructor(
     private readonly upstreamName: ComputerUseToolName,
     schema: ComputerUseToolSchema,
+    private readonly config?: Config,
   ) {
     const qwenName = `computer_use__${upstreamName}`;
     super(
@@ -226,7 +236,7 @@ export class ComputerUseTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: ComputerUseParams,
   ): ToolInvocation<ComputerUseParams, ToolResult> {
-    return new ComputerUseInvocation(this.upstreamName, params);
+    return new ComputerUseInvocation(this.upstreamName, params, this.config);
   }
 }
 

@@ -41,6 +41,16 @@ const execFileAsync = promisify(execFile);
 export interface BootstrapContext {
   signal: AbortSignal;
   updateOutput?: (output: string) => void;
+  /**
+   * Treat the first-use install as pre-approved, skipping the
+   * promptInstallApproval gate. Set by the caller when the active approval
+   * mode auto-approves tool calls (YOLO): in that mode the scheduler
+   * bypasses ComputerUseTool's confirmation dialog, so its onConfirm never
+   * records install approval — without this flag the headless fallback
+   * below would refuse and throw "install declined by user". The approval
+   * is still persisted, so later non-YOLO calls also skip the prompt.
+   */
+  autoApproveInstall?: boolean;
 }
 
 /** Result of a permission probe. */
@@ -215,12 +225,20 @@ export async function runBootstrap(
   // Step 1: install approval gate.
   const approved = await isPackageSpecApproved(deps.homeDir, deps.packageSpec);
   if (!approved) {
-    ctx.updateOutput?.('Computer Use needs to be installed (first use).');
-    const ok = await deps.promptInstallApproval(deps.packageSpec);
-    if (!ok) {
-      throw new Error(
-        `Computer Use install declined by user. Re-invoke the tool to be prompted again.`,
-      );
+    if (ctx.autoApproveInstall) {
+      // YOLO (or equivalent auto-approve mode): the scheduler bypassed the
+      // confirmation dialog whose onConfirm would have recorded approval,
+      // so honor the auto-approve intent here instead of falling through to
+      // the headless prompt (which refuses and throws).
+      ctx.updateOutput?.('Computer Use install auto-approved (YOLO mode).');
+    } else {
+      ctx.updateOutput?.('Computer Use needs to be installed (first use).');
+      const ok = await deps.promptInstallApproval(deps.packageSpec);
+      if (!ok) {
+        throw new Error(
+          `Computer Use install declined by user. Re-invoke the tool to be prompted again.`,
+        );
+      }
     }
     await saveInstallState(deps.homeDir, {
       approvedPackageSpec: deps.packageSpec,

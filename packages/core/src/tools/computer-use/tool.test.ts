@@ -13,6 +13,7 @@ import { COMPUTER_USE_SCHEMAS } from './schemas.js';
 import { saveInstallState, isPackageSpecApproved } from './install-state.js';
 import { resolveComputerUsePackageSpec } from './constants.js';
 import { ToolConfirmationOutcome } from '../tools.js';
+import { ApprovalMode, type Config } from '../../config/config.js';
 import type { Part } from '@google/genai';
 
 function makeFakeClient(
@@ -369,6 +370,39 @@ describe('ComputerUseInvocation confirmation pathway', () => {
 
     const packageSpec = resolveComputerUsePackageSpec();
     const approved = await isPackageSpecApproved(tmpHome, packageSpec);
+    expect(approved).toBe(true);
+  });
+
+  it('execute() under YOLO auto-approves install instead of declining (no dialog, no env var)', async () => {
+    // Reproduces the YOLO bug: the scheduler auto-approves the tool call and
+    // skips the confirmation dialog, so onConfirm never records install
+    // approval. With QWEN_COMPUTER_USE_AUTO_APPROVE unset, the bootstrap
+    // fallback used to refuse and surface "install declined by user".
+    const fake = makeFakeClient(async () => ({
+      content: [{ type: 'text', text: '[]' }],
+      isError: false,
+    }));
+    ComputerUseClient.setSharedForTest(fake);
+
+    const yoloConfig = {
+      getApprovalMode: () => ApprovalMode.YOLO,
+    } as unknown as Config;
+
+    const tool = new ComputerUseTool(
+      'list_apps',
+      COMPUTER_USE_SCHEMAS.list_apps,
+      yoloConfig,
+    );
+    const invocation = tool.build({});
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(fake.callTool).toHaveBeenCalledWith('list_apps', {});
+    // Approval persisted so later non-YOLO calls also skip the prompt.
+    const approved = await isPackageSpecApproved(
+      tmpHome,
+      resolveComputerUsePackageSpec(),
+    );
     expect(approved).toBe(true);
   });
 });
