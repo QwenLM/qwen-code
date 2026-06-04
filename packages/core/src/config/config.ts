@@ -2205,8 +2205,7 @@ export class Config {
    * Falls back to the raw model id when the model is not found.
    */
   getModelDisplayName(): string {
-    const modelId = this.getModel();
-    return modelId ? this.modelsConfig.getModelDisplayName(modelId) : 'unknown';
+    return this.modelsConfig.getModelDisplayName(this.getModel());
   }
 
   onModelChange(listener: (model: string) => void): () => void {
