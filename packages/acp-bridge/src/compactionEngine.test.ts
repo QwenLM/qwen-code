@@ -919,6 +919,36 @@ describe('parentToolCallId-aware text merging', () => {
     );
   });
 
+  it('same-parent tool call evicts thought slots too', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeThoughtChunkWithParent(1, 'thought-before', 'task-A'));
+    engine.ingest({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc1',
+          status: 'running',
+          _meta: { parentToolCallId: 'task-A' },
+        },
+      },
+    });
+    engine.ingest(makeThoughtChunkWithParent(3, 'thought-after', 'task-A'));
+    engine.ingest(makeTurnComplete(4));
+
+    const snap = engine.snapshot();
+    const thoughtEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_thought_chunk',
+    );
+    expect(thoughtEvents).toHaveLength(2);
+    expect(getUpdate(thoughtEvents[0]!).content.text).toBe('thought-before');
+    expect(getUpdate(thoughtEvents[1]!).content.text).toBe('thought-after');
+  });
+
   it('[subA, main, main, subA] produces two merged events', () => {
     const engine = new TurnBoundaryCompactionEngine();
     engine.ingest(makeTextChunkWithParent(1, 'A-start ', 'task-A'));
