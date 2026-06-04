@@ -1731,6 +1731,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                   col,
                   text.repeat(repeatCount),
                 );
+                // Cursor on first pasted character
+                buffer.vimMoveLeft(text.length * repeatCount);
               }
             }
             dispatch({ type: 'CLEAR_COUNT' });
