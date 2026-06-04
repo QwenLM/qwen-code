@@ -182,22 +182,33 @@ export function saveTrustedFolders(
       fs.mkdirSync(dirPath, { recursive: true });
     }
 
-    let content: string;
+    let content = stringify(trustedFoldersFile.config, null, 2);
     if (fs.existsSync(trustedFoldersFile.path)) {
-      const originalContent = fs.readFileSync(trustedFoldersFile.path, 'utf-8');
-      const parsed = parse(originalContent) as Record<string, unknown>;
-      const updated = applyUpdates(
-        parsed,
-        trustedFoldersFile.config as Record<string, unknown>,
-        true,
-      );
-      content = stringify(updated, null, 2);
+      try {
+        // Intentionally keep the comment-preserving round-trip local here
+        // instead of reusing updateSettingsFilePreservingFormat(), because
+        // trustedFolders.json must continue to use atomicWriteFileSync with
+        // noFollow:true when it is finally written to disk.
+        const originalContent = fs.readFileSync(
+          trustedFoldersFile.path,
+          'utf-8',
+        );
+        const parsed = parse(originalContent) as Record<string, unknown>;
+        const updated = applyUpdates(
+          parsed,
+          trustedFoldersFile.config as Record<string, unknown>,
+          false,
+        );
+        const preservedContent = stringify(updated, null, 2);
 
-      // Validate the serialized output before writing so a malformed
-      // formatting-preserving update never corrupts the trust file.
-      parse(content);
-    } else {
-      content = stringify(trustedFoldersFile.config, null, 2);
+        // Validate the serialized output before writing. If the round-trip
+        // fails at any point, fall back to writing a clean normalized file so
+        // a corrupted trustedFolders.json can still self-heal on save.
+        parse(preservedContent);
+        content = preservedContent;
+      } catch {
+        // Fall back to a clean rewrite when comment-preserving round-trip fails.
+      }
     }
 
     atomicWriteFileSync(

@@ -21,6 +21,7 @@ import {
   type Mock,
 } from 'vitest';
 import * as fs from 'node:fs';
+import * as commentJson from 'comment-json';
 import stripJsonComments from 'strip-json-comments';
 import * as path from 'node:path';
 import {
@@ -54,6 +55,14 @@ vi.mock('fs', async (importOriginal) => {
 vi.mock('strip-json-comments', () => ({
   default: vi.fn((content) => content),
 }));
+vi.mock('comment-json', async (importOriginal) => {
+  const actual = await importOriginal<typeof commentJson>();
+  return {
+    ...actual,
+    parse: vi.fn(actual.parse),
+    stringify: vi.fn(actual.stringify),
+  };
+});
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -247,13 +256,12 @@ describe('Trusted Folders Loading', () => {
     expect(writtenContent).toContain('"/new/path": "TRUST_FOLDER"');
   });
 
-  it('saveTrustedFolders should remove stale entries while preserving remaining comments', () => {
+  it('saveTrustedFolders should preserve disk-only entries when updating a different path', () => {
     const userPath = getTrustedFoldersPath();
     const dirPath = path.dirname(userPath);
     const originalContent = `{
   // keep this one
-  "/keep/path": "TRUST_FOLDER",
-  "/remove/path": "DO_NOT_TRUST"
+  "/keep/path": "TRUST_FOLDER"
 }`;
 
     (mockFsExistsSync as Mock).mockImplementation(
@@ -267,7 +275,7 @@ describe('Trusted Folders Loading', () => {
     saveTrustedFolders({
       path: userPath,
       config: {
-        '/keep/path': TrustLevel.TRUST_FOLDER,
+        '/new/path': TrustLevel.TRUST_FOLDER,
       },
     });
 
@@ -275,7 +283,69 @@ describe('Trusted Folders Loading', () => {
     const writtenContent = vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1];
     expect(writtenContent).toContain('// keep this one');
     expect(writtenContent).toContain('"/keep/path": "TRUST_FOLDER"');
-    expect(writtenContent).not.toContain('/remove/path');
+    expect(writtenContent).toContain('"/new/path": "TRUST_FOLDER"');
+  });
+
+  it('saveTrustedFolders should fall back to a clean rewrite when preserving comments fails during parse', () => {
+    const userPath = getTrustedFoldersPath();
+    const dirPath = path.dirname(userPath);
+
+    (mockFsExistsSync as Mock).mockImplementation(
+      (p) => p === userPath || p === dirPath,
+    );
+    (fs.readFileSync as Mock).mockImplementation((p) => {
+      if (p === userPath) return '{ invalid jsonc';
+      return '{}';
+    });
+
+    saveTrustedFolders({
+      path: userPath,
+      config: {
+        '/new/path': TrustLevel.TRUST_FOLDER,
+      },
+    });
+
+    expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toBe(
+      `{\n  "/new/path": "TRUST_FOLDER"\n}`,
+    );
+  });
+
+  it('saveTrustedFolders should fall back to a clean rewrite when preserved output validation fails', () => {
+    const userPath = getTrustedFoldersPath();
+    const dirPath = path.dirname(userPath);
+    const originalContent = `{
+  // work repos
+  "/existing/path": "TRUST_FOLDER"
+}`;
+    const parseSpy = vi.mocked(commentJson.parse);
+
+    (mockFsExistsSync as Mock).mockImplementation(
+      (p) => p === userPath || p === dirPath,
+    );
+    (fs.readFileSync as Mock).mockImplementation((p) => {
+      if (p === userPath) return originalContent;
+      return '{}';
+    });
+    parseSpy.mockImplementationOnce(
+      (content: string) =>
+        JSON.parse(content) as ReturnType<typeof commentJson.parse>,
+    );
+    parseSpy.mockImplementationOnce(() => {
+      throw new Error('invalid preserved output');
+    });
+
+    saveTrustedFolders({
+      path: userPath,
+      config: {
+        '/new/path': TrustLevel.TRUST_FOLDER,
+      },
+    });
+
+    expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toBe(
+      `{\n  "/new/path": "TRUST_FOLDER"\n}`,
+    );
   });
 });
 
