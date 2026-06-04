@@ -115,9 +115,9 @@ export type {
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
-export {
+export type {
   WorkflowTool,
-  type WorkflowParams,
+  WorkflowParams,
 } from './tools/workflow/workflow.js';
 export type {
   TodoWriteTool,
