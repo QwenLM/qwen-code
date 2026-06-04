@@ -491,7 +491,9 @@ export const useSlashCommandProcessor = (
                       controller.signal,
                     )
                 : undefined;
-              if (controller.signal.aborted) return null;
+              if (controller.signal.aborted) {
+                return { error: 'Skill execution cancelled by user.' };
+              }
               if (output) {
                 const blockingError = output.getBlockingError();
                 if (blockingError.blocked || output.shouldStopExecution()) {

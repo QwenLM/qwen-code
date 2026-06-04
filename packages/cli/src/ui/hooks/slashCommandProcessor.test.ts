@@ -765,6 +765,13 @@ describe('useSlashCommandProcessor', () => {
       expect(mockUpdateItem).not.toHaveBeenCalledWith(1, {
         sentToModel: true,
       });
+      expect(logSlashCommand).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          command: 'filecmd',
+          status: SlashCommandStatus.SUCCESS,
+        }),
+      );
     });
 
     it('should block submit_prompt actions when UserPromptExpansion blocks', async () => {
@@ -974,7 +981,9 @@ describe('useSlashCommandProcessor', () => {
       unmount();
       resolveHook?.();
 
-      await expect(pendingContent).resolves.toBeNull();
+      await expect(pendingContent).resolves.toEqual({
+        error: 'Skill execution cancelled by user.',
+      });
     });
   });
 
