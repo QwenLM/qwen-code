@@ -12,6 +12,9 @@ Three comments, one per stage. Post each with `gh pr comment` and capture its ID
 COMMENT_ID=$(gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/stage-N.md --json id --jq '.id')
 ```
 
+> **Note:** `--body @/path` does not read files in gh CLI (that's curl syntax). It posts the literal string.
+> Always use `--body-file /path` to post file content.
+
 | Stage   | Comment                                       |
 | ------- | --------------------------------------------- |
 | Stage 1 | Gate findings                                 |
@@ -21,8 +24,10 @@ COMMENT_ID=$(gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/stage-N.
 **Re-runs:** if the triage runs again on the same PR, update each comment in place:
 
 ```bash
-gh api -X PATCH "/repos/$REPO/issues/comments/$COMMENT_ID" -f body=@/tmp/stage-N-updated.md
+gh api -X PATCH "/repos/$REPO/issues/comments/$COMMENT_ID" -F body=@/tmp/stage-N-updated.md
 ```
+
+> Use `-F` (capital, `--field`) here — only `-F` expands `@file` to file contents. Lowercase `-f` sends the raw string.
 
 Never create duplicates.
 

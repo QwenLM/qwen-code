@@ -61,7 +61,6 @@ jobs:
         uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          TARGET_NUMBER: '${{ steps.resolve.outputs.number }}'
           REPOSITORY: '${{ github.repository }}'
         with:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
@@ -76,19 +75,4 @@ jobs:
               ],
               "sandbox": false
             }
-          prompt: |-
-            You are a triage assistant for the QwenLM/qwen-code repository.
-
-            Run `/triage ${TARGET_NUMBER}` to triage this issue or PR.
-
-            Use the available shell commands (`gh`) to gather information and
-            execute the triage workflow. The triage skill is available at
-            `.qwen/skills/triage/SKILL.md` — follow its rules exactly.
-
-            Key rules:
-            - Only target QwenLM/qwen-code with `--repo QwenLM/qwen-code`
-            - Labels: apply existing only, verify with `gh label list`
-            - Comments: use `--body-file` with heredoc for multi-line content
-            - Include both stage markers and bot-coordination markers
-            - Never close, merge, approve, assign, or remove labels
-            - Evaluate the tiered gate model before any `gh` write call
+          prompt: '/triage ${{ steps.resolve.outputs.number }}'
