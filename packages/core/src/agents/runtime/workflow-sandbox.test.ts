@@ -51,6 +51,58 @@ return 1`;
 phase("plan")`;
     expect(stripExportMeta(src).trim()).toBe(`phase("plan")`);
   });
+
+  // T16 (Round 1 review Suggestion): line comments must skip their contents
+  // including stray quotes and braces, otherwise an `it's a plan` comment
+  // opens a phantom string literal that walks to EOF.
+  it('handles single-line comments inside meta object', () => {
+    const src = `export const meta = {
+  // it's the plan
+  name: 'x',
+}
+phase("plan")
+return 1`;
+    expect(stripExportMeta(src).trim()).toBe(`phase("plan")\nreturn 1`);
+  });
+
+  it('handles braces inside single-line comments', () => {
+    const src = `export const meta = {
+  name: 'x', // closes brace } here
+}
+return 1`;
+    expect(stripExportMeta(src).trim()).toBe(`return 1`);
+  });
+
+  it('handles block comments inside meta object', () => {
+    const src = `export const meta = {
+  /* a multi-line comment with } and ' inside */
+  name: 'x',
+}
+return 42`;
+    expect(stripExportMeta(src).trim()).toBe(`return 42`);
+  });
+
+  // T16: regex literals shouldn't be parsed as division on `/`.
+  it('handles regex literals in meta values', () => {
+    const src = `export const meta = { name: 'x', pattern: /\\{[a-z]+\\}/g }
+return 1`;
+    expect(stripExportMeta(src).trim()).toBe(`return 1`);
+  });
+
+  // T9 / T17 (Round 1 review Critical): refuse to silently delete the script
+  // when the meta block has unmatched braces — previously returned `""`
+  // which made the workflow appear to succeed while returning nothing.
+  it('throws on unbalanced meta braces (does not silently delete script)', () => {
+    expect(() => stripExportMeta(`export const meta = { name: 'x'`)).toThrow(
+      /unbalanced/i,
+    );
+  });
+
+  it('throws on meta with unterminated string', () => {
+    expect(() =>
+      stripExportMeta(`export const meta = { name: 'foo }\nreturn 1`),
+    ).toThrow(/unbalanced/i);
+  });
 });
 
 describe('createWorkflowSandbox', () => {
@@ -94,36 +146,181 @@ describe('createWorkflowSandbox', () => {
   });
 });
 
-// TST-C1/C2/C3 security PoC tests (FIX-1 through FIX-4, FIX-9)
+// Security PoC tests — verify that every known realm-escape vector returns
+// 'undefined' / safe values rather than the host `process` object.
 describe('createWorkflowSandbox security', () => {
-  // SEC-C1: args JSON-roundtrip severs prototype chain → realm escape returns
-  // undefined or throws rather than reaching host process.
-  it('blocks args.constructor.constructor realm escape', async () => {
+  // Round 1 (PR #4732) approach: all globals are built in the vm-realm via
+  // an init script. `args.constructor` therefore points at vm-realm Object,
+  // `.constructor.constructor` at vm-realm Function, which when invoked
+  // runs in the vm realm where `process` is not defined → returns
+  // 'undefined' rather than the host process object.
+  it('args.constructor.constructor cannot reach host process', async () => {
     const sandbox = createWorkflowSandbox({
       args: { x: 1 },
       dispatch: async () => 'ignored',
     });
-    await expect(
-      sandbox.run(`
-        const ctor = args.constructor && args.constructor.constructor;
-        if (ctor) {
-          try {
-            return ctor("return typeof process")();
-          } catch (e) { return 'blocked-via-throw'; }
-        }
-        return 'blocked-via-undefined';
-      `),
-    ).resolves.toMatch(/blocked-via-/);
+    const result = await sandbox.run(`
+      try {
+        const v = args.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 60); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(String(result)).toMatch(/^undefined|^threw/);
   });
 
-  // SEC-C1: hardenClosure on phase blocks fn.constructor.constructor escape.
-  it('hardens phase global against constructor escape', async () => {
+  // T1 (Round 1 review Critical): `try { throw } catch(e) { e.constructor }`
+  // previously reached the host Function constructor because injected
+  // closures threw host-realm Error objects. The vm-realm wrapper now
+  // converts every rejection into `new Error(msg)` inside the vm context,
+  // so `e.constructor` stays in the vm realm.
+  it('thrown Error from agent() options validation cannot reach host process', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
-    const result = await sandbox.run(`return phase.constructor`);
-    expect(result).toBeUndefined();
+    const result = await sandbox.run(`
+      try {
+        await agent("x", { schema: { type: "object" } });
+        return 'no-throw';
+      } catch (e) {
+        try {
+          const v = e.constructor.constructor("return typeof process")();
+          return String(v);
+        } catch (err) { return 'inner-threw:' + String(err.message).slice(0, 40); }
+      }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(String(result)).toMatch(/^undefined|^inner-threw/);
+  });
+
+  // T8 / T14 (Round 1 review Critical): the Promise returned by agent() used
+  // to be a host-realm Promise; its constructor chain reached host Function.
+  // The vm-realm wrapper now returns a vm-realm Promise built via
+  // `new Promise(...)` inside the init script.
+  it('agent() success-path Promise constructor cannot reach host process', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ok',
+    });
+    const result = await sandbox.run(`
+      const p = agent("x");
+      try {
+        const v = p.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+    expect(String(result)).toMatch(/^undefined|^threw/);
+  });
+
+  // Same vector via parallel / pipeline / workflow stubs — they all return
+  // vm-realm Promises now.
+  it('parallel() Promise constructor cannot reach host process', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ok',
+    });
+    const result = await sandbox.run(`
+      const p = parallel([async () => 1]).catch(() => 0);
+      try {
+        const v = p.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
+  });
+
+  // T13 (Round 1 review Suggestion): the `[key: string]: unknown` index
+  // signature lets typos like `scema` past TypeScript. The runtime
+  // allowlist throws on any opt name not in the known set.
+  it('agent() rejects unknown opts (typo guard)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await expect(
+      sandbox.run(`return agent("hi", { scema: { type: 'object' } });`),
+    ).rejects.toThrow(/scema.*unknown option/);
+  });
+
+  // T2 (Round 1 review Critical): `Object.setPrototypeOf(out, null)` used to
+  // remove Array.prototype, so `for...of`, `.map`, `.forEach`, spread, and
+  // destructuring all threw `TypeError: args is not iterable`. The vm-realm
+  // approach builds args from vm-realm `JSON.parse`, so they retain
+  // vm-realm Array.prototype.
+  it('array args support for...of iteration', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: [1, 2, 3],
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`
+      let sum = 0;
+      for (const x of args) sum += x;
+      return sum;
+    `);
+    expect(result).toBe(6);
+  });
+
+  it('array args support .map / .filter / spread / destructuring', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: [1, 2, 3, 4],
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`
+      const doubled = args.map(x => x * 2);
+      const evens = args.filter(x => x % 2 === 0);
+      const spread = [0, ...args, 5];
+      const [first, ...rest] = args;
+      return { doubled, evens, spread, first, rest };
+    `);
+    expect(result).toEqual({
+      doubled: [2, 4, 6, 8],
+      evens: [2, 4],
+      spread: [0, 1, 2, 3, 4, 5],
+      first: 1,
+      rest: [2, 3, 4],
+    });
+  });
+
+  // Nested-object args also iterate correctly via Object.entries / keys.
+  it('object args support Object.keys / entries / spread', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: { a: 1, b: 2, c: 3 },
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`
+      const keys = Object.keys(args);
+      const vals = Object.values(args);
+      const ents = Object.entries(args);
+      const spread = { ...args, d: 4 };
+      return { keys, vals, ents, spread };
+    `);
+    expect(result).toEqual({
+      keys: ['a', 'b', 'c'],
+      vals: [1, 2, 3],
+      ents: [
+        ['a', 1],
+        ['b', 2],
+        ['c', 3],
+      ],
+      spread: { a: 1, b: 2, c: 3, d: 4 },
+    });
+  });
+
+  // Sanity: vm-realm phase.constructor exists but cannot reach host.
+  it('phase global is a vm-realm function (constructor cannot reach host)', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    const result = await sandbox.run(`
+      try {
+        const v = phase.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
   });
 
   // SEC-C2: vm timeout kills a synchronous infinite loop within 30s.
@@ -472,26 +669,36 @@ describe('createWorkflowSandbox security', () => {
     expect(result).toBeNull();
   });
 
-  // FIX-G (Round 4 test Critical): inner descriptor functions on budget
-  // must ALSO be hardened. Without it, `budget.spent.constructor` returns
-  // host Function (because the spent function's prototype chain still
-  // points at host Function.prototype).
-  it('budget.spent.constructor is undefined (blocks inner-function escape)', async () => {
+  // budget.spent / remaining are vm-realm functions whose .constructor is
+  // vm-realm Function. The escape would only matter if that chain reached
+  // host Function — it doesn't, because the entire budget object is built
+  // inside the vm init script.
+  it('budget.spent.constructor cannot reach host process', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
-    const result = await sandbox.run(`return budget.spent.constructor`);
-    expect(result).toBeUndefined();
+    const result = await sandbox.run(`
+      try {
+        const v = budget.spent.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
   });
 
-  it('budget.remaining.constructor is undefined (blocks inner-function escape)', async () => {
+  it('budget.remaining.constructor cannot reach host process', async () => {
     const sandbox = createWorkflowSandbox({
       args: undefined,
       dispatch: async () => 'ignored',
     });
-    const result = await sandbox.run(`return budget.remaining.constructor`);
-    expect(result).toBeUndefined();
+    const result = await sandbox.run(`
+      try {
+        const v = budget.remaining.constructor.constructor("return typeof process")();
+        return String(v);
+      } catch (e) { return 'threw:' + String(e.message).slice(0, 40); }
+    `);
+    expect(result).not.toMatch(/object|darwin|linux|win32/i);
   });
 
   // FIX-G (Round 4 test Important): Date.parse is implemented but was
@@ -507,7 +714,39 @@ describe('createWorkflowSandbox security', () => {
     ).rejects.toThrow(/unavailable in workflow scripts/i);
   });
 
-  // FIX-E (Round 4 Important): explicit max-depth cap on args nesting.
+  // T6 (Round 1 review Suggestion): validateArgs must reject functions,
+  // BigInts, and circular references — without it, JSON.stringify silently
+  // drops function-valued keys, and circular refs throw a generic message.
+  it('rejects args with function-valued properties', () => {
+    expect(() =>
+      createWorkflowSandbox({
+        args: { fn: () => 1 },
+        dispatch: async () => 'ignored',
+      }),
+    ).toThrow(/JSON-serializable.*functions/i);
+  });
+
+  it('rejects args with BigInt values', () => {
+    expect(() =>
+      createWorkflowSandbox({
+        args: { n: BigInt(1) },
+        dispatch: async () => 'ignored',
+      }),
+    ).toThrow(/JSON-serializable.*BigInt/i);
+  });
+
+  it('rejects args with circular references', () => {
+    const a: Record<string, unknown> = {};
+    a['self'] = a;
+    expect(() =>
+      createWorkflowSandbox({
+        args: a,
+        dispatch: async () => 'ignored',
+      }),
+    ).toThrow(/JSON-serializable.*circular/i);
+  });
+
+  // Explicit max-depth cap on args nesting.
   it('rejects args with nesting beyond max depth with a clear error', () => {
     const deep: Record<string, unknown> = {};
     let cur = deep;
@@ -632,6 +871,23 @@ describe('createWorkflowSandbox primitives', () => {
     `);
     expect(result).toEqual(['1', '2']);
     expect(order).toEqual([1, 2]);
+  });
+
+  // T5 (Round 1 review Suggestion): console.log/warn/error must route to
+  // getLogs() — a refactor removing the routing would silently break
+  // model scripts that use console for diagnostics.
+  it('console.log / warn / error route to getLogs()', async () => {
+    const sandbox = createWorkflowSandbox({
+      args: undefined,
+      dispatch: async () => 'ignored',
+    });
+    await sandbox.run(`
+      console.log("info");
+      console.warn("warn");
+      console.error("err");
+      return 0;
+    `);
+    expect(sandbox.getLogs()).toEqual(['info', 'warn', 'err']);
   });
 
   it('full P1 acceptance script: phase + agent returns expected value', async () => {

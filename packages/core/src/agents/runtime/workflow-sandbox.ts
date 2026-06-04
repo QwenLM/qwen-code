@@ -1,4 +1,10 @@
 /**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
  * Strip a leading `export const meta = { ... }` declaration from a workflow
  * script. Required because Node's vm script mode rejects ES module syntax.
  *
@@ -6,10 +12,12 @@
  * models whose first line is `export const meta = {...}` do not produce a
  * SyntaxError at sandbox parse time.
  *
- * Matches only at the start of a (optionally whitespace-prefixed) line; a
- * naked `const meta = ...` later in the script is left intact. Single-quote,
- * double-quote, and template-literal contents inside the meta object are
- * treated opaquely (their `{` / `}` characters are not counted as braces).
+ * Recognises `//` / `/* *\/` comments and regex literals in addition to
+ * string literals (single, double, template). Throws on unbalanced braces
+ * instead of returning a truncated string — silently deleting the script
+ * body produced the worst-case failure mode (workflow runs, returns
+ * undefined, no diagnostic).
+ *
  * Template-literal `${...}` substitutions that contain `{` or `}` are not
  * supported — model-authored `meta` should avoid them.
  */
@@ -23,6 +31,48 @@ export function stripExportMeta(source: string): string {
   let i = startBrace + 1;
   while (i < source.length && depth > 0) {
     const ch = source[i];
+    const next = source[i + 1];
+    // Single-line comment: skip to newline (T16).
+    if (ch === '/' && next === '/') {
+      i += 2;
+      while (i < source.length && source[i] !== '\n') i++;
+      continue;
+    }
+    // Block comment: skip to closing `*/` (T16).
+    if (ch === '/' && next === '*') {
+      i += 2;
+      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/'))
+        i++;
+      i += 2;
+      continue;
+    }
+    // Regex literal: skip to matching `/`. We accept the heuristic that a `/`
+    // appearing as a value in `{` context is a regex literal, not division
+    // — meta objects don't perform arithmetic on properties.
+    if (ch === '/' && isRegexContext(source, i)) {
+      i++;
+      let inClass = false;
+      while (
+        i < source.length &&
+        (inClass || source[i] !== '/') &&
+        source[i] !== '\n'
+      ) {
+        if (source[i] === '\\') i += 2;
+        else if (source[i] === '[') {
+          inClass = true;
+          i++;
+        } else if (source[i] === ']') {
+          inClass = false;
+          i++;
+        } else {
+          i++;
+        }
+      }
+      i++; // skip closing /
+      // Skip flags
+      while (i < source.length && /[gimsuy]/.test(source[i]!)) i++;
+      continue;
+    }
     if (ch === '"' || ch === "'" || ch === '`') {
       const q = ch;
       i++;
@@ -30,56 +80,74 @@ export function stripExportMeta(source: string): string {
         if (source[i] === '\\') i++; // skip escaped char
         i++;
       }
-    } else if (ch === '{') {
-      depth++;
-    } else if (ch === '}') {
-      depth--;
+      i++; // skip closing quote
+      continue;
     }
+    if (ch === '{') depth++;
+    else if (ch === '}') depth--;
     i++;
+  }
+  // T9/T17: refuse to truncate the script when the meta block is unbalanced.
+  // Returning `""` previously caused the entire workflow body to vanish
+  // silently — the worst possible failure mode.
+  if (depth !== 0) {
+    throw new Error(
+      'stripExportMeta: unbalanced braces in export const meta declaration — ' +
+        'the workflow script cannot be safely stripped. Check the meta block syntax.',
+    );
   }
   // Skip trailing whitespace and an optional semicolon.
   while (i < source.length && /[\s;]/.test(source[i]!)) i++;
   return source.slice(0, exportIdx) + source.slice(i);
 }
 
+/**
+ * Heuristic: a `/` at offset `i` is a regex literal (not division) if the
+ * previous non-whitespace character is an operator, opening brace/bracket,
+ * comma, colon, or `=` — i.e. positions where a value is expected.
+ */
+function isRegexContext(source: string, i: number): boolean {
+  let j = i - 1;
+  while (j >= 0 && /\s/.test(source[j]!)) j--;
+  if (j < 0) return true;
+  const prev = source[j]!;
+  return /[{[(,;:=!&|?+\-*/%^~<>]/.test(prev);
+}
+
 import * as vm from 'node:vm';
 
-// FIX-9 (SEC-I2): cap the number of log lines to prevent unbounded memory use.
+// Cap log + phase lines to prevent unbounded memory growth from runaway
+// model-authored loops.
 const MAX_LOG_LINES = 10_000;
-// FIX-C5 (SEC-2-I1): cap phases entries similarly; large model-authored loops
-// could otherwise push millions of phase titles and OOM the host.
 const MAX_PHASE_ENTRIES = 10_000;
+// Max nesting depth for args; defends against stack-overflow on deeply
+// nested model-authored input.
+const ARGS_MAX_DEPTH = 64;
 
 /**
  * WorkflowAgentOpts — structured options for the `agent()` global.
  *
- * FIX-4 (UP-C1): extending the options type from `{ label? }` to a
- * documented interface so that unsupported P1 fields produce a clean
- * runtime error rather than silent semantic drift.
+ * The named fields below are explicitly recognised. P1 throws for unsupported
+ * fields (`schema`, `model`, `isolation`, `agentType`) rather than silently
+ * dropping them. The runtime allowlist enforced in the vm-realm init script
+ * additionally throws on ANY field not in the known set — catching typos
+ * like `scema` before they reach dispatch.
  */
 export interface WorkflowAgentOpts {
   label?: string;
   phase?: string;
-  // The following are documented for future phases. P1 throws if any of them
-  // is set — silently ignoring them would produce hard-to-debug semantic drift
-  // (e.g. opts.schema set but no StructuredOutput → script gets a string and
-  // crashes on .field access).
   schema?: object;
   model?: string;
   isolation?: 'worktree' | 'remote';
   agentType?: string;
-  // Allow forward-compat extra keys without TS error; runtime throws on any
-  // explicitly-named unsupported field above.
+  // The index signature exists so TypeScript accepts forward-compat opt names
+  // at compile time; the runtime allowlist still rejects unknown names.
   [key: string]: unknown;
 }
 
 /**
- * Forward-compatibility alias for the agent dispatch return type.
- *
- * P1: always `string`. P3 will widen this to support StructuredOutput
- * (the schema-validated object path). Re-declared here so SandboxOptions
- * stays decoupled from `workflow-orchestrator.ts`; the orchestrator
- * re-exports the same alias for external consumers.
+ * Forward-compatibility alias for the agent dispatch return type. P1: always
+ * `string`. P3 will widen this to support StructuredOutput.
  */
 export type WorkflowAgentResult = string;
 
@@ -99,25 +167,14 @@ export interface SandboxOptions {
   /**
    * Function called by the script's `agent(prompt, opts)` global. Returns the
    * agent's final text. Injected so tests can mock without spawning an LLM.
-   *
-   * FIX-4 (UP-C1): opts type widened to WorkflowAgentOpts.
-   * FIX-E (Round 4 ARCH-I1): return type now uses `WorkflowAgentResult` so
-   * P3's widening (to `string | { schema; value }`) propagates here
-   * automatically.
    */
   dispatch: (
     prompt: string,
     opts: WorkflowAgentOpts,
   ) => Promise<WorkflowAgentResult>;
   /**
-   * FIX-H (Round 5 ARCH I1/I2/I3): forward-compatibility injection seams for
-   * P2 (parallel / pipeline) and P5 (budget). If omitted, the sandbox falls
-   * back to throwing stubs that surface a clear "scheduled for PN" error
-   * — so P1 behaviour is preserved when callers don't provide these.
-   *
-   * Adding these now means P2/P5 can wire real implementations from the
-   * orchestrator layer without modifying createWorkflowSandbox internals
-   * (and thereby invalidating the sandbox's security-review surface).
+   * Forward-compatibility injection seams for P2 (parallel / pipeline) and
+   * P5 (budget). When omitted the sandbox falls back to throwing stubs.
    */
   parallel?: (thunks: Array<() => Promise<unknown>>) => Promise<unknown[]>;
   pipeline?: (
@@ -143,85 +200,63 @@ export interface WorkflowSandbox {
 }
 
 /**
- * FIX-2 (SEC-C1): Recursively replace every plain-object prototype with null
- * so that `val.constructor` returns undefined in the vm context.
- *
- * Arrays are left as-is (their elements are recursed). Primitives and null
- * pass through. This is applied after the JSON roundtrip so the shape is
- * guaranteed to be JSON-safe (no cycles, no functions).
+ * Validate `args` without mutating it. Throws on functions, BigInts, circular
+ * references, and nesting beyond `ARGS_MAX_DEPTH`. The actual sandbox `args`
+ * global is built INSIDE the vm context via `JSON.parse` so it inherits
+ * vm-realm prototypes — this validation just gates what we hand to JSON
+ * stringification.
  */
-const DEEP_NULL_PROTO_MAX_DEPTH = 64;
-
-function deepNullProto(val: unknown, depth = 0): unknown {
-  if (depth > DEEP_NULL_PROTO_MAX_DEPTH) {
-    // FIX-E (Round 4 Important): explicit depth cap. Without this, an args
-    // object with nesting depth ~5_000 throws a generic RangeError from the
-    // host stack overflow — opaque to the caller.
+function validateArgs(
+  val: unknown,
+  depth = 0,
+  seen: WeakSet<object> = new WeakSet(),
+): void {
+  if (depth > ARGS_MAX_DEPTH) {
     throw new Error(
-      `WorkflowSandbox: args exceeded max nesting depth of ${DEEP_NULL_PROTO_MAX_DEPTH}`,
+      `WorkflowSandbox: args exceeded max nesting depth of ${ARGS_MAX_DEPTH}`,
     );
   }
-  if (val === null || typeof val !== 'object') return val;
+  if (val === null) return;
+  const t = typeof val;
+  if (t === 'function') {
+    throw new Error(
+      'WorkflowSandbox: args must be JSON-serializable (functions are not allowed).',
+    );
+  }
+  if (t === 'bigint') {
+    throw new Error(
+      'WorkflowSandbox: args must be JSON-serializable (BigInt is not allowed — pass as string).',
+    );
+  }
+  if (t !== 'object') return;
+  const obj = val as object;
+  if (seen.has(obj)) {
+    throw new Error(
+      'WorkflowSandbox: args must be JSON-serializable (circular reference detected).',
+    );
+  }
+  seen.add(obj);
   if (Array.isArray(val)) {
-    // FIX-E (Round 4 CRITICAL): sever the array's own prototype too.
-    // Previously the array body kept Array.prototype, so `args.constructor`
-    // was host `Array` and `args.constructor.constructor` was host
-    // `Function` — a confirmed PoC read `process.env.HOME`.
-    const out = val.map((x) => deepNullProto(x, depth + 1));
-    Object.setPrototypeOf(out, null);
-    return out;
+    for (const item of val) validateArgs(item, depth + 1, seen);
+  } else {
+    for (const v of Object.values(val as Record<string, unknown>)) {
+      validateArgs(v, depth + 1, seen);
+    }
   }
-  const out: Record<string, unknown> = Object.create(null);
-  for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
-    out[k] = deepNullProto(v, depth + 1);
-  }
-  return out;
-}
-
-/**
- * FIX-3 (SEC-C1) + FIX-D (Round 3 SEC C1-C3): Sever the prototype chain of an
- * injected host-realm object so sandbox scripts cannot walk it back to the
- * host Function constructor.
- *
- * Round 2 added `.constructor = undefined`, which blocked the direct path
- * `fn.constructor.constructor`. Round 3 PoCs showed three remaining escapes:
- *   - `fn.toString.constructor` — toString inherited from host Function.prototype
- *   - `fn.__proto__.constructor` — direct prototype access
- *   - `Math.abs.constructor` — inherited Math methods are host functions
- *
- * Fix: also call `Object.setPrototypeOf(obj, null)`. This makes:
- *   - `obj.constructor` → undefined (per defineProperty above)
- *   - `obj.toString` → undefined (no Function.prototype inherited)
- *   - `obj.__proto__` → undefined (no Object.prototype inherited)
- *   - `obj.bind/.call/.apply` → undefined (severed Function.prototype)
- *
- * The function is still callable (its [[Call]] internal slot is unaffected).
- */
-function hardenInjected<T extends object>(obj: T): T {
-  Object.defineProperty(obj, 'constructor', {
-    value: undefined,
-    writable: false,
-    configurable: false,
-  });
-  Object.setPrototypeOf(obj, null);
-  return obj;
 }
 
 export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
   const phases: string[] = [];
   const logs: string[] = [];
 
-  // FIX-9 (SEC-I2): cap log lines to prevent unbounded memory growth.
   const safeLog = (msg: unknown): void => {
     if (logs.length < MAX_LOG_LINES) {
       logs.push(String(msg));
     } else if (logs.length === MAX_LOG_LINES) {
       logs.push(`[workflow log truncated at ${MAX_LOG_LINES} lines]`);
     }
-    // Beyond MAX_LOG_LINES + 1, additional entries are silently dropped.
   };
 
-  // FIX-C5 (SEC-2-I1): same cap pattern for phases.
   const safePhase = (title: string): void => {
     if (phases.length < MAX_PHASE_ENTRIES) {
       phases.push(String(title));
@@ -232,210 +267,55 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
     }
   };
 
-  // FIX-2 (SEC-C1): JSON-roundtrip args then strip all Object.prototype links
-  // via deepNullProto. Two-step rationale:
-  //
-  //   1. JSON.parse(JSON.stringify(x)) rejects non-serialisable values (functions,
-  //      circular refs) with a clear error, keeping the surface well-defined.
-  //   2. deepNullProto(x) replaces every plain-object's prototype with null so
-  //      that `args.constructor` returns undefined inside the vm context instead
-  //      of pointing at the host Object/Function constructor chain. Without this
-  //      step the classic PoC `args.constructor.constructor("return process")()`
-  //      still reaches the host realm even after JSON roundtrip.
-  let safeArgs: unknown;
-  try {
-    safeArgs =
-      opts.args === undefined
-        ? undefined
-        : deepNullProto(JSON.parse(JSON.stringify(opts.args)));
-  } catch (err) {
-    throw new Error(
-      `WorkflowSandbox: args must be JSON-serializable (no functions, no circular references). Got: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
+  // FIX-Round1-T6: validate args structure (functions/BigInt/circular/depth)
+  // before serialising. Without this, `JSON.stringify({fn: () => {}})` silently
+  // drops the function key.
+  if (opts.args !== undefined) validateArgs(opts.args);
+  const argsJson = opts.args === undefined ? null : JSON.stringify(opts.args);
 
-  // FIX-D (Round 3 SEC C1-C3, UP C1): Math and Date are NOT injected here.
-  // Round 3 PoCs proved that injecting host-realm Math (via Proxy) and Date
-  // (as a plain object) leaks the host Function constructor via three paths:
-  //   1. `Math.__proto__.constructor.constructor("return process")()`
-  //   2. `Math.toString.constructor("return process")()` (Math.toString
-  //      inherited from host Function.prototype)
-  //   3. `Date.constructor.constructor("return process")()` (Date stub is a
-  //      plain host Object, its constructor is the host Object).
-  // Instead, after vm.createContext, we evaluate an init script that
-  // constructs Math and Date IN-CONTEXT using vm-realm primordials. A
-  // vm-realm `Math.abs.constructor` is the vm-realm `Function`; invoking it
-  // runs code in the vm realm where `process` is undefined — escape blocked
-  // at the source.
-  const sandboxGlobals = {
-    // FIX-2 (SEC-C1): use JSON-roundtripped args instead of opts.args directly.
-    args: safeArgs,
-    // FIX-3 + FIX-D: harden phase/log/agent closures so .constructor AND
-    // .toString AND .__proto__ all return undefined — blocking every known
-    // closure-based realm-escape PoC.
-    // FIX-C5: route phase through safePhase for the entries cap.
-    phase: hardenInjected((title: string): void => {
-      safePhase(String(title));
-    }),
-    log: hardenInjected((message: unknown): void => {
-      safeLog(message);
-    }),
-    // FIX-4 (UP-C1): agent() now validates opts fields and throws on any
-    // unsupported option rather than silently discarding them.
-    agent: hardenInjected(
-      async (
-        prompt: string,
-        agentOpts: WorkflowAgentOpts = {},
-      ): Promise<string> => {
-        // Reject opts that P1 cannot honor — silently dropping them produces
-        // semantic corruption rather than a clean error.
-        if (agentOpts.schema !== undefined) {
-          throw new Error(
-            'agent({schema}) is not supported in P1. ' +
-              'Schema enforcement / StructuredOutput contract is scheduled for P3.',
-          );
-        }
-        if (agentOpts.isolation !== undefined) {
-          throw new Error(
-            `agent({isolation: '${agentOpts.isolation}'}) is not supported in P1. ` +
-              'Worktree / remote isolation is scheduled for a later phase.',
-          );
-        }
-        if (agentOpts.model !== undefined) {
-          throw new Error(
-            'agent({model}) is not supported in P1. Model override is scheduled for a later phase.',
-          );
-        }
-        if (agentOpts.agentType !== undefined) {
-          throw new Error('agent({agentType}) is not supported in P1.');
-        }
-        // opts.phase IS honored — push it to the phases array if not duplicate.
-        // FIX-C5: route through safePhase for the entries cap.
-        if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
-          if (phases[phases.length - 1] !== agentOpts.phase) {
-            safePhase(agentOpts.phase);
-          }
-        }
-        // opts.label is harmless to dispatch as-is.
-        return opts.dispatch(prompt, agentOpts);
-      },
-    ),
-    // FIX-F + FIX-H (Round 4 UP Critical + Round 5 ARCH I1/I2): P2/P5
-    // primitives are surfaced as injectable seams. If the caller supplies
-    // `opts.parallel` / `opts.pipeline` / `opts.budget`, the sandbox uses
-    // them; otherwise it falls back to throwing stubs that give the model
-    // a clear "scheduled for PN" message instead of `ReferenceError`.
-    //
-    // Adding the injection seams in P1 means P2 can wire real concurrent
-    // dispatchers without modifying createWorkflowSandbox itself — keeping
-    // the sandbox's already-reviewed security surface unchanged.
-    parallel: hardenInjected(
-      opts.parallel
-        ? async (thunks: Array<() => Promise<unknown>>) =>
-            opts.parallel!(thunks)
-        : async (_thunks: unknown): Promise<unknown> => {
-            throw new Error(
-              'parallel() is not supported in P1. Sequential agent() is the only ' +
-                'execution mode in P1. Concurrent fan-out is scheduled for P2.',
-            );
-          },
-    ),
-    pipeline: hardenInjected(
-      opts.pipeline
-        ? async (
-            items: unknown[],
-            ...stages: Array<
-              (prev: unknown, item: unknown, idx: number) => Promise<unknown>
-            >
-          ) => opts.pipeline!(items, ...stages)
-        : async (_items: unknown, ..._stages: unknown[]): Promise<unknown> => {
-            throw new Error(
-              'pipeline() is not supported in P1. Staggered multi-stage execution ' +
-                'is scheduled for P2.',
-            );
-          },
-    ),
-    workflow: hardenInjected(
-      async (_nameOrRef: unknown, _args?: unknown): Promise<unknown> => {
-        throw new Error(
-          'workflow() (nested workflow invocation) is not supported in P1. ' +
-            'Scheduled for a later phase.',
-        );
-      },
-    ),
-    // FIX-F + FIX-G + FIX-H: budget injected if provided, else hardened
-    // throwing stub. The injected budget is wrapped in hardenInjected too,
-    // and its inner spent/remaining methods are re-hardened to block the
-    // `budget.spent.constructor` host-Function escape vector.
-    budget: hardenInjected(
-      opts.budget
-        ? (Object.create(null, {
-            total: {
-              value: opts.budget.total,
-              writable: false,
-              configurable: false,
-            },
-            spent: {
-              value: hardenInjected(() => opts.budget!.spent()),
-              writable: false,
-              configurable: false,
-            },
-            remaining: {
-              value: hardenInjected(() => opts.budget!.remaining()),
-              writable: false,
-              configurable: false,
-            },
-          }) as object)
-        : (Object.create(null, {
-            total: { value: null, writable: false, configurable: false },
-            spent: {
-              value: hardenInjected(() => {
-                throw new Error(
-                  'budget.spent() is not supported in P1. Token tracking is scheduled for P5.',
-                );
-              }),
-              writable: false,
-              configurable: false,
-            },
-            remaining: {
-              value: hardenInjected(() => {
-                throw new Error(
-                  'budget.remaining() is not supported in P1. Token tracking is scheduled for P5.',
-                );
-              }),
-              writable: false,
-              configurable: false,
-            },
-          }) as object),
-    ),
-    // FIX-3 + FIX-D: console.* closures hardened (proto null) and routed
-    // through safeLog for the log cap. The `console` container object is
-    // ALSO hardened so `console.constructor.constructor` cannot escape.
-    console: hardenInjected({
-      log: hardenInjected((...args: unknown[]) =>
-        safeLog(args.map(String).join(' ')),
-      ),
-      warn: hardenInjected((...args: unknown[]) =>
-        safeLog(args.map(String).join(' ')),
-      ),
-      error: hardenInjected((...args: unknown[]) =>
-        safeLog(args.map(String).join(' ')),
-      ),
-    }),
+  // FIX-Round1-T1/T8/T14: build EVERY sandbox global inside the vm-realm
+  // via the init script below. Host-realm objects (Promises returned by host
+  // async functions, Error objects thrown by host code) leak the host Function
+  // constructor through their prototype chains:
+  //   `agent("x").constructor.constructor("return process")()` (T8, success path)
+  //   `try { throw new Error } catch(e) { e.constructor.constructor(...)() }` (T1)
+  // The fix is to NEVER expose a host object across the vm boundary. Instead
+  // we expose a primitive bridge (functions and strings) on globalThis,
+  // delete it as the first init action, and have the init script build vm-realm
+  // wrappers that internally call the bridge but only return / throw vm-realm
+  // values.
+  const bridge = {
+    argsJson,
+    pushPhase: safePhase,
+    pushLog: safeLog,
+    lastPhase: () => phases[phases.length - 1],
+    hostAgent: opts.dispatch,
+    // The truthy flags distinguish "injected" from "default stub" inside the
+    // init script without leaking the host function itself when not used.
+    hasParallel: !!opts.parallel,
+    hasPipeline: !!opts.pipeline,
+    hasBudget: !!opts.budget,
+    hostParallel: opts.parallel,
+    hostPipeline: opts.pipeline,
+    budgetTotal: opts.budget ? opts.budget.total : null,
+    hostBudgetSpent: opts.budget ? opts.budget.spent.bind(opts.budget) : null,
+    hostBudgetRemaining: opts.budget
+      ? opts.budget.remaining.bind(opts.budget)
+      : null,
   };
 
-  const ctx = vm.createContext(sandboxGlobals);
+  const ctx = vm.createContext({ __workflowBridge: bridge });
 
-  // FIX-D (Round 3 SEC C1-C3, UP C1): construct vm-realm Math and Date stubs.
-  // Evaluating this init script inside the vm context means:
-  //   - `Math` is now a vm-realm null-proto object
-  //   - `Math.abs.constructor` is vm-realm Function (cannot reach host process)
-  //   - `Math.__proto__` is null (no prototype chain to walk)
-  //   - `Date` is a vm-realm function whose [[Call]] throws our nice message
-  //   - `Date.constructor` is undefined (proto severed)
-  // Error messages are verbatim from claude-code 2.1.160 binary §axO and §sxO.
+  // FIX-D + FIX-Round1: build Math, Date, args, all async/sync globals,
+  // and the console object entirely inside the vm-realm. After this init
+  // script completes, `globalThis.__workflowBridge` is deleted so the user
+  // script cannot reach it.
   vm.runInContext(
     `(() => {
+      const __b = globalThis.__workflowBridge;
+      delete globalThis.__workflowBridge;
+
+      // --- Math (vm-realm, random throws) ---
       const realMath = Math;
       const safeMath = Object.create(null);
       for (const k of Object.getOwnPropertyNames(realMath)) {
@@ -450,6 +330,7 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       };
       globalThis.Math = safeMath;
 
+      // --- Date (vm-realm function that throws on any access) ---
       const dateMsg = 'Date.now() / new Date() are unavailable in workflow ' +
         'scripts (breaks resume). Stamp results after the workflow returns, ' +
         'or pass timestamps via args.';
@@ -462,6 +343,184 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
         value: undefined, writable: false, configurable: false,
       });
       globalThis.Date = safeDate;
+
+      // --- args (parsed via vm-realm JSON → vm-realm objects/arrays) ---
+      // FIX-Round1-T2: vm-realm arrays keep their vm-realm Array.prototype,
+      // so for...of, .map, .forEach, spread, destructuring all work — and
+      // their inherited methods' constructors are vm-realm Function, which
+      // cannot reach host process.
+      globalThis.args = __b.argsJson === null ? undefined : JSON.parse(__b.argsJson);
+
+      // --- Wrap a host async function so it returns a vm-realm Promise ---
+      // FIX-Round1-T1/T8/T14: success and failure both cross the boundary
+      // as vm-realm values: resolve with the host's value (a primitive
+      // string for dispatch; vm-realm arrays for parallel/pipeline because
+      // those wrappers will produce vm-realm results); reject with a
+      // freshly-constructed vm-realm Error so e.constructor.constructor
+      // stays in the vm realm.
+      function vmAsync(hostFn) {
+        return function (...vmArgs) {
+          return new Promise(function (resolve, reject) {
+            try {
+              const hostPromise = hostFn.apply(null, vmArgs);
+              hostPromise.then(
+                function (value) { resolve(value); },
+                function (hostErr) {
+                  const msg = (hostErr && hostErr.message != null)
+                    ? String(hostErr.message)
+                    : String(hostErr);
+                  reject(new Error(msg));
+                }
+              );
+            } catch (hostErr) {
+              const msg = (hostErr && hostErr.message != null)
+                ? String(hostErr.message)
+                : String(hostErr);
+              reject(new Error(msg));
+            }
+          });
+        };
+      }
+
+      // --- phase / log ---
+      globalThis.phase = function phase(title) {
+        __b.pushPhase(String(title));
+      };
+      globalThis.log = function log(msg) {
+        __b.pushLog(msg);
+      };
+
+      // --- console (object with hardened methods, all in vm-realm) ---
+      const safeConsole = Object.create(null);
+      safeConsole.log = function () {
+        const parts = [];
+        for (let i = 0; i < arguments.length; i++) parts.push(String(arguments[i]));
+        __b.pushLog(parts.join(' '));
+      };
+      safeConsole.warn = safeConsole.log;
+      safeConsole.error = safeConsole.log;
+      globalThis.console = safeConsole;
+
+      // --- agent (with runtime allowlist + named throws, all vm-realm) ---
+      // FIX-Round1-T13: throw on any opts key not in the allowlist — catches
+      // typos like { scema: ... } that previously slipped through the
+      // [key:string]: unknown index signature.
+      const KNOWN_AGENT_OPTS = ['label', 'phase', 'schema', 'model', 'isolation', 'agentType'];
+      globalThis.agent = vmAsync(function (prompt, agentOpts) {
+        agentOpts = agentOpts || {};
+        const keys = Object.keys(agentOpts);
+        for (let i = 0; i < keys.length; i++) {
+          const k = keys[i];
+          if (KNOWN_AGENT_OPTS.indexOf(k) === -1) {
+            throw new Error(
+              "agent({" + k + "}): unknown option. " +
+              "Known options are: " + KNOWN_AGENT_OPTS.join(', ') + "."
+            );
+          }
+        }
+        if (agentOpts.schema !== undefined) {
+          throw new Error(
+            'agent({schema}) is not supported in P1. ' +
+            'Schema enforcement / StructuredOutput contract is scheduled for P3.'
+          );
+        }
+        if (agentOpts.isolation !== undefined) {
+          throw new Error(
+            "agent({isolation: '" + agentOpts.isolation + "'}) is not supported in P1. " +
+            'Worktree / remote isolation is scheduled for a later phase.'
+          );
+        }
+        if (agentOpts.model !== undefined) {
+          throw new Error(
+            'agent({model}) is not supported in P1. Model override is scheduled for a later phase.'
+          );
+        }
+        if (agentOpts.agentType !== undefined) {
+          throw new Error('agent({agentType}) is not supported in P1.');
+        }
+        if (typeof agentOpts.phase === 'string' && agentOpts.phase.length > 0) {
+          if (__b.lastPhase() !== agentOpts.phase) {
+            __b.pushPhase(agentOpts.phase);
+          }
+        }
+        return __b.hostAgent(prompt, agentOpts);
+      });
+
+      // --- parallel / pipeline ---
+      if (__b.hasParallel) {
+        globalThis.parallel = vmAsync(function (thunks) {
+          return __b.hostParallel(thunks);
+        });
+      } else {
+        globalThis.parallel = function parallel() {
+          return new Promise(function (_, reject) {
+            reject(new Error(
+              'parallel() is not supported in P1. Sequential agent() is the only ' +
+              'execution mode in P1. Concurrent fan-out is scheduled for P2.'
+            ));
+          });
+        };
+      }
+      if (__b.hasPipeline) {
+        globalThis.pipeline = vmAsync(function (items) {
+          const stages = [];
+          for (let i = 1; i < arguments.length; i++) stages.push(arguments[i]);
+          return __b.hostPipeline.apply(null, [items].concat(stages));
+        });
+      } else {
+        globalThis.pipeline = function pipeline() {
+          return new Promise(function (_, reject) {
+            reject(new Error(
+              'pipeline() is not supported in P1. Staggered multi-stage execution ' +
+              'is scheduled for P2.'
+            ));
+          });
+        };
+      }
+      // workflow() always throws in P1.
+      globalThis.workflow = function workflow() {
+        return new Promise(function (_, reject) {
+          reject(new Error(
+            'workflow() (nested workflow invocation) is not supported in P1. ' +
+            'Scheduled for a later phase.'
+          ));
+        });
+      };
+
+      // --- budget ---
+      const safeBudget = Object.create(null);
+      Object.defineProperty(safeBudget, 'total', {
+        value: __b.budgetTotal,
+        writable: false, configurable: false,
+      });
+      if (__b.hasBudget) {
+        Object.defineProperty(safeBudget, 'spent', {
+          value: function spent() { return __b.hostBudgetSpent(); },
+          writable: false, configurable: false,
+        });
+        Object.defineProperty(safeBudget, 'remaining', {
+          value: function remaining() { return __b.hostBudgetRemaining(); },
+          writable: false, configurable: false,
+        });
+      } else {
+        Object.defineProperty(safeBudget, 'spent', {
+          value: function spent() {
+            throw new Error(
+              'budget.spent() is not supported in P1. Token tracking is scheduled for P5.'
+            );
+          },
+          writable: false, configurable: false,
+        });
+        Object.defineProperty(safeBudget, 'remaining', {
+          value: function remaining() {
+            throw new Error(
+              'budget.remaining() is not supported in P1. Token tracking is scheduled for P5.'
+            );
+          },
+          writable: false, configurable: false,
+        });
+      }
+      globalThis.budget = safeBudget;
     })();`,
     ctx,
     { filename: 'workflow-sandbox-init.js' },
@@ -474,16 +533,11 @@ export function createWorkflowSandbox(opts: SandboxOptions): WorkflowSandbox {
       const script = new vm.Script(wrapped, {
         filename: 'workflow.js',
       });
-      // FIX-1 (SEC-C2): add a 30s wall-clock timeout to protect the host
-      // from synchronous infinite loops (e.g. `while(true){}`).
-      //
-      // IMPORTANT: vm `timeout` only covers SYNCHRONOUS execution per the
-      // Node.js vm docs. An async infinite loop such as
-      //   `while(true) { await agent(...) }`
-      // is NOT killed by this timeout — that is the responsibility of the
-      // 1000-agent cap scheduled for P2.
+      // 30s sync wall-clock cap. Only covers synchronous execution; async
+      // infinite loops (`while(true){await agent(...)}`) are bounded by P2's
+      // upcoming 1000-agent cap.
       const runOpts: vm.RunningScriptOptions = {
-        timeout: 30_000, // 30s wall-clock cap; protects host from sync infinite loops.
+        timeout: 30_000,
       };
       const result = script.runInContext(ctx, runOpts) as Promise<unknown>;
       return result;
