@@ -500,7 +500,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     // Idle timeout: if no chunks arrive for this duration the consumer has
     // likely abandoned the generator without calling .return(). Close the
-    // span so it doesn't leak forever.  The timer resets on every chunk,
+    // span so it doesn't leak forever. The timer resets on every chunk,
     // so legitimately long-running streams are never affected.
     const STREAM_IDLE_TIMEOUT_MS = 5 * 60_000; // 5 minutes
     let spanEndTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -572,7 +572,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       // it with a "success" api_response log or model-output span attributes.
       // The OpenAI interaction log is also skipped — telemetry already carries
       // the timeout signal and a parallel "success" record would be confusing
-      // during incident response (#4212).
+      // during incident response .
       if (!spanEndedByTimeout) {
         runInSpan(() =>
           this.safelyLogApiResponse(
@@ -603,7 +603,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       // closed the span as failed, do not emit a parallel api_error log
       // (the span is the canonical signal). Otherwise we'd produce the
       // exact contradictory pair the timeout fix targets — span timed-out
-      // + api_error log — just on the error branch (#4302 review).
+      // + api_error log — just on the error branch ( review).
       if (!spanEndedByTimeout) {
         const durationMs = Date.now() - startTime;
         runInSpan(() =>

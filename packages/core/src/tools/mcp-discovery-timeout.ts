@@ -7,7 +7,7 @@
 import type { MCPServerConfig } from '../config/config.js';
 
 /**
- * F2 (#4175 commit 6 review fix — wenshao W43 / W44 / gpt-5.5 W25):
+ *
  * shared discovery-timeout primitives used by BOTH
  * `McpTransportPool.spawnEntry` (initial connect/discover) AND
  * `PoolEntry.doRestart` (manual restart). Pre-fix only spawn was

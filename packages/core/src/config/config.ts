@@ -382,7 +382,7 @@ export interface TelemetryMetricsSettings {
  * the qwen-code process and INTO third-party LLM provider request
  * streams (DashScope, OpenAI, Anthropic, etc.). Different recipients =
  * different consent decision, so a different settings tree. See PR
- * #4390 review (LaZzyMan) for the framing rationale.
+ *  review for the framing rationale.
  *
  * All values default to off / no propagation. Operators who want to
  * propagate trace context for server-side trace stitching (e.g. ARMS
@@ -629,7 +629,7 @@ export interface ConfigParameters {
    * invocation), tools listed here are not registered at all and never
    * appear in `/tools`, `getAllTools()`, or function-call discovery.
    * Sourced from `settings.tools.disabled` and the daemon mutation route
-   * `POST /workspace/tools/:name/enable {enabled:false}` (#4175 Wave 4 PR
+   * `POST /workspace/tools/:name/enable {enabled:false}` ( PR
    * 17). Active sessions retain already-registered tools — the disabled
    * set is consulted at register time, so toggling takes effect on the
    * next ACP child spawn or `ToolRegistry.refresh()`.
@@ -688,7 +688,7 @@ export interface ConfigParameters {
   maxSessionTurns?: number;
   /**
    * Wall-clock budget for an unattended run, in seconds. `-1` (default)
-   * means no limit. Enforced by the CLI's non-interactive run loop —
+   * means no limit. Enforced by the CLI's non-interactive run loop
    * see `RunBudgetEnforcer` in `packages/cli/src/utils/runBudget.ts`.
    * Issue: QwenLM/qwen-code#4103.
    */
@@ -920,7 +920,7 @@ export interface ConfigInitializeOptions {
    */
   skipGeminiInitialization?: boolean;
   /**
-   * F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): skip MCP
+   * skip MCP
    * discovery entirely (both inline tool-registry-time discovery AND
    * the post-`createToolRegistry` background `startMcpDiscoveryInBackground`).
    * The bootstrap config in ACP daemon mode uses this to AVOID spawning
@@ -970,7 +970,7 @@ export class Config {
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   /**
-   * PR 14b fix #2 (codex review round 1): callback stashed BEFORE
+   * callback stashed BEFORE
    * `initialize()` runs and applied as soon as `toolRegistry` is up,
    * so the manager's `setOnBudgetEvent` is wired before
    * `startMcpDiscoveryInBackground` (or legacy blocking discovery)
@@ -1024,7 +1024,7 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
-  // #4282 fold-in 5 (Codex P2-2). `disabledTools` is set at construction
+  //   . `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
   // `discoverMcpToolsForServer` sees the latest disabled set instead
@@ -1646,7 +1646,7 @@ export class Config {
     // an escape hatch.
     const legacyBlockingMcp =
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
-    // W119: also force the inline-discovery skip when the caller opts
+    // : also force the inline-discovery skip when the caller opts
     // out of MCP entirely (ACP bootstrap path) — otherwise the legacy
     // blocking mode would still spawn MCP servers via the tool-registry
     // construction path.
@@ -1687,7 +1687,7 @@ export class Config {
     // shortly after each server settles. See `AppContainer.tsx`'s
     // `mcp-client-update` subscriber.
     //
-    // W119: also gated on `!options?.skipMcpDiscovery` — the ACP
+    // : also gated on `!options?.skipMcpDiscovery` — the ACP
     // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
     // config doesn't run discovery under its pool-less manager.
     if (
@@ -1795,7 +1795,7 @@ export class Config {
     // exists only because some tests (e.g. those using
     // `createMockToolRegistry`) stub `ToolRegistry` as a plain object
     // that doesn't implement the method. The optional-chaining call
-    // (`?.()`) means the stubbed path resolves to `undefined` instead
+    // (`?.`) means the stubbed path resolves to `undefined` instead
     // of crashing `initialize()` for tests that never exercise MCP.
     //
     // Crucially, the inner shape is `ReturnType<ToolRegistry['getMcpClientManager']>`
@@ -2160,8 +2160,8 @@ export class Config {
     // Only refresh when THIS process established its own sidecar at
     // startup (interactive UI). A non-interactive `/clear` (e.g.
     // qwen --prompt-interactive) must not delete a sibling shell's
-    // sidecar that happens to share the outgoing session id —
-    // mirrors kimi-cli PR #2082's "write only when a session is
+    // sidecar that happens to share the outgoing session id
+    // mirrors kimi-cli PR 's "write only when a session is
     // established for this process" rule.
     if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
       const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
@@ -2591,8 +2591,8 @@ export class Config {
    *
    * This merges all sources so that PermissionManager receives a single,
    * authoritative list:
-   *   - settings.permissions.allow  (persistent rules from all scopes)
-   *   - allowedTools param  (SDK / argv auto-approve list)
+   *   - settings.permissions.allow (persistent rules from all scopes)
+   *   - allowedTools param (SDK / argv auto-approve list)
    *
    * Note: coreTools is intentionally excluded here — it has whitelist semantics
    * (only listed tools are registered), not auto-approve semantics. It is
@@ -2621,8 +2621,8 @@ export class Config {
    * Returns the merged deny-rules for PermissionManager.
    *
    * Merges:
-   *   - settings.permissions.deny  (persistent rules from all scopes)
-   *   - excludeTools param  (SDK / argv blocklist)
+   *   - settings.permissions.deny (persistent rules from all scopes)
+   *   - excludeTools param (SDK / argv blocklist)
    *
    * CLI callers pre-merge argv.excludeTools into permissionsDeny.
    */
@@ -2655,7 +2655,7 @@ export class Config {
    * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
    * `ToolRegistry.registerFactory` to skip registration.
    *
-   * Mutability semantics (#4282 fold-in 5 P2-2): the snapshot is
+   * Mutability semantics ( P2-2): the snapshot is
    * mutable via `setDisabledTools()` so the daemon's
    * `setWorkspaceToolEnabled` route can re-sync the set after a
    * `tools.disabled` settings write — without that sync, the
@@ -2677,7 +2677,7 @@ export class Config {
   }
 
   /**
-   * #4282 fold-in 5 (Codex P2-2). Replace the in-process `disabledTools`
+   *   . Replace the in-process `disabledTools`
    * snapshot with a fresh set sourced from the workspace settings.
    * Intended for the `qwen serve` mutation surface
    * (`setWorkspaceToolEnabled` → ACP `qwen/control/...` → here): the
@@ -2685,7 +2685,7 @@ export class Config {
    * in-memory Config in sync so a subsequent MCP rediscovery / next
    * tool registration honors the just-toggled value.
    *
-   * Already-registered tools are NOT retroactively unregistered —
+   * Already-registered tools are NOT retroactively unregistered
    * `ToolRegistry` consults the set at registration time only, which
    * matches the documented "toggling does not unregister live tools"
    * contract.
@@ -2703,14 +2703,14 @@ export class Config {
   }
 
   /**
-   * F2 (#4175 commit 4): optional workspace-shared MCP transport pool
+   * optional workspace-shared MCP transport pool
    * injected by the daemon-mode `QwenAgent`. When set, the wrapping
    * `ToolRegistry` threads it into `McpClientManager`, which delegates
    * non-SDK MCP server discovery to the pool instead of spawning its
    * own per-session `McpClient`. Standalone `qwen` (non-daemon) leaves
-   * this `undefined` and the manager keeps its pre-F2 behavior.
+   * this `undefined` and the manager keeps its previously behavior.
    *
-   * Eagerly instantiated by `QwenAgent` (per V21-13 Q6 resolved); the
+   * Eagerly instantiated by `QwenAgent` (per Q6 resolved); the
    * pool itself is lazy w.r.t. actual MCP work — it spawns nothing
    * until the first `acquire()` from a session.
    */
@@ -2730,7 +2730,7 @@ export class Config {
 
   /**
    * T2.8: return the raw settings-layer MCP servers map (without the
-   * runtime overlay or extension contributions).  Used by
+   * runtime overlay or extension contributions). Used by
    * `McpClientManager.addRuntimeMcpServer` to detect shadow-over-
    * settings (a runtime entry whose name collides with a pre-existing
    * settings entry).
@@ -2797,7 +2797,7 @@ export class Config {
    * Add a runtime-only MCP server. Unlike `addMcpServers`, this does NOT
    * touch `this.mcpServers` (settings layer) and does not enforce the
    * `initialized` guard — the whole point is post-init mutation from the
-   * daemon surface.  `getMcpServers()` will overlay these entries on top
+   * daemon surface. `getMcpServers()` will overlay these entries on top
    * of the settings layer (Task 5).
    */
   addRuntimeMcpServer(name: string, config: MCPServerConfig): void {
@@ -2806,7 +2806,7 @@ export class Config {
 
   /**
    * Remove a runtime-only MCP server previously added via
-   * `addRuntimeMcpServer`.  Returns `true` if the entry existed and was
+   * `addRuntimeMcpServer`. Returns `true` if the entry existed and was
    * removed, `false` otherwise.
    */
   removeRuntimeMcpServer(name: string): boolean {
@@ -3466,7 +3466,7 @@ export class Config {
 
   /**
    * Fast-path check: returns true only when hooks are enabled AND there are
-   * registered hooks for the given event name.  Callers can use this to skip
+   * registered hooks for the given event name. Callers can use this to skip
    * expensive MessageBus round-trips when no hooks are configured.
    */
   hasHooksForEvent(eventName: string, sessionId?: string): boolean {
@@ -4259,7 +4259,7 @@ export class Config {
       });
     }
 
-    // Register computer-use tools unless disabled. All 9 are deferred —
+    // Register computer-use tools unless disabled. All 9 are deferred
     // they surface only via ToolSearch keyword match
     // (see packages/core/src/tools/computer-use/).
     //
@@ -4280,7 +4280,7 @@ export class Config {
       return new MonitorTool(this);
     });
 
-    // PR 14b fix #2 (codex review round 1): apply any pending MCP
+    // apply any pending MCP
     // budget-event callback BEFORE `discoverAllTools` (legacy blocking
     // mode runs MCP discovery synchronously in there) and BEFORE the
     // post-`createToolRegistry` `startMcpDiscoveryInBackground` (default
@@ -4292,7 +4292,7 @@ export class Config {
       if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
         mgr.setOnBudgetEvent(this.pendingMcpBudgetCallback);
       }
-      // PR 14b fix (codex round 6): clear after consumption so a
+      // clear after consumption so a
       // subsequent `createToolRegistry` call (e.g. subagent override
       // via `createApprovalModeOverride` /
       // `buildSubagentContextOverride`) doesn't re-apply the parent
@@ -4318,7 +4318,7 @@ export class Config {
   }
 
   /**
-   * PR 14b fix #2 (codex review round 1): register the MCP guardrail
+   * register the MCP guardrail
    * push-event callback. Acceptable to call at any point in the
    * Config lifecycle — before, during, or after `initialize()`.
    *

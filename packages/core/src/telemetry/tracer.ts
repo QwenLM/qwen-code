@@ -74,7 +74,7 @@ function safeEndSpan(span: Span): void {
 }
 
 // SYNC: keep parent-resolution logic in step with resolveParentContext()
-// in telemetry/session-tracing.ts (#4302 review).
+// in telemetry/session-tracing.ts ( review).
 function getParentContext(): Context {
   return context.active();
 }
@@ -181,7 +181,7 @@ export async function withSpan<T>(
  *
  *   const { span, runInContext } = startSpanWithContext('stream', attrs);
  *   try {
- *     return await runInContext(() => doWork());
+ *     return await runInContext( => doWork());
  *   } catch (error) {
  *     span.setStatus({ code: SpanStatusCode.ERROR, message: 'failed' });
  *     throw error;
@@ -248,7 +248,7 @@ function shouldForceSampled(): boolean {
 
 /**
  * @deprecated No longer used for span parenting — each interaction is now a
- * trace root with its own traceId.  Retained for backward compatibility
+ * trace root with its own traceId. Retained for backward compatibility
  * and existing tests.
  */
 export function createSessionRootContext(sessionId: string): Context {

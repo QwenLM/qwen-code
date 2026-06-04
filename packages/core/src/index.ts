@@ -82,7 +82,7 @@ export * from './tools/tools.js';
 // Individual tools — MCP/SDK infrastructure only (tool classes are lazy-loaded)
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
-// F2 (#4175 commit 4): pool primitives consumed by acpAgent (daemon
+// pool primitives consumed by acpAgent (daemon
 // pool construction) and downstream daemon status routes.
 export {
   McpTransportPool,
@@ -200,7 +200,7 @@ export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
 export * from './memory/const.js';
-// Issue #4175 PR 16: write helper for hierarchical context files,
+// Issue : write helper for hierarchical context files,
 // re-exported so the `qwen serve` daemon can mutate workspace memory
 // via `POST /workspace/memory` without depending on internal paths.
 export * from './memory/writeContextFile.js';

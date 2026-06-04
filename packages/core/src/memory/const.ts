@@ -48,9 +48,9 @@ export function setGeminiMdFilename(newFilename: string | string[]): void {
 
 export function getCurrentGeminiMdFilename(): string {
   if (Array.isArray(currentGeminiMdFilename)) {
-    // #4297 fold-in 10 (qwen-latest critical, addresses divergence
+    //   (qwen-latest critical, addresses divergence
     // with daemon's `extractContextFilename`): skip empty / whitespace
-    // entries so callers that pass `['  ', 'AGENTS.md']` get
+    // entries so callers that pass `[' ', 'AGENTS.md']` get
     // `'AGENTS.md'` instead of `''`. Without this filter the daemon's
     // `extractContextFilename` (which DOES skip empty) and this
     // process-global picker disagreed on the same input — daemon

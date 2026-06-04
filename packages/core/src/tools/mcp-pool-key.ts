@@ -24,7 +24,7 @@ export type PoolKey = string;
 /**
  * `McpTransportKind` and `mcpTransportOf` re-exported from
  * `mcp-client-manager.ts` (where they originated as part of the
- * PR 14 budget guardrail accounting). F2 imports + re-exports
+ * budget guardrail accounting). imports + re-exports
  * via the pool barrel for downstream daemon code.
  */
 export { mcpTransportOf, type McpTransportKind } from './mcp-client-manager.js';
@@ -34,7 +34,7 @@ export { mcpTransportOf, type McpTransportKind } from './mcp-client-manager.js';
  * are true OS subprocesses whose state is observable and isolatable;
  * HTTP/SSE servers often bind state to the request stream and need
  * explicit operator opt-in. See `docs/design/f2-mcp-transport-pool.md`
- * §5.2.
+ * .
  */
 export const POOLED_TRANSPORTS_DEFAULT: ReadonlySet<McpTransportKind> = new Set(
   ['stdio', 'websocket'],
@@ -56,13 +56,13 @@ export function isPoolable(
 /**
  * Normalize OAuth config so functionally-equivalent shapes collapse
  * to the same fingerprint. `undefined`, `null`, `{}`, `{enabled: false}`
- * all mean "no OAuth" → all return `null`. See V21-9 in design doc.
+ * all mean "no OAuth" → all return `null`. See in design doc.
  *
  * Scopes / audiences sorted so callsite order doesn't matter; explicit
  * `null` defaults so an undefined field doesn't change the hash vs an
  * explicitly null one.
  *
- * F2 (#4175 commit 6 review fix — qwen-latest W88): hash every
+ * hash every
  * `MCPOAuthConfig` field (oauth-provider.ts:51-62). Pre-fix only
  * `clientId` / `scopes` / `authorizationUrl` / `tokenUrl` were hashed
  * — so two configs differing ONLY in `clientSecret` / `audiences` /
@@ -120,9 +120,9 @@ function sortedEntries(
  *   discoveryTimeoutMs (operational tuning; honored from the first
  *   acquire's config but not in the key — see TODO below)
  *
- * TODO(F2 follow-up): if two sessions race-acquire the same key with
+ * TODO(follow-up): if two sessions race-acquire the same key with
  * different discoveryTimeoutMs values, the first wins. This matches
- * pre-F2 behavior (per-session managers each used their own timeout)
+ * previously behavior (per-session managers each used their own timeout)
  * but could surprise operators tuning per-session. Acceptable for v1.
  */
 export function fingerprint(cfg: MCPServerConfig): PoolKey {
@@ -152,7 +152,7 @@ export function fingerprint(cfg: MCPServerConfig): PoolKey {
  * Build the `ConnectionId` from server name + computed fingerprint.
  * Form: `${name}::${fp16hex}`. Same name + different fingerprints
  * (e.g. divergent OAuth tokens or env between sessions) yields
- * distinct ConnectionIds — see §8 global state coexistence for how
+ * distinct ConnectionIds — see global state coexistence for how
  * the global `serverStatuses` Map handles multi-entry name collisions.
  */
 export function connectionIdOf(

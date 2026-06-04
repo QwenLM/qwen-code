@@ -35,7 +35,7 @@ import {
   discoveryTimeoutFor,
   runWithTimeout,
 } from './mcp-discovery-timeout.js';
-// F2 (#4175 commit 6): same `BudgetExhaustedError` thrown by the
+// same `BudgetExhaustedError` thrown by the
 // per-session McpClientManager, re-used at the pool's acquire site
 // so SDK consumers see the same error class regardless of which path
 // (manager or pool) actually enforced the cap.
@@ -65,7 +65,7 @@ export interface McpTransportPoolOptions {
   /** Override per-entry options (rare; usually defaults are sufficient). */
   entryOptions?: (transport: McpTransportKind) => PoolEntryOptions;
   /**
-   * F2 (#4175 commit 6): optional workspace-scoped budget controller.
+   * optional workspace-scoped budget controller.
    * When present, pool's `acquire` consults `tryReserve` pre-spawn
    * (refused → `BudgetExhaustedError` after `recordRefusal`) and
    * pool releases the slot when an entry transitions to `closed`
@@ -81,7 +81,7 @@ export interface McpTransportPoolOptions {
 /**
  * Workspace-scoped shared MCP transport pool.
  *
- * F2 (#4175) core: N ACP sessions on one daemon share one transport
+ * core: N ACP sessions on one daemon share one transport
  * per unique (serverName + fingerprint) tuple, instead of each
  * spawning their own MCP child process.
  *
@@ -96,26 +96,26 @@ export interface McpTransportPoolOptions {
  * Lifecycle invariants:
  *   - Entries are eager: first `acquire` for a key spawns; subsequent acquires reuse
  *   - `spawnInFlight` dedupes concurrent acquires for the same key
- *   - Spawn failure releases the reserved budget slot (V21-4)
+ *   - Spawn failure releases the reserved budget slot
  *   - Drain timer cancelled on attach; restarted on last detach
  *   - `MAX_IDLE_MS` (5min default) hard cap survives drain/attach flap
- *   - Global `serverStatuses` Map written via aggregated status function (§8.1)
+ *   - Global `serverStatuses` Map written via aggregated status function
  */
 export class McpTransportPool {
   private readonly entries = new Map<ConnectionId, PoolEntry>();
   private readonly unpooledIds = new Set<ConnectionId>();
   private readonly spawnInFlight = new Map<ConnectionId, Promise<PoolEntry>>();
-  /** V21-2: reverse index for O(refs) `releaseSession`. */
+  /** : reverse index for O(refs) `releaseSession`. */
   private readonly sessionToEntries = new Map<string, Set<ConnectionId>>();
   /**
-   * Drain mutex (wenshao C5): when `drainAll` is in progress, new
+   * Drain mutex : when `drainAll` is in progress, new
    * acquires reject so they don't latch onto entries that are about
    * to be force-closed. Cleared by `drainAll` only on successful
    * teardown — once set, a fresh pool is required for further work.
    */
   private draining = false;
   /**
-   * Monotonic per-server-name index for `entryIndex` (V21-7). Each
+   * Monotonic per-server-name index for `entryIndex`. Each
    * new entry for a name gets `nextIndexByName.get(name)++`; old
    * entries keep their assigned index even after newer ones appear
    * (so dashboards don't shuffle).
@@ -150,7 +150,7 @@ export class McpTransportPool {
   }
 
   /**
-   * F2 (#4175 commit 6): expose the budget controller for snapshot
+   * expose the budget controller for snapshot
    * builders + status routes. Returns `undefined` when no budget was
    * configured at boot (operator omitted `--mcp-client-budget`).
    */
@@ -167,7 +167,7 @@ export class McpTransportPool {
    * name exists.
    *
    * `spawnInFlight` keys have the form `${name}::${fingerprint}`.
-   * Wenshao W21 review fix: pre-fix used `startsWith(`${name}::`)`
+   * : pre-fix used `startsWith(`${name}::`)`
    * which produced a false positive when a sibling name BEGAN with
    * `${name}::` (server names can contain `::` per
    * `mcp-pool-key.test.ts:258`; `parseConnectionId` uses
@@ -225,8 +225,8 @@ export class McpTransportPool {
     const id = poolable ? connectionIdOf(serverName, cfg) : undefined;
     if (id !== undefined) {
       const existing = this.entries.get(id);
-      // F2 (#4175 commit 6 review fix — wenshao W125): defense-in-depth
-      // against terminal-state attach race. With W122 the silent-drop
+      // defense-in-depth
+      // against terminal-state attach race. With the silent-drop
       // listener calls `onClosed` which removes the entry from
       // `pool.entries`, so the common path is `entries.get(id) ===
       // undefined` → fall through to spawn. But a narrow race remains:
@@ -237,14 +237,14 @@ export class McpTransportPool {
       // session caller. Also handles the leftover stale entry case
       // (any pre-existing zombie not yet evicted by `onClosed`).
       if (existing && !existing.isTerminated()) {
-        // F2 (#4175 commit 6 review fix — wenshao W10): index update
+        // index update
         // happens AFTER `attach` succeeds. Pre-fix the order was
         // reversed; an `attach` rejection (e.g., entry transitioned
         // to `closed`/`failed` between the `entries.get` check and the
         // `attach` call) left a stale `sessionToEntries[sessionId]`
-        // mapping with no matching `entry.refs.has(sessionId)` —
+        // mapping with no matching `entry.refs.has(sessionId)`
         // `releaseSession` would later iterate the stale id and call
-        // `entry.detach` on a non-attached session. W11/PR A:
+        // `entry.detach` on a non-attached session. :
         // `attachPooledSession` is the shared view+attach helper;
         // call-site ordering (indexAttach AFTER attach, terminal-state
         // self-heal in catch) stays here, not in the helper.
@@ -261,12 +261,12 @@ export class McpTransportPool {
           this.indexAttach(sessionId, id);
           return conn;
         } catch (err) {
-          // W125: a race transitioned the entry to terminal between
+          // : a race transitioned the entry to terminal between
           // the isTerminated() pre-check and the attach call. Evict
           // and fall through to spawn instead of propagating
           // "Cannot attach in state failed" out of the pool.
           if (existing.isTerminated()) {
-            // F2 (#4175 commit 6 review fix — wenshao R22 W125-followup
+            //
             // A): route through `evictEntry` so the budget slot is
             // released. Pre-fix the bare `entries.delete(id)` left
             // the slot reserved permanently — the entry's own
@@ -286,7 +286,7 @@ export class McpTransportPool {
           }
         }
       } else if (existing && existing.isTerminated()) {
-        // F2 (#4175 commit 6 review fix — wenshao R22 W125-followup A):
+        //
         // pre-existing terminal entry that hadn't been evicted yet
         // (e.g. mid-`forceShutdown` between the sync `state='closed'`
         // assignment and the async `await sweepAndDisconnect` →
@@ -306,9 +306,9 @@ export class McpTransportPool {
     // Below this point we're committed to creating a NEW connection
     // (pooled spawn OR unpooled). Apply the workspace budget check
     // by NAME — divergent fingerprints for the same name share one
-    // slot (matches PR 14 v1's "configured server slots" semantic).
+    // slot (matches v1's "configured server slots" semantic).
     //
-    // F2 (#4175 commit 6 review fix — wenshao W65): pre-fix the
+    // pre-fix the
     // budget check ran AFTER the `!isPoolable` early-return, so
     // unpooled HTTP/SSE/SDK-MCP connections bypassed enforcement
     // entirely (`--mcp-client-budget=2` would let 3 HTTP MCP servers
@@ -316,7 +316,7 @@ export class McpTransportPool {
     // both branches; refusal under enforce mode throws
     // BudgetExhaustedError so the caller's catch translates to
     // `refused_batch` in the snapshot.
-    // F2 (#4175 commit 6 review fix — wenshao R24 T17 Critical):
+    //
     // hoist `reservationResult` into outer scope so the catch blocks
     // below can distinguish `'reserved'` (THIS acquire actually
     // consumed a slot, must roll back on failure) from
@@ -357,7 +357,7 @@ export class McpTransportPool {
           sessionPromptRegistry,
         );
       } catch (err) {
-        // R24 T17 (codified by W11/PR A as a shared helper): only
+        //  (codified by as a shared helper): only
         // release if THIS acquire actually reserved a new slot.
         // `'already_held'` means the sibling holds it; not ours to
         // release.
@@ -381,7 +381,7 @@ export class McpTransportPool {
       // Order of cleanup matters: `finally` removes the in-flight
       // promise from `spawnInFlight` BEFORE the catch block runs the
       // budget rollback, so `hasNameSibling` (which inspects
-      // `spawnInFlight.keys`) sees the post-cleanup state. Wenshao R1
+      // `spawnInFlight.keys`) sees the post-cleanup state.
       // race-fix: previously the rollback only checked `this.entries`
       // and a sibling entry could prematurely keep the slot reserved
       // even when this rollback should have released it.
@@ -390,12 +390,12 @@ export class McpTransportPool {
           this.spawnInFlight.delete(id);
         })
         .catch((err) => {
-          // F2 (#4175 commit 6): roll back the slot reservation on
-          // spawn failure (V21-4) so a transient connect failure
+          // roll back the slot reservation on
+          // spawn failure so a transient connect failure
           // doesn't leak the slot until daemon restart.
           //
-          // R24 T17 contract (codified as `rollbackReservationOnSpawnFailure`
-          // helper in W11/PR A): only release if THIS acquire actually
+          //  contract (codified as `rollbackReservationOnSpawnFailure`
+          // helper in ): only release if THIS acquire actually
           // reserved a new slot (`reservationResult === 'reserved'`).
           // `'already_held'` means a sibling holds the slot — phantom-
           // releasing here would decrement the counter if the sibling
@@ -406,8 +406,8 @@ export class McpTransportPool {
         });
       this.spawnInFlight.set(id, inFlight);
     }
-    // F2 (#4175 commit 6 review fix — qwen-latest W90): index the
-    // sessionId BEFORE `await inFlight`. Symmetric to W77 on the
+    // index the
+    // sessionId BEFORE `await inFlight`. Symmetric to on the
     // unpooled path. Pre-fix the in-flight branch indexed only after
     // `attach` succeeded (former line 351), so `releaseSession(sessionId)`
     // fired during the await window walked an empty `sessionToEntries`
@@ -419,7 +419,7 @@ export class McpTransportPool {
     // spawnEntry's `entries.set` is still a residual race — the reverse
     // index has the id but `entries.get(id)` is `undefined` so
     // `releaseSession`'s loop skips. Closing that window requires
-    // per-session cancellation plumbing (tracked as W90-followup).
+    // per-session cancellation plumbing (tracked as -followup).
     this.indexAttach(sessionId, id);
 
     let entry: PoolEntry;
@@ -433,7 +433,7 @@ export class McpTransportPool {
       throw err;
     }
 
-    // Post-await terminal-state guard (W90 / W77): a concurrent
+    // Post-await terminal-state guard ( / ): a concurrent
     // `releaseSession` after `entries.set` may have invoked
     // `forceShutdown` on the now-spawned entry, flipping state to
     // 'closed'. `attach` would throw with a deep "Cannot attach in
@@ -456,9 +456,9 @@ export class McpTransportPool {
         sessionToolRegistry,
         sessionPromptRegistry,
       );
-      // F2 (#4175 commit 6 review fix — qwen-latest W111): re-index
+      // re-index
       // AFTER attach succeeds. Pre-fix the early `indexAttach` at the
-      // top of this branch was enough on the unpooled path (W77)
+      // top of this branch was enough on the unpooled path
       // because a concurrent `releaseSession` during the spawn window
       // there always invoked `forceShutdown('manual')` (unpooled +
       // refs=0 → terminal), which the `isTerminated()` guard above
@@ -513,7 +513,7 @@ export class McpTransportPool {
 
   /**
    * Bulk release all entries `sessionId` currently holds. O(refs of
-   * this session) via the reverse index (V21-2). Use this from
+   * this session) via the reverse index. Use this from
    * `acpAgent.killSession` to ensure no leaked refs.
    */
   releaseSession(sessionId: string): void {
@@ -538,10 +538,10 @@ export class McpTransportPool {
 
   /**
    * Restart all pool entries matching `serverName`, or just the one
-   * with `entryIndex` if specified (V21-3). Runs in parallel via
+   * with `entryIndex` if specified. Runs in parallel via
    * `Promise.all` with per-entry try/catch (rejections never escape);
    * returns per-entry results so the caller can surface per-entry
-   * success/failure (§13.1 restart route). W36 doc fix: previous
+   * success/failure ( restart route). : previous
    * docstring named `Promise.allSettled`, but the implementation
    * actually uses `Promise.all` — the per-entry try/catch makes
    * Promise.all safe but the docstring was misleading.
@@ -557,7 +557,7 @@ export class McpTransportPool {
       reason?: string;
     }>
   > {
-    // F2 (#4175 commit 6 review fix — wenshao W68): defense-in-depth
+    // defense-in-depth
     // gate matching `acquire()`'s `draining` check. Pre-fix
     // `restartByName` could call `entry.restart()` mid-`drainAll()`,
     // spawning a fresh subprocess via `client.connect()` that
@@ -574,15 +574,15 @@ export class McpTransportPool {
         const started = Date.now();
         try {
           await entry.restart();
-          // F2 (#4175 commit 6 review fix — qwen-latest W85 / W106):
+          //
           // re-arm the drain timer if the restarted entry has no
           // subscribers. `doRestart` unconditionally cancels both
           // `drainTimer` and `maxIdleTimer` at the top so the restart
-          // can proceed atomically (W4 / W31), but pre-fix the success
+          // can proceed atomically ( / ), but pre-fix the success
           // path never restored the drain lifecycle. If an operator
           // invokes `/workspace/mcp/<srv>/restart` on an idle entry
           // (refs=0, drain timer running), the entry transitioned back
-          // to `'active'` and then sat forever with no subscribers —
+          // to `'active'` and then sat forever with no subscribers
           // a leaked subprocess until the next restart or `drainAll`.
           // Re-arming here hands the lifecycle back to the standard
           // refs=0 → drain → close path. We do this at the pool level
@@ -609,7 +609,7 @@ export class McpTransportPool {
     );
   }
 
-  // F2 (#4175 commit 6 review fix — wenshao W67): the pool-level
+  // the pool-level
   // `onEntryEvent(id, listener)` subscriber API was removed since
   // it had zero callers — F4 (status stream route) was supposed to
   // consume it but isn't shipping in this PR. Sessions still
@@ -623,7 +623,7 @@ export class McpTransportPool {
    * `GET /workspace/mcp` status route. Returns a plain object so the
    * caller can serialize directly.
    *
-   * `entryCount` per server name + `entrySummary` array (V21-7
+   * `entryCount` per server name + `entrySummary` array (
    * opaque `entryIndex`, NOT raw fingerprint) for multi-entry name
    * collisions.
    */
@@ -645,7 +645,7 @@ export class McpTransportPool {
       const status = entry.getLocalStatus();
       if (status === MCPServerStatus.CONNECTED) {
         total += 1;
-        // F2 (#4175 commit 5 review fix — wenshao R4 + R6): only
+        // only
         // count `stdio` toward `subprocessCount`. Websocket transports
         // dial a (potentially remote) MCP server over the network and
         // don't spawn a local OS child — including them inflates the
@@ -678,7 +678,7 @@ export class McpTransportPool {
   /**
    * Aggregate the local statuses of all entries that share `name`,
    * collapsing to a single MCPServerStatus per the "any-CONNECTED
-   * wins" rule (§8.1). Called by individual `PoolEntry` instances
+   * wins" rule. Called by individual `PoolEntry` instances
    * via the callback wired in their constructor.
    */
   aggregateStatusByName(serverName: string): MCPServerStatus {
@@ -709,7 +709,7 @@ export class McpTransportPool {
     const timeoutMs = opts?.timeoutMs ?? 10_000;
     const force = opts?.force ?? false;
 
-    // F2 (#4175 commit 4 review fix — wenshao C5): block new
+    // block new
     // acquires for the duration of drain. After this flag flips,
     // `acquire` rejects with a "draining" error so a session
     // attempting to attach mid-drain doesn't end up holding a handle
@@ -723,7 +723,7 @@ export class McpTransportPool {
     // and leak. `Promise.allSettled` tolerates spawn rejection (the
     // failed entry simply won't appear in `this.entries`).
     //
-    // F2 (#4175 commit 6 review fix — gpt-5.5 W73): the
+    // the
     // `Promise.allSettled` wait was previously UNBOUNDED — a spawn
     // with a large `discoveryTimeoutMs` override (or a stuck spawn
     // running its own 30s default) would block daemon shutdown for
@@ -732,7 +732,7 @@ export class McpTransportPool {
     // in-flight wait races against the SAME `timeoutMs` budget; if
     // it doesn't settle, we proceed with whatever entries are
     // already in `this.entries` (the rest will be force-closed via
-    // `clear()` below). Per-spawn timeouts (W25) bound individual
+    // `clear()` below). Per-spawn timeouts bound individual
     // spawns; the race here is the safety net for misconfigured
     // overrides.
     if (this.spawnInFlight.size > 0) {
@@ -782,7 +782,7 @@ export class McpTransportPool {
           });
         }),
     );
-    // F2 (#4175 commit 6 review fix — wenshao W63): clear the timer
+    // clear the timer
     // when the shutdown promises win the race (otherwise it stays
     // armed until natural fire — `unref` prevents process hang but
     // the timer object leaks). Snapshot `drained` / `errors` lengths
@@ -822,12 +822,12 @@ export class McpTransportPool {
   // ---------- internals ----------
 
   /**
-   * F2 (#4175 commit 6 review fix — wenshao W11 / PR A): shared
+   * shared
    * view+attach helper for the two POOLED `acquire()` branches (the
    * fast-path for an existing entry, and the post-spawn attach after
    * `await inFlight`). Pre-fix both branches inlined the same 3-step
    * pattern (build view → entry.attach → return) with identical
-   * release-callback wiring; PR A's stated cleanup goal is to dedupe
+   * release-callback wiring; stated cleanup goal is to dedupe
    * without losing the per-call-site race-window invariant comments
    * that explain WHY each branch's surrounding ordering is what it is.
    *
@@ -838,10 +838,10 @@ export class McpTransportPool {
    *
    * Caller is responsible for:
    *   - Terminal-state pre-check (`!entry.isTerminated()`) + race-
-   *     window self-heal (`evictEntry` on the W125 catch path).
+   *     window self-heal (`evictEntry` on the catch path).
    *   - Reverse-index ordering (early `indexAttach` BEFORE await on
-   *     the post-spawn branch per W90; AFTER attach on the fast-path
-   *     per W10; W111 re-indexAttach AFTER attach on post-spawn).
+   *     the post-spawn branch per; AFTER attach on the fast-path
+   *     per; re-indexAttach AFTER attach on post-spawn).
    *   The race-window comments live at the call sites because they
    *   describe the surrounding ordering, not the attach itself.
    */
@@ -867,11 +867,11 @@ export class McpTransportPool {
   }
 
   /**
-   * F2 (#4175 commit 6 review fix — wenshao W11 / PR A; codifies the
-   * R24 T17 contract): roll back THIS acquire's slot reservation on
+   * — /; codifies the
+   *  contract): roll back THIS acquire's slot reservation on
    * spawn failure. Used by both the unpooled-spawn catch and the
    * pooled-spawn-in-flight catch — both decisions are identical:
-   *   - `'reserved'`     → THIS acquire newly held the slot; release
+   *   - `'reserved'` → THIS acquire newly held the slot; release
    *                        if no sibling holds it
    *   - `'already_held'` → sibling holds it; never release here (the
    *                        sibling's own onClosed / evictEntry will
@@ -879,7 +879,7 @@ export class McpTransportPool {
    *                        `!hasNameSibling()` check would phantom-
    *                        release a slot this acquire never reserved
    *                        when the sibling was concurrently evicted.
-   *   - `undefined`      → no budget configured; nothing to do.
+   *   - `undefined` → no budget configured; nothing to do.
    */
   private rollbackReservationOnSpawnFailure(
     reservationResult: 'reserved' | 'already_held' | undefined,
@@ -895,20 +895,20 @@ export class McpTransportPool {
   }
 
   /**
-   * F2 (#4175 commit 6 review fix — wenshao R22 W125-followup A+B):
+   *
    * Single source of truth for evicting a pooled entry from
    * `this.entries` AND releasing its budget slot. Used by:
    *   - The pool-managed onClosed callback (terminal-state transition
-   *     paths: `forceShutdown`, `doRestart` catch, W120/W131 silent-
+   *     paths: `forceShutdown`, `doRestart` catch, / silent-
    *     drop listener).
-   *   - The W125 fast-path self-heal branches (catch + else-if) which
+   *   - The fast-path self-heal branches (catch + else-if) which
    *     pre-fix called `this.entries.delete(id)` directly and bypassed
    *     budget release entirely → permanent slot leak per occurrence.
    *
    * Identity check (`current === entry`):
    *   The same id can host multiple entry objects across its lifetime
    *   (eviction + respawn). When `forceShutdown`'s async tail
-   *   (`await sweepAndDisconnect`) runs concurrently with a W125
+   *   (`await sweepAndDisconnect`) runs concurrently with a
    *   fast-path eviction + spawn under the same id, the OLD entry's
    *   onClosed fires AFTER the NEW entry has been inserted. Without
    *   this guard, the OLD onClosed would silently evict the NEW
@@ -917,7 +917,7 @@ export class McpTransportPool {
    *   the assignment hasn't completed; in production the callback
    *   is never invoked synchronously from the constructor.
    *
-   * Budget release: matches the prior inline logic exactly —
+   * Budget release: matches the prior inline logic exactly
    * `hasNameSibling` keeps the slot reserved when divergent-
    * fingerprint entries (e.g. multi-OAuth) or in-flight spawns share
    * the name.
@@ -957,20 +957,20 @@ export class McpTransportPool {
       this.opts.sendSdkMcpMessage,
     );
 
-    // F2 (#4175 commit 6 review fix — wenshao R22 W125-followup B):
+    //
     // capture `entry` in the onClosed callback closure so the eviction
     // helper can identity-check against a respawned entry. Pre-fix the
     // callback did `entries.get(closedId)` and unconditionally
-    // `entries.delete(closedId)` — but if a concurrent W125 fast-path
+    // `entries.delete(closedId)` — but if a concurrent fast-path
     // eviction + spawn replaced this id with a NEW entry between the
     // OLD entry's terminal-state transition and its async tail
     // (`forceShutdown`'s `await sweepAndDisconnect`), `onClosed(id)`
     // would silently evict the new entry and (incorrectly) release
     // its budget slot. `evictEntry` below short-circuits when the
     // current map slot doesn't match the captured ref — safe under
-    // any interleaving with W125's self-heal path.
+    // any interleaving with 's self-heal path.
     // Mutable holder so the onClosed callback can resolve the
-    // captured entry reference at fire time (not construction time —
+    // captured entry reference at fire time (not construction time
     // the entry doesn't exist yet when we build the callback).
     // `entryRef.current` is guaranteed populated before the callback
     // is ever invoked: the assignment happens synchronously after the
@@ -996,7 +996,7 @@ export class McpTransportPool {
     entryRef.current = entry;
 
     try {
-      // F2 (#4175 commit 6 review fix — gpt-5.5 W25 + wenshao W43):
+      //
       // bound the `connect()` + `discoverAndReturn()` sequence with
       // a wall-clock timeout matching
       // `McpClientManager.runWithDiscoveryTimeout` (stdio default
@@ -1005,10 +1005,10 @@ export class McpTransportPool {
       // `spawnInFlight` unresolved forever — every session sharing
       // this `ConnectionId` waited indefinitely AND the budget slot
       // was never rolled back. The timeout's `reject` triggers the
-      // catch path which forces shutdown + budget rollback (W1
-      // fold-in).
+      // catch path which forces shutdown + budget rollback (
+      // ).
       //
-      // W43 (commit 6 review round 6): `entries.set(id, entry)` +
+      //  (commit 6 review round 6): `entries.set(id, entry)` +
       // `entry.markActive(...)` MUST live OUTSIDE the
       // timeout-wrapped IIFE. Pre-fix they were inside; if the
       // timeout fired, the catch removed the entry and
@@ -1026,7 +1026,7 @@ export class McpTransportPool {
       const snap = await runWithTimeout(
         (async () => {
           await client.connect();
-          // F2 (#4175 commit 6 review fix — wenshao R23 T1): explicitly
+          // explicitly
           // opt out of `applyConfigFilters` for pool snapshot. Per-
           // session `SessionMcpView.applyTools` is the authoritative
           // filter (otherwise pool-mode trust + include/exclude would
@@ -1052,7 +1052,7 @@ export class McpTransportPool {
         }
         throw new Error(`McpTransportPool is draining; discarded spawn ${id}`);
       }
-      // F2 (#4175 commit 4 review fix — wenshao C6 follow-up):
+      //
       // register the entry in `this.entries` BEFORE markActive's
       // updateGlobalStatus runs. Pre-fix the order was reversed,
       // and `aggregateStatusByName(serverName)` iterated `entries`
@@ -1074,14 +1074,14 @@ export class McpTransportPool {
           `(id=${id}, transport=${transport}): ${String(err)}`,
       );
       // Don't leak the entry. McpClient self-flips status to
-      // DISCONNECTED on discoverAndReturn error (commit 1 invariant).
+      // DISCONNECTED on discoverAndReturn error .
       // `entries.delete` is idempotent — covers the race where the
       // error came from `markActive` AFTER `entries.set` ran (rare;
       // markActive is mostly assignment + updateGlobalStatus, but
       // a listener could throw). Catches both pre- and post-set
       // failure modes uniformly.
       //
-      // F2 (#4175 commit 6 review fix — wenshao W1): also call
+      // also call
       // `entry.forceShutdown('manual')` to remove the
       // `statusChangeListener` that the `PoolEntry` constructor
       // registered. Pre-fix every spawn failure leaked one listener
@@ -1162,7 +1162,7 @@ export class McpTransportPool {
     );
 
     // Build a SessionMcpView that wraps this session's registries.
-    // F2 (#4175 commit 6 review fix — qwen-latest W110): post-W81/W87
+    // post-/
     // refactor, the unpooled path uses `client.discoverAndReturn`
     // (pure) to obtain a snapshot, then routes through `markActive`
     // + `attach` (no `skipReplay`) — so `view.applyTools` /
@@ -1170,7 +1170,7 @@ export class McpTransportPool {
     // (apply per-session `includeTools` / `excludeTools` and the
     // trust copy), not no-ops. Do NOT re-add `skipReplay: true` on
     // the `attach` call below — that would silently re-introduce
-    // W81 (unpooled servers receiving ALL tools, every tool with
+    //  (unpooled servers receiving ALL tools, every tool with
     // `trust: undefined`).
     const view = new SessionMcpView(
       sessionToolRegistry,
@@ -1188,13 +1188,13 @@ export class McpTransportPool {
       client,
       this.cliConfig,
       entryOpts,
-      // F2 (#4175 commit 6 review fix — wenshao W65): release the
+      // release the
       // budget slot when this unpooled entry closes. Pre-fix
       // unpooled connections (HTTP/SSE not in `pooledTransports`,
       // SDK MCP) bypassed budget enforcement entirely AND skipped
       // budget release on close — the slot was never reserved
       // either, but this hook makes the close-path symmetric for
-      // when budget is now reserved at acquire (W65 follow-on).
+      // when budget is now reserved at acquire ( follow-on).
       // `hasNameSibling` keeps the slot reserved if any pooled
       // entry or in-flight spawn shares the name.
       (closedId) => {
@@ -1206,7 +1206,7 @@ export class McpTransportPool {
           }
         }
       },
-      // F2 (#4175 commit 4 review fix — wenshao S4): aggregator
+      // aggregator
       // delegates to McpClient.getStatus() instead of hardcoded
       // CONNECTED. After `forceShutdown` flips client to
       // DISCONNECTED, the global serverStatuses Map gets the
@@ -1219,7 +1219,7 @@ export class McpTransportPool {
     try {
       this.entries.set(id, entry);
       this.unpooledIds.add(id);
-      // F2 (#4175 commit 6 review fix — gpt-5.5 W77): populate the
+      // populate the
       // reverse index synchronously, BEFORE the connect/discover
       // await. Pre-fix, `releaseSession(sessionId)` fired during this
       // window walked an empty `sessionToEntries[sessionId]` and
@@ -1228,20 +1228,20 @@ export class McpTransportPool {
       // prompts into a session that had already been closed. With the
       // early indexing, a concurrent `releaseSession` finds the entry,
       // calls `entry.forceShutdown('manual')` (which synchronously
-      // flips state→'closed' per W69), and the post-await
+      // flips state→'closed' per ), and the post-await
       // `isTerminated()` guard below catches it. Every error/discard
       // path now mirrors this with `indexDetach` to keep the index
       // consistent.
       this.indexAttach(sessionId, id);
-      // F2 (#4175 commit 6 review fix — wenshao W62): bound the
+      // bound the
       // unpooled connect+discover with the same `runWithTimeout`
-      // wrapper `spawnEntry` (W25) and `doRestart` (W44) use. Pre-
+      // wrapper `spawnEntry` and `doRestart` use. Pre-
       // fix a hung SDK MCP / non-pooled HTTP server blocked
       // `acquire` indefinitely, stalling the entire session's tool
       // discovery. Same `discoveryTimeoutFor(cfg)` resolution
       // (stdio 30s default, remote 5s, per-server override).
       const timeoutMs = discoveryTimeoutFor(cfg);
-      // F2 (#4175 commit 6 review fix — qwen-latest W81 / W87): route
+      // route
       // unpooled through the same `discoverAndReturn` snapshot path as
       // the pooled flow, so the per-session `SessionMcpView.applyTools`
       // / `applyPrompts` filter+trust+rename pipeline is the
@@ -1252,15 +1252,15 @@ export class McpTransportPool {
       // the only filtering layer (view.applyTools). Net effect: SDK
       // MCP / HTTP / SSE servers with `includeTools` / `excludeTools`
       // received ALL tools and every tool had `trust: undefined`. The
-      // prior "avoid double-registration" rationale is obsolete —
+      // prior "avoid double-registration" rationale is obsolete
       // `view.applyTools` calls `removeMcpToolsByServer(serverName)`
       // first, so the snapshot path is idempotent.
       const snap = await runWithTimeout(
         (async () => {
           await client.connect();
-          // F2 (#4175 commit 6 review fix — wenshao R23 T1): same
+          // same
           // opt-out as the pooled spawn — view.applyTools handles
-          // filtering for the unpooled path too (W81/W87 fix routes
+          // filtering for the unpooled path too (/ fix routes
           // unpooled through attach's snapshot-replay).
           return await client.discoverAndReturn(this.cliConfig, {
             applyConfigFilters: false,
@@ -1269,12 +1269,12 @@ export class McpTransportPool {
         timeoutMs,
         `unpooled spawn for ${id}`,
       );
-      // W77: re-check terminal state after the await — a concurrent
+      // : re-check terminal state after the await — a concurrent
       // `releaseSession(sessionId)` may have invoked `forceShutdown`
       // while we were spawning. Without this guard, `markActive` /
       // `attach` would either resurrect the entry or throw deep in
       // attach's state check, leaking the in-flight transport. Now
-      // that the W81/W87 fix routes registration through `attach`'s
+      // that the / fix routes registration through `attach`'s
       // snapshot-replay path, no direct registry mutation has happened
       // yet at this point — `attach` is the only side-effecting call
       // below. `view.teardown` is still defensive in case a future
@@ -1299,7 +1299,7 @@ export class McpTransportPool {
       entry.markActive(snap.tools, snap.prompts);
       // Unpooled handle: snapshot replay through `view.applyTools` /
       // `applyPrompts` applies per-session `includeTools` / `excludeTools`
-      // filtering and the per-session trust copy (W81 fix). Release
+      // filtering and the per-session trust copy ( fix). Release
       // callback runs `forceShutdown` directly — no pool refcount
       // accounting for unpooled entries since they're per-session.
       const conn = entry.attach(sessionId, view, {
@@ -1310,8 +1310,8 @@ export class McpTransportPool {
       });
       return conn;
     } catch (err) {
-      // F2 (#4175 commit 6 review fix — wenshao W14): same listener-
-      // leak as the pooled spawn-failure path (W1). The unpooled
+      // same listener-
+      // leak as the pooled spawn-failure path. The unpooled
       // entry's ctor also registered a `statusChangeListener` via
       // `addMCPStatusChangeListener`, and only `forceShutdown`
       // removes it. Pre-fix every unpooled connect/discover failure
@@ -1323,7 +1323,7 @@ export class McpTransportPool {
       }
       this.entries.delete(id);
       this.unpooledIds.delete(id);
-      // W77: roll back the early reverse-index insertion above so
+      // : roll back the early reverse-index insertion above so
       // `sessionToEntries[sessionId]` does not accumulate stale ids
       // pointing at deleted entries. `indexDetach` is a no-op if the
       // failure happened before we ever indexed (e.g. an error in
@@ -1352,7 +1352,7 @@ export interface McpPoolSnapshot {
    * Live local-subprocess count — stdio entries that are CONNECTED.
    * Websocket transports dial a (potentially remote) MCP server over
    * the network and don't spawn a local OS child, so they're
-   * deliberately excluded (per wenshao R4 review fold-in in commit 5).
+   * deliberately excluded .
    */
   subprocessCount: number;
   /** Per-server entry details. */
@@ -1415,5 +1415,5 @@ function poisonedPromptRegistry(serverName: string): PromptRegistry {
 }
 
 // `runWithTimeout` + `discoveryTimeoutFor` moved to
-// `mcp-discovery-timeout.ts` so `PoolEntry.doRestart` (W44 fold-in)
+// `mcp-discovery-timeout.ts` so `PoolEntry.doRestart`
 // can share the same primitives without cross-module value imports.

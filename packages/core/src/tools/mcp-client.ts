@@ -224,9 +224,9 @@ export class McpClient {
   private status: MCPServerStatus = MCPServerStatus.DISCONNECTED;
   private isDisconnecting = false;
   /**
-   * F2 (#4175 follow-up — W133-a): captures the most recent error
+   * captures the most recent error
    * delivered to the SDK Client's `onerror` callback. The pool entry's
-   * W120 silent-drop block (the DISCONNECTED-on-active branch inside
+   *  silent-drop block (the DISCONNECTED-on-active branch inside
    * `PoolEntry.statusChangeListener`) reads this via
    * `getLastTransportError()` to thread the upstream cause (EPIPE,
    * OAuth 401, server crash) into the `'failed'` event's `lastError`
@@ -259,8 +259,8 @@ export class McpClient {
    */
   async connect(): Promise<void> {
     this.isDisconnecting = false;
-    // F2 (#4175 follow-up — W133-a): clear stale upstream error from
-    // any prior connect/disconnect cycle. The W120 silent-drop reader
+    // clear stale upstream error from
+    // any prior connect/disconnect cycle. The silent-drop reader
     // is otherwise satisfied by `undefined` and falls back to the
     // synthetic marker — but a stale error from a previous incarnation
     // would mis-attribute a fresh transport drop to an old cause.
@@ -273,9 +273,9 @@ export class McpClient {
         if (this.isDisconnecting) {
           return;
         }
-        // F2 (#4175 follow-up — W133-a): capture the upstream error
+        // capture the upstream error
         // BEFORE the synchronous `updateStatus(DISCONNECTED)` cascades
-        // to PoolEntry's statusChangeListener. The listener's W120
+        // to PoolEntry's statusChangeListener. The listener's
         // silent-drop block reads `lastTransportError` inline; setting
         // it ahead of `updateStatus` guarantees the field is populated
         // by the time the listener fires.
@@ -325,13 +325,13 @@ export class McpClient {
    * and logs; we just need the status registry to reflect reality.
    */
   async discover(cliConfig: Config): Promise<void> {
-    // F2 (#4175 commit 6 review fix — wenshao R23 T1 Critical): legacy
+    // legacy
     // `discover()` path (used by non-pool sessions and any direct
     // McpClient consumers) MUST apply config filters at discovery
     // time — pre-PR `this.discoverTools(cliConfig)` defaulted
     // `applyConfigFilters` to `true`, so `trust: true` server config
     // → tool's trust set; `includeTools`/`excludeTools` filtered out
-    // disallowed tools. The F2 refactor routed `discover()` through
+    // disallowed tools. The refactor routed `discover()` through
     // `discoverAndReturn` which used to hardcode
     // `{ applyConfigFilters: false }` (matching pool semantics where
     // `SessionMcpView.applyTools` is the authoritative filter), but
@@ -351,7 +351,7 @@ export class McpClient {
   /**
    * Pure discovery — returns tools and prompts WITHOUT registering them.
    *
-   * F2 (#4175) pool path: a single shared `McpClient` produces this
+   * pool path: a single shared `McpClient` produces this
    * snapshot once; per-session `SessionMcpView` instances each
    * register a filtered/decorated copy into their own registries.
    *
@@ -360,7 +360,7 @@ export class McpClient {
    * `getFailedMcpServerNames()` reflect reality), then re-throws.
    *
    * Returns the same combined "no prompts or tools" error that `discover()`
-   * raised pre-F2, so callers that distinguish "server up but empty" from
+   * raised previously, so callers that distinguish "server up but empty" from
    * "server down" still get the right signal.
    *
    * @param opts.applyConfigFilters Whether to apply `includeTools` /
@@ -442,7 +442,7 @@ export class McpClient {
    * for remote transports (sse / http / websocket) and for stdio
    * transports that have not yet connected or have already exited.
    *
-   * F2 (#4175) `PoolEntry.forceShutdown` reads this to enumerate
+   * `PoolEntry.forceShutdown` reads this to enumerate
    * descendant pids (via `listDescendantPids`) before calling
    * `client.disconnect()`, so wrapper processes like
    * `npx @modelcontextprotocol/server-X` and `uvx ...` don't leak.
@@ -454,14 +454,14 @@ export class McpClient {
   }
 
   /**
-   * F2 (#4175 follow-up — W133-a): expose the most recent SDK Client
-   * `onerror` payload so PoolEntry's W120 silent-drop block can thread
+   * expose the most recent SDK Client
+   * `onerror` payload so PoolEntry's silent-drop block can thread
    * the upstream cause (EPIPE, OAuth 401, server-side crash) into the
    * `'failed'` event's `lastError` string. Returns `undefined` if no
    * error has been observed since the last `connect()`. Caller falls
    * back to the synthetic marker on `undefined`. Population site: the
    * `client.onerror` arrow inside `connect()` (this file). Consumer:
-   * the W120 silent-drop block inside `PoolEntry.statusChangeListener`.
+   * the silent-drop block inside `PoolEntry.statusChangeListener`.
    */
   getLastTransportError(): Error | undefined {
     return this.lastTransportError;
@@ -611,7 +611,7 @@ export function getMCPDiscoveryState(): MCPDiscoveryState {
 }
 
 /**
- * F2 (#4175 commit 6 review fix — gpt-5.5 W72): expose a setter so
+ * expose a setter so
  * `McpClientManager.discoverAllMcpToolsViaPool` can update the
  * module-global `mcpDiscoveryState`. Pre-fix the pool path only
  * updated the manager-local state, leaving the global at
@@ -962,7 +962,7 @@ export async function discoverTools(
     for (const funcDecl of tool.functionDeclarations) {
       try {
         if (!funcDecl.name) {
-          // F2 (#4175 commit 6 review fix — wenshao R23 T5): emit the
+          // emit the
           // malformed-funcDecl warning inline rather than calling
           // `isEnabled` solely for its side effect. Pre-fix
           // `isEnabled(funcDecl, ...)` was invoked just to trigger
@@ -1026,7 +1026,7 @@ export async function discoverTools(
 /**
  * Pure prompt listing. Asks the MCP server for its prompts and returns
  * enriched `DiscoveredMCPPrompt[]` (with `serverName` + bound `invoke`)
- * WITHOUT registering them anywhere. F2 pool uses this so a single
+ * WITHOUT registering them anywhere. pool uses this so a single
  * shared transport can produce the snapshot once and let each session's
  * `SessionMcpView` register into its own registry.
  *

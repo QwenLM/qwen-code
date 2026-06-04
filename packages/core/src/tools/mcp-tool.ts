@@ -509,7 +509,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
    * keeping every other field (including the shared underlying
    * `CallableTool` / MCP transport) identical.
    *
-   * F2 (#4175) pool path: a single shared pool entry produces one
+   * pool path: a single shared pool entry produces one
    * `DiscoveredMCPTool` snapshot; each `SessionMcpView` clones with
    * its own per-session trust before registering into its session's
    * `ToolRegistry`. Without this clone, mutating `trust` on the shared

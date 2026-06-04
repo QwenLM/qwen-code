@@ -196,11 +196,11 @@ export class ToolRegistry {
     sendSdkMcpMessage?: SendSdkMcpMessage,
   ) {
     this.config = config;
-    // F2 (#4175 commit 6 review fix — wenshao R9 / PR A): options-bag
+    // options-bag
     // ctor; previously 7 positional args with `undefined, undefined`
     // sentinels for `healthConfig` / `budgetConfig`. `pool` is
     // forwarded from Config (set by daemon-mode QwenAgent in
-    // `newSessionConfig`); when undefined the manager keeps its pre-F2
+    // `newSessionConfig`); when undefined the manager keeps its previously
     // per-session spawn behavior, when defined non-SDK MCP discovery
     // goes through `pool.acquire` so N sessions in the same workspace
     // share one transport per unique server config.
@@ -215,7 +215,7 @@ export class ToolRegistry {
    * Returns true when `name` is in the Config's `disabledTools` set, in
    * which case `registerTool` / `registerFactory` will skip it. This is
    * the chokepoint for the daemon mutation route at `POST /workspace/
-   * tools/:name/enable {enabled:false}` (#4175 Wave 4 PR 17); both
+   * tools/:name/enable {enabled:false}`; both
    * built-ins and MCP-discovered tools flow through `registerTool`, so
    * gating here covers every registration path.
    */
@@ -257,7 +257,7 @@ export class ToolRegistry {
         );
       }
     }
-    // #4282 fold-in 2 (gpt-5.5 CV3): re-check the disabled set against
+    //   : re-check the disabled set against
     // the FINAL registration name. Without this, an MCP tool that
     // collides with a lazy factory and gets renamed via
     // `asFullyQualifiedTool()` (e.g. `structured_output` →
@@ -444,7 +444,7 @@ export class ToolRegistry {
         // Always drop the server from the global status registry — even
         // if disconnect or the exclusion-list update throws — so the
         // Footer's MCP health pill stops counting it as "offline". A
-        // leftover entry would resurrect the bug from #3895.
+        // leftover entry would resurrect the bug from .
         removeMCPServerStatus(serverName);
       }
     }
