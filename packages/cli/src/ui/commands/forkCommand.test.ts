@@ -23,6 +23,7 @@ vi.mock('../../i18n/index.js', () => ({
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
+  createDebugLogger: () => ({ debug: () => undefined }),
   ToolNames: { AGENT: 'agent' },
 }));
 

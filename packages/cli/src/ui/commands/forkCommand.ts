@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ToolNames } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, ToolNames } from '@qwen-code/qwen-code-core';
 import type { AgentParams } from '@qwen-code/qwen-code-core';
 import type {
   CommandContext,
@@ -14,10 +14,23 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 
+const debugLogger = createDebugLogger('FORK_COMMAND');
+
 /** Short, human-readable label for the background-tasks panel. */
 function deriveForkDescription(directive: string): string {
   const oneLine = directive.replace(/\s+/g, ' ').trim();
   return oneLine.length > 60 ? `${oneLine.slice(0, 57)}…` : oneLine;
+}
+
+function hasFailedDisplayStatus(
+  display: unknown,
+): display is { status: 'failed' } {
+  return (
+    display !== null &&
+    typeof display === 'object' &&
+    'status' in display &&
+    (display as { status?: unknown }).status === 'failed'
+  );
 }
 
 export const forkCommand: SlashCommand = {
@@ -75,7 +88,8 @@ export const forkCommand: SlashCommand = {
     let hasHistory = false;
     try {
       hasHistory = (config.getGeminiClient().getHistory(true) ?? []).length > 0;
-    } catch {
+    } catch (error) {
+      debugLogger.debug('Failed to read history before /fork:', error);
       hasHistory = false;
     }
     if (!hasHistory) {
@@ -132,12 +146,7 @@ export const forkCommand: SlashCommand = {
     // whose display status is 'failed'. Surface that instead of a misleading
     // success message.
     const display = result?.returnDisplay;
-    if (
-      display &&
-      typeof display === 'object' &&
-      'status' in display &&
-      (display as { status?: string }).status === 'failed'
-    ) {
+    if (hasFailedDisplayStatus(display)) {
       const reason =
         typeof result.llmContent === 'string' && result.llmContent.trim()
           ? result.llmContent.trim()
