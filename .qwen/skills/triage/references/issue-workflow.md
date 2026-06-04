@@ -2,6 +2,10 @@
 
 Triage a GitHub issue. Shared rules in `SKILL.md` — read those first.
 
+For detailed classification criteria (type, priority P0-P3), completeness
+checks, version staleness, auto-fix eligibility, and welcome-PR eligibility,
+consult `issue-triage-rules.md`.
+
 **Single comment, updated in place.** Stage 1 posts a concise bilingual
 comment; Stage 2 appends results to the same comment via `gh api PATCH`.
 Key points only — no verbose prose.
@@ -28,10 +32,20 @@ Key points only — no verbose prose.
 
 ## Stage 1: Intake Gate
 
+Before classifying, evaluate the comment gate and label gate from `SKILL.md`.
+Record the gate decisions in the staged report. Analysis always proceeds
+regardless of gate outcomes — only `gh` write calls are affected.
+
+Include the appropriate bot-coordination marker in the comment draft alongside
+the stage marker. For example: `<!-- qwen-triage stage=1 -->` plus
+`<!-- qwen-issue-bot:needs-info -->` for unclear issues.
+
 Default stance: issues are admissible. Close only the narrow inadmissible cases
 below.
 
-Classify the issue from title, body, comments, labels, docs, and source context:
+Classify the issue from title, body, comments, labels, docs, and source context.
+Use the priority definitions from `issue-triage-rules.md` (P0-P3) and the
+completeness check (version, OS, auth method) to decide next steps:
 
 - **Inadmissible**: religious or political flame wars, harassment, abusive
   language, spam, or content unrelated to Qwen Code.
@@ -113,14 +127,37 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 
 ### For bugs without clear reproduction:
 
-1. Add `welcome-pr` if it exists. Say community PRs are welcome.
-2. Add `status/need-retesting` if on a stale version.
-3. Inspect source and docs inside worktree; state confidence: confirmed / plausible / no clear
-   direction.
-4. Append likely root cause or link similar historical issues.
+1. Check version staleness using `issue-triage-rules.md` rules: if the reported
+   version is ≥6 stable releases behind current, add `status/need-retesting`
+   and ask the reporter to upgrade and retest.
+2. Check welcome-PR eligibility using `issue-triage-rules.md`: root cause
+   identified, fix is describable, change is modest, test path is known.
+3. Check auto-fix eligibility: root cause is high-confidence, fix is ≤3 files,
+   change is mechanical, existing tests cover the area. If eligible, ask whether
+   to run `/qc bugfix <issue-number>`.
+4. Inspect source and docs inside worktree; state confidence: confirmed /
+   plausible / no clear direction.
+5. Append likely root cause or link similar historical issues.
+
+For welcome-PR comments, use dual markers:
+
+```markdown
+<!-- qwen-issue-bot:welcome-pr -->
+<!-- qwen-maintain:welcome-pr -->
+```
 
 ### For feature requests:
 
-1. Run `/goal Is this feature request truly aligned with Qwen Code's product direction, and is the proposed approach the best solution?`
-2. Append verdict: accept for exploration, suggest a smaller alternative, or
+1. Produce a product direction assessment using `issue-triage-rules.md`:
+   `aligned` / `discuss` / `reject`.
+2. For `aligned` or `discuss`, state the recommended implementation boundary:
+   skill/prompt, docs, existing command extension, core architecture, or
+   roadmap discussion.
+3. Check welcome-PR readiness: product direction is `aligned`, implementation
+   boundary is self-contained, acceptance criteria can be stated without a
+   private maintainer decision.
+4. For `discuss` or when AI confidence is insufficient, route to
+   `maintainer-discussion`: @ the relevant domain maintainer, add
+   `need-discussion` + `status/ready-for-human`.
+5. Append verdict: accept for exploration, suggest a smaller alternative, or
    decline as out of direction.

@@ -367,6 +367,9 @@ jobs:
               - `<!-- qwen-issue-bot:invalid -->`
               - `<!-- qwen-issue-bot:needs-info -->`
               - `<!-- qwen-issue-bot:related -->`
+              - `<!-- qwen-issue-bot:welcome-pr -->`
+              - `<!-- qwen-maintain:welcome-pr -->`
+              - `<!-- qwen-maintain:pr-intake -->`
             - Do not assign issues to people in this phase.
             - Do not close issues in this workflow version.
             - Add labels only. Do not remove any labels, including

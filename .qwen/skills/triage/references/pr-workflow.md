@@ -2,7 +2,17 @@
 
 Shared rules (untrusted input, skip, bilingual format) are in `SKILL.md`.
 
-**Comment style:** write like a human maintainer — conversational, concise, bilingual. No bullet-point checklists that feel auto-generated.
+For detailed PR evaluation criteria (product fit verdicts, body completeness
+template checks, scope & size thresholds 800/1500 lines, author validation
+expectations by PR type), consult `pr-intake-rules.md`.
+
+Before posting or labeling, evaluate the tiered comment gate and label gate
+from `SKILL.md`. Record the gate decisions in the staged report. Include the
+`<!-- qwen-maintain:pr-intake -->` marker in all PR comments.
+
+**Comment style:** write like a human maintainer — conversational, concise,
+bilingual. No bullet-point checklists that feel auto-generated. See the
+Format section in `SKILL.md` for anti-patterns and distillation rules.
 
 ### Comment Management
 
