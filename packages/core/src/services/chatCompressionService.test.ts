@@ -10,6 +10,7 @@ import {
   COMPACT_MAX_OUTPUT_TOKENS,
   computeThresholds,
   MAX_CONSECUTIVE_FAILURES,
+  MAX_HOOK_INSTRUCTIONS_CHARS,
 } from './chatCompressionService.js';
 import type { Content } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
@@ -17,6 +18,7 @@ import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
@@ -2417,5 +2419,609 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
     // Assertion 3: Image metadata header mentions the source tool and args.
     expect(flatText).toContain('computer_use__get_app_state');
     expect(flatText).toContain('"app":"Safari"');
+  });
+});
+
+describe('ChatCompressionService.compress — customInstructions plumbing', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // The HookSystem wrapper returns DefaultHookOutput | undefined to consumers
+  // (see hookSystem.ts:274-287). Source code calls `result?.getAdditionalContext()`,
+  // so mocks must expose that method — not the raw AggregatedHookResult shape
+  // that hookEventHandler returns. This tiny helper builds a stand-in.
+  function makeHookOutput(opts: { additionalContext?: string }): {
+    getAdditionalContext: () => string | undefined;
+  } {
+    return {
+      getAdditionalContext: () => opts.additionalContext,
+    };
+  }
+
+  // Tiny helper to keep each case readable. Builds a 4-message history
+  // (passes the curatedHistory.length >= 2 guard) and a config with all
+  // accessors required by compress(). hookSystem is overridable so each
+  // test can shape the PreCompact return value.
+  function setup(opts: { hookSystem?: unknown }) {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'u1' }] },
+      { role: 'model', parts: [{ text: 'm1' }] },
+      { role: 'user', parts: [{ text: 'u2' }] },
+      { role: 'model', parts: [{ text: 'm2' }] },
+    ];
+    const getHistoryMock = vi.fn().mockReturnValue(history);
+    const mockChat = {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+    const hookSystem = opts.hookSystem ?? {
+      firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+      firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue(hookSystem),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+    return { mockChat, mockConfig, hookSystem };
+  }
+
+  it('appends customInstructions to the side-query systemInstruction', async () => {
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    const { mockChat, mockConfig } = setup({});
+
+    const service = new ChatCompressionService();
+    await service.compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      customInstructions: 'focus on the auth bug',
+    });
+
+    const passed = spy.mock.calls[0]![1] as { systemInstruction: string };
+    expect(passed.systemInstruction).toContain('Additional Instructions:');
+    expect(passed.systemInstruction).toContain('focus on the auth bug');
+  });
+
+  it('does NOT fire PreCompact hook when curatedHistory.length < 2 (NOOP path)', async () => {
+    // Contract: hooks with side effects (transcript dumps, external
+    // notifications) should only fire when there is actually something to
+    // compress. A history of [user-only] or [model-only] short-circuits to
+    // NOOP — the hook must not be triggered for those.
+    const firePreCompactEvent = vi.fn().mockResolvedValue(undefined);
+    const firePostCompactEvent = vi.fn().mockResolvedValue(undefined);
+    const oneMessageHistory: Content[] = [
+      { role: 'user', parts: [{ text: 'just one' }] },
+    ];
+    const getHistoryMock = vi.fn().mockReturnValue(oneMessageHistory);
+    const mockChat = {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi
+        .fn()
+        .mockReturnValue({ firePreCompactEvent, firePostCompactEvent }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 1_000,
+      customInstructions: 'should not reach the hook',
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+    expect(firePreCompactEvent).not.toHaveBeenCalled();
+    expect(firePostCompactEvent).not.toHaveBeenCalled();
+  });
+
+  it('forwards customInstructions verbatim to firePreCompactEvent', async () => {
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    const firePreCompactEvent = vi.fn().mockResolvedValue(undefined);
+    const { mockChat, mockConfig } = setup({
+      hookSystem: {
+        firePreCompactEvent,
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      customInstructions: 'focus auth',
+    });
+
+    expect(firePreCompactEvent).toHaveBeenCalledWith(
+      PreCompactTrigger.Manual,
+      'focus auth',
+      undefined,
+    );
+  });
+
+  it('appends PreCompact hook additionalContext when no user instructions', async () => {
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    const { mockChat, mockConfig } = setup({
+      hookSystem: {
+        firePreCompactEvent: vi
+          .fn()
+          .mockResolvedValue(
+            makeHookOutput({ additionalContext: 'prefer Chinese summaries' }),
+          ),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const passed = spy.mock.calls[0]![1] as { systemInstruction: string };
+    expect(passed.systemInstruction).toContain('Additional Instructions:');
+    expect(passed.systemInstruction).toContain('prefer Chinese summaries');
+  });
+
+  it('orders user instructions before hook additionalContext', async () => {
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    const { mockChat, mockConfig } = setup({
+      hookSystem: {
+        firePreCompactEvent: vi
+          .fn()
+          .mockResolvedValue(
+            makeHookOutput({ additionalContext: 'HOOK_TEXT' }),
+          ),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+      customInstructions: 'USER_TEXT',
+    });
+
+    const passed = spy.mock.calls[0]![1] as { systemInstruction: string };
+    const userIdx = passed.systemInstruction.indexOf('USER_TEXT');
+    const hookIdx = passed.systemInstruction.indexOf('HOOK_TEXT');
+    expect(userIdx).toBeGreaterThan(-1);
+    expect(hookIdx).toBeGreaterThan(-1);
+    expect(userIdx).toBeLessThan(hookIdx);
+  });
+
+  it('omits the Additional Instructions block when neither source supplies any', async () => {
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    const { mockChat, mockConfig } = setup({});
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const passed = spy.mock.calls[0]![1] as { systemInstruction: string };
+    expect(passed.systemInstruction).not.toContain('Additional Instructions:');
+  });
+
+  it('caps hook additionalContext at MAX_HOOK_INSTRUCTIONS_CHARS', async () => {
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+    // A pathological hook returns far more context than the cap. It must be
+    // clipped before entering the side-query prompt, mirroring the user-text
+    // cap — otherwise an unbounded payload could trigger an unrecoverable PTL.
+    const longCtx = 'H'.repeat(MAX_HOOK_INSTRUCTIONS_CHARS + 1500);
+    const { mockChat, mockConfig } = setup({
+      hookSystem: {
+        firePreCompactEvent: vi
+          .fn()
+          .mockResolvedValue(makeHookOutput({ additionalContext: longCtx })),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const passed = spy.mock.calls[0]![1] as { systemInstruction: string };
+    const hCount = (passed.systemInstruction.match(/H/g) ?? []).length;
+    expect(hCount).toBe(MAX_HOOK_INSTRUCTIONS_CHARS);
+    expect(hCount).toBeLessThan(longCtx.length);
+  });
+});
+
+describe('ChatCompressionService.compress — plan-mode + subagent attachment wiring', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function setupWithAppState(opts: {
+    // Typed as ApprovalMode (not string) so a future enum rename / value
+    // change breaks the test at compile time instead of silently passing
+    // because the literal happens to match the old value.
+    approvalMode?: ApprovalMode;
+    backgroundTasks?: Array<{
+      id: string;
+      kind: string;
+      description: string;
+      status: string;
+      startTime: number;
+      isBackgrounded?: boolean;
+    }>;
+  }) {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'u1' }] },
+      { role: 'model', parts: [{ text: 'm1' }] },
+      { role: 'user', parts: [{ text: 'u2' }] },
+      { role: 'model', parts: [{ text: 'm2' }] },
+    ];
+    const getHistoryMock = vi.fn().mockReturnValue(history);
+    const mockChat = {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => opts.approvalMode ?? ApprovalMode.DEFAULT,
+      getBackgroundTaskRegistry: () => ({
+        getAll: () => opts.backgroundTasks ?? [],
+      }),
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+    return { mockChat, mockConfig };
+  }
+
+  function stubSideQuery() {
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+  }
+
+  it('passes planModeActive=true when getApprovalMode() returns PLAN', async () => {
+    stubSideQuery();
+    const composeSpy = vi
+      .spyOn(postCompactModule, 'composePostCompactHistory')
+      .mockResolvedValue([
+        { role: 'user', parts: [{ text: 's' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ]);
+    const { mockChat, mockConfig } = setupWithAppState({
+      approvalMode: ApprovalMode.PLAN,
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(composeSpy).toHaveBeenCalledOnce();
+    const opts = composeSpy.mock.calls[0]![2] as {
+      planModeActive?: boolean;
+    };
+    expect(opts.planModeActive).toBe(true);
+  });
+
+  it('passes planModeActive=false for non-plan approval modes', async () => {
+    stubSideQuery();
+    const composeSpy = vi
+      .spyOn(postCompactModule, 'composePostCompactHistory')
+      .mockResolvedValue([
+        { role: 'user', parts: [{ text: 's' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ]);
+    const { mockChat, mockConfig } = setupWithAppState({
+      approvalMode: ApprovalMode.AUTO_EDIT,
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const opts = composeSpy.mock.calls[0]![2] as {
+      planModeActive?: boolean;
+    };
+    expect(opts.planModeActive).toBe(false);
+  });
+
+  it('filters background tasks to backgrounded running/paused agent tasks only', async () => {
+    stubSideQuery();
+    const composeSpy = vi
+      .spyOn(postCompactModule, 'composePostCompactHistory')
+      .mockResolvedValue([
+        { role: 'user', parts: [{ text: 's' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ]);
+    const { mockChat, mockConfig } = setupWithAppState({
+      backgroundTasks: [
+        {
+          id: 'r',
+          kind: 'agent',
+          description: 'd',
+          status: 'running',
+          startTime: 1,
+          isBackgrounded: true,
+        },
+        {
+          id: 'p',
+          kind: 'agent',
+          description: 'd',
+          status: 'paused',
+          startTime: 2,
+          isBackgrounded: true,
+        },
+        // Foreground agent (isBackgrounded: false): the parent is
+        // synchronously awaiting it, so it does NOT belong in a
+        // <background-tasks> roster even though it is running.
+        {
+          id: 'fg',
+          kind: 'agent',
+          description: 'd',
+          status: 'running',
+          startTime: 3,
+          isBackgrounded: false,
+        },
+        {
+          id: 'c',
+          kind: 'agent',
+          description: 'd',
+          status: 'completed',
+          startTime: 4,
+          isBackgrounded: true,
+        },
+        {
+          id: 'f',
+          kind: 'agent',
+          description: 'd',
+          status: 'failed',
+          startTime: 5,
+          isBackgrounded: true,
+        },
+        {
+          id: 'x',
+          kind: 'agent',
+          description: 'd',
+          status: 'cancelled',
+          startTime: 6,
+          isBackgrounded: true,
+        },
+        // Non-agent kinds (shell, monitor) must also be excluded — they
+        // do not have a "task" the post-compact agent should send_message
+        // to, only the agent kind is interactive.
+        {
+          id: 's1',
+          kind: 'shell',
+          description: 'd',
+          status: 'running',
+          startTime: 7,
+          isBackgrounded: true,
+        },
+      ],
+    });
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const opts = composeSpy.mock.calls[0]![2] as {
+      runningSubagents?: Array<{ id: string; status: string }>;
+    };
+    // 'fg' is excluded by the isBackgrounded gate; c/f/x by status; s1 by kind.
+    expect(opts.runningSubagents?.map((t) => t.id)).toEqual(['r', 'p']);
+  });
+
+  it('passes an empty runningSubagents array when the registry is missing', async () => {
+    stubSideQuery();
+    const composeSpy = vi
+      .spyOn(postCompactModule, 'composePostCompactHistory')
+      .mockResolvedValue([
+        { role: 'user', parts: [{ text: 's' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ]);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'u1' }] },
+      { role: 'model', parts: [{ text: 'm1' }] },
+    ];
+    const getHistoryMock = vi.fn().mockReturnValue(history);
+    const mockChat = {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      // getBackgroundTaskRegistry intentionally omitted to simulate older
+      // SDK consumers / test harnesses that haven't wired it.
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+
+    await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    const opts = composeSpy.mock.calls[0]![2] as {
+      runningSubagents?: unknown[];
+    };
+    expect(opts.runningSubagents).toEqual([]);
+  });
+
+  it('fallback path still injects plan-mode reminder + subagent snapshot when composePostCompactHistory throws', async () => {
+    // Regression guard: the catch-fallback used to rebuild extraHistory by
+    // hand with only summary+ack, silently dropping plan-mode enforcement and
+    // the subagent roster. Both reminder builders are pure (no I/O), so the
+    // failure that took out composePostCompactHistory must not take them out.
+    // Use a large input / small output so the token-math lands COMPRESSED
+    // (newToken = original - (input-1000) + output) rather than tripping the
+    // inflation guard — we want to assert the fallback's *content*, not status.
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>s</state_snapshot>',
+      usage: {
+        promptTokenCount: 49_000,
+        candidatesTokenCount: 1_500,
+        totalTokenCount: 50_500,
+      },
+    } as never);
+    vi.spyOn(postCompactModule, 'composePostCompactHistory').mockRejectedValue(
+      new Error('EACCES: simulated restoration failure'),
+    );
+    const { mockChat, mockConfig } = setupWithAppState({
+      approvalMode: ApprovalMode.PLAN,
+      backgroundTasks: [
+        {
+          id: 'agent-bg',
+          kind: 'agent',
+          description: 'long-running background task',
+          status: 'running',
+          startTime: 1,
+          isBackgrounded: true,
+        },
+      ],
+    });
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 100_000,
+    });
+
+    // Degraded success — not a failure (summary still reduces context).
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    const flat = (result.newHistory ?? [])
+      .flatMap((c) => c.parts ?? [])
+      .map((p) => (p as { text?: string }).text ?? '')
+      .join('\n');
+    expect(flat).toContain('<plan-mode-active>');
+    expect(flat).toContain('<background-tasks>');
+    expect(flat).toContain('agent-bg');
   });
 });

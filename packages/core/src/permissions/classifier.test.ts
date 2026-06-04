@@ -189,7 +189,7 @@ describe('classifier configuration', () => {
     expect(opts.config?.thinkingConfig?.includeThoughts).toBe(false);
   });
 
-  it('uses max_output_tokens=4096 with thinking enabled for stage 2', async () => {
+  it('uses max_output_tokens=4096 with thinking disabled for stage 2', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })
       .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
@@ -201,7 +201,8 @@ describe('classifier configuration', () => {
       };
     };
     expect(opts.config?.maxOutputTokens).toBe(4096);
-    expect(opts.config?.thinkingConfig?.includeThoughts).toBe(true);
+    // Thinking is disabled in every stage (latency-sensitive permission gate).
+    expect(opts.config?.thinkingConfig?.includeThoughts).toBe(false);
   });
 
   it('does not pin a model — defaults to the fast model via sideQuery', async () => {

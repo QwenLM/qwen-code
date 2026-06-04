@@ -75,6 +75,14 @@ export enum Command {
   // Suggestion expansion
   EXPAND_SUGGESTION = 'expandSuggestion',
   COLLAPSE_SUGGESTION = 'collapseSuggestion',
+
+  // Scroll commands
+  SCROLL_UP = 'scrollUp',
+  SCROLL_DOWN = 'scrollDown',
+  PAGE_UP = 'pageUp',
+  PAGE_DOWN = 'pageDown',
+  SCROLL_HOME = 'scrollHome',
+  SCROLL_END = 'scrollEnd',
 }
 
 /**
@@ -220,4 +228,12 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Suggestion expansion
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
+
+  // Scroll commands
+  [Command.SCROLL_UP]: [{ key: 'up', shift: true }],
+  [Command.SCROLL_DOWN]: [{ key: 'down', shift: true }],
+  [Command.PAGE_UP]: [{ key: 'pageup' }],
+  [Command.PAGE_DOWN]: [{ key: 'pagedown' }],
+  [Command.SCROLL_HOME]: [{ key: 'home', ctrl: true }],
+  [Command.SCROLL_END]: [{ key: 'end', ctrl: true }],
 };

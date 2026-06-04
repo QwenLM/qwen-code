@@ -7,10 +7,10 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "link": "ln -s ../docs content",
+    "link": "node scripts/link-public-docs.mjs",
     "clean": "rm -rf .next",
     "dev": "npm run clean && next --turbopack",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run --config vitest.config.js"
   },
   "dependencies": {
     "next": "^16.0.8",
@@ -18,5 +18,8 @@
     "nextra-theme-docs": "^4.6.1",
     "react": "^19.2.1",
     "react-dom": "^19.2.1"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
   }
 }

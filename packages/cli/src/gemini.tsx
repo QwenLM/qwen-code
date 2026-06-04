@@ -40,6 +40,7 @@ import {
   initializeApp,
   type InitializationResult,
 } from './core/initializer.js';
+import { handleList as handleListExtensions } from './commands/extensions/list.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import {
   setupStartupWorktree,
@@ -466,6 +467,11 @@ export async function main() {
     );
   }
 
+  if (argv.listExtensions) {
+    await handleListExtensions();
+    process.exit(0);
+  }
+
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
     writeStderrLine(
@@ -841,15 +847,6 @@ export async function main() {
       );
     }
 
-    // FIXME: list extensions after the config initialize
-    // if (config.getListExtensions()) {
-    //   console.log('Installed extensions:');
-    //   for (const extension of extensions) {
-    //     console.log(`- ${extension.config.name}`);
-    //   }
-    //   process.exit(0);
-    // }
-
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
     let themeAutoDetectionComplete: Promise<void> | undefined;
@@ -908,6 +905,25 @@ export async function main() {
       // Clean up child processes and force exit, matching other non-interactive modes
       await runExitCleanup();
       process.exit(0);
+    }
+
+    // Background housekeeping: file-history cleanup and (future) other
+    // periodic disk maintenance. Interactive-only — serve/SDK/ACP modes
+    // don't create the file-history dirs this cleans, so they skip.
+    // Dynamic import keeps --help / one-shot --prompt paths from loading
+    // this code at all. Timers inside are .unref()'d so they never block
+    // process exit.
+    if (config.isInteractive()) {
+      // .catch() is intentional: a dynamic-import or module-init failure
+      // (theoretically near-impossible — the module has no top-level side
+      // effects — but defense in depth matches the runPass try/catch in
+      // scheduler.ts) becomes a swallowed log instead of an unhandled
+      // promise rejection that crashes the REPL.
+      void import('./utils/housekeeping/scheduler.js')
+        .then((m) => m.startBackgroundHousekeeping(config, settings))
+        .catch((err) => {
+          debugLogger.warn('failed to start background housekeeping:', err);
+        });
     }
 
     let input = config.getQuestion();

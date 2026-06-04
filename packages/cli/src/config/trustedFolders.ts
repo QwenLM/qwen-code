@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+  atomicWriteFileSync,
   FatalConfigError,
   getErrorMessage,
   isWithinRoot,
@@ -179,10 +180,16 @@ export function saveTrustedFolders(
       fs.mkdirSync(dirPath, { recursive: true });
     }
 
-    fs.writeFileSync(
+    atomicWriteFileSync(
       trustedFoldersFile.path,
       JSON.stringify(trustedFoldersFile.config, null, 2),
-      { encoding: 'utf-8', mode: 0o600 },
+      // noFollow: refuse to follow any pre-placed symlink at the
+      // config path — a redirected write could either leak the
+      // trusted-folder list to an attacker target or leave the user's
+      // real config silently stale. Matches the credential write
+      // sites' security posture (sharedTokenManager, oauth-token-storage,
+      // file-token-storage all use noFollow:true).
+      { encoding: 'utf-8', mode: 0o600, forceMode: true, noFollow: true },
     );
   } catch (error) {
     writeStderrLine('Error saving trusted folders file.');

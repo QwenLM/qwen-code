@@ -116,12 +116,7 @@ describe('Session.pendingWorktreeNotice', () => {
       }),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
-        // Called on every prompt() via #buildInitialSystemReminders
         ensureTool: vi.fn().mockResolvedValue(true),
-      }),
-      // Called on every prompt() to check subagent system reminders
-      getSubagentManager: vi.fn().mockReturnValue({
-        listSubagents: vi.fn().mockResolvedValue([]),
       }),
       getFileService: vi.fn().mockReturnValue({
         shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
