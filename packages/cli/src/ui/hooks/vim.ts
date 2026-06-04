@@ -47,6 +47,18 @@ const CMD_TYPES = {
     UP: 'ck',
     RIGHT: 'cl',
   },
+  DELETE_MOVEMENT: {
+    LEFT: 'dh',
+    DOWN: 'dj',
+    UP: 'dk',
+    RIGHT: 'dl',
+  },
+  YANK_MOVEMENT: {
+    LEFT: 'yh',
+    DOWN: 'yj',
+    UP: 'yk',
+    RIGHT: 'yl',
+  },
 } as const;
 
 type PendingOperator = 'g' | 'd' | 'c' | 'y' | '>' | '<' | null;
@@ -454,6 +466,29 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           if (wordEnd) yankRange(row, col, wordEnd[0], wordEnd[1] + 1, false);
           break;
         }
+        case CMD_TYPES.DELETE_MOVEMENT.LEFT:
+        case CMD_TYPES.DELETE_MOVEMENT.DOWN:
+        case CMD_TYPES.DELETE_MOVEMENT.UP:
+        case CMD_TYPES.DELETE_MOVEMENT.RIGHT: {
+          const movementMap: Record<string, 'h' | 'j' | 'k' | 'l'> = {
+            [CMD_TYPES.DELETE_MOVEMENT.LEFT]: 'h',
+            [CMD_TYPES.DELETE_MOVEMENT.DOWN]: 'j',
+            [CMD_TYPES.DELETE_MOVEMENT.UP]: 'k',
+            [CMD_TYPES.DELETE_MOVEMENT.RIGHT]: 'l',
+          };
+          const m = movementMap[cmdType];
+          if (m) {
+            buffer.vimDeleteMovement(m, count);
+          }
+          break;
+        }
+        case CMD_TYPES.YANK_MOVEMENT.LEFT:
+        case CMD_TYPES.YANK_MOVEMENT.DOWN:
+        case CMD_TYPES.YANK_MOVEMENT.UP:
+        case CMD_TYPES.YANK_MOVEMENT.RIGHT: {
+          // Yank movement doesn't modify buffer, just returns true
+          break;
+        }
         default:
           return false;
       }
@@ -727,6 +762,123 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
     [getCurrentCount, dispatch, buffer, updateMode],
   );
 
+  const handleDeleteMovement = useCallback(
+    (movement: 'h' | 'j' | 'k' | 'l'): boolean => {
+      const count = getCurrentCount();
+      const [row, col] = bufferRef.current.cursor;
+      const lines = bufferRef.current.lines;
+
+      // Calculate the text to be deleted for yank register
+      let text = '';
+      switch (movement) {
+        case 'h': {
+          const startCol = Math.max(0, col - count);
+          text = (lines[row] ?? '').slice(startCol, col);
+          break;
+        }
+        case 'l': {
+          const endCol = Math.min((lines[row] ?? '').length, col + count);
+          text = (lines[row] ?? '').slice(col, endCol);
+          break;
+        }
+        case 'j': {
+          const endRow = Math.min(lines.length - 1, row + count);
+          text = lines.slice(row, endRow + 1).join('\n');
+          break;
+        }
+        case 'k': {
+          const startRow = Math.max(0, row - count + 1);
+          text = lines.slice(startRow, row + 1).join('\n');
+          break;
+        }
+        default:
+          break;
+      }
+
+      dispatch({
+        type: 'SET_YANK_REGISTER',
+        text,
+        linewise: movement === 'j' || movement === 'k',
+      });
+      writeClipboard(text);
+      dispatch({ type: 'CLEAR_COUNT' });
+      buffer.vimDeleteMovement(movement, count);
+
+      const cmdTypeMap = {
+        h: CMD_TYPES.DELETE_MOVEMENT.LEFT,
+        j: CMD_TYPES.DELETE_MOVEMENT.DOWN,
+        k: CMD_TYPES.DELETE_MOVEMENT.UP,
+        l: CMD_TYPES.DELETE_MOVEMENT.RIGHT,
+      };
+
+      dispatch({
+        type: 'SET_LAST_COMMAND',
+        command: { type: cmdTypeMap[movement], count },
+      });
+      dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+      return true;
+    },
+    [getCurrentCount, dispatch, buffer],
+  );
+
+  const handleYankMovement = useCallback(
+    (movement: 'h' | 'j' | 'k' | 'l'): boolean => {
+      const count = getCurrentCount();
+      const [row, col] = bufferRef.current.cursor;
+      const lines = bufferRef.current.lines;
+
+      // Calculate the text to be yanked
+      let text = '';
+      switch (movement) {
+        case 'h': {
+          const startCol = Math.max(0, col - count);
+          text = (lines[row] ?? '').slice(startCol, col);
+          break;
+        }
+        case 'l': {
+          const endCol = Math.min((lines[row] ?? '').length, col + count);
+          text = (lines[row] ?? '').slice(col, endCol);
+          break;
+        }
+        case 'j': {
+          const endRow = Math.min(lines.length - 1, row + count);
+          text = lines.slice(row, endRow + 1).join('\n');
+          break;
+        }
+        case 'k': {
+          const startRow = Math.max(0, row - count + 1);
+          text = lines.slice(startRow, row + 1).join('\n');
+          break;
+        }
+        default:
+          break;
+      }
+
+      dispatch({
+        type: 'SET_YANK_REGISTER',
+        text,
+        linewise: movement === 'j' || movement === 'k',
+      });
+      writeClipboard(text);
+      dispatch({ type: 'CLEAR_COUNT' });
+
+      const cmdTypeMap = {
+        h: CMD_TYPES.YANK_MOVEMENT.LEFT,
+        j: CMD_TYPES.YANK_MOVEMENT.DOWN,
+        k: CMD_TYPES.YANK_MOVEMENT.UP,
+        l: CMD_TYPES.YANK_MOVEMENT.RIGHT,
+      };
+
+      dispatch({
+        type: 'SET_LAST_COMMAND',
+        command: { type: cmdTypeMap[movement], count },
+      });
+      dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+      return true;
+    },
+    [getCurrentCount, dispatch],
+  );
+
   const handleOperatorMotion = useCallback(
     (operator: 'd' | 'c' | 'y', motion: 'w' | 'b' | 'e'): boolean => {
       const count = getCurrentCount();
@@ -833,6 +985,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           // ── Movement ──
           case 'h': {
             if (state.pendingOperator === 'c') return handleChangeMovement('h');
+            if (state.pendingOperator === 'd') return handleDeleteMovement('h');
+            if (state.pendingOperator === 'y') return handleYankMovement('h');
             if (state.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
@@ -842,6 +996,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           case 'j': {
             if (state.pendingOperator === 'c') return handleChangeMovement('j');
+            if (state.pendingOperator === 'd') return handleDeleteMovement('j');
+            if (state.pendingOperator === 'y') return handleYankMovement('j');
             if (state.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
@@ -851,6 +1007,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           case 'k': {
             if (state.pendingOperator === 'c') return handleChangeMovement('k');
+            if (state.pendingOperator === 'd') return handleDeleteMovement('k');
+            if (state.pendingOperator === 'y') return handleYankMovement('k');
             if (state.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
@@ -860,6 +1018,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           case 'l': {
             if (state.pendingOperator === 'c') return handleChangeMovement('l');
+            if (state.pendingOperator === 'd') return handleDeleteMovement('l');
+            if (state.pendingOperator === 'y') return handleYankMovement('l');
             if (state.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
@@ -1547,6 +1707,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       dispatch,
       getCurrentCount,
       handleChangeMovement,
+      handleDeleteMovement,
+      handleYankMovement,
       handleOperatorMotion,
       buffer,
       executeCommand,

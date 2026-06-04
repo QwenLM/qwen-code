@@ -123,6 +123,7 @@ describe('useVim hook', () => {
       vimDeleteToEndOfLine: vi.fn(),
       vimChangeToEndOfLine: vi.fn(),
       vimChangeMovement: vi.fn(),
+      vimDeleteMovement: vi.fn(),
       vimMoveLeft: vi.fn().mockImplementation((count = 1) => {
         const [row, col] = cursorState.pos;
         cursorState.pos = [row, Math.max(0, col - count)];
@@ -2446,6 +2447,107 @@ describe('useVim hook', () => {
 
       expect(buffer.vimDeleteWordForward).not.toHaveBeenCalled();
       expect(buffer.vimMoveWordForward).toHaveBeenCalledWith(1);
+    });
+  });
+
+  describe('Delete movement (dh, dl, dj, dk)', () => {
+    it('should delete character to the left with dh', () => {
+      const buffer = createMockBuffer('hello world', [0, 5]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      act(() => result.current.handleInput(makeKey('d')));
+      act(() => result.current.handleInput(makeKey('h')));
+
+      expect(buffer.vimDeleteMovement).toHaveBeenCalledWith('h', 1);
+    });
+
+    it('should delete character to the right with dl', () => {
+      const buffer = createMockBuffer('hello world', [0, 5]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      act(() => result.current.handleInput(makeKey('d')));
+      act(() => result.current.handleInput(makeKey('l')));
+
+      expect(buffer.vimDeleteMovement).toHaveBeenCalledWith('l', 1);
+    });
+
+    it('should delete current and next line with dj', () => {
+      const buffer = createMockBuffer('line1\nline2\nline3', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      act(() => result.current.handleInput(makeKey('d')));
+      act(() => result.current.handleInput(makeKey('j')));
+
+      expect(buffer.vimDeleteMovement).toHaveBeenCalledWith('j', 1);
+    });
+
+    it('should delete current and previous line with dk', () => {
+      const buffer = createMockBuffer('line1\nline2\nline3', [1, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      act(() => result.current.handleInput(makeKey('d')));
+      act(() => result.current.handleInput(makeKey('k')));
+
+      expect(buffer.vimDeleteMovement).toHaveBeenCalledWith('k', 1);
+    });
+  });
+
+  describe('Yank movement (yh, yl, yj, yk)', () => {
+    it('should yank character to the left with yh', () => {
+      const buffer = createMockBuffer('hello world', [0, 5]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      act(() => result.current.handleInput(makeKey('y')));
+      act(() => result.current.handleInput(makeKey('h')));
+
+      // Yank movement doesn't call buffer methods, just updates register
+      expect(buffer.vimDeleteMovement).not.toHaveBeenCalled();
+    });
+
+    it('should yank character to the right with yl', () => {
+      const buffer = createMockBuffer('hello world', [0, 5]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      act(() => result.current.handleInput(makeKey('y')));
+      act(() => result.current.handleInput(makeKey('l')));
+
+      expect(buffer.vimDeleteMovement).not.toHaveBeenCalled();
+    });
+
+    it('should yank current and next line with yj', () => {
+      const buffer = createMockBuffer('line1\nline2\nline3', [0, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      act(() => result.current.handleInput(makeKey('y')));
+      act(() => result.current.handleInput(makeKey('j')));
+
+      expect(buffer.vimDeleteMovement).not.toHaveBeenCalled();
+    });
+
+    it('should yank current and previous line with yk', () => {
+      const buffer = createMockBuffer('line1\nline2\nline3', [1, 0]);
+      const { result } = renderHook(() =>
+        useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+      );
+
+      act(() => result.current.handleInput(makeKey('y')));
+      act(() => result.current.handleInput(makeKey('k')));
+
+      expect(buffer.vimDeleteMovement).not.toHaveBeenCalled();
     });
   });
 });
