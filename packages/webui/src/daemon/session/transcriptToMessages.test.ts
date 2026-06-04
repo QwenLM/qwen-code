@@ -14,6 +14,7 @@ function textBlock(
   text: string,
   createdAt: number,
   streaming = false,
+  overrides: Partial<DaemonTextTranscriptBlock> = {},
 ): DaemonTextTranscriptBlock {
   return {
     id,
@@ -23,6 +24,7 @@ function textBlock(
     clientReceivedAt: createdAt,
     createdAt,
     updatedAt: createdAt,
+    ...overrides,
   };
 }
 
@@ -1967,6 +1969,89 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(agentB!.callId).toBe('agent-2');
     expect(agentB!.subTools).toHaveLength(1);
     expect(agentB!.subTools![0].callId).toBe('sub-b1');
+  });
+
+  it('nests parented text inside the matching parallel subagent', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'agent-1', 'running', 100, {
+        toolName: 'Agent',
+        title: 'Agent A',
+        rawInput: { subagent_type: 'Explore', prompt: 'a' },
+      }),
+      toolBlock('t2', 'agent-2', 'running', 100, {
+        toolName: 'Agent',
+        title: 'Agent B',
+        rawInput: { subagent_type: 'Security', prompt: 'b' },
+      }),
+      textBlock('th1', 'thought', 'A thinking. ', 150, false, {
+        parentToolCallId: 'agent-1',
+      }),
+      textBlock('msg1', 'assistant', 'B answer. ', 160, false, {
+        parentToolCallId: 'agent-2',
+      }),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    const agentA =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    const agentB =
+      messages[1].role === 'tool_group' ? messages[1].tools[0] : undefined;
+    expect(agentA?.subContent).toBe('A thinking. ');
+    expect(agentB?.subContent).toBe('B answer. ');
+    expect(messages.find((message) => message.role === 'assistant')).toBe(
+      undefined,
+    );
+  });
+
+  it('nests parented shell tools inside the matching failed subagent', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-failed', 'agent-1', 'failed', 100, {
+        toolName: 'agent',
+        title: 'Agent: review PR',
+        rawOutput: { type: 'task_execution', result: 'failed' },
+      }),
+      toolBlock('shell-child', 'shell-1', 'completed', 110, {
+        toolName: 'run_shell_command',
+        title: 'Shell: git diff',
+        rawInput: {
+          command: 'git diff FETCH_HEAD...HEAD',
+          description: '获取 PR diff',
+        },
+        rawOutput: 'No such file or directory',
+        parentToolCallId: 'agent-1',
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const agent =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agent?.callId).toBe('agent-1');
+    expect(agent?.subTools).toHaveLength(1);
+    expect(agent?.subTools?.[0]).toMatchObject({
+      callId: 'shell-1',
+      toolName: 'run_shell_command',
+      rawOutput: 'No such file or directory',
+    });
+  });
+
+  it('nests parented replay text after a completed subagent leaves the active stack', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('t1', 'agent-1', 'completed', 100, {
+        toolName: 'Agent',
+        title: 'Agent A',
+        rawInput: { subagent_type: 'Explore', prompt: 'a' },
+        rawOutput: { type: 'task_execution', result: 'done' },
+        updatedAt: 120,
+      }),
+      textBlock('th1', 'thought', 'late parented thought', 150, false, {
+        parentToolCallId: 'agent-1',
+      }),
+    ]);
+
+    expect(messages).toHaveLength(1);
+    const agent =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(agent?.subContent).toBe('late parented thought');
   });
 
   it('hides unparented thought text while parallel subagents are active', () => {
