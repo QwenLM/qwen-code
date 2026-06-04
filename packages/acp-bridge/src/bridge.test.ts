@@ -8644,9 +8644,55 @@ describe('preheat', () => {
   });
 
   it('is a no-op after shutdown', async () => {
-    const factory: ChannelFactory = async () => makeChannel().channel;
+    let factoryCalls = 0;
+    const factory: ChannelFactory = async () => {
+      factoryCalls++;
+      return makeChannel().channel;
+    };
     const bridge = makeBridge({ channelFactory: factory });
     await bridge.shutdown();
     await bridge.preheat();
+    expect(factoryCalls).toBe(0);
+  });
+
+  it('arms idle timer on preheated channel when channelIdleTimeoutMs > 0', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      let factoryCalls = 0;
+      const factory: ChannelFactory = async () => {
+        factoryCalls++;
+        return handle.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        channelIdleTimeoutMs: 5_000,
+      });
+      await bridge.preheat();
+      expect(factoryCalls).toBe(1);
+      expect(handle.killed).toBe(false);
+
+      // First session cancels the preheat idle timer and reuses channel
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      expect(factoryCalls).toBe(1);
+
+      // Advance past preheat timer — channel should survive (timer cancelled)
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(handle.killed).toBe(false);
+
+      // Close session — new idle timer starts
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

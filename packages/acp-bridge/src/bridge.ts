@@ -837,10 +837,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     }
   }
 
-  async function killChannelWithLog(ci: ChannelInfo): Promise<void> {
+  async function killChannelWithLog(
+    ci: ChannelInfo,
+    context?: string,
+  ): Promise<void> {
     ci.isDying = true;
     await ci.channel.kill().catch((err) => {
-      writeStderrLine(`qwen serve: channel kill failed: ${String(err)}`);
+      writeStderrLine(
+        `qwen serve: channel kill failed${context ? ` (${context})` : ''}: ${String(err)}`,
+      );
     });
   }
 
@@ -851,10 +856,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       : 0;
   }
 
-  async function startIdleTimer(ci: ChannelInfo): Promise<void> {
+  async function startIdleTimer(
+    ci: ChannelInfo,
+    context?: string,
+  ): Promise<void> {
     const timeoutMs = resolvedChannelIdleTimeoutMs();
     if (timeoutMs <= 0) {
-      await killChannelWithLog(ci);
+      await killChannelWithLog(ci, context);
       return;
     }
     cancelIdleTimer();
@@ -864,7 +872,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         writeStderrLine(
           `qwen serve: idle timeout (${timeoutMs}ms) expired, killing channel`,
         );
-        void killChannelWithLog(ci);
+        void killChannelWithLog(ci, context ?? 'idle timeout');
       }
     }, timeoutMs);
     idleTimer.unref();
@@ -2869,7 +2877,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         /* no active prompt or session already torn down */
       }
       if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
-        await startIdleTimer(ci);
+        await startIdleTimer(ci, `closeSession "${sessionId}"`);
       }
     },
 
@@ -4497,7 +4505,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // SIGTERM the restore mid-flight and 500 the caller for a
       // failure orthogonal to their request.
       if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
-        await startIdleTimer(ci);
+        await startIdleTimer(ci, `killSession "${sessionId}"`);
       }
     },
 
