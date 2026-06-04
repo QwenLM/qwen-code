@@ -816,13 +816,14 @@ export default {
   // Команды - Режим подтверждения
   // ============================================================================
   'Tool Approval Mode': 'Режим подтверждения инструментов',
-  '{{mode}} mode': 'Режим {{mode}}',
   'Analyze only, do not modify files or execute commands':
     'Только анализ, без изменения файлов или выполнения команд',
   'Require approval for file edits or shell commands':
     'Требуется подтверждение для редактирования файлов или команд терминала',
   'Automatically approve file edits':
     'Автоматически подтверждать изменения файлов',
+  'Use classifier to automatically approve safe tool calls':
+    'Использовать классификатор для автоматического подтверждения безопасных вызовов инструментов',
   'Automatically approve all tools':
     'Автоматически подтверждать все инструменты',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':

@@ -754,12 +754,13 @@ export default {
   'Available options:': '可用選項：',
   'Set UI language to {{name}}': '將 UI 語言設置為 {{name}}',
   'Tool Approval Mode': '工具審批模式',
-  '{{mode}} mode': '{{mode}} 模式',
   'Analyze only, do not modify files or execute commands':
     '僅分析，不修改檔案或執行命令',
   'Require approval for file edits or shell commands':
     '需要批准檔案編輯或 shell 命令',
   'Automatically approve file edits': '自動批准檔案編輯',
+  'Use classifier to automatically approve safe tool calls':
+    '使用分類器自動批准安全的工具調用',
   'Automatically approve all tools': '自動批准所有工具',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     '工作區審批模式已存在並具有優先級。用戶級別的更改將無效。',

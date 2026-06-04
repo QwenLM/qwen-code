@@ -580,12 +580,13 @@ export default {
     '追加のUI言語パックをリクエストするには、GitHub で Issue を作成してください',
   'Available options:': '使用可能なオプション:',
   'Set UI language to {{name}}': 'UI言語を {{name}} に設定',
-  '{{mode}} mode': '{{mode}}モード',
   'Analyze only, do not modify files or execute commands':
     '分析のみ、ファイルの変更やコマンドの実行はしません',
   'Require approval for file edits or shell commands':
     'ファイル編集やシェルコマンドには承認が必要',
   'Automatically approve file edits': 'ファイル編集を自動承認',
+  'Use classifier to automatically approve safe tool calls':
+    '分類器を使用して安全なツール呼び出しを自動承認',
   'Automatically approve all tools': 'すべてのツールを自動承認',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'ワークスペースの承認モードが存在し、優先されます。ユーザーレベルの変更は効果がありません',
