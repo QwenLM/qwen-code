@@ -35,11 +35,7 @@ import {
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
-import {
-  createHttpAcpBridge,
-  extractErrorMessage,
-  extractErrorCode,
-} from './bridge.js';
+import { extractErrorMessage, extractErrorCode } from './bridge.js';
 import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
