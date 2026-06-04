@@ -37,7 +37,6 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
     },
     { name: 'delete', description: t('local.delete') },
     { name: 'release', description: t('local.release') },
-    { name: 'mode', description: t('local.mode'), argumentHint: '<mode>' },
     {
       name: 'approval-mode',
       description: t('local.approvalMode'),
