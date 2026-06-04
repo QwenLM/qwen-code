@@ -5,11 +5,28 @@
  */
 
 import path from 'node:path';
-import { APPROVAL_MODES, type ApprovalMode } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  type ApprovalMode,
+  BTW_MAX_INPUT_LENGTH,
+  SessionService,
+  WorkspaceMemoryFileTooLargeError,
+  WorkspaceMemoryWriteTimeoutError,
+  writeWorkspaceContextFile,
+} from '@qwen-code/qwen-code-core';
+import { FsError } from '../fs/errors.js';
+import {
+  TooManyActiveDeviceFlowsError,
+  UnsupportedDeviceFlowProviderError,
+  UpstreamDeviceFlowError,
+} from '../auth/deviceFlow.js';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
+import type { WorkspaceFileSystemFactory } from '../fs/index.js';
+import type { DeviceFlowRegistry } from '../auth/deviceFlow.js';
+import { collectWorkspaceMemoryStatus } from '../workspaceMemory.js';
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
@@ -62,6 +79,35 @@ const CONN_ROUTED_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}workspace/init`,
   `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
   `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
+  // Wave 1: session extensions
+  `${QWEN_METHOD_NS}session/recap`,
+  `${QWEN_METHOD_NS}session/btw`,
+  `${QWEN_METHOD_NS}session/shell`,
+  `${QWEN_METHOD_NS}session/detach`,
+  `${QWEN_METHOD_NS}session/context_usage`,
+  `${QWEN_METHOD_NS}session/tasks`,
+  // Wave 1: memory
+  `${QWEN_METHOD_NS}workspace/memory`,
+  `${QWEN_METHOD_NS}workspace/memory/write`,
+  // Wave 1: files
+  `${QWEN_METHOD_NS}file/read`,
+  `${QWEN_METHOD_NS}file/read_bytes`,
+  `${QWEN_METHOD_NS}file/stat`,
+  `${QWEN_METHOD_NS}file/list`,
+  `${QWEN_METHOD_NS}file/glob`,
+  `${QWEN_METHOD_NS}file/write`,
+  `${QWEN_METHOD_NS}file/edit`,
+  // Wave 1: auth
+  `${QWEN_METHOD_NS}workspace/auth/status`,
+  `${QWEN_METHOD_NS}workspace/auth/device_flow/start`,
+  `${QWEN_METHOD_NS}workspace/auth/device_flow/get`,
+  `${QWEN_METHOD_NS}workspace/auth/device_flow/cancel`,
+  // Wave 1: remaining workspace
+  `${QWEN_METHOD_NS}workspace/tools`,
+  `${QWEN_METHOD_NS}workspace/mcp/tools`,
+  `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
+  `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
+  `${QWEN_METHOD_NS}sessions/delete`,
 ]);
 
 // SYNC: server.ts MAX_TOOL_NAME_LENGTH / MAX_SERVER_NAME_LENGTH (both 256).
@@ -129,9 +175,55 @@ function validatePrompt(params: Record<string, unknown>): void {
  * the operator-facing message is not a cross-tenant leak), and anything
  * unrecognized collapses to a generic INTERNAL_ERROR string.
  */
-function toRpcError(err: unknown): { code: number; message: string } {
+function toRpcError(err: unknown): {
+  code: number;
+  message: string;
+  data?: Record<string, unknown>;
+} {
   if (err instanceof AcpParamError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
+  }
+  if (err instanceof FsError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: { errorKind: err.kind, hint: err.hint },
+    };
+  }
+  if (err instanceof WorkspaceMemoryFileTooLargeError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: { errorKind: 'memory_file_too_large' },
+    };
+  }
+  if (err instanceof WorkspaceMemoryWriteTimeoutError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: { errorKind: 'memory_write_timeout' },
+    };
+  }
+  if (err instanceof TooManyActiveDeviceFlowsError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: { errorKind: 'too_many_active_flows' },
+    };
+  }
+  if (err instanceof UnsupportedDeviceFlowProviderError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: { errorKind: 'unsupported_provider' },
+    };
+  }
+  if (err instanceof UpstreamDeviceFlowError) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: err.message,
+      data: { errorKind: 'upstream_error' },
+    };
   }
   const name = err instanceof Error ? err.name : '';
   switch (name) {
@@ -142,6 +234,12 @@ function toRpcError(err: unknown): { code: number; message: string } {
       return { code: RPC.INVALID_PARAMS, message: errMsg(err) };
     case 'SessionLimitExceededError':
       return { code: RPC.INTERNAL_ERROR, message: errMsg(err) };
+    case 'McpServerNotFoundError':
+      return {
+        code: RPC.INVALID_PARAMS,
+        message: errMsg(err),
+        data: { errorKind: 'mcp_server_not_found' },
+      };
     default:
       return { code: RPC.INTERNAL_ERROR, message: 'Internal error' };
   }
@@ -163,6 +261,8 @@ export class AcpDispatcher {
     private readonly bridge: HttpAcpBridge,
     private readonly boundWorkspace: string,
     private readonly workspace: DaemonWorkspaceService,
+    private readonly fsFactory?: WorkspaceFileSystemFactory,
+    private readonly deviceFlowRegistry?: DeviceFlowRegistry,
   ) {}
 
   /**
@@ -900,6 +1000,671 @@ export class AcpDispatcher {
           return;
         }
 
+        // ── Wave 1: Session Extensions ──────────────────────────────
+
+        case `${QWEN_METHOD_NS}session/recap`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const result = await this.bridge.generateSessionRecap(
+            sessionId,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/btw`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const rawQuestion = params['question'];
+          if (
+            typeof rawQuestion !== 'string' ||
+            rawQuestion.trim().length === 0 ||
+            rawQuestion.length > BTW_MAX_INPUT_LENGTH
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`question\` is required, must be a non-empty string, and at most ${BTW_MAX_INPUT_LENGTH} characters`,
+                ),
+              );
+            }
+            return;
+          }
+          const question = rawQuestion.trim();
+          const result = await this.bridge.generateSessionBtw(
+            sessionId,
+            question,
+            undefined,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/shell`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const rawCommand = params['command'];
+          if (
+            typeof rawCommand !== 'string' ||
+            rawCommand.trim().length === 0
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`command` is required and must be a non-empty string',
+                ),
+              );
+            }
+            return;
+          }
+          const trimmedCommand = rawCommand.trim();
+          writeStderrLine(
+            `qwen serve: /acp session/shell session=${sessionId.slice(0, 8)} client=${conn.clientId?.slice(0, 8)} cmd=${trimmedCommand.slice(0, 120)}`,
+          );
+          const result = await this.bridge.executeShellCommand(
+            sessionId,
+            trimmedCommand,
+            undefined,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/detach`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const ctx = this.sessionCtx(conn, sessionId, loopback);
+          await this.bridge.detachClient(sessionId, ctx.clientId);
+          this.replyConn(conn, id, { ok: true });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/context_usage`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const detail = params['detail'] === true;
+          const result = await this.bridge.getSessionContextUsageStatus(
+            sessionId,
+            { detail },
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/tasks`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const result = await this.bridge.getSessionTasksStatus(sessionId);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        // ── Wave 1: Workspace Memory ────────────────────────────────
+
+        case `${QWEN_METHOD_NS}workspace/memory`: {
+          const result = await collectWorkspaceMemoryStatus(
+            this.boundWorkspace,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/memory/write`: {
+          const content = params['content'];
+          if (typeof content !== 'string') {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`content` is required and must be a string',
+                ),
+              );
+            return;
+          }
+          const MAX_MEMORY_CONTENT = 1024 * 1024;
+          if (Buffer.byteLength(content, 'utf8') > MAX_MEMORY_CONTENT) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`content\` exceeds the ${MAX_MEMORY_CONTENT}-byte limit`,
+                ),
+              );
+            return;
+          }
+          const rawScope = params['scope'];
+          if (
+            rawScope !== undefined &&
+            rawScope !== 'workspace' &&
+            rawScope !== 'global'
+          ) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`scope` must be "workspace" or "global"',
+                ),
+              );
+            return;
+          }
+          const scope = (rawScope as 'workspace' | 'global') ?? 'workspace';
+          const rawMode = params['mode'];
+          if (
+            rawMode !== undefined &&
+            rawMode !== 'append' &&
+            rawMode !== 'replace'
+          ) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`mode` must be "append" or "replace"',
+                ),
+              );
+            return;
+          }
+          const mode = (rawMode as 'append' | 'replace') ?? 'append';
+          const writeResult = await writeWorkspaceContextFile({
+            scope,
+            mode,
+            content,
+            projectRoot: this.boundWorkspace,
+          });
+          if (writeResult.changed) {
+            this.bridge.publishWorkspaceEvent({
+              type: 'memory_changed',
+              data: {
+                scope,
+                filePath: writeResult.filePath,
+                mode,
+                bytesWritten: writeResult.bytesWritten,
+              },
+              originatorClientId: conn.clientId,
+            });
+          }
+          this.replyConn(conn, id, {
+            ok: true,
+            filePath: writeResult.filePath,
+            bytesWritten: writeResult.bytesWritten,
+            mode,
+            changed: writeResult.changed,
+          });
+          return;
+        }
+
+        // ── Wave 1: Workspace Files ─────────────────────────────────
+
+        case `${QWEN_METHOD_NS}file/read`: {
+          if (!this.fsFactory) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
+              );
+            return;
+          }
+          const filePath = String(params['path'] ?? '');
+          if (!filePath) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`path` is required'),
+              );
+            return;
+          }
+          const fs = this.fsFactory.forRequest({
+            originatorClientId: conn.clientId,
+            route: `ACP ${method}`,
+          });
+          const resolved = await fs.resolve(filePath, 'read');
+          const out = await fs.readText(resolved, {
+            maxBytes:
+              typeof params['maxBytes'] === 'number'
+                ? params['maxBytes']
+                : undefined,
+            line:
+              typeof params['line'] === 'number' ? params['line'] : undefined,
+            limit:
+              typeof params['limit'] === 'number' ? params['limit'] : undefined,
+          });
+          this.replyConn(conn, id, {
+            path: filePath,
+            content: out.content,
+            ...out.meta,
+          } as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}file/read_bytes`: {
+          if (!this.fsFactory) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
+              );
+            return;
+          }
+          const filePath = String(params['path'] ?? '');
+          if (!filePath) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`path` is required'),
+              );
+            return;
+          }
+          const fs = this.fsFactory.forRequest({
+            originatorClientId: conn.clientId,
+            route: `ACP ${method}`,
+          });
+          const resolved = await fs.resolve(filePath, 'read');
+          const buf = await fs.readBytesWindow(resolved, {
+            offset:
+              typeof params['offset'] === 'number'
+                ? params['offset']
+                : undefined,
+            maxBytes:
+              typeof params['maxBytes'] === 'number'
+                ? params['maxBytes']
+                : undefined,
+          });
+          this.replyConn(conn, id, { path: filePath, ...buf } as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}file/stat`: {
+          if (!this.fsFactory) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
+              );
+            return;
+          }
+          const filePath = String(params['path'] ?? '');
+          if (!filePath) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`path` is required'),
+              );
+            return;
+          }
+          const fs = this.fsFactory.forRequest({
+            originatorClientId: conn.clientId,
+            route: `ACP ${method}`,
+          });
+          const resolved = await fs.resolve(filePath, 'read');
+          const result = await fs.stat(resolved);
+          this.replyConn(conn, id, { path: filePath, ...result } as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}file/list`: {
+          if (!this.fsFactory) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
+              );
+            return;
+          }
+          const dirPath = String(params['path'] ?? '');
+          if (!dirPath) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`path` is required'),
+              );
+            return;
+          }
+          const fs = this.fsFactory.forRequest({
+            originatorClientId: conn.clientId,
+            route: `ACP ${method}`,
+          });
+          const resolved = await fs.resolve(dirPath, 'read');
+          const entries = await fs.list(resolved);
+          this.replyConn(conn, id, { path: dirPath, entries } as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}file/glob`: {
+          if (!this.fsFactory) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
+              );
+            return;
+          }
+          const pattern = String(params['pattern'] ?? '');
+          if (!pattern) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`pattern` is required'),
+              );
+            return;
+          }
+          const fs = this.fsFactory.forRequest({
+            originatorClientId: conn.clientId,
+            route: `ACP ${method}`,
+          });
+          const matches = await fs.glob(pattern);
+          this.replyConn(conn, id, { pattern, matches } as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}file/write`: {
+          if (!this.fsFactory) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
+              );
+            return;
+          }
+          const filePath = String(params['path'] ?? '');
+          if (!filePath) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`path` is required'),
+              );
+            return;
+          }
+          if (typeof params['content'] !== 'string') {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`content` must be a string'),
+              );
+            return;
+          }
+          const fs = this.fsFactory.forRequest({
+            originatorClientId: conn.clientId,
+            route: `ACP ${method}`,
+          });
+          const resolved = await fs.resolve(filePath, 'write');
+          await fs.writeTextOverwrite(resolved, params['content'] as string);
+          this.replyConn(conn, id, { ok: true, path: filePath });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}file/edit`: {
+          if (!this.fsFactory) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'File system not configured'),
+              );
+            return;
+          }
+          const filePath = String(params['path'] ?? '');
+          if (!filePath) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`path` is required'),
+              );
+            return;
+          }
+          const oldText = params['oldText'];
+          const newText = params['newText'];
+          if (typeof oldText !== 'string' || typeof newText !== 'string') {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`oldText` and `newText` must be strings',
+                ),
+              );
+            return;
+          }
+          const fs = this.fsFactory.forRequest({
+            originatorClientId: conn.clientId,
+            route: `ACP ${method}`,
+          });
+          const resolved = await fs.resolve(filePath, 'write');
+          const result = await fs.edit(resolved, oldText, newText);
+          this.replyConn(conn, id, {
+            ok: true,
+            path: filePath,
+            ...result,
+          } as unknown);
+          return;
+        }
+
+        // ── Wave 1: Auth Device Flow ────────────────────────────────
+
+        case `${QWEN_METHOD_NS}workspace/auth/status`: {
+          if (!this.deviceFlowRegistry) {
+            this.replyConn(conn, id, { providers: [], activeFlows: [] });
+            return;
+          }
+          const pending = this.deviceFlowRegistry.listPending();
+          const projected = pending.map((v) => ({
+            deviceFlowId: v.deviceFlowId,
+            providerId: v.providerId,
+            expiresAt: v.expiresAt,
+          }));
+          this.replyConn(conn, id, { pendingDeviceFlows: projected });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/auth/device_flow/start`: {
+          if (!this.deviceFlowRegistry) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'Device flow not configured'),
+              );
+            return;
+          }
+          const providerId = String(params['providerId'] ?? '');
+          if (!providerId) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`providerId` is required'),
+              );
+            return;
+          }
+          const startResult = await this.deviceFlowRegistry.start({
+            providerId,
+            initiatorClientId: conn.clientId,
+          });
+          this.replyConn(conn, id, startResult as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/auth/device_flow/get`: {
+          if (!this.deviceFlowRegistry) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'Device flow not configured'),
+              );
+            return;
+          }
+          const flowId = String(params['id'] ?? '');
+          if (!flowId) {
+            if (id !== undefined)
+              conn.sendConn(error(id, RPC.INVALID_PARAMS, '`id` is required'));
+            return;
+          }
+          const view = this.deviceFlowRegistry.get(flowId);
+          if (!view) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `Device flow "${flowId}" not found`,
+                ),
+              );
+            return;
+          }
+          this.replyConn(conn, id, view as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/auth/device_flow/cancel`: {
+          if (!this.deviceFlowRegistry) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INTERNAL_ERROR, 'Device flow not configured'),
+              );
+            return;
+          }
+          const flowId = String(params['id'] ?? '');
+          if (!flowId) {
+            if (id !== undefined)
+              conn.sendConn(error(id, RPC.INVALID_PARAMS, '`id` is required'));
+            return;
+          }
+          const cancelResult = this.deviceFlowRegistry.cancel(
+            flowId,
+            conn.clientId,
+          );
+          if (!cancelResult) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `Device flow "${flowId}" not found`,
+                ),
+              );
+            return;
+          }
+          this.replyConn(conn, id, {
+            ok: true,
+            alreadyTerminal: cancelResult.alreadyTerminal,
+          });
+          return;
+        }
+
+        // ── Wave 1 continued: remaining workspace methods ───────────
+
+        case `${QWEN_METHOD_NS}workspace/tools`: {
+          const result = await this.bridge.getWorkspaceToolsStatus();
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/mcp/tools`: {
+          const serverName = String(params['serverName'] ?? '');
+          if (!serverName) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`serverName` is required'),
+              );
+            return;
+          }
+          const result =
+            await this.bridge.getWorkspaceMcpToolsStatus(serverName);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/mcp/servers/add`: {
+          const name = String(params['name'] ?? '');
+          if (!name || name.length > MAX_NAME_LENGTH) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`name\` is required and must be ≤ ${MAX_NAME_LENGTH} chars`,
+                ),
+              );
+            return;
+          }
+          const config = params['config'];
+          if (!config || typeof config !== 'object' || Array.isArray(config)) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`config` is required and must be an object',
+                ),
+              );
+            return;
+          }
+          const result = await this.bridge.addRuntimeMcpServer(
+            name,
+            config as Record<string, unknown>,
+            conn.clientId,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/mcp/servers/remove`: {
+          const name = String(params['name'] ?? '');
+          if (!name || name.length > MAX_NAME_LENGTH) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`name\` is required and must be ≤ ${MAX_NAME_LENGTH} chars`,
+                ),
+              );
+            return;
+          }
+          const result = await this.bridge.removeRuntimeMcpServer(
+            name,
+            conn.clientId,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}sessions/delete`: {
+          const sessionIds = params['sessionIds'];
+          if (
+            !Array.isArray(sessionIds) ||
+            sessionIds.length === 0 ||
+            sessionIds.length > 100 ||
+            !sessionIds.every((s) => typeof s === 'string')
+          ) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`sessionIds` must be a non-empty string array (max 100)',
+                ),
+              );
+            return;
+          }
+          const ids = [...new Set(sessionIds as string[])];
+          const closeErrors: Array<{ sessionId: string; error: string }> = [];
+          await Promise.allSettled(
+            ids.map(async (sid) => {
+              try {
+                await this.bridge.closeSession(sid);
+              } catch (err) {
+                closeErrors.push({
+                  sessionId: sid,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            }),
+          );
+          const svc = new SessionService(this.boundWorkspace);
+          const removeResult = await svc.removeSessions(ids);
+          this.replyConn(conn, id, {
+            removed: removeResult.removed,
+            notFound: removeResult.notFound,
+            errors: [
+              ...closeErrors,
+              ...removeResult.errors.map((e) => ({
+                sessionId: e.sessionId,
+                error: e.error.message,
+              })),
+            ],
+          } as unknown);
+          return;
+        }
+
         default:
           if (id !== undefined) {
             conn.sendConn(
@@ -915,8 +1680,8 @@ export class AcpDispatcher {
         `qwen serve: /acp dispatch error (${logSafe(method)}): ${logSafe(errMsg(err))}`,
       );
       if (id !== undefined) {
-        const { code, message } = toRpcError(err);
-        const frame = error(id, code, message);
+        const { code, message, data } = toRpcError(err);
+        const frame = error(id, code, message, data);
         // Route the error the SAME way as the method's success path. Inferring
         // from `params.sessionId` would misroute conn-scoped method failures
         // (session/load|resume|close|…) to a session stream that doesn't exist
@@ -1154,14 +1919,14 @@ export class AcpDispatcher {
       );
       if (id !== undefined) this.replySession(conn, sessionId, id, result);
     } catch (err) {
-      const { code, message } = toRpcError(err);
+      const { code, message, data } = toRpcError(err);
       if (id !== undefined) {
         this.replySession(
           conn,
           sessionId,
           id,
           undefined,
-          error(id, code, message),
+          error(id, code, message, data),
         );
       } else {
         // Notification-form prompt (no id): no response frame to send, so a
