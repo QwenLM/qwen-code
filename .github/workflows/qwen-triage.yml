@@ -28,14 +28,14 @@ jobs:
   triage:
     timeout-minutes: 10
     runs-on: 'ubuntu-latest'
+    # startsWith (not contains) prevents false triggers from comments that
+    # mention the phrase in quoted text or mid-sentence descriptions.
     if: >-
       github.repository == 'QwenLM/qwen-code' && (
         github.event_name == 'issues' ||
         github.event_name == 'pull_request_target' ||
         github.event_name == 'workflow_dispatch' ||
         (github.event_name == 'issue_comment' &&
-         # startsWith prevents false triggers from comments that mention
-         # the phrase in quoted text or mid-sentence descriptions.
          startsWith(github.event.comment.body, '@qwen-code /triage') &&
          (github.event.comment.author_association == 'OWNER' ||
           github.event.comment.author_association == 'MEMBER' ||
