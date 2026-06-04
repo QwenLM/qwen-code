@@ -559,9 +559,20 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             startRow + count - 1,
             buffer.lines.length - 1,
           );
+          // Compute full indented block and issue single replaceRange
+          const lines = buffer.lines;
+          let indentedBlock = '';
           for (let r = startRow; r <= endRow; r++) {
-            buffer.replaceRange(r, 0, r, 0, '  ');
+            if (r > startRow) indentedBlock += '\n';
+            indentedBlock += '  ' + (lines[r] ?? '');
           }
+          buffer.replaceRange(
+            startRow,
+            0,
+            endRow,
+            (lines[endRow] ?? '').length,
+            indentedBlock,
+          );
           break;
         }
         case CMD_TYPES.OUTDENT_LINE: {
@@ -570,14 +581,27 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             startRow + count - 1,
             buffer.lines.length - 1,
           );
+          // Compute full outdented block and issue single replaceRange
+          const lines = buffer.lines;
+          let outdentedBlock = '';
           for (let r = startRow; r <= endRow; r++) {
-            const line = buffer.lines[r] ?? '';
+            if (r > startRow) outdentedBlock += '\n';
+            const line = lines[r] ?? '';
             if (line.startsWith('  ')) {
-              buffer.replaceRange(r, 0, r, 2, '');
+              outdentedBlock += line.slice(2);
             } else if (line.startsWith(' ')) {
-              buffer.replaceRange(r, 0, r, 1, '');
+              outdentedBlock += line.slice(1);
+            } else {
+              outdentedBlock += line;
             }
           }
+          buffer.replaceRange(
+            startRow,
+            0,
+            endRow,
+            (lines[endRow] ?? '').length,
+            outdentedBlock,
+          );
           break;
         }
         default:
@@ -1610,15 +1634,26 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           case '>': {
             if (state.pendingOperator === '>') {
-              // >> — indent N lines
+              // >> — indent N lines (single atomic operation)
               const [startRow] = buffer.cursor;
               const endRow = Math.min(
                 startRow + repeatCount - 1,
                 buffer.lines.length - 1,
               );
+              // Compute full indented block and issue single replaceRange
+              const lines = buffer.lines;
+              let indentedBlock = '';
               for (let r = startRow; r <= endRow; r++) {
-                buffer.replaceRange(r, 0, r, 0, '  ');
+                if (r > startRow) indentedBlock += '\n';
+                indentedBlock += '  ' + (lines[r] ?? '');
               }
+              buffer.replaceRange(
+                startRow,
+                0,
+                endRow,
+                (lines[endRow] ?? '').length,
+                indentedBlock,
+              );
               dispatch({
                 type: 'SET_LAST_COMMAND',
                 command: { type: CMD_TYPES.INDENT_LINE, count: repeatCount },
@@ -1633,20 +1668,33 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           case '<': {
             if (state.pendingOperator === '<') {
-              // << — outdent N lines
+              // << — outdent N lines (single atomic operation)
               const [startRow] = buffer.cursor;
               const endRow = Math.min(
                 startRow + repeatCount - 1,
                 buffer.lines.length - 1,
               );
+              // Compute full outdented block and issue single replaceRange
+              const lines = buffer.lines;
+              let outdentedBlock = '';
               for (let r = startRow; r <= endRow; r++) {
-                const line = buffer.lines[r] ?? '';
+                if (r > startRow) outdentedBlock += '\n';
+                const line = lines[r] ?? '';
                 if (line.startsWith('  ')) {
-                  buffer.replaceRange(r, 0, r, 2, '');
+                  outdentedBlock += line.slice(2);
                 } else if (line.startsWith(' ')) {
-                  buffer.replaceRange(r, 0, r, 1, '');
+                  outdentedBlock += line.slice(1);
+                } else {
+                  outdentedBlock += line;
                 }
               }
+              buffer.replaceRange(
+                startRow,
+                0,
+                endRow,
+                (lines[endRow] ?? '').length,
+                outdentedBlock,
+              );
               dispatch({
                 type: 'SET_LAST_COMMAND',
                 command: { type: CMD_TYPES.OUTDENT_LINE, count: repeatCount },
