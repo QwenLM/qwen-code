@@ -742,11 +742,13 @@ describe('createDaemonWorkspaceService', () => {
         },
       );
 
-      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
-        /appeared.*between/,
-      );
-
-      vi.restoreAllMocks();
+      try {
+        await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+          /appeared.*between/,
+        );
+      } finally {
+        vi.restoreAllMocks();
+      }
     });
 
     it('parent symlink outside workspace is rejected', async () => {
