@@ -1143,6 +1143,94 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('does not inject replay snapshot again after a normal SSE stream end', async () => {
+    const events = vi.fn(async function* replayThenReusableEvents(
+      opts: { signal?: AbortSignal } = {},
+    ) {
+      if (events.mock.calls.length === 1) {
+        return;
+      }
+      await new Promise<void>((resolve) => {
+        if (opts.signal?.aborted) {
+          resolve();
+          return;
+        }
+        opts.signal?.addEventListener('abort', () => resolve(), {
+          once: true,
+        });
+      });
+      yield* [];
+    });
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-1',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'replayed prompt' },
+              },
+            },
+          },
+          {
+            id: 2,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'replayed answer' },
+              },
+            },
+          },
+          {
+            id: 3,
+            v: 1,
+            type: 'turn_complete',
+            data: { stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+      events,
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(5);
+      await flushPromises();
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledTimes(1);
+    expect(events).toHaveBeenCalledTimes(2);
+    expect(blocks.filter((block) => block.kind === 'user')).toHaveLength(1);
+    expect(blocks.filter((block) => block.kind === 'assistant')).toHaveLength(
+      1,
+    );
+    expect(blocks).toMatchObject([
+      { kind: 'user', text: 'replayed prompt' },
+      { kind: 'assistant', text: 'replayed answer', streaming: false },
+      { kind: 'status', text: 'SSE stream ended' },
+    ]);
+  });
+
   it('finishes passive assistant streaming when no prompt action is active', async () => {
     vi.useFakeTimers();
     try {

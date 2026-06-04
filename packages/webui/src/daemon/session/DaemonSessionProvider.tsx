@@ -234,6 +234,7 @@ export function DaemonSessionProvider({
       while (!disposed && !abort.signal.aborted) {
         try {
           let isSameSessionReconnect = false;
+          let shouldInjectReplaySnapshot = false;
           if (!session) {
             setConnection((current) => ({
               ...current,
@@ -301,14 +302,29 @@ export function DaemonSessionProvider({
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
               store.reset();
             } else if (previousSessionId !== undefined) {
-              store.dispatch({ type: 'assistant.done', reason: 'reconnected' });
-              if (store.getSnapshot().awaitingResync) {
-                store.clearAwaitingResync();
+              const replaySnapshotEventCount =
+                nextSession.replaySnapshot.compactedReplay.length +
+                nextSession.replaySnapshot.liveJournal.length;
+              if (replaySnapshotEventCount > 0) {
+                setPromptStatus('idle');
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                store.reset();
+              } else {
+                store.dispatch({
+                  type: 'assistant.done',
+                  reason: 'reconnected',
+                });
+                if (store.getSnapshot().awaitingResync) {
+                  store.clearAwaitingResync();
+                }
               }
             }
             isSameSessionReconnect =
               previousSessionId !== undefined &&
               previousSessionId === nextSession.sessionId;
+            shouldInjectReplaySnapshot =
+              nextSession.replaySnapshot.compactedReplay.length > 0 ||
+              nextSession.replaySnapshot.liveJournal.length > 0;
             session = nextSession;
             reconnectSessionId = session.sessionId;
             shouldCreateFreshSession = false;
@@ -399,7 +415,7 @@ export function DaemonSessionProvider({
           // from lastEventId, so only post-snapshot events are delivered.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
-          if (replayEvents.length > 0) {
+          if (shouldInjectReplaySnapshot && replayEvents.length > 0) {
             const replayOpts = {
               ...eventOptionsRef.current,
               suppressOwnUserEcho: false,
