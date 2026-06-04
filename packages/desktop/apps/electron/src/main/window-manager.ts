@@ -660,7 +660,13 @@ export class WindowManager {
 
     window.setAlwaysOnTop(true, 'floating')
     if (process.platform === 'darwin') {
-      window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+      // skipTransformProcessType: without it, setVisibleOnAllWorkspaces flips the
+      // whole app to NSApplicationActivationPolicyAccessory, which removes the
+      // main Dock icon a moment after the pet window shows. Keep the process type.
+      window.setVisibleOnAllWorkspaces(true, {
+        visibleOnFullScreen: true,
+        skipTransformProcessType: true,
+      })
     }
 
     // Register BEFORE load so the bootstrap preload's __get-workspace-id resolves.
