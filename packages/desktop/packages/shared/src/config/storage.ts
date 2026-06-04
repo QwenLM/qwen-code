@@ -71,6 +71,10 @@ export interface StoredConfig {
   keepAwakeWhileRunning?: boolean;  // Prevent screen sleep while sessions are running (default: false)
   // Tool metadata
   richToolDescriptions?: boolean;  // Add intent/action metadata to all tool calls (default: true)
+  // Pet companion
+  selectedPetId?: string;  // ID of the selected pet companion (default: 'qwen')
+  petEnabled?: boolean;  // Show the floating pet companion (default: true)
+  petWindowBounds?: { x: number; y: number };  // Saved position of the floating pet window
   // Tools
   browserToolEnabled?: boolean;  // Enable built-in browser tool (default: true). Disable for Playwright/Puppeteer.
   // Prompt caching & context
@@ -532,6 +536,62 @@ export function setRichToolDescriptions(enabled: boolean): void {
   const config = loadStoredConfig();
   if (!config) return;
   config.richToolDescriptions = enabled;
+  saveConfig(config);
+}
+
+/**
+ * Get the selected pet companion id. Defaults to 'qwen' if not set.
+ */
+export function getSelectedPetId(): string {
+  const config = loadStoredConfig();
+  return config?.selectedPetId ?? 'qwen';
+}
+
+/**
+ * Set the selected pet companion id.
+ */
+export function setSelectedPetId(id: string): void {
+  const config = loadStoredConfig();
+  if (!config) return;
+  config.selectedPetId = id;
+  saveConfig(config);
+}
+
+/**
+ * Get whether the floating pet companion is shown. Defaults to true.
+ */
+export function getPetEnabled(): boolean {
+  const config = loadStoredConfig();
+  if (config?.petEnabled !== undefined) {
+    return config.petEnabled;
+  }
+  return true;
+}
+
+/**
+ * Set whether the floating pet companion is shown.
+ */
+export function setPetEnabled(enabled: boolean): void {
+  const config = loadStoredConfig();
+  if (!config) return;
+  config.petEnabled = enabled;
+  saveConfig(config);
+}
+
+/**
+ * Get the saved position of the floating pet window, if any.
+ */
+export function getPetWindowBounds(): { x: number; y: number } | undefined {
+  return loadStoredConfig()?.petWindowBounds;
+}
+
+/**
+ * Persist the position of the floating pet window.
+ */
+export function setPetWindowBounds(bounds: { x: number; y: number }): void {
+  const config = loadStoredConfig();
+  if (!config) return;
+  config.petWindowBounds = bounds;
   saveConfig(config);
 }
 

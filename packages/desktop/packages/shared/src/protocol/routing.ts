@@ -44,6 +44,9 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   RPC_CHANNELS.window.END_DRAG,
   RPC_CHANNELS.window.FOCUS_STATE,
   RPC_CHANNELS.window.GET_FOCUS_STATE,
+  RPC_CHANNELS.window.PET_SET_ENABLED,
+  RPC_CHANNELS.window.PET_SET_IGNORE_MOUSE,
+  RPC_CHANNELS.window.PET_FOCUS_SESSION,
 
   // file — native file dialog
   RPC_CHANNELS.file.OPEN_DIALOG,
@@ -156,6 +159,11 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   // appearance — local UI preferences
   RPC_CHANNELS.appearance.GET_RICH_TOOL_DESCRIPTIONS,
   RPC_CHANNELS.appearance.SET_RICH_TOOL_DESCRIPTIONS,
+  RPC_CHANNELS.appearance.GET_SELECTED_PET_ID,
+  RPC_CHANNELS.appearance.SET_SELECTED_PET_ID,
+  RPC_CHANNELS.appearance.GET_PET_ENABLED,
+  RPC_CHANNELS.appearance.SET_PET_ENABLED,
+  RPC_CHANNELS.appearance.LOAD_CUSTOM_PETS,
 
   // caching — prompt cache and context settings
   RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE,

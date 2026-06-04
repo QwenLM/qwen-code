@@ -337,6 +337,14 @@ export const CHANNEL_MAP = {
   setRichToolDescriptions: invoke(
     RPC_CHANNELS.appearance.SET_RICH_TOOL_DESCRIPTIONS,
   ),
+  getSelectedPetId: invoke(RPC_CHANNELS.appearance.GET_SELECTED_PET_ID),
+  setSelectedPetId: invoke(RPC_CHANNELS.appearance.SET_SELECTED_PET_ID),
+  getPetEnabled: invoke(RPC_CHANNELS.appearance.GET_PET_ENABLED),
+  setPetEnabled: invoke(RPC_CHANNELS.appearance.SET_PET_ENABLED),
+  loadCustomPets: invoke(RPC_CHANNELS.appearance.LOAD_CUSTOM_PETS),
+  setPetWindowEnabled: invoke(RPC_CHANNELS.window.PET_SET_ENABLED),
+  petWindowSetIgnoreMouse: invoke(RPC_CHANNELS.window.PET_SET_IGNORE_MOUSE),
+  petFocusSession: invoke(RPC_CHANNELS.window.PET_FOCUS_SESSION),
 
   // Tools settings
   getBrowserToolEnabled: invoke(RPC_CHANNELS.tools.GET_BROWSER_TOOL_ENABLED),

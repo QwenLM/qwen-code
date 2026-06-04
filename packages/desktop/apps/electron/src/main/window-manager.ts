@@ -1,10 +1,14 @@
-import { BrowserWindow, shell, nativeTheme, Menu, app } from 'electron'
+import { BrowserWindow, shell, nativeTheme, Menu, app, screen } from 'electron'
 import { windowLog } from './logger'
 import { join } from 'path'
 import { existsSync } from 'fs'
 import { release } from 'os'
 import { RPC_CHANNELS, type WindowCloseRequestSource } from '../shared/types'
 import type { SavedWindow } from './window-state'
+import {
+  getPetWindowBounds,
+  setPetWindowBounds,
+} from '@craft-agent/shared/config/storage'
 
 // Vite dev server URL for hot reload
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
@@ -52,6 +56,8 @@ export interface CreateWindowOptions {
 
 export class WindowManager {
   private windows: Map<number, ManagedWindow> = new Map()  // webContents.id → ManagedWindow
+  private petWindow: BrowserWindow | null = null  // floating desktop-pet window (not a managed workspace window)
+  private petWorkspaceId = ''  // workspace the pet window subscribes to for activity
   private focusedModeWindows: Set<number> = new Set()  // webContents.id of windows in focused mode
   private pendingCloseTimeouts: Map<number, NodeJS.Timeout> = new Map()  // Fallback timeouts for window close
   private eventSink: ((channel: string, target: import('@craft-agent/shared/protocol').PushTarget, ...args: any[]) => void) | null = null
@@ -411,6 +417,13 @@ export class WindowManager {
    * Get window by webContents.id (used by IPC handlers instead of BrowserWindow.fromId)
    */
   getWindowByWebContentsId(wcId: number): BrowserWindow | null {
+    if (
+      this.petWindow &&
+      !this.petWindow.isDestroyed() &&
+      this.petWindow.webContents.id === wcId
+    ) {
+      return this.petWindow
+    }
     const managed = this.windows.get(wcId)
     return managed?.window ?? null
   }
@@ -450,6 +463,13 @@ export class WindowManager {
    * Get workspace ID for a window (by webContents.id)
    */
   getWorkspaceForWindow(webContentsId: number): string | null {
+    if (
+      this.petWindow &&
+      !this.petWindow.isDestroyed() &&
+      this.petWindow.webContents.id === webContentsId
+    ) {
+      return this.petWorkspaceId
+    }
     const managed = this.windows.get(webContentsId)
     return managed?.workspaceId ?? null
   }
@@ -543,6 +563,121 @@ export class WindowManager {
     const webContentsId = window.webContents.id
     this.windows.set(webContentsId, { window, workspaceId })
     windowLog.info(`Registered window ${webContentsId} for workspace ${workspaceId}`)
+  }
+
+  // ---- Floating desktop-pet window -------------------------------------
+
+  /** The live pet window, or null. */
+  getPetWindow(): BrowserWindow | null {
+    return this.petWindow && !this.petWindow.isDestroyed()
+      ? this.petWindow
+      : null
+  }
+
+  /** Toggle click-through on the pet window (called as the cursor enters/leaves the pet). */
+  setPetWindowIgnoreMouse(ignore: boolean): void {
+    this.getPetWindow()?.setIgnoreMouseEvents(ignore, { forward: true })
+  }
+
+  /**
+   * Show/hide the floating pet window. When already shown, reloads it so a
+   * newly-selected pet takes effect. The pet window is intentionally NOT a
+   * managed workspace window (excluded from state persistence + quit logic).
+   */
+  setPetWindowEnabled(enabled: boolean, workspaceId: string): void {
+    if (!enabled) {
+      if (this.petWindow && !this.petWindow.isDestroyed()) {
+        this.petWindow.destroy()
+      }
+      this.petWindow = null
+      return
+    }
+    this.petWorkspaceId = workspaceId
+    const existing = this.getPetWindow()
+    if (existing) {
+      this.loadPetWindow(existing, workspaceId)
+      existing.showInactive()
+      return
+    }
+    this.createPetWindow(workspaceId)
+  }
+
+  private loadPetWindow(window: BrowserWindow, workspaceId: string): void {
+    if (VITE_DEV_SERVER_URL) {
+      const params = new URLSearchParams({ workspaceId }).toString()
+      void window.loadURL(`${VITE_DEV_SERVER_URL}/pet.html?${params}`)
+    } else {
+      void window.loadFile(join(__dirname, 'renderer/pet.html'), {
+        query: { workspaceId },
+      })
+    }
+  }
+
+  private defaultPetPosition(
+    width: number,
+    height: number,
+  ): { x: number; y: number } {
+    const area = screen.getPrimaryDisplay().workArea
+    return {
+      x: Math.round(area.x + area.width - width - 24),
+      y: Math.round(area.y + area.height - height - 24),
+    }
+  }
+
+  private createPetWindow(workspaceId: string): void {
+    // Tall/wide enough to stack notification cards above the pet; the window is
+    // transparent + click-through so the empty area is invisible and inert.
+    const width = 380
+    const height = 540
+    const saved = getPetWindowBounds()
+    const { x, y } = saved ?? this.defaultPetPosition(width, height)
+
+    const window = new BrowserWindow({
+      width,
+      height,
+      x,
+      y,
+      show: false,
+      frame: false,
+      transparent: true,
+      resizable: false,
+      maximizable: false,
+      minimizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      hasShadow: false,
+      alwaysOnTop: true,
+      title: 'Qwen Pet',
+      webPreferences: {
+        preload: join(__dirname, 'bootstrap-preload.cjs'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+        webviewTag: false,
+      },
+    })
+
+    window.setAlwaysOnTop(true, 'floating')
+    if (process.platform === 'darwin') {
+      window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    }
+
+    // Register BEFORE load so the bootstrap preload's __get-workspace-id resolves.
+    this.petWindow = window
+    this.petWorkspaceId = workspaceId
+
+    window.once('ready-to-show', () => window.showInactive())
+    window.on('moved', () => {
+      if (window.isDestroyed()) return
+      const [px, py] = window.getPosition()
+      setPetWindowBounds({ x: px, y: py })
+    })
+    window.on('closed', () => {
+      if (this.petWindow === window) this.petWindow = null
+    })
+
+    this.loadPetWindow(window, workspaceId)
+    windowLog.info(`Created pet window for workspace ${workspaceId}`)
   }
 
   /**

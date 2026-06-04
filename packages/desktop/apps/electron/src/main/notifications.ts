@@ -83,7 +83,10 @@ export function showNotification(
 /**
  * Handle notification click - focus window and navigate to session
  */
-function handleNotificationClick(workspaceId: string, sessionId: string): void {
+export function handleNotificationClick(
+  workspaceId: string,
+  sessionId: string,
+): void {
   if (!windowManager) {
     mainLog.error('WindowManager not initialized for notification click')
     return

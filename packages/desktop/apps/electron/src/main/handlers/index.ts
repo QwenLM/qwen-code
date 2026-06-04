@@ -12,6 +12,7 @@ import { registerWorkspaceGuiHandlers } from './workspace';
 import { registerBrowserHandlers } from './browser';
 import { registerSettingsGuiHandlers } from './settings';
 import { registerWindowDragGuiHandlers } from './window-drag';
+import { registerPetWindowGuiHandlers } from './pet-window';
 
 export function registerGuiRpcHandlers(
   server: RpcServer,
@@ -22,6 +23,7 @@ export function registerGuiRpcHandlers(
   registerBrowserHandlers(server, deps);
   registerSettingsGuiHandlers(server, deps);
   registerWindowDragGuiHandlers(server, deps);
+  registerPetWindowGuiHandlers(server, deps);
 }
 
 export function registerAllRpcHandlers(

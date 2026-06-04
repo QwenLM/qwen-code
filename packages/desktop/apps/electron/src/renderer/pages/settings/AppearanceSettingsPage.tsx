@@ -28,6 +28,8 @@ import {
   SettingsMenuSelect,
   SettingsToggle,
 } from '@/components/settings'
+import { usePetCompanion } from '@/pets/usePetCompanion'
+import { QwenPet } from '@/components/pet/QwenPet'
 import { useWorkspaceIcons } from '@/hooks/useWorkspaceIcon'
 import { Info_DataTable, SortableHeader } from '@/components/info/Info_DataTable'
 import { Info_Badge } from '@/components/info/Info_Badge'
@@ -135,6 +137,22 @@ export default function AppearanceSettingsPage() {
   const handleRichToolDescriptionsChange = useCallback(async (checked: boolean) => {
     setRichToolDescriptions(checked)
     await window.electronAPI?.setRichToolDescriptions?.(checked)
+  }, [])
+
+  // Pet companion settings + custom pets (synced via shared Jotai atoms)
+  const {
+    pets,
+    selectedPetId,
+    setSelectedPetId,
+    petEnabled,
+    setPetEnabled,
+    refreshCustomPets,
+  } = usePetCompanion()
+  const [petsFolder, setPetsFolder] = useState<string | null>(null)
+  useEffect(() => {
+    window.electronAPI?.getHomeDir?.().then((home) =>
+      setPetsFolder(`${home}/.qwen/pets`),
+    )
   }, [])
 
   // Load preset themes on mount
@@ -350,6 +368,67 @@ export default function AppearanceSettingsPage() {
                     checked={richToolDescriptions}
                     onCheckedChange={handleRichToolDescriptionsChange}
                   />
+                </SettingsCard>
+              </SettingsSection>
+
+              {/* Pet companion */}
+              <SettingsSection
+                title={t("settings.appearance.pet")}
+                description={t("settings.appearance.petDesc")}
+              >
+                <SettingsCard>
+                  <SettingsToggle
+                    label={t("settings.appearance.petEnabled")}
+                    description={t("settings.appearance.petEnabledDesc")}
+                    checked={petEnabled}
+                    onCheckedChange={setPetEnabled}
+                  />
+                  {petEnabled && pets.map((pet) => (
+                    <SettingsRow
+                      key={pet.id}
+                      label={
+                        <div className="flex items-center gap-3">
+                          <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-foreground/[0.04]">
+                            <QwenPet spritesheetUrl={pet.spritesheetUrl} state="idle" size={40} />
+                          </div>
+                          <div className="space-y-0.5">
+                            <div className="text-sm font-medium">{pet.displayName}</div>
+                            <div className="text-sm text-muted-foreground">{pet.description}</div>
+                          </div>
+                        </div>
+                      }
+                      action={
+                        selectedPetId === pet.id ? (
+                          <span className="px-3 text-sm text-muted-foreground">
+                            {t("settings.appearance.petSelected")}
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setSelectedPetId(pet.id)}
+                            className="inline-flex items-center h-8 px-3 text-sm rounded-lg bg-background shadow-minimal hover:bg-foreground/[0.02] transition-colors"
+                          >
+                            {t("settings.appearance.petSelect")}
+                          </button>
+                        )
+                      }
+                    />
+                  ))}
+                  {petEnabled && (
+                    <SettingsRow
+                      label={t("settings.appearance.petCustom")}
+                      description={petsFolder ?? '~/.qwen/pets'}
+                      action={
+                        <button
+                          type="button"
+                          onClick={() => { void refreshCustomPets() }}
+                          className="inline-flex items-center h-8 px-3 text-sm rounded-lg bg-background shadow-minimal hover:bg-foreground/[0.02] transition-colors"
+                        >
+                          {t("settings.appearance.petRefresh")}
+                        </button>
+                      }
+                    />
+                  )}
                 </SettingsCard>
               </SettingsSection>
 

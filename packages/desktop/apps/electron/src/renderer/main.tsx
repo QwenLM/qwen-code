@@ -8,6 +8,7 @@ import App from './App'
 import { ThemeProvider } from './context/ThemeContext'
 import { windowWorkspaceIdAtom } from './atoms/sessions'
 import { Toaster } from '@/components/ui/sonner'
+import { PetWindowController } from '@/components/pet/PetWindowController'
 import { setupI18n } from '@craft-agent/shared/i18n'
 import { BRAND } from '@craft-agent/shared/branding'
 import { initReactI18next } from 'react-i18next'
@@ -107,6 +108,7 @@ function Root() {
     <ThemeProvider activeWorkspaceId={workspaceId}>
       <App />
       <Toaster />
+      <PetWindowController />
     </ThemeProvider>
   )
 }
