@@ -6,6 +6,7 @@
 
 import { createDebugLogger, isGitRepository } from '@qwen-code/qwen-code-core';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 
@@ -31,6 +32,8 @@ const STANDALONE_WINDOWS_INSTALLER =
 export interface InstallationInfo {
   packageManager: PackageManager;
   isGlobal: boolean;
+  isStandalone?: boolean;
+  standaloneDir?: string;
   updateCommand?: string;
   updateMessage?: string;
 }
@@ -174,7 +177,45 @@ export function getInstallationInfo(
       };
     }
 
-    // Assume global npm
+    // Check if the package directory is writable to determine whether npm update requires sudo
+    const npmPackageDir = path.dirname(path.dirname(realPath));
+    let npmPrefixWritable = false;
+    try {
+      fs.accessSync(npmPackageDir, fs.constants.W_OK);
+      npmPrefixWritable = true;
+    } catch {
+      // Not writable (e.g., /usr/local/lib/node_modules owned by root)
+    }
+
+    if (!npmPrefixWritable && isAutoUpdateEnabled) {
+      // npm prefix requires sudo — fall back to standalone update path
+      // which installs to ~/.local/lib/qwen-code/ (user-writable)
+      const installRoot = process.env['HOME'] || os.homedir();
+      if (!installRoot || installRoot === '/') {
+        // Cannot determine a safe user-writable location; skip migration
+        return {
+          packageManager: PackageManager.NPM,
+          isGlobal: true,
+          updateMessage:
+            'Update requires sudo. Run: sudo npm install -g @qwen-code/qwen-code@latest',
+        };
+      }
+      const fallbackStandaloneDir = path.join(
+        installRoot,
+        '.local',
+        'lib',
+        'qwen-code',
+      );
+      return {
+        packageManager: PackageManager.NPM,
+        isGlobal: true,
+        isStandalone: true,
+        standaloneDir: fallbackStandaloneDir,
+        updateMessage:
+          'npm install requires sudo. Migrating to standalone installer for automatic updates.',
+      };
+    }
+
     const updateCommand = 'npm install -g @qwen-code/qwen-code@latest';
     return {
       packageManager: PackageManager.NPM,
@@ -203,14 +244,15 @@ function getStandaloneInstallInfo(
     process.platform === 'win32'
       ? `powershell -ExecutionPolicy Bypass -c "irm ${STANDALONE_WINDOWS_INSTALLER} | iex"`
       : `curl -fsSL ${STANDALONE_UNIX_INSTALLER} | bash`;
-  const updatePrefix = isAutoUpdateEnabled
-    ? 'Standalone install detected. Automatic in-place updates are not supported yet.'
-    : 'Standalone install detected.';
 
   return {
     packageManager: PackageManager.STANDALONE,
     isGlobal: true,
-    updateMessage: `${updatePrefix} Please rerun the standalone installer to update: ${updateCommand}`,
+    isStandalone: true,
+    standaloneDir: installDir,
+    updateMessage: isAutoUpdateEnabled
+      ? 'Standalone install detected. Attempting to automatically update now...'
+      : `Standalone install detected. Please rerun the standalone installer to update: ${updateCommand}`,
   };
 }
 

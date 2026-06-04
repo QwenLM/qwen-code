@@ -28,6 +28,7 @@ vi.mock('fs', async (importOriginal) => {
     existsSync: vi.fn(),
     lstatSync: vi.fn(),
     readFileSync: vi.fn(),
+    accessSync: vi.fn(),
   };
 });
 
@@ -198,9 +199,10 @@ describe('getInstallationInfo', () => {
 
     expect(info.packageManager).toBe(PackageManager.STANDALONE);
     expect(info.isGlobal).toBe(true);
+    expect(info.isStandalone).toBe(true);
+    expect(info.standaloneDir).toBe(installDir);
     expect(info.updateCommand).toBeUndefined();
     expect(info.updateMessage).toContain('Standalone install detected');
-    expect(info.updateMessage).toContain('install-qwen-standalone.sh');
     expect(info.updateMessage).not.toContain('npm install');
   });
 
@@ -242,8 +244,10 @@ describe('getInstallationInfo', () => {
     const info = getInstallationInfo(projectRoot, true);
 
     expect(info.packageManager).toBe(PackageManager.STANDALONE);
+    expect(info.isStandalone).toBe(true);
+    expect(info.standaloneDir).toBe(installDir);
     expect(info.updateCommand).toBeUndefined();
-    expect(info.updateMessage).toContain('install-qwen-standalone.ps1');
+    expect(info.updateMessage).toContain('Standalone install detected');
     expect(info.updateMessage).not.toContain('npm install');
   });
 
@@ -285,8 +289,9 @@ describe('getInstallationInfo', () => {
 
     expect(info.packageManager).toBe(PackageManager.STANDALONE);
     expect(info.isGlobal).toBe(true);
+    expect(info.isStandalone).toBe(true);
+    expect(info.standaloneDir).toBe(installDir);
     expect(info.updateMessage).toContain('Standalone install detected');
-    expect(info.updateMessage).toContain('install-qwen-standalone.sh');
   });
 
   it('should fall back to npm when manifest.json is malformed', () => {
