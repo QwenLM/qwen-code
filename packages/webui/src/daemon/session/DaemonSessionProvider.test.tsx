@@ -2615,6 +2615,117 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('does not settle unaccepted prompts from historical replay turns', async () => {
+    const accepted = createDeferred<NonBlockingPromptAccepted>();
+    const ringEvicted = createDeferred<void>();
+    const reloaded = createDeferred<void>();
+    const realTurnComplete = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-ring-unaccepted-prompt',
+      lastEventId: 10,
+      prompt: vi.fn(() => accepted.promise),
+      events: async function* ringEvictedEvents() {
+        await ringEvicted.promise;
+        yield {
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'ring_evicted',
+            lastDeliveredId: 10,
+            earliestAvailableId: 12,
+          },
+        };
+      },
+    });
+    const reloadedSession = createMockSession({
+      sessionId: 'session-ring-unaccepted-prompt',
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 12,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'old replay answer' },
+              },
+            },
+          },
+          {
+            id: 13,
+            v: 1,
+            type: 'turn_complete',
+            data: { promptId: 'prompt-old', stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+      events: async function* reloadedEvents(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        reloaded.resolve();
+        await Promise.race([
+          realTurnComplete.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          id: 14,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'prompt-new', stopReason: 'end_turn' },
+        };
+      },
+    });
+    sdkMocks.sessions.push(firstSession, reloadedSession);
+
+    let actions: DaemonUiSessionActions | undefined;
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+    function Harness() {
+      actions = useDaemonActions();
+      streamingState = useDaemonStreamingState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    const providerActions = requireActions(actions);
+
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = providerActions.sendPrompt('ring prompt');
+      await flushPromises();
+    });
+    expect(streamingState).toBe('waiting');
+
+    await act(async () => {
+      ringEvicted.resolve();
+      await reloaded.promise;
+      await flushPromises();
+    });
+    expect(streamingState).toBe('responding');
+
+    const pendingPrompt = promptResult;
+    if (!pendingPrompt) throw new Error('prompt was not started');
+    await act(async () => {
+      accepted.resolve({ promptId: 'prompt-new', lastEventId: 10 });
+      await flushPromises();
+      realTurnComplete.resolve();
+      await expect(pendingPrompt).resolves.toEqual({
+        stopReason: 'end_turn',
+      });
+    });
+    expect(streamingState).toBe('idle');
+  });
+
   it('keeps own user messages when replay rebuilds after ring eviction', async () => {
     const reloaded = createDeferred<void>();
     const firstSession = createMockSession({

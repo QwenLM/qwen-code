@@ -456,6 +456,7 @@ export function DaemonSessionProvider({
                   store,
                   setPromptStatus,
                   passiveAssistantDoneTimerRef,
+                  { requireBoundPromptId: true },
                 ) || activePromptSettled;
             }
             const lastReplayEvent = replayEvents[replayEvents.length - 1];
@@ -862,6 +863,7 @@ function settleActivePromptFromTurnEvent(
   store: DaemonTranscriptStore,
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>,
   passiveAssistantDoneTimerRef: TimerRef,
+  opts: { requireBoundPromptId?: boolean } = {},
 ): boolean {
   if (event.type !== 'turn_complete' && event.type !== 'turn_error') {
     return false;
@@ -871,6 +873,9 @@ function settleActivePromptFromTurnEvent(
   if (!promptId) return false;
   const active = activePrompts.get(sessionId);
   if (!active) return false;
+  if (opts.requireBoundPromptId && active.promptId === undefined) {
+    return false;
+  }
   if (active.promptId !== undefined && active.promptId !== promptId) {
     return false;
   }
