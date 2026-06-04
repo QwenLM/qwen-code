@@ -97,8 +97,8 @@ export function getUsageOutputTokenCountForPromptEstimate(
   const thoughts = Math.max(0, usage.thoughtsTokenCount ?? 0);
   // Some OpenAI-compatible providers include reasoning tokens inside
   // candidatesTokenCount when totalTokenCount is unavailable. If candidates
-  // already dominates thoughts, treat thoughts as potentially overlapping;
+  // strictly dominates thoughts, treat thoughts as potentially overlapping;
   // otherwise add the larger reasoning-only count so long-thinking responses
   // still advance the steady-state prompt estimate.
-  return candidates >= thoughts ? candidates : candidates + thoughts;
+  return candidates > thoughts ? candidates : candidates + thoughts;
 }

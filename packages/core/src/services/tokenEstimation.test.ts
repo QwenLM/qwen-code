@@ -141,6 +141,16 @@ describe('getUsageOutputTokenCountForPromptEstimate', () => {
     ).toBe(170);
   });
 
+  it('adds equal candidate and thought counts because equality does not prove overlap', () => {
+    expect(
+      getUsageOutputTokenCountForPromptEstimate({
+        promptTokenCount: 100,
+        candidatesTokenCount: 80,
+        thoughtsTokenCount: 80,
+      }),
+    ).toBe(160);
+  });
+
   it('clamps negative disjoint output token counts to zero', () => {
     expect(
       getUsageOutputTokenCountForPromptEstimate({
