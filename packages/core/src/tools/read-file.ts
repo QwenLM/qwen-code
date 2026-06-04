@@ -27,7 +27,7 @@ import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { isSubpaths } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
-import { isAutoMemPath } from '../memory/paths.js';
+import { isAnyAutoMemPath } from '../memory/paths.js';
 import { memoryFreshnessNote } from '../memory/memoryAge.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -120,10 +120,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     if (
       workspaceContext.isPathWithinWorkspace(filePath) ||
       isSubpaths(allowedRoots, filePath) ||
-      // isAutoMemPath uses the narrower managed auto-memory root for this
-      // project — not the broad getMemoryBaseDir() — to avoid exposing
-      // sensitive ~/.qwen files such as settings.json or OAuth credentials.
-      isAutoMemPath(filePath, this.config.getTargetDir())
+      // isAnyAutoMemPath narrows to the managed auto-memory roots
+      // (per-project + user-level under ~/.qwen/memories/) — never the
+      // broad getMemoryBaseDir() — to avoid exposing sensitive ~/.qwen
+      // files such as settings.json or OAuth credentials.
+      isAnyAutoMemPath(filePath, this.config.getTargetDir())
     ) {
       return 'allow';
     }
@@ -140,7 +141,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // file_unchanged placeholder would skip that prepend, silently
     // dropping the staleness warning for the rest of the session.
     // These files are small; re-emit them on every read.
-    const isAutoMem = isAutoMemPath(absPath, projectRoot);
+    const isAutoMem = isAnyAutoMemPath(absPath, projectRoot);
     // The cache can be disabled at the Config level (escape hatch for
     // sessions where the "model has already seen the prior tool result"
     // assumption breaks down — e.g. after context compaction or
