@@ -169,6 +169,8 @@ function logCommandProblem(
 function withSafeGitConfig(args: string[]): string[] {
   return [
     '-c',
+    'core.quotePath=false',
+    '-c',
     'core.fsmonitor=false',
     '-c',
     'core.untrackedCache=false',

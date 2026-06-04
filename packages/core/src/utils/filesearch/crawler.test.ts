@@ -848,6 +848,80 @@ describe('crawler', () => {
       );
     });
 
+    it('should preserve non-ASCII tracked filenames', async () => {
+      tmpDir = await createTmpDir({
+        '设计文档.txt': '',
+      });
+      await initGitRepo(tmpDir);
+      await runExecFile('git', ['config', 'core.quotePath', 'true'], tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('设计文档.txt');
+      expect(results.some((entry) => entry.includes('\\346'))).toBe(false);
+    });
+
+    it('should disable Git path quoting for crawler commands', async () => {
+      tmpDir = await createTmpDir({ 'tracked.js': '' });
+      const gitArgsSeen: string[][] = [];
+
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command !== 'git') {
+          return { success: false, lines: [] };
+        }
+
+        gitArgsSeen.push(args);
+        const quotePathArgIndex = args.indexOf('core.quotePath=false');
+        expect(quotePathArgIndex).toBeGreaterThan(0);
+        expect(args[quotePathArgIndex - 1]).toBe('-c');
+
+        if (args.includes('rev-parse') && args.includes('--show-toplevel')) {
+          return { success: true, lines: [tmpDir] };
+        }
+        if (args.includes('ls-files') && args.includes('--others')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--deleted')) {
+          return { success: true, lines: [] };
+        }
+        if (args.includes('ls-files') && args.includes('--cached')) {
+          return { success: true, lines: ['H tracked.js'] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('tracked.js');
+      expect(gitArgsSeen.length).toBeGreaterThan(0);
+    });
+
     it('should resolve the git root from a subdirectory crawl', async () => {
       tmpDir = await createTmpDir({
         src: ['file2.js'],
