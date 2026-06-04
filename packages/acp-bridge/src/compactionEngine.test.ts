@@ -152,6 +152,30 @@ function makeAvailableCommandsUpdate(id: number): BridgeEvent {
   };
 }
 
+function makeTextChunkWithParent(
+  id: number,
+  text: string,
+  parentToolCallId: string,
+): BridgeEvent {
+  const event = makeTextChunk(id, text);
+  (event.data as { update: Record<string, unknown> }).update['_meta'] = {
+    parentToolCallId,
+  };
+  return event;
+}
+
+function makeThoughtChunkWithParent(
+  id: number,
+  text: string,
+  parentToolCallId: string,
+): BridgeEvent {
+  const event = makeThoughtChunk(id, text);
+  (event.data as { update: Record<string, unknown> }).update['_meta'] = {
+    parentToolCallId,
+  };
+  return event;
+}
+
 function extractTexts(events: BridgeEvent[]): string[] {
   return events
     .filter((e) => e.type === 'session_update')
@@ -487,6 +511,30 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.compactedTurns).toHaveLength(4); // 2 seeded + 2 new
       expect(snap.lastEventId).toBe(13);
     });
+
+    it('seed clears in-flight slots so stale data does not corrupt post-seed output', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      // Populate in-flight state (no turn_complete to compact them)
+      engine.ingest(makeTextChunkWithParent(1, 'stale-sub', 'old-task'));
+      engine.ingest(makeTextChunk(2, 'stale-top'));
+      engine.ingest(makeToolCall(3, 'tc-stale', 'running'));
+
+      // Seed replaces history — should also clear in-flight slots
+      engine.seed({
+        compactedTurns: [makeTextChunk(100, 'seeded'), makeTurnComplete(101)],
+        lastEventId: 101,
+      });
+
+      // Ingest fresh events and complete the turn
+      engine.ingest(makeTextChunk(102, 'fresh'));
+      engine.ingest(makeTurnComplete(103));
+
+      const snap = engine.snapshot();
+      const texts = extractTexts(snap.compactedTurns);
+      // Should contain only seeded + fresh, not the stale pre-seed events
+      expect(texts).toEqual(['seeded', 'fresh']);
+      expect(snap.compactedTurns).toHaveLength(4); // seeded text + seeded tc + fresh text + fresh tc
+    });
   });
 
   describe('close', () => {
@@ -599,9 +647,33 @@ describe('EventBus + CompactionEngine integration', () => {
     const engine = new TurnBoundaryCompactionEngine();
     const bus = new EventBus(100, undefined, engine);
 
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'hello' } } } });
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Hi' } } } });
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' there' } } } });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Hi' },
+        },
+      },
+    });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: ' there' },
+        },
+      },
+    });
     bus.publish({ type: 'turn_complete', data: { stopReason: 'end_turn' } });
 
     const snapshot = bus.snapshotReplay();
@@ -626,8 +698,24 @@ describe('EventBus + CompactionEngine integration', () => {
     const engine = new TurnBoundaryCompactionEngine();
     const bus = new EventBus(100, undefined, engine);
 
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'streaming' } } } });
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '...' } } } });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'streaming' },
+        },
+      },
+    });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '...' },
+        },
+      },
+    });
 
     const snapshot = bus.snapshotReplay()!;
     expect(snapshot.compactedTurns).toHaveLength(0);
@@ -639,11 +727,406 @@ describe('EventBus + CompactionEngine integration', () => {
     const engine = new TurnBoundaryCompactionEngine();
     const bus = new EventBus(100, undefined, engine);
 
-    bus.publish({ type: 'session_update', data: { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'test' } } } });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'test' },
+        },
+      },
+    });
     bus.close();
 
     const snapshot = engine.snapshot();
     expect(snapshot.compactedTurns).toHaveLength(0);
     expect(snapshot.liveJournal).toHaveLength(0);
+  });
+});
+
+describe('parentToolCallId-aware text merging', () => {
+  type UpdatePayload = {
+    update: {
+      sessionUpdate: string;
+      content: { text: string };
+      _meta?: Record<string, unknown>;
+    };
+  };
+
+  function getUpdate(event: BridgeEvent): UpdatePayload['update'] {
+    return (event.data as UpdatePayload).update;
+  }
+
+  it('separates text chunks with different parentToolCallIds', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeTextChunkWithParent(1, 'Agent A says ', 'task-A'));
+    engine.ingest(makeTextChunkWithParent(2, 'Agent B says ', 'task-B'));
+    engine.ingest(makeTextChunkWithParent(3, 'hello', 'task-A'));
+    engine.ingest(makeTextChunkWithParent(4, 'world', 'task-B'));
+    engine.ingest(makeTurnComplete(5));
+
+    const snap = engine.snapshot();
+    const textEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
+    );
+    expect(textEvents).toHaveLength(2);
+    expect(getUpdate(textEvents[0]!).content.text).toBe('Agent A says hello');
+    expect(getUpdate(textEvents[1]!).content.text).toBe('Agent B says world');
+    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+    expect(getUpdate(textEvents[1]!)._meta?.['parentToolCallId']).toBe(
+      'task-B',
+    );
+  });
+
+  it('merges interleaved thought chunks with the same parentToolCallId', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeThoughtChunkWithParent(1, 'A thinks ', 'task-A'));
+    engine.ingest(makeThoughtChunkWithParent(2, 'B thinks ', 'task-B'));
+    engine.ingest(makeThoughtChunkWithParent(3, 'more', 'task-A'));
+    engine.ingest(makeThoughtChunkWithParent(4, 'more', 'task-B'));
+    engine.ingest(makeTurnComplete(5));
+
+    const snap = engine.snapshot();
+    const thoughtEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_thought_chunk',
+    );
+    expect(thoughtEvents).toHaveLength(2);
+    expect(getUpdate(thoughtEvents[0]!).content.text).toBe('A thinks more');
+    expect(getUpdate(thoughtEvents[1]!).content.text).toBe('B thinks more');
+    expect(getUpdate(thoughtEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+    expect(getUpdate(thoughtEvents[1]!)._meta?.['parentToolCallId']).toBe(
+      'task-B',
+    );
+  });
+
+  it('does not merge top-level text with subagent text', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeTextChunk(1, 'Top-level '));
+    engine.ingest(makeTextChunkWithParent(2, 'subagent ', 'task-A'));
+    engine.ingest(makeTextChunk(3, 'more top'));
+    engine.ingest(makeTurnComplete(4));
+
+    const snap = engine.snapshot();
+    const textEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
+    );
+    expect(textEvents).toHaveLength(3);
+    expect(getUpdate(textEvents[0]!).content.text).toBe('Top-level ');
+    expect(getUpdate(textEvents[1]!).content.text).toBe('subagent ');
+    expect(getUpdate(textEvents[2]!).content.text).toBe('more top');
+    expect(getUpdate(textEvents[0]!)._meta).toBeUndefined();
+    expect(getUpdate(textEvents[1]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+    expect(getUpdate(textEvents[2]!)._meta).toBeUndefined();
+  });
+
+  it('same subagent thought + text produce separate slots', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeThoughtChunkWithParent(1, 'thinking...', 'task-A'));
+    engine.ingest(makeThoughtChunkWithParent(2, ' deeply', 'task-A'));
+    engine.ingest(makeTextChunkWithParent(3, 'Answer: ', 'task-A'));
+    engine.ingest(makeTextChunkWithParent(4, 'yes', 'task-A'));
+    engine.ingest(makeTurnComplete(5));
+
+    const snap = engine.snapshot();
+    const sessionUpdates = snap.compactedTurns.filter(
+      (e) => e.type === 'session_update',
+    );
+    expect(sessionUpdates).toHaveLength(2);
+
+    const thought = sessionUpdates.find(
+      (e) => getUpdate(e).sessionUpdate === 'agent_thought_chunk',
+    )!;
+    const text = sessionUpdates.find(
+      (e) => getUpdate(e).sessionUpdate === 'agent_message_chunk',
+    )!;
+    expect(getUpdate(thought).content.text).toBe('thinking... deeply');
+    expect(getUpdate(text).content.text).toBe('Answer: yes');
+    expect(getUpdate(thought)._meta?.['parentToolCallId']).toBe('task-A');
+    expect(getUpdate(text)._meta?.['parentToolCallId']).toBe('task-A');
+  });
+
+  it('same-parent tool call segments subagent text into separate slots', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeTextChunk(1, 'Before'));
+    engine.ingest(makeTextChunkWithParent(2, 'sub-A part1', 'task-A'));
+    // tool_call with parentToolCallId=task-A evicts task-A's text slot
+    engine.ingest({
+      id: 3,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc1',
+          status: 'running',
+          _meta: { parentToolCallId: 'task-A' },
+        },
+      },
+    });
+    engine.ingest(makeTextChunkWithParent(4, 'sub-A part2', 'task-A'));
+    engine.ingest(makeTextChunk(5, 'After'));
+    engine.ingest(makeTurnComplete(6));
+
+    const snap = engine.snapshot();
+    const textEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
+    );
+    expect(textEvents).toHaveLength(4);
+    expect(getUpdate(textEvents[0]!).content.text).toBe('Before');
+    expect(getUpdate(textEvents[1]!).content.text).toBe('sub-A part1');
+    expect(getUpdate(textEvents[2]!).content.text).toBe('sub-A part2');
+    expect(getUpdate(textEvents[3]!).content.text).toBe('After');
+    expect(getUpdate(textEvents[1]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+    expect(getUpdate(textEvents[2]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+  });
+
+  it('non-parent tool call does not evict subagent text slots', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeTextChunkWithParent(1, 'sub-A', 'task-A'));
+    // tool_call WITHOUT parentToolCallId should not evict task-A
+    engine.ingest(makeToolCall(2, 'tc1', 'running'));
+    engine.ingest(makeTextChunkWithParent(3, ' more', 'task-A'));
+    engine.ingest(makeTurnComplete(4));
+
+    const snap = engine.snapshot();
+    const textEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
+    );
+    expect(textEvents).toHaveLength(1);
+    expect(getUpdate(textEvents[0]!).content.text).toBe('sub-A more');
+    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+  });
+
+  it('same-parent tool call evicts thought slots too', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeThoughtChunkWithParent(1, 'thought-before', 'task-A'));
+    engine.ingest({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc1',
+          status: 'running',
+          _meta: { parentToolCallId: 'task-A' },
+        },
+      },
+    });
+    engine.ingest(makeThoughtChunkWithParent(3, 'thought-after', 'task-A'));
+    engine.ingest(makeTurnComplete(4));
+
+    const snap = engine.snapshot();
+    const thoughtEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_thought_chunk',
+    );
+    expect(thoughtEvents).toHaveLength(2);
+    expect(getUpdate(thoughtEvents[0]!).content.text).toBe('thought-before');
+    expect(getUpdate(thoughtEvents[1]!).content.text).toBe('thought-after');
+  });
+
+  it('[subA, main, main, subA] produces two merged events', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeTextChunkWithParent(1, 'A-start ', 'task-A'));
+    engine.ingest(makeTextChunk(2, 'main-1 '));
+    engine.ingest(makeTextChunk(3, 'main-2'));
+    engine.ingest(makeTextChunkWithParent(4, 'A-end', 'task-A'));
+    engine.ingest(makeTurnComplete(5));
+
+    const snap = engine.snapshot();
+    const textEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
+    );
+    expect(textEvents).toHaveLength(2);
+    expect(getUpdate(textEvents[0]!).content.text).toBe('A-start A-end');
+    expect(getUpdate(textEvents[1]!).content.text).toBe('main-1 main-2');
+    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+    expect(getUpdate(textEvents[1]!)._meta).toBeUndefined();
+  });
+
+  it('handles 9 parallel subagent thought streams without garbling', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const subagents = Array.from({ length: 9 }, (_, i) => `task-${i}`);
+    let eventId = 1;
+
+    for (let round = 0; round < 3; round++) {
+      for (const taskId of subagents) {
+        engine.ingest(
+          makeThoughtChunkWithParent(eventId++, `[${taskId}:${round}]`, taskId),
+        );
+      }
+    }
+    engine.ingest(makeTurnComplete(eventId));
+
+    const snap = engine.snapshot();
+    const thoughtEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_thought_chunk',
+    );
+    expect(thoughtEvents).toHaveLength(9);
+    for (let i = 0; i < 9; i++) {
+      const taskId = `task-${i}`;
+      const update = getUpdate(thoughtEvents[i]!);
+      expect(update.content.text).toBe(
+        `[${taskId}:0][${taskId}:1][${taskId}:2]`,
+      );
+      expect(update._meta?.['parentToolCallId']).toBe(taskId);
+    }
+  });
+
+  it('chunk without parentToolCallId separates from subagent chunk into top-level path', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeTextChunkWithParent(1, 'hello ', 'task-A'));
+    engine.ingest({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'world' },
+          _meta: { usage: { inputTokens: 100 } },
+        },
+      },
+    });
+    engine.ingest(makeTurnComplete(3));
+
+    const snap = engine.snapshot();
+    const textEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
+    );
+    // The chunk without parentToolCallId goes to the top-level path,
+    // so we get two separate events
+    expect(textEvents).toHaveLength(2);
+    expect(getUpdate(textEvents[0]!).content.text).toBe('hello ');
+    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+    expect(getUpdate(textEvents[1]!).content.text).toBe('world');
+  });
+
+  it('tool_call_update does not evict subagent text slots', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeTextChunkWithParent(1, 'part1', 'task-A'));
+    // First tool_call creates the tool block — evicts task-A
+    engine.ingest({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc1',
+          status: 'running',
+          _meta: { parentToolCallId: 'task-A' },
+        },
+      },
+    });
+    engine.ingest(makeTextChunkWithParent(3, 'part2', 'task-A'));
+    // tool_call_update is a status update, not a new tool — should NOT evict
+    engine.ingest({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc1',
+          status: 'completed',
+          _meta: { parentToolCallId: 'task-A' },
+        },
+      },
+    });
+    engine.ingest(makeTextChunkWithParent(5, ' part3', 'task-A'));
+    engine.ingest(makeTurnComplete(6));
+
+    const snap = engine.snapshot();
+    const textEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
+    );
+    // part1 (evicted by tool_call), part2+part3 (merged, not evicted by update)
+    expect(textEvents).toHaveLength(2);
+    expect(getUpdate(textEvents[0]!).content.text).toBe('part1');
+    expect(getUpdate(textEvents[1]!).content.text).toBe('part2 part3');
+  });
+
+  it('parentToolCallId survives in lastMeta through multi-chunk merge', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeTextChunkWithParent(1, 'hello ', 'task-A'));
+    engine.ingest({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'world' },
+          _meta: { parentToolCallId: 'task-A', usage: { inputTokens: 100 } },
+        },
+      },
+    });
+    engine.ingest(makeTurnComplete(3));
+
+    const snap = engine.snapshot();
+    const textEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
+    );
+    expect(textEvents).toHaveLength(1);
+    expect(getUpdate(textEvents[0]!).content.text).toBe('hello world');
+    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
+  });
+
+  it('single subagent chunk preserves parentToolCallId in output', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(makeTextChunkWithParent(1, 'hello', 'task-A'));
+    engine.ingest(makeTurnComplete(2));
+
+    const snap = engine.snapshot();
+    const textEvents = snap.compactedTurns.filter(
+      (e) =>
+        e.type === 'session_update' &&
+        getUpdate(e).sessionUpdate === 'agent_message_chunk',
+    );
+    expect(textEvents).toHaveLength(1);
+    expect(getUpdate(textEvents[0]!)._meta?.['parentToolCallId']).toBe(
+      'task-A',
+    );
   });
 });

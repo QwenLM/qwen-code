@@ -38,9 +38,9 @@ const LATEST_WINS_UPDATES = new Set([
 ]);
 
 type CompactedSlot =
-  | { kind: 'text'; chunks: string[]; lastEventId: number; lastMeta: unknown }
   | {
-      kind: 'thought';
+      kind: 'text' | 'thought';
+      parentToolCallId?: string;
       chunks: string[];
       lastEventId: number;
       lastMeta: unknown;
@@ -68,6 +68,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
   private slots: CompactedSlot[] = [];
   private toolSlotIndex: Map<string, number> = new Map();
+  private textSlotIndex: Map<string, number> = new Map();
 
   ingest(event: BridgeEvent): void {
     if (this.closed) return;
@@ -104,6 +105,10 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     if (this.closed) return;
     this.compactedTurns = snapshot.compactedTurns.slice();
     this.lastEventId = snapshot.lastEventId;
+    this.liveJournal = [];
+    this.slots = [];
+    this.toolSlotIndex.clear();
+    this.textSlotIndex.clear();
   }
 
   close(): void {
@@ -113,6 +118,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.liveJournal = [];
     this.slots = [];
     this.toolSlotIndex.clear();
+    this.textSlotIndex.clear();
   }
 
   private classifySessionUpdate(event: BridgeEvent): void {
@@ -155,6 +161,16 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
             toolCallId,
             event: normalizedEvent,
           });
+          // Evict text/thought index entries for this tool's parent so
+          // subsequent chunks from the same subagent create new slots,
+          // preserving text segmentation around tool-call boundaries.
+          const toolParent = extractParentToolCallIdFromMeta(
+            data?.update?._meta,
+          );
+          if (toolParent) {
+            this.textSlotIndex.delete(`text::${toolParent}`);
+            this.textSlotIndex.delete(`thought::${toolParent}`);
+          }
         }
         break;
       }
@@ -187,18 +203,55 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     data: SessionUpdateData | undefined,
   ): void {
     const text = data?.update?.content?.text ?? '';
-    const lastSlot = this.slots[this.slots.length - 1];
-    if (lastSlot && lastSlot.kind === kind) {
-      lastSlot.chunks.push(text);
-      if (event.id !== undefined) lastSlot.lastEventId = event.id;
-      lastSlot.lastMeta = data?.update?._meta ?? lastSlot.lastMeta;
+    const meta = data?.update?._meta;
+    const parentToolCallId = extractParentToolCallIdFromMeta(meta);
+
+    if (parentToolCallId != null) {
+      // Subagent path: merge by (kind, parentToolCallId) regardless of
+      // position. Parallel subagents interleave chunks; the index lets
+      // us reassemble each subagent's stream without garbling.
+      const slotKey = `${kind}::${parentToolCallId}`;
+      const existingIdx = this.textSlotIndex.get(slotKey);
+      if (existingIdx !== undefined) {
+        const slot = this.slots[existingIdx] as Extract<
+          CompactedSlot,
+          { kind: 'text' | 'thought' }
+        >;
+        slot.chunks.push(text);
+        if (event.id !== undefined) slot.lastEventId = event.id;
+        slot.lastMeta = meta ?? slot.lastMeta;
+      } else {
+        this.textSlotIndex.set(slotKey, this.slots.length);
+        this.slots.push({
+          kind,
+          parentToolCallId,
+          chunks: [text],
+          lastEventId: event.id ?? 0,
+          lastMeta: meta,
+        });
+      }
     } else {
-      this.slots.push({
-        kind,
-        chunks: [text],
-        lastEventId: event.id ?? 0,
-        lastMeta: data?.update?._meta,
-      });
+      // Top-level path: merge only consecutive same-kind chunks that
+      // also have no parentToolCallId. Preserves text segmentation
+      // around tool calls (text before / text after stay separate).
+      const lastSlot = this.slots[this.slots.length - 1];
+      if (
+        lastSlot &&
+        lastSlot.kind === kind &&
+        lastSlot.parentToolCallId == null
+      ) {
+        lastSlot.chunks.push(text);
+        if (event.id !== undefined) lastSlot.lastEventId = event.id;
+        lastSlot.lastMeta = meta ?? lastSlot.lastMeta;
+      } else {
+        this.slots.push({
+          kind,
+          parentToolCallId: undefined,
+          chunks: [text],
+          lastEventId: event.id ?? 0,
+          lastMeta: meta,
+        });
+      }
     }
   }
 
@@ -208,19 +261,12 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     for (const slot of this.slots) {
       switch (slot.kind) {
         case 'text':
-          compacted.push(
-            makeMergedSessionUpdateEvent(
-              'agent_message_chunk',
-              slot.chunks.join(''),
-              slot.lastEventId,
-              slot.lastMeta,
-            ),
-          );
-          break;
         case 'thought':
           compacted.push(
             makeMergedSessionUpdateEvent(
-              'agent_thought_chunk',
+              slot.kind === 'text'
+                ? 'agent_message_chunk'
+                : 'agent_thought_chunk',
               slot.chunks.join(''),
               slot.lastEventId,
               slot.lastMeta,
@@ -242,6 +288,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.liveJournal = [];
     this.slots = [];
     this.toolSlotIndex.clear();
+    this.textSlotIndex.clear();
   }
 }
 
@@ -277,6 +324,16 @@ function normalizeToolCallType(event: BridgeEvent): BridgeEvent {
     };
   }
   return event;
+}
+
+function extractParentToolCallIdFromMeta(
+  meta: unknown,
+): string | undefined {
+  if (typeof meta === 'object' && meta !== null) {
+    const val = (meta as Record<string, unknown>)['parentToolCallId'];
+    return typeof val === 'string' && val.length > 0 ? val : undefined;
+  }
+  return undefined;
 }
 
 function mergeToolCallEvent(
