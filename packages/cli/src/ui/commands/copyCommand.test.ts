@@ -817,6 +817,51 @@ describe('copyCommand', () => {
     });
   });
 
+  it('should resolve /copy N code <lang> M to the Mth lang block in Nth-last message', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    const history = [
+      {
+        role: 'model',
+        parts: [
+          {
+            text: [
+              '```python',
+              'first_in_oldest = 1',
+              '```',
+              '```python',
+              'second_in_oldest = 2',
+              '```',
+            ].join('\n'),
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'next' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            text: ['```python', 'middle_only = 1', '```'].join('\n'),
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'and then' }] },
+      { role: 'model', parts: [{ text: 'newest plain reply' }] },
+    ];
+
+    mockGetHistoryShallow.mockReturnValue(history);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '3 code python 2');
+
+    expect(mockCopyToClipboard).toHaveBeenCalledWith('second_in_oldest = 2');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'python code block 2 copied to the clipboard',
+    });
+  });
+
   it('should combine /copy N with a latex sub-selector', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
