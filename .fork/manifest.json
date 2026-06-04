@@ -121,6 +121,7 @@
       "package.json": "@alife/dataworks-qwen-code",
       "packages/cli/package.json": "@alife/dataworks-qwen-code",
       "packages/core/package.json": "@alife/dataworks-qwen-code-core",
+      "packages/sdk-typescript/package.json": "@alife/dataworks-qwen-code-sdk",
       "packages/acp-bridge/package.json": "@alife/dataworks-qwen-code-acp-bridge",
       "packages/webui/package.json": "@alife/dataworks-qwen-code-webui",
       "packages/web-templates/package.json": "@alife/dataworks-qwen-code-web-templates",

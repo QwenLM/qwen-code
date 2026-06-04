@@ -149,3 +149,9 @@ TARBALL="${ARTIFACT_DIR}/qwen-code-standalone-${VERSION}.tar.gz"
 tar -czf "$TARBALL" -C "$(dirname "$STANDALONE_DIR")" "$(basename "$STANDALONE_DIR")"
 echo "✅ Standalone artifact: $TARBALL"
 echo "   Size: $(du -h "$TARBALL" | cut -f1)"
+
+# 兼容旧格式：下游依赖 qwen-code-{version}-linux-amd64.tar.gz
+ARCH="${ARCH:-amd64}"
+TARBALL_COMPAT="${ARTIFACT_DIR}/qwen-code-${VERSION}-linux-${ARCH}.tar.gz"
+cp "$TARBALL" "$TARBALL_COMPAT"
+echo "✅ Compat artifact:     $TARBALL_COMPAT"

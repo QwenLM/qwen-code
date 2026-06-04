@@ -43,7 +43,7 @@ echo "=== VERSION: ${VERSION} ==="
 rm -rf "${ARTIFACT_DIR}"
 mkdir -p "${ARTIFACT_DIR}"
 
-# 查找并拷贝 tarball
+# 查找并拷贝 tarball（新格式 + 兼容旧格式）
 TARBALL_NAME=""
 for candidate in "${BUILD_DIR}/${TARBALL_NEW}" "${ARTIFACT_DIR}/../${TARBALL_NEW}" \
                  "${BUILD_DIR}/${TARBALL_OLD}" "${ARTIFACT_DIR}/../${TARBALL_OLD}"; do
@@ -59,8 +59,17 @@ if [ -z "${TARBALL_NAME}" ]; then
   exit 1
 fi
 
-# 生成 SHA256
-(cd "${ARTIFACT_DIR}" && sha256sum "${TARBALL_NAME}" > SHA256SUMS)
+# 拷贝兼容格式（如果存在且和主 tarball 不同名）
+for candidate in "${BUILD_DIR}/${TARBALL_OLD}" "${ARTIFACT_DIR}/../${TARBALL_OLD}"; do
+  if [ -f "${candidate}" ] && [ "${TARBALL_NAME}" != "${TARBALL_OLD}" ]; then
+    cp "${candidate}" "${ARTIFACT_DIR}/${TARBALL_OLD}"
+    echo ">>> Compat tarball copied: ${TARBALL_OLD}"
+    break
+  fi
+done
+
+# 生成 SHA256（包含所有 tarball）
+(cd "${ARTIFACT_DIR}" && sha256sum *.tar.gz > SHA256SUMS)
 
 # metadata.json
 METADATA_FILE=""

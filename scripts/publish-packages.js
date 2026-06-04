@@ -5,11 +5,13 @@
  */
 
 /**
- * Publish all non-private workspace packages to anpm registry.
+ * Publish CLI bundle and channel-base to anpm registry.
  *
- * Uses `npm publish --workspaces` from the root — npm automatically skips
- * packages with "private": true and triggers each package's lifecycle
- * hooks (including prepublishOnly for the CLI bundle).
+ * Mirrors upstream's release.yml approach: publish the esbuild CLI bundle
+ * from dist/ (after prepare:package) and @qwen-code/channel-base from its
+ * workspace directory. All other workspace packages (core, webui, sdk, etc.)
+ * are either bundled into the CLI or published via separate pipelines upstream,
+ * so they are NOT published here.
  *
  * Usage:
  *   node scripts/publish-packages.js --token <anpm_token> [--tag latest] [--pre-id dataworks] [--dry-run] [--auto-version]
@@ -35,6 +37,41 @@ const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
 const REGISTRY = 'https://registry.anpm.alibaba-inc.com/';
+
+/**
+ * Packages to publish, mirroring upstream release.yml.
+ * Each entry: { dir, label }.
+ *   - dir:   working directory for `npm publish` (relative to rootDir)
+ *   - label: human-readable name for logs
+ */
+const PUBLISH_TARGETS = [
+  { dir: 'dist', label: 'CLI bundle' },
+  { dir: 'packages/channels/base', label: 'channel-base' },
+];
+
+/**
+ * Expand workspace entries (which may contain glob patterns like "packages/*")
+ * into concrete package.json paths.
+ */
+function expandWorkspacePaths(workspaces, root) {
+  const seen = new Set();
+  for (const ws of workspaces || []) {
+    if (ws.includes('*')) {
+      const [base] = ws.split('*');
+      const dir = path.join(root, base);
+      if (!fs.existsSync(dir)) continue;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const pkgPath = path.join(dir, entry.name, 'package.json');
+        if (fs.existsSync(pkgPath)) seen.add(pkgPath);
+      }
+    } else {
+      const pkgPath = path.join(root, ws, 'package.json');
+      if (fs.existsSync(pkgPath)) seen.add(pkgPath);
+    }
+  }
+  return [...seen];
+}
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
@@ -99,10 +136,8 @@ if (autoVersion) {
   updatePackageVersion(path.join(rootDir, 'package.json'), nextVersion);
   console.log(`  (root) → ${nextVersion}`);
 
-  const workspaces = rootPkg.workspaces || [];
-  for (const ws of workspaces) {
-    const pkgPath = path.join(rootDir, ws, 'package.json');
-    if (!fs.existsSync(pkgPath)) continue;
+  const pkgPaths = expandWorkspacePaths(rootPkg.workspaces, rootDir);
+  for (const pkgPath of pkgPaths) {
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
     if (pkg.private) continue;
     updatePackageVersion(pkgPath, nextVersion);
@@ -117,54 +152,71 @@ if (autoVersion) {
 }
 
 // -------------------------------------------------------------------------
-// Publish all workspaces in one command
+// Prepare dist/ for publishing (synthetic package.json, README, LICENSE)
 // -------------------------------------------------------------------------
 
-const publishCmd = [
-  'npm publish',
-  '--workspaces',
-  `--tag ${tag}`,
-  `--registry ${REGISTRY}`,
-  dryRun ? '--dry-run' : '',
-]
-  .filter(Boolean)
-  .join(' ');
+console.log('Preparing dist/ package for publishing...\n');
+execSync('npm run prepare:package', { cwd: rootDir, stdio: 'inherit' });
+console.log();
 
-console.log(`Running: ${publishCmd}\n`);
+// -------------------------------------------------------------------------
+// Publish packages explicitly (matching upstream release.yml)
+// -------------------------------------------------------------------------
 
-try {
-  execSync(publishCmd, {
-    cwd: rootDir,
-    stdio: 'inherit',
-    env: { ...process.env },
-  });
-  console.log('\n✅ All packages published successfully');
-} catch (_err) {
-  console.error('\n❌ Publish failed');
+let failed = false;
+
+for (const { dir, label } of PUBLISH_TARGETS) {
+  const absDir = path.join(rootDir, dir);
+  const pkgPath = path.join(absDir, 'package.json');
+
+  if (!fs.existsSync(pkgPath)) {
+    console.error(`⚠️  Skipping ${label}: ${pkgPath} not found`);
+    continue;
+  }
+
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+  const publishCmd = [
+    'npm publish',
+    `--tag ${tag}`,
+    `--registry ${REGISTRY}`,
+    dryRun ? '--dry-run' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  console.log(`Publishing ${label} (${pkg.name}@${pkg.version})...`);
+  console.log(`  cwd: ${absDir}`);
+  console.log(`  cmd: ${publishCmd}\n`);
+
+  try {
+    execSync(publishCmd, {
+      cwd: absDir,
+      stdio: 'inherit',
+      env: { ...process.env },
+    });
+    console.log(`\n✅ ${label} published successfully\n`);
+  } catch (_err) {
+    console.error(`\n❌ ${label} publish failed\n`);
+    failed = true;
+  }
+}
+
+if (failed) {
   process.exit(1);
 }
 
+console.log('✅ All packages published successfully\n');
+
 // -------------------------------------------------------------------------
-// Print published package tree
+// Print summary
 // -------------------------------------------------------------------------
 
-console.log('\n📦 Published packages:');
-const rootPkgFinal = JSON.parse(
-  fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
-);
-const workspacesFinal = rootPkgFinal.workspaces || [];
-for (const ws of workspacesFinal) {
-  const pkgPath = path.join(rootDir, ws, 'package.json');
+console.log('📦 Published packages:');
+for (const { dir, label } of PUBLISH_TARGETS) {
+  const pkgPath = path.join(rootDir, dir, 'package.json');
   if (!fs.existsSync(pkgPath)) continue;
   const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-  if (pkg.private) {
-    console.log(`  ├─ ${ws} (${pkg.name}) [private, skipped]`);
-  } else {
-    const hasPrepublish = pkg.scripts?.prepublishOnly
-      ? ' → prepublishOnly'
-      : '';
-    console.log(`  ├─ ${ws} (${pkg.name}@${pkg.version})${hasPrepublish}`);
-  }
+  console.log(`  ├─ ${dir} (${pkg.name}@${pkg.version}) [${label}]`);
 }
 console.log();
 

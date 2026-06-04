@@ -1,0 +1,214 @@
+# .aoneci/release-rollback.yml
+# 回滚发布：将 OSS channel 指针回退到指定版本，并 deprecate 指定的 npm 包版本。
+#
+# 使用场景：
+#   - 发布了一个有问题的版本，需要让下游自动更新机制回退到旧版本
+#   - 废弃某个 npm 版本，安装时显示警告信息
+#
+# 操作：
+#   1. 将指定 channel（beta/dataworks/latest）的 metadata.json 回退到 rollback_to 版本
+#   2. （可选）npm deprecate 指定版本的所有非 private workspace 包
+#
+# 仅手动触发，需要明确确认。
+
+name: 'Release Rollback'
+
+params:
+  rollback_to:
+    description: '回退到的目标版本号（OSS 上必须已存在该版本的 metadata.json），如 0.15.11-dataworks.2'
+    type: string
+    required: true
+  channels:
+    description: '要回退的 channel（逗号分隔），如 beta 或 dataworks,latest'
+    type: string
+    default: 'beta'
+  deprecate_version:
+    description: '要废弃的 npm 版本号（留空则不执行 npm deprecate），如 0.17.0-beta.3'
+    type: string
+  deprecate_message:
+    description: 'npm deprecate 的警告信息'
+    type: string
+    default: 'This version has been rolled back. Please use an earlier version.'
+  dry_run:
+    description: '勾选=仅模拟，不真正执行'
+    type: boolean
+    default: true
+
+jobs:
+  rollback:
+    runs-on:
+      - 4-8Gi
+    name: 'Rollback Release'
+    image: alios-8u
+    steps:
+      - uses: checkout
+      - uses: setup-env
+        inputs:
+          node-version: '22'
+
+      - name: 'Validate inputs'
+        run: |
+          ROLLBACK_TO="${{ params.rollback_to }}"
+          CHANNELS="${{ params.channels }}"
+          DRY_RUN="${{ params.dry_run }}"
+
+          if [ -z "$ROLLBACK_TO" ]; then
+            echo "❌ rollback_to 版本号不能为空"
+            exit 1
+          fi
+
+          echo "=== Rollback Plan ==="
+          echo "  Target version:     $ROLLBACK_TO"
+          echo "  Channels:           $CHANNELS"
+          echo "  Deprecate version:  ${{ params.deprecate_version }}"
+          echo "  Dry run:            $DRY_RUN"
+          echo ""
+
+      - name: 'Rollback OSS channel pointers'
+        run: |
+          set -euo pipefail
+
+          ROLLBACK_TO="${{ params.rollback_to }}"
+          CHANNELS="${{ params.channels }}"
+          DRY_RUN="${{ params.dry_run }}"
+
+          OSS_BUCKET="dataworks-notebook-cn-shanghai"
+          OSS_ENDPOINT="https://oss-cn-shanghai.aliyuncs.com"
+          OSS_PROJECT_ROOT="public-datasets/aone-release/alishu/qwen-code"
+          OSS_PREFIX="${OSS_PROJECT_ROOT}/${ROLLBACK_TO}"
+
+          # 安装 ossutil
+          if ! command -v ossutil64 &>/dev/null && ! command -v ossutil &>/dev/null; then
+            curl -fsSL "https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip" -o /tmp/ossutil.zip
+            unzip -o /tmp/ossutil.zip -d /tmp/ossutil
+            chmod +x /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil64
+            cp /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil64 /usr/local/bin/ossutil64
+          fi
+          OSSUTIL=$(command -v ossutil64 || command -v ossutil)
+
+          ${OSSUTIL} config \
+            -e "${OSS_ENDPOINT}" \
+            -i "${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}" \
+            -k "${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}"
+
+          # 验证目标版本的 metadata.json 存在
+          echo "📋 验证目标版本 ${ROLLBACK_TO} 的 metadata.json..."
+          METADATA_URL="oss://${OSS_BUCKET}/${OSS_PREFIX}/metadata.json"
+          if ! ${OSSUTIL} stat "$METADATA_URL" &>/dev/null; then
+            echo "❌ 目标版本 ${ROLLBACK_TO} 的 metadata.json 不存在于 OSS"
+            echo "   路径: ${METADATA_URL}"
+            exit 1
+          fi
+
+          # 下载目标版本的 metadata.json
+          TMPDIR=$(mktemp -d)
+          ${OSSUTIL} cp -f "$METADATA_URL" "${TMPDIR}/metadata.json"
+          echo "✅ 目标版本 metadata.json:"
+          cat "${TMPDIR}/metadata.json"
+          echo ""
+
+          # 回退每个 channel 的 metadata.json 指针
+          IFS=',' read -ra CHANNEL_LIST <<< "$CHANNELS"
+          for CHANNEL in "${CHANNEL_LIST[@]}"; do
+            CHANNEL=$(echo "$CHANNEL" | tr -d ' ')
+            if [ -z "$CHANNEL" ]; then continue; fi
+
+            CHANNEL_PATH="oss://${OSS_BUCKET}/${OSS_PROJECT_ROOT}/${CHANNEL}/metadata.json"
+
+            echo ""
+            echo "🔄 Channel: ${CHANNEL}"
+            echo "   当前指向:"
+            ${OSSUTIL} cp -f "$CHANNEL_PATH" "${TMPDIR}/current_${CHANNEL}.json" 2>/dev/null || true
+            cat "${TMPDIR}/current_${CHANNEL}.json" 2>/dev/null || echo "   (不存在)"
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "   [DRY-RUN] 将回退到 ${ROLLBACK_TO}"
+            else
+              ${OSSUTIL} cp -f "${TMPDIR}/metadata.json" "$CHANNEL_PATH"
+              echo "   ✅ 已回退到 ${ROLLBACK_TO}"
+            fi
+          done
+
+      - name: 'Deprecate npm version'
+        run: |
+          set -euo pipefail
+
+          DEPRECATE_VERSION="${{ params.deprecate_version }}"
+          DEPRECATE_MSG="${{ params.deprecate_message }}"
+          DRY_RUN="${{ params.dry_run }}"
+          REGISTRY="https://registry.anpm.alibaba-inc.com/"
+
+          if [ -z "$DEPRECATE_VERSION" ]; then
+            echo "⏭️  deprecate_version 为空，跳过 npm deprecate"
+            exit 0
+          fi
+
+          # 配置 npm auth
+          NPM_TOKEN="${{ secrets.inner_npm_publish_token }}"
+          echo "//registry.anpm.alibaba-inc.com/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+
+          # 读取所有需要 deprecate 的包
+          PACKAGES=$(node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const glob = require('glob') || { sync: () => [] };
+            const root = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            const ws = root.workspaces || [];
+            const pkgs = [];
+            for (const pattern of ws) {
+              if (pattern.includes('*')) {
+                const base = pattern.split('*')[0];
+                if (!fs.existsSync(base)) continue;
+                for (const d of fs.readdirSync(base, { withFileTypes: true })) {
+                  if (!d.isDirectory()) continue;
+                  const p = path.join(base, d.name, 'package.json');
+                  if (fs.existsSync(p)) {
+                    const pkg = JSON.parse(fs.readFileSync(p, 'utf-8'));
+                    if (!pkg.private) pkgs.push(pkg.name);
+                  }
+                }
+              } else {
+                const p = path.join(pattern, 'package.json');
+                if (fs.existsSync(p)) {
+                  const pkg = JSON.parse(fs.readFileSync(p, 'utf-8'));
+                  if (!pkg.private) pkgs.push(pkg.name);
+                }
+              }
+            }
+            // root package
+            const rootPkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
+            if (!rootPkg.private) pkgs.unshift(rootPkg.name);
+            console.log(JSON.stringify([...new Set(pkgs)]));
+          ")
+
+          echo "📦 要 deprecate 的包 (版本 ${DEPRECATE_VERSION}):"
+          echo "$PACKAGES" | node -e "JSON.parse(require('fs').readFileSync(0,'utf-8')).forEach(p => console.log('  - ' + p))"
+
+          echo ""
+          echo "$PACKAGES" | node -e "
+            const pkgs = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+            const { execSync } = require('child_process');
+            const version = '${DEPRECATE_VERSION}';
+            const msg = '${DEPRECATE_MSG}';
+            const dryRun = '${DRY_RUN}' === 'true';
+            const registry = '${REGISTRY}';
+
+            for (const pkg of pkgs) {
+              const spec = pkg + '@' + version;
+              if (dryRun) {
+                console.log('[DRY-RUN] npm deprecate ' + spec);
+              } else {
+                try {
+                  execSync('npm deprecate \"' + spec + '\" \"' + msg + '\" --registry ' + registry, {
+                    stdio: 'inherit',
+                  });
+                  console.log('✅ deprecated: ' + spec);
+                } catch (err) {
+                  console.error('⚠️  failed to deprecate ' + spec + ' (may not exist on registry, skipping)');
+                }
+              }
+            }
+          "
+
+          echo ""
+          echo "=== Rollback Complete ==="
