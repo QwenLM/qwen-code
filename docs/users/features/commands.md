@@ -212,17 +212,19 @@ this setting.
 
 Commands for obtaining information and performing system settings.
 
-| Command         | Description                                     | Usage Examples                   |
-| --------------- | ----------------------------------------------- | -------------------------------- |
-| `/help`         | Display help information for available commands | `/help` or `/?`                  |
-| `/status`       | Display version information                     | `/status` or `/about`            |
-| `/status paths` | Display current session file and log paths      | `/status paths`                  |
-| `/stats`        | Display detailed statistics for current session | `/stats`                         |
-| `/settings`     | Open settings editor                            | `/settings`                      |
-| `/auth`         | Change authentication method                    | `/auth`                          |
-| `/bug`          | Submit issue about Qwen Code                    | `/bug Button click unresponsive` |
-| `/copy`         | Copy last output content to clipboard           | `/copy`                          |
-| `/quit`         | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
+| Command         | Description                                                                                                                                                                                                                                                                                     | Usage Examples                   |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| `/help`         | Display help information for available commands                                                                                                                                                                                                                                                 | `/help` or `/?`                  |
+| `/status`       | Display version information                                                                                                                                                                                                                                                                     | `/status` or `/about`            |
+| `/status paths` | Display current session file and log paths                                                                                                                                                                                                                                                      | `/status paths`                  |
+| `/stats`        | Open interactive usage statistics dashboard with three tabs: Session (live metrics), Activity (heatmap, token trend, project ranking), and Efficiency (cache rate, tool leaderboard, model comparison). Use `tab` to switch tabs, `r` to cycle time ranges, `←→` to pan months, `esc` to close. | `/stats`                         |
+| `/stats model`  | Show per-model token breakdown and estimated cost                                                                                                                                                                                                                                               | `/stats model`                   |
+| `/stats tools`  | Show per-tool call counts                                                                                                                                                                                                                                                                       | `/stats tools`                   |
+| `/settings`     | Open settings editor                                                                                                                                                                                                                                                                            | `/settings`                      |
+| `/auth`         | Change authentication method                                                                                                                                                                                                                                                                    | `/auth`                          |
+| `/bug`          | Submit issue about Qwen Code                                                                                                                                                                                                                                                                    | `/bug Button click unresponsive` |
+| `/copy`         | Copy last output content to clipboard                                                                                                                                                                                                                                                           | `/copy`                          |
+| `/quit`         | Exit Qwen Code immediately                                                                                                                                                                                                                                                                      | `/quit` or `/exit`               |
 
 ### 1.9 Common Shortcuts
 

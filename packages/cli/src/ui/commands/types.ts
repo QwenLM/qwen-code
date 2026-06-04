@@ -189,7 +189,8 @@ export interface OpenDialogActionReturn {
     | 'hooks'
     | 'mcp'
     | 'rewind'
-    | 'diff';
+    | 'diff'
+    | 'stats';
 }
 
 /**

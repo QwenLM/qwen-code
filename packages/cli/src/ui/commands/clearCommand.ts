@@ -11,6 +11,7 @@ import {
   uiTelemetryService,
   SessionEndReason,
   ToolNames,
+  persistSessionUsage,
 } from '@qwen-code/qwen-code-core';
 import {
   hasBlockingBackgroundWork,
@@ -57,6 +58,25 @@ export const clearCommand: SlashCommand = {
       config.getMonitorRegistry().abortAll({ notify: false });
       config.getBackgroundShellRegistry().abortAll();
       resetBackgroundStateForSessionSwitch(config);
+
+      // Persist current session's usage before resetting metrics
+      const metrics = uiTelemetryService.getMetrics();
+      const hasActivity = Object.values(metrics.models).some(
+        (m) => m.api.totalRequests > 0,
+      );
+      if (hasActivity) {
+        try {
+          persistSessionUsage({
+            sessionId: config.getSessionId(),
+            startTime: context.session.stats.sessionStartTime ?? new Date(),
+            endTime: new Date(),
+            project: config.getProjectRoot(),
+            metrics,
+          });
+        } catch {
+          // Best-effort — don't block /clear
+        }
+      }
 
       const newSessionId = config.startNewSession();
 

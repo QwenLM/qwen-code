@@ -9,7 +9,6 @@ import { statsCommand } from './statsCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { MessageType } from '../types.js';
-import { formatDuration } from '../utils/formatters.js';
 import { MAIN_SOURCE } from '@qwen-code/qwen-code-core';
 import type { ModelMetricsCore, ModelMetrics } from '@qwen-code/qwen-code-core';
 
@@ -34,21 +33,16 @@ describe('statsCommand', () => {
     mockContext.session.stats.sessionStartTime = startTime;
   });
 
-  it('should display general session stats when run with no subcommand', () => {
+  it('should open stats dialog when run with no subcommand in interactive mode', () => {
     if (!statsCommand.action) throw new Error('Command has no action');
 
-    statsCommand.action(mockContext, '');
+    const result = statsCommand.action(mockContext, '') as {
+      type: string;
+      dialog: string;
+    };
 
-    const expectedDuration = formatDuration(
-      endTime.getTime() - startTime.getTime(),
-    );
-    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.STATS,
-        duration: expectedDuration,
-      },
-      expect.any(Number),
-    );
+    expect(result).toEqual({ type: 'dialog', dialog: 'stats' });
+    expect(mockContext.ui.addItem).not.toHaveBeenCalled();
   });
 
   it('should display model stats when using the "model" subcommand', () => {
@@ -109,7 +103,7 @@ describe('statsCommand', () => {
       expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
     });
 
-    it('should return error if sessionStartTime is not available', async () => {
+    it('should return info with zero duration if sessionStartTime is not available', async () => {
       if (!statsCommand.action) throw new Error('Command has no action');
 
       (
@@ -122,10 +116,12 @@ describe('statsCommand', () => {
       const result = (await statsCommand.action(nonInteractiveContext, '')) as {
         type: string;
         messageType: string;
+        content: string;
       };
 
       expect(result.type).toBe('message');
-      expect(result.messageType).toBe('error');
+      expect(result.messageType).toBe('info');
+      expect(result.content).toContain('Session duration');
     });
 
     it('stats model subcommand should return text in non-interactive mode', async () => {

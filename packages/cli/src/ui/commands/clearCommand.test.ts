@@ -17,7 +17,10 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
     ...actual,
     uiTelemetryService: {
       reset: vi.fn(),
+      getMetrics: vi.fn(() => ({ models: {} })),
+      getSessionStartTime: vi.fn(() => new Date()),
     },
+    persistSessionUsage: vi.fn(),
   };
 });
 
