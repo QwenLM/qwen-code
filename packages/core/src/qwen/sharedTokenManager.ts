@@ -474,7 +474,6 @@ export class SharedTokenManager {
       // Check if we have a refresh token before attempting refresh
       const currentCredentials = qwenClient.getCredentials();
       if (!currentCredentials.refresh_token) {
-        // console.debug('create a NO_REFRESH_TOKEN error');
         throw new TokenManagerError(
           TokenError.NO_REFRESH_TOKEN,
           'No refresh token available for token refresh',
