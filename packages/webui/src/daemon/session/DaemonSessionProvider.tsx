@@ -400,17 +400,30 @@ export function DaemonSessionProvider({
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
           if (replayEvents.length > 0) {
-            const replayOpts = eventOptionsRef.current;
+            const replayOpts = {
+              ...eventOptionsRef.current,
+              suppressOwnUserEcho: false,
+            };
             const allUiEvents: DaemonUiEvent[] = [];
             for (const replayEvent of replayEvents) {
-              allUiEvents.push(
-                ...normalizeAndFilterEvent(
-                  replayEvent,
-                  activeSession.clientId,
-                  replayOpts,
-                  setConnection,
-                ),
-              );
+              try {
+                allUiEvents.push(
+                  ...normalizeAndFilterEvent(
+                    replayEvent,
+                    activeSession.clientId,
+                    replayOpts,
+                    setConnection,
+                  ),
+                );
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : String(error);
+                allUiEvents.push({
+                  type: 'error',
+                  text: `Skipped malformed replay event: ${message}`,
+                  recoverable: true,
+                });
+              }
             }
             if (allUiEvents.length > 0) {
               store.dispatch(allUiEvents);
