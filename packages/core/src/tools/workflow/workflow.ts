@@ -26,6 +26,7 @@ import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
 import {
   WorkflowOrchestrator,
+  WorkflowExecutionError,
   createProductionDispatch,
   type WorkflowAgentDispatch,
 } from '../../agents/runtime/workflow-orchestrator.js';
@@ -106,51 +107,98 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       });
 
       // FIX-7 (UP-C2): unwrap the script result so the LLM receives the
-      // script's return value verbatim (or its JSON representation for
-      // non-strings). The full metadata (runId, phases, logs) is preserved in
-      // returnDisplay for the UI, but must not pad the LLM context window with
-      // bookkeeping noise the model did not ask for.
-      const llmText =
-        outcome.result === undefined
-          ? '(workflow returned no value)'
-          : typeof outcome.result === 'string'
-            ? outcome.result
-            : JSON.stringify(outcome.result, null, 2);
-
-      const displayPayload = {
+      // script's return value verbatim. The full metadata (runId, phases,
+      // logs) is preserved in returnDisplay for the UI but does not pad
+      // the LLM context with bookkeeping noise.
+      //
+      // T12 / T18 (PR #4732 R1): defensive serialization. A successful
+      // workflow whose `return` value is a BigInt, a circular reference,
+      // or otherwise non-JSON used to be reported as `Workflow failed:
+      // Converting circular structure to JSON` — the script succeeded but
+      // the post-processing crashed. Wrap each JSON.stringify in its own
+      // try/catch with a clear placeholder so a serialization issue
+      // degrades gracefully instead of masquerading as a run failure.
+      const llmText = safeStringifyResult(outcome.result);
+      const displayJson = safeStringifyDisplayPayload({
         runId: outcome.runId,
         phases: outcome.phases,
         logs: outcome.logs,
         result: outcome.result,
-      };
-      const displayJson = JSON.stringify(displayPayload, null, 2);
+      });
 
       return {
         llmContent: [{ text: llmText }],
         returnDisplay: '```json\n' + displayJson + '\n```',
       };
     } catch (err) {
-      // FIX-H (Round 5 SEC Minor): Error.stack frames include absolute host
-      // file paths. Surface only the message — never `err.stack` — to the
-      // LLM and the UI. Caller's stderr/debug log can still see the full
-      // stack via standard logging mechanisms.
+      // FIX-H (Round 5 SEC Minor): surface only the message — never the
+      // stack frame — to the LLM and the UI. Caller's stderr/debug log
+      // can still see the full stack via standard logging mechanisms.
       //
-      // KNOWN LIMITATION: a script that intentionally captures `e.stack`
-      // inside the sandbox and returns it (e.g. `try { throw 0 } catch(e)
-      // { return e.stack }`) still surfaces stack frames to the LLM via the
-      // script's return value. Model-authored scripts are unlikely to do
-      // this; documented as out-of-scope for P1.
-      const message = err instanceof Error ? err.message : String(err);
+      // Cross-realm `instanceof Error` is false for vm-realm Errors; use
+      // duck-typed extraction so script-thrown errors aren't coerced to
+      // their "Error: <msg>" toString() form.
+      const message = extractErrorMessage(err);
+      // T19 (PR #4732 R1): if the orchestrator preserved phases / logs
+      // accumulated before the failure, include them in the display so
+      // the user can see what ran before the error.
+      const phases =
+        err instanceof WorkflowExecutionError ? err.phases : undefined;
+      const logs = err instanceof WorkflowExecutionError ? err.logs : undefined;
+      const display =
+        phases || logs
+          ? `Workflow failed: ${message}\n\n${safeStringifyDisplayPayload({
+              phases: phases ?? [],
+              logs: logs ?? [],
+            })}`
+          : `Workflow failed: ${message}`;
       return {
         llmContent: [{ text: `Workflow failed: ${message}` }],
-        returnDisplay: `Workflow failed: ${message}`,
+        returnDisplay: display,
         // FIX-10 (REUSE-I1): use the standard ToolErrorType.EXECUTION_FAILED
-        // code so error routing / dashboards can classify workflow failures the
-        // same way as other execution-time tool errors.
+        // code so error routing / dashboards can classify workflow failures
+        // the same way as other execution-time tool errors.
         error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
   }
+}
+
+/**
+ * T12 / T18 (PR #4732 R1): serialize the script's return value, falling back
+ * to a clear placeholder on BigInt / circular / non-JSON values so a
+ * successful workflow is not reported as a failure.
+ */
+function safeStringifyResult(result: unknown): string {
+  if (result === undefined) return '(workflow returned no value)';
+  if (typeof result === 'string') return result;
+  try {
+    return JSON.stringify(result, null, 2);
+  } catch {
+    return `(workflow returned a non-JSON-serializable value of type ${typeof result})`;
+  }
+}
+
+function safeStringifyDisplayPayload(payload: unknown): string {
+  try {
+    return JSON.stringify(payload, null, 2);
+  } catch {
+    return '(display payload not JSON-serializable)';
+  }
+}
+
+/**
+ * Duck-typed extraction so vm-realm Errors (raised inside the sandbox)
+ * don't coerce to "Error: <msg>" via toString(). See workflow-orchestrator.ts
+ * for the matching helper on the orchestrator side.
+ */
+function extractErrorMessage(err: unknown): string {
+  if (err && typeof err === 'object' && 'message' in err) {
+    const m = (err as { message: unknown }).message;
+    if (typeof m === 'string') return m;
+    return String(m);
+  }
+  return String(err);
 }
 
 export class WorkflowTool extends BaseDeclarativeTool<

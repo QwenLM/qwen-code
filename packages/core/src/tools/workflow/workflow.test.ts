@@ -70,6 +70,63 @@ describe('WorkflowTool', () => {
     expect(result.error).toBeDefined();
     expect(result.error!.message).toContain('scripted failure');
     expect(JSON.stringify(result.llmContent)).toContain('Workflow failed');
+    // T4 (PR #4732 R1): assert the machine-readable error type so a
+    // refactor removing the field doesn't go uncaught.
+    expect(result.error!.type).toBe('execution_failed');
+  });
+
+  // T19 (PR #4732 R1): phases / logs accumulated before a script failure
+  // must be included in the user-visible display so debugging is possible.
+  it('execute() includes phases + logs in returnDisplay when script fails', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async () => 'unused',
+    });
+    const invocation = tool.build({
+      script: `
+        phase("plan");
+        log("computing");
+        phase("execute");
+        log("about to fail");
+        throw new Error("boom");
+      `,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    const display = String(result.returnDisplay);
+    expect(display).toContain('Workflow failed: boom');
+    expect(display).toContain('plan');
+    expect(display).toContain('execute');
+    expect(display).toContain('computing');
+    expect(display).toContain('about to fail');
+  });
+
+  // T12 / T18 (PR #4732 R1): a script that returns a BigInt or a circular
+  // value must not be reported as a workflow failure — the script ran fine,
+  // only the post-processing JSON.stringify hit a limitation.
+  it('execute() degrades gracefully on BigInt return values (success, not failure)', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async () => 'unused',
+    });
+    const invocation = tool.build({
+      script: 'return 1n + 2n;',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const llmText = (result.llmContent as Array<{ text: string }>)[0]!.text;
+    expect(llmText).toMatch(/non-JSON-serializable value of type bigint/);
+  });
+
+  it('execute() degrades gracefully on circular return values', async () => {
+    const tool = new WorkflowTool(fakeConfig(), {
+      dispatch: async () => 'unused',
+    });
+    const invocation = tool.build({
+      script: 'const a = {}; a.self = a; return a;',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const llmText = (result.llmContent as Array<{ text: string }>)[0]!.text;
+    expect(llmText).toMatch(/non-JSON-serializable value of type object/);
   });
 
   // TST-C3: llmContent must be the unwrapped script return value (FIX-7).

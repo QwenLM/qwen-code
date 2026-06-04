@@ -1,6 +1,15 @@
-import { describe, it, expect, beforeEach, vi as vitest } from 'vitest';
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// T7 (PR #4732 R1): the `vi as vitest` alias diverges from every other
+// test file in the repo. Use `vi` directly.
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   WorkflowOrchestrator,
+  WorkflowExecutionError,
   createProductionDispatch,
 } from './workflow-orchestrator.js';
 import type { Config } from '../../config/config.js';
@@ -13,24 +22,30 @@ import type { Config } from '../../config/config.js';
 // FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
 // and the (ctx, signal?) shape of execute so any drift between the production
 // call site and the real AgentHeadless surface becomes a test failure.
-const { created } = vitest.hoisted(() => ({
+const { created, nextTerminateMode } = vi.hoisted(() => ({
   created: [] as Array<{
     name: string;
     prompt: string;
     signal?: AbortSignal;
     promptConfigSystemPrompt?: string;
+    runConfig?: { max_turns?: number; max_time_minutes?: number };
+    toolConfig?: { tools?: string[]; disallowedTools?: string[] };
   }>,
+  // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
+  // throws on non-GOAL. Tests set `nextTerminateMode.value` to simulate
+  // CANCELLED / MAX_TURNS / TIMEOUT outcomes.
+  nextTerminateMode: { value: 'GOAL' as string },
 }));
 
-vitest.mock('./agent-headless.js', () => ({
+vi.mock('./agent-headless.js', () => ({
   AgentHeadless: {
     create: async (
       name: string,
       _runtimeContext: unknown,
       promptConfig: { systemPrompt?: string },
       _modelConfig: unknown,
-      _runConfig: unknown,
-      _toolConfig?: unknown,
+      runConfig: { max_turns?: number; max_time_minutes?: number },
+      toolConfig?: { tools?: string[]; disallowedTools?: string[] },
       // The next three optional params reflect the real AgentHeadless.create
       // signature (eventEmitter?, hooks?, runtimeView?). Accepting them as
       // `unknown` lets the mock detect if the production call site ever adds
@@ -48,6 +63,8 @@ vitest.mock('./agent-headless.js', () => ({
           prompt: ctx.get('task_prompt') as string,
           signal,
           promptConfigSystemPrompt: promptConfig.systemPrompt,
+          runConfig,
+          toolConfig,
         });
         if (
           !promptConfig.systemPrompt?.includes('subagent spawned by a workflow')
@@ -59,6 +76,7 @@ vitest.mock('./agent-headless.js', () => ({
       },
       getFinalText: () =>
         `headless-said:${created[created.length - 1]!.prompt}`,
+      getTerminateMode: () => nextTerminateMode.value,
     }),
   },
   ContextState: class ContextState {
@@ -157,9 +175,11 @@ describe('WorkflowOrchestrator', () => {
 
 describe('createProductionDispatch', () => {
   // FIX-C3: reset the shared mock-state array between tests so each case
-  // observes its own subagent.execute call only.
+  // observes its own subagent.execute call only. Also reset the simulated
+  // terminate mode back to 'goal' (success).
   beforeEach(() => {
     created.length = 0;
+    nextTerminateMode.value = 'GOAL';
   });
 
   it('routes calls through AgentHeadless and returns getFinalText', async () => {
@@ -200,5 +220,75 @@ describe('createProductionDispatch', () => {
     expect(sp).toContain('return ONLY the raw JSON');
     expect(sp).toContain('no code fences');
     expect(sp).toContain('SendUserMessage');
+  });
+
+  // T11 (PR #4732 R1): subagents must be bounded so a single agent() call
+  // cannot loop the model indefinitely.
+  it('passes bounded runConfig (max_turns + max_time_minutes)', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await dispatch('hello', { label: 'h1' });
+    expect(created[0]!.runConfig).toEqual({
+      max_turns: 50,
+      max_time_minutes: 10,
+    });
+  });
+
+  // T11: disallow SendMessage / ExitPlanMode to mirror upstream Tg8.
+  it('disallows SendMessage and ExitPlanMode for workflow subagents', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await dispatch('hello', { label: 'h1' });
+    expect(created[0]!.toolConfig?.tools).toEqual(['*']);
+    expect(created[0]!.toolConfig?.disallowedTools).toEqual([
+      'send_message',
+      'exit_plan_mode',
+    ]);
+  });
+
+  // T10 (PR #4732 R1): the production dispatch must throw when the
+  // subagent terminates with a non-GOAL mode. Without this, `await agent(...)`
+  // would resolve to '' on user cancel and the script would keep running.
+  it.each([
+    ['CANCELLED', /terminate mode: CANCELLED/],
+    ['MAX_TURNS', /terminate mode: MAX_TURNS/],
+    ['TIMEOUT', /terminate mode: TIMEOUT/],
+    ['ERROR', /terminate mode: ERROR/],
+  ])(
+    'throws when subagent terminate mode is %s',
+    async (mode, expectedMessage) => {
+      nextTerminateMode.value = mode;
+      const dispatch = createProductionDispatch(fakeConfig());
+      await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
+        expectedMessage,
+      );
+    },
+  );
+});
+
+describe('WorkflowOrchestrator failure-context preservation', () => {
+  // T19 (PR #4732 R1): phases / logs accumulated before a script failure
+  // must be preserved on the thrown error so the tool layer can display
+  // them. Previously the sandbox instance was discarded with the error.
+  it('throws WorkflowExecutionError carrying phases and logs on script failure', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'ok');
+    let caught: unknown;
+    try {
+      await orchestrator.run({
+        script: `
+          phase("plan");
+          log("starting");
+          phase("execute");
+          log("about to fail");
+          throw new Error("scripted failure");
+        `,
+        args: undefined,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(WorkflowExecutionError);
+    const wfErr = caught as WorkflowExecutionError;
+    expect(wfErr.message).toContain('scripted failure');
+    expect(wfErr.phases).toEqual(['plan', 'execute']);
+    expect(wfErr.logs).toEqual(['starting', 'about to fail']);
   });
 });
