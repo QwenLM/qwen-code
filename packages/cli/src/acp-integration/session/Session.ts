@@ -125,6 +125,9 @@ import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
+const BACKGROUND_TASK_NOTIFICATION_POLL_MS = 100;
+const BACKGROUND_TASK_NOTIFICATION_DRAIN_TIMEOUT_MS = 1000;
+
 // Import modular session components
 import type {
   ApprovalModeValue,
@@ -396,6 +399,8 @@ export class Session implements SessionContext {
   private notificationQueue: Array<{ displayText: string; modelText: string }> =
     [];
   private notificationResolve: (() => void) | null = null;
+  private notificationProcessing: Promise<void> | null = null;
+  private notificationDraining = false;
 
   // Cron scheduling state
   private cronQueue: string[] = [];
@@ -788,6 +793,7 @@ export class Session implements SessionContext {
     });
 
     try {
+      this.#installBackgroundTaskNotificationCallback();
       const result = await this.#executePrompt(params, pendingSend);
       await this.#drainBackgroundTaskNotifications(pendingSend);
       this.pendingPrompt = null;
@@ -1786,16 +1792,16 @@ export class Session implements SessionContext {
     pendingSend: AbortController,
   ): Promise<void> {
     const registry = this.config.getBackgroundTaskRegistry();
-    if (!registry.hasUnfinalizedTasks()) return;
+    if (
+      !registry.hasUnfinalizedTasks() &&
+      this.notificationQueue.length === 0
+    ) {
+      registry.setNotificationCallback(undefined);
+      return;
+    }
+    const deadline = Date.now() + BACKGROUND_TASK_NOTIFICATION_DRAIN_TIMEOUT_MS;
 
-    registry.setNotificationCallback((displayText, modelText) => {
-      this.notificationQueue.push({ displayText, modelText });
-      if (this.notificationResolve) {
-        this.notificationResolve();
-        this.notificationResolve = null;
-      }
-    });
-
+    this.notificationDraining = true;
     try {
       while (true) {
         if (pendingSend.signal.aborted) {
@@ -1815,14 +1821,85 @@ export class Session implements SessionContext {
           break;
         }
 
+        if (Date.now() >= deadline) {
+          debugLogger.debug(
+            'Timed out draining background task notifications; leaving tasks running.',
+          );
+          break;
+        }
+
         await new Promise<void>((resolve) => {
           this.notificationResolve = resolve;
-          setTimeout(resolve, 100);
+          setTimeout(resolve, BACKGROUND_TASK_NOTIFICATION_POLL_MS);
         });
       }
     } finally {
-      registry.setNotificationCallback(undefined);
+      this.notificationDraining = false;
       this.notificationResolve = null;
+      if (registry.hasUnfinalizedTasks() || this.notificationQueue.length > 0) {
+        this.#scheduleBackgroundTaskNotificationProcessing();
+      } else {
+        registry.setNotificationCallback(undefined);
+      }
+    }
+  }
+
+  #installBackgroundTaskNotificationCallback(): void {
+    const registry = this.config.getBackgroundTaskRegistry();
+    registry.setNotificationCallback((displayText, modelText) => {
+      this.notificationQueue.push({ displayText, modelText });
+      if (this.notificationResolve) {
+        this.notificationResolve();
+        this.notificationResolve = null;
+      } else if (!this.notificationDraining) {
+        this.#scheduleBackgroundTaskNotificationProcessing();
+      }
+    });
+  }
+
+  #scheduleBackgroundTaskNotificationProcessing(): void {
+    if (this.notificationProcessing) return;
+    this.notificationProcessing = this.#processBackgroundTaskNotifications()
+      .catch((error) => {
+        debugLogger.warn(
+          `Failed to process background task notification: ${this.#formatError(
+            error,
+          )}`,
+        );
+      })
+      .finally(() => {
+        this.notificationProcessing = null;
+        const registry = this.config.getBackgroundTaskRegistry();
+        if (this.notificationQueue.length > 0) {
+          this.#scheduleBackgroundTaskNotificationProcessing();
+        } else if (!registry.hasUnfinalizedTasks()) {
+          registry.setNotificationCallback(undefined);
+        }
+      });
+  }
+
+  async #processBackgroundTaskNotifications(): Promise<void> {
+    if (this.pendingPromptCompletion) {
+      try {
+        await this.pendingPromptCompletion;
+      } catch {
+        // Expected: previous prompt was cancelled or errored.
+      }
+    }
+
+    let resolveCompletion!: () => void;
+    this.pendingPromptCompletion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    const notificationSend = new AbortController();
+    try {
+      while (this.notificationQueue.length > 0) {
+        const item = this.notificationQueue.shift()!;
+        await this.#executeNotificationPrompt(item, notificationSend);
+      }
+    } finally {
+      resolveCompletion();
     }
   }
 

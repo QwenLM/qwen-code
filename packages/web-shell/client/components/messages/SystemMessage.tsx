@@ -19,12 +19,14 @@ interface SystemMessageProps {
   variant: 'info' | 'error' | 'warning';
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  isLatest?: boolean;
 }
 
 export const SystemMessage = memo(function SystemMessage({
   content,
   variant,
   onShowContextDetail,
+  isLatest = false,
 }: SystemMessageProps) {
   const contextUsage =
     variant === 'info' ? parseContextUsageMessage(content) : null;
@@ -81,7 +83,7 @@ export const SystemMessage = memo(function SystemMessage({
   if (goalStatus) {
     return (
       <div className={styles.flushMessage}>
-        <GoalStatusMessage status={goalStatus} />
+        <GoalStatusMessage status={goalStatus} activateFooter={isLatest} />
       </div>
     );
   }

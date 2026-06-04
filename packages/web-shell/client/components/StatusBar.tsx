@@ -188,6 +188,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
     const [pollingActive, setPollingActive] = useState(false);
     const [, setGoalTick] = useState(0);
     const emptyPollsRef = useRef(0);
+    const tasksRefreshInFlightRef = useRef(false);
     const taskPillRef = useRef<HTMLButtonElement>(null);
 
     useEffect(() => {
@@ -210,6 +211,8 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
 
       let disposed = false;
       const refresh = () => {
+        if (tasksRefreshInFlightRef.current) return;
+        tasksRefreshInFlightRef.current = true;
         actions
           .getTasks()
           .then((snapshot) => {
@@ -230,6 +233,9 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
           .catch((error: unknown) => {
             if (disposed) return;
             console.warn('Failed to refresh tasks for status bar:', error);
+          })
+          .finally(() => {
+            tasksRefreshInFlightRef.current = false;
           });
       };
 

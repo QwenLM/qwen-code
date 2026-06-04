@@ -336,7 +336,8 @@ function parseAuthProviderInstallRequest(
   if (
     typeof providerId !== 'string' ||
     providerId.trim().length === 0 ||
-    typeof apiKey !== 'string'
+    typeof apiKey !== 'string' ||
+    apiKey.trim().length === 0
   ) {
     return undefined;
   }
@@ -1877,11 +1878,9 @@ export function createServeApp(
     const sessionId = req.params['id'];
     const taskId = req.params['taskId'];
     if (!sessionId || !taskId) {
-      res
-        .status(400)
-        .json({
-          error: '`sessionId` and `taskId` route parameters are required',
-        });
+      res.status(400).json({
+        error: '`sessionId` and `taskId` route parameters are required',
+      });
       return;
     }
     const body = safeBody(req);

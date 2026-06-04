@@ -32,6 +32,7 @@ import type {
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
+  DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceFile,
@@ -1133,7 +1134,7 @@ export class DaemonClient {
   async sessionTaskCancel(
     sessionId: string,
     taskId: string,
-    kind: string,
+    kind: DaemonSessionTaskStatus['kind'],
     clientId?: string,
   ): Promise<{ cancelled: boolean }> {
     return await this.fetchWithTimeout(

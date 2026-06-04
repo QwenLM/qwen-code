@@ -5696,19 +5696,34 @@ class QwenAgent implements Agent {
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
         switch (taskKind) {
-          case 'agent':
+          case 'agent': {
+            const task = config.getBackgroundTaskRegistry().get(taskId);
+            if (!task || task.status !== 'running') {
+              return { cancelled: false };
+            }
             config.getBackgroundTaskRegistry().cancel(taskId);
-            break;
-          case 'shell':
+            return { cancelled: true };
+          }
+          case 'shell': {
+            const task = config.getBackgroundShellRegistry().get(taskId);
+            if (!task || task.status !== 'running') {
+              return { cancelled: false };
+            }
             config.getBackgroundShellRegistry().requestCancel(taskId);
-            break;
-          case 'monitor':
+            return { cancelled: true };
+          }
+          case 'monitor': {
+            const task = config.getMonitorRegistry().get(taskId);
+            if (!task || task.status !== 'running') {
+              return { cancelled: false };
+            }
             config.getMonitorRegistry().cancel(taskId);
-            break;
+            return { cancelled: true };
+          }
           default:
             break;
         }
-        return { cancelled: true };
+        return { cancelled: false };
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
         const name = params['name'];

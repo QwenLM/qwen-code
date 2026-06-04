@@ -588,6 +588,7 @@ export function MessageList({
           onConfirm={onConfirm}
           onShowContextDetail={onShowContextDetail}
           workspaceCwd={workspaceCwd}
+          isLatest={itemIndex === displayItems.length - 1}
         />
       );
     },

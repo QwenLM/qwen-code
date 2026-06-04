@@ -102,10 +102,13 @@ function getTitle(status: SerializedGoalStatusMessage): {
 
 export function GoalStatusMessage({
   status,
+  activateFooter = false,
 }: {
   status: SerializedGoalStatusMessage;
+  activateFooter?: boolean;
 }) {
   useEffect(() => {
+    if (!activateFooter) return;
     const active = status.kind === 'set' || status.kind === 'checking';
     window.dispatchEvent(
       new CustomEvent(GOAL_STATUS_ACTIVE_EVENT, {
@@ -116,7 +119,7 @@ export function GoalStatusMessage({
         },
       }),
     );
-  }, [status.condition, status.kind, status.setAt]);
+  }, [activateFooter, status.condition, status.kind, status.setAt]);
 
   const title = getTitle(status);
   const stats: string[] = [];

@@ -1330,6 +1330,41 @@ export function App({
       });
   }, [reportError, sessionActions]);
 
+  const dispatchGoalSet = useCallback(
+    (condition: string, setAt: number) => {
+      setActiveGoal({ condition, setAt });
+      store.dispatch([
+        {
+          type: 'status',
+          text: serializeGoalStatusMessage({
+            kind: 'set',
+            condition,
+            setAt,
+          }),
+        },
+      ]);
+    },
+    [store],
+  );
+
+  const dispatchGoalCleared = useCallback(
+    (goal: ActiveGoalStatus | null) => {
+      if (!goal) return;
+      store.dispatch([
+        {
+          type: 'status',
+          text: serializeGoalStatusMessage({
+            kind: 'cleared',
+            condition: goal.condition,
+            durationMs: Date.now() - goal.setAt,
+          }),
+        },
+      ]);
+      setActiveGoal(null);
+    },
+    [store],
+  );
+
   const handleGoalSlashCommand = useCallback(
     (
       text: string,
@@ -1342,36 +1377,19 @@ export function App({
       store.appendLocalUserMessage(text);
 
       if (goalArg && GOAL_CLEAR_KEYWORDS.has(lowerGoalArg)) {
-        const activeGoal = activeGoalRef.current;
-        if (activeGoal) {
-          store.dispatch([
-            {
-              type: 'status',
-              text: serializeGoalStatusMessage({
-                kind: 'cleared',
-                condition: activeGoal.condition,
-                durationMs: Date.now() - activeGoal.setAt,
-              }),
-            },
-          ]);
-          setActiveGoal(null);
+        const goalToClear = activeGoalRef.current;
+        if (!sendToDaemon) {
+          dispatchGoalCleared(goalToClear);
+          return true;
         }
+        sendPrompt(text, images, { optimisticUserMessage: false })
+          .then(() => dispatchGoalCleared(goalToClear))
+          .catch((error: unknown) =>
+            reportError(error, 'Failed to send /goal command'),
+          );
+        return true;
       } else if (goalArg) {
-        const nextGoal = {
-          condition: goalArg,
-          setAt: Date.now(),
-        };
-        setActiveGoal(nextGoal);
-        store.dispatch([
-          {
-            type: 'status',
-            text: serializeGoalStatusMessage({
-              kind: 'set',
-              condition: goalArg,
-              setAt: nextGoal.setAt,
-            }),
-          },
-        ]);
+        dispatchGoalSet(goalArg, Date.now());
       }
 
       if (sendToDaemon) {
@@ -1382,23 +1400,25 @@ export function App({
       }
       return true;
     },
-    [reportError, sendPrompt, store],
+    [dispatchGoalCleared, dispatchGoalSet, reportError, sendPrompt, store],
   );
 
   const handleBusyGoalClear = useCallback(
-    (text: string, images?: PromptImage[]) => {
-      handleGoalSlashCommand(text, images, { sendToDaemon: false });
+    (text: string) => {
+      const goalToClear = activeGoalRef.current;
+      store.appendLocalUserMessage(text);
       sessionActions
         .cancel()
         .then(() =>
           sendPrompt(text, undefined, { optimisticUserMessage: false }),
         )
+        .then(() => dispatchGoalCleared(goalToClear))
         .catch((error: unknown) => {
           reportError(error, 'Failed to clear /goal');
         });
       return true;
     },
-    [handleGoalSlashCommand, reportError, sendPrompt, sessionActions],
+    [dispatchGoalCleared, reportError, sendPrompt, sessionActions, store],
   );
 
   const handleSubmit = useCallback(
@@ -1421,13 +1441,23 @@ export function App({
               dispatch: (events) => store.dispatch(events),
               reportError,
               interactiveHint: t('tasks.dumpHint'),
+              labels: {
+                empty: t('tasks.empty'),
+                title: t('tasks.title'),
+                count: (count: number) => t('tasks.count', { count }),
+                defaultHint: t('tasks.dumpHint'),
+              },
             });
             return true;
           }
           if (cmd === 'goal') {
             if (promptBlocked) {
               if (isGoalClearCommand(text)) {
-                return handleBusyGoalClear(text, images);
+                return handleBusyGoalClear(text);
+              }
+              const goalArg = text.replace(/^\/goal\b/i, '').trim();
+              if (goalArg) {
+                setActiveGoal({ condition: goalArg, setAt: Date.now() });
               }
               return enqueuePrompt(text, images);
             }

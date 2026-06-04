@@ -17,6 +17,7 @@ import type {
   DaemonSessionRecapResult,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   DaemonSessionStatsStatus,
   DaemonShellCommandResult,
@@ -241,7 +242,10 @@ export interface DaemonSessionActions {
   ): Promise<DaemonSessionBtwResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(): Promise<DaemonSessionTasksStatus>;
-  cancelTask(taskId: string, kind: string): Promise<{ cancelled: boolean }>;
+  cancelTask(
+    taskId: string,
+    kind: DaemonSessionTaskStatus['kind'],
+  ): Promise<{ cancelled: boolean }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
 }
 

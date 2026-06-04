@@ -26,6 +26,7 @@ import type {
   DaemonSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   HeartbeatResult,
   PermissionResponse,
@@ -365,7 +366,7 @@ export class DaemonSessionClient {
 
   async cancelTask(
     taskId: string,
-    kind: string,
+    kind: DaemonSessionTaskStatus['kind'],
   ): Promise<{ cancelled: boolean }> {
     return await this.client.sessionTaskCancel(
       this.sessionId,

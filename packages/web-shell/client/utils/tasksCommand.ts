@@ -9,6 +9,13 @@ type LocalStatusDispatcher = (
 
 type ErrorReporter = (error: unknown, fallback: string) => void;
 
+interface FormatTasksLabels {
+  empty?: string;
+  title?: string;
+  count?: (count: number) => string;
+  defaultHint?: string;
+}
+
 function sanitizeTaskText(value: string): string {
   let out = '';
   for (let i = 0; i < value.length; i++) {
@@ -75,20 +82,32 @@ function formatTaskStatus(task: DaemonSessionTaskStatus): string {
 
 export function formatTasksSnapshot(
   snapshot: DaemonSessionTasksStatus,
-  options: { interactiveHint?: string | boolean } = {},
+  options: {
+    interactiveHint?: string | boolean;
+    labels?: FormatTasksLabels;
+  } = {},
 ): string {
-  if (snapshot.tasks.length === 0) return 'No background tasks.';
+  if (snapshot.tasks.length === 0) {
+    return options.labels?.empty ?? 'No background tasks.';
+  }
 
   const lines: string[] = [];
+  const defaultHint =
+    options.labels?.defaultHint ??
+    'Tip: focus the Background tasks pill in the footer (use ↓ from an empty composer) and press Enter for the interactive dialog with detail view + live updates.';
   if (options.interactiveHint) {
     lines.push(
       typeof options.interactiveHint === 'string'
         ? options.interactiveHint
-        : 'Tip: focus the Background tasks pill in the footer (use ↓ from an empty composer) and press Enter for the interactive dialog with detail view + live updates.',
+        : defaultHint,
       '',
     );
   }
-  lines.push(`Background tasks (${snapshot.tasks.length} total)`, '');
+  const title = options.labels?.title ?? 'Background tasks';
+  const count =
+    options.labels?.count?.(snapshot.tasks.length) ??
+    `${snapshot.tasks.length} total`;
+  lines.push(`${title} (${count})`, '');
   for (const task of snapshot.tasks) {
     const pidPart =
       task.kind !== 'agent' && task.pid !== undefined ? ` pid=${task.pid}` : '';
@@ -112,6 +131,7 @@ export function handleTasksSlashCommand(input: {
   dispatch: LocalStatusDispatcher;
   reportError: ErrorReporter;
   interactiveHint?: string;
+  labels?: FormatTasksLabels;
 }): boolean {
   if (input.cmd !== 'tasks') return false;
   void input
@@ -122,8 +142,8 @@ export function handleTasksSlashCommand(input: {
           type: 'status',
           text: formatTasksSnapshot(snapshot, {
             interactiveHint:
-              input.interactiveHint ??
-              'Tip: focus the Background tasks pill in the footer (use ↓ from an empty composer) and press Enter for the interactive dialog with detail view + live updates.',
+              input.interactiveHint ?? input.labels?.defaultHint ?? true,
+            labels: input.labels,
           }),
         },
       ]);

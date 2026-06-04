@@ -64,6 +64,36 @@ describe('formatTasksSnapshot', () => {
     expect(text).toContain('use ↓ from an empty composer');
     expect(text).toContain('Background tasks (1 total)');
   });
+
+  it('uses localized labels when provided', () => {
+    const text = formatTasksSnapshot(
+      makeSnapshot([
+        {
+          kind: 'shell',
+          id: 'sh-1',
+          label: 'npm test',
+          description: 'npm test',
+          status: 'running',
+          startTime: 1_000,
+          runtimeMs: 1_000,
+          command: 'npm test',
+          cwd: '/work',
+        },
+      ]),
+      {
+        interactiveHint: true,
+        labels: {
+          empty: '当前没有运行中的任务',
+          title: '后台任务',
+          count: (count) => `共 ${count} 个`,
+          defaultHint: '使用空输入框的 ↓ 查看详情',
+        },
+      },
+    );
+
+    expect(text).toContain('使用空输入框的 ↓ 查看详情');
+    expect(text).toContain('后台任务 (共 1 个)');
+  });
 });
 
 describe('handleTasksSlashCommand', () => {

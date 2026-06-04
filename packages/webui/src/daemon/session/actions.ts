@@ -10,6 +10,7 @@ import type {
   DaemonSessionClient,
   DaemonSessionBtwResult,
   DaemonSessionRecapResult,
+  DaemonSessionTaskStatus,
   DaemonTranscriptStore,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
@@ -635,7 +636,7 @@ export function createDaemonSessionActions({
       }
     },
 
-    async cancelTask(taskId: string, kind: string) {
+    async cancelTask(taskId: string, kind: DaemonSessionTaskStatus['kind']) {
       const session = requireSessionForAction(
         store,
         sessionRef.current,

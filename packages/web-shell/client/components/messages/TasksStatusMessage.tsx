@@ -185,28 +185,39 @@ export function TasksStatusMessage({
   const [pendingCancelId, setPendingCancelId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const panelIdRef = useRef(`tasks-${Math.random().toString(36).slice(2)}`);
+  const refreshInFlightRef = useRef(false);
   const initialDetailStatusRef = useRef<{
     taskId: string;
     status: TaskStatus;
   } | null>(null);
 
-  const selectedTask = tasks[selectedIndex] ?? null;
+  const clampedSelectedIndex =
+    tasks.length === 0 ? 0 : Math.min(selectedIndex, tasks.length - 1);
+  const selectedTask = tasks[clampedSelectedIndex] ?? null;
 
   useEffect(() => {
     if (!isOpen) return;
     const refresh = () => {
+      if (refreshInFlightRef.current) return;
+      refreshInFlightRef.current = true;
       actions
         .getTasks()
         .then((snapshot) => {
           setTasks(sortTasks(snapshot.tasks));
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => {
+          refreshInFlightRef.current = false;
+        });
     };
     const id = setInterval(refresh, REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
   }, [isOpen, actions]);
 
   useEffect(() => {
+    if (tasks.length === 0 && selectedIndex !== 0) {
+      setSelectedIndex(0);
+    }
     if (selectedIndex >= tasks.length && tasks.length > 0) {
       setSelectedIndex(tasks.length - 1);
     }
@@ -426,7 +437,7 @@ export function TasksStatusMessage({
 
   const { visible, windowStart, hiddenAbove, hiddenBelow } = windowTasks(
     tasks,
-    selectedIndex,
+    clampedSelectedIndex,
   );
 
   return (
@@ -450,7 +461,7 @@ export function TasksStatusMessage({
           )}
           {visible.map((task, visibleIndex) => {
             const index = windowStart + visibleIndex;
-            const selected = index === selectedIndex;
+            const selected = index === clampedSelectedIndex;
             const stClass = statusClassName(task.status);
             return (
               <div
@@ -563,6 +574,9 @@ function TaskDetail({
     }
   }
 
+  const promptLines =
+    task.kind === 'agent' && task.prompt ? task.prompt.split('\n') : [];
+
   return (
     <div className={styles.detail}>
       <div className={styles.title}>{detailTitle(task, t)}</div>
@@ -629,16 +643,13 @@ function TaskDetail({
             {t('tasks.detail.prompt')}
           </div>
           <div className={styles.promptContent}>
-            {task.prompt
-              .split('\n')
-              .slice(0, 5)
-              .map((line, i, arr) => (
-                <div key={i} className={styles.truncate}>
-                  {i === arr.length - 1 && task.prompt!.split('\n').length > 5
-                    ? `${line}…`
-                    : line || ' '}
-                </div>
-              ))}
+            {promptLines.slice(0, 5).map((line, i, arr) => (
+              <div key={i} className={styles.truncate}>
+                {i === arr.length - 1 && promptLines.length > 5
+                  ? `${line}…`
+                  : line || ' '}
+              </div>
+            ))}
           </div>
         </div>
       )}

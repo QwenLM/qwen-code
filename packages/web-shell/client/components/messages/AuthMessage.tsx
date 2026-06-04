@@ -609,7 +609,11 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               setError(null);
             }}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') goNext();
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                event.stopPropagation();
+                goNext();
+              }
             }}
             autoFocus
           />
@@ -649,7 +653,11 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               setError(null);
             }}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') goNext();
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                event.stopPropagation();
+                goNext();
+              }
             }}
             autoFocus
           />
@@ -674,7 +682,11 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
               setError(null);
             }}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') goNext();
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                event.stopPropagation();
+                goNext();
+              }
             }}
             autoFocus
           />
@@ -720,7 +732,11 @@ export function AuthMessage({ onMessage, onClose }: AuthMessageProps) {
           }
           onFocus={() => setOptionIndex(advancedContextIndex)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') goNext();
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              event.stopPropagation();
+              goNext();
+            }
           }}
         />
       </>
