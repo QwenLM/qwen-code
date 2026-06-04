@@ -172,6 +172,8 @@ function withSafeGitConfig(args: string[]): string[] {
     'core.fsmonitor=false',
     '-c',
     'core.untrackedCache=false',
+    '-c',
+    'core.quotePath=false',
     ...args,
   ];
 }

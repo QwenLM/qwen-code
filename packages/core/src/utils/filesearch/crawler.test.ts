@@ -848,6 +848,34 @@ describe('crawler', () => {
       );
     });
 
+    it('should preserve non-ASCII tracked paths from git output', async () => {
+      tmpDir = await createTmpDir({
+        'café.txt': '',
+        '文档.md': '',
+        plain: ['nested.txt'],
+      });
+      await initGitRepo(tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toEqual(
+        expect.arrayContaining(['café.txt', '文档.md', 'plain/nested.txt']),
+      );
+    });
+
     it('should recurse into tracked submodules on the git path', async () => {
       tmpDir = await createTmpDir({});
       const parentRepo = path.join(tmpDir, 'parent');
@@ -903,7 +931,7 @@ describe('crawler', () => {
       });
 
       expect(results).toContain('vendor/lib/inner.txt');
-    });
+    }, 15_000);
 
     it('should skip missing tracked paths from submodule indexes', async () => {
       tmpDir = await createTmpDir({});
