@@ -142,7 +142,6 @@ export function registerDaemonGaugeCallbacks(
   if (gaugesRegistered) return;
   const meter = getMeter();
   if (!meter) return;
-  gaugesRegistered = true;
 
   meter
     .createObservableGauge(DAEMON_SESSION_ACTIVE, {
@@ -183,6 +182,8 @@ export function registerDaemonGaugeCallbacks(
         /* no-op */
       }
     });
+
+  gaugesRegistered = true;
 }
 
 export function recordDaemonHttpRequest(
