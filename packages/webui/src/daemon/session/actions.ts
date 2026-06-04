@@ -158,7 +158,9 @@ export function createDaemonSessionActions({
         if (sessionRef.current?.sessionId === sessionId) {
           store.dispatch({ type: 'assistant.done', reason: 'error' });
         }
-        throw dispatchActionError(store, 'Prompt failed', error);
+        const msg = error instanceof Error ? error.message : String(error);
+        store.dispatch({ type: 'error', text: msg, recoverable: true });
+        throw error instanceof Error ? error : new Error(msg);
       } finally {
         const active = activePromptsRef.current.get(sessionId);
         if (active?.controller === ctrl) {

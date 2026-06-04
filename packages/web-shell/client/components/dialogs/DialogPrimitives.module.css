@@ -135,6 +135,7 @@
 .resume-picker-item-row {
   display: flex;
   align-items: baseline;
+  flex: 1;
   gap: 4px;
   min-width: 0;
   width: 100%;
@@ -151,6 +152,8 @@
 }
 
 .resume-picker-item-title {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-primary);
   flex: 1 1 auto;
   font-size: 13px;
@@ -174,6 +177,7 @@
 }
 
 .resume-picker-item-number {
+  flex-shrink: 0;
   min-width: 28px;
   color: var(--text-secondary);
   font-size: 13px;
@@ -181,6 +185,7 @@
 }
 
 .resume-picker-item-provider {
+  flex-shrink: 0;
   color: var(--accent-color);
   font-size: 13px;
   font-weight: 700;
@@ -223,6 +228,7 @@
   font-size: 11px;
   color: var(--accent-color, #4a9eff);
   opacity: 0.8;
+  white-space: nowrap;
 }
 
 .mcp-status {

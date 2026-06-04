@@ -271,6 +271,8 @@ export function MessageList({
   const prevLastUserMsgId = useRef<string | null>(null);
   const prevCatchingUp: MutableRefObject<boolean | undefined> =
     useRef(catchingUp);
+  const catchingUpRef = useRef(catchingUp);
+  catchingUpRef.current = catchingUp;
 
   const hasTailApproval = useMemo(() => {
     if (!pendingApproval) return false;
@@ -344,9 +346,11 @@ export function MessageList({
     // Rule 2: scrolling up → pause follow
     if (curr < prev - 1) {
       shouldFollow.current = false;
-      return;
     }
     // Rule 3: near bottom → resume follow
+    // (runs unconditionally so that container-resize-induced scrollTop
+    // clamping — which looks like scrolling up — doesn't permanently
+    // disable follow when the viewport is still near the bottom)
     if (distanceFromBottom < 30) {
       shouldFollow.current = true;
     }
@@ -358,6 +362,26 @@ export function MessageList({
       shouldFollow.current = true;
     }
   }, [messages.length]);
+
+  // Container-resize guard: when floating panels (TodoPanel,
+  // ActiveAgentsPanel) appear or disappear the scroll container's
+  // clientHeight changes. Snap back to bottom so the user doesn't
+  // lose their place while follow mode is active.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      if (catchingUpRef.current) return;
+      if (!shouldFollow.current) return;
+      requestAnimationFrame(() => {
+        if (!catchingUpRef.current && shouldFollow.current) {
+          scrollToBottom();
+        }
+      });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [scrollToBottom]);
 
   // Rule 4: new user message → force follow on so the model's reply
   // scrolls into view as it streams in.

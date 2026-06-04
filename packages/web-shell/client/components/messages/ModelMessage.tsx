@@ -153,15 +153,17 @@ export function ModelMessage({
       if (e.key === 'ArrowDown' || e.key === 'j') {
         claim();
         setSelectedIdx((idx) =>
-          availableModels.length > 0
-            ? Math.min(idx + 1, availableModels.length - 1)
-            : 0,
+          availableModels.length > 0 ? (idx + 1) % availableModels.length : 0,
         );
         return;
       }
       if (e.key === 'ArrowUp' || e.key === 'k') {
         claim();
-        setSelectedIdx((idx) => Math.max(idx - 1, 0));
+        setSelectedIdx((idx) =>
+          availableModels.length > 0
+            ? (idx - 1 + availableModels.length) % availableModels.length
+            : 0,
+        );
         return;
       }
       if (e.key === 'Enter') {
@@ -196,7 +198,9 @@ export function ModelMessage({
                 onSelect(model.id);
                 onClose();
               }}
-              onMouseEnter={() => setSelectedIdx(index)}
+              // Intentionally do not select on hover. The inline /model panel
+              // is keyboard-first; hover-driven selection can fight arrow-key
+              // navigation when the mouse is resting over an older row.
             >
               <span className={styles.pointer}>{selected ? '›' : ' '}</span>
               <span className={styles.number}>{index + 1}.</span>

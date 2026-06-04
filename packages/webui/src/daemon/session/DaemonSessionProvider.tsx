@@ -28,6 +28,7 @@ import {
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
   type DaemonTurnCompleteData,
+  type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
 import { createDaemonSessionActions } from './actions.js';
 import { detachDaemonClient, getStableClientId } from './clientLifecycle.js';
@@ -233,6 +234,7 @@ export function DaemonSessionProvider({
       while (!disposed && !abort.signal.aborted) {
         try {
           let isSameSessionReconnect = false;
+          let shouldInjectReplaySnapshot = false;
           if (!session) {
             setConnection((current) => ({
               ...current,
@@ -300,14 +302,29 @@ export function DaemonSessionProvider({
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
               store.reset();
             } else if (previousSessionId !== undefined) {
-              store.dispatch({ type: 'assistant.done', reason: 'reconnected' });
-              if (store.getSnapshot().awaitingResync) {
-                store.clearAwaitingResync();
+              const replaySnapshotEventCount =
+                nextSession.replaySnapshot.compactedReplay.length +
+                nextSession.replaySnapshot.liveJournal.length;
+              if (replaySnapshotEventCount > 0) {
+                setPromptStatus('idle');
+                clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                store.reset();
+              } else {
+                store.dispatch({
+                  type: 'assistant.done',
+                  reason: 'reconnected',
+                });
+                if (store.getSnapshot().awaitingResync) {
+                  store.clearAwaitingResync();
+                }
               }
             }
             isSameSessionReconnect =
               previousSessionId !== undefined &&
               previousSessionId === nextSession.sessionId;
+            shouldInjectReplaySnapshot =
+              nextSession.replaySnapshot.compactedReplay.length > 0 ||
+              nextSession.replaySnapshot.liveJournal.length > 0;
             session = nextSession;
             reconnectSessionId = session.sessionId;
             shouldCreateFreshSession = false;
@@ -378,12 +395,6 @@ export function DaemonSessionProvider({
               ? 'streaming'
               : 'idle',
           );
-          const pendingLoad = pendingSessionLoadRef.current;
-          if (pendingLoad?.sessionId === activeSession.sessionId) {
-            pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoad.timeout);
-            pendingLoad.resolve();
-          }
           if (loadWarningTexts.length > 0) {
             store.dispatch(
               loadWarningTexts.map((text) => ({
@@ -391,6 +402,82 @@ export function DaemonSessionProvider({
                 text,
               })),
             );
+          }
+
+          const pendingLoad = pendingSessionLoadRef.current;
+          const pendingLoadToResolve =
+            pendingLoad?.sessionId === activeSession.sessionId
+              ? pendingLoad
+              : undefined;
+
+          // Feed replay snapshot (compacted history + live journal) into
+          // the store before starting the SSE loop. The SSE stream begins
+          // from lastEventId, so only post-snapshot events are delivered.
+          const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
+          const replayEvents = [...compactedReplay, ...liveJournal];
+          if (shouldInjectReplaySnapshot && replayEvents.length > 0) {
+            const replayOpts = {
+              ...eventOptionsRef.current,
+              suppressOwnUserEcho: false,
+            };
+            const allUiEvents: DaemonUiEvent[] = [];
+            for (const replayEvent of replayEvents) {
+              try {
+                allUiEvents.push(
+                  ...normalizeAndFilterEvent(
+                    replayEvent,
+                    activeSession.clientId,
+                    replayOpts,
+                    setConnection,
+                    { updateConnection: false },
+                  ),
+                );
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : String(error);
+                allUiEvents.push({
+                  type: 'error',
+                  text: `Skipped malformed replay event: ${message}`,
+                  recoverable: true,
+                });
+              }
+            }
+            if (allUiEvents.length > 0) {
+              store.dispatch(allUiEvents);
+              bumpWorkspaceEventSignals(allUiEvents, setWorkspaceEventSignals);
+            }
+            let activePromptSettled = false;
+            for (const replayEvent of replayEvents) {
+              activePromptSettled =
+                settleActivePromptFromTurnEvent(
+                  activePromptsRef.current,
+                  activeSession.sessionId,
+                  replayEvent,
+                  store,
+                  setPromptStatus,
+                  passiveAssistantDoneTimerRef,
+                  { requireBoundPromptId: true },
+                ) || activePromptSettled;
+            }
+            const lastReplayEvent = replayEvents[replayEvents.length - 1];
+            if (
+              !activePromptSettled &&
+              lastReplayEvent &&
+              (lastReplayEvent.type === 'turn_complete' ||
+                lastReplayEvent.type === 'turn_error') &&
+              !activePromptsRef.current.has(activeSession.sessionId)
+            ) {
+              store.dispatch({
+                type: 'assistant.done',
+                reason: 'replay_complete',
+              });
+            }
+            setConnection((c) => ({ ...c, catchingUp: undefined }));
+          }
+          if (pendingLoadToResolve) {
+            pendingSessionLoadRef.current = undefined;
+            clearTimeout(pendingLoadToResolve.timeout);
+            pendingLoadToResolve.resolve();
           }
 
           let sawEvent = false;
@@ -410,16 +497,12 @@ export function DaemonSessionProvider({
                 publishSidechannelFollowupSuggestion(followupSuggestion);
                 continue;
               }
-              updateConnectionFromDaemonEvent(event, setConnection);
-              const eventOptions = eventOptionsRef.current;
-              const normalizedUiEvents = normalizeDaemonEvent(event, {
-                clientId: activeSession.clientId,
-                suppressOwnUserEcho: eventOptions.suppressOwnUserEcho,
-                includeRawEvent: eventOptions.includeRawEvent,
-              });
-              const uiEvents = isPromptLifecycleTurnEvent(event)
-                ? []
-                : normalizedUiEvents;
+              const uiEvents = normalizeAndFilterEvent(
+                event,
+                activeSession.clientId,
+                eventOptionsRef.current,
+                setConnection,
+              );
               bumpWorkspaceEventSignals(uiEvents, setWorkspaceEventSignals);
               if (uiEvents.length > 0) {
                 setPromptStatus((current) =>
@@ -511,7 +594,15 @@ export function DaemonSessionProvider({
                 store.reset();
                 if (reason === 'epoch_reset') {
                   activeSession.setLastEventId(0);
-                } else if (reason !== 'ring_evicted') {
+                } else {
+                  // Ring eviction means the SSE replay window has a real gap.
+                  // Resetting and continuing on the same stream can only replay
+                  // the surviving tail; reload the session snapshot instead so
+                  // compactedReplay/liveJournal rebuild the full transcript.
+                  console.warn(
+                    '[DaemonSessionProvider] ring eviction detected, reloading session (sessionId=%s)',
+                    activeSession.sessionId,
+                  );
                   resyncRequested = true;
                   session = undefined;
                   sessionRef.current = undefined;
@@ -772,6 +863,7 @@ function settleActivePromptFromTurnEvent(
   store: DaemonTranscriptStore,
   setPromptStatus: Dispatch<SetStateAction<DaemonPromptStatus>>,
   passiveAssistantDoneTimerRef: TimerRef,
+  opts: { requireBoundPromptId?: boolean } = {},
 ): boolean {
   if (event.type !== 'turn_complete' && event.type !== 'turn_error') {
     return false;
@@ -781,6 +873,9 @@ function settleActivePromptFromTurnEvent(
   if (!promptId) return false;
   const active = activePrompts.get(sessionId);
   if (!active) return false;
+  if (opts.requireBoundPromptId && active.promptId === undefined) {
+    return false;
+  }
   if (active.promptId !== undefined && active.promptId !== promptId) {
     return false;
   }
@@ -820,6 +915,24 @@ function settleActivePromptFromTurnEvent(
 
 function isPromptLifecycleTurnEvent(event: DaemonEvent): boolean {
   return event.type === 'turn_complete' || event.type === 'turn_error';
+}
+
+function normalizeAndFilterEvent(
+  event: DaemonEvent,
+  clientId: string | undefined,
+  opts: { suppressOwnUserEcho: boolean; includeRawEvent: boolean },
+  setConnection: Dispatch<SetStateAction<DaemonConnectionState>>,
+  behavior: { updateConnection?: boolean } = {},
+): DaemonUiEvent[] {
+  if (behavior.updateConnection !== false) {
+    updateConnectionFromDaemonEvent(event, setConnection);
+  }
+  const normalized = normalizeDaemonEvent(event, {
+    clientId,
+    suppressOwnUserEcho: opts.suppressOwnUserEcho,
+    includeRawEvent: opts.includeRawEvent,
+  });
+  return isPromptLifecycleTurnEvent(event) ? [] : normalized;
 }
 
 export function useDaemonSession(): DaemonSessionContextValue {

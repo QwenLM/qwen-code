@@ -39,6 +39,10 @@ export function transcriptBlocksToDaemonMessages(
   // by callId so later tool updates and permission placeholders merge in O(1)
   // instead of scanning the rendered message list for every block.
   const topLevelToolsByCallId = new Map<string, DaemonMessageToolCall>();
+  // Explicit parentToolCallId can arrive after a subAgent has completed and
+  // left the active stack, especially in compacted replay. Keep a stable
+  // index so parented text/tools still attach to the rendered agent card.
+  const subAgentsByCallId = new Map<string, DaemonMessageToolCall>();
   const subAgentStack: ActiveSubAgent[] = [];
   let currentAssistantIdx: number | null = null;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
@@ -65,10 +69,21 @@ export function transcriptBlocksToDaemonMessages(
       case 'assistant': {
         const textBlock = block as DaemonTextTranscriptBlock;
 
+        const parentSubAgent = textBlock.parentToolCallId
+          ? findIndexedSubAgent(
+              subAgentsByCallId,
+              subAgentStack,
+              textBlock.parentToolCallId,
+            )
+          : undefined;
+        if (parentSubAgent) {
+          appendSubContent(parentSubAgent, textBlock.text);
+          break;
+        }
+
         const activeSubAgent = getFallbackActiveSubAgent(subAgentStack);
         if (activeSubAgent) {
-          activeSubAgent.subContent =
-            (activeSubAgent.subContent || '') + textBlock.text;
+          appendSubContent(activeSubAgent, textBlock.text);
           break;
         }
         if (subAgentStack.length > 0) {
@@ -148,10 +163,21 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'thought': {
         const textBlock = block as DaemonTextTranscriptBlock;
+        const parentSubAgent = textBlock.parentToolCallId
+          ? findIndexedSubAgent(
+              subAgentsByCallId,
+              subAgentStack,
+              textBlock.parentToolCallId,
+            )
+          : undefined;
+        if (parentSubAgent) {
+          appendSubContent(parentSubAgent, textBlock.text);
+          break;
+        }
+
         const activeSubAgent = getFallbackActiveSubAgent(subAgentStack);
         if (activeSubAgent) {
-          activeSubAgent.subContent =
-            (activeSubAgent.subContent || '') + textBlock.text;
+          appendSubContent(activeSubAgent, textBlock.text);
           break;
         }
         if (subAgentStack.length > 0) {
@@ -191,7 +217,11 @@ export function transcriptBlocksToDaemonMessages(
         const toolBlock = block as DaemonToolTranscriptBlock;
         const toolCall = daemonToolBlockToToolCall(toolBlock);
         const parentSubAgent = toolCall.parentToolCallId
-          ? findSubAgent(subAgentStack, toolCall.parentToolCallId)
+          ? findIndexedSubAgent(
+              subAgentsByCallId,
+              subAgentStack,
+              toolCall.parentToolCallId,
+            )
           : undefined;
         const existingTopLevelTool = topLevelToolsByCallId.get(toolCall.callId);
 
@@ -214,12 +244,19 @@ export function transcriptBlocksToDaemonMessages(
 
         if (existingTopLevelTool) {
           mergeToolCall(existingTopLevelTool, toolCall);
+          if (isSubAgentToolCall(existingTopLevelTool)) {
+            subAgentsByCallId.set(
+              existingTopLevelTool.callId,
+              existingTopLevelTool,
+            );
+          }
           break;
         }
 
         if (parentSubAgent) {
           appendSubTool(parentSubAgent, toolCall);
           if (isSubAgentToolCall(toolCall) && !isAgentCompletion(toolCall)) {
+            subAgentsByCallId.set(toolCall.callId, toolCall);
             subAgentStack.push({ tool: toolCall });
           }
           break;
@@ -238,6 +275,9 @@ export function transcriptBlocksToDaemonMessages(
 
         appendToolCallMessage(messages, block.id, toolCall);
         topLevelToolsByCallId.set(toolCall.callId, toolCall);
+        if (isSubAgentToolCall(toolCall)) {
+          subAgentsByCallId.set(toolCall.callId, toolCall);
+        }
         needsNewContentMessage = true;
 
         if (isSubAgentToolCall(toolCall) && !isBackgroundSubAgent(toolCall)) {
@@ -363,6 +403,12 @@ export function transcriptBlocksToDaemonMessages(
               permissionToolCall.callId,
               permissionToolCall,
             );
+            if (isSubAgentPermission) {
+              subAgentsByCallId.set(
+                permissionToolCall.callId,
+                permissionToolCall,
+              );
+            }
             needsNewContentMessage = true;
             if (isSubAgentPermission) {
               subAgentStack.push({ tool: permissionToolCall });
@@ -386,6 +432,9 @@ export function transcriptBlocksToDaemonMessages(
           permissionToolCall.callId,
           permissionToolCall,
         );
+        if (isSubAgentPermission) {
+          subAgentsByCallId.set(permissionToolCall.callId, permissionToolCall);
+        }
         needsNewContentMessage = true;
         if (isSubAgentPermission) {
           subAgentStack.push({ tool: permissionToolCall });
@@ -471,12 +520,24 @@ function findSubAgent(
   return index >= 0 ? stack[index]?.tool : undefined;
 }
 
+function findIndexedSubAgent(
+  index: Map<string, DaemonMessageToolCall>,
+  stack: ActiveSubAgent[],
+  toolCallId: string,
+): DaemonMessageToolCall | undefined {
+  return index.get(toolCallId) ?? findSubAgent(stack, toolCallId);
+}
+
 function appendSubTool(
   parent: DaemonMessageToolCall,
   toolCall: DaemonMessageToolCall,
 ): void {
   parent.subTools ||= [];
   parent.subTools.push(toolCall);
+}
+
+function appendSubContent(parent: DaemonMessageToolCall, text: string): void {
+  parent.subContent = (parent.subContent || '') + text;
 }
 
 function closeCompletedSubAgentsBefore(
