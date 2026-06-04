@@ -105,7 +105,7 @@ export class McpTransportPool {
   private readonly entries = new Map<ConnectionId, PoolEntry>();
   private readonly unpooledIds = new Set<ConnectionId>();
   private readonly spawnInFlight = new Map<ConnectionId, Promise<PoolEntry>>();
-  /** : reverse index for O(refs) `releaseSession`. */
+  /** Reverse index for O(refs) `releaseSession`. */
   private readonly sessionToEntries = new Map<string, Set<ConnectionId>>();
   /**
    * Drain mutex : when `drainAll` is in progress, new
@@ -167,7 +167,7 @@ export class McpTransportPool {
    * name exists.
    *
    * `spawnInFlight` keys have the form `${name}::${fingerprint}`.
-   * : pre-fix used `startsWith(`${name}::`)`
+   * Pre-fix used `startsWith(`${name}::`)`
    * which produced a false positive when a sibling name BEGAN with
    * `${name}::` (server names can contain `::` per
    * `mcp-pool-key.test.ts:258`; `parseConnectionId` uses
@@ -261,13 +261,13 @@ export class McpTransportPool {
           this.indexAttach(sessionId, id);
           return conn;
         } catch (err) {
-          // : a race transitioned the entry to terminal between
+          // A race transitioned the entry to terminal between
           // the isTerminated() pre-check and the attach call. Evict
           // and fall through to spawn instead of propagating
           // "Cannot attach in state failed" out of the pool.
           if (existing.isTerminated()) {
             //
-            // A): route through `evictEntry` so the budget slot is
+            // Route through `evictEntry` so the budget slot is
             // released. Pre-fix the bare `entries.delete(id)` left
             // the slot reserved permanently — the entry's own
             // `onClosed` (when its async terminal-state tail finally
@@ -867,8 +867,7 @@ export class McpTransportPool {
   }
 
   /**
-   * — /; codifies the
-   *  contract): roll back THIS acquire's slot reservation on
+   * Roll back THIS acquire's slot reservation on
    * spawn failure. Used by both the unpooled-spawn catch and the
    * pooled-spawn-in-flight catch — both decisions are identical:
    *   - `'reserved'` → THIS acquire newly held the slot; release
@@ -1268,7 +1267,7 @@ export class McpTransportPool {
         timeoutMs,
         `unpooled spawn for ${id}`,
       );
-      // : re-check terminal state after the await — a concurrent
+      // Re-check terminal state after the await — a concurrent
       // `releaseSession(sessionId)` may have invoked `forceShutdown`
       // while we were spawning. Without this guard, `markActive` /
       // `attach` would either resurrect the entry or throw deep in
@@ -1322,7 +1321,7 @@ export class McpTransportPool {
       }
       this.entries.delete(id);
       this.unpooledIds.delete(id);
-      // : roll back the early reverse-index insertion above so
+      // Roll back the early reverse-index insertion above so
       // `sessionToEntries[sessionId]` does not accumulate stale ids
       // pointing at deleted entries. `indexDetach` is a no-op if the
       // failure happened before we ever indexed (e.g. an error in

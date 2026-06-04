@@ -41,7 +41,7 @@ const MAX_DEPTH = 8;
  * Return all descendant PIDs (children, grandchildren, …) of `rootPid`.
  *
  * Cross-platform implementation per `docs/design/f2-mcp-transport-pool.md`
- * . uses this from `PoolEntry.shutdown()` to SIGTERM
+ * Uses this from `PoolEntry.shutdown()` to SIGTERM
  * wrapped server processes (`npx @modelcontextprotocol/server-X`,
  * `uvx ...`, `pnpm dlx ...`) that would otherwise leak when the
  * pool entry's primary child is killed.
@@ -360,7 +360,7 @@ function walkDescendants(tree: Map<number, number[]>, root: number): number[] {
  * and we don't shell out to taskkill. Returns the count of pids
  * that were successfully signaled.
  *
- * : pre-fix docstring claimed a Windows-specific
+ * Pre-fix docstring claimed a Windows-specific
  * `taskkill /F` branch that didn't exist in the implementation.
  *
  * Caller's responsibility to handle the root pid separately (which

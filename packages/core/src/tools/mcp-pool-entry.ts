@@ -480,7 +480,7 @@ export class PoolEntry {
         // becomes a leading edge of "eventually correct".
         this.updateGlobalStatus();
         // Notify the pool so it drops this entry from `pool.entries`
-        // . The next `pool.acquire(serverName, cfg)` for the
+        // The next `pool.acquire(serverName, cfg)` for the
         // same fingerprint will then miss the fast-path lookup and
         // fall through to spawn a fresh entry — pool self-heals
         // after a silent transport drop without operator intervention.

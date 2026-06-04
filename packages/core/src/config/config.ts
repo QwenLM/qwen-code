@@ -628,8 +628,7 @@ export interface ConfigParameters {
    * invocation), tools listed here are not registered at all and never
    * appear in `/tools`, `getAllTools()`, or function-call discovery.
    * Sourced from `settings.tools.disabled` and the daemon mutation route
-   * `POST /workspace/tools/:name/enable {enabled:false}` ( PR
-   * 17). Active sessions retain already-registered tools — the disabled
+   * `POST /workspace/tools/:name/enable {enabled:false}`. Active sessions retain already-registered tools — the disabled
    * set is consulted at register time, so toggling takes effect on the
    * next ACP child spawn or `ToolRegistry.refresh()`.
    */
@@ -1023,7 +1022,7 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
-  //   . `disabledTools` is set at construction
+  //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
   // `discoverMcpToolsForServer` sees the latest disabled set instead
@@ -1794,7 +1793,7 @@ export class Config {
     // exists only because some tests (e.g. those using
     // `createMockToolRegistry`) stub `ToolRegistry` as a plain object
     // that doesn't implement the method. The optional-chaining call
-    // (`?.`) means the stubbed path resolves to `undefined` instead
+    // (`?.()`) means the stubbed path resolves to `undefined` instead
     // of crashing `initialize()` for tests that never exercise MCP.
     //
     // Crucially, the inner shape is `ReturnType<ToolRegistry['getMcpClientManager']>`
@@ -2654,7 +2653,7 @@ export class Config {
    * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
    * `ToolRegistry.registerFactory` to skip registration.
    *
-   * Mutability semantics ( P2-2): the snapshot is
+   * Mutability semantics: the snapshot is
    * mutable via `setDisabledTools()` so the daemon's
    * `setWorkspaceToolEnabled` route can re-sync the set after a
    * `tools.disabled` settings write — without that sync, the
@@ -2676,7 +2675,7 @@ export class Config {
   }
 
   /**
-   *   . Replace the in-process `disabledTools`
+   * Replace the in-process `disabledTools`
    * snapshot with a fresh set sourced from the workspace settings.
    * Intended for the `qwen serve` mutation surface
    * (`setWorkspaceToolEnabled` → ACP `qwen/control/...` → here): the
