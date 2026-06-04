@@ -290,7 +290,12 @@ export function ModelDialog({
                 [{t2}]
               </Text>
               <Text>{` ${model.label}`}</Text>
-              <Text color={theme.text.secondary} italic>
+              {model.id !== model.label && (
+                <Text color={theme.text.secondary} italic>
+                  {' '}
+                  ({model.id})
+                </Text>
+              )}
                 {' '}
                 ({model.id})
               </Text>
