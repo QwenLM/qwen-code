@@ -1359,8 +1359,7 @@ export class McpClientManager {
       //     established operator intent + capacity reservation; a
       //     transient reconnect hiccup shouldn't lose that.
       //
-      // Round 3 documented "always keep" — corrected here per
-      // + R4 line 546/639: align with
+      // Corrected here: align with
       // `discoverAllMcpTools` (bulk) catch and `readResource`
       // (lazy spawn) catch. All three paths now use the same
       // weReserved-driven cleanup.

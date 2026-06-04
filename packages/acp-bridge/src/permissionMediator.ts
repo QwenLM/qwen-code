@@ -333,7 +333,7 @@ interface PermissionResolutionRecord {
  * Lifecycle:
  *   - `request(record, timeoutMs)` synchronously registers a pending
  *     entry inside the returned Promise's executor (no `await` before
- *     register — see synchronous-register invariant in F3 plan) and arms the timeout.
+ *     register — see synchronous-register invariant) and arms the timeout.
  *   - `vote(vote)` dispatches by `entry.policy` and either resolves,
  *     records, rejects, or reports unknown.
  *   - `forgetSession(sessionId)` cancels every pending matching the
