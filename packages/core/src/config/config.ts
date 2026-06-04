@@ -3215,7 +3215,6 @@ export class Config {
     this.workflowsEnabled = enabled;
   }
 
->>>>>>> e55ff75d7 (feat(core): isWorkflowsEnabled config gate with env-var override (P1))
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
   }
