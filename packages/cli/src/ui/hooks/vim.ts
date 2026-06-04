@@ -1683,11 +1683,15 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                     lastLineLen,
                     '\n' + repeated.replace(/\n$/, ''),
                   );
+                  // Cursor on first line of pasted text (row + 1)
+                  buffer.vimMoveToLine(row + 1);
+                  buffer.vimMoveToLineStart();
                 } else {
                   buffer.replaceRange(row + 1, 0, row + 1, 0, repeated);
+                  // Cursor on first line of pasted text (row + 1)
+                  buffer.vimMoveToLine(row + 1);
+                  buffer.vimMoveToLineStart();
                 }
-                buffer.vimMoveDown(1);
-                buffer.vimMoveToLineStart();
               } else {
                 // Paste after cursor
                 const insertCol = Math.min(col + 1, line.length);
