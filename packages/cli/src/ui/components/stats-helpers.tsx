@@ -24,10 +24,10 @@ export const RANGE_CYCLE: TimeRange[] = ['all', 'month', 'week', 'today'];
 export function getHeatmapColors(): Record<HeatmapIntensity, string> {
   return {
     0: '#161b22',
-    1: '#39d353',
-    2: '#26a641',
-    3: '#006d32',
-    4: '#0e4429',
+    1: '#0e4429',
+    2: '#006d32',
+    3: '#26a641',
+    4: '#39d353',
   };
 }
 
