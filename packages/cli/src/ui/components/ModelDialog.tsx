@@ -296,9 +296,6 @@ export function ModelDialog({
                   ({model.id})
                 </Text>
               )}
-                {' '}
-                ({model.id})
-              </Text>
               {isRuntime && (
                 <Text color={theme.status.warning}> (Runtime)</Text>
               )}
