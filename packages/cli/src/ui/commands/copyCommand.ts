@@ -363,6 +363,7 @@ export const copyCommand: SlashCommand = {
   get description() {
     return t('Copy the last result or code snippet to clipboard');
   },
+  argumentHint: '[N] [code|latex|inline-latex] [<lang>] [<index>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
   action: async (context, _args): Promise<SlashCommandActionReturn | void> => {
