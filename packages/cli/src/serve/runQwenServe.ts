@@ -704,7 +704,9 @@ export async function runQwenServe(
         },
         {
           eventName: `qwen-code.daemon.channel.${action}`,
-          ...(!expected && action === 'exit' ? { severityNumber: 13 } : {}),
+          ...(expected === false && action === 'exit'
+            ? { severityNumber: 13 }
+            : {}),
         },
       );
     },
@@ -1089,7 +1091,7 @@ export async function runQwenServe(
                 );
               }
             }
-            void forceFlushMetrics().catch((flushErr) => {
+            await forceFlushMetrics().catch((flushErr) => {
               daemonLog.warn(
                 `pre-shutdown metrics flush failed: ${
                   flushErr instanceof Error

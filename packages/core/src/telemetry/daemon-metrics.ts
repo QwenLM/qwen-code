@@ -134,11 +134,15 @@ export interface DaemonGaugeCallbacks {
   heapUsed: () => number;
 }
 
+let gaugesRegistered = false;
+
 export function registerDaemonGaugeCallbacks(
   callbacks: DaemonGaugeCallbacks,
 ): void {
+  if (gaugesRegistered) return;
   const meter = getMeter();
   if (!meter) return;
+  gaugesRegistered = true;
 
   meter
     .createObservableGauge(DAEMON_SESSION_ACTIVE, {
@@ -188,15 +192,15 @@ export function recordDaemonHttpRequest(
 ): void {
   if (!initialized) return;
   const statusClass = `${Math.floor(statusCode / 100)}xx`;
-  httpRequestCounter!.add(1, { route, status_class: statusClass });
-  httpRequestDurationHistogram!.record(durationMs, { route });
+  httpRequestCounter?.add(1, { route, status_class: statusClass });
+  httpRequestDurationHistogram?.record(durationMs, { route });
 }
 
 export function recordDaemonSessionLifecycle(
   action: 'spawn' | 'close' | 'die',
 ): void {
   if (!initialized) return;
-  sessionLifecycleCounter!.add(1, { action });
+  sessionLifecycleCounter?.add(1, { action });
 }
 
 export function recordDaemonChannelLifecycle(
@@ -204,7 +208,7 @@ export function recordDaemonChannelLifecycle(
   expected?: boolean,
 ): void {
   if (!initialized) return;
-  channelLifecycleCounter!.add(1, {
+  channelLifecycleCounter?.add(1, {
     action,
     ...(expected != null ? { expected } : {}),
   });
@@ -212,20 +216,20 @@ export function recordDaemonChannelLifecycle(
 
 export function recordDaemonPromptQueueWait(durationMs: number): void {
   if (!initialized) return;
-  promptQueueWaitHistogram!.record(durationMs);
+  promptQueueWaitHistogram?.record(durationMs);
 }
 
 export function recordDaemonPromptDuration(durationMs: number): void {
   if (!initialized) return;
-  promptDurationHistogram!.record(durationMs);
+  promptDurationHistogram?.record(durationMs);
 }
 
 export function recordDaemonBridgeError(err: unknown): void {
   if (!initialized) return;
-  bridgeErrorCounter!.add(1, { error_type: normalizeErrorType(err) });
+  bridgeErrorCounter?.add(1, { error_type: normalizeErrorType(err) });
 }
 
 export function recordDaemonCancel(): void {
   if (!initialized) return;
-  cancelCounter!.add(1);
+  cancelCounter?.add(1);
 }

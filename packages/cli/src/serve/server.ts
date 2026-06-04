@@ -2438,8 +2438,12 @@ export function createServeApp(
     res.flushHeaders();
 
     activeSseCount++;
+    let sseCounted = true;
     res.on('close', () => {
-      activeSseCount--;
+      if (sseCounted) {
+        sseCounted = false;
+        activeSseCount--;
+      }
     });
 
     // Backpressure helper: `res.write` returns false when the kernel send
