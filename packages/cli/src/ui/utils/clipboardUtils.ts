@@ -228,6 +228,8 @@ async function checkClipboardForImage(
           code === 0 &&
             stdout
               .split('\n')
+              // WSL2 Wayland: Windows clipboard exposes images as BMP (image/bmp),
+              // which we convert to PNG via python3 PIL. Both formats must be detected.
               .some((line) => line === 'image/png' || line === 'image/bmp'),
         );
       });

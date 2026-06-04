@@ -60,10 +60,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
-    stat: vi.fn().mockImplementation(async (path: string) => {
-      console.log('fs.stat called with:', path);
-      return { size: 100 };
-    }),
+    stat: vi.fn().mockImplementation(async () => ({ size: 100 })),
     mkdir: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),
     readdir: vi.fn().mockResolvedValue([]),
@@ -132,6 +129,8 @@ function setupX11Env() {
   });
 }
 
+const originalPlatform = process.platform;
+
 describe('clipboardUtils', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -150,7 +149,7 @@ describe('clipboardUtils', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     Object.defineProperty(process, 'platform', {
-      value: 'linux',
+      value: originalPlatform,
       configurable: true,
       writable: true,
     });
