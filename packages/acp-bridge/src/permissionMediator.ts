@@ -68,7 +68,7 @@ export const CANCEL_VOTE_SENTINEL = '__cancelled__' as const;
  * `permission_already_resolved` source).
  * The eviction in `rememberResolved` uses
  * `resolvedOrder.shift()` (drop oldest), not LRU; mirrors the FIFO
- * `PermissionAuditRing` correction in commit b0242ddec. Mirrors the
+ * `PermissionAuditRing` correction. Mirrors the
  * `MAX_RESOLVED_PERMISSION_RECORDS` constant from the previous inline
  * implementation in `httpAcpBridge.ts` (512 entries). Stores only
  * requestId / sessionId / outcome, so 512 records stays well under
