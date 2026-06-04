@@ -24,6 +24,11 @@ export const ScreenReaderAppLayout: React.FC = () => {
   const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItems(
     uiState.terminalHeight,
   );
+  const dialogMaxHeight = Math.max(
+    1,
+    uiState.terminalHeight - uiState.staticExtraHeight - 2,
+  );
+  const dialogHeight = uiState.constrainHeight ? dialogMaxHeight : undefined;
   const shouldShowStickyTodos =
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
@@ -39,7 +44,13 @@ export const ScreenReaderAppLayout: React.FC = () => {
       </Box>
 
       {uiState.dialogsVisible ? (
-        <Box marginX={2} flexDirection="column" width={uiState.mainAreaWidth}>
+        <Box
+          marginX={2}
+          flexDirection="column"
+          width={uiState.mainAreaWidth}
+          height={dialogHeight}
+          overflow={uiState.constrainHeight ? 'hidden' : undefined}
+        >
           <DialogManager
             terminalWidth={uiState.terminalWidth}
             addItem={uiState.historyManager.addItem}

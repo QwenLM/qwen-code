@@ -15,10 +15,22 @@ type ConsentPromptProps = {
   prompt: ReactNode;
   onConfirm: (value: boolean) => void;
   terminalWidth: number;
+  availableTerminalHeight?: number;
 };
 
+// Border, vertical padding, option margin, and two Yes/No option rows.
+const CONSENT_PROMPT_CHROME_ROWS = 7;
+
 export const ConsentPrompt = (props: ConsentPromptProps) => {
-  const { prompt, onConfirm, terminalWidth } = props;
+  const { prompt, onConfirm, terminalWidth, availableTerminalHeight } = props;
+  const constrainedHeight =
+    availableTerminalHeight === undefined
+      ? undefined
+      : Math.max(1, Math.floor(availableTerminalHeight));
+  const promptHeight =
+    constrainedHeight === undefined
+      ? undefined
+      : Math.max(1, constrainedHeight - CONSENT_PROMPT_CHROME_ROWS);
 
   return (
     <Box
@@ -27,17 +39,24 @@ export const ConsentPrompt = (props: ConsentPromptProps) => {
       flexDirection="column"
       paddingY={1}
       paddingX={2}
+      height={constrainedHeight}
+      overflow="hidden"
     >
-      {typeof prompt === 'string' ? (
-        <MarkdownDisplay
-          isPending={true}
-          text={prompt}
-          contentWidth={terminalWidth}
-        />
-      ) : (
-        prompt
-      )}
-      <Box marginTop={1}>
+      <Box flexShrink={1} overflow="hidden">
+        {typeof prompt === 'string' ? (
+          <MarkdownDisplay
+            isPending={true}
+            text={prompt}
+            contentWidth={terminalWidth}
+            {...(promptHeight !== undefined
+              ? { availableTerminalHeight: promptHeight }
+              : {})}
+          />
+        ) : (
+          prompt
+        )}
+      </Box>
+      <Box marginTop={1} flexShrink={0}>
         <RadioButtonSelect
           items={[
             { label: 'Yes', value: true, key: 'Yes' },

@@ -53,11 +53,20 @@ const formatModeDescription = (mode: ApprovalMode): string => {
   }
 };
 
+const DEFAULT_MAX_MODE_ITEMS_TO_SHOW = 10;
+const CONSTRAINED_DIALOG_HEIGHT_THRESHOLD = 12;
+const MIN_HEIGHT_WITH_MODE_SPACER = 9;
+const MIN_HEIGHT_WITH_FOOTER_HINT = 10;
+// Rows consumed by the border, vertical padding, and title before the list.
+const MODE_LIST_CHROME_ROWS = 5;
+const MODE_SPACER_ROWS = 1;
+const FOOTER_HINT_ROWS = 2;
+
 export function ApprovalModeDialog({
   onSelect,
   settings,
   currentMode,
-  availableTerminalHeight: _availableTerminalHeight,
+  availableTerminalHeight,
 }: ApprovalModeDialogProps): React.JSX.Element {
   // Start with User scope by default
   const [selectedScope, setSelectedScope] = useState<SettingScope>(
@@ -75,6 +84,35 @@ export function ApprovalModeDialog({
     value: mode,
     key: mode,
   }));
+
+  const constrainedHeight =
+    availableTerminalHeight === undefined
+      ? undefined
+      : Math.max(1, Math.floor(availableTerminalHeight));
+  const isVerticallyConstrained =
+    constrainedHeight !== undefined &&
+    constrainedHeight < CONSTRAINED_DIALOG_HEIGHT_THRESHOLD;
+  const showModeSpacer =
+    !isVerticallyConstrained ||
+    constrainedHeight >= MIN_HEIGHT_WITH_MODE_SPACER;
+  const showFooterHint =
+    !isVerticallyConstrained ||
+    constrainedHeight >= MIN_HEIGHT_WITH_FOOTER_HINT;
+  const modeListChromeHeight =
+    MODE_LIST_CHROME_ROWS +
+    (showModeSpacer ? MODE_SPACER_ROWS : 0) +
+    (showFooterHint ? FOOTER_HINT_ROWS : 0);
+  const maxModeItemsToShow =
+    constrainedHeight === undefined
+      ? DEFAULT_MAX_MODE_ITEMS_TO_SHOW
+      : Math.max(
+          1,
+          Math.min(
+            DEFAULT_MAX_MODE_ITEMS_TO_SHOW,
+            modeItems.length,
+            constrainedHeight - modeListChromeHeight,
+          ),
+        );
 
   // Find the index of the current mode
   const initialModeIndex = modeItems.findIndex(
@@ -135,6 +173,8 @@ export function ApprovalModeDialog({
       flexDirection="column"
       padding={1}
       width="100%"
+      height={constrainedHeight}
+      overflow="hidden"
     >
       {mode === 'mode' ? (
         <Box flexDirection="column" flexGrow={1}>
@@ -146,14 +186,14 @@ export function ApprovalModeDialog({
               {otherScopeModifiedMessage}
             </Text>
           </Text>
-          <Box height={1} />
+          {showModeSpacer && <Box height={1} />}
           <RadioButtonSelect
             items={modeItems}
             initialIndex={safeInitialModeIndex}
             onSelect={handleModeSelect}
             onHighlight={handleModeHighlight}
             isFocused={mode === 'mode'}
-            maxItemsToShow={10}
+            maxItemsToShow={maxModeItemsToShow}
             showScrollArrows={false}
             showNumbers={mode === 'mode'}
           />
@@ -177,13 +217,15 @@ export function ApprovalModeDialog({
           initialScope={selectedScope}
         />
       )}
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary} wrap="truncate">
-          {mode === 'mode'
-            ? t('(Use Enter to select, Tab to configure scope)')
-            : t('(Use Enter to apply scope, Tab to go back)')}
-        </Text>
-      </Box>
+      {showFooterHint && (
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary} wrap="truncate">
+            {mode === 'mode'
+              ? t('(Use Enter to select, Tab to configure scope)')
+              : t('(Use Enter to apply scope, Tab to go back)')}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 }

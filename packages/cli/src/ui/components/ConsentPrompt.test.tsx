@@ -50,6 +50,28 @@ describe('ConsentPrompt', () => {
     );
   });
 
+  it('passes a constrained height to MarkdownDisplay when terminal height is limited', () => {
+    const prompt = 'Are you sure?';
+    render(
+      <ConsentPrompt
+        prompt={prompt}
+        onConfirm={onConfirm}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={12}
+      />,
+    );
+
+    expect(MockedMarkdownDisplay).toHaveBeenCalledWith(
+      {
+        isPending: true,
+        text: prompt,
+        contentWidth: terminalWidth,
+        availableTerminalHeight: 5,
+      },
+      undefined,
+    );
+  });
+
   it('renders a ReactNode prompt directly', () => {
     const prompt = <Text>Are you sure?</Text>;
     const { lastFrame } = render(

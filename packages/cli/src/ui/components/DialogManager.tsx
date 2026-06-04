@@ -73,6 +73,8 @@ export const DialogManager = ({
   const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
+  const dialogMaxHeight = Math.max(1, terminalHeight - staticExtraHeight - 2);
+  const constrainedDialogHeight = constrainHeight ? dialogMaxHeight : undefined;
 
   if (uiState.showWelcomeBackDialog && uiState.welcomeBackInfo?.hasHistory) {
     return (
@@ -125,7 +127,10 @@ export const DialogManager = ({
   }
   if (uiState.shellConfirmationRequest) {
     return (
-      <ShellConfirmationDialog request={uiState.shellConfirmationRequest} />
+      <ShellConfirmationDialog
+        request={uiState.shellConfirmationRequest}
+        availableTerminalHeight={constrainedDialogHeight}
+      />
     );
   }
   if (uiState.loopDetectionConfirmationRequest) {
@@ -141,6 +146,7 @@ export const DialogManager = ({
         prompt={uiState.confirmationRequest.prompt}
         onConfirm={uiState.confirmationRequest.onConfirm}
         terminalWidth={terminalWidth}
+        availableTerminalHeight={constrainedDialogHeight}
       />
     );
   }
@@ -151,6 +157,7 @@ export const DialogManager = ({
         prompt={request.prompt}
         onConfirm={request.onConfirm}
         terminalWidth={terminalWidth}
+        availableTerminalHeight={constrainedDialogHeight}
       />
     );
   }
@@ -202,9 +209,7 @@ export const DialogManager = ({
           onSelect={uiActions.handleThemeSelect}
           onHighlight={uiActions.handleThemeHighlight}
           settings={settings}
-          availableTerminalHeight={
-            constrainHeight ? terminalHeight - staticExtraHeight : undefined
-          }
+          availableTerminalHeight={constrainedDialogHeight}
           terminalWidth={mainAreaWidth}
         />
       </Box>
@@ -255,7 +260,7 @@ export const DialogManager = ({
             uiActions.closeSettingsDialog();
           }}
           onRestartRequest={() => process.exit(0)}
-          availableTerminalHeight={terminalHeight - staticExtraHeight}
+          availableTerminalHeight={dialogMaxHeight}
           config={config}
         />
       </Box>
@@ -270,7 +275,7 @@ export const DialogManager = ({
         addItem={addItem}
         onSaved={uiActions.notifyStatusLineSettingsChanged}
         onClose={uiActions.closeStatusLineDialog}
-        availableTerminalHeight={terminalHeight - staticExtraHeight}
+        availableTerminalHeight={dialogMaxHeight}
       />
     );
   }
@@ -297,9 +302,7 @@ export const DialogManager = ({
           settings={settings}
           currentMode={currentMode}
           onSelect={uiActions.handleApprovalModeSelect}
-          availableTerminalHeight={
-            constrainHeight ? terminalHeight - staticExtraHeight : undefined
-          }
+          availableTerminalHeight={constrainedDialogHeight}
         />
       </Box>
     );
@@ -498,7 +501,7 @@ export const DialogManager = ({
   if (bgTasksDialogOpen) {
     return (
       <BackgroundTasksDialog
-        availableTerminalHeight={terminalHeight - staticExtraHeight}
+        availableTerminalHeight={dialogMaxHeight}
         terminalWidth={mainAreaWidth}
       />
     );

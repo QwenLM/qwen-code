@@ -16,6 +16,10 @@ describe('ShellConfirmationDialog', () => {
     onConfirm,
   };
 
+  function frameHeight(frame: string): number {
+    return frame.length === 0 ? 0 : frame.split('\n').length;
+  }
+
   it('renders correctly', () => {
     const { lastFrame } = renderWithProviders(
       <ShellConfirmationDialog request={request} />,
@@ -49,5 +53,25 @@ describe('ShellConfirmationDialog', () => {
     const select = lastFrame()!.toString();
     // Simulate selecting the third option
     expect(select).toContain('No (esc)');
+  });
+
+  it('keeps the choices visible when many commands are shown in a small terminal', () => {
+    const availableTerminalHeight = 12;
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: Array.from({ length: 10 }, (_, i) => `command-${i + 1}`),
+          onConfirm,
+        }}
+        availableTerminalHeight={availableTerminalHeight}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain('Always allow in this project');
+    expect(frame).toContain('No (esc)');
+    expect(frame).not.toContain('command-10');
   });
 });

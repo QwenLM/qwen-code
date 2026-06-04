@@ -24,12 +24,17 @@ export interface ShellConfirmationRequest {
 
 export interface ShellConfirmationDialogProps {
   request: ShellConfirmationRequest;
+  availableTerminalHeight?: number;
 }
 
 export const ShellConfirmationDialog: React.FC<
   ShellConfirmationDialogProps
-> = ({ request }) => {
+> = ({ request, availableTerminalHeight }) => {
   const { commands, onConfirm } = request;
+  const constrainedHeight =
+    availableTerminalHeight === undefined
+      ? undefined
+      : Math.max(1, Math.floor(availableTerminalHeight));
 
   useKeypress(
     (key) => {
@@ -81,8 +86,10 @@ export const ShellConfirmationDialog: React.FC<
       padding={1}
       width="100%"
       marginLeft={1}
+      height={constrainedHeight}
+      overflow="hidden"
     >
-      <Box flexDirection="column" marginBottom={1}>
+      <Box flexDirection="column" marginBottom={1} flexShrink={1}>
         <Text bold color={theme.text.primary}>
           {t('Shell Command Execution')}
         </Text>
@@ -104,11 +111,13 @@ export const ShellConfirmationDialog: React.FC<
         </Box>
       </Box>
 
-      <Box marginBottom={1}>
+      <Box marginBottom={1} flexShrink={0}>
         <Text color={theme.text.primary}>{t('Do you want to proceed?')}</Text>
       </Box>
 
-      <RadioButtonSelect items={options} onSelect={handleSelect} isFocused />
+      <Box flexShrink={0}>
+        <RadioButtonSelect items={options} onSelect={handleSelect} isFocused />
+      </Box>
     </Box>
   );
 };

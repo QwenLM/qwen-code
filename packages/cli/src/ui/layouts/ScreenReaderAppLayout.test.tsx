@@ -48,6 +48,9 @@ const baseUIState: Partial<UIState> = {
   isFeedbackDialogOpen: false,
   mainAreaWidth: 80,
   terminalWidth: 80,
+  terminalHeight: 24,
+  staticExtraHeight: 0,
+  constrainHeight: true,
   streamingState: StreamingState.Idle,
   historyManager: {
     addItem: vi.fn(),
