@@ -251,7 +251,7 @@ export interface MediatorDeps {
    * the bridge's `publish` and the mediator's `request` (extremely
    * narrow race), the implementation should return an empty Set
    * rather than throw. The `first-responder` policy ignores the
-   * snapshot, so an empty set is harmless. If
+   * snapshot, so an empty set is harmless.
    * Under `consensus` policy, an empty `votersAtIssue` means EVERY vote on
    * the request gets rejected for "not in voter set" — the request
    * can only resolve via `forgetSession` cleanup or `permissionTimeoutMs`.

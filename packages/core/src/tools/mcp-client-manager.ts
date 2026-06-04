@@ -1703,7 +1703,7 @@ export class McpClientManager {
       // Any in-flight `pool.acquire` callback that resolves between
       // the grace timeout firing and the release loop running sees
       // the gate at line ~1572 and skips the `pooledConnections.set`,
-      // preventing the orphan-entry bug describes. Pre-R23 the
+      // preventing the orphan-entry bug described below. Previously the
       // comment said "set BEFORE the race" which misled readers into
       // expecting a synchronous pre-set; the line citation `~1539`
       // was also stale (the consumer guard is at ~1572).

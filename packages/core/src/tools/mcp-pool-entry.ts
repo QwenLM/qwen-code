@@ -953,7 +953,7 @@ export class PoolEntry {
       // promise, every subsequent restart attempt also hung forever
       // and the HTTP restart-route handler never returned. The
       // timeout falls through to the existing catch (which sweeps
-      // descendants per + transitions to `'failed'` per C3).
+      // descendants and transitions to `'failed'`).
       const timeoutMs = discoveryTimeoutFor(this.cfg);
       snap = await runWithTimeout(
         (async () => {
