@@ -1717,6 +1717,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       enableManagedAutoMemory: false,
       enableManagedAutoDream: 'invalid',
     });
+    vi.mocked(loadSettings).mockReturnValue(settings);
     const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
 
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
@@ -1749,10 +1750,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).resolves.toEqual({
       paths: {
         userMemoryFile: path.join('/tmp/qwen-global-test', 'QWEN.md'),
-        projectMemoryFile: path.join(
-          '/tmp/qwen-memory-cwd-test',
-          'QWEN.md',
-        ),
+        projectMemoryFile: path.join('/tmp/qwen-memory-cwd-test', 'QWEN.md'),
         autoMemoryDir: '/tmp/qwen-memory-root-test/.qwen/memory',
       },
     });
@@ -1909,7 +1907,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           existingConfig: {
             protocol: 'openai',
             baseUrl: 'https://api.deepseek.com',
-            apiKey: 'sk-existing',
+            hasApiKey: true,
             modelIds: ['deepseek-chat'],
           },
         }),
@@ -2156,6 +2154,213 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       await agentPromise;
       await fs.rm(tempHome, { recursive: true, force: true });
     }
+  });
+
+  it('qwen/skills rejects path-traversal slugs without touching the global dir', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.mocked(Storage.getGlobalQwenDir).mockReturnValue(tempHome);
+    // A sentinel that a `..` traversal could overwrite (install) or delete.
+    const sentinel = path.join(tempHome, 'settings.json');
+    await fs.writeFile(sentinel, '{"keep":true}', 'utf8');
+
+    mockConfig = {
+      ...mockConfig,
+      getSkillManager: vi.fn().mockReturnValue({
+        parseSkillContent: vi.fn(),
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+        listSkills: vi.fn().mockResolvedValue([]),
+      }),
+    } as unknown as Config;
+
+    const settings = makeSessionSettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      for (const slug of ['..', '.']) {
+        await expect(
+          agent.extMethod('qwen/skills/install', {
+            skill: {
+              slug,
+              sourceUrl:
+                'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+            },
+          }),
+        ).rejects.toThrow('Invalid skill.slug');
+        await expect(
+          agent.extMethod('qwen/skills/delete', { skill: { slug } }),
+        ).rejects.toThrow('Invalid skill.slug');
+        await expect(
+          agent.extMethod('qwen/skills/setEnabled', {
+            skill: { slug, enabled: false },
+          }),
+        ).rejects.toThrow('Invalid skill.slug');
+      }
+
+      // The global config dir and its contents are untouched.
+      await expect(fs.readFile(sentinel, 'utf8')).resolves.toContain('keep');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('qwen/skills setEnabled preserves comments and nested hooks in frontmatter', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.mocked(Storage.getGlobalQwenDir).mockReturnValue(tempHome);
+
+    const skillDir = path.join(tempHome, 'skills', 'pptx');
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    await fs.mkdir(skillDir, { recursive: true });
+    const original =
+      '---\n' +
+      '# keep this comment\n' +
+      'name: pptx\n' +
+      'description: Create slide decks\n' +
+      'hooks:\n' +
+      '  PreToolUse:\n' +
+      '    - matcher: Bash\n' +
+      '      command: echo hi\n' +
+      '---\n' +
+      'Body\n';
+    await fs.writeFile(skillFile, original, 'utf8');
+
+    const parseSkillContent = vi.fn(
+      (_content: string, filePath: string, level: string) => ({
+        name: 'pptx',
+        description: 'Create slide decks',
+        level,
+        filePath,
+        skillRoot: path.dirname(filePath),
+        body: 'Body',
+      }),
+    );
+    mockConfig = {
+      ...mockConfig,
+      getSkillManager: vi.fn().mockReturnValue({
+        parseSkillContent,
+        refreshCache: vi.fn().mockResolvedValue(undefined),
+      }),
+    } as unknown as Config;
+
+    const settings = makeSessionSettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await agent.extMethod('qwen/skills/setEnabled', {
+        skill: { slug: 'pptx', enabled: false },
+      });
+      let content = await fs.readFile(skillFile, 'utf8');
+      expect(content).toContain('# keep this comment');
+      expect(content).toContain('hooks:');
+      expect(content).toContain('matcher: Bash');
+      expect(content).toContain('command: echo hi');
+      expect(content).toContain('disable-model-invocation: true');
+
+      await agent.extMethod('qwen/skills/setEnabled', {
+        skill: { slug: 'pptx', enabled: true },
+      });
+      content = await fs.readFile(skillFile, 'utf8');
+      expect(content).toContain('# keep this comment');
+      expect(content).toContain('hooks:');
+      expect(content).toContain('matcher: Bash');
+      expect(content).toContain('command: echo hi');
+      expect(content).not.toContain('disable-model-invocation');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('qwen/settings setCoreValue accepts the auto approval mode', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/settings/setCoreValue', {
+        scope: 'user',
+        key: 'tools.approvalMode',
+        value: 'auto',
+      }),
+    ).resolves.toBeDefined();
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'tools.approvalMode',
+      'auto',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect reuses the stored apiKey when the client omits it', async () => {
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { DEEPSEEK_API_KEY: 'sk-existing' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'deepseek-chat',
+              baseUrl: 'https://api.deepseek.com',
+              envKey: 'DEEPSEEK_API_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        modelIds: ['deepseek-chat'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'deepseek' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({ apiKey: 'sk-existing' }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
   });
 
   it('qwen/skills setEnabled resolves user and project skill files through ACP', async () => {

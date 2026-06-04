@@ -1433,9 +1433,23 @@ export class Session implements SessionContext {
         text: `\n[User message received during tool execution]: ${message}`,
       }));
     } catch (error) {
+      // The ACP SDK rejects with the raw JSON-RPC error object
+      // (`{ code, message, data }`), which is not an `Error` instance, so
+      // classify on the JSON-RPC code (-32601 = "Method not found") and fall
+      // back to the message. Otherwise the one-shot latch never trips and every
+      // tool batch keeps paying a failed `extMethod` round-trip all session.
       const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      const isPermanentError = /method not found/i.test(errorMessage);
+        error instanceof Error
+          ? error.message
+          : error && typeof error === 'object' && 'message' in error
+            ? String((error as { message?: unknown }).message)
+            : String(error);
+      const errorCode =
+        error && typeof error === 'object' && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+      const isPermanentError =
+        errorCode === -32601 || /method not found/i.test(errorMessage);
 
       if (isPermanentError) {
         this.midTurnDrainUnavailable = true;

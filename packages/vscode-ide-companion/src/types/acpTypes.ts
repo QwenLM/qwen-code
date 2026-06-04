@@ -46,6 +46,7 @@ export interface SessionUpdateMeta {
     body?: string;
     filePath?: string;
     level?: string;
+    modelInvocable?: boolean;
   }> | null;
 }
 

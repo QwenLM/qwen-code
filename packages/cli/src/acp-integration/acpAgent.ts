@@ -38,8 +38,6 @@ import {
   updateSetting,
   SessionEndReason,
   restoreWorktreeContext,
-  parse as parseYaml,
-  stringify as stringifyYaml,
 } from '@qwen-code/qwen-code-core';
 import type {
   ApprovalMode,
@@ -97,7 +95,8 @@ import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { gunzipSync } from 'node:zlib';
+import { gunzip } from 'node:zlib';
+import { promisify } from 'node:util';
 import type { LoadedSettings } from '../config/settings.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
@@ -379,7 +378,7 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'general.language': { type: 'string' },
   'tools.approvalMode': {
     type: 'enum',
-    values: ['plan', 'default', 'auto-edit', 'yolo'],
+    values: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
   },
   'general.vimMode': { type: 'boolean' },
   'general.enableAutoUpdate': { type: 'boolean' },
@@ -493,15 +492,30 @@ function readRequiredString(value: unknown, fieldName: string): string {
   return stringValue;
 }
 
+// Skill slugs are used to build filesystem paths under `<globalQwenDir>/skills`.
+// The character allowlist below already excludes `/` and `\`, but `.` and `..`
+// would still slip through and let `path.join` traverse out of the skills dir
+// (e.g. slug `..` resolves to the global config dir). Reject them explicitly.
+function validateSkillSlug(slug: string): void {
+  if (
+    !slug ||
+    slug === '.' ||
+    slug === '..' ||
+    slug.includes('/') ||
+    slug.includes(path.sep) ||
+    !/^[a-zA-Z0-9._-]+$/.test(slug)
+  ) {
+    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
+  }
+}
+
 function readSkillInstallRequest(
   params: Record<string, unknown>,
 ): QwenSkillInstallRequest {
   const skillParams = toRecord(params['skill']);
   const input = Object.keys(skillParams).length > 0 ? skillParams : params;
   const slug = readRequiredString(input['slug'], 'skill.slug');
-  if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
-    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
-  }
+  validateSkillSlug(slug);
 
   const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
   if (scope !== 'global') {
@@ -531,9 +545,7 @@ function readSkillSlugRequest(
   const skillParams = toRecord(params['skill']);
   const input = Object.keys(skillParams).length > 0 ? skillParams : params;
   const slug = readRequiredString(input['slug'], 'skill.slug');
-  if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
-    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
-  }
+  validateSkillSlug(slug);
 
   const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
   if (scope !== 'global') {
@@ -552,9 +564,7 @@ function readSkillSetEnabledRequest(
   const skillParams = toRecord(params['skill']);
   const input = Object.keys(skillParams).length > 0 ? skillParams : params;
   const slug = readRequiredString(input['slug'], 'skill.slug');
-  if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
-    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
-  }
+  validateSkillSlug(slug);
 
   const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
   if (scope !== 'global' && scope !== 'project') {
@@ -597,15 +607,69 @@ function splitSkillMarkdown(content: string): {
 
 function setSkillFrontmatterEnabled(content: string, enabled: boolean): string {
   const { frontmatter, body } = splitSkillMarkdown(content);
-  const parsed = parseYaml(frontmatter);
+
+  // Surgically add/remove only the top-level `disable-model-invocation:` line
+  // instead of round-tripping the whole frontmatter through a YAML
+  // parse/stringify. The minimal core YAML serializer drops comments and
+  // flattens nested structures (e.g. `hooks:`), so reserializing here would
+  // corrupt hooks-bearing skills and strip user comments. Working on the raw
+  // text leaves every other byte untouched.
+  const lines = frontmatter.split('\n');
+  const disabledLineIndex = lines.findIndex((line) =>
+    /^disable-model-invocation\s*:/.test(line),
+  );
+
   if (enabled) {
-    delete parsed['disable-model-invocation'];
+    if (disabledLineIndex !== -1) {
+      lines.splice(disabledLineIndex, 1);
+    }
+  } else if (disabledLineIndex !== -1) {
+    lines[disabledLineIndex] = 'disable-model-invocation: true';
   } else {
-    parsed['disable-model-invocation'] = true;
+    let insertIndex = lines.length;
+    while (insertIndex > 0 && lines[insertIndex - 1].trim() === '') {
+      insertIndex -= 1;
+    }
+    lines.splice(insertIndex, 0, 'disable-model-invocation: true');
   }
 
-  const nextFrontmatter = stringifyYaml(parsed);
+  const nextFrontmatter = lines.join('\n');
   return `---\n${nextFrontmatter}\n---\n${body}`;
+}
+
+// Skill downloads must come from the GitHub host set. Restricting the host
+// here prevents the client-supplied `sourceUrl` from driving server-side
+// fetches at internal/loopback/link-local endpoints (SSRF), e.g.
+// `http://169.254.169.254/` cloud-metadata or `http://localhost:<port>/`.
+const ALLOWED_SKILL_SOURCE_HOSTS = new Set([
+  'github.com',
+  'raw.githubusercontent.com',
+  'codeload.github.com',
+  'api.github.com',
+]);
+
+function assertAllowedSkillSourceUrl(sourceUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(sourceUrl);
+  } catch {
+    throw RequestError.invalidParams(
+      undefined,
+      'Skill sourceUrl must be a valid URL',
+    );
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw RequestError.invalidParams(
+      undefined,
+      'Skill sourceUrl must be an HTTP(S) URL',
+    );
+  }
+  if (!ALLOWED_SKILL_SOURCE_HOSTS.has(parsed.hostname)) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Skill sourceUrl host is not allowed (only github.com sources are supported)',
+    );
+  }
 }
 
 function parseGitHubBlobSkillUrl(sourceUrl: string): GitHubBlobSkillUrl | null {
@@ -678,11 +742,43 @@ function stripArchiveRoot(filePath: string): string {
   return parts.length > 1 ? parts.slice(1).join('/') : '';
 }
 
-function extractFilesFromTarGz(
+// Bound the work done on untrusted skill archives so a malicious or oversized
+// download cannot exhaust memory. `gunzip` (async) keeps decompression off the
+// synchronous path so it never blocks the event loop.
+const MAX_SKILL_DOWNLOAD_BYTES = 100 * 1024 * 1024; // 100 MB compressed
+const MAX_SKILL_DECOMPRESSED_BYTES = 500 * 1024 * 1024; // 500 MB decompressed
+const gunzipAsync = promisify(gunzip);
+
+async function extractFilesFromTarGz(
   archiveBytes: Uint8Array,
   directoryPath: string,
-): DownloadedSkillFile[] {
-  const archive = gunzipSync(archiveBytes);
+): Promise<DownloadedSkillFile[]> {
+  if (archiveBytes.length > MAX_SKILL_DOWNLOAD_BYTES) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Skill archive exceeds the maximum allowed size',
+    );
+  }
+
+  let archive: Buffer;
+  try {
+    archive = await gunzipAsync(archiveBytes);
+  } catch (error) {
+    throw RequestError.invalidParams(
+      undefined,
+      `Failed to decompress skill archive: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
+  if (archive.length > MAX_SKILL_DECOMPRESSED_BYTES) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Decompressed skill archive exceeds the maximum allowed size',
+    );
+  }
+
   const normalizedDirectory = directoryPath.replace(/^\/+|\/+$/g, '');
   const directoryPrefix = normalizedDirectory ? `${normalizedDirectory}/` : '';
   const files: DownloadedSkillFile[] = [];
@@ -716,13 +812,31 @@ function extractFilesFromTarGz(
 }
 
 async function fetchBytes(url: string): Promise<Uint8Array> {
-  const response = await fetch(url);
+  // `redirect: 'manual'` stops a redirect hop from an allowed host bouncing the
+  // fetch to an internal endpoint; GitHub's raw/codeload endpoints respond 200
+  // directly so this does not affect legitimate skill downloads.
+  const response = await fetch(url, { redirect: 'manual' });
   if (!response.ok) {
     throw RequestError.invalidParams(
       undefined,
       `Failed to download skill (${response.status})`,
     );
   }
+
+  const contentLength = response.headers?.get('content-length');
+  if (contentLength) {
+    const declaredSize = Number.parseInt(contentLength, 10);
+    if (
+      Number.isFinite(declaredSize) &&
+      declaredSize > MAX_SKILL_DOWNLOAD_BYTES
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill download exceeds the maximum allowed size',
+      );
+    }
+  }
+
   return new Uint8Array(await response.arrayBuffer());
 }
 
@@ -846,6 +960,7 @@ async function downloadGitHubSkillDirectory(
 }
 
 async function downloadSkill(sourceUrl: string): Promise<DownloadedSkill> {
+  assertAllowedSkillSourceUrl(sourceUrl);
   const githubUrl = parseGitHubBlobSkillUrl(sourceUrl);
   if (!githubUrl || path.posix.basename(githubUrl.filePath) !== 'SKILL.md') {
     return downloadSingleSkillFile(sourceUrl);
@@ -880,6 +995,18 @@ function resolveSkillInstallPath(
     );
   }
   return target;
+}
+
+// Builds the per-skill directory and asserts (defense-in-depth, on top of
+// validateSkillSlug) that it stays strictly under the managed skills root, so a
+// crafted slug can never make install/delete operate on `<globalQwenDir>` itself.
+function resolveManagedSkillDir(skillsBaseDir: string, slug: string): string {
+  const root = path.resolve(skillsBaseDir);
+  const skillDir = path.resolve(skillsBaseDir, slug);
+  if (!skillDir.startsWith(root + path.sep)) {
+    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
+  }
+  return skillDir;
 }
 
 function readStringArray(value: unknown, fieldName: string): string[] {
@@ -1087,10 +1214,33 @@ function readExistingProviderConfig(
   return {
     protocol,
     baseUrl,
-    ...(apiKey ? { apiKey } : {}),
+    // Never serialize the raw secret over the ACP wire. Expose only whether a
+    // key is stored; the client can omit `apiKey` on connect to keep it.
+    ...(apiKey ? { hasApiKey: true } : {}),
     ...(existing ? { modelIds: existing.models.map((model) => model.id) } : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
+}
+
+// Resolves the raw, stored API key for a provider for server-side use only
+// (never serialized to the client). Used so `qwen/providers/connect` can keep
+// the existing key when the client updates other fields without resubmitting it.
+function resolveExistingProviderApiKey(
+  config: ProviderConfig,
+  settings: LoadedSettings,
+): string | undefined {
+  const existing = findExistingProviderModels(config, settings);
+  const firstModel = existing?.models[0];
+  const protocol = existing?.protocol ?? config.protocol;
+  const baseUrl =
+    typeof firstModel?.baseUrl === 'string'
+      ? firstModel.baseUrl
+      : resolveBaseUrl(config);
+  const envKey =
+    typeof firstModel?.envKey === 'string'
+      ? firstModel.envKey
+      : resolveProviderEnvKey(config, protocol, baseUrl);
+  return readSettingsEnv(settings, envKey);
 }
 
 function serializeProviderConfig(
@@ -1128,6 +1278,7 @@ function serializeProviderConfig(
 function readProviderSetupInputs(
   config: ProviderConfig,
   params: Record<string, unknown>,
+  existingApiKey?: string,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
     | AuthType
@@ -1157,7 +1308,13 @@ function readProviderSetupInputs(
     );
   }
 
-  const apiKey = readRequiredString(params['apiKey'], 'apiKey');
+  // `apiKey` is optional on update: when the client omits it (e.g. it only
+  // received `hasApiKey` from the list response), fall back to the stored key.
+  const apiKey =
+    readOptionalString(params['apiKey'], 'apiKey') ?? existingApiKey;
+  if (!apiKey) {
+    throw RequestError.invalidParams(undefined, 'Invalid or missing apiKey');
+  }
   const apiKeyError = config.validateApiKey?.(apiKey, baseUrl);
   if (apiKeyError) {
     throw RequestError.invalidParams(undefined, apiKeyError);
@@ -3130,11 +3287,8 @@ class QwenAgent implements Agent {
     }
 
     const download = await downloadSkill(request.sourceUrl);
-    const skillDir = path.join(
-      Storage.getGlobalQwenDir(),
-      'skills',
-      request.slug,
-    );
+    const skillsBaseDir = path.join(Storage.getGlobalQwenDir(), 'skills');
+    const skillDir = resolveManagedSkillDir(skillsBaseDir, request.slug);
     const skillFile = path.join(skillDir, 'SKILL.md');
     const parsed = skillManager.parseSkillContent(
       download.skillContent,
@@ -3203,9 +3357,8 @@ class QwenAgent implements Agent {
     cwd?: string,
   ): Promise<QwenManagedSkillFile> {
     if (scope === 'global') {
-      const qwenSkillDir = path.join(
-        Storage.getGlobalQwenDir(),
-        'skills',
+      const qwenSkillDir = resolveManagedSkillDir(
+        path.join(Storage.getGlobalQwenDir(), 'skills'),
         slug,
       );
       const qwenSkillFile = path.join(qwenSkillDir, 'SKILL.md');
@@ -3351,7 +3504,11 @@ class QwenAgent implements Agent {
           );
         }
 
-        const inputs = readProviderSetupInputs(providerConfig, params);
+        const inputs = readProviderSetupInputs(
+          providerConfig,
+          params,
+          resolveExistingProviderApiKey(providerConfig, this.settings),
+        );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);
         await applyProviderInstallPlan(plan, {
@@ -3394,6 +3551,10 @@ class QwenAgent implements Agent {
       }
       case 'qwen/settings/setMemory': {
         const updates = toRecord(params['updates']);
+        // Mutate a freshly loaded settings object and adopt it, mirroring the
+        // other settings mutation handlers, instead of writing through the
+        // possibly-stale cached `this.settings` and reading it back.
+        const settings = loadSettings(cwd);
         for (const key of QWEN_MEMORY_SETTING_KEYS) {
           if (updates[key] === undefined) continue;
           if (typeof updates[key] !== 'boolean') {
@@ -3402,16 +3563,11 @@ class QwenAgent implements Agent {
               `Invalid memory setting '${key}': expected boolean`,
             );
           }
-          this.settings.setValue(
-            SettingScope.User,
-            `memory.${key}`,
-            updates[key],
-          );
+          settings.setValue(SettingScope.User, `memory.${key}`, updates[key]);
         }
+        this.settings = settings;
         return {
-          settings: normalizeQwenMemorySettings(
-            this.settings.user.settings.memory,
-          ),
+          settings: normalizeQwenMemorySettings(settings.user.settings.memory),
         };
       }
       case 'qwen/settings/getPath': {
@@ -3848,9 +4004,10 @@ class QwenAgent implements Agent {
         ) {
           updateOutputLanguageFile(normalizedValue);
         }
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // `setValue` already persisted to disk and recomputed the in-memory
+        // merged view, so reloading from disk here is redundant I/O.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/settings/setMcpServer': {
         const name = params['name'];
@@ -3872,9 +4029,10 @@ class QwenAgent implements Agent {
           ),
         };
         settings.setValue(settingScope, 'mcpServers', mcpServers);
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // `setValue` already persisted to disk and recomputed the in-memory
+        // merged view, so reloading from disk here is redundant I/O.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/settings/removeMcpServer': {
         const name = params['name'];
@@ -3892,9 +4050,10 @@ class QwenAgent implements Agent {
         const mcpServers = { ...toRecord(existing['mcpServers']) };
         delete mcpServers[name.trim()];
         settings.setValue(settingScope, 'mcpServers', mcpServers);
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // `setValue` already persisted to disk and recomputed the in-memory
+        // merged view, so reloading from disk here is redundant I/O.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/settings/setHook': {
         const event = params['event'];
@@ -3912,16 +4071,25 @@ class QwenAgent implements Agent {
           : [];
         const hook = normalizeHookDefinition(params['hook']);
         const index = params['index'];
-        if (typeof index === 'number' && index >= 0) {
+        // Only replace when the index points at an existing entry. An
+        // out-of-range index would create sparse-array holes that serialize to
+        // `null` in settings.json and corrupt hook loading, so treat it (and a
+        // missing/negative index) as an append.
+        if (
+          typeof index === 'number' &&
+          index >= 0 &&
+          index < eventHooks.length
+        ) {
           eventHooks[index] = hook;
         } else {
           eventHooks.push(hook);
         }
         hooksRoot[event] = eventHooks;
         settings.setValue(settingScope, 'hooks', hooksRoot);
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // `setValue` already persisted to disk and recomputed the in-memory
+        // merged view, so reloading from disk here is redundant I/O.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/settings/removeHook': {
         const event = params['event'];
@@ -3944,9 +4112,10 @@ class QwenAgent implements Agent {
         eventHooks.splice(index, 1);
         hooksRoot[event] = eventHooks;
         settings.setValue(settingScope, 'hooks', hooksRoot);
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // `setValue` already persisted to disk and recomputed the in-memory
+        // merged view, so reloading from disk here is redundant I/O.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/settings/setExtensionSetting': {
         const extensionId = params['extensionId'];
@@ -3987,9 +4156,10 @@ class QwenAgent implements Agent {
           async () => value,
           extScope,
         );
-        const updated = loadSettings(cwd);
-        this.settings = updated;
-        return this.buildCoreSettings(updated, cwd);
+        // `setValue` already persisted to disk and recomputed the in-memory
+        // merged view, so reloading from disk here is redundant I/O.
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
       }
       case 'qwen/permissions/getSettings': {
         const settings = this.loadPermissionSettings(cwd);
