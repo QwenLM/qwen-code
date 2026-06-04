@@ -304,7 +304,7 @@ jobs:
         with:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ secrets.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           settings_json: |-
             {
               "maxSessionTurns": 50,
