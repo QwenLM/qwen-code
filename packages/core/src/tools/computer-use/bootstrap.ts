@@ -44,11 +44,11 @@ export interface BootstrapContext {
   /**
    * Treat the first-use install as pre-approved, skipping the
    * promptInstallApproval gate. Set by the caller when the active approval
-   * mode auto-approves tool calls (YOLO): in that mode the scheduler
-   * bypasses ComputerUseTool's confirmation dialog, so its onConfirm never
-   * records install approval — without this flag the headless fallback
-   * below would refuse and throw "install declined by user". The approval
-   * is still persisted, so later non-YOLO calls also skip the prompt.
+   * mode auto-approves tool calls and bypasses ComputerUseTool's confirmation
+   * dialog (YOLO / AUTO_EDIT / AUTO): in those modes the dialog's onConfirm
+   * never records install approval, so without this flag the headless
+   * fallback below would refuse and throw "install declined by user". The
+   * approval is still persisted, so later interactive calls skip the prompt.
    */
   autoApproveInstall?: boolean;
 }
@@ -226,11 +226,11 @@ export async function runBootstrap(
   const approved = await isPackageSpecApproved(deps.homeDir, deps.packageSpec);
   if (!approved) {
     if (ctx.autoApproveInstall) {
-      // YOLO (or equivalent auto-approve mode): the scheduler bypassed the
-      // confirmation dialog whose onConfirm would have recorded approval,
-      // so honor the auto-approve intent here instead of falling through to
-      // the headless prompt (which refuses and throws).
-      ctx.updateOutput?.('Computer Use install auto-approved (YOLO mode).');
+      // An auto-approve mode (YOLO / AUTO_EDIT / AUTO) already approved the
+      // tool call and bypassed the confirmation dialog whose onConfirm would
+      // have recorded approval, so honor that intent here instead of falling
+      // through to the headless prompt (which refuses and throws).
+      ctx.updateOutput?.('Computer Use install auto-approved (approval mode).');
     } else {
       ctx.updateOutput?.('Computer Use needs to be installed (first use).');
       const ok = await deps.promptInstallApproval(deps.packageSpec);

@@ -136,16 +136,21 @@ class ComputerUseInvocation extends BaseToolInvocation<
 
     // If the user confirmed through the pre-execution dialog, the install state
     // was already written by onConfirm — runBootstrap will skip promptInstallApproval.
-    // In YOLO mode the scheduler auto-approves the tool call WITHOUT showing
-    // that dialog (onConfirm never runs), so pass autoApproveInstall to honor
-    // the auto-approve intent instead of letting bootstrap refuse. For headless
-    // / SDK contexts (no dialog, no YOLO), it falls back to the env-var path in
-    // bootstrap's default promptInstallApproval.
-    await runBootstrap(client, {
-      signal,
-      updateOutput,
-      autoApproveInstall: this.config?.getApprovalMode() === ApprovalMode.YOLO,
-    });
+    // But several approval modes auto-approve the tool call and bypass that
+    // dialog entirely (so onConfirm never runs and install state is never
+    // written): YOLO (needsConfirmation() returns false), AUTO_EDIT
+    // (isAutoEditApproved() auto-approves info-type tools — all computer_use__*
+    // tools are info), and AUTO (classifier-approved calls). In those modes
+    // pass autoApproveInstall so the bootstrap honors the already-granted call
+    // approval instead of refusing with "install declined by user". DEFAULT
+    // still shows the dialog; PLAN blocks. Headless / SDK contexts (no config)
+    // fall back to the env-var path in bootstrap's default promptInstallApproval.
+    const mode = this.config?.getApprovalMode();
+    const autoApproveInstall =
+      mode === ApprovalMode.YOLO ||
+      mode === ApprovalMode.AUTO_EDIT ||
+      mode === ApprovalMode.AUTO;
+    await runBootstrap(client, { signal, updateOutput, autoApproveInstall });
 
     let mcpResult: CallToolResult;
     try {

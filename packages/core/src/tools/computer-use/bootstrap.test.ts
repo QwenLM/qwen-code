@@ -107,12 +107,10 @@ describe('runBootstrap', () => {
     // Did not throw "declined", and never consulted the headless prompt.
     expect(deps.promptInstallApproval).not.toHaveBeenCalled();
     expect(client.start).toHaveBeenCalledOnce();
-    // Approval is persisted so later (non-YOLO) calls skip the prompt too.
+    // Approval is persisted so later (interactive) calls skip the prompt too.
     const { loadInstallState } = await import('./install-state.js');
     const state = await loadInstallState(tmpHome);
-    expect(state?.approvedPackageSpec).toBe(
-      '@qwen-code/open-computer-use@^0.3.0',
-    );
+    expect(state?.approvedPackageSpec).toBe(deps.packageSpec);
   });
 
   it('persists approval on success', async () => {

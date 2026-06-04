@@ -373,38 +373,44 @@ describe('ComputerUseInvocation confirmation pathway', () => {
     expect(approved).toBe(true);
   });
 
-  it('execute() under YOLO auto-approves install instead of declining (no dialog, no env var)', async () => {
-    // Reproduces the YOLO bug: the scheduler auto-approves the tool call and
-    // skips the confirmation dialog, so onConfirm never records install
-    // approval. With QWEN_COMPUTER_USE_AUTO_APPROVE unset, the bootstrap
-    // fallback used to refuse and surface "install declined by user".
-    const fake = makeFakeClient(async () => ({
-      content: [{ type: 'text', text: '[]' }],
-      isError: false,
-    }));
-    ComputerUseClient.setSharedForTest(fake);
+  // Every approval mode where the scheduler auto-approves the tool call and
+  // bypasses the confirmation dialog — so its onConfirm never records install
+  // approval. With QWEN_COMPUTER_USE_AUTO_APPROVE unset, the bootstrap fallback
+  // used to refuse and surface "install declined by user":
+  //   - YOLO       → needsConfirmation() returns false, dialog never built.
+  //   - AUTO_EDIT  → isAutoEditApproved() approves info-type tools, skips onConfirm.
+  //   - AUTO       → classifier-approved calls skip onConfirm.
+  it.each([ApprovalMode.YOLO, ApprovalMode.AUTO_EDIT, ApprovalMode.AUTO])(
+    'execute() under %s auto-approves install instead of declining (no dialog, no env var)',
+    async (mode) => {
+      const fake = makeFakeClient(async () => ({
+        content: [{ type: 'text', text: '[]' }],
+        isError: false,
+      }));
+      ComputerUseClient.setSharedForTest(fake);
 
-    const yoloConfig = {
-      getApprovalMode: () => ApprovalMode.YOLO,
-    } as unknown as Config;
+      const config = {
+        getApprovalMode: () => mode,
+      } as unknown as Config;
 
-    const tool = new ComputerUseTool(
-      'list_apps',
-      COMPUTER_USE_SCHEMAS.list_apps,
-      yoloConfig,
-    );
-    const invocation = tool.build({});
-    const result = await invocation.execute(new AbortController().signal);
+      const tool = new ComputerUseTool(
+        'list_apps',
+        COMPUTER_USE_SCHEMAS.list_apps,
+        config,
+      );
+      const invocation = tool.build({});
+      const result = await invocation.execute(new AbortController().signal);
 
-    expect(result.error).toBeUndefined();
-    expect(fake.callTool).toHaveBeenCalledWith('list_apps', {});
-    // Approval persisted so later non-YOLO calls also skip the prompt.
-    const approved = await isPackageSpecApproved(
-      tmpHome,
-      resolveComputerUsePackageSpec(),
-    );
-    expect(approved).toBe(true);
-  });
+      expect(result.error).toBeUndefined();
+      expect(fake.callTool).toHaveBeenCalledWith('list_apps', {});
+      // Approval persisted so later (interactive) calls also skip the prompt.
+      const approved = await isPackageSpecApproved(
+        tmpHome,
+        resolveComputerUsePackageSpec(),
+      );
+      expect(approved).toBe(true);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
