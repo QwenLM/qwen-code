@@ -698,6 +698,37 @@
           "description": "Settings consumed by the AUTO approval mode classifier.",
           "type": "object",
           "properties": {
+            "classifier": {
+              "description": "Runtime controls for the AUTO approval mode classifier.",
+              "type": "object",
+              "properties": {
+                "timeouts": {
+                  "description": "Timeouts for the two AUTO classifier stages, in milliseconds.",
+                  "type": "object",
+                  "properties": {
+                    "stage1Ms": {
+                      "description": "Timeout in milliseconds for the fast stage-1 AUTO classifier.",
+                      "type": "number"
+                    },
+                    "stage2Ms": {
+                      "description": "Timeout in milliseconds for the stage-2 AUTO classifier review.",
+                      "type": "number"
+                    }
+                  }
+                },
+                "thinking": {
+                  "description": "Provider/API-level thinking controls for the AUTO classifier.",
+                  "type": "object",
+                  "properties": {
+                    "stage2Enabled": {
+                      "description": "Whether stage 2 may use provider/API-level thinking. Stage 1 always keeps thinking disabled.",
+                      "type": "boolean",
+                      "default": false
+                    }
+                  }
+                }
+              }
+            },
             "hints": {
               "description": "Natural-language hints injected into the classifier system prompt.",
               "type": "object",

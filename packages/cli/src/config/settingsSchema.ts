@@ -1568,6 +1568,72 @@ const SETTINGS_SCHEMA = {
         description: 'Settings consumed by the AUTO approval mode classifier.',
         showInDialog: false,
         properties: {
+          classifier: {
+            type: 'object',
+            label: 'Auto Mode Classifier',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description:
+              'Runtime controls for the AUTO approval mode classifier.',
+            showInDialog: false,
+            properties: {
+              timeouts: {
+                type: 'object',
+                label: 'Auto Mode Classifier Timeouts',
+                category: 'Tools',
+                requiresRestart: true,
+                default: {},
+                description:
+                  'Timeouts for the two AUTO classifier stages, in milliseconds.',
+                showInDialog: false,
+                properties: {
+                  stage1Ms: {
+                    type: 'number',
+                    label: 'Auto Mode Stage 1 Timeout',
+                    category: 'Tools',
+                    requiresRestart: true,
+                    default: undefined as number | undefined,
+                    description:
+                      'Timeout in milliseconds for the fast stage-1 AUTO classifier.',
+                    showInDialog: false,
+                  },
+                  stage2Ms: {
+                    type: 'number',
+                    label: 'Auto Mode Stage 2 Timeout',
+                    category: 'Tools',
+                    requiresRestart: true,
+                    default: undefined as number | undefined,
+                    description:
+                      'Timeout in milliseconds for the stage-2 AUTO classifier review.',
+                    showInDialog: false,
+                  },
+                },
+              },
+              thinking: {
+                type: 'object',
+                label: 'Auto Mode Classifier Thinking',
+                category: 'Tools',
+                requiresRestart: true,
+                default: {},
+                description:
+                  'Provider/API-level thinking controls for the AUTO classifier.',
+                showInDialog: false,
+                properties: {
+                  stage2Enabled: {
+                    type: 'boolean',
+                    label: 'Auto Mode Stage 2 Thinking',
+                    category: 'Tools',
+                    requiresRestart: true,
+                    default: false,
+                    description:
+                      'Whether stage 2 may use provider/API-level thinking. Stage 1 always keeps thinking disabled.',
+                    showInDialog: false,
+                  },
+                },
+              },
+            },
+          },
           hints: {
             type: 'object',
             label: 'Classifier Hints',

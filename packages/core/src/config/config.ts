@@ -257,6 +257,18 @@ export const APPROVAL_MODE_INFO: Record<ApprovalMode, ApprovalModeInfo> = {
  * Use `permissions.allow / ask / deny` for hard rules.
  */
 export interface AutoModeSettings {
+  classifier?: {
+    timeouts?: {
+      /** Stage-1 fast classifier timeout in milliseconds. */
+      stage1Ms?: number;
+      /** Stage-2 review classifier timeout in milliseconds. */
+      stage2Ms?: number;
+    };
+    thinking?: {
+      /** Whether stage 2 may use provider/API-level thinking. */
+      stage2Enabled?: boolean;
+    };
+  };
   hints?: {
     /** Natural-language descriptions of actions the user wants AUTO mode to allow. */
     allow?: string[];
