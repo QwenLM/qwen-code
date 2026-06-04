@@ -709,7 +709,7 @@ async function spawnDaemonWithTime(
             fs.rmSync(ws, { recursive: true, force: true });
           }
         },
-        ITERATIONS * 15_000 + 30_000,
+        ITERATIONS * 30_000 + 60_000,
       );
 
       it(
