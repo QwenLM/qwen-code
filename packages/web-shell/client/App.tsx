@@ -115,6 +115,10 @@ import {
   parseMcpStatusMessage,
   serializeMcpStatusMessage,
 } from './components/messages/McpStatusMessage';
+import {
+  GOAL_STATUS_ACTIVE_EVENT,
+  serializeGoalStatusMessage,
+} from './components/messages/GoalStatusMessage';
 import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import type {
@@ -165,10 +169,32 @@ function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
 }
 
+const GOAL_CLEAR_KEYWORDS = new Set([
+  'clear',
+  'stop',
+  'off',
+  'reset',
+  'none',
+  'cancel',
+]);
+
+function isGoalClearCommand(text: string): boolean {
+  const goalArg = text
+    .replace(/^\/goal\b/i, '')
+    .trim()
+    .toLowerCase();
+  return GOAL_CLEAR_KEYWORDS.has(goalArg);
+}
+
 interface QueuedPrompt {
   id: number;
   text: string;
   images?: PromptImage[];
+}
+
+interface ActiveGoalStatus {
+  condition: string;
+  setAt: number;
 }
 
 interface LocalAnchoredMessage {
@@ -714,6 +740,9 @@ export function App({
   const activeAgentsPanelRef = useRef<HTMLDivElement>(null);
   const statusBarRef = useRef<StatusBarHandle>(null);
   const editorRef = useRef<EditorHandle>(null);
+  const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
+  const activeGoalRef = useRef<ActiveGoalStatus | null>(null);
+  activeGoalRef.current = activeGoal;
   const {
     followupState,
     onAcceptFollowup,
@@ -1177,12 +1206,38 @@ export function App({
 
   useEffect(() => {
     if (connection.sessionId) {
+      setActiveGoal(null);
       onSessionIdChange?.(connection.sessionId);
       if (!onSessionIdChange) {
         replaceSessionUrl(connection.sessionId);
       }
     }
   }, [connection.sessionId, onSessionIdChange]);
+
+  useEffect(() => {
+    const onGoalStatusActive = (event: Event) => {
+      const detail = (
+        event as CustomEvent<{
+          active?: boolean;
+          condition?: string;
+          setAt?: number;
+        }>
+      ).detail;
+      if (!detail?.active) {
+        setActiveGoal(null);
+        return;
+      }
+      if (!detail.condition) return;
+      setActiveGoal({
+        condition: detail.condition,
+        setAt: detail.setAt ?? Date.now(),
+      });
+    };
+
+    window.addEventListener(GOAL_STATUS_ACTIVE_EVENT, onGoalStatusActive);
+    return () =>
+      window.removeEventListener(GOAL_STATUS_ACTIVE_EVENT, onGoalStatusActive);
+  }, []);
 
   // Auto-recap: fire when the user returns after being away ≥ 3 minutes
   const hiddenAtRef = useRef<number | null>(null);
@@ -1275,6 +1330,77 @@ export function App({
       });
   }, [reportError, sessionActions]);
 
+  const handleGoalSlashCommand = useCallback(
+    (
+      text: string,
+      images?: PromptImage[],
+      opts?: { sendToDaemon?: boolean },
+    ) => {
+      const goalArg = text.replace(/^\/goal\b/i, '').trim();
+      const lowerGoalArg = goalArg.toLowerCase();
+      const sendToDaemon = opts?.sendToDaemon ?? true;
+      store.appendLocalUserMessage(text);
+
+      if (goalArg && GOAL_CLEAR_KEYWORDS.has(lowerGoalArg)) {
+        const activeGoal = activeGoalRef.current;
+        if (activeGoal) {
+          store.dispatch([
+            {
+              type: 'status',
+              text: serializeGoalStatusMessage({
+                kind: 'cleared',
+                condition: activeGoal.condition,
+                durationMs: Date.now() - activeGoal.setAt,
+              }),
+            },
+          ]);
+          setActiveGoal(null);
+        }
+      } else if (goalArg) {
+        const nextGoal = {
+          condition: goalArg,
+          setAt: Date.now(),
+        };
+        setActiveGoal(nextGoal);
+        store.dispatch([
+          {
+            type: 'status',
+            text: serializeGoalStatusMessage({
+              kind: 'set',
+              condition: goalArg,
+              setAt: nextGoal.setAt,
+            }),
+          },
+        ]);
+      }
+
+      if (sendToDaemon) {
+        sendPrompt(text, images, { optimisticUserMessage: false }).catch(
+          (error: unknown) =>
+            reportError(error, 'Failed to send /goal command'),
+        );
+      }
+      return true;
+    },
+    [reportError, sendPrompt, store],
+  );
+
+  const handleBusyGoalClear = useCallback(
+    (text: string, images?: PromptImage[]) => {
+      handleGoalSlashCommand(text, images, { sendToDaemon: false });
+      sessionActions
+        .cancel()
+        .then(() =>
+          sendPrompt(text, undefined, { optimisticUserMessage: false }),
+        )
+        .catch((error: unknown) => {
+          reportError(error, 'Failed to clear /goal');
+        });
+      return true;
+    },
+    [handleGoalSlashCommand, reportError, sendPrompt, sessionActions],
+  );
+
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
       const promptBlocked = streamingStateRef.current !== 'idle';
@@ -1297,6 +1423,15 @@ export function App({
               interactiveHint: t('tasks.dumpHint'),
             });
             return true;
+          }
+          if (cmd === 'goal') {
+            if (promptBlocked) {
+              if (isGoalClearCommand(text)) {
+                return handleBusyGoalClear(text, images);
+              }
+              return enqueuePrompt(text, images);
+            }
+            return handleGoalSlashCommand(text, images);
           }
           if (cmd === 'theme') {
             const themeArg = text.slice(match[0].length).trim().toLowerCase();
@@ -1842,6 +1977,8 @@ export function App({
       sessionActions,
       store,
       enqueuePrompt,
+      handleBusyGoalClear,
+      handleGoalSlashCommand,
       handleThemeChange,
       handleSetMode,
       onLanguageChange,
@@ -2398,6 +2535,7 @@ export function App({
                   onOpenTasks={() => openTasksPanel()}
                   onReturnToInput={handleReturnToEditor}
                   taskActivityKey={backgroundTaskActivityKey}
+                  activeGoal={activeGoal}
                 />
               ))}
 

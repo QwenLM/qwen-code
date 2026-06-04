@@ -10,6 +10,7 @@ import {
   TasksStatusMessage,
   parseTasksStatusMessage,
 } from './TasksStatusMessage';
+import { GoalStatusMessage, parseGoalStatusMessage } from './GoalStatusMessage';
 import { Markdown } from './Markdown';
 import styles from './SystemMessage.module.css';
 
@@ -71,6 +72,16 @@ export const SystemMessage = memo(function SystemMessage({
     return (
       <div className={styles.flushMessage}>
         <TasksStatusMessage message={tasksStatus} />
+      </div>
+    );
+  }
+
+  const goalStatus =
+    variant === 'info' ? parseGoalStatusMessage(content) : null;
+  if (goalStatus) {
+    return (
+      <div className={styles.flushMessage}>
+        <GoalStatusMessage status={goalStatus} />
       </div>
     );
   }

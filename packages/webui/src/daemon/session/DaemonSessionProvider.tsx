@@ -1174,7 +1174,11 @@ function normalizeAndFilterEvent(
     suppressOwnUserEcho: opts.suppressOwnUserEcho,
     includeRawEvent: opts.includeRawEvent,
   });
-  return isPromptLifecycleTurnEvent(event) ? [] : normalized;
+  const goalStatusEvent = normalizeGoalStatusEvent(event);
+  if (isPromptLifecycleTurnEvent(event)) {
+    return goalStatusEvent ? [goalStatusEvent] : [];
+  }
+  return goalStatusEvent ? [...normalized, goalStatusEvent] : normalized;
 }
 
 function filterDaemonUiEventsForTranscript(
@@ -1379,6 +1383,100 @@ function hasActiveGenerationSignal(
       event.type === 'thought.text.delta' ||
       event.type === 'tool.update',
   );
+}
+
+function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
+  if (event.type !== 'session_update') return null;
+  const data = isRecord(event.data) ? event.data : undefined;
+  const update = isRecord(data?.['update'])
+    ? data['update']
+    : isRecord(event.data)
+      ? event.data
+      : undefined;
+  if (!update || update['sessionUpdate'] !== 'agent_message_chunk') {
+    return null;
+  }
+  const meta = update['_meta'];
+  if (!isRecord(meta)) return null;
+  const terminal = normalizeGoalTerminal(meta['goalTerminal']);
+  if (terminal) {
+    return createGoalStatusUiEvent(event, terminal);
+  }
+
+  const loop = meta['stopHookLoop'];
+  if (!isRecord(loop)) return null;
+  const goal = loop['goal'];
+  if (!isRecord(goal)) return null;
+  const condition = getString(goal, 'condition');
+  if (!condition) return null;
+
+  const reasons = Array.isArray(loop['reasons'])
+    ? loop['reasons'].filter(
+        (reason): reason is string => typeof reason === 'string',
+      )
+    : [];
+  const iterationCount = getNumber(loop, 'iterationCount');
+  const iterations = getNumber(goal, 'iterations') ?? iterationCount;
+  const setAt = getNumber(goal, 'setAt');
+  const lastReason = getString(goal, 'lastReason') ?? reasons.at(-1);
+
+  return createGoalStatusUiEvent(event, {
+    kind: 'checking',
+    condition,
+    ...(iterations !== undefined ? { iterations } : {}),
+    ...(setAt !== undefined ? { setAt } : {}),
+    ...(lastReason ? { lastReason } : {}),
+  });
+}
+
+function createGoalStatusUiEvent(
+  event: DaemonEvent,
+  status: Record<string, unknown>,
+): DaemonUiEvent {
+  return {
+    type: 'status',
+    ...(event.id !== undefined ? { eventId: event.id } : {}),
+    ...(event.originatorClientId
+      ? { originatorClientId: event.originatorClientId }
+      : {}),
+    text: 'web-shell:goal-status:v1:' + JSON.stringify(status),
+  };
+}
+
+function normalizeGoalTerminal(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const kind = getString(value, 'kind');
+  if (kind !== 'achieved' && kind !== 'failed' && kind !== 'aborted') {
+    return null;
+  }
+  const condition = getString(value, 'condition');
+  if (!condition) return null;
+  const iterations = getNumber(value, 'iterations');
+  const durationMs = getNumber(value, 'durationMs');
+  const lastReason = getString(value, 'lastReason');
+  return {
+    kind,
+    condition,
+    ...(iterations !== undefined ? { iterations } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(lastReason ? { lastReason } : {}),
+  };
+}
+
+function getString(
+  value: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const raw = value[key];
+  return typeof raw === 'string' ? raw : undefined;
+}
+
+function getNumber(
+  value: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const raw = value[key];
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
 }
 
 function bumpWorkspaceEventSignals(

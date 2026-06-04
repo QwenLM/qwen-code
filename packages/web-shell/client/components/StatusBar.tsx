@@ -14,6 +14,7 @@ import styles from './StatusBar.module.css';
 
 const TASKS_POLL_INTERVAL_MS = 3000;
 const MAX_EMPTY_TASK_POLLS = 2;
+const GOAL_PILL_INTERVAL_MS = 1000;
 
 export interface StatusBarHandle {
   focusTaskPill(): boolean;
@@ -52,6 +53,10 @@ interface StatusBarProps {
   onOpenTasks?: () => void;
   onReturnToInput?: (text?: string) => void;
   taskActivityKey?: string;
+  activeGoal?: {
+    condition: string;
+    setAt: number;
+  } | null;
 }
 
 // Feather "settings" gear, stroke-based like PromptChevron so it inherits
@@ -143,6 +148,16 @@ function hasActiveTask(tasks: readonly DaemonSessionTaskStatus[]): boolean {
   );
 }
 
+function formatGoalElapsed(ms: number): string {
+  if (ms < 1000) return '';
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
 export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
   function StatusBar(
     {
@@ -154,6 +169,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       onOpenTasks,
       onReturnToInput,
       taskActivityKey,
+      activeGoal,
     },
     ref,
   ) {
@@ -170,6 +186,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
     const modeIndicator = getModeIndicator(currentMode, t);
     const [tasks, setTasks] = useState<DaemonSessionTaskStatus[]>([]);
     const [pollingActive, setPollingActive] = useState(false);
+    const [, setGoalTick] = useState(0);
     const emptyPollsRef = useRef(0);
     const taskPillRef = useRef<HTMLButtonElement>(null);
 
@@ -224,7 +241,22 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       };
     }, [actions, connected, pollingActive]);
 
+    useEffect(() => {
+      if (!activeGoal) return;
+      const id = setInterval(
+        () => setGoalTick((tick) => (tick + 1) % 1_000_000),
+        GOAL_PILL_INTERVAL_MS,
+      );
+      return () => clearInterval(id);
+    }, [activeGoal]);
+
     const taskPillLabel = useMemo(() => getTaskPillLabel(tasks, t), [tasks, t]);
+    const goalElapsed = activeGoal
+      ? formatGoalElapsed(Date.now() - activeGoal.setAt)
+      : '';
+    const goalLabel = activeGoal
+      ? `◎ /goal active${goalElapsed ? ` (${goalElapsed})` : ''}`
+      : '';
 
     useImperativeHandle(
       ref,
@@ -357,6 +389,11 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
                 {t('status.contextUsed', { pct: pctDisplay })}
               </span>
             </button>
+          )}
+          {goalLabel && (
+            <span className={styles.goal} title={activeGoal?.condition}>
+              {goalLabel}
+            </span>
           )}
         </div>
       </div>

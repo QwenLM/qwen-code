@@ -151,6 +151,12 @@
   color: var(--text-dimmed);
 }
 
+.goal {
+  font-size: 12px;
+  color: var(--accent-color);
+  white-space: nowrap;
+}
+
 .separator {
   color: var(--text-dimmed);
 }

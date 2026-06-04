@@ -76,6 +76,11 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       description: t('local.agents'),
       argumentHint: 'manage|create',
     },
+    {
+      name: 'goal',
+      description: t('local.goal'),
+      argumentHint: '[<condition> | clear]',
+    },
     { name: 'tasks', description: t('local.tasks') },
     { name: 'recap', description: t('local.recap') },
     { name: 'clear', description: t('local.clear') },

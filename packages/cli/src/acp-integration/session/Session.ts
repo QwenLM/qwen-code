@@ -25,9 +25,7 @@ import type {
   ChatCompressionInfo,
   AutoModeDecision,
   AutoModeOutcome,
-} from '@qwen-code/qwen-code-core';
-import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
-import {
+
   AuthType,
   ApprovalMode,
   CompressionStatus,
@@ -87,7 +85,10 @@ import {
   logConversationFinishedEvent,
   ConversationFinishedEvent,
   acquireSleepInhibitor,
+  setGoalTerminalObserver,
+  type GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
+import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 
@@ -527,6 +528,16 @@ export class Session implements SessionContext {
     }
   }
 
+  #installGoalTerminalObserver(): void {
+    setGoalTerminalObserver(this.sessionId, (event: GoalTerminalEvent) => {
+      void this.messageEmitter.emitGoalTerminal(event).catch((error) => {
+        debugLogger.warn(
+          `Failed to emit goal terminal update: ${this.#formatError(error)}`,
+        );
+      });
+    });
+  }
+
   /**
    * Replays conversation history to the client using modular components.
    * Delegates to HistoryReplayer for consistent event emission.
@@ -938,6 +949,7 @@ export class Session implements SessionContext {
             let parts: Part[] | null;
 
             if (isSlashCommand(inputText)) {
+              const isGoalCommand = /^\/goal(?:\s|$)/i.test(inputText.trim());
               // Handle slash command in ACP mode using capability-based filtering
               const slashCommandResult = await handleSlashCommand(
                 inputText,
@@ -950,6 +962,9 @@ export class Session implements SessionContext {
                 slashCommandResult,
                 params.prompt,
               );
+              if (isGoalCommand) {
+                this.#installGoalTerminalObserver();
+              }
 
               // If parts is null, the command was fully handled (e.g., /summary completed)
               // Return early without sending to the model

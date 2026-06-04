@@ -14,6 +14,7 @@ import {
   autocompletion,
   closeCompletion,
   completionStatus,
+  moveCompletionSelection,
   startCompletion,
   type CompletionSource,
 } from '@codemirror/autocomplete';
@@ -375,7 +376,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             : historyActionsRef.current;
           const isBrowsingHistory = history.isNavigating();
           if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
-            return false;
+            return moveCompletionSelection(false)(view) || true;
           }
           if (isBrowsingHistory) {
             closeCompletion(view);
@@ -423,7 +424,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
             : historyActionsRef.current;
           const isBrowsingHistory = history.isNavigating();
           if (completionStatus(view.state) === 'active' && !isBrowsingHistory) {
-            return false;
+            return moveCompletionSelection(true)(view) || true;
           }
           if (isBrowsingHistory) {
             closeCompletion(view);
