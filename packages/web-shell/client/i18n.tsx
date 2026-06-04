@@ -380,7 +380,6 @@ const EN: Messages = {
   'local.language': 'Change UI language',
   'local.mcp': 'Manage MCP servers',
   'local.memory': 'Manage memory',
-  'local.mode': 'Change approval mode',
   'local.model': 'Switch model or set fast model',
   'local.new': 'Start a new conversation',
   'local.plan': 'Enter Plan mode',
@@ -553,6 +552,18 @@ const EN: Messages = {
   'mode.auto.desc': 'Automatically decide when approval is needed',
   'mode.auto.notice':
     'Auto mode enabled. An LLM classifier evaluates each tool call and auto-approves safe actions, blocks risky ones. To exit: Shift+Tab or /approval-mode default.',
+  'mode.footer': '(Use Enter to select, Esc to cancel)',
+  'mode.name.plan': 'plan',
+  'mode.name.default': 'default',
+  'mode.name.auto-edit': 'auto-edit',
+  'mode.name.auto': 'auto',
+  'mode.name.yolo': 'yolo',
+  'mode.desc.plan': 'Analyze only, do not modify files or execute commands',
+  'mode.desc.default': 'Require approval for file edits or shell commands',
+  'mode.desc.auto-edit': 'Automatically approve file edits',
+  'mode.desc.auto': 'auto mode',
+  'mode.desc.yolo': 'Automatically approve all tools',
+  'mode.select': 'Approval Mode',
   'mode.autoApproved': ((v) =>
     v?.tool
       ? `Auto-approved: ${v.tool}`
@@ -1040,7 +1051,6 @@ const ZH: Messages = {
   'local.language': '切换 UI 语言',
   'local.mcp': '管理 MCP servers',
   'local.memory': '管理 memory',
-  'local.mode': '切换审批模式',
   'local.model': '切换模型或设置 fast model',
   'local.new': '开始新对话',
   'local.plan': '进入 Plan 模式',
@@ -1203,6 +1213,18 @@ const ZH: Messages = {
   'mode.auto.desc': '自动判断是否需要请求批准',
   'mode.auto.notice':
     'Auto 模式已启用。LLM 分类器会评估每个工具调用，自动批准安全操作，拦截危险操作。退出方式：Shift+Tab 或 /approval-mode default。',
+  'mode.footer': '(Enter 选择，Esc 取消)',
+  'mode.name.plan': 'plan',
+  'mode.name.default': 'default',
+  'mode.name.auto-edit': 'auto-edit',
+  'mode.name.auto': 'auto',
+  'mode.name.yolo': 'yolo',
+  'mode.desc.plan': '仅分析，不修改文件或执行命令',
+  'mode.desc.default': '编辑文件或执行命令前需要批准',
+  'mode.desc.auto-edit': '自动批准文件编辑',
+  'mode.desc.auto': 'auto 模式',
+  'mode.desc.yolo': '自动批准所有工具',
+  'mode.select': '审批模式',
   'mode.autoApproved': ((v) =>
     v?.tool
       ? `已自动批准：${v.tool}`

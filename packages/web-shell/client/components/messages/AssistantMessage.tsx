@@ -26,7 +26,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className={styles.content}>
           <span className={styles.prefix}>✦</span>
           <div className={styles.contentBody}>
-            <Markdown content={content} />
+            <Markdown content={content} source="assistant" />
           </div>
         </div>
       )}

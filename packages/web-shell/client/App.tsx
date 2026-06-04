@@ -27,7 +27,10 @@ import { StreamingStatus } from './components/StreamingStatus';
 import { TodoPanel } from './components/panels/TodoPanel';
 import { ActiveAgentsPanel } from './components/panels/ActiveAgentsPanel';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
+import {
+  APPROVAL_MODE_ACTIVE_EVENT,
+  ApprovalModeMessage,
+} from './components/messages/ApprovalModeMessage';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import {
   AGENTS_ACTIVE_EVENT,
@@ -97,6 +100,11 @@ import type {
 } from './adapters/types';
 import { extractTodosFromToolCall, hasActiveTodos } from './utils/todos';
 import { ThemeProvider } from './themeContext';
+import {
+  WebShellCustomizationProvider,
+  type WebShellMarkdownCustomization,
+  type ToolHeaderExtraRenderer,
+} from './customization';
 import styles from './App.module.css';
 
 export const CompactModeContext = createContext(false);
@@ -104,6 +112,30 @@ export const CompactModeContext = createContext(false);
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_DISPLAYED_QUEUED_PROMPTS = 3;
 const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
+const COMPACT_MODE_STORAGE_KEY = 'web-shell:compact-mode';
+
+function loadCompactMode(): boolean {
+  try {
+    return window.localStorage.getItem(COMPACT_MODE_STORAGE_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function saveCompactMode(enabled: boolean) {
+  try {
+    window.localStorage.setItem(
+      COMPACT_MODE_STORAGE_KEY,
+      enabled ? 'true' : 'false',
+    );
+  } catch {
+    // Ignore storage failures in private browsing or restricted contexts.
+  }
+}
+
+function normalizeHiddenCommand(command: string): string {
+  return command.trim().replace(/^\/+/, '').toLowerCase();
+}
 
 interface QueuedPrompt {
   id: number;
@@ -153,6 +185,12 @@ export interface WebShellProps {
   onError?: (error: Error) => void;
   /** Called when `/bug` is invoked. Receives system info. If omitted, web-shell opens the report URL itself. */
   onBugReport?: (info: BugReportInfo) => void;
+  /** Slash command names to hide from completion/help, for example `['approval-mode']`. */
+  hiddenSlashCommands?: string[];
+  /** Custom renderer for the tool-card header content after the status icon and tool name. */
+  renderToolHeaderExtra?: ToolHeaderExtraRenderer;
+  /** Custom Markdown behavior for assistant content only. */
+  markdown?: WebShellMarkdownCustomization;
 }
 
 function replaceSessionUrl(sessionId: string): void {
@@ -438,6 +476,9 @@ export function App({
   onStreamingStateChange,
   onError,
   onBugReport,
+  hiddenSlashCommands,
+  renderToolHeaderExtra,
+  markdown,
 }: WebShellProps = {}) {
   const [selectedLanguage, setSelectedLanguage] = useState<WebShellLanguage>(
     () =>
@@ -446,6 +487,10 @@ export function App({
         : normalizeLanguage(providedLanguage),
   );
   const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
+  const customization = useMemo(
+    () => ({ renderToolHeaderExtra, markdown }),
+    [renderToolHeaderExtra, markdown],
+  );
   const store = useTranscriptStore();
   const blocks = useTranscriptBlocks();
   const connection = useConnection();
@@ -568,7 +613,7 @@ export function App({
 
   const [modelInlineMode, setModelInlineMode] =
     useState<ModelInlineMode | null>(null);
-  const [showModeDialog, setShowModeDialog] = useState(false);
+  const [approvalModeInlineOpen, setApprovalModeInlineOpen] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [showReleaseDialog, setShowReleaseDialog] = useState(false);
@@ -586,6 +631,7 @@ export function App({
   const [memoryPortalHost, setMemoryPortalHost] =
     useState<HTMLDivElement | null>(null);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const approvalModePanelActive = usePanelActive(APPROVAL_MODE_ACTIVE_EVENT);
   const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
   const agentsPanelActive = usePanelActive(AGENTS_ACTIVE_EVENT);
   const memoryPanelActive = usePanelActive(MEMORY_ACTIVE_EVENT);
@@ -603,7 +649,6 @@ export function App({
   const nextQueuedPromptIdRef = useRef(1);
   const drainingQueueRef = useRef(false);
   const dialogOpen =
-    showModeDialog ||
     showResumeDialog ||
     showDeleteDialog ||
     showReleaseDialog ||
@@ -612,6 +657,7 @@ export function App({
     showToolsDialog;
   const bottomHidden =
     dialogOpen ||
+    approvalModePanelActive ||
     mcpPanelActive ||
     agentsPanelActive ||
     memoryPanelActive ||
@@ -854,7 +900,7 @@ export function App({
     setShowShortcuts((prev) => !prev);
   }, []);
 
-  const [compactMode, setCompactMode] = useState(false);
+  const [compactMode, setCompactMode] = useState(loadCompactMode);
   const compactModeRef = useRef(compactMode);
   compactModeRef.current = compactMode;
 
@@ -869,13 +915,8 @@ export function App({
   const handleToggleCompact = useCallback(() => {
     const next = !compactModeRef.current;
     setCompactMode(next);
-    store.dispatch([
-      {
-        type: 'status',
-        text: next ? t('compact.enabled') : t('compact.disabled'),
-      },
-    ]);
-  }, [store, t]);
+    saveCompactMode(next);
+  }, []);
 
   const handleSetMode = useCallback(
     (modeId: string) => {
@@ -1192,12 +1233,13 @@ export function App({
               });
             return true;
           }
-          if (cmd === 'approval-mode' || cmd === 'mode') {
+          if (cmd === 'approval-mode') {
             const modeArg = text.slice(match[0].length).trim();
             if (modeArg) {
               handleSetMode(modeArg);
             } else {
-              setShowModeDialog(true);
+              store.appendLocalUserMessage(text);
+              setApprovalModeInlineOpen(true);
             }
             return true;
           }
@@ -1374,7 +1416,9 @@ export function App({
             return true;
           }
           if (cmd === 'clear') {
-            store.reset();
+            sessionActions.newSession().catch((error: unknown) => {
+              reportError(error, 'Failed to create a new session');
+            });
             return true;
           }
           if (cmd === 'new' || cmd === 'reset') {
@@ -1791,13 +1835,17 @@ export function App({
 
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
-    return mergeCommands(connection.commands ?? [], getLocalCommands(t)).map(
-      (command) =>
+    const hidden = new Set(
+      (hiddenSlashCommands ?? []).map(normalizeHiddenCommand).filter(Boolean),
+    );
+    return mergeCommands(connection.commands ?? [], getLocalCommands(t))
+      .filter((command) => !hidden.has(normalizeHiddenCommand(command.name)))
+      .map((command) =>
         skillNames.has(command.name)
           ? { ...command, description: t('skills.run') }
           : command,
-    );
-  }, [connection.commands, connection.skills, t]);
+      );
+  }, [connection.commands, connection.skills, hiddenSlashCommands, t]);
 
   const welcomeHeader = useMemo(
     () => (
@@ -1893,13 +1941,6 @@ export function App({
                   onClose={() => setShowReleaseDialog(false)}
                 />
               )}
-              {showModeDialog && (
-                <ApprovalModeDialog
-                  currentMode={currentMode}
-                  onSelect={handleSetMode}
-                  onClose={() => setShowModeDialog(false)}
-                />
-              )}
               {showHelpDialog && (
                 <HelpDialog
                   commands={commands}
@@ -1919,81 +1960,96 @@ export function App({
             </div>
           )}
 
-          <CompactModeContext.Provider value={compactMode}>
-            <div
-              className={
-                floatingTodos.length > 0 || floatingAgents.length > 0
-                  ? `${styles.content} ${styles.contentHasMessages}`
-                  : styles.content
-              }
-              style={dialogOpen ? { visibility: 'hidden' } : undefined}
-            >
-              <MessageList
-                messages={displayMessages}
-                pendingApproval={pendingApproval}
-                onConfirm={handleConfirm}
-                catchingUp={connection.catchingUp}
-                workspaceCwd={connection.workspaceCwd || ''}
-                welcomeHeader={welcomeHeader}
-                tailContent={
-                  agentsInlineMode || memoryInlineOpen || modelInlineMode ? (
-                    <>
-                      {modelInlineMode && (
-                        <ModelMessage
-                          mode={modelInlineMode}
-                          onSelect={
-                            modelInlineMode === 'fast'
-                              ? handleFastModelSelect
-                              : handleModelSelect
-                          }
-                          onClose={() => setModelInlineMode(null)}
-                        />
-                      )}
-                      {agentsInlineMode && (
-                        <AgentsMessage
-                          mode={agentsInlineMode}
-                          onMessage={(text) =>
-                            store.dispatch([{ type: 'status', text }])
-                          }
-                          onClose={() => setAgentsInlineMode(null)}
-                        />
-                      )}
-                      {memoryInlineOpen && (
-                        <MemoryMessage
-                          refreshSignal={memoryRefreshSignal}
-                          addSignal={memoryAddSignal}
-                          addScope={memoryAddScope}
-                          portalHost={memoryPortalHost}
-                          onMessage={(text, type = 'status') => {
-                            store.dispatch([{ type, text }]);
-                          }}
-                          onClose={() => setMemoryInlineOpen(false)}
-                        />
-                      )}
-                    </>
-                  ) : undefined
+          <WebShellCustomizationProvider value={customization}>
+            <CompactModeContext.Provider value={compactMode}>
+              <div
+                className={
+                  floatingTodos.length > 0 || floatingAgents.length > 0
+                    ? `${styles.content} ${styles.contentHasMessages}`
+                    : styles.content
                 }
-                tailKey={
-                  agentsInlineMode || memoryInlineOpen || modelInlineMode
-                    ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}`
-                    : undefined
-                }
-              />
+                style={dialogOpen ? { visibility: 'hidden' } : undefined}
+              >
+                <MessageList
+                  messages={displayMessages}
+                  pendingApproval={pendingApproval}
+                  onConfirm={handleConfirm}
+                  catchingUp={connection.catchingUp}
+                  workspaceCwd={connection.workspaceCwd || ''}
+                  welcomeHeader={welcomeHeader}
+                  tailContent={
+                    agentsInlineMode ||
+                    memoryInlineOpen ||
+                    modelInlineMode ||
+                    approvalModeInlineOpen ? (
+                      <>
+                        {approvalModeInlineOpen && (
+                          <ApprovalModeMessage
+                            currentMode={currentMode}
+                            onSelect={handleSetMode}
+                            onClose={() => setApprovalModeInlineOpen(false)}
+                          />
+                        )}
+                        {modelInlineMode && (
+                          <ModelMessage
+                            mode={modelInlineMode}
+                            onSelect={
+                              modelInlineMode === 'fast'
+                                ? handleFastModelSelect
+                                : handleModelSelect
+                            }
+                            onClose={() => setModelInlineMode(null)}
+                          />
+                        )}
+                        {agentsInlineMode && (
+                          <AgentsMessage
+                            mode={agentsInlineMode}
+                            onMessage={(text) =>
+                              store.dispatch([{ type: 'status', text }])
+                            }
+                            onClose={() => setAgentsInlineMode(null)}
+                          />
+                        )}
+                        {memoryInlineOpen && (
+                          <MemoryMessage
+                            refreshSignal={memoryRefreshSignal}
+                            addSignal={memoryAddSignal}
+                            addScope={memoryAddScope}
+                            portalHost={memoryPortalHost}
+                            onMessage={(text, type = 'status') => {
+                              store.dispatch([{ type, text }]);
+                            }}
+                            onClose={() => setMemoryInlineOpen(false)}
+                          />
+                        )}
+                      </>
+                    ) : undefined
+                  }
+                  tailKey={
+                    agentsInlineMode ||
+                    memoryInlineOpen ||
+                    modelInlineMode ||
+                    approvalModeInlineOpen
+                      ? `inline-${modelInlineMode ?? 'none'}-${agentsInlineMode ?? 'none'}-${memoryInlineOpen ? 'memory' : 'none'}-${approvalModeInlineOpen ? 'approval' : 'none'}`
+                      : undefined
+                  }
+                />
 
-              {btwMessage?.role === 'btw' && (
-                <div className={styles.btwPanel}>
-                  <BtwMessage
-                    question={btwMessage.question}
-                    answer={btwMessage.answer}
-                    isPending={btwMessage.isPending}
-                  />
-                </div>
-              )}
+                {btwMessage?.role === 'btw' && (
+                  <div className={styles.btwPanel}>
+                    <BtwMessage
+                      question={btwMessage.question}
+                      answer={btwMessage.answer}
+                      isPending={btwMessage.isPending}
+                    />
+                  </div>
+                )}
 
-              <StreamingStatus />
-            </div>
-            <div ref={setMemoryPortalHost} data-web-shell-overlay-root />
-          </CompactModeContext.Provider>
+                <StreamingStatus />
+              </div>
+              <div ref={setMemoryPortalHost} data-web-shell-overlay-root />
+            </CompactModeContext.Provider>
+          </WebShellCustomizationProvider>
 
           <div
             className={

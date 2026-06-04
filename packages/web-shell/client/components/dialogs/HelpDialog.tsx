@@ -58,7 +58,6 @@ const BUILT_IN_COMMANDS = new Set([
   'lsp',
   'mcp',
   'memory',
-  'mode',
   'model',
   'new',
   'permissions',

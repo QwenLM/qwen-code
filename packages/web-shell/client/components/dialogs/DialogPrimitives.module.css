@@ -104,6 +104,13 @@
   cursor: pointer;
 }
 
+.resume-picker-session-item {
+  align-items: stretch;
+  flex-direction: column;
+  padding-top: 2px;
+  padding-bottom: 6px;
+}
+
 .resume-picker-item.selected {
   background: var(--bg-tertiary);
 }
@@ -129,6 +136,8 @@
   display: flex;
   align-items: baseline;
   gap: 4px;
+  min-width: 0;
+  width: 100%;
 }
 
 .resume-picker-item-prefix {
@@ -143,11 +152,25 @@
 
 .resume-picker-item-title {
   color: var(--text-primary);
+  flex: 1 1 auto;
   font-size: 13px;
   font-weight: 500;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.resume-picker-item-checkbox {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  font-size: 13px;
+  white-space: pre;
+}
+
+.resume-picker-item.selected .resume-picker-item-checkbox {
+  color: var(--accent-color);
+  font-weight: 700;
 }
 
 .resume-picker-item-number {
@@ -173,7 +196,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-left: 16px;
+  padding-left: 26px;
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -195,6 +218,7 @@
 }
 
 .resume-picker-item-badge {
+  flex-shrink: 0;
   margin-left: 8px;
   font-size: 11px;
   color: var(--accent-color, #4a9eff);

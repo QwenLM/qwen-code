@@ -33,6 +33,11 @@ import {
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
 import { CompactModeContext } from '../../App';
+import {
+  type ToolHeaderExtraRenderInfo,
+  type ToolHeaderKind,
+  useWebShellCustomization,
+} from '../../customization';
 import styles from './tools/ToolChrome.module.css';
 
 interface ToolGroupProps {
@@ -383,6 +388,46 @@ function shouldAutoExpand(tool: ACPToolCall): boolean {
   return false;
 }
 
+function getToolHeaderKind(tool: ACPToolCall): ToolHeaderKind {
+  const name = tool.toolName.toLowerCase();
+  if (isSubAgentToolCall(tool)) return 'agent';
+  if (isShellToolName(name)) return 'shell';
+  if (isWebFetchToolName(name)) return 'fetch';
+  if (name === 'todowrite') return 'todo';
+  if (name === 'read' || name === 'read_file' || name === 'readfile')
+    return 'read';
+  if (name === 'edit' || name === 'editfile') return 'edit';
+  if (name === 'write' || name === 'write_file' || name === 'writefile')
+    return 'write';
+  return 'other';
+}
+
+function DefaultToolHeaderExtra({
+  description,
+  elapsed,
+}: {
+  description: string;
+  elapsed: string;
+}) {
+  return (
+    <>
+      {description && <span className={styles.lineArg}>{description}</span>}
+      {elapsed && <span className={styles.lineElapsed}>{elapsed}</span>}
+    </>
+  );
+}
+
+function ToolHeaderExtra({ info }: { info: ToolHeaderExtraRenderInfo }) {
+  const { renderToolHeaderExtra } = useWebShellCustomization();
+  if (renderToolHeaderExtra) return <>{renderToolHeaderExtra(info)}</>;
+  return (
+    <DefaultToolHeaderExtra
+      description={info.description}
+      elapsed={info.elapsed}
+    />
+  );
+}
+
 function getActiveTool(tools: ACPToolCall[]): ACPToolCall {
   return (
     tools.find((t) => t.status === 'in_progress') ?? tools[tools.length - 1]
@@ -405,6 +450,7 @@ function CompactToolGroup({
 }) {
   const { t } = useI18n();
   const activeTool = getActiveTool(tools);
+  const displayName = formatToolDisplayName(activeTool.toolName);
   const overallStatus = getCompactDisplayStatus(activeTool);
   const description = getToolDescription(activeTool, workspaceCwd);
   const elapsed =
@@ -417,17 +463,23 @@ function CompactToolGroup({
     <div className={styles.compactGroup}>
       <div className={styles.compactHeader}>
         <StatusIcon status={overallStatus} />
-        <span className={styles.lineName}>
-          {formatToolDisplayName(activeTool.toolName)}
-        </span>
+        <span className={styles.lineName}>{displayName}</span>
         {tools.length > 1 && (
           <span className={styles.compactCount}>
             {'× '}
             {tools.length}
           </span>
         )}
-        {description && <span className={styles.lineArg}>{description}</span>}
-        {elapsed && <span className={styles.lineElapsed}>{elapsed}</span>}
+        <ToolHeaderExtra
+          info={{
+            kind: getToolHeaderKind(activeTool),
+            tool: activeTool,
+            displayName,
+            description,
+            elapsed,
+            workspaceCwd,
+          }}
+        />
       </div>
       <div className={styles.compactHint}>{t('compact.hint')}</div>
     </div>
@@ -530,6 +582,7 @@ const ToolLine = memo(function ToolLine({
     }
 
     const info = getAgentDisplayInfo(tool, now);
+    const displayName = t('agent.label');
     const isComplete = tool.status === 'completed' || tool.status === 'failed';
     const toolHint = getAgentCurrentToolHint(tool);
     const progressLabel = tool.status === 'pending' ? 'pending' : 'running';
@@ -541,12 +594,19 @@ const ToolLine = memo(function ToolLine({
       <div className={styles.line}>
         <div className={styles.lineMain}>
           <StatusIcon status={tool.status} />
-          <span className={styles.lineName}>{t('agent.label')}</span>
-          {info.description && (
-            <span className={styles.lineArg}>
-              {truncateText(info.description, 60)}
-            </span>
-          )}
+          <span className={styles.lineName}>{displayName}</span>
+          <ToolHeaderExtra
+            info={{
+              kind: 'agent',
+              tool,
+              displayName,
+              description: info.description
+                ? truncateText(info.description, 60)
+                : '',
+              elapsed: '',
+              workspaceCwd,
+            }}
+          />
         </div>
         {!isComplete && (
           <div
@@ -608,6 +668,7 @@ const ToolLine = memo(function ToolLine({
 
   const description = getToolDescription(tool, workspaceCwd);
   const result = getToolResultSummary(tool);
+  const displayName = formatToolDisplayName(tool.toolName);
   const elapsed =
     isShellToolName(tool.toolName) || isWebFetchToolName(tool.toolName)
       ? ''
@@ -632,11 +693,17 @@ const ToolLine = memo(function ToolLine({
         onClick={expandable ? () => setExpanded(!expanded) : undefined}
       >
         <StatusIcon status={tool.status} />
-        <span className={styles.lineName}>
-          {formatToolDisplayName(tool.toolName)}
-        </span>
-        {description && <span className={styles.lineArg}>{description}</span>}
-        {elapsed && <span className={styles.lineElapsed}>{elapsed}</span>}
+        <span className={styles.lineName}>{displayName}</span>
+        <ToolHeaderExtra
+          info={{
+            kind: getToolHeaderKind(tool),
+            tool,
+            displayName,
+            description,
+            elapsed,
+            workspaceCwd,
+          }}
+        />
       </div>
       {isTodo && <TodoWriteContent tool={tool} />}
       {!isTodo && !expanded && result && (

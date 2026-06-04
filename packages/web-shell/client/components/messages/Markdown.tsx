@@ -7,10 +7,15 @@ import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { codeToHtml, type BundledLanguage } from 'shiki';
 import { useI18n } from '../../i18n';
+import {
+  useWebShellCustomization,
+  type MarkdownContentSource,
+} from '../../customization';
 import styles from './Markdown.module.css';
 
 interface MarkdownProps {
   content: string;
+  source?: MarkdownContentSource;
 }
 
 const SUPPORTED_LANGUAGES = new Set([
@@ -434,17 +439,37 @@ const components: Components = {
   },
 };
 
-export const Markdown = memo(function Markdown({ content }: MarkdownProps) {
+export const Markdown = memo(function Markdown({
+  content,
+  source,
+}: MarkdownProps) {
+  const { markdown } = useWebShellCustomization();
+
   if (!content) return null;
 
+  const sourceMarkdown = source ? markdown : undefined;
+  const renderedContent =
+    source && sourceMarkdown?.transformMarkdown
+      ? sourceMarkdown.transformMarkdown(content, { source })
+      : content;
+  const renderedComponents = sourceMarkdown?.components
+    ? { ...components, ...sourceMarkdown.components }
+    : components;
+  const remarkPlugins = sourceMarkdown?.remarkPlugins
+    ? [remarkGfm, remarkMath, ...sourceMarkdown.remarkPlugins]
+    : [remarkGfm, remarkMath];
+  const rehypePlugins = sourceMarkdown?.rehypePlugins
+    ? [rehypeKatex, ...sourceMarkdown.rehypePlugins]
+    : [rehypeKatex];
+
   return (
-    <div className={styles.content}>
+    <div className={styles.content} data-markdown-source={source}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
-        components={components}
+        remarkPlugins={remarkPlugins}
+        rehypePlugins={rehypePlugins}
+        components={renderedComponents}
       >
-        {content}
+        {renderedContent}
       </ReactMarkdown>
     </div>
   );
