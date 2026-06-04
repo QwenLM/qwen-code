@@ -62,6 +62,13 @@ vi.mock('@opentelemetry/api', () => ({
     INT: 1,
     DOUBLE: 2,
   },
+  diag: {
+    setLogger: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    debug: vi.fn(),
+  },
 }));
 
 describe('Daemon Metrics', () => {

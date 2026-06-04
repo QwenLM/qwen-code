@@ -1153,7 +1153,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // but daemon stays up) still logs — there's no upstream
         // context line in that flow, and the message confirms the
         // cleanup actually ran.
-        const channelExitExpected = shuttingDown;
+        const channelExitExpected = shuttingDown || info.isDying;
         telemetry.metrics?.channelLifecycle('exit', channelExitExpected);
         if (!shuttingDown) {
           telemetry.event('channel.exited', {
