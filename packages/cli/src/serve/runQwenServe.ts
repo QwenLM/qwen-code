@@ -1204,15 +1204,13 @@ export async function runQwenServe(
         daemonLog.error('server error', err instanceof Error ? err : null);
       });
       if (!deps.bridge) {
-        Promise.resolve()
-          .then(() => bridge.preheat())
-          .catch((err) => {
-            writeStderrLine(
-              `qwen serve: ACP preheat failed, will retry on first session: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
-          });
+        bridge.preheat().catch((err) => {
+          writeStderrLine(
+            `qwen serve: ACP preheat failed, will retry on first session: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
       }
 
       resolve(handle);
