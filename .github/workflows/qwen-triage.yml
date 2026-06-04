@@ -62,6 +62,7 @@ jobs:
         uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
         env:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           REPOSITORY: '${{ github.repository }}'
         with:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
