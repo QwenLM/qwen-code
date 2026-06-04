@@ -337,6 +337,27 @@ function formatCodeBlockLabel(
   return `Code block ${block.index}`;
 }
 
+function parseLeadingMessageIndex(args: string): {
+  messageIndex: number | null;
+  subArgs: string;
+} {
+  const trimmed = args.trim();
+  if (!trimmed) return { messageIndex: null, subArgs: '' };
+
+  const firstWhitespace = trimmed.search(/\s/);
+  const firstToken =
+    firstWhitespace === -1 ? trimmed : trimmed.slice(0, firstWhitespace);
+
+  if (!/^\d+$/.test(firstToken)) {
+    return { messageIndex: null, subArgs: args };
+  }
+
+  return {
+    messageIndex: Number(firstToken),
+    subArgs: firstWhitespace === -1 ? '' : trimmed.slice(firstWhitespace + 1),
+  };
+}
+
 export const copyCommand: SlashCommand = {
   name: 'copy',
   get description() {
@@ -347,38 +368,61 @@ export const copyCommand: SlashCommand = {
   action: async (context, _args): Promise<SlashCommandActionReturn | void> => {
     const chat = await context.services.config?.getGeminiClient()?.getChat();
     const history = chat?.getHistoryShallow();
+    const aiMessages = history?.filter((item) => item.role === 'model') ?? [];
 
-    // Get the last message from the AI (model role)
-    const lastAiMessage = history
-      ? history.filter((item) => item.role === 'model').pop()
-      : undefined;
-
-    if (!lastAiMessage) {
+    if (aiMessages.length === 0) {
       return {
         type: 'message',
         messageType: 'info',
         content: 'No output in history',
       };
     }
+
+    const { messageIndex, subArgs } = parseLeadingMessageIndex(_args);
+
+    let selectedAiMessage;
+    if (messageIndex !== null) {
+      if (messageIndex < 1) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content:
+            'Message index must be a positive integer (1 = last AI message).',
+        };
+      }
+      if (messageIndex > aiMessages.length) {
+        const turnLabel =
+          aiMessages.length === 1 ? 'AI message' : 'AI messages';
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: `Only ${aiMessages.length} ${turnLabel} in this session.`,
+        };
+      }
+      selectedAiMessage = aiMessages[aiMessages.length - messageIndex];
+    } else {
+      selectedAiMessage = aiMessages[aiMessages.length - 1];
+    }
+
     // Extract text from the parts
-    const lastAiOutput = lastAiMessage.parts
+    const aiOutput = selectedAiMessage.parts
       ?.filter((part) => part.text && !part.thought)
       .map((part) => part.text)
       .join('');
 
-    if (lastAiOutput) {
+    if (aiOutput) {
       try {
-        const selectedLatexBlock = selectLatexBlock(lastAiOutput, _args);
+        const selectedLatexBlock = selectLatexBlock(aiOutput, subArgs);
         if (selectedLatexBlock === null) {
           return {
             type: 'message',
             messageType: 'info',
             content:
-              _args
+              subArgs
                 .trim()
                 .split(/\s+/)
                 .some((token) => token === 'inline') ||
-              _args.trim().toLowerCase().startsWith('inline-latex')
+              subArgs.trim().toLowerCase().startsWith('inline-latex')
                 ? 'No matching inline LaTeX expression found in the last AI output.'
                 : 'No matching LaTeX block found in the last AI output.',
           };
@@ -397,7 +441,7 @@ export const copyCommand: SlashCommand = {
           };
         }
 
-        const selectedCodeBlock = selectCodeBlock(lastAiOutput, _args);
+        const selectedCodeBlock = selectCodeBlock(aiOutput, subArgs);
         if (selectedCodeBlock === null) {
           return {
             type: 'message',
@@ -406,7 +450,7 @@ export const copyCommand: SlashCommand = {
           };
         }
 
-        const copiedText = selectedCodeBlock?.block.content ?? lastAiOutput;
+        const copiedText = selectedCodeBlock?.block.content ?? aiOutput;
         await copyToClipboard(copiedText);
 
         return {
