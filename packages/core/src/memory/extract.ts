@@ -191,20 +191,43 @@ export async function runAutoMemoryExtract(params: {
       params.sessionId,
       agentResult.touchedTopics,
     );
-    const rebuilds: Array<Promise<unknown>> = [];
+    // Rebuild each touched scope independently. A throw on the user-level
+    // rebuild (e.g. EACCES on a read-only ~/.qwen/memories/) must not
+    // poison a successful project-level rebuild — that mirrors the same
+    // failure-isolation pattern the user-level scaffold uses above.
+    // Promise.allSettled gives both branches a chance to run and we log
+    // any rejections instead of bubbling them up.
+    const rebuilds: Array<{ scope: string; promise: Promise<unknown> }> = [];
     if (agentResult.touchedProjectScope) {
-      rebuilds.push(rebuildManagedAutoMemoryIndex(params.projectRoot));
+      rebuilds.push({
+        scope: 'project',
+        promise: rebuildManagedAutoMemoryIndex(params.projectRoot),
+      });
     }
     if (agentResult.touchedUserScope) {
-      rebuilds.push(rebuildUserAutoMemoryIndex());
+      rebuilds.push({
+        scope: 'user',
+        promise: rebuildUserAutoMemoryIndex(),
+      });
     }
     // Defensive: if neither flag was set (e.g. an older planner that did not
     // populate the scope booleans), still refresh the project-level index so
     // the old behavior is preserved.
     if (rebuilds.length === 0) {
-      rebuilds.push(rebuildManagedAutoMemoryIndex(params.projectRoot));
+      rebuilds.push({
+        scope: 'project',
+        promise: rebuildManagedAutoMemoryIndex(params.projectRoot),
+      });
     }
-    await Promise.all(rebuilds);
+    const settled = await Promise.allSettled(rebuilds.map((r) => r.promise));
+    settled.forEach((result, idx) => {
+      if (result.status === 'rejected') {
+        const scope = rebuilds[idx]?.scope ?? 'unknown';
+        debugLogger.warn(
+          `Auto-memory ${scope}-level index rebuild failed (non-critical, other scopes unaffected): ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+        );
+      }
+    });
   }
 
   const cursor: AutoMemoryExtractCursor = {

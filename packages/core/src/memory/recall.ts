@@ -168,8 +168,12 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
     scanAutoMemoryTopicDocuments(projectRoot),
     scanUserAutoMemoryTopicDocuments(),
   ]);
+  // Project-level docs come first so the stable sort in
+  // selectRelevantAutoMemoryDocuments breaks score+type ties in favour
+  // of the more-specific scope — matching the PR's "project shadows
+  // user" precedence. Reversing this order regresses recall ranking.
   const docs = filterExcludedAutoMemoryDocuments(
-    [...userDocs, ...projectDocs],
+    [...projectDocs, ...userDocs],
     options.excludedFilePaths,
   );
   const limit = options.limit ?? MAX_RELEVANT_DOCS;
