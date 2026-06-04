@@ -103,8 +103,7 @@ export const approvalModeCommand: SlashCommand = {
       type: 'message',
       messageType: 'info',
       content: t('Approval mode set to "{{mode}}"', {
-        mode:
-          mode === ApprovalModeEnum.YOLO ? formatApprovalModeName(mode) : mode,
+        mode: formatApprovalModeName(mode),
       }),
     };
   },
