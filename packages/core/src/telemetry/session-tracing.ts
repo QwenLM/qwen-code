@@ -141,7 +141,7 @@ interface SpanContext {
  *     cross-prompt correlation uses the `session.id` attribute instead.
  *
  * SYNC: keep parent-resolution logic in step with getParentContext() in
- * telemetry/tracer.ts ( review).
+ * telemetry/tracer.ts.
  */
 function resolveParentContext(parent: SpanContext | undefined): Context {
   if (parent) {
@@ -202,13 +202,13 @@ function sweepStaleSpans(now: number): void {
         ctx.ended = true;
         // Mark the span so backends can distinguish "abandoned and
         // garbage-collected by the TTL safety net" from "deliberately
-        // ended without setting status / attrs" ( review).
+        // ended without setting status / attrs".
         const ageMs = now - ctx.startTime;
         const toolName = ctx.attributes['tool.name'];
         const callId = ctx.attributes['tool.call_id'];
         // setAttributes and span.end() are wrapped separately so a
-        // setAttributes throw can't prevent the span from being ended
-        // ( review-3. For blocked_on_user
+        // setAttributes throw can't prevent the span from being ended.
+        // For blocked_on_user
         // spans, also stamp the canonical decision/source taxonomy so
         // dashboards filtering by `decision: 'aborted'` count
         // walk-aways consistently with explicit user aborts.
@@ -227,13 +227,13 @@ function sweepStaleSpans(now: number): void {
           // OTel errors must not prevent span.end() from running, but
           // they're worth surfacing — dropping the sentinel attrs makes
           // a TTL-aborted span look identical to a deliberately-UNSET
-          // one in dashboards ( review-7 silent-failure-hunter).
+          // one in dashboards.
           debugLogger.warn(
             `Failed to stamp TTL attrs on stale span ${spanId}: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
         // Include tool name + call_id so the log is actionable in
-        // production without a trace-backend lookup .
+        // production without a trace-backend lookup.
         const ctxLabel =
           toolName && callId
             ? `${ctx.type} (tool.name=${toolName}, tool.call_id=${callId})`
@@ -274,7 +274,7 @@ const SPAN_ERROR_MAX_CHARS = 1024;
  * Bound the size of error strings written to span attributes / status
  * messages. Hook server responses, raw exception stacks, or malicious
  * inputs can be unbounded; some OTel backends drop the entire span when
- * any field exceeds their limit ( review-3 .
+ * any field exceeds their limit.
  *
  * Truncates by UTF-16 code units (`String.length`/`String.slice`), not
  * bytes — for ASCII-heavy text this approximates a 1KB byte limit, but
@@ -282,15 +282,14 @@ const SPAN_ERROR_MAX_CHARS = 1024;
  * encoding. That's still well under all major OTel backends'
  * per-attribute limits (Jaeger ~64KB, Honeycomb ~64KB, OTLP default
  * ~32KB), so we keep the simpler char-count bound rather than paying
- * the encoder cost on every endXSpan .
+ * the encoder cost on every endXSpan.
  */
 export function truncateSpanError(s: string): string {
   if (s.length <= SPAN_ERROR_MAX_CHARS) return s;
   // Back up one code unit if the cut lands on a high surrogate so we
   // don't emit a lone surrogate followed by the sentinel — strict
   // OTLP/gRPC collectors reject span batches with invalid UTF-8
-  // (a lone high surrogate encodes to an invalid byte sequence)
-  // ( review-8 .
+  // (a lone high surrogate encodes to an invalid byte sequence).
   let end = SPAN_ERROR_MAX_CHARS;
   const code = s.charCodeAt(end - 1);
   if (code >= 0xd800 && code <= 0xdbff) end--;
@@ -801,7 +800,7 @@ export function endToolExecutionSpan(
      * still recorded but status stays UNSET, mirroring setToolSpanCancelled
      * on the parent tool span. Without this, success: false unconditionally
      * sets ERROR and trace backends filtering for errors false-positive on
-     * user cancels ( review).
+     * user cancels.
      */
     cancelled?: boolean;
   },
@@ -1127,7 +1126,7 @@ export function clearSessionTracingForTesting(): void {
   interactionSequence = 0;
   lastInteractionCtx = undefined;
   clearDetailedSpanState();
-  // Reach into session-context module to prevent cross-test leakage .
+  // Reach into session-context module to prevent cross-test leakage.
   setSessionContext(undefined);
 }
 

@@ -14,14 +14,12 @@ import type { ToolRegistry } from './tool-registry.js';
 const debugLogger = createDebugLogger('McpPool:View');
 
 /**
- * — /; PR-A-R2 #2
- * folded the exports to delegate here): precompute lookup `Set`s
- * once per `applyTools` / `applyPrompts` pass so the per-tool
- * predicate is O(1) instead of repeating an array scan for every
- * snapshot entry. Same semantics: `excludeTools` is direct-equality
- * match (parens form not stripped — intentional previously behavior
- * preserved); `includeTools` strips the first `(...)` suffix so
- * `toolName(args)` matches `toolName`.
+ * Precompute lookup `Set`s once per `applyTools` / `applyPrompts`
+ * pass so the per-tool predicate is O(1) instead of repeating an
+ * array scan for every snapshot entry. Same semantics: `excludeTools`
+ * is direct-equality match (parens form not stripped — intentional
+ * previous behavior preserved); `includeTools` strips the first
+ * `(...)` suffix so `toolName(args)` matches `toolName`.
  *
  * PR-A-R2 #2: `passesSessionFilter` / `passesSessionPromptFilter`
  * (exported below for unit-testability) now route THROUGH
@@ -72,14 +70,14 @@ function compiledFilterAccepts(
  * Matches the existing `isEnabled` semantics in `mcp-client.ts` but
  * works against `DiscoveredMCPTool` instead of `FunctionDeclaration`.
  * `excludeTools` wins over `includeTools` when both list the same
- * tool (previously behavior preserved).
+ * tool (previous behavior preserved).
  *
  * `serverToolName` is the bare name as advertised by the MCP server.
  * `includeTools` entries may use either the bare name or a
  * `<name>(<args>)` parenthesized form — the parens form is stripped
  * before comparing (matches `mcp-client.ts:isEnabled` history).
  * `excludeTools` is checked via direct equality — no parens-form
- * support, intentionally matching the existing previously behavior so
+ * support, intentionally matching the existing previous behavior so
  * operators don't see semantic divergence between the two filter
  * lists when migrating sessions through pool mode.
  *
@@ -177,7 +175,7 @@ export class SessionMcpView {
    */
   applyTools(snapshot: readonly DiscoveredMCPTool[]): void {
     this.sessionToolRegistry.removeMcpToolsByServer(this.serverName);
-    // : precompute filter Sets once per pass so the per-tool
+    // Precompute filter Sets once per pass so the per-tool
     // predicate is O(1). Pre-fix `passesSessionFilter` re-scanned the
     // includeTools / excludeTools arrays inside every iteration
     // O(M tools × N filter entries) per pass. Same semantics applied.
@@ -190,7 +188,7 @@ export class SessionMcpView {
       if (!compiledFilterAccepts(filter, tool.serverToolName)) {
         continue;
       }
-      // : per-session trust copy. `withTrust` returns the same
+      // Per-session trust copy. `withTrust` returns the same
       // instance when value unchanged, so the common case (same trust)
       // pays zero allocation.
       const sessionTool = tool.withTrust(this.cfg.trust);
@@ -205,7 +203,7 @@ export class SessionMcpView {
         );
       }
     }
-    // : pre-fix this string contained literal "N" instead
+    // Pre-fix this string contained literal "N" instead
     // of an interpolation; operators saw a meaningless placeholder.
     debugLogger.debug(
       `SessionMcpView[${this.sessionId}/${this.serverName}] applied ${snapshot.length} tools (filtered to ${registered} registered)`,
@@ -232,7 +230,7 @@ export class SessionMcpView {
    */
   applyPrompts(snapshot: readonly DiscoveredMCPPrompt[]): void {
     this.sessionPromptRegistry.removePromptsByServer(this.serverName);
-    // : same Set precompute as applyTools.
+    // Same Set precompute as applyTools.
     const filter = compileNameFilter(
       this.cfg.includeTools,
       this.cfg.excludeTools,

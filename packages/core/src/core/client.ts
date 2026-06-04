@@ -1226,7 +1226,7 @@ export class GeminiClient {
       // submission, lastPrompt === fr parts) closes the pair via the real
       // `functionResponse` before we synthesize an error one. Doing the
       // repair here would happen pre-push and race against the user
-      // content's own pairing — see PR review for the corner.
+      // content's own pairing.
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
@@ -1420,7 +1420,7 @@ export class GeminiClient {
           const m = mcResult.meta;
           this.getChat().setHistory(mcResult.history);
           // Disarm only the blanked files' fast-path, keeping
-          // read-before-write state intact (issue; rationale on
+          // read-before-write state intact (rationale on
           // FileReadEntry.readResidentInHistory). Any blanked read we
           // can't disarm surgically forces the old blanket wipe so a
           // later Read can't get a dangling file_unchanged placeholder.

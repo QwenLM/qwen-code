@@ -194,7 +194,7 @@ function stringifyError(err: unknown): string {
  * `qwen serve` provides a ring-backed publisher; embedded callers and
  * unit tests that don't care about audit can let the bridge fall back
  * here. Single canonical fallback prevents stub-vs-prod divergence
- * ((single canonical fallback).
+ * (single canonical fallback).
  */
 export function createNoOpPermissionAuditPublisher(): PermissionAuditPublisher {
   return {
@@ -252,7 +252,7 @@ export interface MediatorDeps {
    * narrow race), the implementation should return an empty Set
    * rather than throw. The `first-responder` policy ignores the
    * snapshot, so an empty set is harmless. If
-   * `voteConsensus`, an empty `votersAtIssue` means EVERY vote on
+   * Under `consensus` policy, an empty `votersAtIssue` means EVERY vote on
    * the request gets rejected for "not in voter set" — the request
    * can only resolve via `forgetSession` cleanup or `permissionTimeoutMs`.
    * The bridge's torn-down-session race is short enough that this is
@@ -379,8 +379,8 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * Consumers can `await` the returned Promise and forward the
    * result without a `.catch()` block.
    *
-   * **Synchronous-throw exception** (
-   * Note: when the agent's `allowedOptionIds` contains the
+   * **Synchronous-throw exception**:
+   * when the agent's `allowedOptionIds` contains the
    * cancel-vote sentinel string, this method throws
    * `CancelSentinelCollisionError` synchronously BEFORE constructing
    * the Promise. The synchronous shape is intentional — a
@@ -1105,7 +1105,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
   }
 
   /**
-   * The 3271627457 — emit a stderr breadcrumb
+   * Emit a stderr breadcrumb
    * for every vote rejection (the three forbidden paths in
    * voteDesignated / voteConsensus / voteLocalOnly). Mirrors the
    * timeout breadcrumb pattern: audit ring + SSE event are
@@ -1151,7 +1151,7 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    * Single helper used at all five audit call sites so the
    * "audit is best-effort" invariant is uniformly enforced (the
    * pre-fix asymmetric `try/catch` at 2 of 5 sites was a real
-   * silent-failure hole; see ).
+   * silent-failure hole.
    *
    * doc placement — JSDoc was previously
    * stacked above `writeForbiddenStderr` so IDE hover and API

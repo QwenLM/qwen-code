@@ -603,7 +603,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       // closed the span as failed, do not emit a parallel api_error log
       // (the span is the canonical signal). Otherwise we'd produce the
       // exact contradictory pair the timeout fix targets — span timed-out
-      // + api_error log — just on the error branch ( review).
+      // + api_error log — just on the error branch.
       if (!spanEndedByTimeout) {
         const durationMs = Date.now() - startTime;
         runInSpan(() =>

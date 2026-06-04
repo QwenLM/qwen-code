@@ -80,7 +80,7 @@ const DEFAULT_MAX_QUEUED = 256;
  * turn, real workloads can be 10× that or more once tool-call /
  * thought streams pile up). 1000 was the original default and could
  * be exhausted by a moderate turn before the client reconnected;
- * 8000 matches the target set in the target for chatty Stage 1
+ * 8000 matches the target set for chatty Stage 1
  * sessions, with ~30–60× headroom over a typical-but-busy turn at
  * the cost of a few hundred KB of RAM per session. Operators can
  * override per-daemon via `qwen serve --event-ring-size <n>`.

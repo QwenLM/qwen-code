@@ -381,8 +381,7 @@ export interface TelemetryMetricsSettings {
  * collector / file outfile). The settings here control data flow OUT of
  * the qwen-code process and INTO third-party LLM provider request
  * streams (DashScope, OpenAI, Anthropic, etc.). Different recipients =
- * different consent decision, so a different settings tree. See PR
- *  review for the framing rationale.
+ * different consent decision, so a different settings tree.
  *
  * All values default to off / no propagation. Operators who want to
  * propagate trace context for server-side trace stitching (e.g. ARMS
@@ -1646,7 +1645,7 @@ export class Config {
     // an escape hatch.
     const legacyBlockingMcp =
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
-    // : also force the inline-discovery skip when the caller opts
+    // Also force the inline-discovery skip when the caller opts
     // out of MCP entirely (ACP bootstrap path) — otherwise the legacy
     // blocking mode would still spawn MCP servers via the tool-registry
     // construction path.
@@ -1687,7 +1686,7 @@ export class Config {
     // shortly after each server settles. See `AppContainer.tsx`'s
     // `mcp-client-update` subscriber.
     //
-    // : also gated on `!options?.skipMcpDiscovery` — the ACP
+    // Also gated on `!options?.skipMcpDiscovery` — the ACP
     // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
     // config doesn't run discovery under its pool-less manager.
     if (
@@ -2161,7 +2160,7 @@ export class Config {
     // startup (interactive UI). A non-interactive `/clear` (e.g.
     // qwen --prompt-interactive) must not delete a sibling shell's
     // sidecar that happens to share the outgoing session id
-    // mirrors kimi-cli PR 's "write only when a session is
+    // mirrors the kimi-cli "write only when a session is
     // established for this process" rule.
     if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
       const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
@@ -2708,7 +2707,7 @@ export class Config {
    * `ToolRegistry` threads it into `McpClientManager`, which delegates
    * non-SDK MCP server discovery to the pool instead of spawning its
    * own per-session `McpClient`. Standalone `qwen` (non-daemon) leaves
-   * this `undefined` and the manager keeps its previously behavior.
+   * this `undefined` and the manager keeps its previous behavior.
    *
    * Eagerly instantiated by `QwenAgent` (per Q6 resolved); the
    * pool itself is lazy w.r.t. actual MCP work — it spawns nothing

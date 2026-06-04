@@ -8,7 +8,7 @@
  * `PermissionMediator` — type-only interface contract for daemon
  * permission flow. **No implementation lives here.** Permission voting
  * still runs inside `BridgeClient.requestPermission`
- * (`@qwen-code/acp-bridge/bridgeClient` after ) and
+ * (`@qwen-code/acp-bridge/bridgeClient`) and
  * `respondToPermission` (inside `createHttpAcpBridge` factory closure
  * at `@qwen-code/acp-bridge/bridge` after F1 step 3), hard-coded to
  * `first-responder`. A future change will move that code behind this
@@ -45,7 +45,7 @@ export type PermissionPolicy =
 /**
  * One pending permission tracked by a `PermissionMediator`. The
  * shape mirrors the current `PendingPermission` record in
- * `@qwen-code/acp-bridge/bridgeClient` (lifted in )
+ * `@qwen-code/acp-bridge/bridgeClient`
  * so the mediation implementation's lift is a structural rename rather than a redesign.
  */
 export interface PermissionRequestRecord {

@@ -74,7 +74,7 @@ function safeEndSpan(span: Span): void {
 }
 
 // SYNC: keep parent-resolution logic in step with resolveParentContext()
-// in telemetry/session-tracing.ts ( review).
+// in telemetry/session-tracing.ts.
 function getParentContext(): Context {
   return context.active();
 }
@@ -181,7 +181,7 @@ export async function withSpan<T>(
  *
  *   const { span, runInContext } = startSpanWithContext('stream', attrs);
  *   try {
- *     return await runInContext( => doWork());
+ *     return await runInContext(() => doWork());
  *   } catch (error) {
  *     span.setStatus({ code: SpanStatusCode.ERROR, message: 'failed' });
  *     throw error;

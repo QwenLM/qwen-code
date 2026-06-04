@@ -33,8 +33,7 @@ export { mcpTransportOf, type McpTransportKind } from './mcp-client-manager.js';
  * Default set of transports the pool will share. stdio + websocket
  * are true OS subprocesses whose state is observable and isolatable;
  * HTTP/SSE servers often bind state to the request stream and need
- * explicit operator opt-in. See `docs/design/f2-mcp-transport-pool.md`
- * .
+ * explicit operator opt-in. See `docs/design/f2-mcp-transport-pool.md`.
  */
 export const POOLED_TRANSPORTS_DEFAULT: ReadonlySet<McpTransportKind> = new Set(
   ['stdio', 'websocket'],
@@ -56,7 +55,7 @@ export function isPoolable(
 /**
  * Normalize OAuth config so functionally-equivalent shapes collapse
  * to the same fingerprint. `undefined`, `null`, `{}`, `{enabled: false}`
- * all mean "no OAuth" → all return `null`. See in design doc.
+ * all mean "no OAuth" → all return `null`.
  *
  * Scopes / audiences sorted so callsite order doesn't matter; explicit
  * `null` defaults so an undefined field doesn't change the hash vs an
@@ -122,7 +121,7 @@ function sortedEntries(
  *
  * TODO(follow-up): if two sessions race-acquire the same key with
  * different discoveryTimeoutMs values, the first wins. This matches
- * previously behavior (per-session managers each used their own timeout)
+ * previous behavior (per-session managers each used their own timeout)
  * but could surprise operators tuning per-session. Acceptable for v1.
  */
 export function fingerprint(cfg: MCPServerConfig): PoolKey {

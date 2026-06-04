@@ -6,9 +6,9 @@
 
 /**
  * `BridgeOptions` and the daemon-host injection seam (`DaemonStatusProvider`)
- * for the ACP bridge factory. Lifted to `@qwen-code/acp-bridge` in the
- * 22b/2 so the bridge package owns the construction contract independently
- * of `cli/src/serve/`. The factory implementation itself moves in the next step.
+ * for the ACP bridge factory. Lifted to `@qwen-code/acp-bridge` so the
+ * bridge package owns the construction contract independently of
+ * `cli/src/serve/`.
  */
 
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
@@ -287,8 +287,7 @@ export interface BridgeOptions {
   telemetry?: BridgeTelemetry;
 
   /**
-   * Optional fs injection seam
-   * scope). When provided, `BridgeClient.readTextFile` and
+   * Optional fs injection seam. When provided, `BridgeClient.readTextFile` and
    * `BridgeClient.writeTextFile` delegate every ACP fs call to this
    * implementation instead of using BridgeClient's inline
    * `fs.realpath` / `fs.writeFile` / `fs.readFile` proxy.

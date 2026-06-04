@@ -3015,11 +3015,10 @@ export function detectFromLoopback(req: {
 }
 
 /**
- * Workspace-level mutation routes validate the parsed `X-Qwen-Client-Id`
- * against `bridge.knownClientIds()` so the `originatorClientId` stamped
- * onto fan-out events is grounded in a known identity. Returns the
- * validated client id (or `undefined` when no header was supplied),
- * `null` when a 400 has already been emitted.
+ * Validate that a server name from a route parameter is a non-empty
+ * alphanumeric string within the length limit and not a reserved JS
+ * property name. Emits a 400 JSON response and returns `false` on
+ * validation failure.
  */
 function validateMcpRuntimeServerName(
   name: unknown,
@@ -3057,6 +3056,13 @@ function validateMcpRuntimeServerName(
   return true;
 }
 
+/**
+ * Workspace-level mutation routes validate the parsed `X-Qwen-Client-Id`
+ * against `bridge.knownClientIds()` so the `originatorClientId` stamped
+ * onto fan-out events is grounded in a known identity. Returns the
+ * validated client id (or `undefined` when no header was supplied),
+ * `null` when a 400 has already been emitted.
+ */
 function parseAndValidateWorkspaceClientId(
   req: import('express').Request,
   res: import('express').Response,

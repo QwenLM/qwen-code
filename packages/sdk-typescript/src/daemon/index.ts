@@ -35,13 +35,11 @@ export {
   createDaemonSessionViewState,
   isDaemonEventType,
   isKnownDaemonEvent,
-  // Re-export
-  // the workspace-scoped budget event helper. Pre-fix the PR
-  // description and event JSDoc told consumers to use this helper to
-  // branch on `scope === 'workspace'`, but the function lived in
-  // `events.ts` and was never added to this barrel — SDK consumers
-  // had no public import path. Same omission pattern caught for PR-21
-  // auth surface; locked down by `daemon-public-surface.test.ts`.
+  // Re-export the workspace-scoped budget event helper. Previously
+  // the event JSDoc told consumers to use this helper to branch on
+  // `scope === 'workspace'`, but the function lived in `events.ts`
+  // and was never added to this barrel — SDK consumers had no public
+  // import path. Now locked down by `daemon-public-surface.test.ts`.
   isWorkspaceScopedBudgetEvent,
   reduceDaemonAuthEvent,
   reduceDaemonAuthEvents,

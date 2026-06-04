@@ -244,10 +244,9 @@ export class BudgetExhaustedError extends Error {
  * `subprocessCount = stdio + websocket` arithmetic is therefore
  * accurate-by-vacancy today (no real websocket subprocesses exist
  * yet) and will need revisiting if a websocket transport ships.
- * Tracked: / future core decision (see PR thread for
- *
- * on (a) implement WS in createTransport vs (b) drop `tcp` from
- * `MCPServerConfig` + both mappers).
+ * This is a future core decision: (a) implement WS in
+ * createTransport vs (b) drop `tcp` from `MCPServerConfig` + both
+ * mappers.
  *
  * `sdk` is checked first because `SDK_MCP_SERVER_FIELDS` may coexist
  * with a placeholder `command` — without the sdk-first order, an
@@ -1559,7 +1558,7 @@ export class McpClientManager {
             // terminal failure → entry removed from `pool.entries`)
             // evicts our stale handle.
             //
-            // : keep a NAMED listener and unregister it on
+            // Keep a NAMED listener and unregister it on
             // 'failed' BEFORE deleting from `pooledConnections`. Pre-
             // fix the anonymous arrow stayed attached to the entry's
             // EventEmitter even after we deleted from
@@ -1631,7 +1630,7 @@ export class McpClientManager {
     } finally {
       poolBudget?.endBulkPass();
       this.discoveryState = MCPDiscoveryState.COMPLETED;
-      // : same global update as the IN_PROGRESS write
+      // Same global update as the IN_PROGRESS write
       // above; preflight cell + snapshot route both read the global.
       setMCPDiscoveryState(MCPDiscoveryState.COMPLETED);
       this.eventEmitter?.emit('mcp-client-update', this.clients);
@@ -1669,13 +1668,13 @@ export class McpClientManager {
     // already cleared the Map — leaking pool refs that no caller now
     // tracks.
     //
-    //  hardening over plain `await`:
+    // Hardening over plain `await`:
     //   1. Outer 5s deadline via `Promise.race` — a single hung MCP
     //      server should not block daemon SIGTERM indefinitely;
     //      individual acquires are bounded by `runWithTimeout`
     //      (stdio default 30s, remote 5s), but the aggregate
     //      `discoveryInFlight` promise has no inherent cap. Matches
-    //      the pool's own `drainAll` shutdown-bounded contract .
+    //      the pool's own `drainAll` shutdown-bounded contract.
     //   2. Debug log on entry + on rejection — pre-fix the empty catch
     //      silently swallowed rejections; an MCP-discovery hang during
     //      shutdown left zero log trail. Now operators tailing
@@ -2252,8 +2251,7 @@ export class McpClientManager {
         // absent, so the trailing `finally`-block call becomes a no-op.
         this.stopHealthCheck(serverName);
         this.clients.delete(serverName);
-        // fix (review + R8 #4 line
-        // 1221): release the budget slot ONLY if THIS in-flight
+        // Release the budget slot ONLY if THIS in-flight
         // discoverMcpToolsForServerInternal call freshly reserved
         // it. `freshReservations.has(serverName)` distinguishes:
         //

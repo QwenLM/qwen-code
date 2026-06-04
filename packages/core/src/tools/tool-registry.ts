@@ -200,7 +200,7 @@ export class ToolRegistry {
     // ctor; previously 7 positional args with `undefined, undefined`
     // sentinels for `healthConfig` / `budgetConfig`. `pool` is
     // forwarded from Config (set by daemon-mode QwenAgent in
-    // `newSessionConfig`); when undefined the manager keeps its previously
+    // `newSessionConfig`); when undefined the manager keeps its previous
     // per-session spawn behavior, when defined non-SDK MCP discovery
     // goes through `pool.acquire` so N sessions in the same workspace
     // share one transport per unique server config.
@@ -257,7 +257,7 @@ export class ToolRegistry {
         );
       }
     }
-    //   : re-check the disabled set against
+    // Re-check the disabled set against
     // the FINAL registration name. Without this, an MCP tool that
     // collides with a lazy factory and gets renamed via
     // `asFullyQualifiedTool()` (e.g. `structured_output` →
@@ -444,7 +444,7 @@ export class ToolRegistry {
         // Always drop the server from the global status registry — even
         // if disconnect or the exclusion-list update throws — so the
         // Footer's MCP health pill stops counting it as "offline". A
-        // leftover entry would resurrect the bug from .
+        // leftover entry would resurrect the bug.
         removeMCPServerStatus(serverName);
       }
     }

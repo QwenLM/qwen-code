@@ -13,23 +13,18 @@ import type {
 
 /**
  * Injection seam for the ACP fs proxy on `BridgeClient.readTextFile` /
- * `BridgeClient.writeTextFile`. The immediate follow-up PR will land
- * a serve-side adapter that wraps its `WorkspaceFileSystem` so
- * production `qwen serve` writes pick up the TOCTOU + symlink +
- * trust-gate + audit machinery — closing the
- * follow-up thread about `BridgeClient`'s inline fs
- * proxy bypassing `WorkspaceFileSystem` (originally raised in
- * code review; see also FIXME(stage-1.5) lifted
- * to this package as part of the extraction). Until that adapter ships and `runQwenServe` wires it
- * through `BridgeOptions.fileSystem`, BridgeClient continues to use
- * its inline fs proxy (preserving pre-F1 behavior).
+ * `BridgeClient.writeTextFile`. A serve-side adapter wraps
+ * `WorkspaceFileSystem` so production `qwen serve` writes pick up the
+ * TOCTOU + symlink + trust-gate + audit machinery. Until that adapter
+ * ships and `runQwenServe` wires it through `BridgeOptions.fileSystem`,
+ * BridgeClient continues to use its inline fs proxy (preserving
+ * pre-extraction behavior).
  *
  * Lifted from the inline `fs.writeFile` / `fs.readFile` implementations
- * BridgeClient carried before
- * scope). Bridge tests + Mode A embedded callers can omit the
- * field on `BridgeOptions`; BridgeClient falls back to its inline
- * proxy so the pre-lift behavior is preserved verbatim when no
- * provider is injected.
+ * BridgeClient carried before the extraction. Bridge tests + Mode A
+ * embedded callers can omit the field on `BridgeOptions`; BridgeClient
+ * falls back to its inline proxy so the pre-lift behavior is preserved
+ * verbatim when no provider is injected.
  *
  * Method signatures intentionally mirror the ACP SDK request/response
  * shapes so the adapter does the minimum amount of translation
@@ -89,9 +84,9 @@ export interface BridgeFileSystem {
    * lacks the concept entirely). The contract does NOT require it.
    *
    * The serve-side adapter satisfies this via
-   * `WorkspaceFileSystem.writeTextOverwrite` — the
-   * that does atomic tmp+rename with mode preservation + `0o600`
-   * default + symlink reject inside a per-path lock.
+   * `WorkspaceFileSystem.writeTextOverwrite`, which does atomic
+   * tmp+rename with mode preservation + `0o600` default + symlink
+   * reject inside a per-path lock.
    */
   writeText(params: WriteTextFileRequest): Promise<WriteTextFileResponse>;
 }

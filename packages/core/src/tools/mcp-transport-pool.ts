@@ -394,8 +394,8 @@ export class McpTransportPool {
           // spawn failure so a transient connect failure
           // doesn't leak the slot until daemon restart.
           //
-          //  contract (codified as `rollbackReservationOnSpawnFailure`
-          // helper in ): only release if THIS acquire actually
+          // Contract (codified as `rollbackReservationOnSpawnFailure`
+          // helper): only release if THIS acquire actually
           // reserved a new slot (`reservationResult === 'reserved'`).
           // `'already_held'` means a sibling holds the slot — phantom-
           // releasing here would decrement the counter if the sibling
@@ -1228,7 +1228,7 @@ export class McpTransportPool {
       // prompts into a session that had already been closed. With the
       // early indexing, a concurrent `releaseSession` finds the entry,
       // calls `entry.forceShutdown('manual')` (which synchronously
-      // flips state→'closed' per ), and the post-await
+      // flips state→'closed'), and the post-await
       // `isTerminated()` guard below catches it. Every error/discard
       // path now mirrors this with `indexDetach` to keep the index
       // consistent.

@@ -120,10 +120,10 @@ export function mountWorkspaceAgentsRoutes(
       //   - 4 levels × <50 agents on local SSD = sub-ms IO, well below
       //     the per-request budget for any client UI.
       //   - A short-TTL cache would re-introduce the exact stale-list
-      //     bug a previous fix addressed (a recently-edited file invisible
+      //     bug that was previously fixed (a recently-edited file invisible
       //     until the TTL elapses); invalidation logic adds state to
-      //     the route handler that audit / policy / mediator is
-      //     the proper home for.
+      //     the route handler that the audit / policy / mediator layer
+      //     is the proper home for.
       //   - `fs.watch` is platform-fragile (recursive watch broken on
       //     some macOS Node versions, inotify limits on Linux) and the
       //     daemon's per-request semantics make watchers harder to

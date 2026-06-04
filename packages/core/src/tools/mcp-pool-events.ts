@@ -90,7 +90,7 @@ export type PoolEvent =
        *     reconnect-budget concept; this case carries a synthetic
        *     marker string instead of the upstream cause (threading
        *     the real `McpClient` error to this emit is tracked as a
-       *     follow-up — ).
+       *     follow-up.
        * SDK consumers writing reducers around `'failed'` should NOT
        * assume "reconnect was attempted and exhausted"; the entry is
        * simply terminal and the manager-side `onFailed` listener has
