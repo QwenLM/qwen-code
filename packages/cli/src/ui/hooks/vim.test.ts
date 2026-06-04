@@ -1986,8 +1986,8 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('>')));
         act(() => result.current.handleInput(makeKey('>')));
 
-        // Should insert spaces at line start
-        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 0, 0, 0, '  ');
+        // Should replace entire line with indented version (atomic operation)
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 0, 0, 5, '  hello');
       });
     });
 
@@ -2001,8 +2001,8 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('<')));
         act(() => result.current.handleInput(makeKey('<')));
 
-        // Should remove spaces from line start
-        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 0, 0, 2, '');
+        // Should replace entire line with outdented version (atomic operation)
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 0, 0, 7, 'hello');
       });
     });
 
