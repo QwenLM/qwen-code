@@ -2736,7 +2736,7 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
     });
 
-    it('does not count hard-rescue NOOP results toward the retry bound', async () => {
+    it('stops hard-rescue after repeated NOOP results are still oversized', async () => {
       const compressSpy = vi
         .spyOn(ChatCompressionService.prototype, 'compress')
         .mockResolvedValue({
@@ -2749,7 +2749,7 @@ describe('GeminiChat', async () => {
         });
 
       chat.setLastPromptTokenCount(176_999);
-      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES + 1; i++) {
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
         await expect(
           chat.sendMessageStream(
             'test-model',
@@ -2759,11 +2759,25 @@ describe('GeminiChat', async () => {
         ).rejects.toThrow(/compression status: NOOP/i);
       }
 
-      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES + 1);
-      expect(compressSpy.mock.calls.map(([, opts]) => opts.force)).toEqual(
-        Array(MAX_CONSECUTIVE_FAILURES + 1).fill(true),
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('after bounded noop hard-rescue'),
       );
-      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'send after bounded noop hard-rescue' },
+        'prompt-hard-rescue-after-noop-bound',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
+      expect(compressSpy.mock.calls.map(([, opts]) => opts.force)).toEqual(
+        Array(MAX_CONSECUTIVE_FAILURES).fill(true),
+      );
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
     });
 
     it('forwards latched consecutiveFailures into hard-rescue (no pre-call reset); success recovers via the post-call branch', async () => {

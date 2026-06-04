@@ -1630,12 +1630,14 @@ export class GeminiChat {
           compressionInfo,
           localPromptTokensAfterCompression,
         );
+        if (shouldForceFromHard) {
+          this.hardRescueFailureCount =
+            hardRescueFailureCountBeforeHardRescue + 1;
+        }
         if (
           compressionInfo.compressionStatus === CompressionStatus.COMPRESSED &&
           historyBeforeHardRescue
         ) {
-          this.hardRescueFailureCount =
-            hardRescueFailureCountBeforeHardRescue + 1;
           // Hard-rescue compression mutates in-memory history before this
           // guard can compare the compressed prompt size. If the compressed
           // prompt is still too large to send, restore the pre-compression
