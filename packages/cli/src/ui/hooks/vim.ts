@@ -1552,11 +1552,15 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           // ── Paste ──
           case 'p': {
             let text = state.yankRegister;
-            if (!text) text = readClipboard();
+            let isLinewise = state.yankLinewise;
+            if (!text) {
+              text = readClipboard();
+              isLinewise = text.includes('\n');
+            }
             if (text) {
               const [row, col] = buffer.cursor;
               const line = buffer.lines[row] ?? '';
-              if (state.yankLinewise) {
+              if (isLinewise) {
                 const repeated = preparePasteText(text, repeatCount);
                 if (row + 1 >= buffer.lines.length) {
                   const lastRow = buffer.lines.length - 1;
@@ -1592,10 +1596,14 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           case 'P': {
             let text = state.yankRegister;
-            if (!text) text = readClipboard();
+            let isLinewise = state.yankLinewise;
+            if (!text) {
+              text = readClipboard();
+              isLinewise = text.includes('\n');
+            }
             if (text) {
               const [row, col] = buffer.cursor;
-              if (state.yankLinewise) {
+              if (isLinewise) {
                 const repeated = preparePasteText(text, repeatCount);
                 buffer.replaceRange(row, 0, row, 0, repeated);
                 buffer.vimMoveToLineStart();
