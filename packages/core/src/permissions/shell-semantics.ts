@@ -390,6 +390,17 @@ function targetDirectoryWrite(
   return { virtualTool: 'write_file', filePath: resolvePath(target, cwd) };
 }
 
+function writeOpForFlag(
+  args: string[],
+  cwd: string,
+  shortName: string,
+  longName: string,
+): ShellOperation | undefined {
+  const target = getFlagValue(args, shortName, longName);
+  if (!target || !looksLikePath(target)) return undefined;
+  return { virtualTool: 'write_file', filePath: resolvePath(target, cwd) };
+}
+
 function hasCombinedShortFlag(arg: string, flag: string): boolean {
   return (
     arg.startsWith('-') && !arg.startsWith('--') && arg.slice(1).includes(flag)
@@ -692,26 +703,31 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
         '--width',
       ]),
     ),
-  sort: (a, d) =>
-    readOps(
-      a,
-      d,
-      new Set([
-        '-k',
-        '-t',
-        '-T',
-        '--output',
-        '-o',
-        '--field-separator',
-        '--key',
-        '--temporary-directory',
-        '--compress-program',
-        '--batch-size',
-        '--parallel',
-        '--random-source',
-        '--sort',
-      ]),
-    ),
+  sort: (a, d) => {
+    const output = writeOpForFlag(a, d, '-o', '--output');
+    return [
+      ...readOps(
+        a,
+        d,
+        new Set([
+          '-k',
+          '-t',
+          '-T',
+          '--output',
+          '-o',
+          '--field-separator',
+          '--key',
+          '--temporary-directory',
+          '--compress-program',
+          '--batch-size',
+          '--parallel',
+          '--random-source',
+          '--sort',
+        ]),
+      ),
+      ...(output ? [output] : []),
+    ];
+  },
   uniq: (a, d) =>
     readOps(
       a,

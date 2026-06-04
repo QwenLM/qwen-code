@@ -707,6 +707,23 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ).toBe(true);
   });
 
+  it('returns true for sort writing protected paths via output flags', () => {
+    for (const command of [
+      'sort -o .qwen/settings.json /dev/null',
+      'sort --output=.qwen/settings.json /dev/null',
+    ]) {
+      expect(
+        shouldForceAutoModeReviewForAllow(
+          ctx({
+            toolName: ToolNames.SHELL,
+            command,
+            cwd: '/repo',
+          }),
+        ),
+      ).toBe(true);
+    }
+  });
+
   it('returns true for protected heredoc redirects with repeated quote tokens', () => {
     expect(
       shouldForceAutoModeReviewForAllow(

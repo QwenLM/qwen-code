@@ -388,6 +388,29 @@ describe('extractShellOperations', () => {
     });
   });
 
+  it('sort -o emits the output path as a write', () => {
+    expect(
+      sorted(
+        extractShellOperations('sort -o .qwen/settings.json /tmp/in', CWD),
+      ),
+    ).toEqual([
+      { virtualTool: 'read_file', filePath: '/tmp/in' },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen/settings.json` },
+    ]);
+
+    expect(
+      sorted(
+        extractShellOperations(
+          'sort --output=.qwen/settings.json /tmp/in',
+          CWD,
+        ),
+      ),
+    ).toEqual([
+      { virtualTool: 'read_file', filePath: '/tmp/in' },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen/settings.json` },
+    ]);
+  });
+
   it('combined redirect >file without space', () => {
     const ops = extractShellOperations('echo hi >/tmp/foo', CWD);
     expect(ops).toContainEqual({

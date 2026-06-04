@@ -44,7 +44,7 @@ import type { PermissionCheckContext } from './types.js';
 const autoModeDebugLogger = createDebugLogger('AUTO_MODE');
 
 const RAW_PROTECTED_WRITE_COMMANDS =
-  /\b(?:cp|mv|install|rsync|patch|perl|sed)\b/;
+  /\b(?:cp|mv|install|rsync|patch|perl|sed|sort)\b/;
 
 /**
  * Built-in tools whose any-parameter behavior is safe under the AUTO mode

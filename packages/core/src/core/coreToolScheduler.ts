@@ -1364,6 +1364,7 @@ export class CoreToolScheduler {
             this.finalizeToolSpan(callId);
           }
           this.callIdToPostToolBatchSignal.delete(callId);
+          this.autoModeFallbackCallIds.delete(callId);
         } catch (e) {
           debugLogger.warn(
             `drainSpansForBatch: failed to drain ${callId}: ${e instanceof Error ? e.message : String(e)}`,
