@@ -73,8 +73,37 @@ describe('insightCommand', () => {
       pathToFileURL(
         path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
       ).href,
-      { allowFile: true },
+      {
+        allowFile: true,
+        allowedFilePaths: [
+          path.resolve('runtime-output', 'insights', 'insight-2026-03-05.html'),
+        ],
+      },
     );
+  });
+
+  it('shows the generated file path before attempting to open the browser', async () => {
+    if (!insightCommand.action) {
+      throw new Error('insight command must have action');
+    }
+
+    await insightCommand.action(mockContext, '');
+
+    const messages = vi
+      .mocked(mockContext.ui.addItem)
+      .mock.calls.map(([item]) =>
+        'text' in item && typeof item.text === 'string' ? item.text : '',
+      );
+    expect(messages).toContain(
+      `Insights generated at: ${path.resolve(
+        'runtime-output',
+        'insights',
+        'insight-2026-03-05.html',
+      )}. If the browser does not open automatically, open this file manually.`,
+    );
+    expect(
+      messages.some((message) => message.includes('Opening insights')),
+    ).toBe(false);
   });
 
   it('streams ACP progress messages without waiting for generation to finish', async () => {

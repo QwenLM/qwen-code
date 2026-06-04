@@ -57,7 +57,19 @@ export const docsCommand: SlashCommand = {
         },
         Date.now(),
       );
-      await openBrowserSecurely(docsUrl);
+      try {
+        await openBrowserSecurely(docsUrl);
+      } catch (_error) {
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: t('Failed to open browser. View documentation at {{url}}', {
+              url: docsUrl,
+            }),
+          },
+          Date.now(),
+        );
+      }
     }
     return;
   },

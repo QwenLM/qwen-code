@@ -225,9 +225,12 @@ export const insightCommand: SlashCommand = {
       context.ui.addItem(
         {
           type: MessageType.INFO,
-          text: t('Opening insights in your browser: {{path}}', {
-            path: outputPath,
-          }),
+          text: t(
+            'Insights generated at: {{path}}. If the browser does not open automatically, open this file manually.',
+            {
+              path: outputPath,
+            },
+          ),
         },
         Date.now(),
       );
@@ -235,22 +238,10 @@ export const insightCommand: SlashCommand = {
       try {
         await openBrowserSecurely(pathToFileURL(outputPath).href, {
           allowFile: true,
+          allowedFilePaths: [outputPath],
         });
       } catch (browserError) {
         logger.error('Failed to open browser automatically:', browserError);
-
-        context.ui.addItem(
-          {
-            type: MessageType.INFO,
-            text: t(
-              'Insights generated at: {{path}}. Please open this file in your browser.',
-              {
-                path: outputPath,
-              },
-            ),
-          },
-          Date.now(),
-        );
       }
 
       context.ui.setDebugMessage(t('Insights ready.'));

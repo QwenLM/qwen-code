@@ -4,22 +4,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type SpawnOptions } from 'node:child_process';
 import { promisify } from 'node:util';
 import { platform } from 'node:os';
-import { URL } from 'node:url';
-import { shouldAttemptBrowserLaunch } from './browser.js';
+import { resolve } from 'node:path';
+import { URL, fileURLToPath } from 'node:url';
+import {
+  isBrowserCommandBlocked,
+  shouldAttemptBrowserLaunch,
+} from './browser.js';
 
 const execFileAsync = promisify(execFile);
 
+type BrowserLaunchOptions = {
+  allowFile?: boolean;
+  allowedFilePaths?: string[];
+};
+
 /**
  * Validates that a URL is safe to open in a browser.
- * Only allows HTTP and HTTPS URLs to prevent command injection.
+ * Only allows HTTP and HTTPS URLs by default. file:// URLs are allowed only
+ * when a caller opts in for locally generated reports.
  *
  * @param url The URL to validate
  * @throws Error if the URL is invalid or uses an unsafe protocol
  */
-function validateUrl(url: string, { allowFile = false } = {}): void {
+function validateUrl(
+  url: string,
+  { allowFile = false, allowedFilePaths }: BrowserLaunchOptions = {},
+): void {
   let parsedUrl: URL;
 
   try {
@@ -39,6 +52,17 @@ function validateUrl(url: string, { allowFile = false } = {}): void {
         ', ',
       )} are allowed.`,
     );
+  }
+
+  if (parsedUrl.protocol === 'file:' && allowFile) {
+    if (!allowedFilePaths?.length) {
+      throw new Error('allowedFilePaths is required when allowFile is true');
+    }
+    const requestedPath = resolve(fileURLToPath(parsedUrl));
+    const allowed = allowedFilePaths.map((filePath) => resolve(filePath));
+    if (!allowed.includes(requestedPath)) {
+      throw new Error('File URL is not in the allowed file set');
+    }
   }
 
   // Additional validation: ensure no newlines or control characters
@@ -61,12 +85,35 @@ function validateUrl(url: string, { allowFile = false } = {}): void {
  */
 export async function openBrowserSecurely(
   url: string,
-  browserOptions: { allowFile?: boolean } = {},
+  browserOptions: BrowserLaunchOptions = {},
 ): Promise<void> {
   // Validate the URL first
   validateUrl(url, browserOptions);
 
-  if (!shouldAttemptBrowserLaunch()) {
+  const platformName = platform();
+  let command: string;
+  let args: string[];
+
+  const browserEnv = process.env['BROWSER']?.trim();
+  const browserCommand =
+    platformName === 'win32' ? undefined : buildBrowserCommand(browserEnv, url);
+
+  if (browserCommand) {
+    try {
+      await launchDetached(browserCommand.command, browserCommand.args);
+      return;
+    } catch (_error) {
+      /* eslint-disable no-console */
+      console.warn(
+        `Failed to open BROWSER command ${browserCommand.command}: ${formatLaunchError(
+          _error,
+        )}. Falling back to the platform browser opener.`,
+      );
+      /* eslint-enable no-console */
+    }
+  }
+
+  if (!shouldAttemptBrowserLaunch({ ignoreBrowserBlocklist: true })) {
     /* eslint-disable no-console */
     console.warn(
       `Browser launch is not available in this environment. Please open this URL manually: ${url}`,
@@ -75,21 +122,7 @@ export async function openBrowserSecurely(
     return;
   }
 
-  const platformName = platform();
-  let command: string;
-  let args: string[];
-
-  const browserEnv = process.env['BROWSER']?.trim();
-  const browserBlocklist = ['www-browser'];
-  if (browserEnv && !browserBlocklist.includes(browserEnv)) {
-    const browserCommand = parseBrowserCommand(browserEnv);
-    if (browserCommand) {
-      command = browserCommand.command;
-      args = [...browserCommand.args, url];
-    } else {
-      throw new Error('Invalid BROWSER environment variable');
-    }
-  } else {
+  {
     switch (platformName) {
       case 'darwin':
         // macOS
@@ -148,17 +181,21 @@ export async function openBrowserSecurely(
       command === 'xdg-open'
     ) {
       const fallbackCommands = [
-        'gnome-open',
-        'kde-open',
-        'firefox',
-        'chromium',
-        'google-chrome',
-        'microsoft-edge',
+        { command: 'gnome-open', detached: false },
+        { command: 'kde-open', detached: false },
+        { command: 'firefox', detached: true },
+        { command: 'chromium', detached: true },
+        { command: 'google-chrome', detached: true },
+        { command: 'microsoft-edge', detached: true },
       ];
 
-      for (const fallbackCommand of fallbackCommands) {
+      for (const { command: fallbackCommand, detached } of fallbackCommands) {
         try {
-          await execFileAsync(fallbackCommand, [url], execOptions);
+          if (detached) {
+            await launchDetached(fallbackCommand, [url]);
+          } else {
+            await execFileAsync(fallbackCommand, [url], execOptions);
+          }
           return; // Success!
         } catch {
           // Try next command
@@ -177,19 +214,121 @@ export async function openBrowserSecurely(
   }
 }
 
+async function launchDetached(command: string, args: string[]): Promise<void> {
+  const spawnOptions: SpawnOptions = {
+    env: {
+      ...process.env,
+      SHELL: undefined,
+    },
+    detached: true,
+    stdio: 'ignore',
+  };
+
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, spawnOptions);
+    let settled = false;
+
+    child.once('error', (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(error);
+    });
+
+    child.once('spawn', () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      child.unref();
+      resolve();
+    });
+  });
+}
+
+function formatLaunchError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function buildBrowserCommand(
+  browserEnv: string | undefined,
+  url: string,
+): { command: string; args: string[] } | undefined {
+  if (!browserEnv) {
+    return undefined;
+  }
+
+  const browserCommand = parseBrowserCommand(browserEnv);
+  if (!browserCommand) {
+    /* eslint-disable no-console */
+    console.warn(
+      'Invalid BROWSER environment variable, falling back to platform default.',
+    );
+    /* eslint-enable no-console */
+    return undefined;
+  }
+
+  if (isBrowserCommandBlocked(browserCommand.command)) {
+    return undefined;
+  }
+
+  let usedPlaceholder = false;
+  const args = browserCommand.args.map((arg) => {
+    if (!arg.includes('%s')) {
+      return arg;
+    }
+    usedPlaceholder = true;
+    return arg.replace(/%s/g, () => url);
+  });
+
+  if (!usedPlaceholder) {
+    args.push(url);
+  }
+
+  return { command: browserCommand.command, args };
+}
+
 function parseBrowserCommand(
   browserEnv: string,
 ): { command: string; args: string[] } | undefined {
-  const parts =
-    browserEnv.match(/"[^"]*"|'[^']*'|[^\s]+/g)?.map((part) => {
-      if (
-        (part.startsWith('"') && part.endsWith('"')) ||
-        (part.startsWith("'") && part.endsWith("'"))
-      ) {
-        return part.slice(1, -1);
+  const parts: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | undefined;
+
+  for (const char of browserEnv) {
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      } else {
+        current += char;
       }
-      return part;
-    }) ?? [];
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      if (current) {
+        parts.push(current);
+        current = '';
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (quote) {
+    return undefined;
+  }
+
+  if (current) {
+    parts.push(current);
+  }
 
   const [command, ...args] = parts;
   if (!command) {

@@ -205,4 +205,26 @@ Memory Usage: 100 MB`;
     );
     expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(expectedUrl);
   });
+
+  it('should report browser launch failures without failing the command', async () => {
+    mockOpenBrowserSecurely.mockRejectedValueOnce(new Error('browser failed'));
+    const mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getBugCommand: () => undefined,
+        },
+      },
+    });
+
+    if (!bugCommand.action) throw new Error('Action is not defined');
+    await bugCommand.action(mockContext, 'Browser failure');
+
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: 'Could not open URL in browser: browser failed',
+      }),
+      expect.any(Number),
+    );
+  });
 });

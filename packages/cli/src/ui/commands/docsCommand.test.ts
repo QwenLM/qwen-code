@@ -102,6 +102,25 @@ describe('docsCommand', () => {
     expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(docsUrl);
   });
 
+  it('should show the docs URL when browser opening throws unexpectedly', async () => {
+    if (!docsCommand.action) {
+      throw new Error('docsCommand must have an action.');
+    }
+
+    const docsUrl = 'https://qwenlm.github.io/qwen-code-docs/en';
+    mockOpenBrowserSecurely.mockRejectedValueOnce(new Error('bad url'));
+
+    await docsCommand.action(mockContext, '');
+
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.ERROR,
+        text: `Failed to open browser. View documentation at ${docsUrl}`,
+      },
+      expect.any(Number),
+    );
+  });
+
   describe('non-interactive mode', () => {
     it('should return docs URL without opening browser', async () => {
       if (!docsCommand.action) throw new Error('Command has no action');
