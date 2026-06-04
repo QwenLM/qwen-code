@@ -562,19 +562,28 @@ function broadcastTurnComplete(
  * `message`; the actual detail lives in `data.details`.
  */
 export function extractErrorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
+  if (err instanceof Error) {
+    const data = (err as Error & { data?: unknown }).data;
+    const detail = extractJsonRpcErrorDetail(data);
+    return detail ?? err.message;
+  }
   if (typeof err === 'object' && err !== null) {
     const obj = err as Record<string, unknown>;
-    const data = obj['data'];
-    if (typeof data === 'string' && data.length > 0) return data;
-    if (typeof data === 'object' && data !== null) {
-      const details = (data as Record<string, unknown>)['details'];
-      if (typeof details === 'string' && details.length > 0) return details;
-    }
+    const detail = extractJsonRpcErrorDetail(obj['data']);
+    if (detail) return detail;
     const msg = obj['message'];
     if (typeof msg === 'string') return msg;
   }
   return String(err);
+}
+
+function extractJsonRpcErrorDetail(data: unknown): string | undefined {
+  if (typeof data === 'string' && data.length > 0) return data;
+  if (typeof data === 'object' && data !== null) {
+    const details = (data as Record<string, unknown>)['details'];
+    if (typeof details === 'string' && details.length > 0) return details;
+  }
+  return undefined;
 }
 
 export function extractErrorCode(err: unknown): string | undefined {

@@ -429,6 +429,7 @@ export function DaemonSessionProvider({
                     activeSession.clientId,
                     replayOpts,
                     setConnection,
+                    { updateConnection: false },
                   ),
                 );
               } catch (error) {
@@ -583,6 +584,10 @@ export function DaemonSessionProvider({
                   // Resetting and continuing on the same stream can only replay
                   // the surviving tail; reload the session snapshot instead so
                   // compactedReplay/liveJournal rebuild the full transcript.
+                  console.warn(
+                    '[DaemonSessionProvider] ring eviction detected, reloading session (sessionId=%s)',
+                    activeSession.sessionId,
+                  );
                   resyncRequested = true;
                   session = undefined;
                   sessionRef.current = undefined;
@@ -898,8 +903,11 @@ function normalizeAndFilterEvent(
   clientId: string | undefined,
   opts: { suppressOwnUserEcho: boolean; includeRawEvent: boolean },
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>,
+  behavior: { updateConnection?: boolean } = {},
 ): DaemonUiEvent[] {
-  updateConnectionFromDaemonEvent(event, setConnection);
+  if (behavior.updateConnection !== false) {
+    updateConnectionFromDaemonEvent(event, setConnection);
+  }
   const normalized = normalizeDaemonEvent(event, {
     clientId,
     suppressOwnUserEcho: opts.suppressOwnUserEcho,

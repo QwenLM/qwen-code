@@ -8409,6 +8409,24 @@ describe('extractErrorMessage', () => {
     ).toBe('session not found');
   });
 
+  it('extracts details from Error subclasses with JSON-RPC data', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', {
+          details: 'session not found',
+        }),
+      ),
+    ).toBe('session not found');
+  });
+
+  it('extracts string data from Error subclasses with JSON-RPC data', () => {
+    expect(
+      extractErrorMessage(
+        new RequestError(-32603, 'Internal error', 'session not found'),
+      ),
+    ).toBe('session not found');
+  });
+
   it('extracts string data from JSON-RPC error object', () => {
     expect(
       extractErrorMessage({

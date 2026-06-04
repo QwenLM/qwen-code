@@ -1231,6 +1231,153 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('injects replay snapshot on initial session load', async () => {
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'initial replay' },
+              },
+            },
+          },
+          {
+            id: 2,
+            v: 1,
+            type: 'turn_complete',
+            data: { stopReason: 'end_turn' },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'initial replay', streaming: false },
+    ]);
+  });
+
+  it('does not let replay state events overwrite fresh connection status', async () => {
+    const session = createMockSession({
+      context: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'session-1',
+        workspaceCwd: '/mock-workspace',
+        state: { modes: { currentModeId: 'fresh-mode' } },
+      })),
+      supportedCommands: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'session-1',
+        availableCommands: [
+          {
+            name: 'fresh-command',
+            description: 'Fresh command',
+            input: null,
+            _meta: { source: 'builtin' },
+          },
+        ],
+        availableSkills: ['fresh-skill'],
+      })),
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 1,
+            v: 1,
+            type: 'approval_mode_changed',
+            data: { next: 'stale-mode' },
+          },
+          {
+            id: 2,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'available_commands_update',
+                availableCommands: [
+                  {
+                    name: 'stale-command',
+                    description: 'Stale command',
+                    input: null,
+                    _meta: { source: 'builtin' },
+                  },
+                ],
+                availableSkills: ['stale-skill'],
+              },
+            },
+          },
+          {
+            id: 3,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'replayed answer' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let connection: DaemonConnectionState | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      connection = useDaemonConnection();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'assistant',
+          text: 'replayed answer',
+        }),
+      ]),
+    );
+    expect(connection).toMatchObject({
+      currentMode: 'fresh-mode',
+      skills: ['fresh-skill'],
+    });
+    expect(connection?.commands?.map((command) => command.name)).toEqual([
+      'fresh-command',
+      'fresh-skill',
+    ]);
+  });
+
   it('finishes passive assistant streaming when no prompt action is active', async () => {
     vi.useFakeTimers();
     try {
