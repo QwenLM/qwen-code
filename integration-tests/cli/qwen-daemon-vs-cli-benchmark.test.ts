@@ -789,6 +789,7 @@ async function spawnDaemonWithTime(
             daemon = await spawnDaemon({
               workspaceCwd: ws,
               bootTimeoutMs: 35_000,
+              extraArgs: ['--max-sessions', '0'],
             });
 
             // Warmup: first session triggers ACP child spawn.
@@ -835,6 +836,7 @@ async function spawnDaemonWithTime(
           daemon = await spawnDaemon({
             workspaceCwd: ws,
             bootTimeoutMs: 35_000,
+            extraArgs: ['--max-sessions', '0'],
           });
 
           // Trigger ACP child spawn with first session

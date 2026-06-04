@@ -7,6 +7,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as os from 'node:os';
 import { Readable, Writable } from 'node:stream';
+import { getHeapStatistics } from 'node:v8';
 import { ndJsonStream } from '@agentclientprotocol/sdk';
 import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
 import { MissingCliEntryError } from './status.js';
@@ -22,8 +23,11 @@ export function getAcpMemoryArgs(): string[] {
     constrained && constrained > 0 ? constrained : os.totalmem();
   const totalMB = Math.floor(totalBytes / (1024 * 1024));
   const targetMB = Math.min(Math.floor(totalMB * 0.5), 16_384);
+  const currentLimitMB = Math.floor(
+    getHeapStatistics().heap_size_limit / (1024 * 1024),
+  );
   cachedMemoryArgs =
-    targetMB > 2048 ? [`--max-old-space-size=${targetMB}`] : [];
+    targetMB > currentLimitMB ? [`--max-old-space-size=${targetMB}`] : [];
   return cachedMemoryArgs;
 }
 
