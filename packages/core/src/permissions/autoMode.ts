@@ -307,7 +307,6 @@ export function shouldForceAutoModeReviewForAllow(
 function hasRawProtectedRedirect(command: string, cwd: string): boolean {
   for (let i = 0; i < command.length; i++) {
     if (command[i] !== '>') continue;
-    if (command[i - 1] === '<') continue;
     while (command[i] === '>' || command[i] === '|' || command[i] === '&') {
       i++;
     }

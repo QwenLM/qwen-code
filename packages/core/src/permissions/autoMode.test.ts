@@ -769,6 +769,30 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ).toBe(true);
   });
 
+  it('returns true for bidirectional redirects to protected paths', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'cat <> .qwen/settings.json',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('returns true for target-directory writes to protected filenames', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'cp -t .qwen /tmp/settings.json',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it('uses the provided cwd fallback when ctx.cwd is absent', () => {
     expect(
       shouldForceAutoModeReviewForAllow(

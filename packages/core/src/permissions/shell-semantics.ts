@@ -381,13 +381,23 @@ function getFlagValue(
   return undefined;
 }
 
-function targetDirectoryWrite(
-  args: string[],
-  cwd: string,
-): ShellOperation | undefined {
+function targetDirectoryPath(args: string[], cwd: string): string | undefined {
   const target = getFlagValue(args, '-t', '--target-directory');
   if (!target || !looksLikePath(target)) return undefined;
-  return { virtualTool: 'write_file', filePath: resolvePath(target, cwd) };
+  return resolvePath(target, cwd);
+}
+
+function targetDirectoryWrites(
+  targetDir: string,
+  sources: string[],
+): ShellOperation[] {
+  return sources.map((source) => ({
+    virtualTool: 'write_file',
+    filePath: nodePath.posix.join(
+      targetDir,
+      nodePath.posix.basename(source.replace(/\\/g, '/')),
+    ),
+  }));
 }
 
 function writeOpForFlag(
@@ -1164,7 +1174,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       })),
 
   cp: (args, cwd) => {
-    const targetDir = targetDirectoryWrite(args, cwd);
+    const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-S',
       '--suffix',
@@ -1188,7 +1198,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
           virtualTool: 'read_file' as const,
           filePath: resolvePath(p, cwd),
         })),
-        targetDir,
+        ...targetDirectoryWrites(targetDir, positional),
       ];
     }
     if (positional.length === 1) {
@@ -1211,7 +1221,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   },
 
   mv: (args, cwd) => {
-    const targetDir = targetDirectoryWrite(args, cwd);
+    const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-S',
       '--suffix',
@@ -1230,7 +1240,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
           virtualTool: 'edit' as const,
           filePath: resolvePath(p, cwd),
         })),
-        targetDir,
+        ...targetDirectoryWrites(targetDir, positional),
       ];
     }
     if (positional.length < 2) return [];
@@ -1247,7 +1257,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
   },
 
   install: (args, cwd) => {
-    const targetDir = targetDirectoryWrite(args, cwd);
+    const targetDir = targetDirectoryPath(args, cwd);
     const flagsWithValue = new Set([
       '-m',
       '--mode',
@@ -1275,7 +1285,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
           virtualTool: 'read_file' as const,
           filePath: resolvePath(p, cwd),
         })),
-        targetDir,
+        ...targetDirectoryWrites(targetDir, positional),
       ];
     }
     if (positional.length < 2) return [];
@@ -1349,7 +1359,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 
   ln: (args, cwd) => {
     // ln [-s] TARGET LINKNAME — the link being created is a write operation
-    const targetDir = targetDirectoryWrite(args, cwd);
+    const targetDir = targetDirectoryPath(args, cwd);
     const positional = getPositionalArgs(
       args,
       new Set(['-S', '--suffix', '-t', '--target-directory', '-b', '--backup']),
@@ -1360,7 +1370,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
           virtualTool: 'read_file' as const,
           filePath: resolvePath(p, cwd),
         })),
-        targetDir,
+        ...targetDirectoryWrites(targetDir, positional),
       ];
     }
     if (positional.length < 2) return [];

@@ -218,34 +218,34 @@ describe('extractShellOperations', () => {
 
   it('cp/mv/install/ln -t forms emit target-directory writes', () => {
     expect(
-      sorted(extractShellOperations('cp -t .qwen /tmp/payload', CWD)),
+      sorted(extractShellOperations('cp -t .qwen /tmp/settings.json', CWD)),
     ).toEqual([
-      { virtualTool: 'read_file', filePath: '/tmp/payload' },
-      { virtualTool: 'write_file', filePath: `${CWD}/.qwen` },
+      { virtualTool: 'read_file', filePath: '/tmp/settings.json' },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen/settings.json` },
     ]);
     expect(
       sorted(extractShellOperations('mv --target-directory=.qwen /tmp/a', CWD)),
     ).toEqual([
       { virtualTool: 'edit', filePath: '/tmp/a' },
-      { virtualTool: 'write_file', filePath: `${CWD}/.qwen` },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen/a` },
     ]);
     expect(
       sorted(extractShellOperations('install -t .qwen /tmp/tool', CWD)),
     ).toEqual([
       { virtualTool: 'read_file', filePath: '/tmp/tool' },
-      { virtualTool: 'write_file', filePath: `${CWD}/.qwen` },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen/tool` },
     ]);
     expect(
       sorted(extractShellOperations('ln -t .qwen /tmp/target', CWD)),
     ).toEqual([
       { virtualTool: 'read_file', filePath: '/tmp/target' },
-      { virtualTool: 'write_file', filePath: `${CWD}/.qwen` },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen/target` },
     ]);
     expect(
       sorted(extractShellOperations('cp -rt .qwen /tmp/payload', CWD)),
     ).toEqual([
       { virtualTool: 'read_file', filePath: '/tmp/payload' },
-      { virtualTool: 'write_file', filePath: `${CWD}/.qwen` },
+      { virtualTool: 'write_file', filePath: `${CWD}/.qwen/payload` },
     ]);
   });
 
