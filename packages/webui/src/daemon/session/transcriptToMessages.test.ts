@@ -243,6 +243,52 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('keeps compacted replay subagent content from overflowing to top level', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-completed', 'agent-1', 'completed', 10, {
+        title: 'Agent: 查询官网活动',
+        toolName: 'agent',
+        rawOutput: {
+          type: 'task_execution',
+          result: 'subagent final answer',
+        },
+        updatedAt: 100,
+      }),
+      textBlock('sub-thought', 'thought', 'subagent thinking', 20),
+      textBlock('sub-assistant', 'assistant', 'subagent answer', 30),
+      toolBlock('sub-fetch', 'fetch-1', 'completed', 40, {
+        title: 'WebFetch',
+        toolName: 'WebFetch',
+      }),
+      textBlock('main-assistant', 'assistant', 'main answer', 110),
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      role: 'tool_group',
+      tools: [
+        {
+          callId: 'agent-1',
+          status: 'completed',
+          subContent: 'subagent thinkingsubagent answer',
+          subTools: [{ callId: 'fetch-1', status: 'completed' }],
+        },
+      ],
+    });
+    expect(messages[1]).toMatchObject({
+      id: 'main-assistant',
+      role: 'assistant',
+      content: 'main answer',
+    });
+    expect(
+      messages.some(
+        (message) =>
+          message.role === 'assistant' &&
+          message.content.includes('subagent answer'),
+      ),
+    ).toBe(false);
+  });
+
   it('keeps parallel top-level subagents as sibling tool messages', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-1', 'agent-call-1', 'in_progress', 10, {

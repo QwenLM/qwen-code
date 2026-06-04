@@ -28,6 +28,7 @@ import {
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
   type DaemonTurnCompleteData,
+  type DaemonUiEvent,
 } from '@qwen-code/sdk/daemon';
 import { createDaemonSessionActions } from './actions.js';
 import { detachDaemonClient, getStableClientId } from './clientLifecycle.js';
@@ -378,12 +379,6 @@ export function DaemonSessionProvider({
               ? 'streaming'
               : 'idle',
           );
-          const pendingLoad = pendingSessionLoadRef.current;
-          if (pendingLoad?.sessionId === activeSession.sessionId) {
-            pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoad.timeout);
-            pendingLoad.resolve();
-          }
           if (loadWarningTexts.length > 0) {
             store.dispatch(
               loadWarningTexts.map((text) => ({
@@ -391,6 +386,51 @@ export function DaemonSessionProvider({
                 text,
               })),
             );
+          }
+
+          const pendingLoad = pendingSessionLoadRef.current;
+          if (pendingLoad?.sessionId === activeSession.sessionId) {
+            pendingSessionLoadRef.current = undefined;
+            clearTimeout(pendingLoad.timeout);
+            pendingLoad.resolve();
+          }
+
+          // Feed replay snapshot (compacted history + live journal) into
+          // the store before starting the SSE loop. The SSE stream begins
+          // from lastEventId, so only post-snapshot events are delivered.
+          const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
+          const replayEvents = [...compactedReplay, ...liveJournal];
+          if (replayEvents.length > 0) {
+            const replayOpts = eventOptionsRef.current;
+            const allUiEvents: DaemonUiEvent[] = [];
+            for (const replayEvent of replayEvents) {
+              updateConnectionFromDaemonEvent(replayEvent, setConnection);
+              const normalized = normalizeDaemonEvent(replayEvent, {
+                clientId: activeSession.clientId,
+                suppressOwnUserEcho: replayOpts.suppressOwnUserEcho,
+                includeRawEvent: replayOpts.includeRawEvent,
+              });
+              const filtered = isPromptLifecycleTurnEvent(replayEvent)
+                ? []
+                : normalized;
+              allUiEvents.push(...filtered);
+            }
+            if (allUiEvents.length > 0) {
+              store.dispatch(allUiEvents);
+            }
+            const lastReplayEvent = replayEvents[replayEvents.length - 1];
+            if (
+              lastReplayEvent &&
+              (lastReplayEvent.type === 'turn_complete' ||
+                lastReplayEvent.type === 'turn_error') &&
+              !activePromptsRef.current.has(activeSession.sessionId)
+            ) {
+              store.dispatch({
+                type: 'assistant.done',
+                reason: 'replay_complete',
+              });
+            }
+            setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
 
           let sawEvent = false;
@@ -511,7 +551,11 @@ export function DaemonSessionProvider({
                 store.reset();
                 if (reason === 'epoch_reset') {
                   activeSession.setLastEventId(0);
-                } else if (reason !== 'ring_evicted') {
+                } else {
+                  // Ring eviction means the SSE replay window has a real gap.
+                  // Resetting and continuing on the same stream can only replay
+                  // the surviving tail; reload the session snapshot instead so
+                  // compactedReplay/liveJournal rebuild the full transcript.
                   resyncRequested = true;
                   session = undefined;
                   sessionRef.current = undefined;

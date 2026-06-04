@@ -14,7 +14,7 @@
 
 .thinking {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   gap: 0;
   margin-bottom: 4px;
 }
@@ -25,14 +25,41 @@
   line-height: 1.5;
 }
 
-.thinking pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: var(--font-mono);
+.thinkingBody {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   color: var(--thinking-pre-color);
   line-height: 1.5;
+}
+
+.thinkingBody > div {
+  font-size: 13px;
+  color: var(--thinking-pre-color);
+  line-height: 1.5;
+}
+
+.thinkingBody p,
+.thinkingBody ul,
+.thinkingBody ol,
+.thinkingBody blockquote,
+.thinkingBody pre {
+  margin-top: 0;
+  margin-bottom: 4px;
+}
+
+.thinkingBody :last-child {
+  margin-bottom: 0;
+}
+
+.thinkingBody ul,
+.thinkingBody ol {
+  padding-left: 18px;
+}
+
+.thinkingBody pre {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .content {
