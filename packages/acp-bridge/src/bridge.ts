@@ -854,9 +854,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   async function startIdleTimer(ci: ChannelInfo): Promise<void> {
     const timeoutMs = resolvedChannelIdleTimeoutMs();
     if (timeoutMs <= 0) {
-      writeStderrLine(
-        'qwen serve: last session closed, killing channel immediately',
-      );
       await killChannelWithLog(ci);
       return;
     }

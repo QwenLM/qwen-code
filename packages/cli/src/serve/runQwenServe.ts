@@ -629,6 +629,17 @@ export async function runQwenServe(
       );
     }
   }
+  if (opts.channelIdleTimeoutMs !== undefined) {
+    if (
+      !Number.isFinite(opts.channelIdleTimeoutMs) ||
+      !Number.isInteger(opts.channelIdleTimeoutMs) ||
+      opts.channelIdleTimeoutMs < 0
+    ) {
+      throw new TypeError(
+        `Invalid channelIdleTimeoutMs: ${opts.channelIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = immediate kill).`,
+      );
+    }
+  }
   // Per-handle env overrides: `undefined` value means "scrub this
   // var from the child env" — important when a different daemon
   // in the same process set the var globally previously. Always

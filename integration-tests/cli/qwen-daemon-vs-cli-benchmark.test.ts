@@ -201,9 +201,9 @@ const snapshot: BenchmarkSnapshot = {
       'measure full initialization (Node startup + ESM + config + MCP ' +
       'discovery + auth). Profiler-reported fullStartupMs is used when ' +
       'available, else wall-clock time.',
-    'Daemon boot latency includes HTTP listener startup + ACP child ' +
-      'spawn + first session creation (ACP child is lazy-spawned on ' +
-      'first session).',
+    'Daemon boot latency includes HTTP listener startup. ACP child ' +
+      'is preheated after listener start (fire-and-forget); first ' +
+      'session creation coalesces onto the preheat if still in flight.',
     'Memory RSS is measured across the full process tree (daemon + ACP ' +
       'child + MCP grandchildren), not just the daemon parent.',
     'Stage 1 daemon uses a single ACP child — concurrent prompts are ' +
