@@ -427,8 +427,8 @@ export function handleVimAction(
         }
 
         case 'j': {
-          // Down
-          const linesToDelete = Math.min(count, totalLines - cursorRow);
+          // Down - delete current line + count lines below (count + 1 total)
+          const linesToDelete = Math.min(count + 1, totalLines - cursorRow);
           if (linesToDelete > 0) {
             if (totalLines === 1) {
               const currentLine = state.lines[0] || '';
@@ -463,8 +463,8 @@ export function handleVimAction(
         }
 
         case 'k': {
-          // Up
-          const upLines = Math.min(count, cursorRow + 1);
+          // Up - delete current line + count lines above (count + 1 total)
+          const upLines = Math.min(count + 1, cursorRow + 1);
           if (upLines > 0) {
             if (state.lines.length === 1) {
               const currentLine = state.lines[0] || '';
@@ -477,7 +477,7 @@ export function handleVimAction(
                 '',
               );
             } else {
-              const startRow = Math.max(0, cursorRow - count + 1);
+              const startRow = Math.max(0, cursorRow - count);
               const linesToDelete = cursorRow - startRow + 1;
               const nextState = pushUndo(state);
               const { startOffset, endOffset } = getLineRangeOffsets(

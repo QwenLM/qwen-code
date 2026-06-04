@@ -877,12 +877,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           break;
         }
         case 'j': {
-          const endRow = Math.min(lines.length - 1, row + count);
+          const endRow = Math.min(lines.length - 1, row + count - 1);
           text = lines.slice(row, endRow + 1).join('\n');
           break;
         }
         case 'k': {
-          const startRow = Math.max(0, row - count + 1);
+          const startRow = Math.max(0, row - count);
           text = lines.slice(startRow, row + 1).join('\n');
           break;
         }
@@ -936,12 +936,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           break;
         }
         case 'j': {
-          const endRow = Math.min(lines.length - 1, row + count);
+          const endRow = Math.min(lines.length - 1, row + count - 1);
           text = lines.slice(row, endRow + 1).join('\n');
           break;
         }
         case 'k': {
-          const startRow = Math.max(0, row - count + 1);
+          const startRow = Math.max(0, row - count);
           text = lines.slice(startRow, row + 1).join('\n');
           break;
         }
@@ -1407,7 +1407,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
 
           case 'u': {
-            buffer.undo();
+            for (let i = 0; i < repeatCount; i++) buffer.undo();
             dispatch({ type: 'CLEAR_COUNT' });
             dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
