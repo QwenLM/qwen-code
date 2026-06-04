@@ -220,7 +220,7 @@ export function createDaemonWorkspaceService(
               errors?: ServeWorkspacePreflightStatus['errors'];
             };
             // Filter to only ACP cells from the ACP response (daemon cells come from our provider).
-            acpCells = result.cells.filter((c) => c.locality === 'acp');
+            acpCells = result.cells.filter((c) => c.locality !== 'daemon');
             errors = result.errors;
           }
         } catch (err) {
@@ -494,7 +494,7 @@ export function createDaemonWorkspaceService(
             publishWorkspaceEvent({
               type: 'mcp_server_restarted',
               data: {
-                serverName,
+                serverName: result.serverName,
                 durationMs: entry.durationMs ?? 0,
                 entryIndex: entry.entryIndex,
               },
@@ -504,7 +504,7 @@ export function createDaemonWorkspaceService(
             publishWorkspaceEvent({
               type: 'mcp_server_restart_refused',
               data: {
-                serverName,
+                serverName: result.serverName,
                 reason: 'restart_failed',
                 entryIndex: entry.entryIndex,
                 ...(entry.reason ? { details: entry.reason } : {}),

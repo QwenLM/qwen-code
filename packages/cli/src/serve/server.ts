@@ -682,7 +682,9 @@ export function createServeApp(
       persistDisabledTools:
         deps.persistDisabledTools ??
         (async () => {
-          /* no-op for tests */
+          throw new Error(
+            'setWorkspaceToolEnabled requires persistDisabledTools in ServeAppDeps',
+          );
         }),
       queryWorkspaceStatus: (method, idle) =>
         bridge.queryWorkspaceStatus(method, idle),

@@ -669,7 +669,7 @@ describe('createDaemonWorkspaceService', () => {
       );
     });
 
-    it('throws WorkspaceInitRaceError on EEXIST during create', async () => {
+    it('throws WorkspaceInitConflictError when existing file has content and force is unset', async () => {
       const svc = createDaemonWorkspaceService(
         makeDeps({
           boundWorkspace: tmpDir,

@@ -1619,10 +1619,6 @@ describe('createServeApp', () => {
     });
 
     it('returns workspace env status from the bridge', async () => {
-      // Post-workspace-service refactoring: env status is answered
-      // daemon-locally from the statusProvider (not from ACP). When
-      // no statusProvider is injected (test default), the workspace
-      // service returns idle env data (empty cells).
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -1640,15 +1636,10 @@ describe('createServeApp', () => {
         initialized: true,
         acpChannelLive: false,
       });
-      // Without a statusProvider, cells are empty (idle fallback).
-      expect(res.body.cells).toEqual([]);
+      expect(res.body.cells.length).toBeGreaterThan(0);
     });
 
     it('returns workspace preflight status from the bridge', async () => {
-      // Post-workspace-service refactoring: preflight stitches daemon
-      // cells (from statusProvider) and ACP cells (from queryWorkspaceStatus
-      // when channel is live). Without statusProvider and with no live
-      // channel, only idle ACP cells are returned.
       const bridge = fakeBridge();
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -1666,16 +1657,18 @@ describe('createServeApp', () => {
         initialized: true,
         acpChannelLive: false,
       });
-      // Without statusProvider, daemon cells are empty. Without a live
-      // channel, ACP cells are idle placeholders.
       const cells = res.body.cells as Array<{
         kind: string;
         status: string;
         locality: string;
       }>;
       expect(cells.length).toBeGreaterThan(0);
-      expect(cells.every((c) => c.locality === 'acp')).toBe(true);
-      expect(cells.every((c) => c.status === 'not_started')).toBe(true);
+      expect(cells.some((c) => c.locality === 'daemon')).toBe(true);
+      expect(
+        cells
+          .filter((c) => c.locality === 'acp')
+          .every((c) => c.status === 'not_started'),
+      ).toBe(true);
     });
 
     it('returns read-only session snapshots from the bridge', async () => {

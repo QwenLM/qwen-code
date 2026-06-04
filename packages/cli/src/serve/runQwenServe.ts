@@ -870,7 +870,6 @@ export async function runQwenServe(
     daemonLog,
     workspace: workspaceService,
     persistDisabledTools: persistDisabledToolsFn,
-    contextFilename: contextFilenameForInit ?? 'QWEN.md',
   });
   // Pull the device-flow registry back out so the close hook can
   // dispose it before `bridge.shutdown()`, ensuring polling timers +
