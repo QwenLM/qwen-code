@@ -174,8 +174,8 @@ export default {
     '在瀏覽器中打開完整的 Qwen Code 文檔',
   'Configuration not available.': '配置不可用',
   'Connect an LLM provider': '連接 LLM 提供商',
-  'Copy the last result or code snippet to clipboard':
-    '將最後的結果或代碼片段複製到剪貼板',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    '將最近的 AI 回應複製到剪貼簿（/copy N 複製倒數第 N 則）',
   'Show working-tree change stats versus HEAD':
     '顯示工作區相對 HEAD 的變更統計',
   'Could not determine current working directory.': '無法確定當前工作目錄。',

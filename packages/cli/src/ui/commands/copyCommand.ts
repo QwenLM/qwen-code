@@ -361,7 +361,7 @@ function parseLeadingMessageIndex(args: string): {
 export const copyCommand: SlashCommand = {
   name: 'copy',
   get description() {
-    return t('Copy the last result or code snippet to clipboard');
+    return t('Copy the last AI response to clipboard (/copy N for Nth-latest)');
   },
   argumentHint: '[N]',
   kind: CommandKind.BUILT_IN,

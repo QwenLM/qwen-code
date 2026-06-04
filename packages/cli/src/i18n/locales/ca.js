@@ -192,8 +192,8 @@ export default {
     'obrir la documentació completa de Qwen Code al navegador',
   'Configuration not available.': 'Configuració no disponible.',
   'Connect an LLM provider': 'Connectar un proveïdor LLM',
-  'Copy the last result or code snippet to clipboard':
-    "Copiar l'últim resultat o fragment de codi al porta-retalls",
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    "Copia l'última resposta de la IA al porta-retalls (/copy N per a l'N-èsima)",
 
   // ============================================================================
   // Ordres - Agents

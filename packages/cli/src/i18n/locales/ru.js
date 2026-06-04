@@ -194,8 +194,8 @@ export default {
     'Открытие полной документации Qwen Code в браузере',
   'Configuration not available.': 'Конфигурация недоступна.',
   'Connect an LLM provider': 'Подключить провайдера LLM',
-  'Copy the last result or code snippet to clipboard':
-    'Копирование последнего результата или фрагмента кода в буфер обмена',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Копировать последний ответ ИИ в буфер обмена (/copy N для N-го с конца)',
 
   // ============================================================================
   // Команды - Агенты

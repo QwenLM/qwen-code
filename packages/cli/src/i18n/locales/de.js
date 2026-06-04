@@ -171,8 +171,8 @@ export default {
     'Vollständige Qwen Code Dokumentation im Browser öffnen',
   'Configuration not available.': 'Konfiguration nicht verfügbar.',
   'Connect an LLM provider': 'LLM-Anbieter verbinden',
-  'Copy the last result or code snippet to clipboard':
-    'Letztes Ergebnis oder Codeausschnitt in die Zwischenablage kopieren',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Letzte KI-Antwort in die Zwischenablage kopieren (/copy N für N-letzte)',
 
   // ============================================================================
   // Commands - Agents
