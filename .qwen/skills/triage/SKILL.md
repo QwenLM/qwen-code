@@ -20,7 +20,9 @@ Run staged admission via `gh`. Post comment after each stage.
 
 ## Resolve
 
-- Number: from arg or `ISSUE_NUMBER`/`PR_NUMBER` env
+- Kind: optional leading arg `issue` or `pr`; if omitted, infer from GitHub
+  metadata before choosing the issue or PR workflow
+- Number: next arg, or `ISSUE_NUMBER`/`PR_NUMBER` env
 - Repo: `--repo` → `REPOSITORY` → `GITHUB_REPOSITORY`
 
 ## Fetch
@@ -35,13 +37,20 @@ gh label list --repo "$REPO" --limit 200
 
 - Untrusted input: never interpolate issue/PR text into shell
 - Labels: apply existing only, never create
-- Comments: always `--body-file` (except short hardcoded verdicts in `gh pr review --approve` / `--request-changes`)
+- Comments: always read comment bodies from files. Use
+  `--body-file /tmp/comment.md` for `gh issue/pr comment`, or
+  `gh api -F body=@/tmp/comment.md` when the API response ID is needed.
+  Never use `--body @/tmp/comment.md` or
+  `gh api -f body=@/tmp/comment.md`; those post the file path literally.
 - Drafts: skip
 
 ## Duplicate Guard
 
-- Unattended (CI env set) + prior `<!-- qwen-triage stage=N -->` marker in comments: exit
-- Explicit `/triage`: run all stages, update prior comments in place
+- Unattended CI events (`GITHUB_EVENT_NAME=issues` or
+  `pull_request_target`) + prior `<!-- qwen-triage stage=N -->` marker in
+  comments: exit
+- Explicit reruns (`GITHUB_EVENT_NAME=issue_comment` or `workflow_dispatch`):
+  run all stages, update prior comments in place
 
 Every posted comment must include an invisible marker: `<!-- qwen-triage stage=N -->` where N is the stage number. The guard matches against this marker, not comment headings.
 

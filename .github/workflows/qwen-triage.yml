@@ -13,10 +13,29 @@ on:
         description: 'Issue or PR number to triage'
         required: true
         type: 'number'
+      target:
+        description: 'Target type for manual triage'
+        required: false
+        default: 'issue'
+        type: 'choice'
+        options:
+          - 'issue'
+          - 'pr'
 
 concurrency:
   group: '${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
-  cancel-in-progress: true
+  cancel-in-progress: >-
+    ${{
+      github.event_name != 'issue_comment' ||
+      (
+        startsWith(github.event.comment.body, '@qwen-code /triage') &&
+        (
+          github.event.comment.author_association == 'OWNER' ||
+          github.event.comment.author_association == 'MEMBER' ||
+          github.event.comment.author_association == 'COLLABORATOR'
+        )
+      )
+    }}
 
 permissions:
   contents: 'read'
@@ -43,19 +62,22 @@ jobs:
       )
     steps:
       - name: 'Checkout repo'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'
 
-      - name: 'Resolve target number'
+      - name: 'Resolve target'
         id: 'resolve'
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "number=${{ github.event.inputs.number }}" >> "$GITHUB_OUTPUT"
+            echo "kind=${{ github.event.inputs.target }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
             echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            echo "kind=pr" >> "$GITHUB_OUTPUT"
           else
             echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+            echo "kind=${{ github.event.issue.pull_request && 'pr' || 'issue' }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 'Run Qwen Triage'
@@ -77,19 +99,4 @@ jobs:
               ],
               "sandbox": false
             }
-          prompt: |-
-            You are a triage assistant for the QwenLM/qwen-code repository.
-
-            Run `/triage ${{ steps.resolve.outputs.number }}` to triage this issue or PR.
-
-            Use the available shell commands (`gh`) to gather information and
-            execute the triage workflow. The triage skill is available at
-            `.qwen/skills/triage/SKILL.md` — follow its rules exactly.
-
-            Key rules:
-            - Only target QwenLM/qwen-code with `--repo QwenLM/qwen-code`
-            - Labels: apply existing only, verify with `gh label list`
-            - Comments: use `--body-file` with heredoc for multi-line content
-            - Include both stage markers and bot-coordination markers
-            - Never close, merge, approve, assign, or remove labels
-            - Evaluate the tiered gate model before any `gh` write call
+          prompt: '/triage ${{ steps.resolve.outputs.kind }} ${{ steps.resolve.outputs.number }} --repo ${{ github.repository }}'

@@ -6,10 +6,11 @@ Shared rules (untrusted input, skip, bilingual format) are in `SKILL.md`.
 
 ### Comment Management
 
-Three comments, one per stage. Post each with `gh pr comment` and capture its ID:
+Three comments, one per stage. Post each through the issues comments API and
+capture its ID:
 
 ```bash
-COMMENT_ID=$(gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/stage-N.md --json id --jq '.id')
+COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage-N.md --jq '.id')
 ```
 
 | Stage   | Comment                                       |
@@ -21,7 +22,7 @@ COMMENT_ID=$(gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/stage-N.
 **Re-runs:** if the triage runs again on the same PR, update each comment in place:
 
 ```bash
-gh api -X PATCH "/repos/$REPO/issues/comments/$COMMENT_ID" -f body=@/tmp/stage-N-updated.md
+gh api -X PATCH "repos/$REPO/issues/comments/$COMMENT_ID" -F body=@/tmp/stage-N-updated.md
 ```
 
 Never create duplicates.
