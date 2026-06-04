@@ -419,10 +419,12 @@ export function DaemonSessionProvider({
           if (shouldInjectReplaySnapshot && replayEvents.length > 0) {
             const totalReplayEventCount = replayEvents.length;
             if (replayEvents.length > MAX_REPLAY_EVENTS) {
-              replayEvents.length = MAX_REPLAY_EVENTS;
+              const droppedReplayEventCount =
+                replayEvents.length - MAX_REPLAY_EVENTS;
+              replayEvents.splice(0, droppedReplayEventCount);
               store.dispatch({
                 type: 'error',
-                text: `Replay snapshot truncated: ${totalReplayEventCount} events exceeds limit`,
+                text: `Replay snapshot truncated: dropped ${droppedReplayEventCount} oldest events from ${totalReplayEventCount} total`,
                 recoverable: true,
               });
             }
