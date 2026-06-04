@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
@@ -302,31 +301,39 @@ function touchedTopicsFromFilePaths(
   touchedProjectScope: boolean;
   touchedUserScope: boolean;
 } {
-  // Append a path separator so `/foo/memory` does not collide with
-  // `/foo/memory-other/x.md` under startsWith. Files always live INSIDE
-  // the root (never at the root itself), so the trailing separator is safe.
-  const projectRootPrefix = getAutoMemoryRoot(projectRoot) + path.sep;
-  const userRootPrefix = getUserAutoMemoryRoot() + path.sep;
+  // Use startsWith against the directly-retrieved roots (rather than the
+  // isAutoMemPath helper, which calls into paths.ts internals and would
+  // bypass module-level mocks in extractionAgentPlanner.test.ts). This
+  // also keeps the routing decision symmetric across both scopes.
+  const projectRootDir = getAutoMemoryRoot(projectRoot);
+  const userRootDir = getUserAutoMemoryRoot();
+  // Guard against `/foo/memory` colliding with `/foo/memory-other/x.md`:
+  // a file under the root must have a `/` or `\` immediately after the
+  // root string. Files always live INSIDE the root (never AT it), so the
+  // separator is guaranteed. Accept BOTH separators so the check works
+  // when an agent reports forward-slash paths on Windows (and vice versa).
+  const isUnderRoot = (p: string, root: string): boolean => {
+    if (!p.startsWith(root)) return false;
+    const next = p.charAt(root.length);
+    return next === '/' || next === '\\';
+  };
   const topicSet = new Set<AutoMemoryType>();
   let touchedProjectScope = false;
   let touchedUserScope = false;
 
   for (const p of filePaths) {
-    // Use startsWith against the directly-retrieved roots (rather than the
-    // isAutoMemPath helper, which calls into paths.ts internals and would
-    // bypass module-level mocks in extractionAgentPlanner.test.ts). This
-    // also keeps the routing decision symmetric across both scopes.
-    let rootPrefix: string | undefined;
-    if (p.startsWith(projectRootPrefix)) {
-      rootPrefix = projectRootPrefix;
+    let root: string | undefined;
+    if (isUnderRoot(p, projectRootDir)) {
+      root = projectRootDir;
       touchedProjectScope = true;
-    } else if (p.startsWith(userRootPrefix)) {
-      rootPrefix = userRootPrefix;
+    } else if (isUnderRoot(p, userRootDir)) {
+      root = userRootDir;
       touchedUserScope = true;
     } else {
       continue;
     }
-    const rel = p.slice(rootPrefix.length);
+    // +1 to also strip the separator we just checked for.
+    const rel = p.slice(root.length + 1);
     const segment = rel.split(/[/\\]/)[0] as AutoMemoryType;
     if (
       segment === 'user' ||

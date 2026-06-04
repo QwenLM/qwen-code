@@ -169,6 +169,27 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(result.touchedProjectScope).toBe(false);
   });
 
+  it('classifies file paths regardless of which separator the agent reported', async () => {
+    // Roots come back from the mocked getAutoMemoryRoot/getUserAutoMemoryRoot
+    // as POSIX paths (`/tmp/...`). The agent's filesTouched may use either
+    // separator on Windows hosts — the check must accept both.
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [
+        '/tmp/auto-memory\\project\\arch.md',
+        '/tmp/user-memory\\user\\role.md',
+      ],
+    });
+
+    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    expect(result.touchedTopics).toEqual(
+      expect.arrayContaining(['project', 'user']),
+    );
+    expect(result.touchedProjectScope).toBe(true);
+    expect(result.touchedUserScope).toBe(true);
+  });
+
   it('rejects sibling directories that share a root prefix (no startsWith collision)', async () => {
     // getAutoMemoryRoot mocked → /tmp/auto-memory.
     // A path inside /tmp/auto-memory-other/ shares the string prefix but is
