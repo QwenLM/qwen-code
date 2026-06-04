@@ -11,8 +11,12 @@ import { theme } from '../semantic-colors.js';
 import { RenderInline } from '../utils/InlineMarkdownRenderer.js';
 import type { RadioSelectItem } from './shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
+import { MaxSizedBox } from './shared/MaxSizedBox.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
+
+// Outer chrome plus question and option rows that must remain visible.
+const SHELL_CONFIRMATION_FIXED_ROWS = 10;
 
 export interface ShellConfirmationRequest {
   commands: string[];
@@ -25,16 +29,21 @@ export interface ShellConfirmationRequest {
 export interface ShellConfirmationDialogProps {
   request: ShellConfirmationRequest;
   availableTerminalHeight?: number;
+  contentWidth?: number;
 }
 
 export const ShellConfirmationDialog: React.FC<
   ShellConfirmationDialogProps
-> = ({ request, availableTerminalHeight }) => {
+> = ({ request, availableTerminalHeight, contentWidth = 80 }) => {
   const { commands, onConfirm } = request;
   const constrainedHeight =
     availableTerminalHeight === undefined
       ? undefined
       : Math.max(1, Math.floor(availableTerminalHeight));
+  const commandPreviewHeight =
+    constrainedHeight === undefined
+      ? undefined
+      : Math.max(2, constrainedHeight - SHELL_CONFIRMATION_FIXED_ROWS);
 
   useKeypress(
     (key) => {
@@ -89,27 +98,45 @@ export const ShellConfirmationDialog: React.FC<
       height={constrainedHeight}
       overflow="hidden"
     >
-      <Box flexDirection="column" marginBottom={1} flexShrink={1}>
-        <Text bold color={theme.text.primary}>
-          {t('Shell Command Execution')}
-        </Text>
-        <Text color={theme.text.primary}>
-          {t('A custom command wants to run the following shell commands:')}
-        </Text>
-        <Box
-          flexDirection="column"
-          borderStyle="round"
-          borderColor={theme.border.default}
-          paddingX={1}
-          marginTop={1}
-        >
-          {commands.map((cmd) => (
-            <Text key={cmd} color={theme.text.link}>
-              <RenderInline text={cmd} />
-            </Text>
-          ))}
+      {constrainedHeight === undefined ? (
+        <Box flexDirection="column" marginBottom={1} flexShrink={1}>
+          <Text bold color={theme.text.primary}>
+            {t('Shell Command Execution')}
+          </Text>
+          <Text color={theme.text.primary}>
+            {t('A custom command wants to run the following shell commands:')}
+          </Text>
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={theme.border.default}
+            paddingX={1}
+            marginTop={1}
+          >
+            {commands.map((cmd) => (
+              <Text key={cmd} color={theme.text.link}>
+                <RenderInline text={cmd} />
+              </Text>
+            ))}
+          </Box>
         </Box>
-      </Box>
+      ) : (
+        <Box flexDirection="column" marginBottom={1} flexShrink={1}>
+          <MaxSizedBox
+            maxHeight={commandPreviewHeight}
+            maxWidth={Math.max(1, contentWidth - 8)}
+            overflowDirection="bottom"
+          >
+            {commands.map((cmd) => (
+              <Box key={cmd}>
+                <Text color={theme.text.link}>
+                  <RenderInline text={cmd} />
+                </Text>
+              </Box>
+            ))}
+          </MaxSizedBox>
+        </Box>
+      )}
 
       <Box marginBottom={1} flexShrink={0}>
         <Text color={theme.text.primary}>{t('Do you want to proceed?')}</Text>

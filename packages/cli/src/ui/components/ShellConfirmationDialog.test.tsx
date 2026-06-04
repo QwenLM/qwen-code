@@ -64,6 +64,7 @@ describe('ShellConfirmationDialog', () => {
           onConfirm,
         }}
         availableTerminalHeight={availableTerminalHeight}
+        contentWidth={80}
       />,
     );
 
@@ -72,6 +73,7 @@ describe('ShellConfirmationDialog', () => {
     expect(frame).toContain('Yes, allow once');
     expect(frame).toContain('Always allow in this project');
     expect(frame).toContain('No (esc)');
+    expect(frame).toMatch(/lines hidden/);
     expect(frame).not.toContain('command-10');
   });
 });

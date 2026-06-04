@@ -130,6 +130,7 @@ export const DialogManager = ({
       <ShellConfirmationDialog
         request={uiState.shellConfirmationRequest}
         availableTerminalHeight={constrainedDialogHeight}
+        contentWidth={mainAreaWidth}
       />
     );
   }
