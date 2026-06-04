@@ -26,6 +26,8 @@ vi.mock('fs', async (importOriginal) => {
     ...actualFs,
     realpathSync: vi.fn(),
     existsSync: vi.fn(),
+    lstatSync: vi.fn(),
+    readFileSync: vi.fn(),
   };
 });
 
@@ -40,21 +42,49 @@ vi.mock('child_process', async (importOriginal) => {
 const mockedIsGitRepository = vi.mocked(isGitRepository);
 const mockedRealPathSync = vi.mocked(fs.realpathSync);
 const mockedExistsSync = vi.mocked(fs.existsSync);
+const mockedLstatSync = vi.mocked(fs.lstatSync);
+const mockedReadFileSync = vi.mocked(fs.readFileSync);
 const mockedExecSync = vi.mocked(childProcess.execSync);
 
 describe('getInstallationInfo', () => {
   const projectRoot = '/path/to/project';
   let originalArgv: string[];
+  let originalPlatform: PropertyDescriptor | undefined;
+
+  const setPlatform = (platform: NodeJS.Platform) => {
+    Object.defineProperty(process, 'platform', {
+      configurable: true,
+      value: platform,
+    });
+  };
+
+  const fileStats = (mode = 0o755): fs.Stats =>
+    ({
+      isFile: () => true,
+      isSymbolicLink: () => false,
+      mode,
+    }) as fs.Stats;
+
+  const symlinkStats = (): fs.Stats =>
+    ({
+      isFile: () => true,
+      isSymbolicLink: () => true,
+      mode: 0o755,
+    }) as fs.Stats;
 
   beforeEach(() => {
     vi.resetAllMocks();
     originalArgv = [...process.argv];
+    originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
     // Mock process.cwd() for isGitRepository
     vi.spyOn(process, 'cwd').mockReturnValue(projectRoot);
   });
 
   afterEach(() => {
     process.argv = originalArgv;
+    if (originalPlatform) {
+      Object.defineProperty(process, 'platform', originalPlatform);
+    }
   });
 
   it('should return UNKNOWN when cliPath is not available', () => {
@@ -130,10 +160,252 @@ describe('getInstallationInfo', () => {
     expect(info.updateMessage).toBe('Running via bunx, update not applicable.');
   });
 
-  it('should detect Homebrew installation via execSync', () => {
-    Object.defineProperty(process, 'platform', {
-      value: 'darwin',
+  it('should detect standalone installs and avoid npm auto-update', () => {
+    setPlatform('linux');
+    const installDir = '/Users/test/.local/lib/qwen-code';
+    const cliPath = `${installDir}/lib/cli.js`;
+    process.argv[1] = cliPath;
+    mockedRealPathSync.mockReturnValue(cliPath);
+    mockedExistsSync.mockImplementation((candidate) =>
+      [
+        path.join(installDir, 'manifest.json'),
+        path.join(installDir, 'bin', 'qwen'),
+        path.join(installDir, 'node', 'bin', 'node'),
+      ].includes(String(candidate)),
+    );
+    mockedReadFileSync.mockImplementation((candidate) => {
+      if (candidate === path.join(installDir, 'manifest.json')) {
+        return JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          target: 'linux-x64',
+        });
+      }
+      throw new Error(`Unexpected read: ${candidate}`);
     });
+    mockedLstatSync.mockImplementation((candidate) => {
+      if (
+        [
+          path.join(installDir, 'bin', 'qwen'),
+          path.join(installDir, 'node', 'bin', 'node'),
+        ].includes(String(candidate))
+      ) {
+        return fileStats();
+      }
+      throw new Error(`Unexpected lstat: ${candidate}`);
+    });
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.STANDALONE);
+    expect(info.isGlobal).toBe(true);
+    expect(info.updateCommand).toBeUndefined();
+    expect(info.updateMessage).toContain('Standalone install detected');
+    expect(info.updateMessage).toContain('install-qwen-standalone.sh');
+    expect(info.updateMessage).not.toContain('npm install');
+  });
+
+  it('should detect Windows standalone installs and avoid npm auto-update', () => {
+    setPlatform('win32');
+    const installDir = 'C:/Users/test/AppData/Local/qwen-code';
+    const cliPath = `${installDir}/lib/cli.js`;
+    process.argv[1] = cliPath;
+    mockedRealPathSync.mockReturnValue(cliPath);
+    mockedExistsSync.mockImplementation((candidate) =>
+      [
+        `${installDir}/manifest.json`,
+        `${installDir}/bin/qwen.cmd`,
+        `${installDir}/node/node.exe`,
+      ].includes(String(candidate).replace(/\\/g, '/')),
+    );
+    mockedReadFileSync.mockImplementation((candidate) => {
+      if (
+        String(candidate).replace(/\\/g, '/') === `${installDir}/manifest.json`
+      ) {
+        return JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          target: 'win-x64',
+        });
+      }
+      throw new Error(`Unexpected read: ${candidate}`);
+    });
+    mockedLstatSync.mockImplementation((candidate) => {
+      if (
+        [`${installDir}/bin/qwen.cmd`, `${installDir}/node/node.exe`].includes(
+          String(candidate).replace(/\\/g, '/'),
+        )
+      ) {
+        return fileStats(0o644);
+      }
+      throw new Error(`Unexpected lstat: ${candidate}`);
+    });
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.STANDALONE);
+    expect(info.updateCommand).toBeUndefined();
+    expect(info.updateMessage).toContain('install-qwen-standalone.ps1');
+    expect(info.updateMessage).not.toContain('npm install');
+  });
+
+  it('should detect macOS standalone installs and avoid npm auto-update', () => {
+    setPlatform('darwin');
+    const installDir = '/Users/test/.local/lib/qwen-code';
+    const cliPath = `${installDir}/lib/cli.js`;
+    process.argv[1] = cliPath;
+    mockedRealPathSync.mockReturnValue(cliPath);
+    mockedExistsSync.mockImplementation((candidate) =>
+      [
+        path.join(installDir, 'manifest.json'),
+        path.join(installDir, 'bin', 'qwen'),
+        path.join(installDir, 'node', 'bin', 'node'),
+      ].includes(String(candidate)),
+    );
+    mockedReadFileSync.mockImplementation((candidate) => {
+      if (candidate === path.join(installDir, 'manifest.json')) {
+        return JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          target: 'darwin-arm64',
+        });
+      }
+      throw new Error(`Unexpected read: ${candidate}`);
+    });
+    mockedLstatSync.mockImplementation((candidate) => {
+      if (
+        [
+          path.join(installDir, 'bin', 'qwen'),
+          path.join(installDir, 'node', 'bin', 'node'),
+        ].includes(String(candidate))
+      ) {
+        return fileStats();
+      }
+      throw new Error(`Unexpected lstat: ${candidate}`);
+    });
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.STANDALONE);
+    expect(info.isGlobal).toBe(true);
+    expect(info.updateMessage).toContain('Standalone install detected');
+    expect(info.updateMessage).toContain('install-qwen-standalone.sh');
+  });
+
+  it('should fall back to npm when manifest.json is malformed', () => {
+    setPlatform('linux');
+    const installDir = '/Users/test/.local/lib/qwen-code';
+    const cliPath = `${installDir}/lib/cli.js`;
+    process.argv[1] = cliPath;
+    mockedRealPathSync.mockReturnValue(cliPath);
+    mockedExistsSync.mockImplementation((candidate) =>
+      [
+        path.join(installDir, 'manifest.json'),
+        path.join(installDir, 'bin', 'qwen'),
+        path.join(installDir, 'node', 'bin', 'node'),
+      ].includes(String(candidate)),
+    );
+    mockedReadFileSync.mockReturnValue('{invalid json');
+    mockedLstatSync.mockReturnValue(fileStats());
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.NPM);
+    expect(info.updateCommand).toBe(
+      'npm install -g @qwen-code/qwen-code@latest',
+    );
+  });
+
+  it('should ignore standalone-like installs for the wrong target', () => {
+    setPlatform('linux');
+    const installDir = '/Users/test/.local/lib/qwen-code';
+    const cliPath = `${installDir}/lib/cli.js`;
+    process.argv[1] = cliPath;
+    mockedRealPathSync.mockReturnValue(cliPath);
+    mockedExistsSync.mockImplementation((candidate) =>
+      [
+        path.join(installDir, 'manifest.json'),
+        path.join(installDir, 'bin', 'qwen'),
+        path.join(installDir, 'node', 'bin', 'node'),
+      ].includes(String(candidate)),
+    );
+    mockedReadFileSync.mockReturnValue(
+      JSON.stringify({
+        name: '@qwen-code/qwen-code',
+        target: 'win-x64',
+      }),
+    );
+    mockedLstatSync.mockReturnValue(fileStats());
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.NPM);
+    expect(info.updateCommand).toBe(
+      'npm install -g @qwen-code/qwen-code@latest',
+    );
+  });
+
+  it('should ignore standalone-like installs with symlinked runtime files', () => {
+    setPlatform('linux');
+    const installDir = '/Users/test/.local/lib/qwen-code';
+    const cliPath = `${installDir}/lib/cli.js`;
+    process.argv[1] = cliPath;
+    mockedRealPathSync.mockReturnValue(cliPath);
+    mockedExistsSync.mockImplementation((candidate) =>
+      [
+        path.join(installDir, 'manifest.json'),
+        path.join(installDir, 'bin', 'qwen'),
+        path.join(installDir, 'node', 'bin', 'node'),
+      ].includes(String(candidate)),
+    );
+    mockedReadFileSync.mockReturnValue(
+      JSON.stringify({
+        name: '@qwen-code/qwen-code',
+        target: 'linux-x64',
+      }),
+    );
+    mockedLstatSync.mockImplementation((candidate) => {
+      if (candidate === path.join(installDir, 'bin', 'qwen')) {
+        return symlinkStats();
+      }
+      return fileStats();
+    });
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.NPM);
+  });
+
+  it('should ignore Unix standalone-like installs with non-executable runtime files', () => {
+    setPlatform('linux');
+    const installDir = '/Users/test/.local/lib/qwen-code';
+    const cliPath = `${installDir}/lib/cli.js`;
+    process.argv[1] = cliPath;
+    mockedRealPathSync.mockReturnValue(cliPath);
+    mockedExistsSync.mockImplementation((candidate) =>
+      [
+        path.join(installDir, 'manifest.json'),
+        path.join(installDir, 'bin', 'qwen'),
+        path.join(installDir, 'node', 'bin', 'node'),
+      ].includes(String(candidate)),
+    );
+    mockedReadFileSync.mockReturnValue(
+      JSON.stringify({
+        name: '@qwen-code/qwen-code',
+        target: 'linux-x64',
+      }),
+    );
+    mockedLstatSync.mockImplementation((candidate) => {
+      if (candidate === path.join(installDir, 'bin', 'qwen')) {
+        return fileStats(0o644);
+      }
+      return fileStats();
+    });
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.NPM);
+  });
+
+  it('should detect Homebrew installation via execSync', () => {
+    setPlatform('darwin');
     const cliPath = '/usr/local/bin/gemini';
     process.argv[1] = cliPath;
     mockedRealPathSync.mockReturnValue(cliPath);
@@ -151,9 +423,7 @@ describe('getInstallationInfo', () => {
   });
 
   it('should fall through if brew command fails', () => {
-    Object.defineProperty(process, 'platform', {
-      value: 'darwin',
-    });
+    setPlatform('darwin');
     const cliPath = '/usr/local/bin/gemini';
     process.argv[1] = cliPath;
     mockedRealPathSync.mockReturnValue(cliPath);
