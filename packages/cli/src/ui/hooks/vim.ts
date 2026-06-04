@@ -485,6 +485,39 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           };
           const m = movementMap[cmdType];
           if (m) {
+            const [row, col] = bufferRef.current.cursor;
+            const lines = bufferRef.current.lines;
+            let text = '';
+            switch (m) {
+              case 'h': {
+                const startCol = Math.max(0, col - count);
+                text = (lines[row] ?? '').slice(startCol, col);
+                break;
+              }
+              case 'l': {
+                const endCol = Math.min((lines[row] ?? '').length, col + count);
+                text = (lines[row] ?? '').slice(col, endCol);
+                break;
+              }
+              case 'j': {
+                const endRow = Math.min(lines.length - 1, row + count - 1);
+                text = lines.slice(row, endRow + 1).join('\n');
+                break;
+              }
+              case 'k': {
+                const startRow = Math.max(0, row - count);
+                text = lines.slice(startRow, row + 1).join('\n');
+                break;
+              }
+              default:
+                break;
+            }
+            dispatch({
+              type: 'SET_YANK_REGISTER',
+              text,
+              linewise: m === 'j' || m === 'k',
+            });
+            writeClipboard(text);
             buffer.vimDeleteMovement(m, count);
           }
           break;
@@ -493,7 +526,48 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         case CMD_TYPES.YANK_MOVEMENT.DOWN:
         case CMD_TYPES.YANK_MOVEMENT.UP:
         case CMD_TYPES.YANK_MOVEMENT.RIGHT: {
-          // Yank movement doesn't modify buffer, just returns true
+          const movementMap: Record<string, 'h' | 'j' | 'k' | 'l'> = {
+            [CMD_TYPES.YANK_MOVEMENT.LEFT]: 'h',
+            [CMD_TYPES.YANK_MOVEMENT.DOWN]: 'j',
+            [CMD_TYPES.YANK_MOVEMENT.UP]: 'k',
+            [CMD_TYPES.YANK_MOVEMENT.RIGHT]: 'l',
+          };
+          const m = movementMap[cmdType];
+          if (m) {
+            const [row, col] = bufferRef.current.cursor;
+            const lines = bufferRef.current.lines;
+            let text = '';
+            switch (m) {
+              case 'h': {
+                const startCol = Math.max(0, col - count);
+                text = (lines[row] ?? '').slice(startCol, col);
+                break;
+              }
+              case 'l': {
+                const endCol = Math.min((lines[row] ?? '').length, col + count);
+                text = (lines[row] ?? '').slice(col, endCol);
+                break;
+              }
+              case 'j': {
+                const endRow = Math.min(lines.length - 1, row + count - 1);
+                text = lines.slice(row, endRow + 1).join('\n');
+                break;
+              }
+              case 'k': {
+                const startRow = Math.max(0, row - count);
+                text = lines.slice(startRow, row + 1).join('\n');
+                break;
+              }
+              default:
+                break;
+            }
+            dispatch({
+              type: 'SET_YANK_REGISTER',
+              text,
+              linewise: m === 'j' || m === 'k',
+            });
+            writeClipboard(text);
+          }
           break;
         }
         case CMD_TYPES.REPLACE_CHAR: {
