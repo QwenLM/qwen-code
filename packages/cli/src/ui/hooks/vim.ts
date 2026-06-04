@@ -301,7 +301,9 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
   const { setVimMode } = useVimModeActions();
   const [state, dispatch] = useReducer(vimReducer, initialVimState);
   const bufferRef = useRef(buffer);
+  const stateRef = useRef(state);
   bufferRef.current = buffer;
+  stateRef.current = state;
 
   useEffect(() => {
     dispatch({ type: 'SET_MODE', mode: vimMode });
@@ -1051,13 +1053,15 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         return false;
       }
 
+      const s = stateRef.current;
+
       // ── INSERT mode ──
-      if (state.mode === 'INSERT') {
+      if (s.mode === 'INSERT') {
         return handleInsertModeInput(normalizedKey);
       }
 
       // ── Pending char read (r, f, F, t, T) ──
-      if (state.pendingCharRead && state.mode === 'NORMAL') {
+      if (s.pendingCharRead && s.mode === 'NORMAL') {
         if (normalizedKey.name === 'escape') {
           dispatch({ type: 'CLEAR_PENDING_STATES' });
           return true;
@@ -1073,18 +1077,18 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       }
 
       // ── NORMAL mode ──
-      if (state.mode === 'NORMAL') {
+      if (s.mode === 'NORMAL') {
         if (
           normalizedKey.sequence === '?' &&
           buffer.text.length === 0 &&
-          state.pendingOperator === null &&
-          state.count === 0
+          s.pendingOperator === null &&
+          s.count === 0
         ) {
           return false;
         }
 
         if (normalizedKey.name === 'escape') {
-          if (state.pendingOperator) {
+          if (s.pendingOperator) {
             dispatch({ type: 'CLEAR_PENDING_STATES' });
             return true;
           }
@@ -1093,7 +1097,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
         if (
           DIGIT_1_TO_9.test(normalizedKey.sequence) ||
-          (normalizedKey.sequence === '0' && state.count > 0)
+          (normalizedKey.sequence === '0' && s.count > 0)
         ) {
           dispatch({
             type: 'INCREMENT_COUNT',
@@ -1107,10 +1111,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         switch (normalizedKey.sequence) {
           // ── Movement ──
           case 'h': {
-            if (state.pendingOperator === 'c') return handleChangeMovement('h');
-            if (state.pendingOperator === 'd') return handleDeleteMovement('h');
-            if (state.pendingOperator === 'y') return handleYankMovement('h');
-            if (state.pendingOperator) {
+            if (s.pendingOperator === 'c') return handleChangeMovement('h');
+            if (s.pendingOperator === 'd') return handleDeleteMovement('h');
+            if (s.pendingOperator === 'y') return handleYankMovement('h');
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveLeft(repeatCount);
@@ -1118,10 +1122,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case 'j': {
-            if (state.pendingOperator === 'c') return handleChangeMovement('j');
-            if (state.pendingOperator === 'd') return handleDeleteMovement('j');
-            if (state.pendingOperator === 'y') return handleYankMovement('j');
-            if (state.pendingOperator) {
+            if (s.pendingOperator === 'c') return handleChangeMovement('j');
+            if (s.pendingOperator === 'd') return handleDeleteMovement('j');
+            if (s.pendingOperator === 'y') return handleYankMovement('j');
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveDown(repeatCount);
@@ -1129,10 +1133,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case 'k': {
-            if (state.pendingOperator === 'c') return handleChangeMovement('k');
-            if (state.pendingOperator === 'd') return handleDeleteMovement('k');
-            if (state.pendingOperator === 'y') return handleYankMovement('k');
-            if (state.pendingOperator) {
+            if (s.pendingOperator === 'c') return handleChangeMovement('k');
+            if (s.pendingOperator === 'd') return handleDeleteMovement('k');
+            if (s.pendingOperator === 'y') return handleYankMovement('k');
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveUp(repeatCount);
@@ -1140,10 +1144,10 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case 'l': {
-            if (state.pendingOperator === 'c') return handleChangeMovement('l');
-            if (state.pendingOperator === 'd') return handleDeleteMovement('l');
-            if (state.pendingOperator === 'y') return handleYankMovement('l');
-            if (state.pendingOperator) {
+            if (s.pendingOperator === 'c') return handleChangeMovement('l');
+            if (s.pendingOperator === 'd') return handleDeleteMovement('l');
+            if (s.pendingOperator === 'y') return handleYankMovement('l');
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveRight(repeatCount);
@@ -1153,13 +1157,13 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
           // ── Word movement (small word) ──
           case 'w': {
-            if (state.pendingOperator === 'd')
+            if (s.pendingOperator === 'd')
               return handleOperatorMotion('d', 'w');
-            if (state.pendingOperator === 'c')
+            if (s.pendingOperator === 'c')
               return handleOperatorMotion('c', 'w');
-            if (state.pendingOperator === 'y')
+            if (s.pendingOperator === 'y')
               return handleOperatorMotion('y', 'w');
-            if (state.pendingOperator) {
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveWordForward(repeatCount);
@@ -1167,13 +1171,13 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case 'b': {
-            if (state.pendingOperator === 'd')
+            if (s.pendingOperator === 'd')
               return handleOperatorMotion('d', 'b');
-            if (state.pendingOperator === 'c')
+            if (s.pendingOperator === 'c')
               return handleOperatorMotion('c', 'b');
-            if (state.pendingOperator === 'y')
+            if (s.pendingOperator === 'y')
               return handleOperatorMotion('y', 'b');
-            if (state.pendingOperator) {
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveWordBackward(repeatCount);
@@ -1181,13 +1185,13 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case 'e': {
-            if (state.pendingOperator === 'd')
+            if (s.pendingOperator === 'd')
               return handleOperatorMotion('d', 'e');
-            if (state.pendingOperator === 'c')
+            if (s.pendingOperator === 'c')
               return handleOperatorMotion('c', 'e');
-            if (state.pendingOperator === 'y')
+            if (s.pendingOperator === 'y')
               return handleOperatorMotion('y', 'e');
-            if (state.pendingOperator) {
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveWordEnd(repeatCount);
@@ -1198,12 +1202,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           // ── Word movement (big WORD) ──
           case 'W': {
             if (
-              state.pendingOperator === 'd' ||
-              state.pendingOperator === 'c' ||
-              state.pendingOperator === 'y'
+              s.pendingOperator === 'd' ||
+              s.pendingOperator === 'c' ||
+              s.pendingOperator === 'y'
             ) {
               // For now, treat W same as w for operators
-              return handleOperatorMotion(state.pendingOperator, 'w');
+              return handleOperatorMotion(s.pendingOperator, 'w');
             }
             // Big WORD forward: move to next non-blank after whitespace
             {
@@ -1254,11 +1258,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           case 'B': {
             if (
-              state.pendingOperator === 'd' ||
-              state.pendingOperator === 'c' ||
-              state.pendingOperator === 'y'
+              s.pendingOperator === 'd' ||
+              s.pendingOperator === 'c' ||
+              s.pendingOperator === 'y'
             ) {
-              return handleOperatorMotion(state.pendingOperator, 'b');
+              return handleOperatorMotion(s.pendingOperator, 'b');
             }
             {
               const [row, col] = buffer.cursor;
@@ -1292,11 +1296,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           case 'E': {
             if (
-              state.pendingOperator === 'd' ||
-              state.pendingOperator === 'c' ||
-              state.pendingOperator === 'y'
+              s.pendingOperator === 'd' ||
+              s.pendingOperator === 'c' ||
+              s.pendingOperator === 'y'
             ) {
-              return handleOperatorMotion(state.pendingOperator, 'e');
+              return handleOperatorMotion(s.pendingOperator, 'e');
             }
             {
               const [row, col] = buffer.cursor;
@@ -1349,7 +1353,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             // Currently clears operator to prevent stale state; operator+find
             // should capture the operator, execute the find, then apply the
             // operator over the range from original cursor to found char.
-            if (state.pendingOperator) {
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             dispatch({
@@ -1359,19 +1363,15 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
 
           case ';': {
-            if (state.lastFind) {
-              executeFind(
-                state.lastFind.type,
-                state.lastFind.char,
-                repeatCount,
-              );
+            if (s.lastFind) {
+              executeFind(s.lastFind.type, s.lastFind.char, repeatCount);
             }
             dispatch({ type: 'CLEAR_COUNT' });
             dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
           case ',': {
-            if (state.lastFind) {
+            if (s.lastFind) {
               // Reverse the find direction
               const reverseMap: Record<string, 'f' | 'F' | 't' | 'T'> = {
                 f: 'F',
@@ -1380,8 +1380,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                 T: 't',
               };
               executeFind(
-                reverseMap[state.lastFind.type],
-                state.lastFind.char,
+                reverseMap[s.lastFind.type],
+                s.lastFind.char,
                 repeatCount,
               );
             }
@@ -1481,7 +1481,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
           // ── Line navigation ──
           case '0': {
-            if (state.pendingOperator) {
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveToLineStart();
@@ -1489,7 +1489,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case '$': {
-            if (state.pendingOperator) {
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveToLineEnd();
@@ -1497,7 +1497,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case '^': {
-            if (state.pendingOperator) {
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
             buffer.vimMoveToFirstNonWhitespace();
@@ -1505,7 +1505,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case 'g': {
-            if (state.pendingOperator === 'g') {
+            if (s.pendingOperator === 'g') {
               buffer.vimMoveToFirstLine();
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             } else {
@@ -1515,11 +1515,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case 'G': {
-            if (state.pendingOperator) {
+            if (s.pendingOperator) {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             }
-            if (state.count > 0) {
-              buffer.vimMoveToLine(state.count);
+            if (s.count > 0) {
+              buffer.vimMoveToLine(s.count);
             } else {
               buffer.vimMoveToLastLine();
             }
@@ -1529,7 +1529,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
           // ── Delete / Change / Yank operators ──
           case 'd': {
-            if (state.pendingOperator === 'd') {
+            if (s.pendingOperator === 'd') {
               const c = getCurrentCount();
               executeCommand(CMD_TYPES.DELETE_LINE, c);
               dispatch({
@@ -1544,7 +1544,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case 'c': {
-            if (state.pendingOperator === 'c') {
+            if (s.pendingOperator === 'c') {
               const c = getCurrentCount();
               executeCommand(CMD_TYPES.CHANGE_LINE, c);
               dispatch({
@@ -1559,7 +1559,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case 'y': {
-            if (state.pendingOperator === 'y') {
+            if (s.pendingOperator === 'y') {
               // yy — yank line
               const c = getCurrentCount();
               executeCommand(CMD_TYPES.YANK_LINE, c);
@@ -1637,7 +1637,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case '>': {
-            if (state.pendingOperator === '>') {
+            if (s.pendingOperator === '>') {
               // >> — indent N lines (single atomic operation)
               const [startRow] = buffer.cursor;
               const endRow = Math.min(
@@ -1671,7 +1671,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case '<': {
-            if (state.pendingOperator === '<') {
+            if (s.pendingOperator === '<') {
               // << — outdent N lines (single atomic operation)
               const [startRow] = buffer.cursor;
               const endRow = Math.min(
@@ -1714,8 +1714,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
           // ── Paste ──
           case 'p': {
-            let text = state.yankRegister;
-            let isLinewise = state.yankLinewise;
+            let text = s.yankRegister;
+            let isLinewise = s.yankLinewise;
             if (!text) {
               text = readClipboard();
               isLinewise = text.includes('\n');
@@ -1762,8 +1762,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             return true;
           }
           case 'P': {
-            let text = state.yankRegister;
-            let isLinewise = state.yankLinewise;
+            let text = s.yankRegister;
+            let isLinewise = s.yankLinewise;
             if (!text) {
               text = readClipboard();
               isLinewise = text.includes('\n');
@@ -1794,8 +1794,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
           // ── Dot repeat ──
           case '.': {
-            if (state.lastCommand) {
-              executeCommand(state.lastCommand.type, state.lastCommand.count);
+            if (s.lastCommand) {
+              executeCommand(s.lastCommand.type, s.lastCommand.count);
             }
             dispatch({ type: 'CLEAR_COUNT' });
             dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
@@ -1820,9 +1820,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
             // ── Arrow keys ──
             if (normalizedKey.name === 'left') {
-              if (state.pendingOperator === 'c')
-                return handleChangeMovement('h');
-              if (state.pendingOperator) {
+              if (s.pendingOperator === 'c') return handleChangeMovement('h');
+              if (s.pendingOperator) {
                 dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
               }
               buffer.vimMoveLeft(repeatCount);
@@ -1830,9 +1829,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               return true;
             }
             if (normalizedKey.name === 'down') {
-              if (state.pendingOperator === 'c')
-                return handleChangeMovement('j');
-              if (state.pendingOperator) {
+              if (s.pendingOperator === 'c') return handleChangeMovement('j');
+              if (s.pendingOperator) {
                 dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
               }
               buffer.vimMoveDown(repeatCount);
@@ -1840,9 +1838,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               return true;
             }
             if (normalizedKey.name === 'up') {
-              if (state.pendingOperator === 'c')
-                return handleChangeMovement('k');
-              if (state.pendingOperator) {
+              if (s.pendingOperator === 'c') return handleChangeMovement('k');
+              if (s.pendingOperator) {
                 dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
               }
               buffer.vimMoveUp(repeatCount);
@@ -1850,9 +1847,8 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
               return true;
             }
             if (normalizedKey.name === 'right') {
-              if (state.pendingOperator === 'c')
-                return handleChangeMovement('l');
-              if (state.pendingOperator) {
+              if (s.pendingOperator === 'c') return handleChangeMovement('l');
+              if (s.pendingOperator) {
                 dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
               }
               buffer.vimMoveRight(repeatCount);
@@ -1873,14 +1869,6 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
       normalizeKey,
       handleInsertModeInput,
       handleCharRead,
-      state.mode,
-      state.count,
-      state.pendingOperator,
-      state.lastCommand,
-      state.pendingCharRead,
-      state.lastFind,
-      state.yankRegister,
-      state.yankLinewise,
       dispatch,
       getCurrentCount,
       handleChangeMovement,
