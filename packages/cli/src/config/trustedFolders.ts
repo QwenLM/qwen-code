@@ -193,9 +193,16 @@ export function saveTrustedFolders(
           trustedFoldersFile.path,
           'utf-8',
         );
-        const parsed = parse(originalContent) as Record<string, unknown>;
+        const parsed = parse(originalContent);
+        if (
+          typeof parsed !== 'object' ||
+          parsed === null ||
+          Array.isArray(parsed)
+        ) {
+          throw new Error('trusted folders file is not a JSON object');
+        }
         const updated = applyUpdates(
-          parsed,
+          parsed as Record<string, unknown>,
           trustedFoldersFile.config as Record<string, unknown>,
           false,
         );
@@ -206,8 +213,11 @@ export function saveTrustedFolders(
         // a corrupted trustedFolders.json can still self-heal on save.
         parse(preservedContent);
         content = preservedContent;
-      } catch {
+      } catch (error) {
         // Fall back to a clean rewrite when comment-preserving round-trip fails.
+        writeStderrLine(
+          `Falling back to clean rewrite for trusted folders: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
 
@@ -215,7 +225,7 @@ export function saveTrustedFolders(
       trustedFoldersFile.path,
       content,
       // noFollow: refuse to follow any pre-placed symlink at the
-      // config path — a redirected write could either leak the
+      // config path 鈥?a redirected write could either leak the
       // trusted-folder list to an attacker target or leave the user's
       // real config silently stale. Matches the credential write
       // sites' security posture (sharedTokenManager, oauth-token-storage,
