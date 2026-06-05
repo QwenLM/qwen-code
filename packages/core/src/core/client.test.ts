@@ -2481,7 +2481,10 @@ Other open files:
       expect(mockChat.addHistory).not.toHaveBeenCalled();
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
-        [`<system-reminder>\n${expectedContext}\n</system-reminder>\n\nHi`],
+        [
+          expect.stringMatching(/^The current date is:/),
+          `<system-reminder>\n${expectedContext}\n</system-reminder>\n\nHi`,
+        ],
         expect.any(AbortSignal),
       );
     });
@@ -3187,7 +3190,7 @@ hello
       // The main request should have been called without any memory content
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
-        ['Quick question'],
+        [expect.stringMatching(/^The current date is:/), 'Quick question'],
         expect.any(AbortSignal),
       );
 
@@ -3223,7 +3226,7 @@ hello
       // The main request should have been called without any memory content
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
-        ['Quick question'],
+        [expect.stringMatching(/^The current date is:/), 'Quick question'],
         expect.any(AbortSignal),
       );
     });
@@ -3278,6 +3281,103 @@ hello
         type: GeminiEventType.HookSystemMessage,
         value: 'Managed auto-memory updated: user.md',
       });
+    });
+
+    it('should inject the current date on every UserQuery turn', async () => {
+      // Freeze time to a specific date
+      vi.setSystemTime(new Date('2026-06-05T10:00:00Z'));
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'What day is it?' }],
+        new AbortController().signal,
+        'prompt-id-date-inject',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      // The first element in the request should be the date reminder
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        [
+          expect.stringMatching(/^The current date is: Friday, June 5, 2026/),
+          'What day is it?',
+        ],
+        expect.any(AbortSignal),
+      );
+
+      vi.setSystemTime(undefined);
+    });
+
+    it('should not inject duplicate date on the same day', async () => {
+      // Freeze time to a specific date
+      vi.setSystemTime(new Date('2026-06-05T10:00:00Z'));
+
+      const mockStream1 = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream1);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // First query on June 5 — should inject date
+      const stream1 = client.sendMessageStream(
+        [{ text: 'First question' }],
+        new AbortController().signal,
+        'prompt-id-date-first',
+      );
+      for await (const _ of stream1) {
+        // consume stream
+      }
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        [
+          expect.stringMatching(/^The current date is: Friday, June 5, 2026/),
+          'First question',
+        ],
+        expect.any(AbortSignal),
+      );
+
+      // Second query same day — should NOT inject date again
+      const mockStream2 = (async function* () {
+        yield { type: 'content', value: 'World' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream2);
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'First question' }] },
+        { role: 'model', parts: [{ text: 'Hello' }] },
+      ]);
+
+      const stream2 = client.sendMessageStream(
+        [{ text: 'Second question' }],
+        new AbortController().signal,
+        'prompt-id-date-second',
+      );
+      for await (const _ of stream2) {
+        // consume stream
+      }
+
+      // Second call should NOT have date prefix (already injected today)
+      const secondCall = mockTurnRunFn.mock.calls[1];
+      expect(secondCall[1][0]).toBe('Second question');
+
+      vi.setSystemTime(undefined);
     });
 
     describe('autoSkill: scheduleSkillReview via runManagedAutoMemoryBackgroundTasks', () => {
