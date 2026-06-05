@@ -149,9 +149,9 @@ import {
   resolveOutputLanguage,
   isAutoLanguage,
   OUTPUT_LANGUAGE_AUTO,
-
   getOutputLanguageFilePath,
-  writeOutputLanguageAndRegisterPath} from '../utils/languageUtils.js';
+  writeOutputLanguageAndRegisterPath,
+} from '../utils/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
 import { appEvents, AppEvent } from '../utils/events.js';
@@ -2241,30 +2241,13 @@ export async function runAcpAgent(
   settings: LoadedSettings,
   argv: CliArgs,
 ) {
-  // Skip MCP discovery in the BOOTSTRAP config. Bootstrap MCP clients
-  // are never used to serve a session (each session runs its own
-  // discovery), so skipping here avoids spawning every server twice.
-  const bootstrapSkipsMcpDiscovery = true;
   await config.initialize({
     skipGeminiInitialization: true,
-    skipMcpDiscovery: bootstrapSkipsMcpDiscovery,
+    // Bootstrap skips MCP discovery — each session runs its own
+    // pool-routed discovery, so bootstrap-level spawns would be
+    // redundant subprocess leaks (W119).
+    skipMcpDiscovery: true,
   });
-  // Skip the MCP failure warning when discovery was intentionally
-  // bypassed — per-session paths surface real failures through their
-  // own status routes / events.
-  if (!bootstrapSkipsMcpDiscovery) {
-    await config.waitForMcpReady();
-    const failedMcpServers =
-      typeof config.getFailedMcpServerNames === 'function'
-        ? config.getFailedMcpServerNames()
-        : [];
-    if (failedMcpServers.length > 0) {
-      process.stderr.write(
-        `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
-          `Continuing with built-in tools and any servers that did connect.\n`,
-      );
-    }
-  }
 
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
   const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
