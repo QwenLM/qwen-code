@@ -470,12 +470,6 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
             // track via `onSkillLoaded` — no skill body was loaded, and
             // conflating the two would inflate skill telemetry /
             // `/context` skill-token attribution with command runs.
-            if (typeof content === 'object' && 'error' in content) {
-              return {
-                llmContent: content.error,
-                returnDisplay: content.error,
-              };
-            }
             return {
               llmContent: [{ text: content }],
               returnDisplay: `Delegated to command: ${this.params.skill}`,
