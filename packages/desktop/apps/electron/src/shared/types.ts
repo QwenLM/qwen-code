@@ -425,6 +425,10 @@ export interface ElectronAPI {
     name: string,
     remoteServer?: { url: string; token: string; remoteWorkspaceId: string },
   ): Promise<Workspace>;
+  createPermanentWorktree(
+    workspaceId: string,
+    branchName: string,
+  ): Promise<Workspace>;
   checkWorkspaceSlug(slug: string): Promise<{ exists: boolean; path: string }>;
   updateWorkspaceRemoteServer(
     workspaceId: string,
@@ -846,7 +850,11 @@ export interface ElectronAPI {
   setSelectedPetId(id: string): Promise<void>;
   getPetEnabled(): Promise<boolean>;
   setPetEnabled(enabled: boolean): Promise<void>;
+  onPetEnabledChanged(callback: (enabled: boolean) => void): () => void;
+  getPetSize(): Promise<number>;
+  setPetSize(size: number): Promise<void>;
   loadCustomPets(): Promise<CustomPetEntry[]>;
+  openPetsFolder(): Promise<string>;
   setPetWindowEnabled(enabled: boolean): Promise<void>;
   petWindowSetIgnoreMouse(ignore: boolean): Promise<void>;
   petFocusSession(sessionId: string): Promise<void>;

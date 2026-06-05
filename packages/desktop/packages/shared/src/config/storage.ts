@@ -74,6 +74,7 @@ export interface StoredConfig {
   // Pet companion
   selectedPetId?: string;  // ID of the selected pet companion (default: 'qwen')
   petEnabled?: boolean;  // Show the floating pet companion (default: true)
+  petSize?: number;  // Rendered height of the floating pet companion (default: 96)
   petWindowBounds?: { x: number; y: number };  // Saved position of the floating pet window
   // Tools
   browserToolEnabled?: boolean;  // Enable built-in browser tool (default: true). Disable for Playwright/Puppeteer.
@@ -575,6 +576,34 @@ export function setPetEnabled(enabled: boolean): void {
   const config = loadStoredConfig();
   if (!config) return;
   config.petEnabled = enabled;
+  saveConfig(config);
+}
+
+const DEFAULT_PET_SIZE = 96;
+const MIN_PET_SIZE = 64;
+const MAX_PET_SIZE = 240;
+
+function normalizePetSize(size: unknown): number {
+  if (typeof size !== 'number' || !Number.isFinite(size)) {
+    return DEFAULT_PET_SIZE;
+  }
+  return Math.round(Math.min(MAX_PET_SIZE, Math.max(MIN_PET_SIZE, size)));
+}
+
+/**
+ * Get the rendered height of the floating pet companion.
+ */
+export function getPetSize(): number {
+  return normalizePetSize(loadStoredConfig()?.petSize);
+}
+
+/**
+ * Persist the rendered height of the floating pet companion.
+ */
+export function setPetSize(size: number): void {
+  const config = loadStoredConfig();
+  if (!config) return;
+  config.petSize = normalizePetSize(size);
   saveConfig(config);
 }
 

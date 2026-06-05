@@ -24,8 +24,17 @@ const EXPECTED_CHANNELS: string[] = [
   'LLM_Connection:setDefault',
   'LLM_Connection:setWorkspaceDefault',
   'LLM_Connection:test',
+  'appearance:getPetEnabled',
+  'appearance:getPetSize',
   'appearance:getRichToolDescriptions',
+  'appearance:getSelectedPetId',
+  'appearance:loadCustomPets',
+  'appearance:openPetsFolder',
+  'appearance:petEnabledChanged',
+  'appearance:setPetEnabled',
+  'appearance:setPetSize',
   'appearance:setRichToolDescriptions',
+  'appearance:setSelectedPetId',
   'auth:logout',
   'auth:showDeleteSessionConfirmation',
   'auth:showLogoutConfirmation',
@@ -205,6 +214,8 @@ const EXPECTED_CHANNELS: string[] = [
   'sessions:import',
   'sessions:importRemoteTransfer',
   'sessions:killShell',
+  'sessions:listChanged',
+  'sessions:listRefreshStateChanged',
   'sessions:markAllRead',
   'sessions:respondToCredential',
   'sessions:respondToPermission',
@@ -218,12 +229,21 @@ const EXPECTED_CHANNELS: string[] = [
   'settings:getDefaultThinkingLevel',
   'settings:getGlobalPermissionMode',
   'settings:getNetworkProxy',
+  'settings:getQwenCoreSettings',
+  'settings:getQwenPermissionSettings',
   'settings:getServerConfig',
   'settings:getServerStatus',
   'settings:listQwenProviders',
+  'settings:removeQwenHook',
+  'settings:removeQwenMcpServer',
   'settings:setDefaultThinkingLevel',
   'settings:setGlobalPermissionMode',
   'settings:setNetworkProxy',
+  'settings:setQwenCoreSetting',
+  'settings:setQwenExtensionSetting',
+  'settings:setQwenHook',
+  'settings:setQwenMcpServer',
+  'settings:setQwenPermissionRules',
   'settings:setServerConfig',
   'settings:setupLlmConnection',
   'settings:testLlmConnectionSetup',
@@ -298,6 +318,9 @@ const EXPECTED_CHANNELS: string[] = [
   'window:moveDrag',
   'window:openSessionInNewWindow',
   'window:openWorkspace',
+  'window:petFocusSession',
+  'window:petSetEnabled',
+  'window:petSetIgnoreMouse',
   'window:setTrafficLights',
   'window:switchWorkspace',
   'workspace:getPermissions',
@@ -307,6 +330,7 @@ const EXPECTED_CHANNELS: string[] = [
   'workspaceSettings:update',
   'workspaces:checkSlug',
   'workspaces:create',
+  'workspaces:createPermanentWorktree',
   'workspaces:get',
   'workspaces:updateRemote',
 ];
@@ -350,6 +374,13 @@ describe('BroadcastEventMap payload shapes', () => {
   it('skills:changed carries (workspaceId, skills)', () => {
     type Payload = BroadcastEventMap[typeof RPC_CHANNELS.skills.CHANGED];
     const _check: AssertTuple<Payload, 2> = true;
+    expect(_check).toBe(true);
+  });
+
+  it('appearance:petEnabledChanged carries enabled', () => {
+    type Payload =
+      BroadcastEventMap[typeof RPC_CHANNELS.appearance.PET_ENABLED_CHANGED];
+    const _check: AssertTuple<Payload, 1> = true;
     expect(_check).toBe(true);
   });
 });

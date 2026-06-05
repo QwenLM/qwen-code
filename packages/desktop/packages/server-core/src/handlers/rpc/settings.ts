@@ -63,6 +63,7 @@ import type {
 } from '@craft-agent/server-core/transport';
 import type { HandlerDeps } from '../handler-deps';
 import {
+  pushTyped,
   requestClientOpenFileDialog,
   requestClientOpenPath,
 } from '@craft-agent/server-core/transport';
@@ -90,7 +91,10 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.appearance.SET_SELECTED_PET_ID,
   RPC_CHANNELS.appearance.GET_PET_ENABLED,
   RPC_CHANNELS.appearance.SET_PET_ENABLED,
+  RPC_CHANNELS.appearance.GET_PET_SIZE,
+  RPC_CHANNELS.appearance.SET_PET_SIZE,
   RPC_CHANNELS.appearance.LOAD_CUSTOM_PETS,
+  RPC_CHANNELS.appearance.OPEN_PETS_FOLDER,
   RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE,
   RPC_CHANNELS.caching.SET_EXTENDED_PROMPT_CACHE,
   RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT,
@@ -744,6 +748,12 @@ export function registerSettingsHandlers(
         '@craft-agent/shared/config/storage'
       );
       setPetEnabled(enabled);
+      pushTyped(
+        server,
+        RPC_CHANNELS.appearance.PET_ENABLED_CHANGED,
+        { to: 'all' },
+        enabled,
+      );
     },
   );
 
@@ -753,6 +763,35 @@ export function registerSettingsHandlers(
       '@craft-agent/shared/config/pets'
     );
     return loadCustomPets();
+  });
+
+  // Get rendered pet size
+  server.handle(RPC_CHANNELS.appearance.GET_PET_SIZE, async () => {
+    const { getPetSize } = await import(
+      '@craft-agent/shared/config/storage'
+    );
+    return getPetSize();
+  });
+
+  // Set rendered pet size
+  server.handle(
+    RPC_CHANNELS.appearance.SET_PET_SIZE,
+    async (_ctx, size: number) => {
+      const { setPetSize } = await import(
+        '@craft-agent/shared/config/storage'
+      );
+      setPetSize(size);
+    },
+  );
+
+  // Ensure and open the custom pets folder on the local machine.
+  server.handle(RPC_CHANNELS.appearance.OPEN_PETS_FOLDER, async (ctx) => {
+    const { getPetsDir } = await import('@craft-agent/shared/config/pets');
+    const petsDir = getPetsDir();
+    mkdirSync(petsDir, { recursive: true });
+    const result = await requestClientOpenPath(server, ctx.clientId, petsDir);
+    if (result.error) throw new Error(result.error);
+    return petsDir;
   });
 
   // ============================================================

@@ -25,6 +25,7 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   // workspaces — local workspace CRUD (workspace list is local config)
   RPC_CHANNELS.workspaces.GET,
   RPC_CHANNELS.workspaces.CREATE,
+  RPC_CHANNELS.workspaces.CREATE_PERMANENT_WORKTREE,
   RPC_CHANNELS.workspaces.CHECK_SLUG,
   RPC_CHANNELS.workspaces.UPDATE_REMOTE,
 
@@ -163,7 +164,11 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   RPC_CHANNELS.appearance.SET_SELECTED_PET_ID,
   RPC_CHANNELS.appearance.GET_PET_ENABLED,
   RPC_CHANNELS.appearance.SET_PET_ENABLED,
+  RPC_CHANNELS.appearance.PET_ENABLED_CHANGED,
+  RPC_CHANNELS.appearance.GET_PET_SIZE,
+  RPC_CHANNELS.appearance.SET_PET_SIZE,
   RPC_CHANNELS.appearance.LOAD_CUSTOM_PETS,
+  RPC_CHANNELS.appearance.OPEN_PETS_FOLDER,
 
   // caching — prompt cache and context settings
   RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE,

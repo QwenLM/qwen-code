@@ -16,7 +16,7 @@ import { EditPopover, EditButton, getEditConfig } from '@/components/ui/EditPopo
 import { useTheme } from '@/context/ThemeContext'
 import { useAppShellContext } from '@/context/AppShellContext'
 import { routes } from '@/lib/navigate'
-import { Monitor, Sun, Moon } from 'lucide-react'
+import { FolderOpen, Monitor, RefreshCw, Sun, Moon } from 'lucide-react'
 import type { DetailsPageMeta } from '@/lib/navigation-registry'
 import type { ToolIconMapping } from '../../../shared/types'
 
@@ -153,6 +153,14 @@ export default function AppearanceSettingsPage() {
     window.electronAPI?.getHomeDir?.().then((home) =>
       setPetsFolder(`${home}/.qwen/pets`),
     )
+  }, [])
+  const handleOpenPetsFolder = useCallback(async () => {
+    try {
+      const path = await window.electronAPI?.openPetsFolder?.()
+      if (path) setPetsFolder(path)
+    } catch {
+      // Keep the settings page usable if the OS folder open request fails.
+    }
   }, [])
 
   // Load preset themes on mount
@@ -416,16 +424,34 @@ export default function AppearanceSettingsPage() {
                   ))}
                   {petEnabled && (
                     <SettingsRow
-                      label={t("settings.appearance.petCustom")}
+                      label={
+                        <div className="space-y-1">
+                          <div>{t("settings.appearance.petCustom")}</div>
+                          <div className="text-xs font-normal leading-4 text-muted-foreground">
+                            {t("settings.appearance.petCustomHint")}
+                          </div>
+                        </div>
+                      }
                       description={petsFolder ?? '~/.qwen/pets'}
                       action={
-                        <button
-                          type="button"
-                          onClick={() => { void refreshCustomPets() }}
-                          className="inline-flex items-center h-8 px-3 text-sm rounded-lg bg-background shadow-minimal hover:bg-foreground/[0.02] transition-colors"
-                        >
-                          {t("settings.appearance.petRefresh")}
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={handleOpenPetsFolder}
+                            className="inline-flex items-center h-8 gap-1.5 px-3 text-sm rounded-lg bg-background shadow-minimal hover:bg-foreground/[0.02] transition-colors"
+                          >
+                            <FolderOpen className="h-3.5 w-3.5" />
+                            {t("settings.appearance.petOpenFolder")}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { void refreshCustomPets() }}
+                            className="inline-flex items-center h-8 gap-1.5 px-3 text-sm rounded-lg bg-background shadow-minimal hover:bg-foreground/[0.02] transition-colors"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            {t("settings.appearance.petRefresh")}
+                          </button>
+                        </div>
                       }
                     />
                   )}

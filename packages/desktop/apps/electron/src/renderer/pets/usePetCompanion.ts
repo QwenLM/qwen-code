@@ -4,7 +4,14 @@
  */
 import { useAtom } from 'jotai';
 import { useCallback, useEffect, useMemo } from 'react';
-import { customPetsAtom, petEnabledAtom, selectedPetIdAtom } from './pet-atoms';
+import {
+  customPetsAtom,
+  petEnabledAtom,
+  petSettingsLoadedAtom,
+  petSizeAtom,
+  selectedPetIdAtom,
+} from './pet-atoms';
+import { normalizePetSize } from './pet-size';
 import { mergeCustomPets, resolvePet, type PetDescriptor } from './registry';
 
 // Load persisted state once per app session, regardless of how many components
@@ -18,12 +25,19 @@ export interface PetCompanion {
   setSelectedPetId: (id: string) => void;
   petEnabled: boolean;
   setPetEnabled: (enabled: boolean) => void;
+  petSettingsLoaded: boolean;
+  petSize: number;
+  setPetSize: (size: number) => void;
   refreshCustomPets: () => Promise<void>;
 }
 
 export function usePetCompanion(): PetCompanion {
   const [selectedPetId, setSelectedIdState] = useAtom(selectedPetIdAtom);
   const [petEnabled, setEnabledState] = useAtom(petEnabledAtom);
+  const [petSettingsLoaded, setPetSettingsLoaded] = useAtom(
+    petSettingsLoadedAtom,
+  );
+  const [petSize, setPetSizeState] = useAtom(petSizeAtom);
   const [customPets, setCustomPets] = useAtom(customPetsAtom);
 
   const refreshCustomPets = useCallback(async () => {
@@ -36,19 +50,35 @@ export function usePetCompanion(): PetCompanion {
     bootstrapStarted = true;
     void (async () => {
       try {
-        const [id, enabled, custom] = await Promise.all([
+        const [id, enabled, size, custom] = await Promise.all([
           window.electronAPI?.getSelectedPetId?.(),
           window.electronAPI?.getPetEnabled?.(),
+          window.electronAPI?.getPetSize?.(),
           window.electronAPI?.loadCustomPets?.(),
         ]);
         if (id) setSelectedIdState(id);
         if (typeof enabled === 'boolean') setEnabledState(enabled);
+        if (typeof size === 'number') setPetSizeState(normalizePetSize(size));
         if (custom) setCustomPets(custom);
       } catch {
         // Fall back to in-memory defaults if the IPC layer isn't ready.
+      } finally {
+        setPetSettingsLoaded(true);
       }
     })();
-  }, [setSelectedIdState, setEnabledState, setCustomPets]);
+  }, [
+    setSelectedIdState,
+    setEnabledState,
+    setPetSettingsLoaded,
+    setPetSizeState,
+    setCustomPets,
+  ]);
+
+  useEffect(() => {
+    return window.electronAPI?.onPetEnabledChanged?.((enabled) => {
+      setEnabledState(enabled);
+    });
+  }, [setEnabledState]);
 
   const pets = useMemo(() => mergeCustomPets(customPets), [customPets]);
   const selectedPet = useMemo(
@@ -72,6 +102,15 @@ export function usePetCompanion(): PetCompanion {
     [setEnabledState],
   );
 
+  const setPetSize = useCallback(
+    (size: number) => {
+      const normalized = normalizePetSize(size);
+      setPetSizeState(normalized);
+      void window.electronAPI?.setPetSize?.(normalized);
+    },
+    [setPetSizeState],
+  );
+
   return {
     pets,
     selectedPet,
@@ -79,6 +118,9 @@ export function usePetCompanion(): PetCompanion {
     setSelectedPetId,
     petEnabled,
     setPetEnabled,
+    petSettingsLoaded,
+    petSize,
+    setPetSize,
     refreshCustomPets,
   };
 }
