@@ -327,9 +327,13 @@ describe('Trusted Folders Loading', () => {
       if (p === userPath) return originalContent;
       return '{}';
     });
-    parseSpy.mockImplementationOnce(() => {
-      throw new Error('invalid preserved output');
-    });
+    parseSpy
+      .mockImplementationOnce((...args: Parameters<typeof commentJson.parse>) =>
+        commentJson.parse(...args),
+      )
+      .mockImplementationOnce(() => {
+        throw new Error('invalid preserved output');
+      });
 
     saveTrustedFolders({
       path: userPath,
