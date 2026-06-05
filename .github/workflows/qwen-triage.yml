@@ -23,19 +23,8 @@ on:
           - 'pr'
 
 concurrency:
-  group: '${{ github.workflow }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
-  cancel-in-progress: >-
-    ${{
-      github.event_name != 'issue_comment' ||
-      (
-        startsWith(github.event.comment.body, '@qwen-code /triage') &&
-        (
-          github.event.comment.author_association == 'OWNER' ||
-          github.event.comment.author_association == 'MEMBER' ||
-          github.event.comment.author_association == 'COLLABORATOR'
-        )
-      )
-    }}
+  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
+  cancel-in-progress: true
 
 permissions:
   contents: 'read'

@@ -36,7 +36,7 @@ gh label list --repo "$REPO" --limit 200
 ## Rules
 
 - Untrusted input: never interpolate issue/PR text into shell
-- Labels: apply existing only, never create
+- Labels: apply existing only, never create. Do not touch process labels (`welcome-pr`, `maintainer`, `help wanted`, `good first issue`)
 - Comments: always read comment bodies from files. Use
   `--body-file /tmp/comment.md` for `gh issue/pr comment`, or
   `gh api -F body=@/tmp/comment.md` when the API response ID is needed.
