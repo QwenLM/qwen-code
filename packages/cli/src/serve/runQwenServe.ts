@@ -30,7 +30,6 @@ import {
   recordDaemonPromptDuration,
   recordDaemonPromptQueueWait,
   recordDaemonSessionLifecycle,
-  registerDaemonGaugeCallbacks,
   resolveTelemetrySettings,
   shutdownTelemetry,
   type TelemetryRuntimeConfig,
@@ -44,11 +43,7 @@ import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
 } from './permissionAudit.js';
-import {
-  createServeApp,
-  getActiveSseCount,
-  resolveBridgeFsFactory,
-} from './server.js';
+import { createServeApp, resolveBridgeFsFactory } from './server.js';
 import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { createDaemonWorkspaceService } from './workspace-service/index.js';
