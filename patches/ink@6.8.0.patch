@@ -1,0 +1,15 @@
+diff --git a/build/reconciler.js b/build/reconciler.js
+index c30da7f..6939e1e 100644
+--- a/build/reconciler.js
++++ b/build/reconciler.js
+@@ -26,8 +26,8 @@ $ npm install --save-dev react-devtools-core
+         }
+-        else {
+-            // eslint-disable-next-line @typescript-eslint/only-throw-error
++        else if (typeof Bun === 'undefined') {
+             throw error;
+         }
++        // Silently ignore other errors (e.g. Bun compatibility in catch)
+     }
+ }
+ const diff = (before, after) => {

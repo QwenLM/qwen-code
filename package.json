@@ -144,6 +144,6 @@
     ]
   },
   "patchedDependencies": {
-    "ink@6.2.3": "patches/ink@6.2.3.patch"
+    "ink@6.8.0": "patches/ink@6.8.0.patch"
   }
 }

@@ -378,6 +378,9 @@
       },
     },
   },
+  "patchedDependencies": {
+    "ink@6.8.0": "patches/ink@6.8.0.patch",
+  },
   "overrides": {
     "ansi-regex": "6.2.2",
     "baseline-browser-mapping": "^2.9.19",
@@ -2651,6 +2654,24 @@
 
     "@pnpm/network.ca-file/graceful-fs": ["graceful-fs@4.2.10", "", {}, "sha512-9ByhssR2fPVsNZj478qUUbKfmL0+t5BDVyjShtyZZLiK7ZDAArFFfopyOTj0M05wE2tJPisA4iTnnXl2YoPvOA=="],
 
+    "@qwen-code/channel-dingtalk/@qwen-code/channel-base": ["@qwen-code/channel-base@file:packages/channels/base", { "dependencies": { "@agentclientprotocol/sdk": "^0.14.1" }, "devDependencies": { "typescript": "^5.0.0" } }],
+
+    "@qwen-code/channel-plugin-example/@qwen-code/channel-base": ["@qwen-code/channel-base@file:packages/channels/base", { "dependencies": { "@agentclientprotocol/sdk": "^0.14.1" }, "devDependencies": { "typescript": "^5.0.0" } }],
+
+    "@qwen-code/channel-telegram/@qwen-code/channel-base": ["@qwen-code/channel-base@file:packages/channels/base", { "dependencies": { "@agentclientprotocol/sdk": "^0.14.1" }, "devDependencies": { "typescript": "^5.0.0" } }],
+
+    "@qwen-code/channel-weixin/@qwen-code/channel-base": ["@qwen-code/channel-base@file:packages/channels/base", { "dependencies": { "@agentclientprotocol/sdk": "^0.14.1" }, "devDependencies": { "typescript": "^5.0.0" } }],
+
+    "@qwen-code/qwen-code/@qwen-code/channel-base": ["@qwen-code/channel-base@file:packages/channels/base", { "dependencies": { "@agentclientprotocol/sdk": "^0.14.1" }, "devDependencies": { "typescript": "^5.0.0" } }],
+
+    "@qwen-code/qwen-code/@qwen-code/channel-dingtalk": ["@qwen-code/channel-dingtalk@file:packages/channels/dingtalk", { "dependencies": { "@qwen-code/channel-base": "file:../base", "dingtalk-stream-sdk-nodejs": "^2.0.4" }, "devDependencies": { "typescript": "^5.0.0" } }],
+
+    "@qwen-code/qwen-code/@qwen-code/channel-telegram": ["@qwen-code/channel-telegram@file:packages/channels/telegram", { "dependencies": { "@qwen-code/channel-base": "file:../base", "grammy": "^1.41.1", "https-proxy-agent": "^7.0.6", "telegram-markdown-formatter": "^0.1.2" }, "devDependencies": { "typescript": "^5.0.0" } }],
+
+    "@qwen-code/qwen-code/@qwen-code/channel-weixin": ["@qwen-code/channel-weixin@file:packages/channels/weixin", { "dependencies": { "@qwen-code/channel-base": "file:../base" }, "devDependencies": { "typescript": "^5.0.0" } }],
+
+    "@qwen-code/qwen-code/@qwen-code/web-templates": ["@qwen-code/web-templates@file:packages/web-templates", { "devDependencies": { "@types/react": "^18.2.0", "@types/react-dom": "^18.2.0", "@vitejs/plugin-react": "^4.2.0", "autoprefixer": "^10.4.22", "postcss": "^8.5.6", "tailwindcss": "^3.4.18", "typescript": "^5.3.3", "vite": "^5.0.0" } }],
+
     "@qwen-code/sdk/@vitest/coverage-v8": ["@vitest/coverage-v8@1.6.1", "", { "dependencies": { "@ampproject/remapping": "^2.2.1", "@bcoe/v8-coverage": "^0.2.3", "debug": "^4.3.4", "istanbul-lib-coverage": "^3.2.2", "istanbul-lib-report": "^3.0.1", "istanbul-lib-source-maps": "^5.0.4", "istanbul-reports": "^3.1.6", "magic-string": "^0.30.5", "magicast": "^0.3.3", "picocolors": "^1.0.0", "std-env": "^3.5.0", "strip-literal": "^2.0.0", "test-exclude": "^6.0.0" }, "peerDependencies": { "vitest": "1.6.1" } }, "sha512-6YeRZwuO4oTGKxD3bijok756oktHSIm3eczVVzNe3scqzuhLwltIF3S9ZL/vwOVIpURmU6SnZhziXXAfw8/Qlw=="],
 
     "@qwen-code/sdk/eslint": ["eslint@8.57.1", "", { "dependencies": { "@eslint-community/eslint-utils": "^4.2.0", "@eslint-community/regexpp": "^4.6.1", "@eslint/eslintrc": "^2.1.4", "@eslint/js": "8.57.1", "@humanwhocodes/config-array": "^0.13.0", "@humanwhocodes/module-importer": "^1.0.1", "@nodelib/fs.walk": "^1.2.8", "@ungap/structured-clone": "^1.2.0", "ajv": "^6.12.4", "chalk": "^4.0.0", "cross-spawn": "^7.0.2", "debug": "^4.3.2", "doctrine": "^3.0.0", "escape-string-regexp": "^4.0.0", "eslint-scope": "^7.2.2", "eslint-visitor-keys": "^3.4.3", "espree": "^9.6.1", "esquery": "^1.4.2", "esutils": "^2.0.2", "fast-deep-equal": "^3.1.3", "file-entry-cache": "^6.0.1", "find-up": "^5.0.0", "glob-parent": "^6.0.2", "globals": "^13.19.0", "graphemer": "^1.4.0", "ignore": "^5.2.0", "imurmurhash": "^0.1.4", "is-glob": "^4.0.0", "is-path-inside": "^3.0.3", "js-yaml": "^4.1.0", "json-stable-stringify-without-jsonify": "^1.0.1", "levn": "^0.4.1", "lodash.merge": "^4.6.2", "minimatch": "^3.1.2", "natural-compare": "^1.4.0", "optionator": "^0.9.3", "strip-ansi": "^6.0.1", "text-table": "^0.2.0" }, "bin": { "eslint": "bin/eslint.js" } }, "sha512-ypowyDxpVSYpkXr9WPv2PAZCtNip1Mv5KTW0SCurXv/9iOpcrH9PaqUElksqEB6pChqHGDRCFTyrZlGhnLNGiA=="],
@@ -2958,6 +2979,16 @@
     "@jsonjoy.com/fs-snapshot/@jsonjoy.com/util/@jsonjoy.com/codegen": ["@jsonjoy.com/codegen@17.67.0", "", { "peerDependencies": { "tslib": "2" } }, "sha512-idnkUplROpdBOV0HMcwhsCUS5TRUi9poagdGs70A6S4ux9+/aPuKbh8+UYRTLYQHtXvAdNfQWXDqZEx5k4Dj2Q=="],
 
     "@microsoft/api-extractor/minimatch/brace-expansion": ["brace-expansion@5.0.6", "", { "dependencies": { "balanced-match": "^4.0.2" } }, "sha512-kLpxurY4Z4r9sgMsyG0Z9uzsBlgiU/EFKhj/h91/8yHu0edo7XuixOIH3VcJ8kkxs6/jPzoI6U9Vj3WqbMQ94g=="],
+
+    "@qwen-code/qwen-code/@qwen-code/channel-dingtalk/@qwen-code/channel-base": ["@qwen-code/channel-base@file:packages/channels/base", {}],
+
+    "@qwen-code/qwen-code/@qwen-code/channel-telegram/@qwen-code/channel-base": ["@qwen-code/channel-base@file:packages/channels/base", {}],
+
+    "@qwen-code/qwen-code/@qwen-code/channel-weixin/@qwen-code/channel-base": ["@qwen-code/channel-base@file:packages/channels/base", {}],
+
+    "@qwen-code/qwen-code/@qwen-code/web-templates/@types/react": ["@types/react@18.3.28", "", { "dependencies": { "@types/prop-types": "*", "csstype": "^3.2.2" } }, "sha512-z9VXpC7MWrhfWipitjNdgCauoMLRdIILQsAEV+ZesIzBq/oUlxk0m3ApZuMFCXdnS4U7KrI+l3WRUEGQ8K1QKw=="],
+
+    "@qwen-code/qwen-code/@qwen-code/web-templates/@types/react-dom": ["@types/react-dom@18.3.7", "", { "peerDependencies": { "@types/react": "^18.0.0" } }, "sha512-MEe3UeoENYVFXzoXEWsvcpg6ZvlrFNlOQ7EOsvhI3CfAXwzPfO8Qwuxd40nepsYKqyyVQnTdEfv68q91yLcKrQ=="],
 
     "@qwen-code/sdk/@vitest/coverage-v8/@bcoe/v8-coverage": ["@bcoe/v8-coverage@0.2.3", "", {}, "sha512-0hYQ8SB4Db5zvZB4axdMHGwEaQjkZzFjQiN9LVYvIFB2nSUHW9tYpxWriPrWDASIxiaXax83REcLxuSdnGPZtw=="],
 
