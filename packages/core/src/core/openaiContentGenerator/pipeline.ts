@@ -114,6 +114,9 @@ export class ContentGenerationPipeline {
         if (!perRequestAc) {
           return this.processStreamWithLogging(stream, context, request);
         }
+        // Capture the narrowed controller so the closure below sees a non-
+        // nullable type (TS does not propagate narrowing into nested funcs).
+        const ac = perRequestAc;
         const innerStream = this.processStreamWithLogging(
           stream,
           context,
@@ -123,7 +126,7 @@ export class ContentGenerationPipeline {
           try {
             yield* innerStream;
           } finally {
-            perRequestAc.abort();
+            ac.abort();
           }
         }
         return drainThenCleanup();
