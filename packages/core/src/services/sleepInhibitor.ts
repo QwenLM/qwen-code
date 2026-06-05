@@ -33,6 +33,24 @@ const NOOP_HANDLE: SleepInhibitorHandle = {
   release() {},
 };
 
+const MAX_INHIBITOR_REASON_LENGTH = 120;
+
+/**
+ * Sanitize the inhibitor reason before it is passed to `systemd-inhibit
+ * --why=`. The string is visible in process listings (`ps`,
+ * `systemd-inhibit --list`) on shared systems, so strip control characters
+ * and cap the length to avoid leaking large/multiline context.
+ */
+function sanitizeInhibitorReason(reason: string): string {
+  // Strip C0 control characters and DEL.
+  // eslint-disable-next-line no-control-regex
+  const controlChars = /[\x00-\x1f\x7f]/g;
+  return reason
+    .replace(controlChars, ' ')
+    .slice(0, MAX_INHIBITOR_REASON_LENGTH)
+    .trim();
+}
+
 export class SleepInhibitor {
   private activeCount = 0;
   private child: ChildProcess | undefined;
@@ -101,6 +119,9 @@ export class SleepInhibitor {
       this.logger.debug(
         `Sleep inhibition is unsupported on platform ${this.platform}.`,
       );
+      // Latch so we don't re-check and re-log the unsupported platform on
+      // every subsequent acquire() within the same run.
+      this.spawnFailedForCurrentRun = true;
       return;
     }
 
@@ -206,9 +227,11 @@ export class SleepInhibitor {
   ): { command: string; args: string[] } | undefined {
     switch (this.platform) {
       case 'darwin':
-        // -i prevents idle sleep, -s prevents system sleep (including
-        // lid-close on AC power). Both are needed to match the Linux
-        // systemd-inhibit semantics which blocks all sleep transitions.
+        // -i prevents idle sleep; -s prevents system sleep but, per the
+        // caffeinate(8) man page, only while on AC power. On battery -s is
+        // ignored and lid-close sleep still occurs — macOS does not expose a
+        // way to block that, so this does not fully match the Linux
+        // systemd-inhibit semantics on battery.
         return { command: 'caffeinate', args: ['-is'] };
       case 'linux':
         return {
@@ -216,7 +239,7 @@ export class SleepInhibitor {
           args: [
             '--what=sleep',
             '--who=Qwen Code',
-            `--why=${reason}`,
+            `--why=${sanitizeInhibitorReason(reason)}`,
             '--mode=block',
             'sleep',
             'infinity',

@@ -531,7 +531,10 @@ const SETTINGS_SCHEMA = {
         type: 'boolean',
         label: 'Prevent System Sleep While Running',
         category: 'General',
-        requiresRestart: false,
+        // Read once at startup via Config.preventSystemSleep (a readonly field
+        // captured in loadCliConfig), so a runtime toggle only takes effect
+        // after restart.
+        requiresRestart: true,
         default: true,
         description:
           'Prevent the system from sleeping while Qwen Code is streaming a model response or executing tools. Idle prompt time and permission prompts do not inhibit sleep.',

@@ -202,4 +202,101 @@ describe('SleepInhibitor', () => {
     expect(() => disabled.release()).not.toThrow();
     expect(() => missingGetter.release()).not.toThrow();
   });
+
+  it('dispose kills the active child, resets state, and is idempotent', () => {
+    const { children, inhibitor } = createHarness('linux');
+
+    inhibitor.acquire('work');
+    inhibitor.acquire('more work');
+    expect(inhibitor.getActiveCount()).toBe(2);
+    expect(inhibitor.isRunning()).toBe(true);
+
+    inhibitor.dispose();
+    expect(children[0]!.kill).toHaveBeenCalledTimes(1);
+    expect(inhibitor.getActiveCount()).toBe(0);
+    expect(inhibitor.isRunning()).toBe(false);
+
+    // Second dispose is a no-op and must not throw or re-kill.
+    expect(() => inhibitor.dispose()).not.toThrow();
+    expect(children[0]!.kill).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not propagate when child.kill() throws during release', () => {
+    const children: ChildProcess[] = [];
+    const spawn = vi.fn(() => {
+      const child = new EventEmitter() as ChildProcess;
+      Object.defineProperty(child, 'killed', { get: () => false });
+      child.kill = vi.fn(() => {
+        throw new Error('ESRCH');
+      });
+      children.push(child);
+      return child;
+    });
+    const logger = { debug: vi.fn(), warn: vi.fn() };
+    const inhibitor = new SleepInhibitor({ platform: 'linux', spawn, logger });
+
+    const handle = inhibitor.acquire();
+    expect(() => handle.release()).not.toThrow();
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Failed to stop sleep inhibitor: ESRCH',
+    );
+    expect(inhibitor.getActiveCount()).toBe(0);
+  });
+
+  it('ignores a late error event from an already-replaced child', () => {
+    const { children, inhibitor, logger, spawn } = createHarness('linux');
+
+    const first = inhibitor.acquire();
+    // First child exits, so this.child is cleared and a re-acquire respawns.
+    children[0]!.emit('exit', 0, null);
+    const second = inhibitor.acquire();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(inhibitor.isRunning()).toBe(true);
+
+    logger.debug.mockClear();
+    // A late error from the stale first child must be ignored: it must not
+    // flip spawnFailedForCurrentRun nor clear the current (second) child.
+    children[0]!.emit('error', new Error('ESRCH'));
+    expect(logger.debug).not.toHaveBeenCalledWith(
+      'Failed to start sleep inhibitor: ESRCH',
+    );
+    expect(inhibitor.isRunning()).toBe(true);
+
+    first.release();
+    second.release();
+  });
+
+  it('latches on an unsupported platform so it only checks once', () => {
+    const { inhibitor, logger, spawn } = createHarness(
+      'freebsd' as NodeJS.Platform,
+    );
+
+    const first = inhibitor.acquire();
+    const second = inhibitor.acquire();
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(inhibitor.isRunning()).toBe(false);
+    expect(
+      logger.debug.mock.calls.filter((call) =>
+        String(call[0]).includes('unsupported on platform'),
+      ),
+    ).toHaveLength(1);
+
+    first.release();
+    second.release();
+  });
+
+  it('sanitizes the systemd-inhibit reason (strips control chars, caps length)', () => {
+    const { inhibitor, spawn } = createHarness('linux');
+
+    const handle = inhibitor.acquire(`run\x00 tool\n${'x'.repeat(200)}`);
+    const args = spawn.mock.calls[0]![1] as string[];
+    const why = args.find((arg) => arg.startsWith('--why='))!;
+
+    // eslint-disable-next-line no-control-regex
+    expect(why).not.toMatch(/[\x00-\x1f\x7f]/);
+    expect(why.length).toBeLessThanOrEqual('--why='.length + 120);
+
+    handle.release();
+  });
 });
