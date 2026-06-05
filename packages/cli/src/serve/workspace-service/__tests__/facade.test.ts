@@ -234,6 +234,70 @@ describe('createDaemonWorkspaceService', () => {
       );
     });
 
+    it('getWorkspaceEnvStatus falls back to idle envelope when statusProvider throws', async () => {
+      const statusProvider: DaemonWorkspaceServiceDeps['statusProvider'] = {
+        getEnvStatus: vi.fn().mockRejectedValue(new Error('provider boom')),
+        getDaemonPreflightCells: vi.fn().mockResolvedValue([]),
+      };
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          statusProvider,
+          boundWorkspace: '/ws',
+          isChannelLive: () => true,
+        }),
+      );
+
+      const result = await svc.getWorkspaceEnvStatus(makeCtx());
+
+      expect(result.workspaceCwd).toBe('/ws');
+      expect(result.acpChannelLive).toBe(true);
+      expect(result.initialized).toBe(true);
+    });
+
+    it('getWorkspacePreflightStatus falls back to empty daemon cells when getDaemonPreflightCells throws', async () => {
+      const statusProvider: DaemonWorkspaceServiceDeps['statusProvider'] = {
+        getEnvStatus: vi.fn().mockResolvedValue({ v: 1, cells: [] }),
+        getDaemonPreflightCells: vi
+          .fn()
+          .mockRejectedValue(new Error('daemon cells boom')),
+      };
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          statusProvider,
+          boundWorkspace: '/ws',
+          isChannelLive: () => false,
+        }),
+      );
+
+      const result = await svc.getWorkspacePreflightStatus(makeCtx());
+
+      // Daemon cells failed → no daemon-locality cells in the result.
+      const daemonCells = result.cells.filter((c) => c.locality === 'daemon');
+      expect(daemonCells).toHaveLength(0);
+      // ACP idle cells should still be present (channel is not live).
+      expect(result.cells.length).toBeGreaterThan(0);
+    });
+
+    it('getWorkspacePreflightStatus builds error entry when ACP query throws', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockRejectedValue(new Error('acp channel down'));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          isChannelLive: () => true,
+        }),
+      );
+
+      const result = await svc.getWorkspacePreflightStatus(makeCtx());
+
+      expect(result.errors).toBeDefined();
+      expect(result.errors!.length).toBeGreaterThan(0);
+      expect(result.errors![0]!.kind).toBe('preflight');
+      expect(result.errors![0]!.status).toBe('error');
+      expect(result.errors![0]!.error).toContain('acp channel down');
+    });
+
     it('getWorkspacePreflightStatus idle fallback includes ACP placeholder cells', async () => {
       const queryWorkspaceStatus = vi
         .fn()
@@ -745,6 +809,82 @@ describe('createDaemonWorkspaceService', () => {
         await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
           /appeared.*between/,
         );
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it('throws WorkspaceInitSymlinkError when overwrite open hits ELOOP', async () => {
+      const target = path.join(tmpDir, 'QWEN.md');
+      await fs.writeFile(target, '# existing content', 'utf8');
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      const origOpen = fs.open;
+      vi.spyOn(fs, 'open').mockImplementation(
+        async (
+          filePath: Parameters<typeof origOpen>[0],
+          flags?: Parameters<typeof origOpen>[1],
+        ) => {
+          if (
+            typeof flags === 'number' &&
+            String(filePath).endsWith('QWEN.md')
+          ) {
+            const err = new Error('ELOOP') as NodeJS.ErrnoException;
+            err.code = 'ELOOP';
+            throw err;
+          }
+          return origOpen(filePath, flags as string);
+        },
+      );
+
+      try {
+        await expect(
+          svc.initWorkspace(makeCtx(), { force: true }),
+        ).rejects.toThrow(/O_NOFOLLOW.*ELOOP|symlink/i);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it('throws WorkspaceInitRaceError when overwrite open hits ENOENT', async () => {
+      const target = path.join(tmpDir, 'QWEN.md');
+      await fs.writeFile(target, '# existing content', 'utf8');
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      const origOpen = fs.open;
+      vi.spyOn(fs, 'open').mockImplementation(
+        async (
+          filePath: Parameters<typeof origOpen>[0],
+          flags?: Parameters<typeof origOpen>[1],
+        ) => {
+          if (
+            typeof flags === 'number' &&
+            String(filePath).endsWith('QWEN.md')
+          ) {
+            const err = new Error('ENOENT') as NodeJS.ErrnoException;
+            err.code = 'ENOENT';
+            throw err;
+          }
+          return origOpen(filePath, flags as string);
+        },
+      );
+
+      try {
+        await expect(
+          svc.initWorkspace(makeCtx(), { force: true }),
+        ).rejects.toThrow(/deleted.*between|concurrent/i);
       } finally {
         vi.restoreAllMocks();
       }

@@ -38,6 +38,7 @@ import {
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge/status';
+import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
 
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
@@ -446,7 +447,7 @@ export function createDaemonWorkspaceService(
         result = await invokeWorkspaceCommand<RestartMcpServerResult>(
           SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
           params,
-          { timeoutMs: 300_000 },
+          { timeoutMs: MCP_RESTART_SERVER_DEADLINE_MS },
         );
       } catch (err) {
         const data = (err as { data?: unknown })?.data;
