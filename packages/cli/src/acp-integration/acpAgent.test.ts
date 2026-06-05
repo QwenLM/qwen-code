@@ -285,7 +285,10 @@ import {
   toStdioServer,
   toSseServer,
   toHttpServer,
+  normalizeCoreSettingValue,
+  extractFilesFromTarGz,
 } from './acpAgent.js';
+import { gzipSync } from 'node:zlib';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
@@ -3891,5 +3894,97 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+});
+
+describe('normalizeCoreSettingValue', () => {
+  it('accepts a valid boolean and rejects a non-boolean', () => {
+    expect(normalizeCoreSettingValue('general.vimMode', true)).toBe(true);
+    expect(() =>
+      normalizeCoreSettingValue('general.vimMode', 'yes'),
+    ).toThrowError(/general\.vimMode must be a boolean/);
+  });
+
+  it('accepts a number at/above the minimum and rejects below-min and non-numbers', () => {
+    expect(
+      normalizeCoreSettingValue('general.sessionRecapAwayThresholdMinutes', 5),
+    ).toBe(5);
+    expect(() =>
+      normalizeCoreSettingValue('general.sessionRecapAwayThresholdMinutes', 0),
+    ).toThrowError(/must be at least 1/);
+    expect(() =>
+      normalizeCoreSettingValue(
+        'general.sessionRecapAwayThresholdMinutes',
+        Number.NaN,
+      ),
+    ).toThrowError(/must be a number/);
+  });
+
+  it('accepts an allowed enum value and rejects an unknown one', () => {
+    expect(normalizeCoreSettingValue('tools.approvalMode', 'yolo')).toBe(
+      'yolo',
+    );
+    expect(() =>
+      normalizeCoreSettingValue('tools.approvalMode', 'bogus'),
+    ).toThrowError(/must be one of/);
+  });
+
+  it('trims a valid string and rejects a non-string', () => {
+    expect(
+      normalizeCoreSettingValue('general.outputLanguage', '  English  '),
+    ).toBe('English');
+    expect(() =>
+      normalizeCoreSettingValue('general.outputLanguage', 42),
+    ).toThrowError(/must be a string/);
+  });
+});
+
+describe('extractFilesFromTarGz', () => {
+  // Minimal tar (ustar) entry builder — only the fields the parser reads.
+  function tarEntry(name: string, content: string): Buffer {
+    const header = Buffer.alloc(512);
+    header.write(name, 0, 'utf8'); // name @ 0 (100 bytes)
+    const size = Buffer.byteLength(content);
+    header.write(`${size.toString(8).padStart(11, '0')}\0`, 124, 'utf8'); // size @ 124 (octal)
+    header.write('0', 156, 'utf8'); // typeflag '0' = regular file
+    const data = Buffer.alloc(Math.ceil(size / 512) * 512);
+    data.write(content, 0, 'utf8');
+    return Buffer.concat([header, data]);
+  }
+
+  function makeTarGz(name: string, content: string): Uint8Array {
+    const tar = Buffer.concat([tarEntry(name, content), Buffer.alloc(1024)]); // + end blocks
+    return new Uint8Array(gzipSync(tar));
+  }
+
+  it('extracts files under the requested directory (stripping the archive root)', async () => {
+    const archive = makeTarGz('repo-main/skills/SKILL.md', 'hello skill');
+    const files = await extractFilesFromTarGz(archive, 'skills');
+    expect(files).toHaveLength(1);
+    expect(files[0]!.relativePath).toBe('SKILL.md');
+    expect(Buffer.from(files[0]!.content).toString('utf8')).toBe('hello skill');
+  });
+
+  it('rejects an archive whose compressed size exceeds the limit', async () => {
+    await expect(
+      extractFilesFromTarGz(new Uint8Array(64), 'skills', {
+        maxCompressedBytes: 16,
+      }),
+    ).rejects.toThrowError(/exceeds the maximum allowed size/);
+  });
+
+  it('rejects an archive that fails to decompress', async () => {
+    await expect(
+      extractFilesFromTarGz(new Uint8Array([1, 2, 3, 4, 5]), 'skills'),
+    ).rejects.toThrowError(/Failed to decompress skill archive/);
+  });
+
+  it('rejects an archive whose decompressed size exceeds the limit', async () => {
+    const archive = makeTarGz('repo-main/skills/SKILL.md', 'x'.repeat(2048));
+    await expect(
+      extractFilesFromTarGz(archive, 'skills', {
+        maxDecompressedBytes: 16,
+      }),
+    ).rejects.toThrowError(/Decompressed skill archive exceeds/);
   });
 });

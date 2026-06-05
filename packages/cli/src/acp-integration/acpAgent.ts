@@ -752,11 +752,22 @@ const MAX_SKILL_DOWNLOAD_BYTES = 100 * 1024 * 1024; // 100 MB compressed
 const MAX_SKILL_DECOMPRESSED_BYTES = 500 * 1024 * 1024; // 500 MB decompressed
 const gunzipAsync = promisify(gunzip);
 
-async function extractFilesFromTarGz(
+export async function extractFilesFromTarGz(
   archiveBytes: Uint8Array,
   directoryPath: string,
+  // Limits are injectable so the size-guard branches can be exercised in tests
+  // without allocating the 100MB/500MB production thresholds.
+  limits: {
+    maxCompressedBytes?: number;
+    maxDecompressedBytes?: number;
+  } = {},
 ): Promise<DownloadedSkillFile[]> {
-  if (archiveBytes.length > MAX_SKILL_DOWNLOAD_BYTES) {
+  const maxCompressedBytes =
+    limits.maxCompressedBytes ?? MAX_SKILL_DOWNLOAD_BYTES;
+  const maxDecompressedBytes =
+    limits.maxDecompressedBytes ?? MAX_SKILL_DECOMPRESSED_BYTES;
+
+  if (archiveBytes.length > maxCompressedBytes) {
     throw RequestError.invalidParams(
       undefined,
       'Skill archive exceeds the maximum allowed size',
@@ -775,7 +786,7 @@ async function extractFilesFromTarGz(
     );
   }
 
-  if (archive.length > MAX_SKILL_DECOMPRESSED_BYTES) {
+  if (archive.length > maxDecompressedBytes) {
     throw RequestError.invalidParams(
       undefined,
       'Decompressed skill archive exceeds the maximum allowed size',
@@ -1416,7 +1427,7 @@ function readCoreSettingValues(
   return values;
 }
 
-function normalizeCoreSettingValue(
+export function normalizeCoreSettingValue(
   key: QwenCoreSettingKey,
   value: unknown,
 ): QwenSettingValue {
