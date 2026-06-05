@@ -30,6 +30,7 @@ import {
   getMissingSlashPrefixCompletion,
   type SkillInfo,
 } from '../completions/slashCompletion';
+import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import { createAtCompletionSource } from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
 import { useI18n } from '../i18n';
@@ -49,6 +50,7 @@ interface EditorProps {
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
+  slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => string | null;
   onClearQueuedMessages?: () => boolean;
@@ -157,6 +159,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
     placeholderText = 'Type a message...',
     commands,
     skills = [],
+    slashCommandCategoryOrder,
     queuedMessages = [],
     onPopQueuedMessages,
     onClearQueuedMessages,
@@ -187,6 +190,10 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   commandsRef.current = commands;
   const skillsRef = useRef(skills);
   skillsRef.current = skills;
+  const slashCommandCategoryOrderRef = useRef(slashCommandCategoryOrder);
+  slashCommandCategoryOrderRef.current = slashCommandCategoryOrder;
+  const tRef = useRef(t);
+  tRef.current = t;
   const queuedMessagesRef = useRef(queuedMessages);
   queuedMessagesRef.current = queuedMessages;
   const onPopQueuedMessagesRef = useRef(onPopQueuedMessages);
@@ -295,6 +302,8 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
         () => commandsRef.current,
         () => skillsRef.current,
         () => languageRef.current,
+        (key) => tRef.current(key),
+        () => slashCommandCategoryOrderRef.current,
       ),
       createAtCompletionSource(
         () => workspaceActionsRef.current?.globWorkspace,
@@ -716,6 +725,16 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
           '.cm-tooltip-autocomplete ul li[aria-selected]': {
             background: 'var(--bg-tertiary, #1e1e1e)',
             color: 'var(--accent-color, #4a9eff)',
+          },
+          '.cm-tooltip-autocomplete completion-section': {
+            display: 'block',
+            height: '0',
+            margin: '6px 10px 3px',
+            padding: '0',
+            borderBottom: '1px solid var(--border-color, #2a2a2a)',
+          },
+          '.cm-tooltip-autocomplete completion-section:first-of-type': {
+            display: 'none',
           },
           '.cm-completionLabel': {
             fontFamily: 'var(--font-mono, monospace)',

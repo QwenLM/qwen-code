@@ -105,6 +105,7 @@ import {
   type WebShellMarkdownCustomization,
   type ToolHeaderExtraRenderer,
 } from './customization';
+import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
 
 export const CompactModeContext = createContext(false);
@@ -187,6 +188,8 @@ export interface WebShellProps {
   onBugReport?: (info: BugReportInfo) => void;
   /** Slash command names to hide from completion/help, for example `['approval-mode']`. */
   hiddenSlashCommands?: string[];
+  /** Slash command category order. Defaults to custom, skill, system. */
+  slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   /** Custom renderer for the tool-card header content after the status icon and tool name. */
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom Markdown behavior for assistant content only. */
@@ -493,6 +496,7 @@ export function App({
   onError,
   onBugReport,
   hiddenSlashCommands,
+  slashCommandCategoryOrder,
   renderToolHeaderExtra,
   markdown,
 }: WebShellProps = {}) {
@@ -1177,9 +1181,7 @@ export function App({
               setSelectedLanguage(nextLanguage);
               onLanguageChange?.(nextLanguage);
               if (!promptBlocked) {
-                sendPrompt(`/language ui ${nextLanguage}`, undefined, {
-                  optimisticUserMessage: false,
-                })
+                sendPrompt(`/language ui ${nextLanguage}`)
                   .then(() => sessionActions.refreshCommands())
                   .catch((error: unknown) => {
                     reportError(error, 'Failed to sync /language command');
@@ -1866,11 +1868,14 @@ export function App({
     );
     return mergeCommands(connection.commands ?? [], getLocalCommands(t))
       .filter((command) => !hidden.has(normalizeHiddenCommand(command.name)))
-      .map((command) =>
-        skillNames.has(command.name)
-          ? { ...command, description: t('skills.run') }
-          : command,
-      );
+      .map((command) => {
+        if (!skillNames.has(command.name)) return command;
+        return {
+          ...command,
+          displayCategory: 'skill' as const,
+          description: command.description || t('skills.run'),
+        };
+      });
   }, [connection.commands, connection.skills, hiddenSlashCommands, t]);
 
   const welcomeHeader = useMemo(
@@ -2100,6 +2105,7 @@ export function App({
                   disabled={isDisabled}
                   commands={commands}
                   skills={loadedSkills}
+                  slashCommandCategoryOrder={slashCommandCategoryOrder}
                   queuedMessages={queuedPrompts.map((prompt) => prompt.text)}
                   onFocusActiveAgents={handleFocusActiveAgents}
                   onPopQueuedMessages={popQueuedPromptsForEdit}

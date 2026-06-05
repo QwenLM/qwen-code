@@ -2,14 +2,26 @@ import type {
   Completion,
   CompletionContext,
   CompletionResult,
+  CompletionSection,
 } from '@codemirror/autocomplete';
 import type { CommandInfo } from '../adapters/types';
 import type { WebShellLanguage } from '../i18n';
+import {
+  compareCommandsByCategory,
+  DEFAULT_COMMAND_CATEGORY_ORDER,
+  getCategoryRank,
+  getCommandDisplayCategory,
+  type CommandDisplayCategory,
+  type CommandDisplayCategoryOrder,
+} from '../utils/commandDisplay';
 
 export interface SkillInfo {
   name: string;
   description: string;
 }
+
+type Translate = (key: string) => string;
+const COMMAND_NAME_PATTERN = String.raw`([^\s/]+)`;
 
 interface SubcommandNode {
   name: string;
@@ -87,6 +99,7 @@ const IMPLICIT_SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
   ],
   mcp: [
     { name: 'desc', description: '显示 MCP server 和工具描述' },
+    { name: 'nodesc', description: '隐藏 MCP server 和工具描述' },
     { name: 'schema', description: '显示工具参数 schema' },
   ],
   memory: [
@@ -110,6 +123,7 @@ const IMPLICIT_SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
   ],
   mcp: [
     { name: 'desc', description: 'Show MCP server and tool descriptions' },
+    { name: 'nodesc', description: 'Hide MCP server and tool descriptions' },
     { name: 'schema', description: 'Show tool parameter schemas' },
   ],
   memory: [
@@ -163,6 +177,43 @@ function comparePrefixFirst(a: string, b: string, query: string): number {
   return a.localeCompare(b);
 }
 
+function compareSlashCommands(
+  a: CommandInfo,
+  b: CommandInfo,
+  query: string,
+  categoryOrder: CommandDisplayCategoryOrder,
+): number {
+  const order = compareCommandsByCategory(a, b, categoryOrder);
+  if (order !== 0) return order;
+  return query ? comparePrefixFirst(a.name, b.name, query) : 0;
+}
+
+const COMMAND_SECTION_KEYS: Record<CommandDisplayCategory, string> = {
+  custom: 'slash.category.custom',
+  skill: 'slash.category.skill',
+  system: 'slash.category.system',
+};
+
+function renderCommandSectionHeader(section: CompletionSection): HTMLElement {
+  const header = document.createElement('completion-section');
+  header.className = 'cm-command-section-header';
+  header.setAttribute('aria-label', section.name);
+  return header;
+}
+
+function getCommandSection(
+  command: CommandInfo,
+  translate: Translate,
+  categoryOrder: CommandDisplayCategoryOrder,
+): CompletionSection {
+  const category = getCommandDisplayCategory(command);
+  return {
+    name: translate(COMMAND_SECTION_KEYS[category]),
+    rank: getCategoryRank(category, categoryOrder),
+    header: renderCommandSectionHeader,
+  };
+}
+
 export function getMissingSlashPrefixCompletion(
   text: string,
   commands: CommandInfo[],
@@ -181,7 +232,7 @@ export function getImplicitTabCompletion(
   commands: CommandInfo[],
   language: WebShellLanguage,
 ): string | null {
-  const match = text.match(/^\/(\w[\w-]*)\s+$/);
+  const match = text.match(new RegExp(`^/${COMMAND_NAME_PATTERN}\\s+$`));
   if (!match) return null;
 
   const cmdName = match[1];
@@ -206,7 +257,7 @@ export function getSlashCommandArgumentHint(
   commands: CommandInfo[],
   language: WebShellLanguage,
 ): string | null {
-  const match = text.match(/^\/(\w[\w-]*)(\s*)$/);
+  const match = text.match(new RegExp(`^/${COMMAND_NAME_PATTERN}(\\s*)$`));
   if (!match) return null;
 
   const cmdName = match[1];
@@ -235,13 +286,18 @@ export function slashCompletionSource(
   getCommands: () => CommandInfo[],
   getSkills: () => SkillInfo[] = () => [],
   getLanguage: () => WebShellLanguage = () => 'en',
+  translate: Translate = (key) => key,
+  getCategoryOrder: () => CommandDisplayCategoryOrder | undefined = () =>
+    DEFAULT_COMMAND_CATEGORY_ORDER,
 ) {
   return (context: CompletionContext): CompletionResult | null => {
     const line = context.state.doc.lineAt(context.pos);
     const textBefore = line.text.slice(0, context.pos - line.from);
 
     // Sub-command completion: "/command arg1 arg2..."
-    const subMatch = textBefore.match(/^\/(\w[\w-]*)\s+(.*)$/);
+    const subMatch = textBefore.match(
+      new RegExp(`^/${COMMAND_NAME_PATTERN}\\s+(.*)$`),
+    );
     if (subMatch) {
       const [, cmdName, rest] = subMatch;
       const commands = getCommands();
@@ -320,27 +376,28 @@ export function slashCompletionSource(
     // Top-level command completion: "/" or "/ex".
     // Use the whole line so moving the cursor before or inside the command
     // still offers the same completions and replaces the full command token.
-    const match = line.text.match(/^\/(\w*)$/);
+    const match = line.text.match(/^\/([^\s/]*)$/);
     if (!match) return null;
 
     const prefix = match[1];
     const commands = getCommands();
-
+    const categoryOrder = getCategoryOrder() ?? DEFAULT_COMMAND_CATEGORY_ORDER;
     const lp = prefix.toLowerCase();
-    const options = commands
+    const filteredCommands = commands
       .filter((c) => {
         if (!prefix) return true;
         return c.name.toLowerCase().includes(lp);
       })
-      .sort((a, b) => (prefix ? comparePrefixFirst(a.name, b.name, lp) : 0))
-      .map((c): Completion => {
-        const command = `/${c.name}`;
-        return {
-          label: command,
-          detail: c.description || undefined,
-          apply: `${command} `,
-        };
-      });
+      .sort((a, b) => compareSlashCommands(a, b, lp, categoryOrder));
+    const options = filteredCommands.map((c): Completion => {
+      const command = `/${c.name}`;
+      return {
+        label: command,
+        detail: c.description || undefined,
+        apply: `${command} `,
+        section: getCommandSection(c, translate, categoryOrder),
+      };
+    });
 
     if (options.length === 0) return null;
 
