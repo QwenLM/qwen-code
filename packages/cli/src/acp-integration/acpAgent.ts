@@ -677,10 +677,12 @@ function assertAllowedSkillSourceUrl(sourceUrl: string): void {
 
 function parseGitHubBlobSkillUrl(sourceUrl: string): GitHubBlobSkillUrl | null {
   const parsed = new URL(sourceUrl);
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+  // HTTPS-only, consistent with assertAllowedSkillSourceUrl (skill content can
+  // include executable hooks, so plaintext http: is MITM-able).
+  if (parsed.protocol !== 'https:') {
     throw RequestError.invalidParams(
       undefined,
-      'Skill sourceUrl must be an HTTP(S) URL',
+      'Skill sourceUrl must be an HTTPS URL',
     );
   }
 
@@ -750,6 +752,10 @@ function stripArchiveRoot(filePath: string): string {
 // synchronous path so it never blocks the event loop.
 const MAX_SKILL_DOWNLOAD_BYTES = 100 * 1024 * 1024; // 100 MB compressed
 const MAX_SKILL_DECOMPRESSED_BYTES = 500 * 1024 * 1024; // 500 MB decompressed
+// Bounds for the GitHub Contents-API directory walk (the archive path is
+// already bounded by the byte caps above).
+const MAX_SKILL_API_DIR_DEPTH = 16;
+const MAX_SKILL_API_FILE_COUNT = 2000;
 const gunzipAsync = promisify(gunzip);
 
 export async function extractFilesFromTarGz(
@@ -943,7 +949,19 @@ async function downloadGitHubSkillDirectoryFromApi(
   githubUrl: GitHubBlobSkillUrl,
   directoryPath: string,
   relativeRoot = '',
+  // Bound the recursive API walk so a crafted repo (deeply nested dirs, huge
+  // file counts, or large cumulative size) can't exhaust memory/time. The
+  // archive fallback already enforces size caps; this gives the API path
+  // equivalent guards.
+  depth = 0,
+  budget: { files: number; bytes: number } = { files: 0, bytes: 0 },
 ): Promise<DownloadedSkillFile[]> {
+  if (depth > MAX_SKILL_API_DIR_DEPTH) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Skill directory nesting exceeds the maximum allowed depth',
+    );
+  }
   const items = await fetchGitHubDirectoryItems(githubUrl, directoryPath);
   const files: DownloadedSkillFile[] = [];
 
@@ -962,19 +980,39 @@ async function downloadGitHubSkillDirectoryFromApi(
           githubUrl,
           itemPath,
           relativePath,
+          depth + 1,
+          budget,
         )),
       );
       continue;
     }
 
     if (type !== 'file') continue;
+    budget.files += 1;
+    if (budget.files > MAX_SKILL_API_FILE_COUNT) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill directory contains too many files',
+      );
+    }
     const downloadUrl = readRequiredString(
       record['download_url'],
       'github.download_url',
     );
+    // SSRF defense: the API-provided download_url is attacker-influenced, so
+    // run it through the same host allowlist + HTTPS check as the initial URL.
+    assertAllowedSkillSourceUrl(downloadUrl);
+    const content = await fetchBytes(downloadUrl);
+    budget.bytes += content.length;
+    if (budget.bytes > MAX_SKILL_DECOMPRESSED_BYTES) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill directory exceeds the maximum allowed size',
+      );
+    }
     files.push({
       relativePath,
-      content: await fetchBytes(downloadUrl),
+      content,
     });
   }
 
@@ -1833,15 +1871,6 @@ async function resolvePreferredMemoryFile(
   return path.join(dir, fallbackFilename);
 }
 
-async function ensureMemoryFile(filePath: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.access(filePath);
-  } catch {
-    await fs.writeFile(filePath, '', 'utf-8');
-  }
-}
-
 async function resolveQwenMemoryPaths(params: {
   cwd: string;
   projectRoot: string;
@@ -1857,12 +1886,11 @@ async function resolveQwenMemoryPaths(params: {
   );
   const autoMemoryDir = getAutoMemoryRoot(params.projectRoot);
 
-  await Promise.all([
-    ensureMemoryFile(userMemoryFile),
-    ensureMemoryFile(projectMemoryFile),
-    fs.mkdir(autoMemoryDir, { recursive: true }),
-  ]);
-
+  // Resolve-only: `getMemoryPaths` is a read query, so it must not create
+  // files or directories as a side effect (the old code ran ensureMemoryFile
+  // + fs.mkdir on every call, including against a client-controlled
+  // projectRoot). Callers that write memory are responsible for ensuring the
+  // target exists.
   return {
     userMemoryFile,
     projectMemoryFile,
@@ -2538,11 +2566,22 @@ class QwenAgent implements Agent {
       for (const session of this.sessions.values()) {
         const pm = session.getConfig().getPermissionManager?.();
         if (!pm) continue;
-        for (const rule of removed) {
-          pm.removePersistentRule(rule, ruleType);
-        }
-        for (const rule of added) {
-          pm.addPersistentRule(rule, ruleType);
+        // Isolate per-session failures: a stale/broken permission manager for
+        // one session must not abort syncing the rest (settings are already
+        // persisted, so the in-memory sync is best-effort).
+        try {
+          for (const rule of removed) {
+            pm.removePersistentRule(rule, ruleType);
+          }
+          for (const rule of added) {
+            pm.addPersistentRule(rule, ruleType);
+          }
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to sync permission rules to a live session: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
         }
       }
     }
@@ -3361,13 +3400,31 @@ class QwenAgent implements Agent {
       );
     }
 
-    // Remove any previous install first so files dropped in a newer version
-    // (e.g. a deleted helper) don't linger as orphans after reinstall.
-    await fs.rm(skillDir, { recursive: true, force: true });
-    for (const file of download.files) {
-      const targetPath = resolveSkillInstallPath(skillDir, file.relativePath);
-      await fs.mkdir(path.dirname(targetPath), { recursive: true });
-      await fs.writeFile(targetPath, file.content);
+    // Install atomically: stage all files in a sibling temp directory, then
+    // swap it in with a single rename. A mid-write failure (disk full,
+    // permission error) therefore leaves the previously installed skill
+    // intact instead of deleting it up front and ending up with a partial
+    // install. Removing the old dir before writing also dropped orphaned
+    // files from older versions; the rename preserves that property.
+    const stagingDir = `${skillDir}.installing-${process.pid}-${Date.now()}`;
+    try {
+      await fs.rm(stagingDir, { recursive: true, force: true });
+      for (const file of download.files) {
+        const targetPath = resolveSkillInstallPath(
+          stagingDir,
+          file.relativePath,
+        );
+        await fs.mkdir(path.dirname(targetPath), { recursive: true });
+        await fs.writeFile(targetPath, file.content);
+      }
+      // stagingDir is a sibling of skillDir (same filesystem), so the rename
+      // is atomic; the only gap is between the rm and rename, during which
+      // the fully-staged copy still exists for recovery.
+      await fs.rm(skillDir, { recursive: true, force: true });
+      await fs.rename(stagingDir, skillDir);
+    } catch (error) {
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+      throw error;
     }
     await skillManager.refreshCache();
 
@@ -3548,6 +3605,16 @@ class QwenAgent implements Agent {
 
     const nextContent = setSkillFrontmatterEnabled(content, request.enabled);
     skillManager.parseSkillContent(nextContent, skillFile, level);
+    // Defense-in-depth (consistent with deleteGlobalSkill): readManagedSkillFile's
+    // generic fallback can resolve skillFile from listSkills() to an arbitrary
+    // path. We only ever write back to the SKILL.md manifest we just read and
+    // whose parsed name matched the slug, so refuse to write anything else.
+    if (path.basename(skillFile) !== 'SKILL.md') {
+      throw RequestError.invalidParams(
+        undefined,
+        `Refusing to write to unexpected skill file: ${skillFile}`,
+      );
+    }
     await fs.writeFile(skillFile, nextContent, 'utf8');
     await skillManager.refreshCache();
     return {
