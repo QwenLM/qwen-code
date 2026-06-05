@@ -94,6 +94,7 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
   const [chartMonthOffset, setChartMonthOffset] = useState(0);
   const [data, setData] = useState<StatsData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
   const { stats } = useSessionStats();
   const config = useConfig();
 
@@ -114,11 +115,15 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
       .then((d) => {
         if (!stale) {
           setData(d);
+          setError(false);
           setLoading(false);
         }
       })
       .catch(() => {
-        if (!stale) setLoading(false);
+        if (!stale) {
+          setError(true);
+          setLoading(false);
+        }
       });
     return () => {
       stale = true;
@@ -200,6 +205,11 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
             {activeTab === 'session' && <SessionTab />}
             {activeTab !== 'session' && loading && (
               <Text color={theme.text.secondary}>{t('Loading stats...')}</Text>
+            )}
+            {activeTab !== 'session' && !loading && error && (
+              <Text color={theme.status.error}>
+                {t('Failed to load stats. Press r to retry.')}
+              </Text>
             )}
             {activeTab === 'activity' && !loading && data && (
               <ActivityTab

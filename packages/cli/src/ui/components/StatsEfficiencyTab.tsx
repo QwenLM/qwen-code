@@ -103,7 +103,7 @@ export const EfficiencyTab: React.FC<{
                   : theme.status.error
               }
             >
-              {data.delta.avgLatency <= 0 ? '\u25B2' : '\u25BC'}{' '}
+              {data.delta.avgLatency <= 0 ? '\u25BC' : '\u25B2'}{' '}
               {Math.abs(data.delta.avgLatency / 1000).toFixed(1)}s
             </Text>
           )}

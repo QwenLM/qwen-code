@@ -72,7 +72,7 @@ export function fmtDurationShort(ms: number): string {
 }
 
 export function fmtSuccessBar(rate: number): string {
-  const filled = Math.round(rate / 10);
+  const filled = Math.max(0, Math.min(10, Math.round(rate / 10)));
   return '\u2588'.repeat(filled) + '\u2591'.repeat(10 - filled);
 }
 

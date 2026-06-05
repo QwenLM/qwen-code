@@ -308,7 +308,7 @@ export function aggregateUsage(
     return ts >= start.getTime() && ts <= end.getTime();
   });
 
-  const models: AggregatedReport['models'] = {};
+  const models: AggregatedReport['models'] = Object.create(null);
   let totalCalls = 0;
   let totalSuccess = 0;
   let totalFail = 0;
@@ -332,6 +332,7 @@ export function aggregateUsage(
   >();
 
   for (const r of filtered) {
+    if (!r.models || !r.tools?.byName || !r.files) continue;
     totalDurationMs += r.durationMs;
     totalLatencyMs += r.totalLatencyMs ?? 0;
     totalCalls += r.tools.totalCalls;
