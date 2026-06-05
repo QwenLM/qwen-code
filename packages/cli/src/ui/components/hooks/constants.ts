@@ -62,6 +62,16 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
       },
       { code: 'Other', description: t('show stderr to user only') },
     ],
+    [HookEventName.UserPromptExpansion]: [
+      { code: 0, description: t('stdout shown to Qwen') },
+      {
+        code: 2,
+        description: t(
+          'block expanded prompt submission and show stderr to user only',
+        ),
+      },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
     [HookEventName.SessionStart]: [
       { code: 0, description: t('stdout shown to Qwen') },
       {
@@ -152,6 +162,9 @@ export function getHookShortDescription(eventName: string): string {
     [HookEventName.PostToolBatch]: t('After all tool calls in a batch resolve'),
     [HookEventName.Notification]: t('When notifications are sent'),
     [HookEventName.UserPromptSubmit]: t('When the user submits a prompt'),
+    [HookEventName.UserPromptExpansion]: t(
+      'When a slash command expands into a prompt',
+    ),
     [HookEventName.SessionStart]: t('When a new session is started'),
     [HookEventName.Stop]: t('Right before Qwen Code concludes its response'),
     [HookEventName.SubagentStart]: t(
@@ -201,6 +214,9 @@ export function getHookDescription(eventName: string): string {
     ),
     [HookEventName.UserPromptSubmit]: t(
       'Input to command is JSON with original user prompt text.',
+    ),
+    [HookEventName.UserPromptExpansion]: t(
+      'Input to command is JSON with command_name, command_args, and expanded prompt text.',
     ),
     [HookEventName.SessionStart]: t(
       'Input to command is JSON with session start source.',

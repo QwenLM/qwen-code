@@ -168,6 +168,63 @@ describe('HookEventHandler', () => {
     });
   });
 
+  describe('fireUserPromptExpansionEvent', () => {
+    it('should execute hooks for UserPromptExpansion event', async () => {
+      const mockPlan = createMockExecutionPlan([]);
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        mockAggregated,
+      );
+
+      const result = await hookEventHandler.fireUserPromptExpansionEvent(
+        'goal',
+        'write tests',
+        'expanded prompt',
+      );
+
+      expect(mockHookPlanner.createExecutionPlan).toHaveBeenCalledWith(
+        HookEventName.UserPromptExpansion,
+        { commandName: 'goal' },
+      );
+      expect(result.success).toBe(true);
+    });
+
+    it('should include command metadata and expanded prompt in the hook input', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptExpansionEvent(
+        'goal',
+        'write tests',
+        'expanded prompt',
+      );
+
+      const mockCalls = (mockHookRunner.executeHooksParallel as Mock).mock
+        .calls;
+      const input = mockCalls[0][2] as {
+        command_name: string;
+        command_args: string;
+        prompt: string;
+      };
+      expect(input.command_name).toBe('goal');
+      expect(input.command_args).toBe('write tests');
+      expect(input.prompt).toBe('expanded prompt');
+    });
+  });
+
   describe('fireStopEvent', () => {
     it('should execute hooks for Stop event', async () => {
       const mockPlan = createMockExecutionPlan([]);
@@ -652,6 +709,47 @@ describe('HookEventHandler', () => {
         [sessionHook.config],
         HookEventName.UserPromptSubmit,
         expect.objectContaining({ prompt: 'hello' }),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.any(Object),
+      );
+    });
+
+    it('matches UserPromptExpansion session hooks against the command name', async () => {
+      const sessionHook = createSessionHookEntry(
+        HookEventName.UserPromptExpansion,
+        'goal',
+      );
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(null);
+      vi.mocked(mockSessionHooksManager.getMatchingHooks).mockReturnValue([
+        sessionHook,
+      ]);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireUserPromptExpansionEvent(
+        'goal',
+        'write tests',
+        'expanded prompt',
+      );
+
+      expect(mockSessionHooksManager.getMatchingHooks).toHaveBeenCalledWith(
+        'test-session-id',
+        HookEventName.UserPromptExpansion,
+        'goal',
+      );
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        [sessionHook.config],
+        HookEventName.UserPromptExpansion,
+        expect.objectContaining({
+          command_name: 'goal',
+          command_args: 'write tests',
+          prompt: 'expanded prompt',
+        }),
         expect.any(Function),
         expect.any(Function),
         undefined,
@@ -1309,6 +1407,25 @@ describe('HookEventHandler', () => {
         reason:
           'Hook system failed while processing TodoCompleted: TodoCompleted planner error',
       });
+    });
+
+    it('should fail open for UserPromptExpansion when hook execution setup fails', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
+        throw new Error('UserPromptExpansion planner error');
+      });
+
+      const result = await hookEventHandler.fireUserPromptExpansionEvent(
+        'goal',
+        'write tests',
+        'expanded prompt',
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe(
+        'UserPromptExpansion planner error',
+      );
+      expect(result.finalOutput).toBeUndefined();
     });
 
     it('should redact sensitive todo fields from hook telemetry', async () => {

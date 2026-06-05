@@ -743,6 +743,8 @@ export default {
   'After tool execution fails': 'After tool execution fails',
   'When notifications are sent': 'When notifications are sent',
   'When the user submits a prompt': 'When the user submits a prompt',
+  'When a slash command expands into a prompt':
+    'When a slash command expands into a prompt',
   'When a new session is started': 'When a new session is started',
   'Right before Qwen Code concludes its response':
     'Right before Qwen Code concludes its response',
@@ -768,6 +770,8 @@ export default {
     'Input to command is JSON with notification message and type.',
   'Input to command is JSON with original user prompt text.':
     'Input to command is JSON with original user prompt text.',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'Input to command is JSON with command_name, command_args, and expanded prompt text.',
   'Input to command is JSON with session start source.':
     'Input to command is JSON with session start source.',
   'Input to command is JSON with session end reason.':
@@ -796,6 +800,8 @@ export default {
     'show stderr to user only but continue with tool call',
   'block processing, erase original prompt, and show stderr to user only':
     'block processing, erase original prompt, and show stderr to user only',
+  'block expanded prompt submission and show stderr to user only':
+    'block expanded prompt submission and show stderr to user only',
   'stdout shown to Qwen': 'stdout shown to Qwen',
   'show stderr to user only (blocking errors ignored)':
     'show stderr to user only (blocking errors ignored)',

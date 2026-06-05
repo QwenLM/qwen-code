@@ -57,9 +57,22 @@ import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
 } from '../state/extensions.js';
+import {
+  appendUserPromptExpansionAdditionalContext,
+  formatUserPromptExpansionBlockedMessage,
+  serializeUserPromptExpansionPrompt,
+} from '../../utils/userPromptExpansionHook.js';
 
 type SerializableHistoryItem = Record<string, unknown>;
 const debugLogger = createDebugLogger('SLASH_COMMAND_PROCESSOR');
+
+function hasUserPromptExpansionHooks(config: Config | null): config is Config {
+  return (
+    !!config &&
+    !config.getDisableAllHooks?.() &&
+    (config.hasHooksForEvent?.('UserPromptExpansion') ?? false)
+  );
+}
 
 function serializeHistoryItemForRecording(
   item: HistoryItemWithoutId,
@@ -468,7 +481,33 @@ export const useSlashCommandProcessor = (
               } as unknown as Parameters<typeof cmd.action>[0];
               const result = await cmd.action(minimalContext, args);
               if (!result || result.type !== 'submit_prompt') return null;
-              const content = result.content;
+              const output = hasUserPromptExpansionHooks(config)
+                ? await config
+                    .getHookSystem()
+                    ?.fireUserPromptExpansionEvent(
+                      name,
+                      args,
+                      serializeUserPromptExpansionPrompt(result.content),
+                      controller.signal,
+                    )
+                : undefined;
+              if (controller.signal.aborted) {
+                return { error: 'Skill execution cancelled by user.' };
+              }
+              if (output) {
+                const blockingError = output.getBlockingError();
+                if (blockingError.blocked || output.shouldStopExecution()) {
+                  return {
+                    error: formatUserPromptExpansionBlockedMessage(
+                      blockingError.reason || output.getEffectiveReason(),
+                    ),
+                  };
+                }
+              }
+              const content = appendUserPromptExpansionAdditionalContext(
+                result.content,
+                output?.getAdditionalContext(),
+              );
               if (typeof content === 'string') return content;
               if (Array.isArray(content)) {
                 return content
@@ -769,7 +808,41 @@ export const useSlashCommandProcessor = (
                   actions.quit(result.messages);
                   return { type: 'handled' };
 
-                case 'submit_prompt':
+                case 'submit_prompt': {
+                  const invocation = fullCommandContext.invocation;
+                  let content = result.content;
+                  const output = hasUserPromptExpansionHooks(config)
+                    ? await config
+                        .getHookSystem()
+                        ?.fireUserPromptExpansionEvent(
+                          invocation?.name ?? '',
+                          invocation?.args ?? '',
+                          serializeUserPromptExpansionPrompt(content),
+                          abortController.signal,
+                        )
+                    : undefined;
+                  if (abortController.signal.aborted) {
+                    hasError = true;
+                    return { type: 'handled' };
+                  }
+                  if (output) {
+                    const blockingError = output.getBlockingError();
+                    if (blockingError.blocked || output.shouldStopExecution()) {
+                      hasError = true;
+                      addMessage({
+                        type: MessageType.ERROR,
+                        content: formatUserPromptExpansionBlockedMessage(
+                          blockingError.reason || output.getEffectiveReason(),
+                        ),
+                        timestamp: new Date(),
+                      });
+                      return { type: 'handled' };
+                    }
+                    content = appendUserPromptExpansionAdditionalContext(
+                      content,
+                      output.getAdditionalContext(),
+                    );
+                  }
                   if (invocationItemId !== undefined) {
                     invocationSentToModel = true;
                     debugLogger.debug(
@@ -784,9 +857,10 @@ export const useSlashCommandProcessor = (
                   }
                   return {
                     type: 'submit_prompt',
-                    content: result.content,
+                    content,
                     onComplete: result.onComplete,
                   };
+                }
                 case 'confirm_shell_commands': {
                   const { outcome, approvedCommands } = await new Promise<{
                     outcome: ToolConfirmationOutcome;
@@ -993,6 +1067,7 @@ export const useSlashCommandProcessor = (
     btwItem,
     setBtwItem,
     cancelBtw,
+    cancelSlashCommand,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,

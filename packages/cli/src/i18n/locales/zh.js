@@ -702,6 +702,7 @@ export default {
   'After tool execution fails': '工具执行失败后',
   'When notifications are sent': '发送通知时',
   'When the user submits a prompt': '用户提交提示时',
+  'When a slash command expands into a prompt': '斜杠命令展开为提示时',
   'When a new session is started': '新会话开始时',
   'Right before Qwen Code concludes its response': 'Qwen Code 结束响应之前',
   'When a subagent (Agent tool call) is started':
@@ -723,6 +724,8 @@ export default {
     '命令输入为包含通知消息和类型的 JSON。',
   'Input to command is JSON with original user prompt text.':
     '命令输入为包含原始用户提示文本的 JSON。',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    '命令输入为包含 command_name、command_args 和展开后提示文本的 JSON。',
   'Input to command is JSON with session start source.':
     '命令输入为包含会话启动来源的 JSON。',
   'Input to command is JSON with session end reason.':
@@ -750,6 +753,8 @@ export default {
     '仅向用户显示 stderr 但继续工具调用',
   'block processing, erase original prompt, and show stderr to user only':
     '阻止处理，擦除原始提示，仅向用户显示 stderr',
+  'block expanded prompt submission and show stderr to user only':
+    '阻止提交展开后的提示，并仅向用户显示 stderr',
   'stdout shown to Qwen': '向 Qwen 显示 stdout',
   'show stderr to user only (blocking errors ignored)':
     '仅向用户显示 stderr（忽略阻塞错误）',

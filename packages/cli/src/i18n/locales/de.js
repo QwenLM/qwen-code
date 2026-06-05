@@ -654,6 +654,8 @@ export default {
   'After tool execution fails': 'Wenn die Tool-Ausführung fehlschlägt',
   'When notifications are sent': 'Wenn Benachrichtigungen gesendet werden',
   'When the user submits a prompt': 'Wenn der Benutzer einen Prompt absendet',
+  'When a slash command expands into a prompt':
+    'Wenn ein Slash-Befehl zu einem Prompt erweitert wird',
   'When a new session is started': 'Wenn eine neue Sitzung gestartet wird',
   'Right before Qwen Code concludes its response':
     'Direkt bevor Qwen Code seine Antwort abschließt',
@@ -680,6 +682,8 @@ export default {
     'Die Eingabe an den Befehl ist JSON mit Benachrichtigungsnachricht und -typ.',
   'Input to command is JSON with original user prompt text.':
     'Die Eingabe an den Befehl ist JSON mit dem ursprünglichen Benutzer-Prompt-Text.',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'Die Eingabe an den Befehl ist JSON mit command_name, command_args und erweitertem Prompt-Text.',
   'Input to command is JSON with session start source.':
     'Die Eingabe an den Befehl ist JSON mit der Sitzungsstart-Quelle.',
   'Input to command is JSON with session end reason.':
@@ -708,6 +712,8 @@ export default {
     'stderr nur dem Benutzer anzeigen, aber mit Tool-Aufruf fortfahren',
   'block processing, erase original prompt, and show stderr to user only':
     'Verarbeitung blockieren, ursprünglichen Prompt löschen und stderr nur dem Benutzer anzeigen',
+  'block expanded prompt submission and show stderr to user only':
+    'Einreichen des erweiterten Prompts blockieren und stderr nur dem Benutzer anzeigen',
   'stdout shown to Qwen': 'stdout dem Qwen anzeigen',
   'show stderr to user only (blocking errors ignored)':
     'stderr nur dem Benutzer anzeigen (Blockierungsfehler ignoriert)',

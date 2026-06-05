@@ -181,6 +181,8 @@ export {
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 };
 
+export type ModelInvocableCommandExecutorResult = string | { error: string };
+
 export enum ApprovalMode {
   PLAN = 'plan',
   DEFAULT = 'default',
@@ -984,7 +986,10 @@ export class Config {
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
   private modelInvocableCommandsExecutor:
-    | ((name: string, args?: string) => Promise<string | null>)
+    | ((
+        name: string,
+        args?: string,
+      ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
@@ -1441,6 +1446,14 @@ export class Config {
             switch (request.eventName) {
               case 'UserPromptSubmit':
                 result = await hookSystem.fireUserPromptSubmitEvent(
+                  (input['prompt'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'UserPromptExpansion':
+                result = await hookSystem.fireUserPromptExpansionEvent(
+                  (input['command_name'] as string) || '',
+                  (input['command_args'] as string) || '',
                   (input['prompt'] as string) || '',
                   signal,
                 );
@@ -3865,7 +3878,10 @@ export class Config {
    * the command cannot be found or executed. Called by the CLI layer.
    */
   setModelInvocableCommandsExecutor(
-    executor: (name: string, args?: string) => Promise<string | null>,
+    executor: (
+      name: string,
+      args?: string,
+    ) => Promise<ModelInvocableCommandExecutorResult | null>,
   ): void {
     this.modelInvocableCommandsExecutor = executor;
   }
@@ -3875,7 +3891,10 @@ export class Config {
    * has been registered (e.g., in SDK mode).
    */
   getModelInvocableCommandsExecutor():
-    | ((name: string, args?: string) => Promise<string | null>)
+    | ((
+        name: string,
+        args?: string,
+      ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null {
     return this.modelInvocableCommandsExecutor;
   }

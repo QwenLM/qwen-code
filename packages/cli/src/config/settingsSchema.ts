@@ -2206,6 +2206,18 @@ const SETTINGS_SCHEMA = {
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
       },
+      UserPromptExpansion: {
+        type: 'array',
+        label: 'Prompt Expansion Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a slash command expands into a prompt.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
       Stop: {
         type: 'array',
         label: 'After Agent Hooks',

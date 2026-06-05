@@ -669,6 +669,8 @@ export default {
   'After tool execution fails': 'При неудачном выполнении инструмента',
   'When notifications are sent': 'При отправке уведомлений',
   'When the user submits a prompt': 'Когда пользователь отправляет промпт',
+  'When a slash command expands into a prompt':
+    'Когда slash-команда разворачивается в промпт',
   'When a new session is started': 'При запуске новой сессии',
   'Right before Qwen Code concludes its response':
     'Непосредственно перед завершением ответа Qwen Code',
@@ -693,6 +695,8 @@ export default {
     'Ввод в команду — это JSON с сообщением уведомления и типом.',
   'Input to command is JSON with original user prompt text.':
     'Ввод в команду — это JSON с исходным текстом промпта пользователя.',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'Ввод в команду — это JSON с command_name, command_args и развернутым текстом промпта.',
   'Input to command is JSON with session start source.':
     'Ввод в команду — это JSON с источником запуска сессии.',
   'Input to command is JSON with session end reason.':
@@ -721,6 +725,8 @@ export default {
     'показать stderr только пользователю, но продолжить вызов инструмента',
   'block processing, erase original prompt, and show stderr to user only':
     'заблокировать обработку, стереть исходный промпт и показать stderr только пользователю',
+  'block expanded prompt submission and show stderr to user only':
+    'заблокировать отправку развернутого промпта и показать stderr только пользователю',
   'stdout shown to Qwen': 'stdout показан Qwen',
   'show stderr to user only (blocking errors ignored)':
     'показать stderr только пользователю (блокирующие ошибки игнорируются)',

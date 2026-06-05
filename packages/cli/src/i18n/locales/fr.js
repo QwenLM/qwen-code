@@ -722,6 +722,8 @@ export default {
   'After tool execution fails': "Après l'échec de l'exécution de l'outil",
   'When notifications are sent': 'Quand des notifications sont envoyées',
   'When the user submits a prompt': "Quand l'utilisateur soumet une invite",
+  'When a slash command expands into a prompt':
+    'Quand une commande slash se développe en invite',
   'When a new session is started': 'Quand une nouvelle session est démarrée',
   'Right before Qwen Code concludes its response':
     'Juste avant que Qwen Code conclue sa réponse',
@@ -746,6 +748,8 @@ export default {
     "L'entrée de la commande est du JSON avec le message et le type de notification.",
   'Input to command is JSON with original user prompt text.':
     "L'entrée de la commande est du JSON avec le texte d'invite original de l'utilisateur.",
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    "L'entrée de la commande est du JSON avec command_name, command_args et le texte d'invite développé.",
   'Input to command is JSON with session start source.':
     "L'entrée de la commande est du JSON avec la source de démarrage de session.",
   'Input to command is JSON with session end reason.':
@@ -773,6 +777,8 @@ export default {
     "afficher stderr à l'utilisateur uniquement mais continuer l'appel d'outil",
   'block processing, erase original prompt, and show stderr to user only':
     "bloquer le traitement, effacer l'invite originale et afficher stderr à l'utilisateur uniquement",
+  'block expanded prompt submission and show stderr to user only':
+    "bloquer l'envoi de l'invite développée et afficher stderr uniquement à l'utilisateur",
   'stdout shown to Qwen': 'stdout affiché à Qwen',
   'show stderr to user only (blocking errors ignored)':
     "afficher stderr à l'utilisateur uniquement (erreurs bloquantes ignorées)",

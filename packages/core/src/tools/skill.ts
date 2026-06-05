@@ -7,7 +7,10 @@
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { ToolResult, ToolResultDisplay } from './tools.js';
-import type { Config } from '../config/config.js';
+import type {
+  Config,
+  ModelInvocableCommandExecutorResult,
+} from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
@@ -21,6 +24,7 @@ const debugLogger = createDebugLogger('SKILL');
 
 export interface SkillParams {
   skill: string;
+  args?: string;
 }
 
 // Re-export for backward compatibility
@@ -63,7 +67,11 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       properties: {
         skill: {
           type: 'string',
-          description: 'The skill name (no arguments). E.g., "pdf" or "xlsx"',
+          description: 'The skill or command name. E.g., "pdf" or "xlsx"',
+        },
+        args: {
+          type: 'string',
+          description: 'Optional arguments for model-invocable slash commands.',
         },
       },
       required: ['skill'],
@@ -227,6 +235,7 @@ How to invoke:
   - \`skill: "pdf"\` - invoke the pdf skill
   - \`skill: "xlsx"\` - invoke the xlsx skill
   - \`skill: "ms-office-suite:pdf"\` - invoke using fully qualified name
+  - \`skill: "mcp-prompt", args: "topic"\` - invoke a model-invocable command with arguments
 
 Important:
 - When a skill is relevant, you must invoke this tool IMMEDIATELY as your first action
@@ -256,6 +265,9 @@ ${skillDescriptions}
       params.skill.trim() === ''
     ) {
       return 'Parameter "skill" must be a non-empty string.';
+    }
+    if (params.args !== undefined && typeof params.args !== 'string') {
+      return 'Parameter "args" must be a string when provided.';
     }
 
     // Check file-based skills
@@ -300,7 +312,9 @@ ${skillDescriptions}
   }
 
   override toAutoClassifierInput(params: SkillParams): Record<string, unknown> {
-    return { skill: params.skill };
+    return params.args === undefined
+      ? { skill: params.skill }
+      : { skill: params.skill, args: params.args };
   }
 
   getAvailableSkillNames(): string[] {
@@ -350,7 +364,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     params: SkillParams,
     private readonly onSkillLoaded: (name: string) => void,
     private readonly commandExecutor:
-      | ((name: string, args?: string) => Promise<string | null>)
+      | ((
+          name: string,
+          args?: string,
+        ) => Promise<ModelInvocableCommandExecutorResult | null>)
       | null = null,
   ) {
     super(params);
@@ -361,7 +378,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
   }
 
   getDescription(): string {
-    return `Use skill: "${this.params.skill}"`;
+    return this.params.args === undefined
+      ? `Use skill: "${this.params.skill}"`
+      : `Use skill: "${this.params.skill}" with args: "${formatArgsForDescription(this.params.args)}"`;
   }
 
   /**
@@ -389,15 +408,32 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       if (!skill) {
         // Try model-invocable command executor (e.g. MCP prompts)
         if (this.commandExecutor) {
-          const content = await this.commandExecutor(this.params.skill);
-          if (content !== null) {
+          const commandResult = await this.commandExecutor(
+            this.params.skill,
+            this.params.args ?? '',
+          );
+          if (
+            commandResult &&
+            typeof commandResult === 'object' &&
+            'error' in commandResult
+          ) {
+            logSkillLaunch(
+              this.config,
+              new SkillLaunchEvent(this.params.skill, false, this.promptId),
+            );
+            return {
+              llmContent: commandResult.error,
+              returnDisplay: commandResult.error,
+            };
+          }
+          if (typeof commandResult === 'string') {
             logSkillLaunch(
               this.config,
               new SkillLaunchEvent(this.params.skill, true, this.promptId),
             );
             this.onSkillLoaded(this.params.skill);
             return {
-              llmContent: [{ text: content }],
+              llmContent: [{ text: commandResult }],
               returnDisplay: `Executed command: ${this.params.skill}`,
             };
           }
@@ -498,4 +534,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       };
     }
   }
+}
+
+function formatArgsForDescription(args: string): string {
+  const escapeMarkdown = (value: string) =>
+    value.replace(/([\\`*_{}[\]()#+\-.!|>])/g, '\\$1');
+  return args.length > 120
+    ? `${escapeMarkdown(args.slice(0, 117))}...`
+    : escapeMarkdown(args);
 }

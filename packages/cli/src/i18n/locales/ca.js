@@ -715,6 +715,8 @@ export default {
   'After tool execution fails': "Quan falla l'execució de l'eina",
   'When notifications are sent': "Quan s'envien notificacions",
   'When the user submits a prompt': "Quan l'usuari envia un missatge",
+  'When a slash command expands into a prompt':
+    "Quan una ordre de barra s'expandeix en un missatge",
   'When a new session is started': "Quan s'inicia una nova sessió",
   'Right before Qwen Code concludes its response':
     'Immediatament abans que Qwen Code conclou la seva resposta',
@@ -736,6 +738,8 @@ export default {
     "L'entrada a l'ordre és JSON amb el missatge de notificació i el tipus.",
   'Input to command is JSON with original user prompt text.':
     "L'entrada a l'ordre és JSON amb el text original del missatge de l'usuari.",
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    "L'entrada a l'ordre és JSON amb command_name, command_args i el text del missatge expandit.",
   'Input to command is JSON with session start source.':
     "L'entrada a l'ordre és JSON amb la font d'inici de sessió.",
   'Input to command is JSON with session end reason.':
@@ -759,6 +763,8 @@ export default {
     "mostrar stderr només a l'usuari però continuar amb la crida a l'eina",
   'block processing, erase original prompt, and show stderr to user only':
     "blocar el processament, esborrar el missatge original i mostrar stderr només a l'usuari",
+  'block expanded prompt submission and show stderr to user only':
+    "blocar l'enviament del missatge expandit i mostrar stderr només a l'usuari",
   'stdout shown to Qwen': 'stdout mostrat a Qwen',
   'show stderr to user only (blocking errors ignored)':
     "mostrar stderr només a l'usuari (errors de bloqueig ignorats)",
