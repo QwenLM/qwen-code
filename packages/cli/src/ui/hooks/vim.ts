@@ -576,7 +576,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           if (replaceChar != null) {
             const [row, col] = bufferRef.current.cursor;
             const line = bufferRef.current.lines[row] ?? '';
-            if (col + count <= line.length && col < line.length) {
+            if (col + count <= cpLen(line) && col < cpLen(line)) {
               buffer.replaceRange(
                 row,
                 col,
@@ -617,17 +617,17 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           );
           if (row < endRow) {
             let joined = lines[row] ?? '';
-            let joinCol = joined.length;
+            let joinCol = 0;
             for (let r = row + 1; r <= endRow; r++) {
               const trimmed = (lines[r] ?? '').trimStart();
-              joinCol += 1 + trimmed.length;
               joined += ' ' + trimmed;
+              joinCol = cpLen(joined) - cpLen(trimmed) - 1;
             }
             buffer.replaceRange(
               row,
               0,
               endRow,
-              (lines[endRow] ?? '').length,
+              cpLen(lines[endRow] ?? ''),
               joined,
             );
             buffer.vimMoveToLineStart();
@@ -1697,17 +1697,17 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             );
             if (row < endRow) {
               let joined = lines[row] ?? '';
-              let joinCol = joined.length;
+              let joinCol = 0;
               for (let r = row + 1; r <= endRow; r++) {
                 const trimmed = (lines[r] ?? '').trimStart();
-                joinCol += 1 + trimmed.length;
                 joined += ' ' + trimmed;
+                joinCol = cpLen(joined) - cpLen(trimmed) - 1;
               }
               buffer.replaceRange(
                 row,
                 0,
                 endRow,
-                (lines[endRow] ?? '').length,
+                cpLen(lines[endRow] ?? ''),
                 joined,
               );
               buffer.vimMoveToLineStart();
@@ -1820,12 +1820,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                     lastLineLen,
                     '\n' + repeated.replace(/\n$/, ''),
                   );
-                  // Cursor on first line of pasted text (row + 1)
+                  // Cursor on first line of pasted text (line row+2, i.e. 0-based row+1)
                   buffer.vimMoveToLine(row + 2);
                   buffer.vimMoveToLineStart();
                 } else {
                   buffer.replaceRange(row + 1, 0, row + 1, 0, repeated);
-                  // Cursor on first line of pasted text (row + 1)
+                  // Cursor on first line of pasted text (line row+2, i.e. 0-based row+1)
                   buffer.vimMoveToLine(row + 2);
                   buffer.vimMoveToLineStart();
                 }
