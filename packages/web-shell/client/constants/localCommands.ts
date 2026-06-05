@@ -10,7 +10,7 @@ type Translate = ReturnType<typeof useI18n>['t'];
  * with ACP taking precedence on duplicates.
  */
 export function getLocalCommands(t: Translate): CommandInfo[] {
-  return [
+  const commands: CommandInfo[] = [
     { name: 'help', description: t('local.help') },
     {
       name: 'theme',
@@ -90,4 +90,8 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       argumentHint: '<session-id>',
     },
   ];
+  return commands.map((command) => ({
+    ...command,
+    source: 'builtin-command',
+  }));
 }

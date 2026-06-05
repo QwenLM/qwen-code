@@ -64,6 +64,8 @@ export interface CommandInfo {
   description: string;
   argumentHint?: string;
   subcommands?: string[];
+  source?: string;
+  displayCategory?: 'custom' | 'skill' | 'system';
 }
 
 export interface ModelInfo {

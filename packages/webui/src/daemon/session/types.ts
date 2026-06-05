@@ -107,6 +107,7 @@ export interface DaemonCommandInfo {
   name: string;
   description: string;
   argumentHint?: string;
+  source?: string;
   raw: DaemonAvailableCommand;
 }
 
