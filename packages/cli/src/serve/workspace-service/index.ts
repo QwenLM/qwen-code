@@ -96,7 +96,7 @@ async function canonicalizeExistingAncestor(
 async function verifyParentPostOpen(
   target: string,
   wsCanonical: string,
-  fh: import('node:fs/promises').FileHandle,
+  _fh: import('node:fs/promises').FileHandle,
 ): Promise<void> {
   const parentCanonical = await canonicalizeExistingAncestor(
     path.dirname(target),
@@ -105,9 +105,8 @@ async function verifyParentPostOpen(
     parentCanonical === wsCanonical ||
     parentCanonical.startsWith(wsCanonical + path.sep);
   if (within) return;
-  // Close the fd before throwing. Do NOT fs.unlink(target) — the path
-  // now resolves through a potentially attacker-controlled parent symlink.
-  await fh.close().catch(() => {});
+  // Do NOT close fh here — the caller's `finally` block handles it.
+  // Closing here would cause a double-close on Node 22+ (ERR_INVALID_STATE).
   throw new WorkspaceInitSymlinkError(
     target,
     'parent',
@@ -245,7 +244,7 @@ export function createDaemonWorkspaceService(
         initialized: true,
         acpChannelLive,
         cells: [...daemonCells, ...acpCells],
-        ...(errors ? { errors } : {}),
+        ...(errors && errors.length > 0 ? { errors } : {}),
       } as ServeWorkspacePreflightStatus;
     },
 
