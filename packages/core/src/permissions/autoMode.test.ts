@@ -918,6 +918,18 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ).toBe(true);
   });
 
+  it('returns true for find execdir writes with placeholder operands', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'find . -execdir cp {} .qwen/settings.json ;',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it('returns true for long in-place sed/perl writes to protected paths', () => {
     for (const command of [
       "sed --in-place 's/x/y/' .qwen/settings.json",
