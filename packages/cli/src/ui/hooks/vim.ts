@@ -851,12 +851,12 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           const [row, col] = buffer.cursor;
           const line = buffer.lines[row] ?? '';
           const count = stateRef.current.count || 1;
-          if (col + count > line.length) {
+          if (col + count > cpLen(line)) {
             dispatch({ type: 'CLEAR_COUNT' });
             dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
             return true;
           }
-          if (col < line.length) {
+          if (col < cpLen(line)) {
             buffer.replaceRange(row, col, row, col + count, char.repeat(count));
           }
           dispatch({
