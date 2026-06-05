@@ -1,10 +1,11 @@
+import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import type { ProxyOptions } from 'vite';
 import react from '@vitejs/plugin-react';
 import pkg from './package.json' with { type: 'json' };
 
 const daemonProxy: ProxyOptions = {
-  target: 'http://127.0.0.1:4170',
+  target: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
   changeOrigin: true,
   bypass: (req) => {
     if (req.url?.startsWith('/api/')) return undefined;
@@ -28,10 +29,20 @@ const daemonProxy: ProxyOptions = {
   },
 };
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   root: 'client',
   plugins: [react()],
   resolve: {
+    alias:
+      command === 'serve'
+        ? {
+            '@qwen-code/webui/daemon-react-sdk': resolve(
+              __dirname,
+              '../webui/src/daemon-react-sdk.ts',
+            ),
+            '@qwen-code/webui': resolve(__dirname, '../webui/src/index.ts'),
+          }
+        : {},
     dedupe: ['react', 'react-dom', '@qwen-code/webui'],
   },
   build: {
@@ -56,4 +67,4 @@ export default defineConfig({
       '/glob': daemonProxy,
     },
   },
-});
+}));
