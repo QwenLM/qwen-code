@@ -197,7 +197,10 @@ export function saveTrustedFolders(
         if (
           typeof parsed !== 'object' ||
           parsed === null ||
-          Array.isArray(parsed)
+          Array.isArray(parsed) ||
+          parsed instanceof String ||
+          parsed instanceof Number ||
+          parsed instanceof Boolean
         ) {
           throw new Error('trusted folders file is not a JSON object');
         }
@@ -225,7 +228,7 @@ export function saveTrustedFolders(
       trustedFoldersFile.path,
       content,
       // noFollow: refuse to follow any pre-placed symlink at the
-      // config path 鈥?a redirected write could either leak the
+      // config path - a redirected write could either leak the
       // trusted-folder list to an attacker target or leave the user's
       // real config silently stale. Matches the credential write
       // sites' security posture (sharedTokenManager, oauth-token-storage,
