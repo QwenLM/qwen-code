@@ -37,6 +37,7 @@ export const forkCommand: SlashCommand = {
   name: 'fork',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
+  argumentHint: '<directive>',
   get description() {
     return t('Spawn a background agent that inherits the full conversation');
   },
