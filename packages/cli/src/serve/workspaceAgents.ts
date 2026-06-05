@@ -64,14 +64,13 @@ const MAX_TOOLS_ENTRIES = 256;
 const MAX_TOOL_ID_LENGTH = 256;
 import {
   STATUS_SCHEMA_VERSION,
-  type ServeAgentLevel,
   type ServeWorkspaceAgentDetail,
   type ServeWorkspaceAgentSummary,
   type ServeWorkspaceAgentsStatus,
 } from './status.js';
 
 /**
- * Issue #4175 PR 16: workspace subagent CRUD routes.
+ * Workspace subagent CRUD routes.
  *
  * Wraps `SubagentManager` over five HTTP routes:
  *
@@ -121,9 +120,9 @@ export function mountWorkspaceAgentsRoutes(
       //   - 4 levels × <50 agents on local SSD = sub-ms IO, well below
       //     the per-request budget for any client UI.
       //   - A short-TTL cache would re-introduce the exact stale-list
-      //     bug Codex P2 #2 fixed (a recently-edited file invisible
+      //     bug that was previously fixed (a recently-edited file invisible
       //     until the TTL elapses); invalidation logic adds state to
-      //     the route handler that PR 24 (audit / policy / mediator)
+      //     the route handler that the audit / policy / mediator layer
       //     is the proper home for.
       //   - `fs.watch` is platform-fragile (recursive watch broken on
       //     some macOS Node versions, inotify limits on Linux) and the
@@ -260,7 +259,7 @@ export function mountWorkspaceAgentsRoutes(
         // disk. Operators MUST be able to correlate the orphan file
         // with the failed POST, so emit a stderr breadcrumb with the
         // path; a fresh `GET /workspace/agents` will surface the
-        // agent on next request. PR 24's PermissionMediator can layer
+        // agent on next request. PermissionMediator can layer
         // a proper rollback policy on top once mutation auditing
         // arrives.
         writeStderrLine(
@@ -568,9 +567,8 @@ export function mountWorkspaceAgentsRoutes(
         return;
       }
 
-      // [Critical] gpt-5.5 round-6 finding:
       // `SubagentManager.deleteSubagent` swallows per-level
-      // `fs.unlink()` failures (subagent-manager.ts:332-336) and
+      // `fs.unlink()` failures and
       // returns success as long as ANY level was removed. Trusting
       // that signal would let us publish `agent_changed`/`deleted`
       // for a file still on disk (EACCES / EBUSY / EPERM) — the
@@ -1272,7 +1270,7 @@ function toSummary(config: SubagentConfig): ServeWorkspaceAgentSummary {
     kind: 'agent',
     name: config.name,
     description: config.description,
-    level: toServeLevel(config.level),
+    level: config.level,
     isBuiltin: config.isBuiltin === true || config.level === 'builtin',
     hasTools: Array.isArray(config.tools) && config.tools.length > 0,
   };
@@ -1311,10 +1309,6 @@ function toDetail(config: SubagentConfig): ServeWorkspaceAgentDetail {
     detail.runConfig = runConfig;
   }
   return detail;
-}
-
-function toServeLevel(level: SubagentLevel): ServeAgentLevel {
-  return level;
 }
 
 /**

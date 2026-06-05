@@ -67,13 +67,11 @@ function assertTimerDelayInRange(name: string, value: number): void {
 }
 
 /**
- * Issue #4514 T2.9. Resolve a positive-integer millisecond value from
- * an env var. Returns `undefined` when the var is absent (caller falls
- * back to the CLI option / `ServeOptions` field), throws when the var
- * is present but malformed so a typo fails the boot loudly instead of
- * silently disabling the deadline. Whitespace-only values are also
- * treated as malformed (rather than silently "unset") — the JSDoc
- * "fail loud on typo" promise applies symmetrically.
+ * Resolve a positive-integer millisecond value from an env var.
+ * Returns `undefined` when the var is absent (caller falls back to the
+ * CLI option / `ServeOptions` field), throws when the var is present
+ * but malformed so a typo fails the boot loudly instead of silently
+ * disabling the deadline.
  */
 function parseDeadlineEnv(
   envName: string,
@@ -125,18 +123,10 @@ function createDaemonTelemetryRuntimeConfig(
 }
 
 /**
- * Wenshao review #4335 / 3271978374 — boot-time policy validation
- * errors. Replaces the previous substring-matching of "invalid
- * policy." in error messages (fragile against unrelated errors
- * happening to contain that phrase, and against future rewordings
- * of the validation message). The catch block in `runQwenServe`
+ * Boot-time policy validation error. The catch block in `runQwenServe`
  * matches with `instanceof InvalidPolicyConfigError` to distinguish
  * operator-misconfiguration (rethrow → fail boot loudly) from
  * settings-read failures (fall back to defaults).
- *
- * Exported so tests can `instanceof`-check; pre-Round-7 the class
- * was private and the `expect(...).toThrow(InvalidPolicyConfigError)`
- * assertion couldn't bind the constructor.
  */
 export class InvalidPolicyConfigError extends Error {
   override readonly name = 'InvalidPolicyConfigError';
@@ -147,9 +137,7 @@ export class InvalidPolicyConfigError extends Error {
 
 /**
  * Parse + validate the `policy.*` section of merged daemon settings.
- * Extracted from inline boot logic (Round 8 / 3272493818) so the
- * validation contract can be unit-tested without spinning up a
- * daemon. Returns the resolved `permissionPolicy` /
+ * Returns the resolved `permissionPolicy` /
  * `permissionConsensusQuorum` for `BridgeOptions`, or throws
  * `InvalidPolicyConfigError` for operator misconfiguration.
  *
@@ -163,11 +151,9 @@ export class InvalidPolicyConfigError extends Error {
  * The mismatch warning runs through `onWarning` so tests can
  * capture it; production passes `writeStderrLine`.
  *
- * Wenshao review #4335 / 3272581563 — the runtime valid-policy set
- * is derived from `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes`
- * (single source of truth) instead of repeating the four literals
- * a fourth time. The compile-time check that every entry is a
- * `PermissionPolicy` ensures registry drift surfaces here.
+ * The runtime valid-policy set is derived from
+ * `SERVE_CAPABILITY_REGISTRY.permission_mediation.modes` (single
+ * source of truth) instead of repeating the four literals.
  */
 export function validatePolicyConfig(
   policyConfig: { permissionStrategy?: string; consensusQuorum?: number } = {},
@@ -209,15 +195,9 @@ export function validatePolicyConfig(
         `${String(policyConfig.consensusQuorum)}; must be a positive integer`,
     );
   }
-  // Wenshao review #4335 / 3273077270 — when consensusQuorum is set
-  // but the active strategy doesn't use it, the warning previously
-  // promised "the override will be ignored" while the function
-  // STILL propagated the value to BridgeOptions. The downstream
-  // mediator only reads it under the consensus policy, so behavior
-  // was correct, but the public contract contradicted its own
-  // warning text. Adopt option (a): make the public contract match
-  // the warning by dropping the value when the strategy is not
-  // 'consensus'. Operators reading the warning at boot now see
+  // When consensusQuorum is set but the active strategy doesn't
+  // use it, drop the value so the public contract matches the
+  // warning. Operators reading the warning at boot now see
   // consistent behavior all the way down.
   const consensusQuorumActive =
     policyConfig.consensusQuorum !== undefined &&
@@ -264,13 +244,9 @@ function formatHostForUrl(host: string): string {
 }
 
 /**
- * #4297 fold-in 7 (deepseek S1, addresses #3262690842). Pull the
- * `context.fileName` snapshot out of merged settings into a typed
- * string, falling back to `undefined` when the value is missing or
- * malformed. Exported so the daemon entrypoint can extract it from
- * a `LoadedSettings` instance and tests can validate the four
- * branches (string / array-with-string / array-with-non-strings /
- * non-string non-array) without spinning up a real daemon.
+ * Pull the `context.fileName` snapshot out of merged settings into a
+ * typed string, falling back to `undefined` when the value is missing
+ * or malformed.
  *
  * Validation contract:
  *   - non-empty string after trim → returned trimmed
@@ -299,27 +275,19 @@ export function extractContextFilename(value: unknown): string | undefined {
 }
 
 /**
- * #4282 fold-in 4 (qwen-latest C2). Per-workspace promise chain that
- * serializes settings read-modify-write cycles inside this process.
+ * Per-workspace promise chain that serializes settings read-modify-write
+ * cycles inside this process.
  *
  * Both `persistApprovalMode` and `persistDisabledTools` re-read
  * `tools.disabled` (or `tools.approvalMode`) from disk before writing
  * the merged result back, which is a textbook lost-update window if
  * two concurrent HTTP requests land at the same workspace. Threading
- * each call through this lock collapses the window: the first request
- * holds the chain until its `setValue` flush completes, and the second
- * sees the post-write state when it runs its own load.
+ * each call through this lock collapses the window.
  *
- * Scope is INTRA-process: a separate `qwen serve` invocation against
- * the same workspace would not share the Map, but per-workspace
- * single-daemon is the supported deployment shape (see #3803 §02).
- * The lock decays naturally — when no callers are queued, the chain
- * resolves and stays mounted in the Map; the per-workspace memory
- * cost is one settled Promise and one Map entry.
- *
- * Errors propagate to the caller; the chain advances to the next
- * waiter regardless via the `.then(fn, fn)` pattern, so a single
- * failed write doesn't permanently stall persistence.
+ * Scope is INTRA-process: per-workspace single-daemon is the supported
+ * deployment shape. Errors propagate to the caller; the chain advances
+ * to the next waiter regardless via the `.then(fn, fn)` pattern, so a
+ * single failed write doesn't permanently stall persistence.
  */
 const settingsWriteLocks = new Map<string, Promise<unknown>>();
 function withSettingsLock<T>(
@@ -344,13 +312,10 @@ export interface RunQwenServeDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: HttpAcpBridge;
   /**
-   * Workspace filesystem factory (#4175 PR 19). When omitted,
-   * `runQwenServe` constructs one using `boundWorkspace`,
-   * `trustedWorkspace`, and a default warning-emit hook. Tests
-   * inject a real factory + custom emit to capture audit events,
-   * or override `trustedWorkspace` to flip the trust snapshot
-   * without re-routing through the OS-level trustedFolders config
-   * file.
+   * Workspace filesystem factory. When omitted, `runQwenServe`
+   * constructs one using `boundWorkspace`, `trustedWorkspace`, and a
+   * default warning-emit hook. Tests inject a real factory + custom
+   * emit to capture audit events.
    */
   fsFactory?: WorkspaceFileSystemFactory;
   /**
@@ -369,10 +334,7 @@ export interface RunQwenServeDeps {
   /**
    * Audit-emit hook for `fs.access` / `fs.denied`. Defaults to a
    * stderr warning every 100 events so a regression that drops
-   * audit emission stays visible in the operator log. PR 21's SSE
-   * fan-out will replace the default with a workspace-scoped event
-   * channel; for now tests inject a recording array to assert the
-   * audit pipeline.
+   * audit emission stays visible in the operator log.
    */
   fsAuditEmit?: (event: BridgeEvent) => void;
 }
@@ -403,7 +365,7 @@ export async function runQwenServe(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
-  // T2.9: env-var fallback for the deadline options. Explicit option
+  // Env-var fallback for the deadline options. Explicit option
   // beats the env beats unset (= unlimited). `parseDeadlineEnv` throws
   // on malformed values so an `export QWEN_SERVE_PROMPT_DEADLINE_MS=abc`
   // typo fails boot loudly instead of silently disabling the cap.
@@ -422,11 +384,11 @@ export async function runQwenServe(
   const opts: ServeOptions = {
     ...optsIn,
     token,
-    ...(promptDeadlineMs !== undefined ? { promptDeadlineMs } : {}),
-    ...(writerIdleTimeoutMs !== undefined ? { writerIdleTimeoutMs } : {}),
+    promptDeadlineMs,
+    writerIdleTimeoutMs,
   };
 
-  // BU-sh: catch the `--hostname localhost:4170` / `127.0.0.1:4170`
+  // Catch the `--hostname localhost:4170` / `127.0.0.1:4170`
   // typo BEFORE the loopback / token check so the operator sees a
   // useful "did you mean --port?" message instead of "Refusing to
   // bind localhost:4170:0 without a bearer token". Unbracketed input
@@ -449,8 +411,8 @@ export async function runQwenServe(
         `(127.0.0.1, localhost, ::1, or [::1]).`,
     );
   }
-  // Issue #4175 PR 15. `--require-auth` extends the "must have a token"
-  // rule to loopback as well. Boot-loud, like the non-loopback check
+  // `--require-auth` extends the "must have a token" rule to loopback
+  // as well. Boot-loud, like the non-loopback check
   // above: silently dropping the flag when no token is configured
   // would leave the operator believing the deployment is hardened
   // when it isn't. Mention both the env var and the flag so log
@@ -463,7 +425,7 @@ export async function runQwenServe(
     );
   }
 
-  // T2.4 (issue #4514). Validate `--allow-origin` patterns at boot so
+  // Validate `--allow-origin` patterns at boot so
   // operators discover typos before the daemon advertises
   // `allow_origin` to clients. Each entry must be either `*` or a value
   // that round-trips through `new URL(...).origin` — see
@@ -503,18 +465,13 @@ export async function runQwenServe(
     );
   }
 
-  // Resolve the bound workspace per #3803 §02 (1 daemon = 1 workspace).
+  // Resolve the bound workspace (1 daemon = 1 workspace).
   // Explicit `--workspace` wins; otherwise default to process.cwd().
   // `POST /session` with a mismatched `cwd` is rejected by the bridge
   // with `WorkspaceMismatchError`. Multi-workspace deployments use
   // multiple daemon processes, not intra-daemon routing.
   //
   // Boot-loud validation: absolute path, exists, is a directory.
-  // Without the stat() check, `canonicalizeWorkspace`'s ENOENT fallback
-  // to `path.resolve` would let the daemon boot pointed at a
-  // non-existent directory; every `POST /session` would then spawn a
-  // `qwen --acp` child with that cwd and the agent would fail with an
-  // opaque ENOENT — operator pain we can avoid by failing at boot.
   const rawWorkspace = opts.workspace ?? process.cwd();
   if (!path.isAbsolute(rawWorkspace)) {
     throw new Error(
@@ -569,29 +526,12 @@ export async function runQwenServe(
     `qwen serve: daemon log → ${daemonLog.getLogPath() || '(disabled)'}`,
   );
 
-  // Issue #4175 PR 14. The MCP client guardrails enforce in the ACP
-  // child process (where `McpClientManager` lives), not the daemon.
-  // Forward the budget config via env vars so the child's
-  // `readBudgetFromEnv()` picks them up.
-  //
-  // PR 14 fix (review #4247 wenshao R5 line 216): use per-handle env
-  // overrides via `BridgeOptions.childEnvOverrides` instead of
-  // mutating global `process.env`. Pre-fix concurrent embedded
-  // daemons (`runQwenServe()` × 2 in the same process) would race
-  // on `process.env` — `defaultSpawnChannelFactory` snapshots
-  // `process.env` AT SPAWN TIME, so the later daemon's env value
-  // would silently win for the earlier daemon's subsequent ACP
-  // child spawns. With per-handle overrides closed over inside
-  // each bridge, each daemon's children inherit ONLY that
-  // daemon's intended budget config, regardless of what other
-  // daemons in the same process are doing.
-  //
-  // Also: `runQwenServe` is exported and other validations
-  // (`requireAuth` no-token, `maxConnections` NaN, `--workspace`
-  // checks) live here, so embedded callers expect boot-time
-  // rejection of invalid inputs. The yargs CLI handler duplicates
-  // these for fast-fail UX, but `runQwenServe` is the source of
-  // truth.
+  // The MCP client guardrails enforce in the ACP child process (where
+  // `McpClientManager` lives), not the daemon. Forward the budget
+  // config via env vars so the child's `readBudgetFromEnv()` picks
+  // them up. Use per-handle env overrides via
+  // `BridgeOptions.childEnvOverrides` instead of mutating global
+  // `process.env`, so concurrent embedded daemons don't race.
   if (opts.mcpClientBudget !== undefined) {
     if (
       !Number.isFinite(opts.mcpClientBudget) ||
@@ -609,7 +549,7 @@ export async function runQwenServe(
         'Pass mcpClientBudget=N, or set mcpBudgetMode to "warn" or "off".',
     );
   }
-  // T2.9: validate the deadline options on the explicit option path.
+  // Validate the deadline options on the explicit option path.
   // The env path is already validated inside `parseDeadlineEnv`. Boot-
   // loud so an embedded caller passing `{ promptDeadlineMs: -5 }`
   // doesn't end up with a daemon that silently fails to enforce the
@@ -647,13 +587,10 @@ export async function runQwenServe(
   // child's MCP budget env is fully determined by this handle's
   // options, with no inheritance from process.env's current state.
   //
-  // F2 (#4175 commit 5): if the daemon parent process has the pool
-  // kill switch (`QWEN_SERVE_NO_MCP_POOL=1`) in its own env, infer
+  // If the daemon parent process has the pool kill switch
+  // (`QWEN_SERVE_NO_MCP_POOL=1`) in its own env, infer
   // `mcpPoolActive: false` so the capabilities envelope drops the
-  // `mcp_workspace_pool` + `mcp_pool_restart` tags. The ACP child
-  // inherits the env directly so its `QwenAgent.mcpPool` field stays
-  // undefined; advertising the tags would lie about the daemon's
-  // actual feature set.
+  // `mcp_workspace_pool` + `mcp_pool_restart` tags.
   const inheritedNoPool = process.env['QWEN_SERVE_NO_MCP_POOL'] === '1';
   if (opts.mcpPoolActive === undefined && inheritedNoPool) {
     opts.mcpPoolActive = false;
@@ -666,13 +603,12 @@ export async function runQwenServe(
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
   };
 
-  // #4282 fold-in 5 + F3 Commit 5: read settings once at boot for
-  // both the workspace context filename (Codex P2-1) and the new
-  // F3 policy fields (permissionStrategy / consensusQuorum). Wrap
-  // in try/catch (#4297 fold-in 7) so a corrupted settings.json
-  // doesn't block daemon boot — context filename falls back to the
-  // bridge's default; policy validation rethrows because invalid
-  // policy is an explicit operator misconfiguration.
+  // Read settings once at boot for the workspace context filename and
+  // policy fields (permissionStrategy / consensusQuorum). Wrap in
+  // try/catch so a corrupted settings.json doesn't block daemon boot
+  // — context filename falls back to the bridge's default; policy
+  // validation rethrows because invalid policy is an explicit operator
+  // misconfiguration.
   let contextFilenameForInit: string | undefined;
   let permissionPolicy: PermissionPolicy | undefined;
   let permissionConsensusQuorum: number | undefined;
@@ -695,11 +631,8 @@ export async function runQwenServe(
     permissionPolicy = resolved.permissionPolicy;
     permissionConsensusQuorum = resolved.permissionConsensusQuorum;
   } catch (err) {
-    // F3 invariant: invalid policy values must fail startup loudly.
-    // Wenshao review #4335 / 3271978374 — discriminate by error class
-    // rather than substring-matching the message; a future reworded
-    // validation string would have silently downgraded operator
-    // misconfiguration to "fall back to defaults" without this.
+    // Invalid policy values must fail startup loudly. Discriminate by
+    // error class rather than substring-matching the message.
     if (err instanceof InvalidPolicyConfigError) {
       throw err;
     }
@@ -728,35 +661,24 @@ export async function runQwenServe(
   );
   const daemonTelemetry = createDaemonBridgeTelemetry();
 
-  // F3 Commit 2 — allocate the audit ring + publisher in the daemon
-  // host (here) rather than inside the bridge factory, because the
-  // ring is the seam future PRs will lift up to expose `GET
-  // /workspace/permission/audit`. Wenshao review #4335 (3270622298 /
-  // 3270622304): without this wiring all 5 audit record types were
-  // silently dropped through `createNoOpPermissionAuditPublisher`,
-  // and the timeout breadcrumb the bridge JSDoc promised never
-  // existed. The mediator now writes a stderr line on each timeout
-  // (preserving pre-F3 visibility) and forwards the entry to this
-  // ring for the future query route.
+  // Allocate the audit ring + publisher in the daemon host (here)
+  // rather than inside the bridge factory, because the ring is the
+  // seam for exposing `GET /workspace/permission/audit` in the
+  // future.
   const permissionAuditRing = new PermissionAuditRing();
   const permissionAuditPublisher = createPermissionAuditPublisher({
     ring: permissionAuditRing,
   });
 
-  // F1 follow-up (#4319): construct `fsFactory` BEFORE the bridge so
-  // the bridge can wire it through `BridgeFileSystem` for ACP-side
-  // writeTextFile / readTextFile calls. Pre-fix the bridge constructed
-  // first and `fsFactory` lived only inside the HTTP route layer —
-  // agent-triggered fs calls used `BridgeClient`'s inline `fs.realpath`
-  // / `fs.writeFile` proxy, bypassing PR 18's TOCTOU + symlink + trust
-  // gate + audit machinery. See `bridgeFileSystemAdapter.ts` for the
-  // translation layer.
+  // Construct `fsFactory` BEFORE the bridge so the bridge can wire it
+  // through `BridgeFileSystem` for ACP-side writeTextFile / readTextFile
+  // calls. See `bridgeFileSystemAdapter.ts` for the translation layer.
   const trustedWorkspace = deps.trustedWorkspace ?? true;
   const fsFactory = resolveBridgeFsFactory({
     boundWorkspace,
-    ...(deps.fsFactory ? { injected: deps.fsFactory } : {}),
+    injected: deps.fsFactory,
     trusted: trustedWorkspace,
-    ...(deps.fsAuditEmit ? { emit: deps.fsAuditEmit } : {}),
+    emit: deps.fsAuditEmit,
   });
 
   // Create a spawn channel factory that tees child-stderr diagnostics
@@ -782,66 +704,41 @@ export async function runQwenServe(
       channelFactory,
       onDiagnosticLine: diagnosticSink,
       telemetry: daemonTelemetry,
-      // F3 Commit 5 — wire the validated policy/quorum from
-      // settings into the bridge. Bridge factory does its own
-      // defensive `Number.isInteger` recheck on the quorum so a
-      // direct embedder can't bypass our validation.
+      // Wire the validated policy/quorum from settings into the
+      // bridge.
       ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
       ...(permissionConsensusQuorum !== undefined
         ? { permissionConsensusQuorum }
         : {}),
       permissionAudit: permissionAuditPublisher,
-      // #4175 PR 22b/2: inject the daemon-host status provider so the
-      // bridge can pull env / preflight cells through a typed seam
-      // instead of importing daemon-host helpers directly. Production
-      // implementation wraps `buildEnvStatusFromProcess` and the
-      // (lifted) `buildDaemonPreflightCells` body.
+      // Inject the daemon-host status provider so the bridge can pull
+      // env / preflight cells through a typed seam instead of
+      // importing daemon-host helpers directly.
       statusProvider: createDaemonStatusProvider(),
-      // F1 follow-up (#4319): inject the WorkspaceFileSystem adapter so
-      // agent ACP `writeTextFile` / `readTextFile` calls go through
-      // PR 18's defensive fs layer (trust gate + atomic write + symlink
-      // resolution + audit emit) instead of `BridgeClient`'s inline
-      // raw-fs proxy. Closes the `ws.ts:613` follow-up thread.
+      // Inject the WorkspaceFileSystem adapter so agent ACP
+      // `writeTextFile` / `readTextFile` calls go through the
+      // defensive fs layer (trust gate + atomic write + symlink
+      // resolution + audit emit).
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
       ...(contextFilenameForInit !== undefined
         ? { contextFilename: contextFilenameForInit }
         : {}),
-      // #4175 Wave 4 PR 17: `POST /session/:id/approval-mode` accepts
-      // an opt-in `persist: true` flag. We re-load settings on each
-      // persist call rather than caching a `LoadedSettings` handle —
-      // another writer (CLI, another daemon, an editor) could have
-      // touched the file between calls, so the freshest state wins
-      // over a stale in-memory cache.
-      //
-      // #4282 fold-in 4 (qwen-latest C2): both persist callbacks run
-      // through `withSettingsLock` — a per-workspace promise chain that
-      // serializes the read-modify-write cycle. Without the lock, two
-      // concurrent `POST /workspace/tools/:name/enable` requests could
-      // both read the same pre-modification state and the second write
-      // would silently overwrite the first toggle, leaving the disk
-      // copy out of sync with the SDK reducer's view. The lock costs
-      // one tick of latency per call but eliminates the lost-update
-      // window for the entire process; cross-daemon races against the
-      // same workspace file remain (rare; documented).
+      // `POST /session/:id/approval-mode` accepts an opt-in
+      // `persist: true` flag. We re-load settings on each persist call
+      // rather than caching a `LoadedSettings` handle — another writer
+      // could have touched the file between calls. Both persist
+      // callbacks run through `withSettingsLock` to serialize the
+      // read-modify-write cycle.
       persistApprovalMode: (workspace, mode) =>
         withSettingsLock(workspace, async () => {
           const fresh = loadSettings(workspace);
           fresh.setValue(SettingScope.Workspace, 'tools.approvalMode', mode);
         }),
-      // #4175 Wave 4 PR 17: `POST /workspace/tools/:name/enable` writes
-      // through this callback. Re-reads settings on each call (same
-      // freshness rationale as `persistApprovalMode`) and merges into
-      // the existing `tools.disabled` array — concurrent toggles from
-      // other writers stay safe across the read/modify/write window.
-      //
-      // #4282 wenshao H2 fold-in: read from the WORKSPACE scope only.
-      // Reading `fresh.merged.tools?.disabled` (the UNION across
-      // System / SystemDefaults / User / Workspace) and writing the
-      // result back into `SettingScope.Workspace` would copy entries
-      // from higher scopes into the workspace file on the first
-      // toggle. Subsequent removals at the originating scope (e.g.
-      // User) would no longer take effect because the names have been
-      // baked into the workspace file with no obvious source.
+      // `POST /workspace/tools/:name/enable` writes through this
+      // callback. Re-reads settings on each call and merges into the
+      // existing `tools.disabled` array. Reads from the WORKSPACE
+      // scope only — reading the merged union across all scopes would
+      // copy entries from higher scopes into the workspace file.
       persistDisabledTools: (workspace, toolName, enabled) =>
         withSettingsLock(workspace, async () => {
           const fresh = loadSettings(workspace);
@@ -869,12 +766,9 @@ export async function runQwenServe(
   // callers of createServeApp (tests / embeds) omit it and the
   // server canonicalizes itself.
   //
-  // PR 19 — `fsFactory` is now constructed above (before the bridge)
-  // so the bridge can wire it through `BridgeFileSystem`. The HTTP
-  // read routes (`GET /file|/list|/glob|/stat`) still consume the
-  // same factory instance — trust snapshot + audit-emit hook flow
-  // through both surfaces identically, so a single operator audit
-  // stream covers HTTP fs + ACP fs.
+  // `fsFactory` is constructed above (before the bridge) so the
+  // bridge can wire it through `BridgeFileSystem`. The HTTP read
+  // routes and ACP fs calls share the same factory instance.
   const app = createServeApp(opts, () => actualPort, {
     bridge,
     boundWorkspace,
@@ -882,15 +776,10 @@ export async function runQwenServe(
     fsFactory,
     daemonLog,
   });
-  // Issue #4175 PR 21 — `createServeApp` parks the device-flow registry
-  // on `app.locals` when it constructs (or accepts) one. Pull it back
-  // out so the close hook can dispose it before `bridge.shutdown()`,
-  // ensuring polling timers + cancel controllers are torn down BEFORE
-  // we tell agent children to exit (otherwise a stuck IdP fetch could
-  // pin the drain). `unref()`'d timers mean the process WILL exit
-  // either way; explicit dispose is for cleanliness + audit
-  // visibility. Typed accessor (fold-in 4 review thread D) prevents
-  // a key-name typo from silently nulling out the dispose path.
+  // Pull the device-flow registry back out so the close hook can
+  // dispose it before `bridge.shutdown()`, ensuring polling timers +
+  // cancel controllers are torn down BEFORE we tell agent children
+  // to exit.
   const deviceFlowRegistry = getDeviceFlowRegistry(app);
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
@@ -925,25 +814,20 @@ export async function runQwenServe(
     listenHostname = inner;
   }
 
-  // BUF9-: validate maxConnections BEFORE binding so a typo fails the
+  // Validate maxConnections BEFORE binding so a typo fails the
   // promise instead of escaping as an uncaught exception inside the
   // listen callback (which fires from the `listening` event after the
   // outer promise has already resolved). Silent fail-OPEN on NaN /
   // negative would weaken the DoS/FD-exhaustion guard the cap exists
   // for.
-  if (opts.maxConnections !== undefined) {
-    if (Number.isNaN(opts.maxConnections)) {
-      throw new TypeError(
-        'Invalid maxConnections: NaN. Must be >= 0 ' +
-          '(0 / Infinity = unlimited).',
-      );
-    }
-    if (opts.maxConnections < 0) {
-      throw new TypeError(
-        `Invalid maxConnections: ${opts.maxConnections}. Must be >= 0 ` +
-          `(0 / Infinity = unlimited).`,
-      );
-    }
+  if (
+    opts.maxConnections !== undefined &&
+    (Number.isNaN(opts.maxConnections) || opts.maxConnections < 0)
+  ) {
+    throw new TypeError(
+      `Invalid maxConnections: ${opts.maxConnections}. Must be >= 0 ` +
+        `(0 / Infinity = unlimited).`,
+    );
   }
 
   return await new Promise<RunHandle>((resolve, reject) => {
@@ -957,16 +841,16 @@ export async function runQwenServe(
       // socket descriptors. The default of 256 leaves room for many
       // sessions × many legitimate clients while keeping the FD count
       // bounded; operators with high-concurrency deployments raise it
-      // via `--max-connections` (BRQQb).
+      // via `--max-connections`.
       //
-      // tanzhenxin issue 1: `0` and `Infinity` are operator-visible
+      // `0` and `Infinity` are operator-visible
       // "disable the cap" sentinels — but on Node 22 setting
       // `server.maxConnections = 0` causes the listener to refuse
       // EVERY connection (verified on v22.15.0: every fetch fails
       // with `SocketError: other side closed`). Treat 0 / Infinity
       // as "leave the property unset" so the documented disable
       // path actually disables instead of silently bricking the
-      // daemon. NaN / negative are rejected upstream (BUF9-) so
+      // daemon. NaN / negative are rejected upstream so
       // they never reach here.
       const cap = opts.maxConnections ?? 256;
       if (cap > 0 && Number.isFinite(cap)) {
@@ -983,7 +867,7 @@ export async function runQwenServe(
       // Operator log on stderr too (systemd/docker/k8s default
       // captures only stderr for service diagnostics, and the
       // workspace= breadcrumb is the single piece of information
-      // operators need most when triaging §02 migration issues —
+      // operators need most when triaging migration issues —
       // "did the daemon bind to the right workspace?"). The stdout
       // line above stays put so integration tests + scripts that
       // parse stdout for the listening URL keep working;
@@ -1019,13 +903,13 @@ export async function runQwenServe(
       // drain completes. The handler is registered just before `resolve()`.
       const onSignal = async (signal: NodeJS.Signals) => {
         if (shuttingDown) {
-          // BSA0K: second signal forces exit. During drain (up to
+          // Second signal forces exit. During drain (up to
           // ~15s for a stuck child + the 5s force-close timer) an
           // operator's reflexive `^C^C` would otherwise be dropped.
           // Match standard daemon behavior (nginx, redis, etc.):
           // first signal = graceful drain; second = hard exit.
           //
-          // Bd1y6: synchronously SIGKILL every live `qwen --acp`
+          // Synchronously SIGKILL every live `qwen --acp`
           // child BEFORE `process.exit(1)`. Otherwise the daemon
           // vanishes but its child processes keep running with
           // dangling stdin/stdout pipes — visible as orphan
@@ -1095,7 +979,7 @@ export async function runQwenServe(
             // the bridge was still tearing children down — orphaning
             // any that hadn't yet hit `KILL_HARD_DEADLINE_MS`.
             let settled = false;
-            // BV-qW: track bridge.shutdown failures so close()
+            // Track bridge.shutdown failures so close()
             // doesn't silently report success when the bridge
             // teardown itself failed. The contract says "resolves
             // when the listener has fully closed and the bridge is
@@ -1127,7 +1011,7 @@ export async function runQwenServe(
                 });
             };
 
-            // PR 21: dispose the device-flow registry FIRST so any
+            // Dispose the device-flow registry FIRST so any
             // in-flight IdP poll is cancelled and timers are cleared
             // before the bridge tear-down (which would otherwise race
             // with the still-polling registry on shared HTTP agents).
@@ -1155,7 +1039,7 @@ export async function runQwenServe(
               .finally(() => {
                 // Phase 2: arm the force timer NOW so it only races
                 // server.close, not the bridge tear-down above.
-                // BUb7h: `RunHandle.close()` contract says "fully
+                // `RunHandle.close()` contract says "fully
                 // closed and bridge drained" — the previous code
                 // resolved on a 100ms shortcut AFTER
                 // `closeAllConnections()` without waiting for
@@ -1204,7 +1088,7 @@ export async function runQwenServe(
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
 
-      // BX9_i: swap the boot-error listener for a runtime-error one
+      // Swap the boot-error listener for a runtime-error one
       // before resolving. `server.once('error', reject)` at the
       // bottom only catches errors BEFORE listening; post-listen
       // errors (EMFILE after FD exhaustion, runtime errors on the

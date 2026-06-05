@@ -152,7 +152,7 @@ export function runAdapterConformanceSuite(
   const failed: ConformanceFailure[] = [];
   let passed = 0;
   for (const fx of fixtures) {
-    // wenshao R5 (qwen3.7-max): wrap adapter calls in try/catch so an
+    // Wrap adapter calls in try/catch so an
     // adapter throw is reported as a fixture failure (with the error
     // captured in `renderedExcerpt`) instead of aborting the whole
     // suite. JSDoc promises "does not throw"; without the wrapper the
@@ -227,7 +227,7 @@ function filterFixtures(
  * - **mcp**: MCP-specific events (budget warning, restart)
  * - **auth**: device-flow lifecycle
  * - **multimodal-text-only**: forward-compat hint — multimodal not yet
- *   wired (see PR #4353 TODO §D)
+ *   wired (see TODO)
  * - **trim**: long-session block trim behavior
  * - **redaction**: malformed payloads must not leak raw fields
  */

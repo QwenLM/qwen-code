@@ -7,7 +7,7 @@
 /**
  * Event-bus for the daemon's per-session NDJSON stream.
  *
- * Design notes (from issue #3803 §04 / threat-model):
+ * Design notes (from the threat-model):
  *   - Each event carries a monotonic `id` (per session) so the SSE
  *     `Last-Event-ID` reconnect protocol can pick up where the client left
  *     off. Backed by a bounded ring of recent events for replay.
@@ -80,7 +80,7 @@ const DEFAULT_MAX_QUEUED = 256;
  * turn, real workloads can be 10× that or more once tool-call /
  * thought streams pile up). 1000 was the original default and could
  * be exhausted by a moderate turn before the client reconnected;
- * 8000 matches the target set in #3803 §02 for chatty Stage 1
+ * 8000 matches the target set for chatty Stage 1
  * sessions, with ~30–60× headroom over a typical-but-busy turn at
  * the cost of a few hundred KB of RAM per session. Operators can
  * override per-daemon via `qwen serve --event-ring-size <n>`.
@@ -132,7 +132,7 @@ interface InternalSub {
    */
   warned: boolean;
   /**
-   * BmJT1: cleanup hook for the eviction path (overflow → close queue
+   * Note: cleanup hook for the eviction path (overflow → close queue
    * → remove from `subs`). Without this, the abort listener registered
    * in `subscribe()` would stay attached against the consumer's
    * AbortSignal — and the consumer is by definition stalled (that's
@@ -159,7 +159,7 @@ export class SubscriberLimitExceededError extends Error {
   }
 }
 
-// FIXME(stage-1.5, chiga0 finding 2):
+// FIXME(stage-1.5):
 // `EventBus` is currently private to the SSE route handler. Stage 1.5
 // should lift it to a top-level building block (likely
 // `packages/event-bus`) so other agent-exposing surfaces
@@ -200,7 +200,7 @@ export class EventBus {
    * (with `id` + `v` assigned) on success, or `undefined` when the
    * bus is closed.
    *
-   * **Never throws** (BX9_p contract). Closing the bus mid-publish
+   * **Never throws** (never-throws contract). Closing the bus mid-publish
    * is the only abnormal path and is handled as a return-undefined
    * no-op; subscriber-enqueue failures are caught internally and
    * translated to per-subscriber eviction. Call sites can rely on
@@ -232,10 +232,10 @@ export class EventBus {
       this.compactionEngine?.ingest(event);
     } catch {
       // CompactionEngine is best-effort; a throw must not break the
-      // publish() never-throws contract (BX9_p).
+      // publish() never-throws contract (never-throws).
     }
     // Eviction-by-shift is O(n) once the ring is full. At the current
-    // default `ringSize=8000` (#3803 §02) the per-publish shift work
+    // default `ringSize=8000` (the target) the per-publish shift work
     // measures in low milliseconds on chatty sessions — still well
     // below per-frame latency budgets. A circular-buffer refactor
     // would push it to O(1) but adds index bookkeeping; deferred until
@@ -267,7 +267,7 @@ export class EventBus {
         // consumer iterator unwinds with a final synthetic event.
         sub.queue.forcePush(evictionFrame);
         sub.queue.close();
-        // BmJT1: dispose the subscription cleanly. `sub.dispose()`
+        // Note: dispose the subscription cleanly. `sub.dispose()`
         // both removes from `this.subs` AND detaches the
         // AbortSignal listener that `subscribe()` registered. Pre-
         // fix the eviction path only did `this.subs.delete(sub)`,
@@ -380,8 +380,8 @@ export class EventBus {
     this.subs.add(sub);
 
     if (opts.lastEventId !== undefined) {
-      // Detect ring eviction on resume (#4175 F4 prereq, Ilya0527
-      // issue #15): if the earliest event still in the ring has
+      // Detect ring eviction on resume
+      // (ring eviction detection): if the earliest event still in the ring has
       // `id > lastEventId + 1`, then events between `lastEventId + 1`
       // and `earliestInRing - 1` were evicted before the consumer
       // reconnected — the consumer's reducer has a gap it doesn't
@@ -398,7 +398,7 @@ export class EventBus {
       // continue flowing afterward. The SDK reducer treats this as
       // "your state is stale; call loadSession before applying any
       // further deltas" — see `awaitingResync` flag in the SDK
-      // reducer. Wenshao review (#4360) corrected the prior wording
+      // reducer. The prior wording was corrected to note
       // that called this "TERMINAL" — that's misleading for oncall;
       // `client_evicted` is genuinely terminal (closes stream),
       // `state_resync_required` is recovery-oriented (keeps stream
@@ -409,7 +409,7 @@ export class EventBus {
       // loadSession clears the flag, but the frames stay on the
       // wire so SDK has the option to compute a "what you missed"
       // diff later. This is network-friendly (no extra reconnect).
-      // Epoch-reset detection (doudouOUC #4484 post-merge review, D1).
+      // Epoch-reset detection (epoch-reset detection).
       // `this.nextId` is the next id this bus will assign, so the bus has
       // only ever emitted ids `< nextId` THIS epoch. A consumer presenting
       // `lastEventId >= nextId` therefore saw an id this epoch never
@@ -499,7 +499,7 @@ export class EventBus {
         v: EVENT_SCHEMA_VERSION,
         type: 'replay_complete',
         data: {
-          // D4 (doudouOUC #4484 post-merge review): `lastReplayedEventId`
+          // Note: `lastReplayedEventId`
           // is the canonical wire name — the old `lastEventId` collided
           // semantically with the SSE protocol's `Last-Event-ID` (envelope
           // `id`) in raw daemon traces. Emit both: `lastReplayedEventId`

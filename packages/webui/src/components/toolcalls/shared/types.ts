@@ -103,7 +103,7 @@ export interface ToolCallData {
    * `daemonTranscriptToUnifiedMessages` when
    * `enrichToolDetailsWithPreview: true`. Renderers can show it
    * alongside `rawOutput` (which is now preserved verbatim, addressing
-   * the doudouOUC review on PR #4353).
+   * a code review).
    */
   previewMarkdown?: string;
 }

@@ -118,14 +118,14 @@ export class DaemonSessionClient {
     // - **Newly-created sessions** (`session.attached === false`): the
     //   child's `newSession` handler runs MCP discovery synchronously
     //   in legacy blocking mode and as background work in progressive
-    //   mode. PR 14b's `mcp_budget_warning` / `mcp_child_refused_batch`
+    //   mode. The daemon's `mcp_budget_warning` / `mcp_child_refused_batch`
     //   push events fire during this window and are buffered on
     //   `BridgeClient.earlyEvents` until `byId.set` runs, then drained
     //   into the per-session bus before `spawnOrAttach` returns. The
     //   guardrail events advertised via `mcp_guardrail_events` are
     //   useless without this seed because they predate any live
     //   subscription.
-    // - **Pre-PR 14b carve-out**: `modelServiceId` switch failures are
+    // - **Carve-out**: `modelServiceId` switch failures are
     //   reported on SSE, not the create/attach HTTP response. The
     //   original carve-out covered just this case; the unified rule
     //   below subsumes it (newly-created sessions always seed) while
@@ -271,7 +271,7 @@ export class DaemonSessionClient {
   /**
    * Bump the daemon's last-seen bookkeeping for this session. Adapters
    * with a long-lived view of a session (TUI/IDE/web) can fire this on
-   * an interval to keep diagnostics fresh and feed PR 24 revocation
+   * an interval to keep diagnostics fresh and feed future revocation
    * policy. Forwards the bound `clientId` so identified clients update
    * their per-client timestamp instead of just the session-wide one.
    */

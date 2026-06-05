@@ -18,7 +18,7 @@ const execFileAsync = promisify(execFile);
 const QUERY_TIMEOUT_MS = 2_000;
 
 /**
- * F2 (#4175 commit 6 review fix — wenshao R10 / R23 T7 / PR A): cap
+ * cap
  * for `execFile`'s internal stdout buffer on the snapshot path. Default
  * is 1MB, which is enough for ~30k-process hosts (~30 bytes/line) but
  * an 8MB cap covers >250k-process pathological cases without forcing
@@ -41,12 +41,12 @@ const MAX_DEPTH = 8;
  * Return all descendant PIDs (children, grandchildren, …) of `rootPid`.
  *
  * Cross-platform implementation per `docs/design/f2-mcp-transport-pool.md`
- * §6.4. F2 (#4175) uses this from `PoolEntry.shutdown()` to SIGTERM
+ * Uses this from `PoolEntry.shutdown()` to SIGTERM
  * wrapped server processes (`npx @modelcontextprotocol/server-X`,
  * `uvx ...`, `pnpm dlx ...`) that would otherwise leak when the
  * pool entry's primary child is killed.
  *
- * F2 (#4175 commit 6 review fix — wenshao R10 / R23 T7 / PR A):
+ *
  * the implementation switched from per-pid `pgrep -P <pid>` BFS
  * (Linux/macOS) / per-pid `Get-CimInstance -Filter "ParentProcessId=$p"`
  * BFS (Windows) — which forked one subprocess per node visited — to
@@ -205,11 +205,11 @@ async function listDescendantPidsWin(root: number): Promise<number[]> {
 async function snapshotProcessTreeWin(): Promise<Map<number, number[]>> {
   // Single-shot CIM query for ALL processes' (ProcessId,
   // ParentProcessId), CSV-formatted for stable parsing.
-  // F2 (#4175 commit 5 review fix — wenshao R5): no integer
+  // no integer
   // interpolation into the script; this query takes no parameters
   // (we filter in-memory after the snapshot returns).
   //
-  // F2 (#4175 commit 6 review fix — wenshao PR-A-R3 T3): explicit
+  // explicit
   // `-Delimiter ","` on `ConvertTo-Csv`. Pre-fix PowerShell 5.1
   // honored the system locale's list separator (semicolon on
   // German / French / Dutch / etc.), so the regex
@@ -267,7 +267,7 @@ async function listDescendantPidsWinPerPidFallback(
       // CIM is the modern replacement for `wmic` (deprecated in
       // Win10 21H1+). Single-line script so we can pass via -Command.
       //
-      // F2 (#4175 commit 5 review fix — wenshao R5): bind the pid to
+      // bind the pid to
       // a PowerShell `$p` variable instead of interpolating the
       // integer directly into the `-Filter` string. The entry-point
       // guard (`Number.isInteger(rootPid) && rootPid > 0`) plus
@@ -310,13 +310,13 @@ async function listDescendantPidsWinPerPidFallback(
 }
 
 /**
- * F2 (#4175 commit 6 review fix — wenshao R10 / R23 T7 / PR A):
+ *
  * shared in-memory BFS over a snapshot tree. Replaces both
  * platforms' per-node subprocess forks once the snapshot has been
  * obtained. Same MAX_DESCENDANTS / MAX_DEPTH caps as the legacy
  * fallback path. Returns BFS order — children before grandchildren.
  *
- * F2 (#4175 commit 6 review fix — wenshao PR-A-R2 #1): `visited`
+ * `visited`
  * set prevents BFS revisits when the snapshot captures a PID-reuse
  * cycle (rare but possible on busy hosts with rapid pid churn
  * between snapshot start and parse — Linux pid wraparound can make
@@ -360,7 +360,7 @@ function walkDescendants(tree: Map<number, number[]>, root: number): number[] {
  * and we don't shell out to taskkill. Returns the count of pids
  * that were successfully signaled.
  *
- * wenshao S2 doc fix: pre-fix docstring claimed a Windows-specific
+ * Pre-fix docstring claimed a Windows-specific
  * `taskkill /F` branch that didn't exist in the implementation.
  *
  * Caller's responsibility to handle the root pid separately (which

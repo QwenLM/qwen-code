@@ -161,14 +161,15 @@ export class MessageEmitter extends BaseEmitter {
     epochMs: number | undefined,
     subagentMeta?: SubagentMeta,
   ): Record<string, unknown> | undefined {
-    const meta: Record<string, unknown> = {};
-    if (subagentMeta?.parentToolCallId) {
-      meta['parentToolCallId'] = subagentMeta.parentToolCallId;
-    }
-    if (subagentMeta?.subagentType) {
-      meta['subagentType'] = subagentMeta.subagentType;
-    }
-    if (epochMs != null) meta['timestamp'] = epochMs;
+    const meta: Record<string, unknown> = {
+      ...(subagentMeta?.parentToolCallId
+        ? { parentToolCallId: subagentMeta.parentToolCallId }
+        : {}),
+      ...(subagentMeta?.subagentType
+        ? { subagentType: subagentMeta.subagentType }
+        : {}),
+      ...(epochMs != null ? { timestamp: epochMs } : {}),
+    };
     return Object.keys(meta).length > 0 ? meta : undefined;
   }
 }

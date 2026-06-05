@@ -861,7 +861,7 @@ export class Session implements SessionContext {
             // arena) so the model sees them, matching the behaviour of
             // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
             // plan mode in ACP has no effect because the model never learns it
-            // should avoid edits (#1151).
+            // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
             if (systemReminders.length > 0) {
               parts = [...systemReminders, ...parts];
@@ -1854,7 +1854,7 @@ export class Session implements SessionContext {
     const effectiveAuthType = after?.authType ?? selectedAuthType;
     const effectiveModelId = after?.model ?? parsed.modelId;
 
-    // A1 (#4511): notify attached clients of an in-session model switch so a
+    // Notify attached clients of an in-session model switch so a
     // `/model` slash command or plan-mode change reaches the bus (today only
     // the HTTP `POST /session/:id/model` path publishes `model_switched`).
     // `current_model_update` is NOT an ACP `SessionUpdate` variant (the type
@@ -2007,7 +2007,7 @@ export class Session implements SessionContext {
    * start of a user query or cron fire. Mirrors the subagent/plan/arena
    * branches in `GeminiClient.sendMessageStream` (`client.ts:848-878`) —
    * the ACP path bypasses that code, so without this helper plan mode is
-   * silently inert (#1151) and subagent/arena sessions lose context.
+   * silently inert and subagent/arena sessions lose context.
    *
    * Scope note: the `relevantAutoMemory` reminder is intentionally NOT
    * included here. Managed auto-memory requires a prefetch pipeline that
@@ -3001,11 +3001,7 @@ export class Session implements SessionContext {
           processedQueryParts.push(clampInlineMediaPart(part));
         }
       }
-    } else if (embeddedContext.length > 0) {
-      // No @path files to read, but we have embedded context
-      processedQueryParts.push({ text: initialQueryText.trim() });
     } else {
-      // No @path files found
       processedQueryParts.push({ text: initialQueryText.trim() });
     }
 

@@ -265,11 +265,7 @@ export class AcpConnection {
   closeSessionStream(sessionId: string): void {
     const binding = this.sessions.get(sessionId);
     if (!binding) return;
-    binding.abort.abort();
-    binding.promptAbort?.abort();
-    binding.stream?.close();
-    this.abandonPendingForSession(sessionId, binding.clientId);
-    this.onDetachSession?.(sessionId, binding.clientId);
+    this.teardownBinding(binding);
     this.sessions.delete(sessionId);
     this.ownedSessions.delete(sessionId);
   }
@@ -278,18 +274,20 @@ export class AcpConnection {
     this.destroyed = true;
     this.clearGraceTimer();
     for (const binding of this.sessions.values()) {
-      binding.abort.abort();
-      binding.promptAbort?.abort();
-      binding.stream?.close();
-      this.abandonPendingForSession(binding.sessionId, binding.clientId);
-      // Release the bridge-stamped clientId so it doesn't linger in the
-      // bridge's voter/known-client sets after this connection is gone.
-      this.onDetachSession?.(binding.sessionId, binding.clientId);
+      this.teardownBinding(binding);
     }
     this.sessions.clear();
     this.ownedSessions.clear();
     this.pending.clear();
     this.connStream?.close();
+  }
+
+  private teardownBinding(binding: SessionBinding): void {
+    binding.abort.abort();
+    binding.promptAbort?.abort();
+    binding.stream?.close();
+    this.abandonPendingForSession(binding.sessionId, binding.clientId);
+    this.onDetachSession?.(binding.sessionId, binding.clientId);
   }
 
   /**

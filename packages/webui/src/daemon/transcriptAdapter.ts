@@ -200,7 +200,7 @@ function daemonToolBlockToToolCallData(
   block: DaemonToolTranscriptBlock,
   enrichDetails: boolean = false,
 ): ToolCallData {
-  // doudouOUC review (Important): do NOT overwrite `rawOutput` with the
+  // Do NOT overwrite `rawOutput` with the
   // preview markdown. The previous code replaced the structured tool
   // output with a string summary when `enrichDetails === true`, which
   // (a) broke downstream consumers that expect an object shape on
@@ -316,7 +316,7 @@ function classifySelectedPermissionOption(detail: string): ToolCallStatus {
   // explicit-fail (`failed:reason`) from option-selection (`selected:x`)
   // at the caller layer.
   //
-  // wenshao R3 (qwen3.7-max) proposed adding a CANCELLED check here, but
+  // Adding a CANCELLED check here, but
   // that conflicts with the explicit design intent and the existing
   // `cancelled-substring-permission` test (input `selected:abort`,
   // expected status `completed`). When the daemon means "user cancelled

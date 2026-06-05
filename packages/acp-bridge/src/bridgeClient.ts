@@ -21,13 +21,10 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
-// Wenshao review #4335 / 3272581569 — narrowed from the concrete
-// `MultiClientPermissionMediator` to the sub-interface this class
-// actually uses (`request` only). The bridge factory still
-// constructs the full `MultiClientPermissionMediator` (it needs
-// `peekSessionFor` / `pendingCount` / `forgetSession`); structural
-// typing lets us pass the same instance here without a cast.
-// Test stubs no longer have to fake all 6 mediator members.
+// Narrowed from the concrete `MultiClientPermissionMediator` to the
+// sub-interface this class actually uses (`request` only). Structural
+// typing lets the bridge factory pass the full mediator instance
+// without a cast; test stubs only need to fake the `request` method.
 import type { PermissionMediator } from './permission.js';
 import type {
   PermissionRequestRecord,
@@ -37,31 +34,17 @@ import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 
 /**
- * Duck-type check for `FsError` from `cli/src/serve/fs/errors.ts`
- * (#4175 F4 prereq — Codex review on #4360 round 2). FsError lives
- * in the `cli` package, but this class lives in `acp-bridge` — a
- * direct `import { FsError }` would invert the dependency. We use
- * the same `.name`-based duck typing that `mapDomainErrorToErrorKind`
- * (status.ts) already applies to `TrustGateError` / `SkillError`
- * for the same cross-package bundling reason.
+ * Duck-type check for `FsError` from `cli/src/serve/fs/errors.ts`.
+ * FsError lives in `cli`, but this class lives in `acp-bridge` — a
+ * direct import would invert the dependency. Uses `.name`-based duck
+ * typing (same pattern as `mapDomainErrorToErrorKind` in status.ts).
  *
- * Without this preservation: when the `BridgeFileSystem` adapter
- * throws an `FsError` (e.g. `kind: 'untrusted_workspace'`, `kind:
- * 'symlink_escape'`, `kind: 'file_too_large'`), the ACP SDK's
- * default RPC error path serializes only `error.message` as
- * "Internal error" — the structured `kind` / `status` / `hint` are
- * lost on the wire. SDK consumers downstream can no longer dispatch
- * typed UI (auth retry vs file picker vs proxy hint) without
- * regex-matching the human-readable message.
- *
- * With this preservation: the bridge boundary catches FsError,
- * rethrows as ACP `RequestError(-32603, message, {errorKind, hint,
- * status})`. The agent's RPC client receives `data.errorKind` and
- * can branch on the closed-enum kind. JSON-RPC code stays at
- * internal-error (-32603) since the bridge can't reliably map
- * FsError.kind to a JSON-RPC error code shape — the structured
- * `data` field is what carries semantic information for SDK
- * consumers.
+ * Without this: when the `BridgeFileSystem` adapter throws an
+ * `FsError`, the ACP SDK's default RPC error path serializes only
+ * `error.message` — the structured `kind` / `status` / `hint` are
+ * lost. With this: the bridge catches FsError and rethrows as ACP
+ * `RequestError(-32603, message, {errorKind, hint, status})` so the
+ * agent's RPC client can branch on `data.errorKind`.
  */
 interface FsErrorShape {
   name: 'FsError';
@@ -98,11 +81,9 @@ function preserveFsErrorOverAcp(err: unknown): never {
 }
 
 /**
- * #4175 F3 Commit 3 — translate the mediator's internal
- * `PermissionResolution` to the ACP-shaped `RequestPermissionResponse`
- * the agent expects. Voter-cancel (mediator returns
- * `{kind:'cancelled', reason:'agent_cancelled'}` from the sentinel
- * path) and timeout / session-closed all project to the same
+ * Translate the mediator's internal `PermissionResolution` to the
+ * ACP-shaped `RequestPermissionResponse` the agent expects.
+ * Voter-cancel, timeout, and session-closed all project to the same
  * `{outcome: 'cancelled'}` shape — the ACP wire frame doesn't
  * distinguish them. The audit log carries `decisionReason.type`
  * for forensic discrimination.
@@ -119,32 +100,18 @@ function resolutionToAcpResponse(
   return { outcome: { outcome: 'cancelled' } };
 }
 
-// Wenshao review #4335 / 3272581548 — `MAX_RESOLVED_PERMISSION_RECORDS`,
-// `PendingPermission`, and `PermissionResolutionRecord` were removed
-// from this file. The mediator now owns all pending+resolved state
-// (`permissionMediator.ts:77` declares its own MAX constant; line 319
-// declares its own differently-shaped `PermissionResolutionRecord`),
-// so the pre-F3 inline definitions here had become dead code with
-// stale JSDoc that referenced deleted closures (`registerPending`,
-// `resolvedPermissions` map). httpAcpBridge.ts re-exports were
-// dropped in the same commit.
-
 /**
- * PR 14b fix #1 (codex review round 1): bounded buffering for ACP
- * `extNotification` frames that arrive on `BridgeClient` before the
- * matching session has been registered in `byId`. The bridge populates
- * `byId` only AFTER `connection.newSession` returns, but the child's
- * MCP discovery runs INSIDE `newSession` and may fire budget events
- * synchronously before the response makes it back. Without buffering,
- * those frames hit `resolveEntry → undefined` and are silently dropped
- * — the very first replay-ring slot for the new session is missing
- * the events that fired during its creation.
+ * Bounded buffering for ACP `extNotification` frames that arrive on
+ * `BridgeClient` before the matching session has been registered in
+ * `byId`. The bridge populates `byId` only AFTER `connection.newSession`
+ * returns, but the child's MCP discovery runs INSIDE `newSession` and
+ * may fire budget events synchronously before the response makes it
+ * back. Without buffering, those frames are silently dropped.
  *
- * The triple bound (max sessions × max events per session × TTL)
+ * The triple bound (max sessions x max events per session x TTL)
  * caps worst-case heap retention even if a malicious / buggy child
  * spammed `extNotification` for sessionIds that never register:
- * 64 × 32 × ~200B ≈ 400 KB total. TTL is generous (60s — far longer
- * than realistic session creation latency of seconds) so brief
+ * 64 x 32 x ~200B = 400 KB total. TTL is generous (60s) so brief
  * scheduling pauses don't cause real warnings to be evicted.
  */
 const MAX_EARLY_EVENT_SESSIONS = 64;
@@ -222,7 +189,7 @@ export interface BridgeClientSessionEntry {
   pendingPermissionIds: Set<string>;
   activePromptOriginatorClientId?: string;
   /**
-   * A1 (#4511): true while the bridge drives a model roundtrip; the
+   * True while the bridge drives a model roundtrip; the
    * `current_model_update` extNotification demux reads it to suppress
    * promotion during a bridge-driven change. Set on the full `SessionEntry`
    * in `bridge.ts`; surfaced here for the demux.
@@ -249,14 +216,7 @@ export interface BridgeClientSessionEntry {
  * sandbox. The agent could already read or write the same files via its
  * built-in tools (e.g. shell). Restricting the bridge here would be
  * theatre. Stage 4+ remote-sandbox deployments swap this `Client` for a
- * sandbox-aware variant — see issue #3803 §11.
- *
- * Lifted from `cli/src/serve/httpAcpBridge.ts` to `@qwen-code/acp-bridge`
- * in #4175 F1 (step 2 of the package self-sufficiency lift) so the
- * bridge core can be consumed by `channels/base/AcpBridge.ts` and the
- * VSCode IDE companion without reaching into the cli package. The
- * 22b' BridgeFileSystem injection seam is folded into the same F1 lift
- * as a separate follow-up step.
+ * sandbox-aware variant.
  */
 export class BridgeClient implements Client {
   constructor(
@@ -277,13 +237,11 @@ export class BridgeClient implements Client {
     private readonly resolvePendingRestoreEvents: (
       sessionId?: string,
     ) => EventBus | undefined,
-    /**
-     * #4175 F3 Commit 3 — the multi-client permission coordinator.
-     * Owns ALL pending + resolved permission state; this client just
-     * plumbs `requestPermission` into `mediator.request` and forwards
+    /** The multi-client permission coordinator. Owns ALL pending +
+     * resolved permission state; this client just plumbs
+     * `requestPermission` into `mediator.request` and forwards
      * the resolution to the agent. Strategy dispatch and audit/emit
-     * fan-out live inside the mediator. Replaces the pre-F3
-     * `registerPending` / `rollbackPending` callbacks.
+     * fan-out live inside the mediator.
      */
     private readonly mediator: Pick<PermissionMediator, 'request'>,
     /**
@@ -303,15 +261,14 @@ export class BridgeClient implements Client {
      */
     private readonly maxPendingPerSession: number,
     /**
-     * Optional fs injection seam (#4175 PR F1 step 5). When provided,
-     * `writeTextFile` / `readTextFile` delegate to this implementation
-     * instead of running the inline `fs.realpath` / `fs.writeFile` /
-     * `fs.readFile` proxy below. Production `qwen serve` wires a
-     * serve-side adapter wrapping PR 18's `WorkspaceFileSystem` here
-     * so writes get the TOCTOU + symlink + trust-gate + audit machinery
-     * the inline proxy lacks. Omitted by tests + Mode A in-process
-     * consumers + channels / IDE companion — preserves the pre-F1
-     * inline proxy behavior.
+     * Optional fs injection seam. When provided, `writeTextFile` /
+     * `readTextFile` delegate to this implementation instead of running
+     * the inline `fs.realpath` / `fs.writeFile` / `fs.readFile` proxy
+     * below. Production `qwen serve` wires a serve-side adapter
+     * wrapping `WorkspaceFileSystem` here so writes get the TOCTOU +
+     * symlink + trust-gate + audit machinery the inline proxy lacks.
+     * Omitted by tests + Mode A in-process consumers + channels / IDE
+     * companion — preserves the inline proxy behavior.
      */
     private readonly fileSystem?: BridgeFileSystem,
   ) {}
@@ -344,11 +301,11 @@ export class BridgeClient implements Client {
     );
     allowedOptionIds.delete('');
 
-    // F3 final-pass review fold-in — pre-flight the cancel-vote
-    // sentinel collision BEFORE publishing the `permission_request`
-    // SSE event. The mediator also checks defensively at issue
-    // time, but if we publish first and the mediator throws, SSE
-    // subscribers see an orphan event with no resolution.
+    // Pre-flight the cancel-vote sentinel collision BEFORE publishing
+    // the `permission_request` SSE event. The mediator also checks
+    // defensively at issue time, but if we publish first and the
+    // mediator throws, SSE subscribers see an orphan event with no
+    // resolution.
     const requestId = randomUUID();
     if (allowedOptionIds.has(CANCEL_VOTE_SENTINEL)) {
       throw new CancelSentinelCollisionError(requestId, CANCEL_VOTE_SENTINEL);
@@ -414,12 +371,11 @@ export class BridgeClient implements Client {
   }
 
   /**
-   * PR 14b fix #1 (codex review round 1): bounded early-event buffer.
-   * Frames are keyed by sessionId; each entry tracks its `expiresAt`
-   * for lazy TTL-based eviction in `bufferEarlyEvent`. Drained by
-   * `drainEarlyEvents` whenever the bridge registers a session with
-   * a matching id. See MAX_EARLY_EVENT_* constants for capacity
-   * bounds.
+   * Bounded early-event buffer. Frames are keyed by sessionId; each
+   * entry tracks its `expiresAt` for lazy TTL-based eviction in
+   * `bufferEarlyEvent`. Drained by `drainEarlyEvents` whenever the
+   * bridge registers a session with a matching id. See
+   * MAX_EARLY_EVENT_* constants for capacity bounds.
    */
   private readonly earlyEvents = new Map<
     string,
@@ -430,27 +386,19 @@ export class BridgeClient implements Client {
   >();
 
   /**
-   * PR 14b fix (codex review round 5): tombstone for closed/killed
-   * session ids. Pre-fix, `extNotification` buffered events for any
-   * unknown sessionId — including ids of just-closed sessions whose
-   * dying child fired one last `extNotification` between
-   * `byId.delete(sid)` and the channel actually exiting. If the SAME
-   * id was later re-registered via `session/load` or `session/resume`
-   * within the buffer's 60s TTL, `drainEarlyEvents` would replay
-   * stale prior-session telemetry (false budget warnings, refused
-   * server names from the OLD session) onto the NEW subscriber.
+   * Tombstone for closed/killed session ids. Prevents late
+   * `extNotification` from a dying child from leaking into the
+   * early-event buffer and being replayed onto a future session
+   * that reuses the same id via `session/load` or `session/resume`.
    *
    * Tombstone semantics:
    * - Marked when the bridge removes a sessionId from `byId` (kill
    *   path, channel.exited handler, closeSession).
-   * - Concurrently purges any in-flight `earlyEvents[id]` so a
-   *   buffered-but-undelivered frame can't leak either.
-   * - `bufferEarlyEvent` rejects tombstoned ids (the dying child's
-   *   late notification just gets dropped).
+   * - Concurrently purges any in-flight `earlyEvents[id]`.
+   * - `bufferEarlyEvent` rejects tombstoned ids.
    * - `drainEarlyEvents` clears the tombstone — a fresh
-   *   `createSessionEntry` for the same id is the legitimate
-   *   "load/resume of a persisted session id" case, and at that
-   *   point any stale event has already been rejected at buffer time.
+   *   `createSessionEntry` for the same id is a legitimate
+   *   "load/resume of a persisted session id" case.
    * - TTL = `EARLY_EVENT_TTL_MS` (60s) — same as the early-event
    *   buffer, so by the time a tombstone expires there can be no
    *   stale frame for that id anywhere in the system.
@@ -458,39 +406,29 @@ export class BridgeClient implements Client {
   private readonly tombstonedSessionIds = new Map<string, number>();
 
   /**
-   * PR 14b fix (codex review round 6): allow-list of sessionIds that
-   * are currently being restored via `session/load` /
-   * `session/resume`. Bypasses the tombstone check in
-   * `bufferEarlyEvent` so restore-time guardrail events for a
+   * Allow-list of sessionIds currently being restored via
+   * `session/load` / `session/resume`. Bypasses the tombstone check
+   * in `bufferEarlyEvent` so restore-time guardrail events for a
    * previously-closed id flow through to the future
-   * `createSessionEntry → drainEarlyEvents` call.
+   * `createSessionEntry -> drainEarlyEvents` call.
    *
-   * Pre-fix the round-5 tombstone protected against post-mortem
-   * stale events from dying children (correct), but it ALSO
-   * rejected legitimate restore-time events for the same id
-   * because `markSessionClosed` (60s TTL) is set BEFORE a future
-   * `load` can clear the tombstone via `drainEarlyEvents` (which
-   * only runs AFTER `createSessionEntry`, which only runs AFTER the
-   * ACP `loadSession`/`unstable_resumeSession` returns). The
-   * restored child's MCP discovery firing during that ACP call
-   * window had its budget events silently dropped.
+   * Without this, the tombstone set before a future `load` can clear
+   * it via `drainEarlyEvents` would silently drop legitimate
+   * restore-time events (e.g. MCP discovery budget events firing
+   * during the ACP call window).
    *
    * Bridge factory enters the set before awaiting the ACP restore
-   * call and exits the set on settle (success or failure). Multi-
-   * waiter coalescing on the same id is naturally handled — the
-   * Set is idempotent on add and the cleanup is paired with the
-   * IIFE that does the ACP call (only one such IIFE per id at a
-   * time).
+   * call and exits on settle (success or failure).
    */
   private readonly inFlightRestoreIds = new Set<string>();
 
   /**
-   * Handle child→bridge ACP `extNotification` calls. Three methods are
-   * recognized — `qwen/notify/session/model-update` (A1 #4511),
+   * Handle child->bridge ACP `extNotification` calls. Three methods are
+   * recognized — `qwen/notify/session/model-update`,
    * `qwen/notify/session/prompt-suggestion` (followup assist), and
-   * `qwen/notify/session/mcp-budget-event` (PR 14b) — each translated
-   * into a session-scoped SSE frame. Unknown methods are dropped
-   * silently for forward-compat.
+   * `qwen/notify/session/mcp-budget-event` — each translated into a
+   * session-scoped SSE frame. Unknown methods are dropped silently
+   * for forward-compat.
    */
   async extNotification(
     method: string,
@@ -528,13 +466,14 @@ export class BridgeClient implements Client {
     const sessionId = params['sessionId'];
     if (typeof sessionId !== 'string') return;
     const kind = params['kind'];
-    const type =
-      kind === 'budget_warning'
-        ? 'mcp_budget_warning'
-        : kind === 'refused_batch'
-          ? 'mcp_child_refused_batch'
-          : undefined;
-    if (!type) return;
+    let type: string;
+    if (kind === 'budget_warning') {
+      type = 'mcp_budget_warning';
+    } else if (kind === 'refused_batch') {
+      type = 'mcp_child_refused_batch';
+    } else {
+      return;
+    }
     // Strip the routing fields (`v`, `sessionId`, `kind`) from the
     // outbound `data` payload — the SSE frame already carries `v` at
     // the envelope level (`EVENT_SCHEMA_VERSION`) and the session id
@@ -564,13 +503,12 @@ export class BridgeClient implements Client {
   }
 
   /**
-   * A1 (#4511): promote an in-session `current_model_update` extNotification
-   * to a `model_switched` bus event (field mapping: `currentModelId` →
-   * `data.modelId`, `sessionId` → `data.sessionId`). Suppressed while the
-   * bridge is driving its own model roundtrip (`entry.modelRoundtripInFlight`)
-   * — there the bridge publishes the authoritative `model_switched`, so
-   * promoting here too would double-publish. A structured log records the
-   * decision so the `dropped` case is observable.
+   * Promote an in-session `current_model_update` extNotification to a
+   * `model_switched` bus event. Suppressed while the bridge is driving
+   * its own model roundtrip (`entry.modelRoundtripInFlight`) — there the
+   * bridge publishes the authoritative `model_switched`, so promoting
+   * here too would double-publish. A structured log records the decision
+   * so the `dropped` case is observable.
    */
   private handleInSessionModelUpdate(params: Record<string, unknown>): void {
     const sessionId = params['sessionId'];
@@ -611,30 +549,28 @@ export class BridgeClient implements Client {
   }
 
   /**
-   * PR 14b fix #1: enqueue `frame` for `sessionId`. Lazy TTL sweep
-   * runs first so caller doesn't pay for stale entries before
-   * deciding whether the session-cap is reached. New sessionIds
-   * past `MAX_EARLY_EVENT_SESSIONS` are dropped (defense against a
+   * Enqueue `frame` for `sessionId`. Lazy TTL sweep runs first so
+   * caller doesn't pay for stale entries before deciding whether
+   * the session-cap is reached. New sessionIds past
+   * `MAX_EARLY_EVENT_SESSIONS` are dropped (defense against a
    * malicious / buggy child fanning out fake sessionIds); same-
-   * sessionId frames past `MAX_EARLY_EVENTS_PER_SESSION` are dropped
-   * to bound per-session memory.
+   * sessionId frames past `MAX_EARLY_EVENTS_PER_SESSION` are
+   * dropped to bound per-session memory.
    */
   private bufferEarlyEvent(
     sessionId: string,
     frame: Omit<BridgeEvent, 'id' | 'v'>,
   ): void {
     const now = Date.now();
-    // PR 14b fix (codex round 5): drop frames for ids the bridge has
-    // already marked closed/killed. Sweep + check before any other
-    // work so a malicious / buggy child can't keep appending
-    // post-mortem frames against an old id. Live ids that re-register
-    // (load/resume) clear their tombstone in `drainEarlyEvents`.
+    // Drop frames for ids the bridge has already marked closed/killed.
+    // Sweep + check before any other work so a malicious / buggy child
+    // can't keep appending post-mortem frames against an old id. Live
+    // ids that re-register (load/resume) clear their tombstone in
+    // `drainEarlyEvents`.
     //
-    // Round 6 amendment: skip the tombstone check for ids currently
-    // being restored. Pre-amendment a `close → load same id` sequence
-    // within 60s lost any restore-time guardrail events because the
-    // tombstone outlived `bufferEarlyEvent` but `drainEarlyEvents`
-    // (which clears it) only runs after the ACP restore returns.
+    // Skip the tombstone check for ids currently being restored so a
+    // `close -> load same id` sequence within 60s doesn't lose
+    // restore-time guardrail events.
     this.sweepExpiredTombstones(now);
     if (
       this.tombstonedSessionIds.has(sessionId) &&
@@ -651,12 +587,8 @@ export class BridgeClient implements Client {
     let buf = this.earlyEvents.get(sessionId);
     if (!buf) {
       if (this.earlyEvents.size >= MAX_EARLY_EVENT_SESSIONS) {
-        // PR 14b fix (codex round 6): observability. Other drop
-        // sites in this PR all log; the silent return here was the
-        // outlier. Stays at stderr (visible without debug=true)
-        // because hitting this cap means the daemon is under
-        // notification pressure from 64+ concurrent sessions —
-        // worth surfacing.
+        // Hitting this cap means the daemon is under notification
+        // pressure from 64+ concurrent sessions — worth surfacing.
         writeStderrLine(
           `qwen serve: dropping mcp guardrail extNotification — ` +
             `early-event buffer at MAX_EARLY_EVENT_SESSIONS ` +
@@ -691,25 +623,20 @@ export class BridgeClient implements Client {
   }
 
   /**
-   * PR 14b fix (codex round 5): mark a sessionId as closed so a late
-   * `extNotification` from the dying child can't leak into the
-   * early-event buffer. Bridge factory calls this from every
-   * `byId.delete(sid)` site (kill path, channel.exited handler,
-   * closeSession). Idempotent on already-tombstoned ids — refreshes
-   * the TTL so a recently-killed id stays dead long enough for any
-   * in-flight stale frames to expire.
+   * Mark a sessionId as closed so a late `extNotification` from the
+   * dying child can't leak into the early-event buffer. Bridge factory
+   * calls this from every `byId.delete(sid)` site (kill path,
+   * channel.exited handler, closeSession). Idempotent on already-
+   * tombstoned ids — refreshes the TTL so a recently-killed id stays
+   * dead long enough for any in-flight stale frames to expire.
    */
   markSessionClosed(sessionId: string): void {
     const now = Date.now();
-    // PR 14b fix (codex round 7): bound `tombstonedSessionIds` under
-    // session churn. Pre-fix `sweepExpiredTombstones` was only called
-    // inside `bufferEarlyEvent`; on a daemon that closes/kills many
-    // sessions but rarely receives extNotifications (the common
-    // production pattern when MCP guardrail mode is `off`), the map
-    // grew monotonically and the documented 60s TTL didn't bound
-    // memory. Sweeping at every close is O(map size) but cheap (one
-    // integer compare per entry); under any realistic workload the
-    // map stays small.
+    // Bound `tombstonedSessionIds` under session churn. On a daemon
+    // that closes/kills many sessions but rarely receives
+    // extNotifications, the map would grow monotonically without this
+    // sweep. O(map size) but cheap (one integer compare per entry);
+    // under any realistic workload the map stays small.
     this.sweepExpiredTombstones(now);
     this.tombstonedSessionIds.set(sessionId, now + EARLY_EVENT_TTL_MS);
     // Purge any frames already buffered for this id — they're now
@@ -718,57 +645,48 @@ export class BridgeClient implements Client {
   }
 
   /**
-   * PR 14b fix (codex round 6): mark a sessionId as currently being
-   * restored via `session/load` / `session/resume`. While in this set,
-   * `bufferEarlyEvent` accepts frames for the id even if it's
-   * tombstoned — so restore-time guardrail events from the freshly-
-   * restored child reach `drainEarlyEvents` instead of being rejected
-   * by the close-window tombstone.
+   * Mark a sessionId as currently being restored via `session/load` /
+   * `session/resume`. While in this set, `bufferEarlyEvent` accepts
+   * frames for the id even if it's tombstoned — so restore-time
+   * guardrail events from the freshly-restored child reach
+   * `drainEarlyEvents` instead of being rejected by the tombstone.
    *
    * Bridge factory calls this BEFORE awaiting the ACP restore call.
    * `clearRestoreInFlight` is paired in the matching `finally` so a
    * failed restore doesn't leave a dangling allow-list entry.
-   * Idempotent — safe to call repeatedly during coalesced restores.
    */
   markRestoreInFlight(sessionId: string): void {
     this.inFlightRestoreIds.add(sessionId);
   }
 
   /**
-   * PR 14b fix (codex round 6): companion to `markRestoreInFlight`.
-   * Bridge factory calls this when the restore IIFE settles —
-   * after `createSessionEntry` runs (success) or after the ACP
-   * restore call fails (error). After the entry is registered,
-   * `bufferEarlyEvent` is no longer reached for this id (notifications
-   * route through `entry.events.publish`), so the allow-list entry
-   * has no further effect — but cleared anyway to prevent the Set
-   * from growing forever under high restore churn.
+   * Companion to `markRestoreInFlight`. Bridge factory calls this when
+   * the restore IIFE settles — after `createSessionEntry` runs
+   * (success) or after the ACP restore call fails (error). Cleared to
+   * prevent the Set from growing forever under high restore churn.
    */
   clearRestoreInFlight(sessionId: string): void {
     this.inFlightRestoreIds.delete(sessionId);
   }
 
   /**
-   * PR 14b fix #1: drain any frames buffered for `sessionId` onto
-   * `entry.events`. Bridge calls this immediately after
-   * `byId.set(sessionId, entry)` in `createSessionEntry`. The frames
-   * were captured before the entry existed (e.g. MCP discovery during
-   * the child's `newSession` handler), so draining them now lands
-   * them in the replay ring as the FIRST events of this session —
-   * SDK consumers reconnecting with `Last-Event-ID: 0` see them on
-   * their initial subscription.
+   * Drain any frames buffered for `sessionId` onto `entry.events`.
+   * Bridge calls this immediately after `byId.set(sessionId, entry)`
+   * in `createSessionEntry`. The frames were captured before the
+   * entry existed (e.g. MCP discovery during the child's `newSession`
+   * handler), so draining them now lands them in the replay ring as
+   * the FIRST events of this session.
    *
    * Public so the bridge factory can call it directly. Idempotent on
    * unknown sessionIds.
    */
   drainEarlyEvents(sessionId: string, entry: BridgeClientSessionEntry): void {
-    // PR 14b fix (codex round 5): a fresh registration clears any
-    // tombstone for this id — this is the legitimate
-    // "load/resume of a persisted session id" case. Any stale
-    // pre-tombstone frame was already rejected by `bufferEarlyEvent`
-    // above; clearing the tombstone now means subsequent
-    // notifications for this re-attached session (which is now in
-    // `byId`) flow through the normal `entry.events.publish` path.
+    // A fresh registration clears any tombstone for this id — this is
+    // the legitimate "load/resume of a persisted session id" case.
+    // Any stale pre-tombstone frame was already rejected by
+    // `bufferEarlyEvent`; clearing the tombstone now means subsequent
+    // notifications flow through the normal `entry.events.publish`
+    // path.
     this.tombstonedSessionIds.delete(sessionId);
     const buf = this.earlyEvents.get(sessionId);
     if (!buf) return;
@@ -779,21 +697,17 @@ export class BridgeClient implements Client {
   async writeTextFile(
     params: WriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {
-    // #4175 PR F1 step 5: delegate to the injected `BridgeFileSystem`
-    // when present. Production `qwen serve` wires PR 18's
-    // `WorkspaceFileSystem` through a serve-side adapter so writes get
-    // the trust-gate + TOCTOU + symlink + `.gitignore` + audit
-    // machinery the inline proxy below lacks. Bridge tests, Mode A
-    // consumers, channels, and the VSCode IDE companion omit the
-    // injection and fall through to the inline path so pre-F1 behavior
-    // is preserved verbatim where no adapter has been wired.
+    // Delegate to the injected `BridgeFileSystem` when present.
+    // Production `qwen serve` wires `WorkspaceFileSystem` through a
+    // serve-side adapter so writes get the trust-gate + TOCTOU +
+    // symlink + `.gitignore` + audit machinery the inline proxy below
+    // lacks. Tests, Mode A consumers, channels, and IDE companion
+    // fall through to the inline path.
     if (this.fileSystem) {
-      // #4175 F4 prereq — preserve FsError structure over ACP wire
-      // (Codex review on #4360 round 2). Without this catch, an
-      // `FsError({kind:'untrusted_workspace'})` from the adapter
-      // would land at the agent as `{code:-32603, message:...}` with
-      // the kind/status/hint stripped. See `preserveFsErrorOverAcp`
-      // for the cross-package duck-typing rationale.
+      // Preserve FsError structure over ACP wire. Without this catch,
+      // an `FsError({kind:'untrusted_workspace'})` from the adapter
+      // would land at the agent with the kind/status/hint stripped.
+      // See `preserveFsErrorOverAcp` for rationale.
       try {
         return await this.fileSystem.writeText(params);
       } catch (err) {
@@ -814,8 +728,7 @@ export class BridgeClient implements Client {
     // Stage 1 (most agent-side tools call core directly, NOT through
     // these ACP fs methods) and Stage 2 in-process eliminates the
     // bridge fs proxy entirely. Tracked as a Stage 2 prerequisite —
-    // the F1 follow-up step introduces `BridgeFileSystem` for exactly
-    // this seam.
+    // the `BridgeFileSystem` injection addresses exactly this seam.
     //
     // BSA0D: write-then-rename so a SIGKILL / OOM mid-write doesn't
     // leave the target truncated. POSIX `rename` is atomic within the
@@ -940,13 +853,12 @@ export class BridgeClient implements Client {
   async readTextFile(
     params: ReadTextFileRequest,
   ): Promise<ReadTextFileResponse> {
-    // #4175 PR F1 step 5: delegate to the injected `BridgeFileSystem`
-    // when present (parallels the write path above). Production
-    // `qwen serve` wires PR 18's `WorkspaceFileSystem` adapter; tests +
-    // Mode A + channels + IDE companion fall through to the inline
-    // proxy below.
+    // Delegate to the injected `BridgeFileSystem` when present
+    // (parallels the write path above). Production `qwen serve` wires
+    // `WorkspaceFileSystem` adapter; tests + Mode A + channels + IDE
+    // companion fall through to the inline proxy below.
     if (this.fileSystem) {
-      // #4175 F4 prereq — preserve FsError structure over ACP wire.
+      // Preserve FsError structure over ACP wire.
       // See sibling block in `writeTextFile` for rationale.
       try {
         return await this.fileSystem.readText(params);

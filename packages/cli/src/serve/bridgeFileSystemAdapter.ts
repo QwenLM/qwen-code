@@ -7,35 +7,24 @@
 /**
  * Serve-side adapter that satisfies `@qwen-code/acp-bridge`'s
  * `BridgeFileSystem` interface by routing ACP `writeTextFile` /
- * `readTextFile` requests through PR 18's `WorkspaceFileSystem`.
- *
- * F1 (#4319) shipped the seam — `BridgeOptions.fileSystem` +
- * `BridgeClient`'s early-return delegation; without this adapter the
- * seam stays unused in production and `BridgeClient` falls back to
- * its inline `fs.realpath` / `fs.writeFile` / `fs.readFile` proxy
- * (which lacks the TOCTOU + symlink + trust-gate + audit machinery
- * PR 18 added).
- *
- * Wiring this adapter through `runQwenServe` + `createServeApp`'s
- * default bridge construction closes the `ws.ts:613` follow-up
- * thread tracked since PR 18 landed — agent-side ACP fs calls now
- * pick up the same defensive guarantees the HTTP file routes
- * (`POST /file`, `POST /file/edit` from PR 20) already enforce.
+ * `readTextFile` requests through the `WorkspaceFileSystem`. Agent-side
+ * ACP fs calls pick up the same defensive guarantees the HTTP file
+ * routes already enforce.
  *
  * The adapter is a thin translation layer:
  *   - ACP request → `WorkspaceFileSystem.resolve(path, intent)` to
  *     materialize the `ResolvedPath` brand
- *   - For writes: `wfs.writeTextOverwrite(resolved, content)` — the PR
- *     18 primitive that does atomic temp+rename with target-mode
+ *   - For writes: `wfs.writeTextOverwrite(resolved, content)` — the
+ *     primitive that does atomic temp+rename with target-mode
  *     preservation (existing `0o600` survives the edit; new files
  *     default to `0o600`, NOT umask). Picked over `wfs.writeText` (no
  *     mode handling, non-atomic) and over `wfs.writeTextAtomic` (whose
  *     `expectedHash` CAS gate doesn't map to ACP's hash-less
  *     `WriteTextFileRequest` wire shape).
- *   - For reads: `wfs.readText(resolved, { line, limit })` (PR 18's
- *     read path enforces size caps + line/limit windowing + audit)
- *   - Error propagation is by reference — `FsError` (PR 18's
- *     boundary-error type, carrying a discriminator on `.kind`:
+ *   - For reads: `wfs.readText(resolved, { line, limit })` (the read
+ *     path enforces size caps + line/limit windowing + audit)
+ *   - Error propagation is by reference — `FsError` (the boundary-error
+ *     type, carrying a discriminator on `.kind`:
  *     `untrusted_workspace` / `symlink_escape` / `file_too_large` /
  *     etc.) is thrown unchanged through `BridgeClient`'s ACP
  *     `writeTextFile` / `readTextFile` handlers and serialized to the
@@ -48,7 +37,7 @@
  *     errors take the same shape (`sendFsError` in `cli/src/serve/fs/
  *     errors.ts` serializes the same `.kind`), so an SDK consumer
  *     handling either surface keys on `.kind` either way.
- *     Future PR: if `mapDomainErrorToErrorKind` should also map
+ *     Future: if `mapDomainErrorToErrorKind` should also map
  *     `FsError.kind`, it'd need cross-package imports (FsError lives
  *     in `cli/src/serve/fs`, classifier in `acp-bridge`) — handled
  *     as a separate scope.
@@ -119,17 +108,17 @@ export function createBridgeFileSystemAdapter(
     async readText(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
       const wfs = factory.forRequest(buildAuditContext(params, ACP_READ_ROUTE));
       const resolved = await wfs.resolve(params.path, 'read');
-      // ACP `line` / `limit` are `number | null | undefined`; PR 18's
+      // ACP `line` / `limit` are `number | null | undefined`; the
       // `readText` opts expect `number | undefined`. Drop nulls AND
       // undefineds so we only forward concrete numeric windows.
       //
-      // Also drop non-positive `limit` (e.g. `-1`, `0`): pre-PR the
+      // Also drop non-positive `limit` (e.g. `-1`, `0`): the previous
       // inline `BridgeClient.readTextFile` proxy returned `{ content:
-      // '' }` for `limit <= 0`, but PR 18's `readText` applies
+      // '' }` for `limit <= 0`, but the `readText` boundary applies
       // `slice(0, limit)` which returns "all lines except the last
       // |limit|" for negative limits — wrong content. Same for non-
       // positive `line` (1-based; <= 0 is meaningless and currently
-      // rejected with parse_error). Drop both so PR 18 falls back to
+      // rejected with parse_error). Drop both so the boundary falls back to
       // its `undefined` defaults (no windowing) — closest match to the
       // pre-PR empty-content posture without smuggling a `parse_error`
       // to agents that previously got `''`.

@@ -444,7 +444,7 @@ export interface HttpAcpBridge {
   }>;
 
   /**
-   * T2.8 (#4514): Add a runtime MCP server through the ACP child's
+   * Add a runtime MCP server through the ACP child's
    * `McpClientManager.addRuntimeMcpServer`. On success, broadcasts an
    * `mcp_server_added` event to every session bus. Soft-refuse
    * (`budget_warning_only` skip) does NOT emit an event — the caller
@@ -473,7 +473,7 @@ export interface HttpAcpBridge {
   >;
 
   /**
-   * T2.8 (#4514): Remove a runtime MCP server through the ACP child's
+   * Remove a runtime MCP server through the ACP child's
    * `McpClientManager.removeRuntimeMcpServer`. On success, broadcasts
    * an `mcp_server_removed` event. Idempotent skip (`not_present`)
    * does NOT emit — the caller receives the skip shape.
@@ -495,17 +495,17 @@ export interface HttpAcpBridge {
 
   /**
    * Restart a configured MCP server through the ACP child's
-   * `McpClientManager` (pre-F2) or transport pool (F2 #4175 commit 5).
+   * `McpClientManager` or transport pool.
    * Pre-checks the live budget snapshot and returns a structured
    * "skipped" response (200 OK) for soft refusals.
    *
-   * F2 commit 5: under pool mode, a single `serverName` may map to
+   * Under pool mode, a single `serverName` may map to
    * multiple `PoolEntry` instances (different fingerprints from
    * per-session OAuth/env divergence). When `opts.entryIndex` is
    * undefined, the pool restarts ALL matching entries in parallel via
    * `Promise.allSettled` and returns the new `{entries: RestartResult[]}`
    * shape. When `opts.entryIndex` is set, only that entry restarts
-   * (404 / not-found surfaces as `entries: []`). Pre-F2 daemons and
+   * (404 / not-found surfaces as `entries: []`). Older daemons and
    * single-entry pool-mode responses keep the legacy
    * `{restarted, durationMs}` shape so SDK clients that pre-date the
    * `mcp_pool_restart` capability tag observe no diff.
@@ -581,7 +581,7 @@ export interface HttpAcpBridge {
   readonly pendingPermissionCount: number;
 
   /**
-   * #4175 F3 Commit 6 — active permission mediation policy. Reflects
+   * Active permission mediation policy. Reflects
    * the value `runQwenServe` resolved from
    * `settings.policy.permissionStrategy` (or the
    * `'first-responder'` default). Surfaced through the

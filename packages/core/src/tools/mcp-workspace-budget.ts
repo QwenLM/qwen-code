@@ -16,7 +16,7 @@ import {
 const debugLogger = createDebugLogger('McpPool:Budget');
 
 /**
- * F2 (#4175 commit 6): workspace-scoped MCP budget controller.
+ * workspace-scoped MCP budget controller.
  *
  * Owns the same state machine `McpClientManager` carries inline
  * (slot reservation, 75% hysteresis warning, refused-batch coalescing
@@ -24,10 +24,10 @@ const debugLogger = createDebugLogger('McpPool:Budget');
  * inside `McpTransportPool` instead of N-per-session inside each
  * ACP child's manager. The pool delegates `acquire`/`release` calls
  * here so the cap caps the workspace, not each session — see
- * `docs/design/f2-mcp-transport-pool.md` §11.
+ * `docs/design/f2-mcp-transport-pool.md`.
  *
  * Pool-mode budget semantics:
- *   - **Reservation key is server NAME** (matches PR 14 v1 contract;
+ *   - **Reservation key is server NAME** (matches v1 contract;
  *     two pool entries that share a name but differ by fingerprint
  *     consume ONE slot together, not two — operators should think of
  *     budget as "configured server slots" not "subprocess count").
@@ -47,7 +47,7 @@ const debugLogger = createDebugLogger('McpPool:Budget');
  *
  * The legacy `McpClientManager` budget machinery STAYS as-is for
  * standalone qwen and SDK MCP servers (which bypass the pool per
- * commit 4 fix). Pool mode → pool's `WorkspaceMcpBudget` enforces;
+ * ). Pool mode → pool's `WorkspaceMcpBudget` enforces;
  * standalone / SDK MCP → manager's inline machinery enforces. No
  * double-counting because pool mode's `discoverAllMcpToolsViaPool`
  * never calls the manager's `tryReserveSlot`.
@@ -107,7 +107,7 @@ export class WorkspaceMcpBudget {
     onEvent?: (event: McpBudgetEvent) => void;
   }) {
     this.clientBudget = opts.clientBudget;
-    // PR 14b parity: stash undefined when mode is `off` so a stray
+    // parity: stash undefined when mode is `off` so a stray
     // call after construction can't fire — defense in depth alongside
     // the per-method `mode === 'off'` short-circuits.
     this.mode = opts.mode;
@@ -152,10 +152,10 @@ export class WorkspaceMcpBudget {
    * second reservation past the cap at any `await` boundary.
    *
    * Mirrors `McpClientManager.tryReserveSlot` semantics:
-   *   - `reserved`     — slot newly held (or `off`-mode no-op)
+   *   - `reserved` — slot newly held (or `off`-mode no-op)
    *   - `already_held` — slot was already reserved (reconnect / dup
    *     fingerprint for same name)
-   *   - `refused`      — `enforce` mode and the cap is full
+   *   - `refused` — `enforce` mode and the cap is full
    */
   tryReserve(serverName: string): 'reserved' | 'already_held' | 'refused' {
     if (this.reservedSlots.has(serverName)) return 'already_held';
@@ -169,7 +169,7 @@ export class WorkspaceMcpBudget {
       return 'refused';
     }
     this.reservedSlots.add(serverName);
-    // Mirror manager's PR 14b fix #4: drive hysteresis on every
+    // Mirror manager's fix #4: drive hysteresis on every
     // upward mutation so a 75% crossing during bulk discovery fires
     // inline, not at end-of-pass.
     this.evaluateState();

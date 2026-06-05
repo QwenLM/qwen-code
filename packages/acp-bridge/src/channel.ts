@@ -9,14 +9,13 @@ import type { Stream } from '@agentclientprotocol/sdk';
 /**
  * One ACP NDJSON channel to a single agent. Tests inject a fake by
  * replacing the channel factory; production uses
- * `defaultSpawnChannelFactory` (lifted to `./spawnChannel.ts` in
- * #4175 F1 step 1).
+ * `defaultSpawnChannelFactory` (in `./spawnChannel.ts`).
  *
  * This contract is consumed by the daemon HTTP bridge and is available
  * for `packages/channels/base/AcpBridge.ts` and the VSCode IDE
  * companion's `acpConnection.ts` to consume directly via
  * `@qwen-code/acp-bridge/spawnChannel` instead of each reimplementing
- * the child lifecycle. The adapter migrations land separately in F4.
+ * the child lifecycle. The adapter migrations land separately.
  */
 export interface AcpChannel {
   stream: Stream;

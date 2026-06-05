@@ -109,7 +109,7 @@ export interface DaemonClientOptions {
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
-// Server deadline + headroom so the client never races the daemon's own budget (#4330).
+// Server deadline + headroom so the client never races the daemon's own budget.
 const MCP_RESTART_DEFAULT_TIMEOUT_MS =
   MCP_RESTART_SERVER_DEADLINE_MS + MCP_RESTART_CLIENT_HEADROOM_MS;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
@@ -128,16 +128,14 @@ function stripTrailingSlashes(url: string): string {
 }
 
 /**
- * PR 27 (#4175 v0.16-alpha): SDK env fallback for the daemon bearer
- * token. Mirrors the daemon-side `--token` CLI fallback to
- * `QWEN_SERVER_TOKEN` (the daemon's own token-resolution path in
- * `runQwenServe` reads the same env var in the same shape) so a
- * developer with `export QWEN_SERVER_TOKEN=...` in their shell never
- * has to thread the value through every `DaemonClient` construction.
+ * SDK env fallback for the daemon bearer token. Mirrors the daemon-side
+ * `--token` CLI fallback to `QWEN_SERVER_TOKEN` so a developer with
+ * `export QWEN_SERVER_TOKEN=...` in their shell never has to thread the
+ * value through every `DaemonClient` construction.
  *
  * Defensive on three axes:
  *   1. **Browser-safe**: `globalThis.process` indirection. The SDK is
- *      imported by `@qwen-code/webui` (#4328); a literal
+ *      imported by `@qwen-code/webui`; a literal
  *      `process.env[...]` would explode at module load on browser
  *      bundles. Browser globals don't expose `process` so this returns
  *      `undefined` cleanly there.
@@ -187,7 +185,7 @@ export class DaemonHttpError extends Error {
 
 export interface CreateSessionRequest {
   /**
-   * Workspace path the daemon must be bound to (per #3803 §02). When
+   * Workspace path the daemon must be bound to. When
    * omitted, the SDK sends no `cwd` field and the daemon route falls
    * back to its boot-time `boundWorkspace`. Pass `caps.workspaceCwd`
    * to be explicit, or omit it for the daemon-knows-best path. A
@@ -204,11 +202,11 @@ export interface CreateSessionRequest {
    * forces a distinct session for this call. The reverse override
    * (per-request `'single'` against a daemon defaulting to `'thread'`)
    * is also supported, though the daemon's default is hardcoded to
-   * `'single'` today (#4175 may add a CLI flag in a follow-up). Omit
+   * `'single'` today. Omit
    * to inherit the daemon-wide default.
    *
    * Only `'single'` and `'thread'` are accepted; anything else yields
-   * `400 invalid_session_scope`. Old daemons (pre-#4175 PR 5) silently
+   * `400 invalid_session_scope`. Old daemons silently
    * ignore the field — clients should pre-flight
    * `caps.features.session_scope_override` before sending.
    */
@@ -228,14 +226,14 @@ export interface PromptRequest {
   /** Optional ACP _meta passthrough. */
   _meta?: Record<string, unknown> | null;
   /**
-   * Issue #4514 T2.9. Per-prompt wallclock cap (positive integer ms).
+   * Per-prompt wallclock cap (positive integer ms).
    * The effective deadline is `min(server flag, this)` — the request
    * can shorten, never extend. When omitted, the server's
    * `--prompt-deadline-ms` flag governs alone (unlimited when both
    * are unset). On expiry the daemon returns 504 +
    * `errorKind: 'prompt_deadline_exceeded'`.
    *
-   * Daemons without T2.9 (no `prompt_absolute_deadline` capability
+   * Daemons without `prompt_absolute_deadline` capability
    * tag) silently ignore the field — pre-flight
    * `caps.features.includes('prompt_absolute_deadline')` before
    * relying on it.
@@ -282,7 +280,7 @@ export class DaemonClient {
   private _authFlow?: DaemonAuthFlow;
 
   /**
-   * High-level auth helper (issue #4175 PR 21). Wraps the four
+   * High-level auth helper. Wraps the four
    * `*DeviceFlow*` methods with a `start(...).awaitCompletion()` shape
    * for the common "log in remotely" UX. Lazy-constructed.
    */
@@ -295,11 +293,10 @@ export class DaemonClient {
 
   constructor(opts: DaemonClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts.baseUrl);
-    // PR 27 (#4175 v0.16-alpha): when no explicit token is passed, fall
-    // back to QWEN_SERVER_TOKEN env var so clients with
+    // When no explicit token is passed, fall back to
+    // QWEN_SERVER_TOKEN env var so clients with
     // `export QWEN_SERVER_TOKEN=...` in their shell don't have to
-    // thread the value through every construction. Matches the
-    // daemon-side `--token` CLI fallback for symmetry. See
+    // thread the value through every construction. See
     // `readTokenFromEnv` above for browser-safety + trim semantics.
     this.token = opts.token ?? readTokenFromEnv();
     this._fetch = opts.fetch ?? globalThis.fetch.bind(globalThis);
@@ -329,7 +326,7 @@ export class DaemonClient {
     consume?: (res: Response) => Promise<T>,
     perCallTimeoutMs?: number,
   ): Promise<T> {
-    // BRN1o: when `consume` is provided, the timer must remain
+    // When `consume` is provided, the timer must remain
     // armed through the entire callback (body read + parse). The
     // previous `Response`-returning shape cleared the timer the
     // moment headers arrived, so `await res.json()` against a
@@ -340,12 +337,11 @@ export class DaemonClient {
     // stream, so an in-progress `res.json()` rejects cleanly when
     // the timer fires.
     //
-    // #4282 fold-in 5 (Codex P2-3): `perCallTimeoutMs` lets a single
-    // call (e.g. `restartMcpServer`, where the daemon waits up to
-    // 300s for MCP rediscovery) override the client-wide default.
+    // `perCallTimeoutMs` lets a single call (e.g. `restartMcpServer`,
+    // where the daemon waits up to 300s for MCP rediscovery) override
+    // the client-wide default.
     //
-    // #4297 fold-in 2 (copilot + wenshao C1): accept finite,
-    // non-negative values — including `0`, which the
+    // Accept finite, non-negative values -- including `0`, which the
     // `restartMcpServer` JSDoc documents as "disable the timeout
     // entirely". Zero falls through to the no-timeout branch below
     // via the `!effectiveTimeoutMs` truthiness check. NaN / negative
@@ -510,7 +506,7 @@ export class DaemonClient {
     );
   }
 
-  // -- Workspace files (issue #4175 PR 20) -------------------------------
+  // -- Workspace files (workspace files) -------------------------------
 
   async readWorkspaceFile(
     filePath: string,
@@ -636,7 +632,7 @@ export class DaemonClient {
     );
   }
 
-  // -- Workspace memory (issue #4175 PR 16) ------------------------------
+  // -- Workspace memory (workspace memory/agents) ------------------------------
 
   /**
    * Fetch the daemon's `QWEN.md` / `AGENTS.md` snapshot. Read-only;
@@ -650,8 +646,7 @@ export class DaemonClient {
    * directories or recurse into the workspace tree. The route's
    * companion helper `walkWorkspaceForMemory` keeps a guarded
    * upward-walk loop body for a future hierarchical mode but breaks
-   * after iteration 1 in this release. PR 16.5 will lift the cap
-   * once auto-memory CRUD lands.
+   * after iteration 1 in this release.
    */
   async workspaceMemory(): Promise<DaemonWorkspaceMemoryStatus> {
     return await this.fetchWithTimeout(
@@ -693,7 +688,7 @@ export class DaemonClient {
     );
   }
 
-  // -- Workspace agents (issue #4175 PR 16) ------------------------------
+  // -- Workspace agents (workspace memory/agents) ------------------------------
 
   async listWorkspaceAgents(): Promise<DaemonWorkspaceAgentsStatus> {
     return await this.fetchWithTimeout(
@@ -905,7 +900,7 @@ export class DaemonClient {
     req: CreateSessionRequest,
     clientId?: string,
   ): Promise<DaemonSession> {
-    // Per #3803 §02: omitting `cwd` lets the daemon fall back to its
+    // Omitting `cwd` lets the daemon fall back to its
     // bound workspace. JSON.stringify strips `undefined` values, so
     // `cwd: undefined` becomes "no `cwd` key" on the wire — and the
     // server then takes the documented fallback path.
@@ -1100,7 +1095,7 @@ export class DaemonClient {
   }
 
   /**
-   * #4175 Wave 4 PR 17. Change the approval mode of a live session.
+   * Change the approval mode of a live session.
    * The daemon applies the change in the ACP child's per-session
    * `Config` and publishes an `approval_mode_changed` event. Pass
    * `opts.persist: true` to also write `tools.approvalMode` to the
@@ -1142,7 +1137,7 @@ export class DaemonClient {
   }
 
   /**
-   * #4175 follow-up. Generate a one-sentence "where did I leave off"
+   * Generate a one-sentence "where did I leave off"
    * recap of the session. Wraps `generateSessionRecap` (core/services/
    * sessionRecap.ts) via an ACP control-channel ext-method, so the
    * summary is computed against the active GeminiClient chat history
@@ -1230,7 +1225,7 @@ export class DaemonClient {
   }
 
   /**
-   * #4175 Wave 4 PR 17. Toggle a tool name in the workspace's
+   * Toggle a tool name in the workspace's
    * `tools.disabled` settings list. Strict-gated mutation route — the
    * daemon must be configured with a bearer token. The daemon writes
    * the settings file directly and fan-outs a `tool_toggled` event to
@@ -1272,17 +1267,17 @@ export class DaemonClient {
   }
 
   /**
-   * #4175 Wave 4 PR 17. Restart a configured MCP server through the
-   * ACP child's `McpClientManager`. The daemon pre-checks the live
-   * budget snapshot from PR 14 v1; soft refusals (in-flight discovery,
+   * Restart a configured MCP server through the ACP child's
+   * `McpClientManager`. The daemon pre-checks the live budget
+   * snapshot; soft refusals (in-flight discovery,
    * disabled server, budget would exceed under `enforce` mode) come
    * back as 200 OK with `{restarted: false, skipped: true, reason}`.
    * Only hard errors (unknown server name, no live ACP channel)
    * surface as non-2xx.
    *
-   * #4282 fold-in 5 (Codex P2-3): the daemon-side restart waits up to
-   * 5 minutes for stdio MCP discovery; the SDK default allows that
-   * budget plus 30s headroom (#4330) so a slow but valid restart isn't
+   * The daemon-side restart waits up to 5 minutes for stdio MCP
+   * discovery; the SDK default allows that budget plus 30s headroom
+   * so a slow but valid restart isn't
    * aborted client-side while the daemon continues working. Callers can pass a custom
    * `timeoutMs` when their threat model needs a tighter cap, or `0`
    * to disable the timeout entirely.
@@ -1345,7 +1340,7 @@ export class DaemonClient {
   }
 
   /**
-   * T2.8 (#4514). Add (or replace) a runtime MCP server. The daemon
+   * Add (or replace) a runtime MCP server. The daemon
    * validates the config, starts the server, and emits an
    * `mcp_server_added` SSE event to all live sessions. Callers
    * pre-flight `caps.features.mcp_server_runtime_mutation` before
@@ -1376,7 +1371,7 @@ export class DaemonClient {
   }
 
   /**
-   * T2.8 (#4514). Remove a runtime MCP server by name. The daemon
+   * Remove a runtime MCP server by name. The daemon
    * tears down the server process, removes it from the runtime
    * overlay, and emits an `mcp_server_removed` SSE event. Idempotent
    * at the HTTP level: if the server was never present the daemon
@@ -1408,7 +1403,7 @@ export class DaemonClient {
   }
 
   /**
-   * #4175 Wave 4 PR 17. Scaffold a `QWEN.md` at the daemon's bound
+   * Scaffold a `QWEN.md` at the daemon's bound
    * workspace root. Mechanical only — does NOT invoke the LLM. The
    * daemon writes an empty file; clients that want AI-driven content
    * fill should follow up with `POST /session/:id/prompt`.
@@ -1589,8 +1584,8 @@ export class DaemonClient {
   /**
    * Bump the daemon's last-seen bookkeeping for this session. The
    * route is short-lived — drives diagnostics and future revocation
-   * policy (Wave 5 PR 24) — so it goes through the standard
-   * `fetchTimeoutMs`. Older daemons (pre-PR 9) return 404 for
+   * policy -- so it goes through the standard
+   * `fetchTimeoutMs`. Older daemons return 404 for
    * `/heartbeat`; clients should pre-flight
    * `caps.features.client_heartbeat` before calling.
    */
@@ -1872,7 +1867,7 @@ export class DaemonClient {
     );
   }
 
-  // -- Auth device-flow (issue #4175 PR 21) -------------------------------
+  // -- Auth device-flow ---------------------------------------------------
 
   /**
    * Start an OAuth device-flow login for the given provider. The daemon
@@ -1911,13 +1906,12 @@ export class DaemonClient {
     deviceFlowId: string,
     opts: { clientId?: string; signal?: AbortSignal } = {},
   ): Promise<DaemonDeviceFlowState> {
-    // PR #4255 fold-in 7 review thread #6: forward `signal` into
-    // `fetchWithTimeout`, which composes it with the per-request
-    // `fetchTimeoutMs` controller. Without this, an `awaitCompletion`
-    // caller that aborts mid-poll could not cancel the in-flight GET
-    // — only the post-await guard would notice, but that runs only
-    // after the body is already settled (or the daemon-side
-    // `fetchTimeoutMs` fires, which can be 30s+).
+    // Forward `signal` into `fetchWithTimeout`, which composes it
+    // with the per-request `fetchTimeoutMs` controller. Without this,
+    // an `awaitCompletion` caller that aborts mid-poll could not cancel
+    // the in-flight GET -- only the post-await guard would notice, but
+    // that runs only after the body is already settled (or the
+    // daemon-side `fetchTimeoutMs` fires, which can be 30s+).
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/auth/device-flow/${encodeURIComponent(deviceFlowId)}`,
       { headers: this.headers({}, opts.clientId), signal: opts.signal },

@@ -13,23 +13,18 @@ import type {
 
 /**
  * Injection seam for the ACP fs proxy on `BridgeClient.readTextFile` /
- * `BridgeClient.writeTextFile`. The immediate follow-up PR will land
- * a serve-side adapter that wraps PR 18's `WorkspaceFileSystem` so
- * production `qwen serve` writes pick up the TOCTOU + symlink +
- * trust-gate + audit machinery PR 18 introduced — closing the
- * post-PR-18 follow-up thread about `BridgeClient`'s inline fs
- * proxy bypassing `WorkspaceFileSystem` (originally raised in
- * #4250 review; see also FIXME(stage-1.5, chiga0 finding 4) lifted
- * to this package as part of #4175 F1). Until that adapter ships and `runQwenServe` wires it
- * through `BridgeOptions.fileSystem`, BridgeClient continues to use
- * its inline fs proxy (preserving pre-F1 behavior).
+ * `BridgeClient.writeTextFile`. A serve-side adapter wraps
+ * `WorkspaceFileSystem` so production `qwen serve` writes pick up the
+ * TOCTOU + symlink + trust-gate + audit machinery. Until that adapter
+ * ships and `runQwenServe` wires it through `BridgeOptions.fileSystem`,
+ * BridgeClient continues to use its inline fs proxy (preserving
+ * pre-extraction behavior).
  *
  * Lifted from the inline `fs.writeFile` / `fs.readFile` implementations
- * BridgeClient carried before #4175 PR F1 (step 5, originally the
- * 22b' scope). Bridge tests + Mode A embedded callers can omit the
- * field on `BridgeOptions`; BridgeClient falls back to its inline
- * proxy so the pre-lift behavior is preserved verbatim when no
- * provider is injected.
+ * BridgeClient carried before the extraction. Bridge tests + Mode A
+ * embedded callers can omit the field on `BridgeOptions`; BridgeClient
+ * falls back to its inline proxy so the pre-lift behavior is preserved
+ * verbatim when no provider is injected.
  *
  * Method signatures intentionally mirror the ACP SDK request/response
  * shapes so the adapter does the minimum amount of translation
@@ -77,8 +72,8 @@ export interface BridgeFileSystem {
    *     surface `symlink_escape`. This is a **divergence from the
    *     pre-F1 inline `BridgeClient.writeTextFile` proxy** which
    *     resolved symlinks and wrote through to their target;
-   *     production now matches the more conservative PR 18 +
-   *     HTTP `POST /file` posture (PR 20). Agents that previously
+   *     production now matches the more conservative
+   *     HTTP `POST /file` posture. Agents that previously
    *     relied on writing through symlinked dotfiles will need
    *     to address the resolved path directly.
    *   - **Workspace boundary enforcement** — paths outside the
@@ -89,9 +84,9 @@ export interface BridgeFileSystem {
    * lacks the concept entirely). The contract does NOT require it.
    *
    * The serve-side adapter satisfies this via
-   * `WorkspaceFileSystem.writeTextOverwrite` — the PR 18 primitive
-   * that does atomic tmp+rename with mode preservation + `0o600`
-   * default + symlink reject inside a per-path lock.
+   * `WorkspaceFileSystem.writeTextOverwrite`, which does atomic
+   * tmp+rename with mode preservation + `0o600` default + symlink
+   * reject inside a per-path lock.
    */
   writeText(params: WriteTextFileRequest): Promise<WriteTextFileResponse>;
 }

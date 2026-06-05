@@ -1226,7 +1226,7 @@ export class GeminiClient {
       // submission, lastPrompt === fr parts) closes the pair via the real
       // `functionResponse` before we synthesize an error one. Doing the
       // repair here would happen pre-push and race against the user
-      // content's own pairing — see PR #4176 review for the corner.
+      // content's own pairing.
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
@@ -1420,7 +1420,7 @@ export class GeminiClient {
           const m = mcResult.meta;
           this.getChat().setHistory(mcResult.history);
           // Disarm only the blanked files' fast-path, keeping
-          // read-before-write state intact (issue #4239; rationale on
+          // read-before-write state intact (rationale on
           // FileReadEntry.readResidentInHistory). Any blanked read we
           // can't disarm surgically forces the old blanket wipe so a
           // later Read can't get a dangling file_unchanged placeholder.
@@ -1545,7 +1545,7 @@ export class GeminiClient {
       // Prevent context updates from being sent while a tool call is
       // waiting for a response. The Qwen API requires that a functionResponse
       // part from the user immediately follows a functionCall part from the model
-      // in the conversation history . The IDE context is not discarded; it will
+      // in the conversation history. The IDE context is not discarded; it will
       // be included in the next regular message sent to the model.
       const historyLength = this.getHistoryLength();
       const lastMessage = this.peekLastHistoryEntry();
@@ -2175,7 +2175,7 @@ export class GeminiClient {
       debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
       this.config.getFileReadCache().clear();
       this.getChat().setLastPromptTokenCount(info.newTokenCount);
-      // Re-send a full IDE context blob on the next regular message —
+      // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context
       // that lived inside the previous user prompt.
       this.forceFullIdeContext = true;

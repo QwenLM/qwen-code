@@ -30,7 +30,7 @@ export const denyBrowserOriginCors: RequestHandler = (
 };
 
 /**
- * T2.4 (issue #4514). Parsed shape of `--allow-origin <pattern>...`. The
+ * Parsed shape of `--allow-origin <pattern>...`. The
  * literal `*` collapses into a single boolean flag; explicit origin
  * strings live in a Set keyed by the lowercased origin (RFC 6454 §4
  * scheme/host case-insensitivity, port-sensitive).
@@ -41,7 +41,7 @@ export interface ParsedAllowOriginPatterns {
 }
 
 /**
- * T2.4 (issue #4514). Thrown by `parseAllowOriginPatterns` when an entry
+ * Thrown by `parseAllowOriginPatterns` when an entry
  * is neither the `*` literal nor a value that round-trips through
  * `new URL(...).origin`. Caught at boot in `runQwenServe` and converted
  * to a structured stderr message identifying the malformed entry.
@@ -65,7 +65,7 @@ export class InvalidAllowOriginPatternError extends Error {
 }
 
 /**
- * T2.4 (issue #4514). Validate the raw `--allow-origin` arg list and fold
+ * Validate the raw `--allow-origin` arg list and fold
  * it into the lookup-friendly `ParsedAllowOriginPatterns` shape. Throws
  * `InvalidAllowOriginPatternError` on the first malformed entry so the
  * operator sees the exact value to fix.
@@ -103,7 +103,7 @@ export function parseAllowOriginPatterns(
 }
 
 /**
- * T2.4 (issue #4514). Build the CORS allowlist middleware. Replaces
+ * Build the CORS allowlist middleware. Replaces
  * `denyBrowserOriginCors` when `--allow-origin` is configured — owns both
  * halves of the policy (match → allow with CORS headers, unmatched →
  * 403). When no `Origin` header is present (CLI/SDK clients), passes
@@ -321,15 +321,10 @@ export function bearerAuth(token: string | undefined): RequestHandler {
 }
 
 /**
- * Per-route mutation gate (issue #4175 PR 15).
+ * Per-route mutation gate.
  *
- * Wave 4 (PR 16-21) will add broadly state-changing routes — memory
- * CRUD, agent CRUD, tool enable/disable, MCP restart, file write/edit,
- * device-flow auth, etc. The roadmap calls for "a single mutation-gating
- * helper rather than open-code auth checks per route" so all those
- * routes share one choke point. This factory is that choke point;
- * Wave 1-2 routes apply it as a centralization marker (no behavior
- * change today), and Wave 4 routes opt into `strict: true` to enforce
+ * A single mutation-gating helper so all state-changing routes share one
+ * choke point. Routes opt into `strict: true` to enforce
  * "token required even on loopback" without depending on the operator
  * also passing `--require-auth`.
  *
@@ -361,11 +356,11 @@ export function bearerAuth(token: string | undefined): RequestHandler {
 export interface MutationGateOptions {
   /**
    * When true, this route refuses to serve unauthenticated callers
-   * even on loopback no-token defaults. Used by Wave 4 mutation routes
+   * even on loopback no-token defaults. Used by mutation routes
    * (memory, file edit, tool enable, MCP restart, device-flow auth)
    * that should never be reachable without explicit operator opt-in.
-   * Defaults to false so Wave 1-2 routes that already exist can adopt
-   * the helper without behavior change.
+   * Defaults to false so existing routes can adopt the helper without
+   * behavior change.
    */
   strict?: boolean;
 }
@@ -411,7 +406,7 @@ export function createMutationGate(
   // routes preserve the legacy "open on loopback" behavior; strict
   // routes refuse with a structured 401 the SDK can surface.
   //
-  // Body-parser ordering (PR #4236 review #3254485915): the strict 401
+  // Body-parser ordering: the strict 401
   // fires AFTER `express.json()` because the gate is per-route
   // middleware, not app-level. On no-token loopback defaults a strict
   // route therefore parses the request body before refusing it —
@@ -426,7 +421,7 @@ export function createMutationGate(
   // `express.json()`); tracked as a Wave 4 follow-up rather than
   // re-architecting the helper here.
   //
-  // Allocation symmetry (PR #4236 review #3254467193): cache the strict
+  // Allocation symmetry: cache the strict
   // denier alongside `passthrough` so a route table with N strict
   // routes doesn't allocate N identical closures. The auth.test.ts
   // identity assertion anchors this — a future change that loses the
