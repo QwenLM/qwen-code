@@ -30,6 +30,7 @@ import {
   recordDaemonPromptDuration,
   recordDaemonPromptQueueWait,
   recordDaemonSessionLifecycle,
+  registerDaemonGaugeCallbacks,
   resolveTelemetrySettings,
   shutdownTelemetry,
   type TelemetryRuntimeConfig,
@@ -43,7 +44,11 @@ import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
 } from './permissionAudit.js';
-import { createServeApp, resolveBridgeFsFactory } from './server.js';
+import {
+  createServeApp,
+  getActiveSseCount,
+  resolveBridgeFsFactory,
+} from './server.js';
 import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { createDaemonWorkspaceService } from './workspace-service/index.js';
@@ -843,6 +848,12 @@ export async function runQwenServe(
     invokeWorkspaceCommand: (method, params, invokeOpts) =>
       bridge.invokeWorkspaceCommand(method, params, invokeOpts),
     publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
+  });
+
+  registerDaemonGaugeCallbacks({
+    sessionCount: () => bridge.sessionCount,
+    sseCount: () => getActiveSseCount(),
+    heapUsed: () => process.memoryUsage().heapUsed,
   });
 
   let actualPort = opts.port;
