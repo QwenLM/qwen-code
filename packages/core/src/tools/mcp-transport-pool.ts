@@ -108,7 +108,7 @@ export class McpTransportPool {
   /** Reverse index for O(refs) `releaseSession`. */
   private readonly sessionToEntries = new Map<string, Set<ConnectionId>>();
   /**
-   * Drain mutex : when `drainAll` is in progress, new
+   * Drain mutex: when `drainAll` is in progress, new
    * acquires reject so they don't latch onto entries that are about
    * to be force-closed. Cleared by `drainAll` only on successful
    * teardown — once set, a fresh pool is required for further work.
@@ -1191,7 +1191,7 @@ export class McpTransportPool {
       // SDK MCP) bypassed budget enforcement entirely AND skipped
       // budget release on close — the slot was never reserved
       // either, but this hook makes the close-path symmetric for
-      // when budget is now reserved at acquire ( follow-on).
+      // when budget is now reserved at acquire (follow-on).
       // `hasNameSibling` keeps the slot reserved if any pooled
       // entry or in-flight spawn shares the name.
       (closedId) => {
@@ -1296,7 +1296,7 @@ export class McpTransportPool {
       entry.markActive(snap.tools, snap.prompts);
       // Unpooled handle: snapshot replay through `view.applyTools` /
       // `applyPrompts` applies per-session `includeTools` / `excludeTools`
-      // filtering and the per-session trust copy ( fix). Release
+      // filtering and the per-session trust copy (fix). Release
       // callback runs `forceShutdown` directly — no pool refcount
       // accounting for unpooled entries since they're per-session.
       const conn = entry.attach(sessionId, view, {
