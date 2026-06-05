@@ -390,7 +390,7 @@ describe('Trusted Folders Loading', () => {
     );
   });
 
-  it.each(['"hello"', '42', 'true'])(
+  it.each(['"hello"', '42', 'true', 'null'])(
     'saveTrustedFolders should fall back to a clean rewrite when the existing file is a top-level primitive: %s',
     (existingContent) => {
       const userPath = getTrustedFoldersPath();
