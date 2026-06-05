@@ -90,7 +90,9 @@ export const SESS_A = `sess:${WS_A}`;
  * wires `createDaemonStatusProvider()` for the 4 daemon-host
  * integration tests.
  */
-export function makeBridge(opts: Partial<BridgeOptions> = {}): AcpSessionBridge {
+export function makeBridge(
+  opts: Partial<BridgeOptions> = {},
+): AcpSessionBridge {
   return createAcpSessionBridge({
     boundWorkspace: WS_A,
     ...opts,

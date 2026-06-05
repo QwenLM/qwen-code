@@ -20,7 +20,10 @@ import {
 } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
-import { InvalidClientIdError, type AcpSessionBridge } from './acpSessionBridge.js';
+import {
+  InvalidClientIdError,
+  type AcpSessionBridge,
+} from './acpSessionBridge.js';
 import type { BridgeEvent } from './eventBus.js';
 import { mountWorkspaceMemoryRoutes } from './workspaceMemory.js';
 

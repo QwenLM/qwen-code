@@ -18,7 +18,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debugMode.js';
-import { InvalidClientIdError, type AcpSessionBridge } from './acpSessionBridge.js';
+import {
+  InvalidClientIdError,
+  type AcpSessionBridge,
+} from './acpSessionBridge.js';
 
 /**
  * Pattern for the route-layer `:agentType` URL parameter. Matches the

@@ -37,7 +37,10 @@
  * in the lifted package for the full Stage 1/Stage 2 contract.
  */
 
-export { createAcpSessionBridge, createHttpAcpBridge } from '@qwen-code/acp-bridge/bridge';
+export {
+  createAcpSessionBridge,
+  createHttpAcpBridge,
+} from '@qwen-code/acp-bridge/bridge';
 export { defaultSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 // `MAX_RESOLVED_PERMISSION_RECORDS`, `PendingPermission`,
 // `PermissionResolutionRecord` re-exports were removed alongside the
