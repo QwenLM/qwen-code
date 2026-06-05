@@ -1,7 +1,7 @@
 ---
 name: triage
 description: Gatekeep and review GitHub issues and pull requests for Qwen Code maintainers. Use for GitHub Action issue triage, PR admission checks, product-direction review, KISS-focused PR review, and staged bilingual GitHub comments.
-argument-hint: '<issue|pr> <number> [--repo owner/repo]'
+argument-hint: '<number> [--repo owner/repo]'
 allowedTools:
   - run_shell_command
   - read_file
