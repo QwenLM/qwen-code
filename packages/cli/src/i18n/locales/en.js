@@ -2006,8 +2006,10 @@ export default {
   'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
 
   // Stats Dashboard — labels
+  Session: 'Session',
   Activity: 'Activity',
   Efficiency: 'Efficiency',
+  Success: 'Success',
   Today: 'Today',
   'Cache Hit Rate': 'Cache Hit Rate',
   'Tool Success': 'Tool Success',
