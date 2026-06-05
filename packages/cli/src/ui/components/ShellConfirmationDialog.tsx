@@ -17,6 +17,7 @@ import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 // Border, title, subtitle, question, and option rows that must remain visible.
 const SHELL_CONFIRMATION_FIXED_ROWS = 9;
+const MIN_HEIGHT_WITH_HIDDEN_COMMAND_OPTIONS = 8;
 
 export interface ShellConfirmationRequest {
   commands: string[];
@@ -47,6 +48,10 @@ export const ShellConfirmationDialog: React.FC<
     constrainedHeight !== undefined &&
     commandPreviewHeight === 0 &&
     commands.length > 0;
+  const commandApprovalUnavailable =
+    commandsHidden &&
+    constrainedHeight !== undefined &&
+    constrainedHeight < MIN_HEIGHT_WITH_HIDDEN_COMMAND_OPTIONS;
   const compactHiddenCommandsLayout =
     commandsHidden && constrainedHeight <= SHELL_CONFIRMATION_FIXED_ROWS;
 
@@ -91,6 +96,11 @@ export const ShellConfirmationDialog: React.FC<
       key: 'No (esc)',
     },
   ];
+  const visibleOptions = commandApprovalUnavailable
+    ? options.filter(
+        (option) => option.value === ToolConfirmationOutcome.Cancel,
+      )
+    : options;
 
   return (
     <Box
@@ -163,7 +173,11 @@ export const ShellConfirmationDialog: React.FC<
       )}
 
       <Box flexShrink={0}>
-        <RadioButtonSelect items={options} onSelect={handleSelect} isFocused />
+        <RadioButtonSelect
+          items={visibleOptions}
+          onSelect={handleSelect}
+          isFocused
+        />
       </Box>
     </Box>
   );

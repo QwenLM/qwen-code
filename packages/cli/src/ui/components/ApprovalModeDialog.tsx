@@ -88,7 +88,7 @@ export function ApprovalModeDialog({
   const showModeSpacer =
     constrainedHeight === undefined ||
     constrainedHeight >= MIN_HEIGHT_WITH_MODE_SPACER;
-  const showFooterHint =
+  const preferredShowFooterHint =
     constrainedHeight === undefined ||
     constrainedHeight >=
       (showWorkspacePriorityWarning
@@ -97,11 +97,43 @@ export function ApprovalModeDialog({
   const warningRows = showWorkspacePriorityWarning
     ? WORKSPACE_PRIORITY_WARNING_ROWS
     : 0;
-  const modeListChromeHeight =
+  const modeListChromeHeightWithoutFooter =
     MODE_LIST_CHROME_ROWS +
     (showModeSpacer ? MODE_SPACER_ROWS : 0) +
-    (showFooterHint ? FOOTER_HINT_ROWS : 0) +
     warningRows;
+  const rowsWithPreferredFooter =
+    constrainedHeight === undefined
+      ? undefined
+      : Math.max(
+          1,
+          constrainedHeight -
+            modeListChromeHeightWithoutFooter -
+            (preferredShowFooterHint ? FOOTER_HINT_ROWS : 0),
+        );
+  const rowsWithoutFooter =
+    constrainedHeight === undefined
+      ? undefined
+      : Math.max(1, constrainedHeight - modeListChromeHeightWithoutFooter);
+  const footerWouldHideScrollArrows =
+    !showWorkspacePriorityWarning &&
+    preferredShowFooterHint &&
+    rowsWithPreferredFooter !== undefined &&
+    rowsWithoutFooter !== undefined &&
+    rowsWithPreferredFooter <= 2 &&
+    rowsWithoutFooter > 2 &&
+    rowsWithoutFooter < modeItems.length;
+  const showFooterHint =
+    preferredShowFooterHint && !footerWouldHideScrollArrows;
+  const modeListChromeHeight =
+    modeListChromeHeightWithoutFooter + (showFooterHint ? FOOTER_HINT_ROWS : 0);
+  const modeListRows =
+    constrainedHeight === undefined
+      ? undefined
+      : Math.max(1, constrainedHeight - modeListChromeHeight);
+  const showModeScrollArrows =
+    modeListRows !== undefined &&
+    modeListRows > 2 &&
+    modeListRows < modeItems.length;
   const maxModeItemsToShow =
     constrainedHeight === undefined
       ? DEFAULT_MAX_MODE_ITEMS_TO_SHOW
@@ -110,7 +142,7 @@ export function ApprovalModeDialog({
           Math.min(
             DEFAULT_MAX_MODE_ITEMS_TO_SHOW,
             modeItems.length,
-            constrainedHeight - modeListChromeHeight,
+            (modeListRows ?? 1) - (showModeScrollArrows ? 2 : 0),
           ),
         );
 
@@ -182,7 +214,7 @@ export function ApprovalModeDialog({
             onHighlight={handleModeHighlight}
             isFocused={mode === 'mode'}
             maxItemsToShow={maxModeItemsToShow}
-            showScrollArrows={false}
+            showScrollArrows={showModeScrollArrows}
             showNumbers={mode === 'mode'}
           />
           {/* Warning when workspace setting will override user setting */}

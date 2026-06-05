@@ -68,6 +68,41 @@ describe('ApprovalModeDialog', () => {
     expect(lastFrame() ?? '').toContain('Automatically approve all tools');
   });
 
+  it('shows scroll arrows when constrained height hides approval modes', () => {
+    const { lastFrame } = renderWithProviders(
+      <ApprovalModeDialog
+        settings={createSettings()}
+        currentMode={ApprovalMode.DEFAULT}
+        availableTerminalHeight={8}
+        onSelect={vi.fn<
+          (mode: ApprovalMode | undefined, scope: SettingScope) => void
+        >()}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(8);
+    expect(frame).toContain('▼');
+  });
+
+  it('hides the footer hint when needed to show mode scroll arrows', () => {
+    const { lastFrame } = renderWithProviders(
+      <ApprovalModeDialog
+        settings={createSettings()}
+        currentMode={ApprovalMode.DEFAULT}
+        availableTerminalHeight={10}
+        onSelect={vi.fn<
+          (mode: ApprovalMode | undefined, scope: SettingScope) => void
+        >()}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(10);
+    expect(frame).toContain('▼');
+    expect(frame).not.toContain('Use Enter to select');
+  });
+
   it('keeps the workspace priority warning visible when constrained', () => {
     const { lastFrame } = renderWithProviders(
       <ApprovalModeDialog

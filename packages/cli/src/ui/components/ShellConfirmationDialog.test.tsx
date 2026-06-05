@@ -166,6 +166,32 @@ describe('ShellConfirmationDialog', () => {
     expect(frame).toContain('shell commands hidden');
   });
 
+  it('requires resizing before approval when hidden commands and approvals cannot both fit', () => {
+    const availableTerminalHeight = 7;
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: Array.from(
+            { length: 10 },
+            (_, i) => `cmd-${String(i + 1).padStart(2, '0')}`,
+          ),
+          onConfirm,
+        }}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
+    expect(frame).toContain('shell commands hidden');
+    expect(frame).not.toContain('Yes, allow once');
+    expect(frame).not.toContain('Always allow in this project');
+    expect(frame).not.toContain('Always allow for this user');
+    expect(frame).toContain('No (esc)');
+  });
+
   it('renders shell command text literally without inline markdown formatting', () => {
     const command = 'echo `danger` *literal*';
     const { lastFrame } = renderWithProviders(
