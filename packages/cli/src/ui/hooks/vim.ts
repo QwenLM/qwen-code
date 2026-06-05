@@ -819,7 +819,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             break;
           case 'T':
             targetCol = findCharInLineReverse(line, char, currentCol);
-            if (targetCol >= 0 && targetCol < line.length - 1) targetCol++;
+            if (targetCol >= 0 && targetCol < cpLen(line) - 1) targetCol++;
             break;
           default:
             break;
