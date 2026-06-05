@@ -1727,7 +1727,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
                     '\n' + repeated.replace(/\n$/, ''),
                   );
                   // Cursor on first line of pasted text (0-based row+1)
-                  buffer.vimMoveToLine(row + 1);
+                  buffer.vimMoveToLine(row + 2);
                   buffer.vimMoveToLineStart();
                 } else {
                   buffer.replaceRange(row + 1, 0, row + 1, 0, repeated);
