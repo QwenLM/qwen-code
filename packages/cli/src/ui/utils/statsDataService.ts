@@ -48,7 +48,7 @@ function calculateStreaks(dates: string[]): {
 
   const parsed = dates
     .map((d) => {
-      const dt = new Date(d);
+      const dt = new Date(d + 'T00:00:00');
       dt.setHours(0, 0, 0, 0);
       return dt;
     })
@@ -246,7 +246,11 @@ export async function loadStatsData(
   currentSession?: UsageSummaryRecord,
 ): Promise<StatsData> {
   const persisted = await loadUsageHistory();
-  const records = currentSession ? [...persisted, currentSession] : persisted;
+  let records = persisted;
+  if (currentSession) {
+    records = persisted.filter((r) => r.sessionId !== currentSession.sessionId);
+    records.push(currentSession);
+  }
   const report = aggregateUsage(records, range);
   const { start, end } = getTimeRangeBounds(range);
 

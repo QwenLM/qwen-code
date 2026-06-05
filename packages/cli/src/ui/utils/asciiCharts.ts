@@ -102,8 +102,8 @@ export function buildHeatmapData(
 
   // Shift endDate back by monthOffset months
   if (monthOffset > 0) {
+    endDate.setDate(1);
     endDate.setMonth(endDate.getMonth() - monthOffset);
-    // Set to end of that month
     endDate.setMonth(endDate.getMonth() + 1, 0);
   }
 

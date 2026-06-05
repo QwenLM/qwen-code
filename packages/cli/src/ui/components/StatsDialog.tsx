@@ -187,7 +187,7 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
           <StatsTabs activeTab={activeTab} />
 
           <Box marginTop={1}>
-            {activeTab === 'session' && <SessionTab bodyWidth={bodyWidth} />}
+            {activeTab === 'session' && <SessionTab />}
             {activeTab !== 'session' && loading && (
               <Text color={theme.text.secondary}>{t('Loading stats...')}</Text>
             )}

@@ -20,7 +20,7 @@ import {
 } from '../utils/displayUtils.js';
 import { t } from '../../i18n/index.js';
 
-export const SessionTab: React.FC<{ bodyWidth: number }> = () => {
+export const SessionTab: React.FC = () => {
   const SERIES_COLORS = getSeriesColors();
   const { stats } = useSessionStats();
   const { metrics } = stats;

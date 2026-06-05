@@ -21,7 +21,7 @@ export const HeatmapView: React.FC<{
   const heatmap = buildHeatmapData(data.heatmap, weeks, monthOffset);
 
   const fmtDate = (d: string) => {
-    const dt = new Date(d);
+    const dt = new Date(d + 'T00:00:00');
     return `${MONTH_LABELS[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()}`;
   };
 
