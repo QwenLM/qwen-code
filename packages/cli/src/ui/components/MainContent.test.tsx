@@ -238,7 +238,7 @@ const createUIActions = (): UIActions =>
 const renderMainContent = (uiState: UIState) =>
   render(
     <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-      <CompactModeProvider value={{ compactMode: false }}>
+      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
         <UIActionsContext.Provider value={createUIActions()}>
           <UIStateContext.Provider value={uiState}>
             <OverflowProvider>
@@ -277,7 +277,9 @@ describe('<MainContent />', () => {
 
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider value={{ compactMode: false }}>
+        <CompactModeProvider
+          value={{ compactMode: false, compactInline: false }}
+        >
           <UIActionsContext.Provider value={createUIActions()}>
             <UIStateContext.Provider
               value={createUIState({
@@ -427,7 +429,9 @@ describe('<MainContent />', () => {
     staticItemsSpy.mockClear();
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider value={{ compactMode: false }}>
+        <CompactModeProvider
+          value={{ compactMode: false, compactInline: false }}
+        >
           <UIActionsContext.Provider value={createUIActions()}>
             <UIStateContext.Provider
               value={createUIState({
@@ -485,7 +489,9 @@ describe('<MainContent />', () => {
     // meant to avoid.
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider value={{ compactMode: false }}>
+        <CompactModeProvider
+          value={{ compactMode: false, compactInline: false }}
+        >
           <UIActionsContext.Provider value={createUIActions()}>
             <UIStateContext.Provider
               value={createUIState({ history, historyRemountKey: 2 })}
@@ -551,7 +557,9 @@ describe('<MainContent />', () => {
     // someone correctly drives the reset off the model dimension instead.
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider value={{ compactMode: false }}>
+        <CompactModeProvider
+          value={{ compactMode: false, compactInline: false }}
+        >
           <UIActionsContext.Provider value={createUIActions()}>
             <UIStateContext.Provider
               value={createUIState({
@@ -689,7 +697,9 @@ describe('<MainContent />', () => {
       // Flip activePtyId; identical re-render except this one streaming-state field.
       rerender(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <CompactModeProvider value={{ compactMode: false }}>
+          <CompactModeProvider
+            value={{ compactMode: false, compactInline: false }}
+          >
             <UIActionsContext.Provider value={createUIActions()}>
               <UIStateContext.Provider
                 value={createUIState({

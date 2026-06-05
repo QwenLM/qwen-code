@@ -2227,6 +2227,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
+  const [compactInline] = useState<boolean>(
+    settings.merged.ui?.compactInline ?? false,
+  );
   const configuredRenderMode = settings.merged.ui?.renderMode;
   const [renderMode, setRenderMode] = useState<RenderMode>(
     configuredRenderMode === 'raw' ? 'raw' : 'render',
@@ -3625,8 +3628,8 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const compactModeValue = useMemo(
-    () => ({ compactMode, setCompactMode }),
-    [compactMode, setCompactMode],
+    () => ({ compactMode, compactInline, setCompactMode }),
+    [compactMode, compactInline, setCompactMode],
   );
   const renderModeValue = useMemo(
     () => ({ renderMode, setRenderMode }),

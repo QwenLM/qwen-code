@@ -12,7 +12,6 @@ import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
-import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
@@ -105,8 +104,7 @@ const virtualIsStaticItem = (item: HistoryItem) => item.id > 0;
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
-  const uiActions = useUIActions();
-  const { compactMode } = useCompactMode();
+  const { compactMode, compactInline } = useCompactMode();
   const {
     pendingHistoryItems,
     terminalWidth,
@@ -188,6 +186,15 @@ export const MainContent = () => {
       prevMergedHistoryRef.current = uiState.history;
       return uiState.history;
     }
+    // compactInline: tools stay within their own group, no cross-group merging.
+    // <Static> is append-only: once rendered, items cannot be updated.
+    // Data-level merging reduces item count, which <Static> can't handle
+    // without a full clearTerminal + remount (causing "withdrawal" flash).
+    // Skip merging here; virtual-scroll mode below handles it fine.
+    if (compactInline || !uiState.useTerminalBuffer) {
+      prevMergedHistoryRef.current = uiState.history;
+      return uiState.history;
+    }
     const next = mergeCompactToolGroups(
       uiState.history,
       uiState.embeddedShellFocused,
@@ -209,7 +216,9 @@ export const MainContent = () => {
     return next;
   }, [
     compactMode,
+    compactInline,
     uiState.history,
+    uiState.useTerminalBuffer,
     uiState.embeddedShellFocused,
     uiState.activePtyId,
     absorbedCallIds,
@@ -260,35 +269,6 @@ export const MainContent = () => {
     },
     [summaryByCallId],
   );
-
-  // Ink's <Static> is append-only: once an item is rendered to the terminal
-  // buffer, it cannot be replaced. In compact mode, when a new tool_group is
-  // merged into a previous one, the merged result has FEWER items than the
-  // raw history. Static would not re-render the older items even though their
-  // content changed, so we explicitly call refreshStatic() to clear the
-  // terminal and re-render the merged view.
-  //
-  // Detection: if history length grew but mergedHistory length did NOT grow
-  // proportionally (i.e., a merge consolidated items), trigger a refresh.
-  const prevHistoryLengthRef = useRef(uiState.history.length);
-  const prevMergedLengthRef = useRef(mergedHistory.length);
-  useEffect(() => {
-    if (!compactMode) {
-      prevHistoryLengthRef.current = uiState.history.length;
-      prevMergedLengthRef.current = mergedHistory.length;
-      return;
-    }
-    const prevHLen = prevHistoryLengthRef.current;
-    const currHLen = uiState.history.length;
-    const prevMLen = prevMergedLengthRef.current;
-    const currMLen = mergedHistory.length;
-    // History grew, but merged length stayed same or shrank → a merge happened.
-    if (currHLen > prevHLen && currMLen <= prevMLen) {
-      uiActions.refreshStatic();
-    }
-    prevHistoryLengthRef.current = currHLen;
-    prevMergedLengthRef.current = currMLen;
-  }, [compactMode, uiState.history, mergedHistory, uiActions]);
 
   // Virtual viewport path short-circuits below before any of the
   // <Static>-only machinery is needed. The offsets / progressive-replay

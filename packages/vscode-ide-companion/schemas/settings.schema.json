@@ -300,6 +300,11 @@
           "type": "boolean",
           "default": false
         },
+        "compactInline": {
+          "description": "Compact tool display within each group instead of merging across groups. Requires compactMode to be enabled.",
+          "type": "boolean",
+          "default": false
+        },
         "useTerminalBuffer": {
           "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.",
           "type": "boolean",

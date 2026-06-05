@@ -134,6 +134,7 @@ vi.mock('../contexts/CompactModeContext.js', async () => {
     ...actual,
     useCompactMode: () => ({
       compactMode: false,
+      compactInline: false,
       setCompactMode: mockSetCompactMode,
     }),
   };

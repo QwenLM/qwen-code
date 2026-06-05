@@ -857,6 +857,16 @@ const SETTINGS_SCHEMA = {
           'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
         showInDialog: true,
       },
+      compactInline: {
+        type: 'boolean',
+        label: 'Compact Inline',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Compact tool display within each group instead of merging across groups. Requires compactMode to be enabled.',
+        showInDialog: true,
+      },
       useTerminalBuffer: {
         type: 'boolean',
         label: 'Virtualized History (reduces flicker on long sessions)',
