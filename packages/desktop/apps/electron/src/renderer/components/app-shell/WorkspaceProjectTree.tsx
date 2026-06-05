@@ -1,8 +1,9 @@
 import * as React from "react"
 import { useTranslation } from "react-i18next"
+// eslint-disable-next-line import/no-internal-modules
 import { AnimatePresence } from "motion/react"
 import { useSetAtom } from "jotai"
-import { ChevronDown, ChevronRight, Cloud, ExternalLink, Flag, Folder, FolderPlus, MessageSquare, Pencil, Pin, PinOff, Trash2 } from "lucide-react"
+import { ChevronDown, ChevronRight, Cloud, ExternalLink, Flag, Folder, FolderPlus, GitBranch, MessageSquare, Pencil, Pin, PinOff, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { cn } from "@/lib/utils"
@@ -20,6 +21,16 @@ import {
   StyledContextMenuItem,
   StyledContextMenuSeparator,
 } from "@/components/ui/styled-context-menu"
+import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { ContextMenuProvider } from "@/components/ui/menu-context"
 import { RenameDialog } from "@/components/ui/rename-dialog"
 import { SessionMenu } from "./SessionMenu"
@@ -83,6 +94,11 @@ interface ProjectSessionMenuConfig {
 
 const PROJECT_SESSION_PREVIEW_LIMIT = 5
 
+function getDefaultWorktreeBranchName(workspace: Workspace, t: (key: string, defaultValue: string) => string): string {
+  const name = getWorkspaceDisplayName(workspace, t).trim()
+  return `${name || "worktree"}_2`
+}
+
 function WorkspaceHeader({
   workspace,
   displayName,
@@ -97,12 +113,14 @@ function WorkspaceHeader({
   renameLabel,
   pinLabel,
   unpinLabel,
+  createWorktreeLabel,
   removeLabel,
   onToggleCollapsed,
   onNewSession,
   onOpenInNewWindow,
   onRename,
   onTogglePinned,
+  onCreateWorktree,
   onRemove,
 }: {
   workspace: Workspace
@@ -118,12 +136,14 @@ function WorkspaceHeader({
   renameLabel: string
   pinLabel: string
   unpinLabel: string
+  createWorktreeLabel: string
   removeLabel: string
   onToggleCollapsed: () => void
   onNewSession: () => void
   onOpenInNewWindow: () => void
   onRename: () => void
   onTogglePinned: () => void
+  onCreateWorktree: () => void
   onRemove: () => void
 }) {
   const header = (
@@ -208,6 +228,12 @@ function WorkspaceHeader({
               {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
               <span className="flex-1">{isPinned ? unpinLabel : pinLabel}</span>
             </StyledContextMenuItem>
+            {!workspace.remoteServer && (
+              <StyledContextMenuItem onClick={onCreateWorktree}>
+                <GitBranch className="h-3.5 w-3.5" />
+                <span className="flex-1">{createWorktreeLabel}</span>
+              </StyledContextMenuItem>
+            )}
             <StyledContextMenuSeparator />
           </>
         )}
@@ -391,6 +417,10 @@ export function WorkspaceProjectTree({
   const [collapsedWorkspaceIds, setCollapsedWorkspaceIds] = React.useState<Set<string>>(() => new Set())
   const [expandedWorkspaceSessionIds, setExpandedWorkspaceSessionIds] = React.useState<Set<string>>(() => new Set())
   const [optimisticWorkspaceOrder, setOptimisticWorkspaceOrder] = React.useState<string[] | null>(null)
+  const [createWorktreeDialogOpen, setCreateWorktreeDialogOpen] = React.useState(false)
+  const [createWorktreeWorkspaceId, setCreateWorktreeWorkspaceId] = React.useState<string | null>(null)
+  const [createWorktreeBranchName, setCreateWorktreeBranchName] = React.useState("")
+  const [creatingWorktree, setCreatingWorktree] = React.useState(false)
   const hasRemoteWorkspaces = React.useMemo(() => workspaces.some(workspace => workspace.remoteServer), [workspaces])
   const workspaceOrderKey = React.useMemo(() => workspaces.map(workspace => workspace.id).join("\0"), [workspaces])
 
@@ -458,6 +488,46 @@ export function WorkspaceProjectTree({
     onWorkspaceCreated?.(workspace)
     void onSelectWorkspace(workspace.id)
   }, [onSelectWorkspace, onWorkspaceCreated, setFullscreenOverlayOpen, t])
+
+  const handleCreateWorktreeClick = React.useCallback((workspace: Workspace) => {
+    if (isProtectedWorkspace(workspace) || workspace.remoteServer) return
+    setCreateWorktreeWorkspaceId(workspace.id)
+    setCreateWorktreeBranchName(getDefaultWorktreeBranchName(workspace, t))
+    requestAnimationFrame(() => {
+      setCreateWorktreeDialogOpen(true)
+    })
+  }, [t])
+
+  const handleCreateWorktreeDialogOpenChange = React.useCallback((open: boolean) => {
+    setCreateWorktreeDialogOpen(open)
+    if (!open) {
+      setCreateWorktreeWorkspaceId(null)
+      setCreateWorktreeBranchName("")
+    }
+  }, [])
+
+  const handleCreateWorktreeSubmit = React.useCallback(async () => {
+    const branchName = createWorktreeBranchName.trim()
+    if (!createWorktreeWorkspaceId || !branchName || creatingWorktree) return
+
+    setCreatingWorktree(true)
+    try {
+      const workspace = await window.electronAPI.createPermanentWorktree(createWorktreeWorkspaceId, branchName)
+      toast.success(t("toast.createdWorktreeWorkspace", { name: workspace.name }))
+      setCreateWorktreeDialogOpen(false)
+      setCreateWorktreeWorkspaceId(null)
+      setCreateWorktreeBranchName("")
+      onWorkspaceCreated?.(workspace)
+      void onSelectWorkspace(workspace.id)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t("toast.unknownError")
+      toast.error(t("toast.failedToCreateWorktreeWorkspace"), {
+        description: message,
+      })
+    } finally {
+      setCreatingWorktree(false)
+    }
+  }, [createWorktreeBranchName, createWorktreeWorkspaceId, creatingWorktree, onSelectWorkspace, onWorkspaceCreated, t])
 
   const handleRenameClick = React.useCallback((sessionId: string, currentName: string) => {
     setRenameSessionId(sessionId)
@@ -722,12 +792,14 @@ export function WorkspaceProjectTree({
           renameLabel={t("common.rename")}
           pinLabel={t("workspace.pinWorkspace")}
           unpinLabel={t("workspace.unpinWorkspace")}
+          createWorktreeLabel={t("workspace.createPermanentWorktree")}
           removeLabel={t("workspace.removeWorkspace")}
           onToggleCollapsed={() => toggleWorkspaceCollapsed(workspace.id)}
           onNewSession={() => handleNewProjectSession(workspace.id)}
           onOpenInNewWindow={() => void onSelectWorkspace(workspace.id, true)}
           onRename={() => handleWorkspaceRenameClick(workspace)}
           onTogglePinned={() => void handleToggleWorkspacePinned(workspace)}
+          onCreateWorktree={() => handleCreateWorktreeClick(workspace)}
           onRemove={() => void handleRemoveWorkspace(workspace)}
         />
         {!isSorting && !isCollapsed && sessions.length > 0 ? (
@@ -809,6 +881,52 @@ export function WorkspaceProjectTree({
           />
         )}
       </AnimatePresence>
+
+      <Dialog open={createWorktreeDialogOpen} onOpenChange={handleCreateWorktreeDialogOpenChange}>
+        <DialogContent className="sm:max-w-[520px]">
+          <form
+            className="grid gap-5"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void handleCreateWorktreeSubmit()
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle className="text-2xl leading-tight">
+                {t("workspace.createWorktreeDialogTitle")}
+              </DialogTitle>
+              <DialogDescription className="text-base leading-6">
+                {t("workspace.createWorktreeDialogDescription")}
+              </DialogDescription>
+            </DialogHeader>
+            <Input
+              autoFocus
+              value={createWorktreeBranchName}
+              onChange={(event) => setCreateWorktreeBranchName(event.target.value)}
+              disabled={creatingWorktree}
+              aria-label={t("workspace.branchNameLabel")}
+              placeholder={t("workspace.branchNamePlaceholder")}
+              className="h-12 text-base"
+            />
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => handleCreateWorktreeDialogOpenChange(false)}
+                disabled={creatingWorktree}
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button
+                type="submit"
+                disabled={!createWorktreeBranchName.trim() || creatingWorktree}
+              >
+                {creatingWorktree ? t("workspace.creating") : t("common.create")}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <div className="min-h-0 flex-1 overflow-y-auto pb-3 mask-fade-bottom">
         <div className="flex shrink-0 items-center justify-between px-3 pb-2 pt-1">
