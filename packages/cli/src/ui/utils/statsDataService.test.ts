@@ -67,6 +67,15 @@ function makeRecord(
 }
 
 describe('getPreviousRangeBounds', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-05T12:00:00Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('returns null for "all" range', () => {
     expect(getPreviousRangeBounds('all')).toBeNull();
   });
