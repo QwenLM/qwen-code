@@ -15,6 +15,8 @@ vi.mock('../utils/sideQuery.js', () => ({
 import {
   classifyAction,
   sanitizeClassifierReason,
+  STAGE1_TIMEOUT_MS,
+  STAGE2_TIMEOUT_MS,
   type ClassifierInput,
 } from './classifier.js';
 import type { Config } from '../config/config.js';
@@ -203,6 +205,31 @@ describe('classifier configuration', () => {
 
     expect(timeoutSpy).toHaveBeenNthCalledWith(1, 12_345);
     expect(timeoutSpy).toHaveBeenNthCalledWith(2, 67_890);
+  });
+
+  it('falls back when configured stage timeouts are too low', async () => {
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation(() => new AbortController().signal);
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({ thinking: 't', shouldBlock: false, reason: '' });
+
+    await classifyAction(
+      makeInput({
+        config: makeConfig({
+          classifier: {
+            timeouts: {
+              stage1Ms: 1,
+              stage2Ms: 999,
+            },
+          },
+        }),
+      }),
+    );
+
+    expect(timeoutSpy).toHaveBeenNthCalledWith(1, STAGE1_TIMEOUT_MS);
+    expect(timeoutSpy).toHaveBeenNthCalledWith(2, STAGE2_TIMEOUT_MS);
   });
 
   it('uses temperature 0 and max_output_tokens=32 with thinking disabled for stage 1', async () => {

@@ -295,7 +295,7 @@ function resolveClassifierSettings(config: Config): ClassifierSettings {
 }
 
 function resolveTimeoutMs(value: number | undefined, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
+  return typeof value === 'number' && Number.isFinite(value) && value >= 1000
     ? value
     : fallback;
 }
