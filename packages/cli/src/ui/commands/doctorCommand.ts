@@ -21,6 +21,8 @@ import {
   startCpuProfile,
   stopCpuProfile,
 } from '../../utils/cpuProfiler.js';
+import { rollbackStandaloneUpdate } from '../../utils/standalone-update.js';
+import { getInstallationInfo } from '../../utils/installationInfo.js';
 import { t } from '../../i18n/index.js';
 import {
   collectMemoryDiagnostics,
@@ -30,7 +32,8 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 
 const MEMORY_SUBCOMMAND = 'memory';
 const CPU_PROFILE_SUBCOMMAND = 'cpu-profile';
-const DOCTOR_SUBCOMMANDS = [MEMORY_SUBCOMMAND, CPU_PROFILE_SUBCOMMAND] as const;
+const ROLLBACK_SUBCOMMAND = 'rollback';
+const DOCTOR_SUBCOMMANDS = [MEMORY_SUBCOMMAND, CPU_PROFILE_SUBCOMMAND, ROLLBACK_SUBCOMMAND] as const;
 function getHeapSnapshotSensitiveDataWarning(): string {
   return t(
     'Heap snapshot may contain prompts, file contents, tool results, and other sensitive data. Do not share it publicly without reviewing it first.',
@@ -55,7 +58,7 @@ export const doctorCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  argumentHint: '[memory|cpu-profile] [--sample] [--snapshot] [--duration]',
+  argumentHint: '[memory|cpu-profile|rollback] [--sample] [--snapshot] [--duration]',
   examples: [
     '/doctor',
     '/doctor memory',
@@ -63,6 +66,7 @@ export const doctorCommand: SlashCommand = {
     '/doctor memory --snapshot',
     '/doctor cpu-profile',
     '/doctor cpu-profile --duration 10',
+    '/doctor rollback',
   ],
   completion: async (_context, partialArg) => {
     const trimmed = partialArg.trimStart();
@@ -78,6 +82,17 @@ export const doctorCommand: SlashCommand = {
     const subCommand = subCommandArgs[0] ?? '';
     const shouldWriteHeapSnapshot = subCommandArgs.includes('--snapshot');
     const shouldSampleMemory = subCommandArgs.includes('--sample');
+
+    if (subCommand === ROLLBACK_SUBCOMMAND) {
+      if (executionMode === 'acp') {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content: t('Rollback is not available in ACP mode.'),
+        };
+      }
+      return rollbackDoctorAction(context);
+    }
 
     if (subCommand === MEMORY_SUBCOMMAND) {
       if (abortSignal?.aborted) {
@@ -254,6 +269,15 @@ export const doctorCommand: SlashCommand = {
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       argumentHint: '[--duration <seconds>]',
       action: cpuProfileDoctorAction,
+    },
+    {
+      name: 'rollback',
+      get description() {
+        return t('Roll back a standalone update to the previous version');
+      },
+      kind: CommandKind.BUILT_IN,
+      supportedModes: ['interactive', 'non_interactive'] as const,
+      action: rollbackDoctorAction,
     },
   ],
 };
@@ -579,4 +603,58 @@ async function cpuProfileDoctorAction(
     return;
   }
   return { type: 'message', messageType: 'info', content: successMsg };
+}
+
+function rollbackDoctorAction(context: CommandContext) {
+  const installInfo = getInstallationInfo(process.cwd(), false);
+  if (!installInfo.isStandalone || !installInfo.standaloneDir) {
+    const msg = t('Rollback is only available for standalone installations.');
+    if (context.executionMode === 'interactive') {
+      context.ui.addItem({ type: 'info', text: msg }, Date.now());
+      return;
+    }
+    return {
+      type: 'message' as const,
+      messageType: 'info' as const,
+      content: msg,
+    };
+  }
+
+  if (process.platform === 'win32') {
+    const winMsg = t(
+      'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.',
+    );
+    if (context.executionMode === 'interactive') {
+      context.ui.addItem({ type: 'info', text: winMsg }, Date.now());
+      return;
+    }
+    return {
+      type: 'message' as const,
+      messageType: 'info' as const,
+      content: winMsg,
+    };
+  }
+
+  const result = rollbackStandaloneUpdate(installInfo.standaloneDir);
+  let msg: string;
+  let messageType: 'info' | 'error';
+  if (result.ok) {
+    msg = t(
+      'Rollback successful. Restart your terminal to use the previous version.',
+    );
+    messageType = 'info';
+  } else {
+    msg = `${t('Rollback failed:')} ${result.detail}`;
+    messageType = 'error';
+  }
+
+  if (context.executionMode === 'interactive') {
+    context.ui.addItem({ type: messageType, text: msg }, Date.now());
+    return;
+  }
+  return {
+    type: 'message' as const,
+    messageType: messageType as 'info' | 'error',
+    content: msg,
+  };
 }

@@ -447,6 +447,8 @@ export default {
   'After tool execution fails': 'ツール実行失敗時',
   'When notifications are sent': '通知送信時',
   'When the user submits a prompt': 'ユーザーがプロンプトを送信した時',
+  'When a slash command expands into a prompt':
+    'スラッシュコマンドがプロンプトに展開された時',
   'When a new session is started': '新しいセッションが開始された時',
   'Right before Qwen Code concludes its response':
     'Qwen Code が応答を終了する直前',
@@ -470,6 +472,8 @@ export default {
     'コマンドへの入力は通知メッセージとタイプを持つ JSON です。',
   'Input to command is JSON with original user prompt text.':
     'コマンドへの入力は元のユーザープロンプトテキストを持つ JSON です。',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'コマンドへの入力は command_name、command_args、展開後のプロンプトテキストを持つ JSON です。',
   'Input to command is JSON with session start source.':
     'コマンドへの入力はセッション開始ソースを持つ JSON です。',
   'Input to command is JSON with session end reason.':
@@ -498,6 +502,8 @@ export default {
     'stderr をユーザーのみに表示し、ツール呼び出しを続ける',
   'block processing, erase original prompt, and show stderr to user only':
     '処理をブロックし、元のプロンプトを消去し、stderr をユーザーのみに表示',
+  'block expanded prompt submission and show stderr to user only':
+    '展開後のプロンプト送信をブロックし、stderr をユーザーのみに表示',
   'stdout shown to Qwen': 'stdout を Qwen に表示',
   'show stderr to user only (blocking errors ignored)':
     'stderr をユーザーのみに表示（ブロッキングエラーは無視）',
@@ -580,12 +586,13 @@ export default {
     '追加のUI言語パックをリクエストするには、GitHub で Issue を作成してください',
   'Available options:': '使用可能なオプション:',
   'Set UI language to {{name}}': 'UI言語を {{name}} に設定',
-  '{{mode}} mode': '{{mode}}モード',
   'Analyze only, do not modify files or execute commands':
     '分析のみ、ファイルの変更やコマンドの実行はしません',
   'Require approval for file edits or shell commands':
     'ファイル編集やシェルコマンドには承認が必要',
   'Automatically approve file edits': 'ファイル編集を自動承認',
+  'Use classifier to automatically approve safe tool calls':
+    '分類器を使用して安全なツール呼び出しを自動承認',
   'Automatically approve all tools': 'すべてのツールを自動承認',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'ワークスペースの承認モードが存在し、優先されます。ユーザーレベルの変更は効果がありません',

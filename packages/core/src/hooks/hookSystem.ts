@@ -152,6 +152,27 @@ export class HookSystem {
       : undefined;
   }
 
+  /**
+   * Fire a UserPromptExpansion event after a slash command returns a prompt and
+   * before that expanded prompt is submitted to the model.
+   */
+  async fireUserPromptExpansionEvent(
+    commandName: string,
+    commandArgs: string,
+    prompt: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireUserPromptExpansionEvent(
+      commandName,
+      commandArgs,
+      prompt,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('UserPromptExpansion', result.finalOutput)
+      : undefined;
+  }
+
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',

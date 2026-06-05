@@ -16,6 +16,7 @@ import type {
   HookInput,
   HookExecutionResult,
   UserPromptSubmitInput,
+  UserPromptExpansionInput,
   StopInput,
   SessionStartInput,
   SessionEndInput,
@@ -114,6 +115,31 @@ export class HookEventHandler {
       HookEventName.UserPromptSubmit,
       input,
       undefined,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a UserPromptExpansion event
+   * Called when a slash command expands into a prompt.
+   */
+  async fireUserPromptExpansionEvent(
+    commandName: string,
+    commandArgs: string,
+    prompt: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: UserPromptExpansionInput = {
+      ...this.createBaseInput(HookEventName.UserPromptExpansion),
+      command_name: commandName,
+      command_args: commandArgs,
+      prompt,
+    };
+
+    return this.executeHooks(
+      HookEventName.UserPromptExpansion,
+      input,
+      { commandName },
       signal,
     );
   }

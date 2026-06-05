@@ -11,6 +11,7 @@ import { updateEventEmitter } from './updateEventEmitter.js';
 import type { HistoryItemWithoutId } from '../ui/types.js';
 import { MessageType } from '../ui/types.js';
 import { spawnWrapper } from './spawnWrapper.js';
+import { performStandaloneUpdate } from './standalone-update.js';
 import type { spawn } from 'node:child_process';
 import os from 'node:os';
 
@@ -42,6 +43,27 @@ export function handleAutoUpdate(
   updateEventEmitter.emit('update-received', {
     message: combinedMessage,
   });
+
+  if (
+    installationInfo.isStandalone &&
+    installationInfo.standaloneDir &&
+    isAutoUpdateEnabled
+  ) {
+    performStandaloneUpdate(installationInfo.standaloneDir, info.update.latest)
+      .then((result) => {
+        const message =
+          result === 'deferred'
+            ? 'Update downloaded. It will be applied after you exit this session.'
+            : 'Update successful! The new version will be used on your next run.';
+        updateEventEmitter.emit('update-success', { message });
+      })
+      .catch((err: Error) => {
+        updateEventEmitter.emit('update-failed', {
+          message: `Automatic update failed: ${err.message}. Re-run the installer to update manually.`,
+        });
+      });
+    return;
+  }
 
   // Don't automatically run the update if auto-update is disabled or no update command
   if (!installationInfo.updateCommand || !isAutoUpdateEnabled) {
@@ -113,20 +135,24 @@ export function setUpdateHandler(
     }, 60000);
   };
 
-  const handleUpdateFailed = () => {
+  const handleUpdateFailed = (data: { message?: string }) => {
     setUpdateInfo(null);
     addItemOrDefer({
       type: MessageType.ERROR,
-      text: `Automatic update failed. Please try updating manually`,
+      text:
+        data?.message ||
+        'Automatic update failed. Please try updating manually',
     });
   };
 
-  const handleUpdateSuccess = () => {
+  const handleUpdateSuccess = (data: { message?: string }) => {
     successfullyInstalled = true;
     setUpdateInfo(null);
     addItemOrDefer({
       type: MessageType.INFO,
-      text: `Update successful! The new version will be used on your next run.`,
+      text:
+        data?.message ||
+        'Update successful! The new version will be used on your next run.',
     });
   };
 

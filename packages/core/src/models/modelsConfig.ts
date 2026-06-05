@@ -313,6 +313,18 @@ export class ModelsConfig {
   }
 
   /**
+   * Get the display name for a model by its id.
+   * Looks up the model in the registry using the current authType and returns
+   * its resolved name. Falls back to the raw model id when the model is not
+   * found in the registry (e.g. runtime models or unknown models).
+   */
+  getModelDisplayName(modelId: string): string {
+    if (!this.currentAuthType) return modelId;
+    const resolved = this.modelRegistry.getModel(this.currentAuthType, modelId);
+    return resolved?.name ?? modelId;
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Supports both registry models and raw model IDs.
    */
