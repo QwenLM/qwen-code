@@ -181,6 +181,8 @@ export {
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 };
 
+export type ModelInvocableCommandExecutorResult = string | { error: string };
+
 export enum ApprovalMode {
   PLAN = 'plan',
   DEFAULT = 'default',
@@ -984,7 +986,10 @@ export class Config {
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
   private modelInvocableCommandsExecutor:
-    | ((name: string, args?: string) => Promise<string | null>)
+    | ((
+        name: string,
+        args?: string,
+      ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
@@ -1441,6 +1446,14 @@ export class Config {
             switch (request.eventName) {
               case 'UserPromptSubmit':
                 result = await hookSystem.fireUserPromptSubmitEvent(
+                  (input['prompt'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'UserPromptExpansion':
+                result = await hookSystem.fireUserPromptExpansionEvent(
+                  (input['command_name'] as string) || '',
+                  (input['command_args'] as string) || '',
                   (input['prompt'] as string) || '',
                   signal,
                 );
@@ -2197,6 +2210,15 @@ export class Config {
     return (
       this.getContentGeneratorConfig()?.model || this.modelsConfig.getModel()
     );
+  }
+
+  /**
+   * Get the human-readable display name for the currently selected model.
+   * Resolves the model id to its name from the model registry.
+   * Falls back to the raw model id when the model is not found.
+   */
+  getModelDisplayName(): string {
+    return this.modelsConfig.getModelDisplayName(this.getModel());
   }
 
   onModelChange(listener: (model: string) => void): () => void {
@@ -3856,7 +3878,10 @@ export class Config {
    * the command cannot be found or executed. Called by the CLI layer.
    */
   setModelInvocableCommandsExecutor(
-    executor: (name: string, args?: string) => Promise<string | null>,
+    executor: (
+      name: string,
+      args?: string,
+    ) => Promise<ModelInvocableCommandExecutorResult | null>,
   ): void {
     this.modelInvocableCommandsExecutor = executor;
   }
@@ -3866,7 +3891,10 @@ export class Config {
    * has been registered (e.g., in SDK mode).
    */
   getModelInvocableCommandsExecutor():
-    | ((name: string, args?: string) => Promise<string | null>)
+    | ((
+        name: string,
+        args?: string,
+      ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null {
     return this.modelInvocableCommandsExecutor;
   }
@@ -4135,7 +4163,7 @@ export class Config {
       const { registerComputerUseTools } = await import(
         '../tools/computer-use/index.js'
       );
-      await registerComputerUseTools(registerLazy);
+      await registerComputerUseTools(registerLazy, this);
     }
 
     // Register monitor tool

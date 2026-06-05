@@ -743,6 +743,8 @@ export default {
   'After tool execution fails': 'After tool execution fails',
   'When notifications are sent': 'When notifications are sent',
   'When the user submits a prompt': 'When the user submits a prompt',
+  'When a slash command expands into a prompt':
+    'When a slash command expands into a prompt',
   'When a new session is started': 'When a new session is started',
   'Right before Qwen Code concludes its response':
     'Right before Qwen Code concludes its response',
@@ -768,6 +770,8 @@ export default {
     'Input to command is JSON with notification message and type.',
   'Input to command is JSON with original user prompt text.':
     'Input to command is JSON with original user prompt text.',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'Input to command is JSON with command_name, command_args, and expanded prompt text.',
   'Input to command is JSON with session start source.':
     'Input to command is JSON with session start source.',
   'Input to command is JSON with session end reason.':
@@ -796,6 +800,8 @@ export default {
     'show stderr to user only but continue with tool call',
   'block processing, erase original prompt, and show stderr to user only':
     'block processing, erase original prompt, and show stderr to user only',
+  'block expanded prompt submission and show stderr to user only':
+    'block expanded prompt submission and show stderr to user only',
   'stdout shown to Qwen': 'stdout shown to Qwen',
   'show stderr to user only (blocking errors ignored)':
     'show stderr to user only (blocking errors ignored)',
@@ -887,12 +893,13 @@ export default {
   // Commands - Approval Mode
   // ============================================================================
   'Tool Approval Mode': 'Tool Approval Mode',
-  '{{mode}} mode': '{{mode}} mode',
   'Analyze only, do not modify files or execute commands':
     'Analyze only, do not modify files or execute commands',
   'Require approval for file edits or shell commands':
     'Require approval for file edits or shell commands',
   'Automatically approve file edits': 'Automatically approve file edits',
+  'Use classifier to automatically approve safe tool calls':
+    'Use classifier to automatically approve safe tool calls',
   'Automatically approve all tools': 'Automatically approve all tools',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Workspace approval mode exists and takes priority. User-level change will have no effect.',
@@ -1901,6 +1908,17 @@ export default {
     'Show current process memory diagnostics',
   'Record a CPU profile for Chrome DevTools analysis':
     'Record a CPU profile for Chrome DevTools analysis',
+  'Roll back a standalone update to the previous version':
+    'Roll back a standalone update to the previous version',
+  'Rollback is not available in ACP mode.':
+    'Rollback is not available in ACP mode.',
+  'Rollback is only available for standalone installations.':
+    'Rollback is only available for standalone installations.',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    'Rollback successful. Restart your terminal to use the previous version.',
+  'Rollback failed:': 'Rollback failed:',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.',
   'Save a durable memory to the memory system.':
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':

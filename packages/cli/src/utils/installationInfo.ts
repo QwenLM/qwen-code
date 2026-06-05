@@ -6,6 +6,7 @@
 
 import { createDebugLogger, isGitRepository } from '@qwen-code/qwen-code-core';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 
@@ -17,15 +18,22 @@ export enum PackageManager {
   BUN = 'bun',
   BUNX = 'bunx',
   HOMEBREW = 'homebrew',
+  STANDALONE = 'standalone',
   NPX = 'npx',
   UNKNOWN = 'unknown',
 }
 
 const debugLogger = createDebugLogger('INSTALLATION_INFO');
+const STANDALONE_UNIX_INSTALLER =
+  'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh';
+const STANDALONE_WINDOWS_INSTALLER =
+  'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1';
 
 export interface InstallationInfo {
   packageManager: PackageManager;
   isGlobal: boolean;
+  isStandalone?: boolean;
+  standaloneDir?: string;
   updateCommand?: string;
   updateMessage?: string;
 }
@@ -74,6 +82,14 @@ export function getInstallationInfo(
         isGlobal: false,
         updateMessage: 'Running via pnpx, update not applicable.',
       };
+    }
+
+    const standaloneInfo = getStandaloneInstallInfo(
+      realPath,
+      isAutoUpdateEnabled,
+    );
+    if (standaloneInfo) {
+      return standaloneInfo;
     }
 
     // Check for Homebrew
@@ -161,7 +177,45 @@ export function getInstallationInfo(
       };
     }
 
-    // Assume global npm
+    // Check if the package directory is writable to determine whether npm update requires sudo
+    const npmPackageDir = path.dirname(path.dirname(realPath));
+    let npmPrefixWritable = false;
+    try {
+      fs.accessSync(npmPackageDir, fs.constants.W_OK);
+      npmPrefixWritable = true;
+    } catch {
+      // Not writable (e.g., /usr/local/lib/node_modules owned by root)
+    }
+
+    if (!npmPrefixWritable && isAutoUpdateEnabled) {
+      // npm prefix requires sudo — fall back to standalone update path
+      // which installs to ~/.local/lib/qwen-code/ (user-writable)
+      const installRoot = process.env['HOME'] || os.homedir();
+      if (!installRoot || installRoot === '/') {
+        // Cannot determine a safe user-writable location; skip migration
+        return {
+          packageManager: PackageManager.NPM,
+          isGlobal: true,
+          updateMessage:
+            'Update requires sudo. Run: sudo npm install -g @qwen-code/qwen-code@latest',
+        };
+      }
+      const fallbackStandaloneDir = path.join(
+        installRoot,
+        '.local',
+        'lib',
+        'qwen-code',
+      );
+      return {
+        packageManager: PackageManager.NPM,
+        isGlobal: true,
+        isStandalone: true,
+        standaloneDir: fallbackStandaloneDir,
+        updateMessage:
+          'npm install requires sudo. Migrating to standalone installer for automatic updates.',
+      };
+    }
+
     const updateCommand = 'npm install -g @qwen-code/qwen-code@latest';
     return {
       packageManager: PackageManager.NPM,
@@ -175,4 +229,100 @@ export function getInstallationInfo(
     debugLogger.error('Failed to detect installation info:', error);
     return { packageManager: PackageManager.UNKNOWN, isGlobal: false };
   }
+}
+
+function getStandaloneInstallInfo(
+  realPath: string,
+  isAutoUpdateEnabled: boolean,
+): InstallationInfo | null {
+  const installDir = standaloneInstallDirForCliPath(realPath);
+  if (!installDir || !isStandaloneInstallDir(installDir)) {
+    return null;
+  }
+
+  const updateCommand =
+    process.platform === 'win32'
+      ? `powershell -ExecutionPolicy Bypass -c "irm ${STANDALONE_WINDOWS_INSTALLER} | iex"`
+      : `curl -fsSL ${STANDALONE_UNIX_INSTALLER} | bash`;
+
+  return {
+    packageManager: PackageManager.STANDALONE,
+    isGlobal: true,
+    isStandalone: true,
+    standaloneDir: installDir,
+    updateMessage: isAutoUpdateEnabled
+      ? 'Standalone install detected. Attempting to automatically update now...'
+      : `Standalone install detected. Please rerun the standalone installer to update: ${updateCommand}`,
+  };
+}
+
+function standaloneInstallDirForCliPath(realPath: string): string | null {
+  const normalized = realPath.replace(/\\/g, '/');
+  const suffix = '/lib/cli.js';
+  if (!normalized.endsWith(suffix)) {
+    return null;
+  }
+  return realPath.slice(0, -suffix.length);
+}
+
+function isStandaloneInstallDir(installDir: string): boolean {
+  try {
+    const manifestPath = path.join(installDir, 'manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      return false;
+    }
+
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+      name?: unknown;
+      target?: unknown;
+    };
+    // Manifest format is produced by writeManifest in create-standalone-package.js.
+    if (
+      manifest.name !== '@qwen-code/qwen-code' ||
+      typeof manifest.target !== 'string' ||
+      !isStandaloneTargetForCurrentPlatform(manifest.target)
+    ) {
+      return false;
+    }
+
+    const qwenBin =
+      process.platform === 'win32'
+        ? path.join(installDir, 'bin', 'qwen.cmd')
+        : path.join(installDir, 'bin', 'qwen');
+    const nodeBin =
+      process.platform === 'win32'
+        ? path.join(installDir, 'node', 'node.exe')
+        : path.join(installDir, 'node', 'bin', 'node');
+
+    return (
+      fs.existsSync(qwenBin) &&
+      fs.existsSync(nodeBin) &&
+      isStandaloneRuntimeFile(qwenBin) &&
+      isStandaloneRuntimeFile(nodeBin)
+    );
+  } catch (err) {
+    debugLogger.error('Standalone detection failed:', installDir, err);
+    return false;
+  }
+}
+
+function isStandaloneTargetForCurrentPlatform(target: string): boolean {
+  switch (process.platform) {
+    case 'darwin':
+      return /^darwin-(arm64|x64)$/.test(target);
+    case 'linux':
+      return /^linux-(arm64|x64)$/.test(target);
+    case 'win32':
+      return /^win-(arm64|x64)$/.test(target);
+    default:
+      return false;
+  }
+}
+
+function isStandaloneRuntimeFile(filePath: string): boolean {
+  const stats = fs.lstatSync(filePath);
+  if (!stats.isFile() || stats.isSymbolicLink()) {
+    return false;
+  }
+  return process.platform === 'win32' || (stats.mode & 0o111) !== 0;
 }

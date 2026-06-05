@@ -362,7 +362,7 @@ export const copyCommand: SlashCommand = {
     }
     // Extract text from the parts
     const lastAiOutput = lastAiMessage.parts
-      ?.filter((part) => part.text)
+      ?.filter((part) => part.text && !part.thought)
       .map((part) => part.text)
       .join('');
 

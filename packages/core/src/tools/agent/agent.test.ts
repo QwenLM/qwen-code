@@ -242,9 +242,8 @@ describe('AgentTool', () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
-      (config as unknown as Record<string, unknown>)[
-        'isForkSubagentEnabled'
-      ] = vi.fn().mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
+        vi.fn().mockReturnValue(true);
 
       const interactiveTool = new AgentTool(config);
       await vi.runAllTimersAsync();
@@ -259,9 +258,8 @@ describe('AgentTool', () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(false);
-      (config as unknown as Record<string, unknown>)[
-        'isForkSubagentEnabled'
-      ] = vi.fn().mockReturnValue(false);
+      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
+        vi.fn().mockReturnValue(false);
 
       const nonInteractiveTool = new AgentTool(config);
       await vi.runAllTimersAsync();
@@ -285,15 +283,16 @@ describe('AgentTool', () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
-      (config as unknown as Record<string, unknown>)[
-        'isForkSubagentEnabled'
-      ] = vi.fn().mockReturnValue(false);
+      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
+        vi.fn().mockReturnValue(false);
 
       const tool = new AgentTool(config);
       await vi.runAllTimersAsync();
 
       expect(tool.description).not.toContain('When to fork');
-      expect(tool.description).toContain('If omitted, the general-purpose agent is used');
+      expect(tool.description).toContain(
+        'If omitted, the general-purpose agent is used',
+      );
     });
   });
 
@@ -847,9 +846,8 @@ describe('AgentTool', () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
-      (config as unknown as Record<string, unknown>)[
-        'isForkSubagentEnabled'
-      ] = vi.fn().mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)['isForkSubagentEnabled'] =
+        vi.fn().mockReturnValue(true);
     });
 
     it('falls back to general-purpose when fork flag is off', async () => {

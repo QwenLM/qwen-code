@@ -521,33 +521,42 @@ describe('session-tracing', () => {
         durationMs: 1000,
       });
 
-      // sampling_ms = duration - ttft - (requestSetup ?? 0) = 1000 - 200 - 0
+      // sampling_ms = duration - ttft = 1000 - 200 (setup is NOT subtracted —
+      // duration_ms only covers ttft + sampling, never the setup phase that
+      // precedes the span. See Phase 4b commit fixing the formula bug.)
       expect(mockSpans[0]!.attributes['sampling_ms']).toBe(800);
     });
 
-    it('endLLMRequestSpan derives sampling_ms accounting for requestSetupMs (Phase 4b populates this)', () => {
+    it('endLLMRequestSpan does NOT subtract requestSetupMs from sampling_ms (Phase 4b bug fix)', () => {
+      // Phase 4a's formula `duration - ttft - setup` double-counted setup
+      // because duration_ms ALREADY excludes setup (span starts after setup).
+      // Phase 4b populates requestSetupMs with cumulative retry overhead —
+      // if the formula still subtracted setup, sampling_ms would clamp to 0
+      // for every retried request, wiping output-throughput data.
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
         ttftMs: 200,
-        requestSetupMs: 300,
+        requestSetupMs: 300, // would yield 500 under old formula; we want 800
         durationMs: 1000,
       });
 
-      // sampling_ms = 1000 - 200 - 300
-      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(500);
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(800);
+      // request_setup_ms is still emitted as its own attribute — operators can
+      // see the retry overhead AND the sampling time independently.
+      expect(mockSpans[0]!.attributes['request_setup_ms']).toBe(300);
     });
 
-    it('endLLMRequestSpan clamps sampling_ms to 0 when ttft + setup exceed duration (clock skew)', () => {
+    it('endLLMRequestSpan clamps sampling_ms to 0 when ttft exceeds duration (clock skew)', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
-        ttftMs: 800,
-        requestSetupMs: 500,
+        ttftMs: 1500,
         durationMs: 1000,
       });
 
-      // Math.max(0, 1000 - 800 - 500) = 0
+      // Math.max(0, 1000 - 1500) = 0 — only triggers when ttft > duration,
+      // which in practice means clock drift or a measurement bug.
       expect(mockSpans[0]!.attributes['sampling_ms']).toBe(0);
     });
 

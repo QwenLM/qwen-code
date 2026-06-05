@@ -31,6 +31,7 @@ import type {
   ChatCompressionEvent,
   InvalidChunkEvent,
   ContentRetryEvent,
+  ApiRetryEvent,
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
   SubagentExecutionEvent,
@@ -951,6 +952,26 @@ export class QwenLogger {
         error_type: event.error_type,
         attempt_number: event.attempt_number,
         retry_delay_ms: event.retry_delay_ms,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // Phase 4b — HTTP-status retry from retryWithBackoff (429/5xx). Distinct from
+  // logContentRetryEvent which is fired by geminiChat's content-recovery loop.
+  logApiRetryEvent(event: ApiRetryEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'api_retry', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        attempt_number: event.attempt_number,
+        error_type: event.error_type ?? 'unknown',
+        status_code:
+          event.status_code !== undefined ? String(event.status_code) : '',
+        retry_delay_ms: event.retry_delay_ms,
+        subagent_name: event.subagent_name ?? '',
       },
     });
 
