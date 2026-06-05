@@ -644,7 +644,7 @@ export async function shutdownTelemetry(): Promise<void> {
   return telemetryShutdownPromise;
 }
 
-const FORCE_FLUSH_TIMEOUT_MS = 5_000;
+const FORCE_FLUSH_TIMEOUT_MS = 2_000;
 
 export async function forceFlushMetrics(): Promise<void> {
   if (!telemetryInitialized || !activeMetricReader) return;
