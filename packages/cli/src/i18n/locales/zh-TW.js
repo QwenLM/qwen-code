@@ -418,8 +418,6 @@ export default {
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',
-  'check session stats. Usage: /stats [model|tools]':
-    '檢查會話統計信息。用法：/stats [model|tools]',
   'Show model-specific usage statistics.': '顯示模型相關的使用統計信息',
   'Show tool-specific usage statistics.': '顯示工具相關的使用統計信息',
   'exit the cli': '退出命令行界面',
@@ -1228,7 +1226,6 @@ export default {
   'Tool Leaderboard': '工具排行',
   Calls: '調用次數',
   Time: '耗時',
-  Success: '成功率',
   Reqs: '請求',
   Cache: '緩存',
   Latency: '延遲',
@@ -1630,6 +1627,31 @@ export default {
   reqs: '請求',
   in: '輸入',
   out: '輸出',
+
+  // statsCommand non-interactive output
+  'API requests: {{count}}': 'API 請求：{{count}}',
+  'Code changes': '程式碼變更',
+  Cost: '費用',
+  'Estimated cost: ${{cost}}': '預估費用：${{cost}}',
+  'Files: +{{added}} / -{{removed}} lines':
+    '檔案：+{{added}} / -{{removed}} 行',
+  'N/A': 'N/A',
+  Name: '名稱',
+  'No model usage data yet.': '尚無模型使用資料。',
+  'No tool usage data yet.': '尚無工具使用資料。',
+  'Prompts: {{count}}': '提示：{{count}}',
+  'Session duration: {{duration}}': '會話時長：{{duration}}',
+  'Tokens \u2014 prompt: {{prompt}}, output: {{output}}':
+    'Token — 輸入：{{prompt}}，輸出：{{output}}',
+  'Tool calls': '工具呼叫',
+  'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    '工具呼叫：{{total}}（{{success}} 成功，{{fail}} 失敗）',
+  cached: '快取',
+  days: '天',
+  output: '輸出',
+  prompt: '輸入',
+  '\u2191 tabs \u00B7 r to cycle dates \u00B7 esc to close':
+    '\u2191 tab 切換標籤 \u00B7 r 切換時間範圍 \u00B7 esc 關閉',
 
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型註冊表中）',
