@@ -709,15 +709,9 @@ export async function runQwenServe(
         },
       );
     },
-    promptQueueWait(durationMs) {
-      recordDaemonPromptQueueWait(durationMs);
-    },
-    promptDuration(durationMs) {
-      recordDaemonPromptDuration(durationMs);
-    },
-    cancelled() {
-      recordDaemonCancel();
-    },
+    promptQueueWait: recordDaemonPromptQueueWait,
+    promptDuration: recordDaemonPromptDuration,
+    cancelled: recordDaemonCancel,
   };
 
   // Allocate the audit ring + publisher in the daemon host (here)
