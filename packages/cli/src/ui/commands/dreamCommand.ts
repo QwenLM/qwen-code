@@ -16,6 +16,7 @@ export const dreamCommand: SlashCommand = {
     return t('Consolidate managed auto-memory topic files.');
   },
   kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'acp'] as const,
   action: async (context) => {
     const config = context.services.config;
     if (!config) {
@@ -40,6 +41,7 @@ export const dreamCommand: SlashCommand = {
     return {
       type: 'submit_prompt',
       content: prompt,
+      // onComplete is only invoked in interactive mode; ACP silently skips it.
       onComplete: async () => {
         await config
           .getMemoryManager()

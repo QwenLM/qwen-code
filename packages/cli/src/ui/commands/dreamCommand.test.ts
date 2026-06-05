@@ -11,6 +11,21 @@ import { dreamCommand } from './dreamCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 describe('dreamCommand', () => {
+  it('declares acp in supportedModes', () => {
+    expect(dreamCommand.supportedModes).toContain('acp');
+    expect(dreamCommand.supportedModes).toContain('interactive');
+  });
+
+  it('returns error when config is not loaded', async () => {
+    const context = createMockCommandContext({ services: { config: null } });
+    const result = await dreamCommand.action?.(context, '');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Config'),
+    });
+  });
+
   it('submits a consolidation prompt with the project-scoped transcript directory', async () => {
     const projectRoot = path.join('tmp', 'dream-project');
     const buildConsolidationPrompt = vi.fn().mockReturnValue('dream prompt');
