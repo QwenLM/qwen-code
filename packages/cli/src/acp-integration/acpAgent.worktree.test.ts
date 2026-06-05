@@ -146,7 +146,10 @@ vi.mock('../config/settings.js', () => ({
   SettingScope: {},
   loadSettings: vi.fn(),
 }));
-vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
+vi.mock('../config/config.js', () => ({
+  loadCliConfig: vi.fn(),
+  buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+}));
 vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
 vi.mock('../utils/acpModelUtils.js', () => ({
   formatAcpModelId: vi.fn(),

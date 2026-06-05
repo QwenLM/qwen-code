@@ -669,6 +669,19 @@
         }
       }
     },
+    "skills": {
+      "description": "Configuration for skills (SKILL.md-based capabilities) exposed to the model.",
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "description": "Skill names to hide. Matched case-insensitively against the skill name. Hidden skills do not appear in <available_skills> or as /<name> slash commands. UNION-merged across systemDefaults/user/workspace/system scopes — workspace cannot remove entries defined in higher scopes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "permissions": {
       "description": "Permission rules controlling tool usage. Rules are evaluated in priority order: deny > ask > allow.",
       "type": "object",

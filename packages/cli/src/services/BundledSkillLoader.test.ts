@@ -43,6 +43,10 @@ describe('BundledSkillLoader', () => {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue(undefined),
+      // BundledSkillLoader filters via this. Default empty so existing
+      // assertions about bundled skills surfacing stay true; per-test
+      // cases override.
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
     } as unknown as Config;
   });
 
@@ -328,5 +332,46 @@ describe('BundledSkillLoader', () => {
 
     expect(commands).toHaveLength(1);
     expect(commands[0].name).toBe('review');
+  });
+
+  describe('skills.disabled filter', () => {
+    it('omits disabled bundled skills (case-insensitive)', async () => {
+      mockSkillManager.listSkills.mockResolvedValue([
+        makeSkill({ name: 'review' }),
+        makeSkill({ name: 'batch' }),
+      ]);
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['REVIEW'.toLowerCase()]));
+
+      const loader = new BundledSkillLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+
+      expect(commands.map((c) => c.name)).toEqual(['batch']);
+    });
+
+    it('reflects provider mutations on each load (live read)', async () => {
+      mockSkillManager.listSkills.mockResolvedValue([
+        makeSkill({ name: 'review' }),
+      ]);
+      let disabled = new Set<string>();
+      (
+        mockConfig.getDisabledSkillNames as ReturnType<typeof vi.fn>
+      ).mockImplementation(() => disabled);
+
+      const loader = new BundledSkillLoader(mockConfig);
+
+      expect((await loader.loadCommands(signal)).map((c) => c.name)).toEqual([
+        'review',
+      ]);
+
+      disabled = new Set(['review']);
+      expect(await loader.loadCommands(signal)).toEqual([]);
+
+      disabled = new Set<string>();
+      expect((await loader.loadCommands(signal)).map((c) => c.name)).toEqual([
+        'review',
+      ]);
+    });
   });
 });

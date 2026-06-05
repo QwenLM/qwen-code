@@ -26,7 +26,11 @@ import v8 from 'node:v8';
 import React from 'react';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
-import { loadCliConfig, parseArguments } from './config/config.js';
+import {
+  buildDisabledSkillNamesProvider,
+  loadCliConfig,
+  parseArguments,
+} from './config/config.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
 import {
   ENV_CORRUPTED_PATH,
@@ -529,6 +533,7 @@ export async function main() {
           userHooks: settings.getUserHooks(),
           projectHooks: settings.getProjectHooks(),
         },
+        buildDisabledSkillNamesProvider(settings),
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -780,6 +785,7 @@ export async function main() {
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },
+      buildDisabledSkillNamesProvider(settings),
     );
     profileCheckpoint('after_load_cli_config');
 
