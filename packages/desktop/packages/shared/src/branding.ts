@@ -1,7 +1,7 @@
 /**
  * Centralized branding configuration.
  *
- * Supports multiple brand presets (e.g. "qwen-code", "modelstudio").
+ * Supports multiple brand presets (e.g. "qwen-code", "openwork").
  * Select at runtime via the CRAFT_BRAND environment variable.
  * Default: "qwen-code" (backward-compatible).
  */
@@ -96,31 +96,31 @@ const QWEN_CODE_BRAND: BrandConfig = {
 
 const BRANDS: Record<string, BrandConfig> = {
   'qwen-code': QWEN_CODE_BRAND,
-  modelstudio: {
-    id: 'modelstudio',
-    appName: 'ModelStudio Desktop',
-    appId: 'com.alibaba.modelstudio-desktop',
-    productName: 'ModelStudio Desktop',
-    artifactPrefix: 'ModelStudio-Desktop',
+  openwork: {
+    id: 'openwork',
+    appName: 'OpenWork',
+    appId: 'com.alibaba.openwork',
+    productName: 'OpenWork',
+    artifactPrefix: 'OpenWork',
     copyright: 'Copyright © 2026 Alibaba Group.',
-    coAuthorLine: 'Co-Authored-By: ModelStudio Desktop <noreply@alibaba.com>',
-    selfReferName: 'ModelStudio Desktop',
+    coAuthorLine: 'Co-Authored-By: OpenWork <noreply@alibaba.com>',
+    selfReferName: 'OpenWork',
     viewerUrl: 'https://agents.craft.do',
     helpMenuLinks: [
       {
         labelKey: 'menu.homepage',
-        url: 'https://github.com/modelstudioai',
+        url: 'https://github.com/modelstudioai/openwork',
         icon: 'House',
       },
     ],
     assets: {
-      resourceDir: 'resources/brands/modelstudio',
-      rendererSymbol: 'resources/brands/modelstudio/symbol.png',
-      macIcon: 'resources/brands/modelstudio/icon.icns',
-      winIcon: 'resources/brands/modelstudio/icon.png',
-      linuxIcon: 'resources/brands/modelstudio/icon.png',
-      devDockIcon: 'resources/brands/modelstudio/dock.png',
-      liquidGlassAssetsCar: 'resources/brands/modelstudio/Assets.car',
+      resourceDir: 'resources/brands/openwork',
+      rendererSymbol: 'resources/brands/openwork/symbol.png',
+      macIcon: 'resources/brands/openwork/icon.icns',
+      winIcon: 'resources/brands/openwork/icon.png',
+      linuxIcon: 'resources/brands/openwork/icon.png',
+      devDockIcon: 'resources/brands/openwork/dock.png',
+      liquidGlassAssetsCar: 'resources/brands/openwork/Assets.car',
     },
     credits: 'Architecture: craft-agents-oss | Agent: Qwen Code',
     creditsShort: 'Based on craft-agents-oss & Qwen Code',
