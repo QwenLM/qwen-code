@@ -88,6 +88,7 @@ describe('HookSystem', () => {
     mockHookEventHandler = {
       fireUserPromptSubmitEvent: vi.fn(),
       fireInstructionsLoadedEvent: vi.fn(),
+      fireUserPromptExpansionEvent: vi.fn(),
       fireStopEvent: vi.fn(),
       fireSessionStartEvent: vi.fn(),
       fireSessionEndEvent: vi.fn(),
@@ -230,6 +231,16 @@ describe('HookSystem', () => {
 
       expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
         'UserPromptSubmit',
+      );
+    });
+
+    it('should check the correct event name for UserPromptExpansion', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+
+      hookSystem.hasHooksForEvent('UserPromptExpansion');
+
+      expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
+        'UserPromptExpansion',
       );
     });
 
@@ -481,6 +492,86 @@ describe('HookSystem', () => {
 
       expect(result).toBeDefined();
       expect(result?.getAdditionalContext()).toBe('observed load');
+    });
+  });
+
+  describe('fireUserPromptExpansionEvent', () => {
+    it('should fire UserPromptExpansion event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptExpansionEvent(
+        'goal',
+        'write tests',
+        'expanded prompt',
+      );
+
+      expect(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).toHaveBeenCalledWith(
+        'goal',
+        'write tests',
+        'expanded prompt',
+        undefined,
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should return DefaultHookOutput with blocking decision', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'block' as HookDecision,
+          reason: 'Blocked by policy',
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptExpansionEvent(
+        'goal',
+        '',
+        'expanded prompt',
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.isBlockingDecision()).toBe(true);
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptExpansionEvent(
+        'goal',
+        '',
+        'expanded prompt',
+      );
+
+      expect(result).toBeUndefined();
     });
   });
 

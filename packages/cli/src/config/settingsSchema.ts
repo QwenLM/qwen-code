@@ -1760,7 +1760,7 @@ const SETTINGS_SCHEMA = {
         showInDialog: true,
         options: [
           { value: ApprovalMode.PLAN, label: 'Plan' },
-          { value: ApprovalMode.DEFAULT, label: 'Default' },
+          { value: ApprovalMode.DEFAULT, label: 'Ask permissions' },
           { value: ApprovalMode.AUTO_EDIT, label: 'Auto Edit' },
           { value: ApprovalMode.AUTO, label: 'Auto' },
           { value: ApprovalMode.YOLO, label: 'YOLO' },
@@ -2202,6 +2202,18 @@ const SETTINGS_SCHEMA = {
         default: [],
         description:
           'Hooks that execute before agent processing. Can modify prompts or inject context.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      UserPromptExpansion: {
+        type: 'array',
+        label: 'Prompt Expansion Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a slash command expands into a prompt.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,

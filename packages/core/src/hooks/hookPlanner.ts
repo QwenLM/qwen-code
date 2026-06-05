@@ -13,6 +13,7 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
 type HookMatcherTargetKind =
   | 'toolName'
+  | 'commandName'
   | 'agentType'
   | 'trigger'
   | 'sessionTrigger'
@@ -60,6 +61,11 @@ export function getHookMatcherTarget(
 
     case HookEventName.InstructionsLoaded:
       return { kind: 'filePath', target: context?.filePath ?? '' };
+
+    case HookEventName.UserPromptExpansion:
+      // Unlike UserPromptSubmit, command expansions are matchable by the slash
+      // command name that produced the submitted prompt.
+      return { kind: 'commandName', target: context?.commandName ?? '' };
 
     case HookEventName.UserPromptSubmit:
     case HookEventName.Stop:
@@ -162,6 +168,9 @@ export class HookPlanner {
       case 'toolName':
         return this.matchesToolName(matcher, matcherTarget.target);
 
+      case 'commandName':
+        return this.matchesCommandName(matcher, matcherTarget.target);
+
       case 'agentType':
         return this.matchesAgentType(matcher, matcherTarget.target);
 
@@ -245,6 +254,23 @@ export class HookPlanner {
   }
 
   /**
+   * Match slash command name against matcher pattern.
+   */
+  private matchesCommandName(matcher: string, commandName: string): boolean {
+    try {
+      // Attempt to treat the matcher as a regular expression.
+      const regex = new RegExp(matcher);
+      return regex.test(commandName);
+    } catch (error) {
+      // If it's not a valid regex, treat it as a literal string for an exact match.
+      debugLogger.warn(
+        `Invalid regex in hook matcher "${matcher}" for command "${commandName}", falling back to exact match: ${error}`,
+      );
+      return matcher === commandName;
+    }
+  }
+
+  /**
    * Match trigger/source against matcher pattern
    */
   private matchesTrigger(matcher: string, trigger: string): boolean {
@@ -292,6 +318,8 @@ export class HookPlanner {
  */
 export interface HookEventContext {
   toolName?: string;
+  /** Command name for UserPromptExpansion matcher filtering */
+  commandName?: string;
   trigger?: string;
   notificationType?: string;
   /** Agent type for SubagentStart/SubagentStop matcher filtering */

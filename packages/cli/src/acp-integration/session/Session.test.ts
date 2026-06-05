@@ -237,9 +237,6 @@ describe('Session', () => {
 
     mockToolRegistry = {
       getTool: vi.fn(),
-      // #executePrompt → #buildInitialSystemReminders calls
-      // getToolRegistry().ensureTool(ToolNames.AGENT) on every session.prompt(),
-      // so the default mock must provide it (#1151 / #3479).
       ensureTool: vi.fn().mockResolvedValue(true),
     };
     const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
@@ -261,12 +258,6 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(mockChatRecordingService),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
-      // #buildInitialSystemReminders iterates listSubagents() on every
-      // session.prompt(). Default to an empty list so tests that don't
-      // exercise subagent reminders don't need to stub it (#1151 / #3479).
-      getSubagentManager: vi.fn().mockReturnValue({
-        listSubagents: vi.fn().mockResolvedValue([]),
-      }),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
@@ -428,13 +419,14 @@ describe('Session', () => {
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
       ];
-      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       const snapshot = session.captureHistorySnapshot();
       session.restoreHistory(snapshot);
 
       expect(snapshot).toEqual(history);
       expect(mockChat.setHistory).toHaveBeenCalledWith(history);
+      expect(mockChat.getHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a prompt is running', () => {
@@ -3184,20 +3176,7 @@ describe('Session', () => {
         return capture;
       };
 
-      const stubEmptySubagents = () => {
-        (mockConfig as unknown as Record<string, unknown>)[
-          'getSubagentManager'
-        ] = vi.fn().mockReturnValue({
-          listSubagents: vi.fn().mockResolvedValue([]),
-        });
-        // ensureTool is called on the result of getToolRegistry(); add it.
-        (
-          mockToolRegistry as unknown as { ensureTool: () => Promise<boolean> }
-        ).ensureTool = vi.fn().mockResolvedValue(true);
-      };
-
       it('prepends plan-mode reminder when approval mode is PLAN (#1151)', async () => {
-        stubEmptySubagents();
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
         const capture = captureFirstTurnMessage();
 
@@ -3220,7 +3199,6 @@ describe('Session', () => {
       });
 
       it('does not prepend plan-mode reminder in default approval mode', async () => {
-        stubEmptySubagents();
         mockConfig.getApprovalMode = vi
           .fn()
           .mockReturnValue(ApprovalMode.DEFAULT);
@@ -3235,40 +3213,6 @@ describe('Session', () => {
           (p) => p.text && p.text.includes('Plan mode is active'),
         );
         expect(hasPlanReminder).toBe(false);
-      });
-
-      it('prepends subagent reminder when user-level subagents exist', async () => {
-        (mockConfig as unknown as Record<string, unknown>)[
-          'getSubagentManager'
-        ] = vi.fn().mockReturnValue({
-          listSubagents: vi.fn().mockResolvedValue([
-            { name: 'researcher', level: 'user' },
-            { name: 'planner', level: 'project' },
-            // builtin entries are filtered out, matching client.ts:853.
-            { name: 'builtin-helper', level: 'builtin' },
-          ]),
-        });
-        (
-          mockToolRegistry as unknown as { ensureTool: () => Promise<boolean> }
-        ).ensureTool = vi.fn().mockResolvedValue(true);
-        mockConfig.getApprovalMode = vi
-          .fn()
-          .mockReturnValue(ApprovalMode.DEFAULT);
-        const capture = captureFirstTurnMessage();
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: 'hi' }],
-        });
-
-        const reminder = capture.parts.find(
-          (p) =>
-            p.text &&
-            p.text.includes('researcher') &&
-            p.text.includes('planner'),
-        );
-        expect(reminder).toBeTruthy();
-        expect(reminder!.text).not.toContain('builtin-helper');
       });
     });
   });

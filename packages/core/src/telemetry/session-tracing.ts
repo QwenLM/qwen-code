@@ -70,20 +70,27 @@ export interface LLMRequestMetadata {
    */
   ttftMs?: number;
   /**
-   * Time from generateContent/generateContentStream entry to the start of the
-   * successful attempt (ms). Includes all failed retries + backoff sleeps.
-   * Populated by the retry layer in Phase 4b; undefined in Phase 4a.
+   * Time from `retryWithBackoff` entry to THIS attempt's start (ms). On a
+   * successful-attempt span this doubles as the total retry overhead before
+   * success. On a failed-attempt span this is the cumulative time elapsed in
+   * the retry budget at the moment this attempt fired (= attempts 1..N-1's
+   * durations + their backoff sleeps).
+   *
+   * Undefined when no retry context exists (direct calls bypassing
+   * retryWithBackoff: warmup, side-queries, etc.). Populated by the retry
+   * layer in Phase 4b via AsyncLocalStorage (`retryContext`).
    */
   requestSetupMs?: number;
   /**
-   * Final attempt number (1-based). 1 = no retries. Populated by the retry
-   * layer in Phase 4b; undefined in Phase 4a.
+   * 1-based monotonic attempt counter, populated by LoggingContentGenerator
+   * from `retryContext.getStore()`. Defaults to 1 when no retry context is
+   * present so dashboards filtering `WHERE attempt=1` include direct/warmup
+   * calls. Populated by Phase 4b retry layer for attempt >= 2.
    */
   attempt?: number;
   /**
-   * Sum of all backoff delays before the successful attempt (ms). 0 if no
-   * retries occurred. Populated by the retry layer in Phase 4b; undefined
-   * in Phase 4a.
+   * Sum of all backoff delays BEFORE this attempt started (ms). 0 for attempt 1.
+   * Undefined when no retry context exists. Populated by Phase 4b retry layer.
    */
   retryTotalDelayMs?: number;
 }
@@ -438,15 +445,21 @@ export function endLLMRequestSpan(
         endAttributes['retry_total_delay_ms'] = metadata.retryTotalDelayMs;
       }
       // Derived: sampling_ms = time from first user-visible chunk to end
-      // (== output generation time, excluding setup + first-token delay).
-      // Computable only when ttftMs is set. requestSetupMs defaults to 0
-      // when undefined (no retries) — this gives the correct sampling
-      // duration in both Phase 4a (no retry data) and Phase 4b (with).
+      // (== output generation time for THIS attempt).
+      //
+      // NOTE on Phase 4a bug fix: previous formula `duration - ttft - setup`
+      // double-counted the setup time. `duration_ms` is computed as
+      // `Date.now() - spanCtx.startTime`, and startTime is captured when
+      // `startLLMRequestSpan` runs — which is AFTER `requestSetupMs` worth of
+      // overhead has already passed. So the span's `duration_ms` only covers
+      // `ttft + sampling`, never the preceding setup. Subtracting `setup` again
+      // is wrong. In Phase 4a, `requestSetupMs` was always undefined so the
+      // bug was masked (0 subtraction). Phase 4b populates `requestSetupMs`
+      // with cumulative retry overhead, which would have clamped sampling_ms
+      // to 0 for every retried request — wiping out output-throughput data
+      // exactly when operators need it most. Fixed here.
       if (metadata.ttftMs !== undefined) {
-        const samplingMs = Math.max(
-          0,
-          duration - metadata.ttftMs - (metadata.requestSetupMs ?? 0),
-        );
+        const samplingMs = Math.max(0, duration - metadata.ttftMs);
         endAttributes['sampling_ms'] = samplingMs;
         // Derived: output tokens per second during sampling. Undefined when
         // sampling_ms is 0 (avoid divide-by-zero) or when outputTokens missing.

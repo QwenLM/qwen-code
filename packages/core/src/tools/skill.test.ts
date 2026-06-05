@@ -26,6 +26,7 @@ type SkillToolWithProtectedMethods = SkillTool & {
       returnDisplay: ToolResultDisplay;
     }>;
     getDescription: () => string;
+    setPromptId: (promptId: string) => void;
   };
 };
 
@@ -274,11 +275,19 @@ describe('SkillTool', () => {
             description: string;
             enum?: string[];
           };
+          args: {
+            type: string;
+            description: string;
+          };
         };
       };
       expect(properties.properties.skill.type).toBe('string');
       expect(properties.properties.skill.description).toBe(
-        'The skill name (no arguments). E.g., "pdf" or "xlsx"',
+        'The skill or command name. E.g., "pdf" or "xlsx"',
+      );
+      expect(properties.properties.args.type).toBe('string');
+      expect(properties.properties.args.description).toBe(
+        'Optional arguments for model-invocable slash commands.',
       );
       expect(properties.properties.skill.enum).toBeUndefined();
     });
@@ -297,11 +306,19 @@ describe('SkillTool', () => {
             description: string;
             enum?: string[];
           };
+          args: {
+            type: string;
+            description: string;
+          };
         };
       };
       expect(properties.properties.skill.type).toBe('string');
       expect(properties.properties.skill.description).toBe(
-        'The skill name (no arguments). E.g., "pdf" or "xlsx"',
+        'The skill or command name. E.g., "pdf" or "xlsx"',
+      );
+      expect(properties.properties.args.type).toBe('string');
+      expect(properties.properties.args.description).toBe(
+        'Optional arguments for model-invocable slash commands.',
       );
       expect(properties.properties.skill.enum).toBeUndefined();
     });
@@ -316,6 +333,14 @@ describe('SkillTool', () => {
     it('should reject empty skill', () => {
       const result = skillTool.validateToolParams({ skill: '' });
       expect(result).toBe('Parameter "skill" must be a non-empty string.');
+    });
+
+    it('should reject non-string args', () => {
+      const result = skillTool.validateToolParams({
+        skill: 'code-review',
+        args: 123 as unknown as string,
+      });
+      expect(result).toBe('Parameter "args" must be a string when provided.');
     });
 
     it('should reject non-existent skill', () => {
@@ -755,6 +780,58 @@ describe('SkillTool', () => {
       expect(tool.description).toContain('mcp-prompt-a');
     });
 
+    it('includes command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: 'dangerous input',
+      });
+
+      expect(invocation.getDescription()).toBe(
+        'Use skill: "mcp-prompt-a" with args: "dangerous input"',
+      );
+    });
+
+    it('includes empty command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: '',
+      });
+
+      expect(invocation.getDescription()).toBe(
+        'Use skill: "mcp-prompt-a" with args: ""',
+      );
+    });
+
+    it('truncates markdown-looking command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: `${'x'.repeat(121)} **bold** [link](https://example.com)`,
+      });
+
+      expect(invocation.getDescription()).toBe(
+        `Use skill: "mcp-prompt-a" with args: "${'x'.repeat(117)}..."`,
+      );
+    });
+
+    it('escapes markdown-looking command args in the confirmation description', async () => {
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({
+        skill: 'mcp-prompt-a',
+        args: '**bold** [link](https://example.com)',
+      });
+
+      expect(invocation.getDescription()).toBe(
+        'Use skill: "mcp-prompt-a" with args: "\\*\\*bold\\*\\* \\[link\\]\\(https://example\\.com\\)"',
+      );
+    });
+
     it('should not duplicate commands already present as file-based skills', async () => {
       // 'code-review' matches a skill in mockSkills → should be filtered out
       const commandsIncludingSkill = [
@@ -864,10 +941,10 @@ describe('SkillTool', () => {
 
       const invocation = (
         skillTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'mcp-prompt-a' });
+      ).createInvocation({ skill: 'mcp-prompt-a', args: 'with args' });
       const result = await invocation.execute();
 
-      expect(executor).toHaveBeenCalledWith('mcp-prompt-a');
+      expect(executor).toHaveBeenCalledWith('mcp-prompt-a', 'with args');
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Prompt content from MCP');
       expect(result.returnDisplay).toBe('Executed command: mcp-prompt-a');
@@ -887,6 +964,52 @@ describe('SkillTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('"mcp-prompt-a" not found');
+    });
+
+    it('should return executor errors without treating them as prompt content', async () => {
+      const executor = vi.fn().mockResolvedValue({
+        error: 'UserPromptExpansion blocked: Blocked by policy',
+      });
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe('UserPromptExpansion blocked: Blocked by policy');
+      expect(result.returnDisplay).toBe(
+        'UserPromptExpansion blocked: Blocked by policy',
+      );
+    });
+
+    it('logs prompt attribution when executor returns an error', async () => {
+      const executor = vi.fn().mockResolvedValue({
+        error: 'UserPromptExpansion blocked: Blocked by policy',
+      });
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      invocation.setPromptId('prompt-123');
+      await invocation.execute();
+
+      expect(logSkillLaunch).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          skill_name: 'mcp-prompt-a',
+          success: false,
+          prompt_id: 'prompt-123',
+        }),
+      );
     });
 
     it('should skip commandExecutor when no executor is registered', async () => {

@@ -100,7 +100,7 @@ function getPreviewData(config: Config, uiState: UIState) {
   return buildStatusLinePresetData({
     sessionId: stats.sessionId,
     version: config.getCliVersion(),
-    modelDisplayName: uiState.currentModel || config.getModel(),
+    modelDisplayName: config.getModelDisplayName(),
     reasoning: contentGeneratorConfig?.reasoning,
     currentDir: config.getTargetDir(),
     branch: uiState.branchName,

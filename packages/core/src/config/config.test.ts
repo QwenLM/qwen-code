@@ -3627,4 +3627,58 @@ describe('Model Switching and Config Updates', () => {
       );
     });
   });
+
+  describe('getModelDisplayName', () => {
+    it('should return resolved name when model is in registry', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4o',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getModelDisplayName()).toBe('GPT-4o');
+    });
+
+    it('should return raw modelId when model is not in registry', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'custom-runtime-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'gpt-4o',
+              name: 'GPT-4o',
+              baseUrl: 'https://api.openai.example.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getModelDisplayName()).toBe('custom-runtime-model');
+    });
+
+    it('should return raw modelId when currentAuthType is falsy', () => {
+      const config = new Config({
+        ...baseParams,
+        model: 'some-model',
+        // authType is not set
+      });
+
+      // getModel() returns 'some-model', getModelDisplayName returns it as-is
+      // because currentAuthType is falsy
+      expect(config.getModelDisplayName()).toBe('some-model');
+    });
+  });
 });

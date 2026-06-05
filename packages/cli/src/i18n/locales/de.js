@@ -382,7 +382,7 @@ export default {
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',
-  Default: 'Standard',
+  'Ask permissions': 'Berechtigung anfragen',
   'Auto Edit': 'Automatisch bearbeiten',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim-Modus ein-/ausschalten',
@@ -654,6 +654,8 @@ export default {
   'After tool execution fails': 'Wenn die Tool-Ausführung fehlschlägt',
   'When notifications are sent': 'Wenn Benachrichtigungen gesendet werden',
   'When the user submits a prompt': 'Wenn der Benutzer einen Prompt absendet',
+  'When a slash command expands into a prompt':
+    'Wenn ein Slash-Befehl zu einem Prompt erweitert wird',
   'When a new session is started': 'Wenn eine neue Sitzung gestartet wird',
   'Right before Qwen Code concludes its response':
     'Direkt bevor Qwen Code seine Antwort abschließt',
@@ -680,6 +682,8 @@ export default {
     'Die Eingabe an den Befehl ist JSON mit Benachrichtigungsnachricht und -typ.',
   'Input to command is JSON with original user prompt text.':
     'Die Eingabe an den Befehl ist JSON mit dem ursprünglichen Benutzer-Prompt-Text.',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'Die Eingabe an den Befehl ist JSON mit command_name, command_args und erweitertem Prompt-Text.',
   'Input to command is JSON with session start source.':
     'Die Eingabe an den Befehl ist JSON mit der Sitzungsstart-Quelle.',
   'Input to command is JSON with session end reason.':
@@ -708,6 +712,8 @@ export default {
     'stderr nur dem Benutzer anzeigen, aber mit Tool-Aufruf fortfahren',
   'block processing, erase original prompt, and show stderr to user only':
     'Verarbeitung blockieren, ursprünglichen Prompt löschen und stderr nur dem Benutzer anzeigen',
+  'block expanded prompt submission and show stderr to user only':
+    'Einreichen des erweiterten Prompts blockieren und stderr nur dem Benutzer anzeigen',
   'stdout shown to Qwen': 'stdout dem Qwen anzeigen',
   'show stderr to user only (blocking errors ignored)':
     'stderr nur dem Benutzer anzeigen (Blockierungsfehler ignoriert)',
@@ -803,13 +809,14 @@ export default {
   // Commands - Approval Mode
   // ============================================================================
   'Tool Approval Mode': 'Werkzeug-Genehmigungsmodus',
-  '{{mode}} mode': '{{mode}}-Modus',
   'Analyze only, do not modify files or execute commands':
     'Nur analysieren, keine Dateien ändern oder Befehle ausführen',
   'Require approval for file edits or shell commands':
     'Genehmigung für Dateibearbeitungen oder Shell-Befehle erforderlich',
   'Automatically approve file edits':
     'Dateibearbeitungen automatisch genehmigen',
+  'Use classifier to automatically approve safe tool calls':
+    'Klassifikator verwenden, um sichere Werkzeugaufrufe automatisch zu genehmigen',
   'Automatically approve all tools': 'Alle Werkzeuge automatisch genehmigen',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Arbeitsbereich-Genehmigungsmodus existiert und hat Vorrang. Benutzerebene-Änderung hat keine Wirkung.',

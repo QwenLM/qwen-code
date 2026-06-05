@@ -36,7 +36,6 @@ import {
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
-  getSubagentSystemReminder,
 } from './prompts.js';
 import {
   CompressionStatus,
@@ -95,7 +94,10 @@ import {
 } from '../utils/partUtils.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
+import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
+import { ApiRetryEvent } from '../telemetry/types.js';
+import { logApiRetry } from '../telemetry/loggers.js';
 
 // Hook types and utilities
 import {
@@ -1609,20 +1611,6 @@ export class GeminiClient {
       ) {
         const systemReminders = [];
 
-        // add subagent system reminder if there are subagents
-        const hasAgentTool = await this.config
-          .getToolRegistry()
-          .ensureTool(ToolNames.AGENT);
-        const subagents = (
-          await this.config.getSubagentManager().listSubagents()
-        )
-          .filter((subagent) => subagent.level !== 'builtin')
-          .map((subagent) => subagent.name);
-
-        if (hasAgentTool && subagents.length > 0) {
-          systemReminders.push(getSubagentSystemReminder(subagents));
-        }
-
         // add plan mode system reminder if approval mode is plan
         if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
           systemReminders.push(
@@ -2109,6 +2097,24 @@ export class GeminiClient {
         heartbeatFn: (info) => {
           process.stderr.write(
             `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+          );
+        },
+        // Phase 4b — emit ApiRetryEvent telemetry for HTTP-status retries.
+        // subagent_name read from subagentNameContext (active in catch block
+        // since the entire generateContent invocation runs inside the parent
+        // subagent's ALS frame when applicable).
+        onRetry: (info) => {
+          logApiRetry(
+            this.config,
+            new ApiRetryEvent({
+              model: currentAttemptModel,
+              promptId,
+              attemptNumber: info.attempt,
+              error: info.error,
+              statusCode: info.errorStatus,
+              retryDelayMs: info.delayMs,
+              subagentName: subagentNameContext.getStore(),
+            }),
           );
         },
       });

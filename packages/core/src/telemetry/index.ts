@@ -107,6 +107,7 @@ export {
   recordInvalidChunk,
   recordContentRetry,
   recordContentRetryFailure,
+  recordApiRetry,
   // Performance monitoring functions
   recordStartupPerformance,
   recordMemoryUsage,
@@ -172,4 +173,5 @@ export {
   addToolInputAttributes,
   addToolResultAttributes,
   truncateContent,
+  clearDetailedSpanState,
 } from './detailed-span-attributes.js';

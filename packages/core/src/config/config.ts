@@ -186,6 +186,8 @@ export {
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 };
 
+export type ModelInvocableCommandExecutorResult = string | { error: string };
+
 export enum ApprovalMode {
   PLAN = 'plan',
   DEFAULT = 'default',
@@ -708,6 +710,7 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  forkSubagentEnabled?: boolean;
   computerUseEnabled?: boolean;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
@@ -988,7 +991,10 @@ export class Config {
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
   private modelInvocableCommandsExecutor:
-    | ((name: string, args?: string) => Promise<string | null>)
+    | ((
+        name: string,
+        args?: string,
+      ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
@@ -1079,6 +1085,7 @@ export class Config {
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
+  private readonly forkSubagentEnabled: boolean = false;
   private readonly computerUseEnabled: boolean = true;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -1261,6 +1268,7 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
+    this.forkSubagentEnabled = params.forkSubagentEnabled ?? false;
     this.computerUseEnabled = params.computerUseEnabled ?? true;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
@@ -1443,6 +1451,14 @@ export class Config {
             switch (request.eventName) {
               case 'UserPromptSubmit':
                 result = await hookSystem.fireUserPromptSubmitEvent(
+                  (input['prompt'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'UserPromptExpansion':
+                result = await hookSystem.fireUserPromptExpansionEvent(
+                  (input['command_name'] as string) || '',
+                  (input['command_args'] as string) || '',
                   (input['prompt'] as string) || '',
                   signal,
                 );
@@ -2207,6 +2223,15 @@ export class Config {
     return (
       this.getContentGeneratorConfig()?.model || this.modelsConfig.getModel()
     );
+  }
+
+  /**
+   * Get the human-readable display name for the currently selected model.
+   * Resolves the model id to its name from the model registry.
+   * Falls back to the raw model id when the model is not found.
+   */
+  getModelDisplayName(): string {
+    return this.modelsConfig.getModelDisplayName(this.getModel());
   }
 
   onModelChange(listener: (model: string) => void): () => void {
@@ -3205,6 +3230,10 @@ export class Config {
     return this.cronEnabled;
   }
 
+  isForkSubagentEnabled(): boolean {
+    if (process.env['QWEN_CODE_ENABLE_FORK_SUBAGENT'] === '1') return true;
+    return this.forkSubagentEnabled;
+  }
   isComputerUseEnabled(): boolean {
     return this.computerUseEnabled;
   }
@@ -3862,7 +3891,10 @@ export class Config {
    * the command cannot be found or executed. Called by the CLI layer.
    */
   setModelInvocableCommandsExecutor(
-    executor: (name: string, args?: string) => Promise<string | null>,
+    executor: (
+      name: string,
+      args?: string,
+    ) => Promise<ModelInvocableCommandExecutorResult | null>,
   ): void {
     this.modelInvocableCommandsExecutor = executor;
   }
@@ -3872,7 +3904,10 @@ export class Config {
    * has been registered (e.g., in SDK mode).
    */
   getModelInvocableCommandsExecutor():
-    | ((name: string, args?: string) => Promise<string | null>)
+    | ((
+        name: string,
+        args?: string,
+      ) => Promise<ModelInvocableCommandExecutorResult | null>)
     | null {
     return this.modelInvocableCommandsExecutor;
   }
@@ -4141,7 +4176,7 @@ export class Config {
       const { registerComputerUseTools } = await import(
         '../tools/computer-use/index.js'
       );
-      await registerComputerUseTools(registerLazy);
+      await registerComputerUseTools(registerLazy, this);
     }
 
     // Register monitor tool
