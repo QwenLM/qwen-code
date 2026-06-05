@@ -9,9 +9,9 @@ import {
   buildDeferredToolsSection,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
-  getSubagentSystemReminder,
   getPlanModeSystemReminder,
   resolvePathFromEnv,
+  getCompressionPrompt,
 } from './prompts.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
@@ -454,31 +454,6 @@ describe('getCustomSystemPrompt', () => {
   });
 });
 
-describe('getSubagentSystemReminder', () => {
-  it('should format single agent type correctly', () => {
-    const result = getSubagentSystemReminder(['python']);
-
-    expect(result).toMatch(/^<system-reminder>.*<\/system-reminder>$/);
-    expect(result).toContain('available agent types are: python');
-    expect(result).toContain('PROACTIVELY use the');
-  });
-
-  it('should join multiple agent types with commas', () => {
-    const result = getSubagentSystemReminder(['python', 'web', 'analysis']);
-
-    expect(result).toContain(
-      'available agent types are: python, web, analysis',
-    );
-  });
-
-  it('should handle empty array', () => {
-    const result = getSubagentSystemReminder([]);
-
-    expect(result).toContain('available agent types are: ');
-    expect(result).toContain('<system-reminder>');
-  });
-});
-
 describe('buildDeferredToolsSection', () => {
   it('returns an empty string when no deferred tools are passed', () => {
     expect(buildDeferredToolsSection([])).toBe('');
@@ -582,8 +557,8 @@ describe('getPlanModeSystemReminder', () => {
   it('should include workflow instructions', () => {
     const result = getPlanModeSystemReminder();
 
-    expect(result).toContain("1. Answer the user's query comprehensively");
-    expect(result).toContain("2. When you're done researching");
+    expect(result).toContain('Iterative Planning Workflow');
+    expect(result).toContain('### The Loop');
     expect(result).toContain('exit_plan_mode tool');
   });
 
@@ -735,5 +710,72 @@ describe('resolvePathFromEnv helper function', () => {
         isDisabled: false,
       });
     });
+  });
+});
+
+describe('New Applications workflow deferred to skill', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('SANDBOX', undefined);
+  });
+
+  it('system prompt does not contain the full New Applications workflow', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const prompt = getCoreSystemPrompt();
+    expect(prompt).not.toContain(
+      'Autonomously implement and deliver a visually appealing',
+    );
+    expect(prompt).not.toContain('Websites (Frontend):');
+    expect(prompt).not.toContain('npx create-react-app');
+  });
+
+  it('system prompt references the new-app skill', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const prompt = getCoreSystemPrompt();
+    expect(prompt).toContain('new-app');
+    expect(prompt).toContain('## New Applications');
+  });
+});
+
+describe('getCompressionPrompt', () => {
+  it('uses the <state_snapshot> XML envelope with all 9 required section tags', () => {
+    const prompt = getCompressionPrompt();
+    expect(prompt).toContain('<state_snapshot>');
+    expect(prompt).toContain('</state_snapshot>');
+    expect(prompt).toContain('<primary_request_and_intent>');
+    expect(prompt).toContain('<key_technical_concepts>');
+    expect(prompt).toContain('<files_and_code_sections>');
+    expect(prompt).toContain('<errors_and_fixes>');
+    expect(prompt).toContain('<problem_solving>');
+    expect(prompt).toContain('<all_user_messages>');
+    expect(prompt).toContain('<pending_tasks>');
+    expect(prompt).toContain('<current_work>');
+    expect(prompt).toContain('<next_step>');
+  });
+
+  it('instructs the model to wrap reasoning in an <analysis> block', () => {
+    const prompt = getCompressionPrompt();
+    expect(prompt).toContain('<analysis>');
+    // Must signal that <analysis> is stripped (so the model knows it is a
+    // drafting scratchpad, not part of the final summary).
+    expect(prompt).toMatch(/<analysis>.*stripped|stripped.*<analysis>/is);
+  });
+
+  it('asks for the <all_user_messages> section to be chronological and inclusive', () => {
+    const prompt = getCompressionPrompt();
+    // The actual mandate text — verbatim-but-not-VERBATIM-policed.
+    expect(prompt).toMatch(/all user messages.*chronological/i);
+    expect(prompt).toContain('"ok"');
+    expect(prompt).toContain('"continue"');
+  });
+
+  it('does NOT include the resume trailer in the prompt body', () => {
+    // The trailer lives in postCompactAttachments.postProcessSummary, not in
+    // the prompt. Keeping it out of the prompt saves output tokens per
+    // compaction and prevents wording drift.
+    const prompt = getCompressionPrompt();
+    expect(prompt).not.toMatch(
+      /resume.*directly|continue the conversation from where it left off/i,
+    );
   });
 });

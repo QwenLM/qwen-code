@@ -83,6 +83,9 @@ describe('collectMemoryDiagnostics', () => {
       activeRequests: () => 3,
       openFileDescriptors: async () => 501,
       smapsRollup: async () => 'Rss: 5000 kB',
+      processTree: async () => {
+        throw new Error('not available');
+      },
       platform: 'linux',
       nodeVersion: 'v20.19.0',
     });
@@ -117,10 +120,13 @@ describe('collectMemoryDiagnostics', () => {
         },
       ],
       resourceUsage: {
-        maxRSS: 6,
+        maxRSS: 6 * 1024,
+        maxRSSRaw: 6,
+        maxRSSUnit: 'KiB',
         userCPUTime: 10,
         systemCPUTime: 20,
       },
+      processTree: null,
       activeHandles: 300,
       activeRequests: 3,
       openFileDescriptors: 501,
@@ -226,7 +232,7 @@ describe('collectMemoryDiagnostics', () => {
     );
   });
 
-  it('treats maxRSS as bytes on all platforms', async () => {
+  it('normalizes resourceUsage maxRSS from KiB to bytes', async () => {
     const diagnostics = await collectMemoryDiagnostics({
       memoryUsage: () => ({
         heapUsed: 100,
@@ -273,8 +279,70 @@ describe('collectMemoryDiagnostics', () => {
       nodeVersion: 'v20.19.0',
     });
 
-    // Node.js >=14.10.0 returns maxRSS in bytes on all platforms.
-    expect(diagnostics.resourceUsage.maxRSS).toBe(4_096);
+    expect(diagnostics.resourceUsage.maxRSS).toBe(4_096 * 1024);
+    expect(diagnostics.resourceUsage.maxRSSRaw).toBe(4_096);
+    expect(diagnostics.resourceUsage.maxRSSUnit).toBe('KiB');
+  });
+
+  it('includes process tree RSS when the optional probe is available', async () => {
+    const diagnostics = await collectMemoryDiagnostics({
+      memoryUsage: () => ({
+        heapUsed: 100,
+        heapTotal: 200,
+        rss: 300,
+        external: 10,
+        arrayBuffers: 5,
+      }),
+      heapStatistics: () => ({
+        heap_size_limit: 1_000,
+        total_heap_size: 200,
+        total_heap_size_executable: 0,
+        total_physical_size: 200,
+        used_heap_size: 100,
+        malloced_memory: 0,
+        peak_malloced_memory: 0,
+        does_zap_garbage: 0,
+        number_of_native_contexts: 1,
+        number_of_detached_contexts: 0,
+        total_available_size: 900,
+        total_global_handles_size: 0,
+        used_global_handles_size: 0,
+        external_memory: 10,
+      }),
+      resourceUsage: () => ({
+        userCPUTime: 10,
+        systemCPUTime: 20,
+        maxRSS: 4_096,
+        sharedMemorySize: 0,
+        unsharedDataSize: 0,
+        unsharedStackSize: 0,
+        minorPageFault: 0,
+        majorPageFault: 0,
+        swappedOut: 0,
+        fsRead: 0,
+        fsWrite: 0,
+        ipcSent: 0,
+        ipcReceived: 0,
+        signalsCount: 0,
+        voluntaryContextSwitches: 0,
+        involuntaryContextSwitches: 0,
+      }),
+      processTree: async () => ({
+        rootPid: 123,
+        processCount: 3,
+        rootRSS: 10 * 1024 * 1024,
+        treeRSS: 25 * 1024 * 1024,
+      }),
+      platform: 'darwin',
+      nodeVersion: 'v20.19.0',
+    });
+
+    expect(diagnostics.processTree).toEqual({
+      rootPid: 123,
+      processCount: 3,
+      rootRSS: 10 * 1024 * 1024,
+      treeRSS: 25 * 1024 * 1024,
+    });
   });
 
   it('treats unsupported optional probes as unavailable instead of failing', async () => {

@@ -107,6 +107,7 @@ export {
   recordInvalidChunk,
   recordContentRetry,
   recordContentRetryFailure,
+  recordApiRetry,
   // Performance monitoring functions
   recordStartupPerformance,
   recordMemoryUsage,
@@ -146,13 +147,23 @@ export {
   runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
+  startToolBlockedOnUserSpan,
+  endToolBlockedOnUserSpan,
+  startHookSpan,
+  endHookSpan,
   getActiveInteractionSpan,
+  truncateSpanError,
 } from './session-tracing.js';
 export type {
   StartInteractionOptions,
   EndInteractionOptions,
   LLMRequestMetadata,
   ToolSpanMetadata,
+  ToolBlockedDecision,
+  ToolBlockedSource,
+  HookEvent,
+  StartHookSpanOptions,
+  HookSpanMetadata,
 } from './session-tracing.js';
 export {
   addUserPromptAttributes,
@@ -162,4 +173,5 @@ export {
   addToolInputAttributes,
   addToolResultAttributes,
   truncateContent,
+  clearDetailedSpanState,
 } from './detailed-span-attributes.js';

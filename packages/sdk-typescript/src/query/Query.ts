@@ -293,6 +293,9 @@ export class Query implements AsyncIterable<SDKMessage> {
 
       await this.sendControlRequest(ControlRequestType.INITIALIZE, {
         hooks: null,
+        timeout: this.options.timeout?.canUseTool
+          ? { canUseTool: this.options.timeout.canUseTool }
+          : undefined,
         sdkMcpServers:
           Object.keys(sdkMcpServersForCli).length > 0
             ? sdkMcpServersForCli

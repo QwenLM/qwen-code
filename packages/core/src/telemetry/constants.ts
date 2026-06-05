@@ -29,6 +29,11 @@ export const EVENT_INVALID_CHUNK = 'qwen-code.chat.invalid_chunk';
 export const EVENT_CONTENT_RETRY = 'qwen-code.chat.content_retry';
 export const EVENT_CONTENT_RETRY_FAILURE =
   'qwen-code.chat.content_retry_failure';
+// Phase 4b — HTTP-status retry telemetry emitted by `retryWithBackoff` for
+// 429 / 5xx errors at LLM call sites. Distinct from EVENT_CONTENT_RETRY,
+// which is fired by geminiChat for InvalidStreamError retries on a separate
+// retry budget. See docs/design/telemetry-llm-request-timing-design.md.
+export const EVENT_API_RETRY = 'qwen-code.api_retry';
 export const EVENT_CONVERSATION_FINISHED = 'qwen-code.conversation_finished';
 export const EVENT_MALFORMED_JSON_RESPONSE =
   'qwen-code.malformed_json_response';
@@ -64,3 +69,7 @@ export const SPAN_INTERACTION = 'qwen-code.interaction';
 export const SPAN_LLM_REQUEST = 'qwen-code.llm_request';
 export const SPAN_TOOL = 'qwen-code.tool';
 export const SPAN_TOOL_EXECUTION = 'qwen-code.tool.execution';
+/** Brackets the time a tool spends in `awaiting_approval` waiting on the user. */
+export const SPAN_TOOL_BLOCKED_ON_USER = 'qwen-code.tool.blocked_on_user';
+/** Wraps each pre/post-tool-use hook fire site for per-hook latency / decision tracking. */
+export const SPAN_HOOK = 'qwen-code.hook';

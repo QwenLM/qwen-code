@@ -6,7 +6,6 @@
 
 import type React from 'react';
 import { useState, useMemo } from 'react';
-import { AuthType } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { theme } from '../semantic-colors.js';
@@ -23,11 +22,8 @@ import {
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
-} from '../../auth/allProviders.js';
-import {
-  resolveMetadataKey,
   type ProviderConfig,
-} from '../../auth/providerConfig.js';
+} from '@qwen-code/qwen-code-core';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
 
@@ -39,13 +35,11 @@ type ViewLevel =
   | 'main'
   | 'alibaba-select'
   | 'thirdparty-select'
-  | 'oauth-select'
   | 'provider-setup';
 
 type MainOption =
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
-  | 'OAUTH'
   | 'CUSTOM_PROVIDER';
 
 // ---------------------------------------------------------------------------
@@ -70,15 +64,6 @@ const MAIN_ITEMS = [
     value: 'THIRD_PARTY_PROVIDERS' as MainOption,
   },
   {
-    key: 'OAUTH',
-    title: t('OAuth'),
-    label: t('OAuth'),
-    description: t(
-      'Open a browser, sign in, and let the CLI finish provider setup',
-    ),
-    value: 'OAUTH' as MainOption,
-  },
-  {
     key: 'CUSTOM_PROVIDER',
     title: t('Custom Provider'),
     label: t('Custom Provider'),
@@ -86,25 +71,6 @@ const MAIN_ITEMS = [
       'Manually connect a local server, proxy, or unsupported provider',
     ),
     value: 'CUSTOM_PROVIDER' as MainOption,
-  },
-];
-
-const OAUTH_ITEMS = [
-  {
-    key: 'openrouter',
-    title: t('OpenRouter'),
-    label: t('OpenRouter'),
-    description: t(
-      'Browser OAuth · Auto-configure API key and OpenRouter models',
-    ),
-    value: 'openrouter',
-  },
-  {
-    key: 'qwen-oauth-discontinued',
-    title: t('Qwen'),
-    label: t('Qwen'),
-    description: t('Discontinued — switch to Coding Plan or API Key'),
-    value: 'qwen-oauth-discontinued',
   },
 ];
 
@@ -140,10 +106,9 @@ function getStepLabel(step: string | null, p: ProviderConfig): string {
 // ---------------------------------------------------------------------------
 
 const VIEW_TITLES: Record<string, string> = {
-  main: t('Select Authentication Method'),
+  main: t('Connect a Provider'),
   'alibaba-select': t('Alibaba ModelStudio · Access Method'),
   'thirdparty-select': t('Third-party Providers · Provider'),
-  'oauth-select': t('Select OAuth Provider'),
 };
 
 // ---------------------------------------------------------------------------
@@ -152,15 +117,10 @@ const VIEW_TITLES: Record<string, string> = {
 
 export function AuthDialog(): React.JSX.Element {
   const {
-    auth: { pendingAuthType, authError },
+    auth: { authError },
   } = useUIState();
   const {
-    auth: {
-      handleAuthSelect: onAuthSelect,
-      handleProviderSubmit,
-      handleOpenRouterSubmit,
-      onAuthError,
-    },
+    auth: { closeAuthDialog, handleProviderSubmit, onAuthError },
   } = useUIActions();
   const config = useConfig();
   const settings = useSettings();
@@ -219,22 +179,12 @@ export function AuthDialog(): React.JSX.Element {
     pushView('provider-setup');
   };
 
-  const handleOAuthSelect = (value: string) => {
-    clearErrors();
-    if (value === 'openrouter') {
-      void handleOpenRouterSubmit();
-      return;
-    }
-    setErrorMessage(
-      t(
-        'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
-      ),
-    );
-  };
-
   const subMenus: Record<
     string,
-    { items: typeof OAUTH_ITEMS; onSelect: (v: string) => void }
+    {
+      items: Array<ReturnType<typeof providerToItem>>;
+      onSelect: (v: string) => void;
+    }
   > = {
     'alibaba-select': {
       items: alibabaItems,
@@ -244,7 +194,6 @@ export function AuthDialog(): React.JSX.Element {
       items: thirdPartyItems,
       onSelect: handleProviderSelect,
     },
-    'oauth-select': { items: OAUTH_ITEMS, onSelect: handleOAuthSelect },
   };
 
   const activeSubMenu = subMenus[viewLevel];
@@ -256,18 +205,16 @@ export function AuthDialog(): React.JSX.Element {
     contentGenConfig?.baseUrl,
     contentGenConfig?.apiKeyEnvKey,
   );
-  const isCurrentlyCodingPlan = !!(
-    matchedProvider && resolveMetadataKey(matchedProvider)
-  );
 
+  // Land on the tab that matches the active provider's uiGroup so a DeepSeek
+  // / MiniMax / OpenRouter user opens Third-party Providers, not Alibaba.
+  // (resolveMetadataKey returns config.id for *any* provider with a static
+  // models[], so it can't be used to detect "Alibaba" specifically.)
   const defaultMainIndex = useMemo(() => {
-    const currentAuth = pendingAuthType ?? config.getAuthType();
-    if (!currentAuth) return 0;
-    if (currentAuth === AuthType.QWEN_OAUTH) return 2;
-    if (currentAuth === AuthType.USE_OPENAI && isCurrentlyCodingPlan) return 0;
-    return 1;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingAuthType, isCurrentlyCodingPlan]);
+    if (matchedProvider?.uiGroup === 'third-party') return 1;
+    if (matchedProvider?.uiGroup === 'custom') return 2;
+    return 0;
+  }, [matchedProvider]);
 
   // -- Handlers -------------------------------------------------------------
 
@@ -279,9 +226,6 @@ export function AuthDialog(): React.JSX.Element {
         break;
       case 'THIRD_PARTY_PROVIDERS':
         pushView('thirdparty-select');
-        break;
-      case 'OAUTH':
-        pushView('oauth-select');
         break;
       case 'CUSTOM_PROVIDER':
         setupFlow.start(customProvider, undefined, existingEnv);
@@ -305,12 +249,12 @@ export function AuthDialog(): React.JSX.Element {
         if (config.getAuthType() === undefined) {
           setErrorMessage(
             t(
-              'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+              'You must connect a provider to proceed. Press Ctrl+C again to exit.',
             ),
           );
           return;
         }
-        onAuthSelect(undefined);
+        closeAuthDialog();
       }
     },
     { isActive: true },
@@ -401,7 +345,7 @@ export function AuthDialog(): React.JSX.Element {
       {viewLevel === 'main' && (
         <>
           <Box marginY={1}>
-            <Text color={theme.border.default}>{'\u2500'.repeat(80)}</Text>
+            <Text color={theme.border.default}>{'─'.repeat(80)}</Text>
           </Box>
           <Box>
             <Text color={theme.text.primary}>

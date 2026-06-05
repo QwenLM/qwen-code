@@ -400,5 +400,28 @@ describe('detailed-span-attributes', () => {
       addSystemPromptAttributes(config, span2, 'Same prompt');
       expect(span2.attrs['system_prompt']).toBe('Same prompt');
     });
+
+    it('resets seenHashes so tool schema full body is re-emitted after compression', () => {
+      const config = createMockConfig();
+      const tools = [
+        { name: 'Read', description: 'Read a file', parameters: {} },
+      ];
+
+      const span1 = createMockSpan();
+      addToolSchemaAttributes(config, span1, tools);
+      expect(span1.events.length).toBe(1);
+      expect(span1.events[0]!.attributes['tool_definition']).toBeDefined();
+
+      const span2 = createMockSpan();
+      addToolSchemaAttributes(config, span2, tools);
+      expect(span2.events.length).toBe(0);
+
+      clearDetailedSpanState();
+
+      const span3 = createMockSpan();
+      addToolSchemaAttributes(config, span3, tools);
+      expect(span3.events.length).toBe(1);
+      expect(span3.events[0]!.attributes['tool_definition']).toBeDefined();
+    });
   });
 });

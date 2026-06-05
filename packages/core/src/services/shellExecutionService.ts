@@ -21,6 +21,7 @@ import {
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 const { Terminal } = pkg;
 
@@ -550,6 +551,7 @@ export class ShellExecutionService {
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           PAGER: 'cat',
+          ...getShellContextEnvVars(),
         },
       });
 
@@ -1152,6 +1154,7 @@ export class ShellExecutionService {
           TERM: 'xterm-256color',
           PAGER: shellExecutionConfig.pager ?? 'cat',
           GIT_PAGER: shellExecutionConfig.pager ?? 'cat',
+          ...getShellContextEnvVars(),
         },
         handleFlowControl: true,
       });

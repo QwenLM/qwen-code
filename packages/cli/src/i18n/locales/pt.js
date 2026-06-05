@@ -18,6 +18,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Modo shell',
   'YOLO mode': 'Modo YOLO',
+  'Auto mode': 'Modo auto',
   'plan mode': 'modo planejamento',
   'auto-accept edits': 'aceitar edições automaticamente',
   'Accepting edits': 'Aceitando edições',
@@ -183,8 +184,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'abrir documentação completa do Qwen Code no seu navegador',
   'Configuration not available.': 'Configuração não disponível.',
-  'Configure authentication information for login':
-    'Configurar informações de autenticação para login',
+  'Connect an LLM provider': 'Conectar a um provedor LLM',
   'Copy the last result or code snippet to clipboard':
     'Copiar o último resultado ou trecho de código para a área de transferência',
 
@@ -404,7 +404,7 @@ export default {
   Text: 'Texto',
   JSON: 'JSON',
   Plan: 'Planejamento',
-  Default: 'Padrão',
+  'Ask permissions': 'Pedir permissão',
   'Auto Edit': 'Edição Automática',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'alternar modo vim ligado/desligado',
@@ -660,6 +660,8 @@ export default {
   'After tool execution fails': 'Após a falha da execução da ferramenta',
   'When notifications are sent': 'Quando notificações são enviadas',
   'When the user submits a prompt': 'Quando o usuário envia um prompt',
+  'When a slash command expands into a prompt':
+    'Quando um comando slash se expande em um prompt',
   'When a new session is started': 'Quando uma nova sessão é iniciada',
   'Right before Qwen Code concludes its response':
     'Logo antes do Qwen Code concluir sua resposta',
@@ -685,6 +687,8 @@ export default {
     'A entrada para o comando é JSON com mensagem e tipo de notificação.',
   'Input to command is JSON with original user prompt text.':
     'A entrada para o comando é JSON com o texto original do prompt do usuário.',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'A entrada para o comando é JSON com command_name, command_args e o texto do prompt expandido.',
   'Input to command is JSON with session start source.':
     'A entrada para o comando é JSON com a fonte de início da sessão.',
   'Input to command is JSON with session end reason.':
@@ -713,6 +717,8 @@ export default {
     'mostrar stderr apenas ao usuário mas continuar com chamada de ferramenta',
   'block processing, erase original prompt, and show stderr to user only':
     'bloquear processamento, apagar prompt original e mostrar stderr apenas ao usuário',
+  'block expanded prompt submission and show stderr to user only':
+    'bloquear envio do prompt expandido e mostrar stderr apenas ao usuário',
   'stdout shown to Qwen': 'stdout mostrado ao Qwen',
   'show stderr to user only (blocking errors ignored)':
     'mostrar stderr apenas ao usuário (erros de bloqueio ignorados)',
@@ -807,13 +813,14 @@ export default {
   // Commands - Approval Mode
   // ============================================================================
   'Tool Approval Mode': 'Modo de Aprovação de Ferramenta',
-  '{{mode}} mode': 'Modo {{mode}}',
   'Analyze only, do not modify files or execute commands':
     'Apenas analisar, não modificar arquivos nem executar comandos',
   'Require approval for file edits or shell commands':
     'Exigir aprovação para edições de arquivos ou comandos shell',
   'Automatically approve file edits':
     'Aprovar automaticamente edições de arquivos',
+  'Use classifier to automatically approve safe tool calls':
+    'Usar o classificador para aprovar automaticamente chamadas seguras de ferramentas',
   'Automatically approve all tools':
     'Aprovar automaticamente todas as ferramentas',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
@@ -824,6 +831,7 @@ export default {
   'Auto-memory: {{status}}': 'Memória automática: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Consolidação automática: {{status}} · {{lastDream}} · /dream para executar',
+  'Auto-skill: {{status}}': 'Habilidade automática: {{status}}',
   never: 'nunca',
   on: 'ativado',
   off: 'desativado',
@@ -1080,9 +1088,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Bem-vindo de volta! (Última atualização: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Objetivo Geral:',
-  'Select Authentication Method': 'Selecionar Método de Autenticação',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'Você deve selecionar um método de autenticação para prosseguir. Pressione Ctrl+C novamente para sair.',
+  'Connect a Provider': 'Conectar um provedor',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'Você deve conectar um provedor para prosseguir. Pressione Ctrl+C novamente para sair.',
   'Terms of Services and Privacy Notice':
     'Termos de Serviço e Aviso de Privacidade',
   'Qwen OAuth': 'Qwen OAuth',

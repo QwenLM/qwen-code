@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type {
+  ActiveGoal,
   SubagentConfig,
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
@@ -246,13 +247,19 @@ export interface ToolProgressStreamEvent {
   content: McpToolProgressData;
 }
 
+export interface ActiveGoalStreamEvent {
+  type: 'active_goal';
+  active_goal: ActiveGoal | null;
+}
+
 export type StreamEvent =
   | MessageStartStreamEvent
   | ContentBlockStartEvent
   | ContentBlockDeltaEvent
   | ContentBlockStopEvent
   | MessageStopStreamEvent
-  | ToolProgressStreamEvent;
+  | ToolProgressStreamEvent
+  | ActiveGoalStreamEvent;
 
 export interface CLIPartialAssistantMessage {
   type: 'stream_event';
@@ -357,6 +364,9 @@ export interface CLIMcpServerConfig {
 export interface CLIControlInitializeRequest {
   subtype: 'initialize';
   hooks?: HookRegistration[] | null;
+  timeout?: {
+    canUseTool?: number;
+  };
   /**
    * SDK MCP servers config
    * These are MCP servers running in the SDK process, connected via control plane.

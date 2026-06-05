@@ -57,6 +57,9 @@ describe('ExitWorktreeTool — WorktreeSession sidecar cleanup', () => {
       getTargetDir: () => repoRoot,
       getSessionId: () => sessionId,
       getSessionService: () => sessionService,
+      // Phase D-2: EnterWorktreeTool (used here for setup) reads this
+      // setting; return empty so the symlink loop is a no-op.
+      getWorktreeSymlinkDirectories: () => [],
     } as unknown as Config;
   }
 

@@ -40,7 +40,6 @@ import type { Content } from '@google/genai';
 import type {
   Agent,
   AuthenticateRequest,
-  AuthMethod,
   CancelNotification,
   ClientCapabilities,
   InitializeRequest,
@@ -69,7 +68,10 @@ import type {
   SetSessionModeRequest,
   SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
-import { buildAuthMethods } from './authMethods.js';
+import {
+  buildAuthMethods,
+  pickAuthMethodsForAuthRequired,
+} from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
 import type { LoadedSettings } from '../config/settings.js';
@@ -1945,7 +1947,7 @@ class QwenAgent implements Agent {
     const selectedType = config.getModelsConfig().getCurrentAuthType();
     if (!selectedType) {
       throw RequestError.authRequired(
-        { authMethods: this.pickAuthMethodsForAuthRequired() },
+        { authMethods: pickAuthMethodsForAuthRequired() },
         'Use Qwen Code CLI to authenticate first.',
       );
     }
@@ -1956,49 +1958,11 @@ class QwenAgent implements Agent {
       debugLogger.error(`Authentication failed: ${e}`);
       throw RequestError.authRequired(
         {
-          authMethods: this.pickAuthMethodsForAuthRequired(selectedType, e),
+          authMethods: pickAuthMethodsForAuthRequired(selectedType),
         },
         'Authentication failed: ' + (e as Error).message,
       );
     }
-  }
-
-  private pickAuthMethodsForAuthRequired(
-    selectedType?: AuthType | string,
-    error?: unknown,
-  ): AuthMethod[] {
-    const authMethods = buildAuthMethods();
-    const errorMessage = this.extractErrorMessage(error);
-    if (
-      errorMessage?.includes('qwen-oauth') ||
-      errorMessage?.includes('Qwen OAuth')
-    ) {
-      const qwenOAuthMethods = authMethods.filter(
-        (m) => m.id === AuthType.QWEN_OAUTH,
-      );
-      return qwenOAuthMethods.length ? qwenOAuthMethods : authMethods;
-    }
-
-    if (selectedType) {
-      const matched = authMethods.filter((m) => m.id === selectedType);
-      return matched.length ? matched : authMethods;
-    }
-
-    return authMethods;
-  }
-
-  private extractErrorMessage(error?: unknown): string | undefined {
-    if (error instanceof Error) return error.message;
-    if (
-      typeof error === 'object' &&
-      error != null &&
-      'message' in error &&
-      typeof error.message === 'string'
-    ) {
-      return error.message;
-    }
-    if (typeof error === 'string') return error;
-    return undefined;
   }
 
   private setupFileSystem(config: Config): void {

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpanStatusCode } from '@opentelemetry/api';
+import { SpanStatusCode, type Context } from '@opentelemetry/api';
 
 const mockState = vi.hoisted(() => ({
   sdkInitialized: true,
@@ -132,9 +132,16 @@ import {
   runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
+  startToolBlockedOnUserSpan,
+  endToolBlockedOnUserSpan,
+  startHookSpan,
+  endHookSpan,
   getActiveInteractionSpan,
   clearSessionTracingForTesting,
+  runTTLSweepForTesting,
+  truncateSpanError,
 } from './session-tracing.js';
+import { setSessionContext } from './session-context.js';
 
 function createMockConfig(
   overrides: Partial<{
@@ -274,6 +281,52 @@ describe('session-tracing', () => {
     });
   });
 
+  describe('interaction span — trace context (#4486)', () => {
+    it('attaches to the session root context returned by getSessionContext', () => {
+      const fakeRoot = { __sessionRoot: true } as unknown as Context;
+      setSessionContext(fakeRoot, 'test-session');
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toBe(fakeRoot);
+    });
+
+    it('anchors at session root even when an unrelated OTel span is active', () => {
+      const fakeRoot = { __sessionRoot: true } as unknown as Context;
+      setSessionContext(fakeRoot, 'test-session');
+      mockState.activeOtelSpan = { name: 'unrelated-wrapper-span' };
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toBe(fakeRoot);
+    });
+
+    it('falls back to otelContext.active() when no session context is set', () => {
+      // Intentionally NOT calling setSessionContext — exercises the fallback.
+      const fakeActive = { kind: 'fake-active-span' };
+      mockState.activeOtelSpan = fakeActive;
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toMatchObject({ __activeSpan: fakeActive });
+    });
+  });
+
   describe('LLM request spans', () => {
     it('creates and ends an LLM request span', () => {
       const span = startLLMRequestSpan('test-model', 'prompt-llm');
@@ -369,6 +422,223 @@ describe('session-tracing', () => {
 
       // endLLMRequestSpan with noop should be safe
       endLLMRequestSpan(span, { success: true });
+    });
+  });
+
+  describe('LLM request spans — Phase 4a (timing decomposition + GenAI dual-emit)', () => {
+    it('startLLMRequestSpan dual-emits gen_ai.request.model alongside qwen-code.model', () => {
+      const span = startLLMRequestSpan('test-model', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['qwen-code.model']).toBe('test-model');
+      expect(attrs['gen_ai.request.model']).toBe('test-model');
+    });
+
+    it('endLLMRequestSpan dual-emits gen_ai.usage.input_tokens / output_tokens', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 100,
+        outputTokens: 50,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['input_tokens']).toBe(100);
+      expect(attrs['gen_ai.usage.input_tokens']).toBe(100);
+      expect(attrs['output_tokens']).toBe(50);
+      expect(attrs['gen_ai.usage.output_tokens']).toBe(50);
+    });
+
+    it('endLLMRequestSpan dual-emits gen_ai.usage.cached_tokens when present', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 100,
+        cachedInputTokens: 40,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['cached_input_tokens']).toBe(40);
+      expect(attrs['gen_ai.usage.cached_tokens']).toBe(40);
+    });
+
+    it('endLLMRequestSpan omits cached_input_tokens when undefined', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true, inputTokens: 100 });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['cached_input_tokens']).toBeUndefined();
+      expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan emits cached_input_tokens === 0 (cache miss is meaningful info, not undefined)', () => {
+      // Providers that report 0 cached tokens are signaling an explicit cache
+      // miss. Distinct from undefined ("we don't know"). Both attribute names
+      // must propagate the literal 0.
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 100,
+        cachedInputTokens: 0,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['cached_input_tokens']).toBe(0);
+      expect(attrs['gen_ai.usage.cached_tokens']).toBe(0);
+    });
+
+    it('endLLMRequestSpan writes ttft_ms and dual-emits gen_ai.server.time_to_first_token (in seconds)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 234,
+        durationMs: 1000,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['ttft_ms']).toBe(234);
+      // Spec uses seconds as double — 234ms → 0.234s
+      expect(attrs['gen_ai.server.time_to_first_token']).toBeCloseTo(0.234, 6);
+    });
+
+    it('endLLMRequestSpan omits ttft_ms when undefined (non-streaming or aborted before first chunk)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true, durationMs: 500 });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['ttft_ms']).toBeUndefined();
+      expect(attrs['gen_ai.server.time_to_first_token']).toBeUndefined();
+      expect(attrs['sampling_ms']).toBeUndefined();
+      expect(attrs['output_tokens_per_second']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan derives sampling_ms when ttftMs is set (no requestSetup)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1000,
+      });
+
+      // sampling_ms = duration - ttft = 1000 - 200 (setup is NOT subtracted —
+      // duration_ms only covers ttft + sampling, never the setup phase that
+      // precedes the span. See Phase 4b commit fixing the formula bug.)
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(800);
+    });
+
+    it('endLLMRequestSpan does NOT subtract requestSetupMs from sampling_ms (Phase 4b bug fix)', () => {
+      // Phase 4a's formula `duration - ttft - setup` double-counted setup
+      // because duration_ms ALREADY excludes setup (span starts after setup).
+      // Phase 4b populates requestSetupMs with cumulative retry overhead —
+      // if the formula still subtracted setup, sampling_ms would clamp to 0
+      // for every retried request, wiping output-throughput data.
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        requestSetupMs: 300, // would yield 500 under old formula; we want 800
+        durationMs: 1000,
+      });
+
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(800);
+      // request_setup_ms is still emitted as its own attribute — operators can
+      // see the retry overhead AND the sampling time independently.
+      expect(mockSpans[0]!.attributes['request_setup_ms']).toBe(300);
+    });
+
+    it('endLLMRequestSpan clamps sampling_ms to 0 when ttft exceeds duration (clock skew)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 1500,
+        durationMs: 1000,
+      });
+
+      // Math.max(0, 1000 - 1500) = 0 — only triggers when ttft > duration,
+      // which in practice means clock drift or a measurement bug.
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(0);
+    });
+
+    it('endLLMRequestSpan derives output_tokens_per_second from sampling_ms + outputTokens', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1200,
+        outputTokens: 500,
+      });
+
+      // sampling_ms = 1000ms = 1s; otps = 500 / 1.0 = 500
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(1000);
+      expect(mockSpans[0]!.attributes['output_tokens_per_second']).toBe(500);
+    });
+
+    it('endLLMRequestSpan rounds output_tokens_per_second to 2 decimals', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1325, // sampling_ms = 1125
+        outputTokens: 100, // otps = 100 / 1.125 = 88.888…
+      });
+
+      expect(mockSpans[0]!.attributes['output_tokens_per_second']).toBe(88.89);
+    });
+
+    it('endLLMRequestSpan omits output_tokens_per_second when sampling_ms == 0', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 1000,
+        durationMs: 1000,
+        outputTokens: 50,
+      });
+
+      // sampling_ms = 0 → otps would be Infinity, must be omitted
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(0);
+      expect(
+        mockSpans[0]!.attributes['output_tokens_per_second'],
+      ).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan omits output_tokens_per_second when outputTokens missing', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1000,
+      });
+
+      expect(
+        mockSpans[0]!.attributes['output_tokens_per_second'],
+      ).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan writes Phase 4b retry placeholders when caller provides them', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        attempt: 3,
+        requestSetupMs: 4500,
+        retryTotalDelayMs: 4200,
+        durationMs: 5000,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['attempt']).toBe(3);
+      expect(attrs['request_setup_ms']).toBe(4500);
+      expect(attrs['retry_total_delay_ms']).toBe(4200);
+    });
+
+    it('endLLMRequestSpan omits Phase 4b fields when caller does not provide them (Phase 4a default)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true, durationMs: 500 });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['attempt']).toBeUndefined();
+      expect(attrs['request_setup_ms']).toBeUndefined();
+      expect(attrs['retry_total_delay_ms']).toBeUndefined();
     });
   });
 
@@ -534,6 +804,248 @@ describe('session-tracing', () => {
       expect(record?.statuses).toHaveLength(1);
       expect(record?.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
       expect(record?.statuses[0]!.message).toBe('Tool execution failed');
+    });
+  });
+
+  describe('blocked_on_user spans (#3731 Phase 2)', () => {
+    it('parents the blocked span under the explicitly-passed tool span', () => {
+      const toolSpan = startToolSpan('Bash', { 'tool.call_id': 'c1' });
+      const blockedSpan = startToolBlockedOnUserSpan(toolSpan, {
+        tool_name: 'Bash',
+        call_id: 'c1',
+      });
+
+      const blockedRecord = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.blocked_on_user',
+      );
+      expect(blockedRecord).toBeDefined();
+      // Parent context carries the tool span via setSpan()'s __parentSpan tag.
+      expect(blockedRecord?.parentContext).toMatchObject({
+        __parentSpan: toolSpan,
+      });
+      expect(blockedRecord?.attributes['tool.name']).toBe('Bash');
+      expect(blockedRecord?.attributes['tool.call_id']).toBe('c1');
+
+      endToolBlockedOnUserSpan(blockedSpan, {
+        decision: 'proceed_once',
+        source: 'cli',
+      });
+      endToolSpan(toolSpan, { success: true });
+    });
+
+    it('records decision/source attributes on end and leaves status UNSET', () => {
+      const toolSpan = startToolSpan('Bash');
+      const blockedSpan = startToolBlockedOnUserSpan(toolSpan);
+      endToolBlockedOnUserSpan(blockedSpan, {
+        decision: 'cancel',
+        source: 'cli',
+      });
+
+      const blockedRecord = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.blocked_on_user',
+      );
+      expect(blockedRecord?.ended).toBe(true);
+      expect(blockedRecord?.attributes['decision']).toBe('cancel');
+      expect(blockedRecord?.attributes['source']).toBe('cli');
+      // Waiting on the user is neither OK nor ERROR — status stays UNSET.
+      expect(blockedRecord?.statuses).toHaveLength(0);
+    });
+
+    it('is idempotent — second end is a no-op', () => {
+      const toolSpan = startToolSpan('Bash');
+      const blockedSpan = startToolBlockedOnUserSpan(toolSpan);
+      endToolBlockedOnUserSpan(blockedSpan, { decision: 'proceed_once' });
+      endToolBlockedOnUserSpan(blockedSpan, { decision: 'cancel' });
+
+      const blockedRecord = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.blocked_on_user',
+      );
+      // The second end must NOT overwrite decision recorded by the first.
+      expect(blockedRecord?.attributes['decision']).toBe('proceed_once');
+    });
+
+    it('returns NOOP span when SDK is not initialized', () => {
+      mockState.sdkInitialized = false;
+      const toolSpan = startToolSpan('Bash');
+      const blockedSpan = startToolBlockedOnUserSpan(toolSpan);
+      expect(blockedSpan.spanContext().traceId).toBe('0'.repeat(32));
+
+      // End on NOOP span must not throw.
+      endToolBlockedOnUserSpan(blockedSpan, { decision: 'cancel' });
+    });
+
+    it('handles concurrent blocked spans without findLast confusion', () => {
+      // Regression test for the claude-code findLast-by-type bug.
+      // Two concurrent tools each have their own blocked span; ending the
+      // second one first must NOT close the first.
+      const toolA = startToolSpan('Bash', { 'tool.call_id': 'a' });
+      const toolB = startToolSpan('Read', { 'tool.call_id': 'b' });
+      const blockedA = startToolBlockedOnUserSpan(toolA, { call_id: 'a' });
+      const blockedB = startToolBlockedOnUserSpan(toolB, { call_id: 'b' });
+
+      endToolBlockedOnUserSpan(blockedB, { decision: 'cancel' });
+
+      const recordA = mockSpans.find(
+        (s) =>
+          s.name === 'qwen-code.tool.blocked_on_user' &&
+          s.attributes['tool.call_id'] === 'a',
+      );
+      const recordB = mockSpans.find(
+        (s) =>
+          s.name === 'qwen-code.tool.blocked_on_user' &&
+          s.attributes['tool.call_id'] === 'b',
+      );
+      // Only B is ended; A still active.
+      expect(recordB?.ended).toBe(true);
+      expect(recordA?.ended).toBeFalsy();
+
+      endToolBlockedOnUserSpan(blockedA, { decision: 'proceed_once' });
+      expect(recordA?.attributes['decision']).toBe('proceed_once');
+      expect(recordB?.attributes['decision']).toBe('cancel');
+
+      endToolSpan(toolA, { success: true });
+      endToolSpan(toolB, { success: false, error: 'cancelled' });
+    });
+
+    it('falls back to resolveParentContext when the tool span was already ended', () => {
+      const toolSpan = startToolSpan('Bash');
+      // Simulate someone passing an already-ended tool span — the helper
+      // should still produce a span (correlated via the standard fallback
+      // chain) instead of crashing.
+      endToolSpan(toolSpan, { success: true });
+
+      const blockedSpan = startToolBlockedOnUserSpan(toolSpan);
+      expect(
+        mockSpans.find((s) => s.name === 'qwen-code.tool.blocked_on_user'),
+      ).toBeDefined();
+
+      endToolBlockedOnUserSpan(blockedSpan, { decision: 'proceed_once' });
+    });
+  });
+
+  describe('hook spans (#3731 Phase 2)', () => {
+    it('parents under the active tool span when called inside runInToolSpanContext', () => {
+      const toolSpan = startToolSpan('Bash');
+
+      let hookSpan!: ReturnType<typeof startHookSpan>;
+      runInToolSpanContext(toolSpan, () => {
+        hookSpan = startHookSpan({
+          hookEvent: 'PreToolUse',
+          toolName: 'Bash',
+          toolUseId: 'use-1',
+        });
+      });
+
+      const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+      expect(hookRecord).toBeDefined();
+      expect(hookRecord?.parentContext).toBeDefined();
+      expect(hookRecord?.attributes['hook_event']).toBe('PreToolUse');
+      expect(hookRecord?.attributes['tool.name']).toBe('Bash');
+      expect(hookRecord?.attributes['tool.use_id']).toBe('use-1');
+
+      endHookSpan(hookSpan, { success: true, shouldProceed: true });
+      endToolSpan(toolSpan, { success: true });
+    });
+
+    it('records shouldProceed/blockType when PreToolUse blocks', () => {
+      const toolSpan = startToolSpan('Bash');
+      let hookSpan!: ReturnType<typeof startHookSpan>;
+      runInToolSpanContext(toolSpan, () => {
+        hookSpan = startHookSpan({
+          hookEvent: 'PreToolUse',
+          toolName: 'Bash',
+        });
+      });
+      endHookSpan(hookSpan, {
+        success: true,
+        shouldProceed: false,
+        blockType: 'denied',
+      });
+
+      const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+      expect(hookRecord?.attributes['should_proceed']).toBe(false);
+      expect(hookRecord?.attributes['block_type']).toBe('denied');
+      // Blocking is intentional, not an error — status must stay UNSET.
+      expect(hookRecord?.statuses).toHaveLength(0);
+
+      endToolSpan(toolSpan, { success: false, error: 'denied' });
+    });
+
+    it('records shouldStop/hasAdditionalContext on PostToolUse', () => {
+      const toolSpan = startToolSpan('Bash');
+      let hookSpan!: ReturnType<typeof startHookSpan>;
+      runInToolSpanContext(toolSpan, () => {
+        hookSpan = startHookSpan({
+          hookEvent: 'PostToolUse',
+          toolName: 'Bash',
+        });
+      });
+      endHookSpan(hookSpan, {
+        success: true,
+        shouldStop: true,
+        hasAdditionalContext: true,
+      });
+
+      const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+      expect(hookRecord?.attributes['should_stop']).toBe(true);
+      expect(hookRecord?.attributes['has_additional_context']).toBe(true);
+      expect(hookRecord?.statuses).toHaveLength(0);
+
+      endToolSpan(toolSpan, { success: true });
+    });
+
+    it('records shouldStop/hasAdditionalContext on PostToolBatch', () => {
+      const hookSpan = startHookSpan({
+        hookEvent: 'PostToolBatch',
+        toolName: 'batch',
+      });
+      endHookSpan(hookSpan, {
+        success: true,
+        shouldStop: true,
+        hasAdditionalContext: true,
+        postBatchStop: true,
+        postBatchStopReason: 'policy halt',
+      });
+
+      const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+      expect(hookRecord?.attributes['hook_event']).toBe('PostToolBatch');
+      expect(hookRecord?.attributes['should_stop']).toBe(true);
+      expect(hookRecord?.attributes['has_additional_context']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop_reason']).toBe(
+        'policy halt',
+      );
+      expect(hookRecord?.statuses).toHaveLength(0);
+    });
+
+    it('marks status ERROR only when the hook itself threw', () => {
+      const toolSpan = startToolSpan('Bash');
+      let hookSpan!: ReturnType<typeof startHookSpan>;
+      runInToolSpanContext(toolSpan, () => {
+        hookSpan = startHookSpan({
+          hookEvent: 'PostToolUseFailure',
+          toolName: 'Bash',
+          isInterrupt: true,
+        });
+      });
+      endHookSpan(hookSpan, { success: false, error: 'hook crashed' });
+
+      const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+      expect(hookRecord?.statuses[0]?.code).toBe(SpanStatusCode.ERROR);
+      expect(hookRecord?.statuses[0]?.message).toBe('hook crashed');
+      expect(hookRecord?.attributes['is_interrupt']).toBe(true);
+
+      endToolSpan(toolSpan, { success: false, error: 'cancelled' });
+    });
+
+    it('returns NOOP span when SDK is not initialized', () => {
+      mockState.sdkInitialized = false;
+      const hookSpan = startHookSpan({
+        hookEvent: 'PreToolUse',
+        toolName: 'Bash',
+      });
+      expect(hookSpan.spanContext().traceId).toBe('0'.repeat(32));
+      endHookSpan(hookSpan, { success: true });
     });
   });
 
@@ -712,6 +1224,117 @@ describe('session-tracing', () => {
 
       mockState.throwOnSetAttributes = false;
       endToolSpan(toolSpan, { success: true });
+    });
+  });
+
+  describe('TTL safety net (#4321 review)', () => {
+    it('marks stale spans with ttl_expired + duration_ms before ending them', () => {
+      const toolSpan = startToolSpan('staleTool');
+      const record = mockSpans.find((s) => s.name === 'qwen-code.tool')!;
+
+      // 31 minutes after the span started — past the 30-min TTL.
+      const staleNow = Date.now() + 31 * 60 * 1000;
+      runTTLSweepForTesting(staleNow);
+
+      expect(record.ended).toBe(true);
+      // Without the sentinel attrs, operators couldn't tell a TTL-aborted
+      // span from a deliberately-ended span that lost attribution.
+      expect(record.attributes['qwen-code.span.ttl_expired']).toBe(true);
+      expect(
+        record.attributes['qwen-code.span.duration_ms'] as number,
+      ).toBeGreaterThanOrEqual(31 * 60 * 1000 - 1000);
+
+      // Calling endToolSpan after the TTL fires must still be safe — span
+      // already ended, attempt is a no-op.
+      endToolSpan(toolSpan, { success: false });
+    });
+
+    it('does not mark spans that were ended before TTL expiry', () => {
+      const toolSpan = startToolSpan('liveTool');
+      const record = mockSpans.find((s) => s.name === 'qwen-code.tool')!;
+
+      // End normally, then run a sweep. The span is already ended → the
+      // sweep must not retroactively stamp ttl_expired on it.
+      endToolSpan(toolSpan, { success: true });
+      runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
+
+      expect(record.attributes['qwen-code.span.ttl_expired']).toBeUndefined();
+    });
+
+    it('stamps decision=aborted/source=system on TTL-expired blocked_on_user spans', () => {
+      // The blocked-span branch in sweepStaleSpans tags the canonical
+      // taxonomy so dashboards filtering by `decision: 'aborted'` count
+      // walk-aways alongside explicit user aborts.
+      const toolSpan = startToolSpan('blockedStaleParent');
+      const blockedSpan = startToolBlockedOnUserSpan(toolSpan, {
+        tool_name: 'blockedStaleParent',
+      });
+      const blockedRecord = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.blocked_on_user',
+      )!;
+
+      runTTLSweepForTesting(Date.now() + 31 * 60 * 1000);
+
+      expect(blockedRecord.ended).toBe(true);
+      expect(blockedRecord.attributes['qwen-code.span.ttl_expired']).toBe(true);
+      expect(blockedRecord.attributes['decision']).toBe('aborted');
+      expect(blockedRecord.attributes['source']).toBe('system');
+
+      // Cleanup the still-active tool span.
+      endToolBlockedOnUserSpan(blockedSpan);
+      endToolSpan(toolSpan, { success: false });
+    });
+  });
+
+  describe('truncateSpanError (#4321 review)', () => {
+    it('returns short strings unchanged', () => {
+      expect(truncateSpanError('short message')).toBe('short message');
+      expect(truncateSpanError('')).toBe('');
+    });
+
+    it('truncates strings over 1024 chars and appends a sentinel suffix', () => {
+      const oversized = 'a'.repeat(2000);
+      const truncated = truncateSpanError(oversized);
+      expect(truncated.length).toBeLessThan(oversized.length);
+      expect(truncated.endsWith('…[truncated]')).toBe(true);
+      expect(truncated.startsWith('a'.repeat(1024))).toBe(true);
+    });
+
+    it('does not double-suffix already-truncated input', () => {
+      // Hard guarantee: the sentinel is only appended when the input
+      // exceeds the cap. A short string with the suffix already present
+      // would NOT pass back through truncate at production sites — but
+      // sanity-check the boundary anyway.
+      const exactlyAtCap = 'b'.repeat(1024);
+      expect(truncateSpanError(exactlyAtCap)).toBe(exactlyAtCap);
+    });
+
+    it('backs up one code unit when the cut would split a surrogate pair (#4321)', () => {
+      // OTLP/gRPC collectors reject batches with invalid UTF-8. If the
+      // 1024-char cap lands between the high + low surrogate of an
+      // emoji or rare CJK character, truncateSpanError must back up one
+      // code unit so we never emit a lone high surrogate.
+      // 🚀 is U+1F680, encoded as the surrogate pair [0xD83D, 0xDE80].
+      // Put it so the high surrogate is at char index 1023 (last byte
+      // BEFORE the cap), low surrogate at 1024 (first byte AFTER the
+      // cap): pad with 1023 'a's, then the rocket, then enough filler
+      // to push above the cap.
+      const oversized = 'a'.repeat(1023) + '🚀' + 'b'.repeat(100);
+      const truncated = truncateSpanError(oversized);
+      // The truncated string must not END with a lone high surrogate
+      // (code point in [0xD800, 0xDBFF]). The implementation backs up
+      // one code unit when needed.
+      const lastBeforeSentinel = truncated.slice(0, -'…[truncated]'.length);
+      const lastCharCode = lastBeforeSentinel.charCodeAt(
+        lastBeforeSentinel.length - 1,
+      );
+      expect(lastCharCode).not.toBeGreaterThanOrEqual(0xd800);
+      // Validate there are no orphan high surrogates anywhere in the
+      // string — `Buffer.from(s, 'utf16le')` doesn't validate
+      // surrogate pairs (#4321 review-9), so test the property
+      // directly with a regex that matches a high surrogate NOT
+      // followed by a low surrogate.
+      expect(truncated).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
     });
   });
 });

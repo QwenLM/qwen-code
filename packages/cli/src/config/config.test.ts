@@ -2354,6 +2354,16 @@ describe('loadCliConfig with includeDirectories', () => {
     ]);
   });
 
+  it('should default managed-memory toggles to enabled when not in bare mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getManagedAutoMemoryEnabled()).toBe(true);
+    expect(config.getManagedAutoDreamEnabled()).toBe(true);
+    expect(config.getAutoSkillEnabled()).toBe(true);
+  });
+
   it('should force minimal startup behavior in bare mode', async () => {
     process.argv = ['node', 'script.js', '--bare'];
     const argv = await parseArguments();
@@ -2388,10 +2398,13 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getCoreTools()).toEqual([
       ToolNames.READ_FILE,
       ToolNames.EDIT,
+      ToolNames.NOTEBOOK_EDIT,
       ToolNames.SHELL,
     ]);
     expect(config.getDisableAllHooks()).toBe(true);
     expect(config.getManagedAutoMemoryEnabled()).toBe(false);
+    expect(config.getManagedAutoDreamEnabled()).toBe(false);
+    expect(config.getAutoSkillEnabled()).toBe(false);
     expect(config.getToolDiscoveryCommand()).toBeUndefined();
     expect(config.getToolCallCommand()).toBeUndefined();
     expect(config.getMcpServers()).toEqual({});
@@ -2406,6 +2419,7 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getCoreTools()).toEqual([
       ToolNames.READ_FILE,
       ToolNames.EDIT,
+      ToolNames.NOTEBOOK_EDIT,
       ToolNames.SHELL,
     ]);
   });

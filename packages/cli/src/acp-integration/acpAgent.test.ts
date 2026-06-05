@@ -145,7 +145,20 @@ vi.mock('./runtimeOutputDirContext.js', () => ({
   ),
 }));
 
-vi.mock('./authMethods.js', () => ({ buildAuthMethods: vi.fn() }));
+vi.mock('./authMethods.js', () => {
+  const buildAuthMethods = vi.fn();
+  return {
+    buildAuthMethods,
+    pickAuthMethodsForAuthRequired: vi.fn((selectedType?: string) => {
+      const authMethods = buildAuthMethods();
+      if (!selectedType) return authMethods;
+      const matched = authMethods.filter(
+        (method: { id: string }) => method.id === selectedType,
+      );
+      return matched.length ? matched : authMethods;
+    }),
+  };
+});
 vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));
@@ -195,6 +208,7 @@ import { loadSettings } from '../config/settings.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { SERVE_STATUS_EXT_METHODS } from '../serve/status.js';
+import { buildAuthMethods } from './authMethods.js';
 
 describe('runAcpAgent shutdown cleanup', () => {
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -786,6 +800,64 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           http: true,
         },
       },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not return discontinued qwen-oauth as the only ACP auth option', async () => {
+    vi.mocked(buildAuthMethods).mockReturnValue([
+      {
+        id: 'openai',
+        name: 'Use OpenAI API key',
+        description: 'Requires setting OPENAI_API_KEY',
+      },
+    ]);
+
+    const innerConfig = makeInnerConfig();
+    vi.mocked(innerConfig.getModelsConfig).mockReturnValue({
+      getCurrentAuthType: vi.fn().mockReturnValue('qwen-oauth'),
+    } as unknown as ReturnType<Config['getModelsConfig']>);
+    vi.mocked(innerConfig.refreshAuth).mockRejectedValue(
+      new Error('qwen-oauth token expired'),
+    );
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('test-session-id'),
+          getConfig: vi.fn().mockReturnValue(innerConfig),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+    ).rejects.toMatchObject({
+      authMethods: [
+        expect.objectContaining({
+          id: 'openai',
+        }),
+      ],
     });
 
     mockConnectionState.resolve();

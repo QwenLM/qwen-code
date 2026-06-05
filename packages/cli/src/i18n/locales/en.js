@@ -24,6 +24,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell mode',
   'YOLO mode': 'YOLO mode',
+  'Auto mode': 'Auto mode',
   'plan mode': 'plan mode',
   'auto-accept edits': 'auto-accept edits',
   'Accepting edits': 'Accepting edits',
@@ -84,6 +85,8 @@ export default {
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
   'for help on Qwen Code': 'for help on Qwen Code',
   'show version info': 'show version info',
+  'show paths for current session files and logs':
+    'show paths for current session files and logs',
   'submit a bug report': 'submit a bug report',
   Status: 'Status',
 
@@ -190,8 +193,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
-  'Configure authentication information for login':
-    'Configure authentication information for login',
+  'Connect an LLM provider': 'Connect an LLM provider',
   'Copy the last result or code snippet to clipboard':
     'Copy the last result or code snippet to clipboard',
   'Show working-tree change stats versus HEAD':
@@ -472,7 +474,7 @@ export default {
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Plan',
-  Default: 'Default',
+  'Ask permissions': 'Ask permissions',
   'Auto Edit': 'Auto Edit',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'toggle vim mode on/off',
@@ -741,6 +743,8 @@ export default {
   'After tool execution fails': 'After tool execution fails',
   'When notifications are sent': 'When notifications are sent',
   'When the user submits a prompt': 'When the user submits a prompt',
+  'When a slash command expands into a prompt':
+    'When a slash command expands into a prompt',
   'When a new session is started': 'When a new session is started',
   'Right before Qwen Code concludes its response':
     'Right before Qwen Code concludes its response',
@@ -766,6 +770,8 @@ export default {
     'Input to command is JSON with notification message and type.',
   'Input to command is JSON with original user prompt text.':
     'Input to command is JSON with original user prompt text.',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'Input to command is JSON with command_name, command_args, and expanded prompt text.',
   'Input to command is JSON with session start source.':
     'Input to command is JSON with session start source.',
   'Input to command is JSON with session end reason.':
@@ -794,6 +800,8 @@ export default {
     'show stderr to user only but continue with tool call',
   'block processing, erase original prompt, and show stderr to user only':
     'block processing, erase original prompt, and show stderr to user only',
+  'block expanded prompt submission and show stderr to user only':
+    'block expanded prompt submission and show stderr to user only',
   'stdout shown to Qwen': 'stdout shown to Qwen',
   'show stderr to user only (blocking errors ignored)':
     'show stderr to user only (blocking errors ignored)',
@@ -885,12 +893,13 @@ export default {
   // Commands - Approval Mode
   // ============================================================================
   'Tool Approval Mode': 'Tool Approval Mode',
-  '{{mode}} mode': '{{mode}} mode',
   'Analyze only, do not modify files or execute commands':
     'Analyze only, do not modify files or execute commands',
   'Require approval for file edits or shell commands':
     'Require approval for file edits or shell commands',
   'Automatically approve file edits': 'Automatically approve file edits',
+  'Use classifier to automatically approve safe tool calls':
+    'Use classifier to automatically approve safe tool calls',
   'Automatically approve all tools': 'Automatically approve all tools',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Workspace approval mode exists and takes priority. User-level change will have no effect.',
@@ -900,6 +909,7 @@ export default {
   'Auto-memory: {{status}}': 'Auto-memory: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Auto-dream: {{status}} · {{lastDream}} · /dream to run',
+  'Auto-skill: {{status}}': 'Auto-skill: {{status}}',
   never: 'never',
   on: 'on',
   off: 'off',
@@ -1155,9 +1165,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 Welcome back! (Last updated: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Overall Goal:',
-  'Select Authentication Method': 'Select Authentication Method',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+  'Connect a Provider': 'Connect a Provider',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'You must connect a provider to proceed. Press Ctrl+C again to exit.',
   'Terms of Services and Privacy Notice':
     'Terms of Services and Privacy Notice',
   'Qwen OAuth': 'Qwen OAuth',
@@ -1896,6 +1906,19 @@ export default {
   'Open the memory manager.': 'Open the memory manager.',
   'Show current process memory diagnostics':
     'Show current process memory diagnostics',
+  'Record a CPU profile for Chrome DevTools analysis':
+    'Record a CPU profile for Chrome DevTools analysis',
+  'Roll back a standalone update to the previous version':
+    'Roll back a standalone update to the previous version',
+  'Rollback is not available in ACP mode.':
+    'Rollback is not available in ACP mode.',
+  'Rollback is only available for standalone installations.':
+    'Rollback is only available for standalone installations.',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    'Rollback successful. Restart your terminal to use the previous version.',
+  'Rollback failed:': 'Rollback failed:',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.',
   'Save a durable memory to the memory system.':
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':

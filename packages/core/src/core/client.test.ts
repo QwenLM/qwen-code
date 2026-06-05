@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
 import { GeminiClient, SendMessageType } from './client.js';
-import { findCompressSplitPoint } from '../services/chatCompressionService.js';
+import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   AuthType,
   createContentGenerator,
@@ -137,6 +137,13 @@ vi.mock('../utils/getFolderStructure', () => ({
   getFolderStructure: vi.fn().mockResolvedValue('Mock Folder Structure'),
 }));
 vi.mock('../utils/errorReporting', () => ({ reportError: vi.fn() }));
+vi.mock('../utils/gitUtils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/gitUtils.js')>();
+  return {
+    ...actual,
+    getRecentGitStatus: vi.fn().mockReturnValue(null),
+  };
+});
 vi.mock('../utils/nextSpeakerChecker', () => ({
   checkNextSpeaker: vi.fn().mockResolvedValue(null),
 }));
@@ -257,84 +264,6 @@ function getLastTurnRequestText(): string {
   return JSON.stringify(request ?? '');
 }
 
-describe('findCompressSplitPoint', () => {
-  it('should throw an error for non-positive numbers', () => {
-    expect(() => findCompressSplitPoint([], 0)).toThrow(
-      'Fraction must be between 0 and 1',
-    );
-  });
-
-  it('should throw an error for a fraction greater than or equal to 1', () => {
-    expect(() => findCompressSplitPoint([], 1)).toThrow(
-      'Fraction must be between 0 and 1',
-    );
-  });
-
-  it('should handle an empty history', () => {
-    expect(findCompressSplitPoint([], 0.5)).toBe(0);
-  });
-
-  it('should handle a fraction in the middle', () => {
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'This is the first message.' }] }, // JSON length: 66 (19%)
-      { role: 'model', parts: [{ text: 'This is the second message.' }] }, // JSON length: 68 (40%)
-      { role: 'user', parts: [{ text: 'This is the third message.' }] }, // JSON length: 66 (60%)
-      { role: 'model', parts: [{ text: 'This is the fourth message.' }] }, // JSON length: 68 (80%)
-      { role: 'user', parts: [{ text: 'This is the fifth message.' }] }, // JSON length: 65 (100%)
-    ];
-    expect(findCompressSplitPoint(history, 0.5)).toBe(4);
-  });
-
-  it('should handle a fraction of last index', () => {
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'This is the first message.' }] }, // JSON length: 66 (19%)
-      { role: 'model', parts: [{ text: 'This is the second message.' }] }, // JSON length: 68 (40%)
-      { role: 'user', parts: [{ text: 'This is the third message.' }] }, // JSON length: 66 (60%)
-      { role: 'model', parts: [{ text: 'This is the fourth message.' }] }, // JSON length: 68 (80%)
-      { role: 'user', parts: [{ text: 'This is the fifth message.' }] }, // JSON length: 65 (100%)
-    ];
-    expect(findCompressSplitPoint(history, 0.9)).toBe(4);
-  });
-
-  it('should handle a fraction of after last index', () => {
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'This is the first message.' }] }, // JSON length: 66 (24%%)
-      { role: 'model', parts: [{ text: 'This is the second message.' }] }, // JSON length: 68 (50%)
-      { role: 'user', parts: [{ text: 'This is the third message.' }] }, // JSON length: 66 (74%)
-      { role: 'model', parts: [{ text: 'This is the fourth message.' }] }, // JSON length: 68 (100%)
-    ];
-    expect(findCompressSplitPoint(history, 0.8)).toBe(4);
-  });
-
-  it('compresses everything before the trailing in-flight functionCall', () => {
-    const history: Content[] = [
-      { role: 'user', parts: [{ text: 'This is the first message.' }] },
-      { role: 'model', parts: [{ text: 'This is the second message.' }] },
-      { role: 'user', parts: [{ text: 'This is the third message.' }] },
-      { role: 'model', parts: [{ functionCall: {} }] },
-    ];
-    // Trailing m+fc is in-flight; the in-flight fallback compresses
-    // everything except the trailing fc (no preceding pair to retain).
-    expect(findCompressSplitPoint(history, 0.99)).toBe(3);
-  });
-
-  it('should handle a history with only one item', () => {
-    const historyWithEmptyParts: Content[] = [
-      { role: 'user', parts: [{ text: 'Message 1' }] },
-    ];
-    expect(findCompressSplitPoint(historyWithEmptyParts, 0.5)).toBe(0);
-  });
-
-  it('should handle history with weird parts', () => {
-    const historyWithEmptyParts: Content[] = [
-      { role: 'user', parts: [{ text: 'Message 1' }] },
-      { role: 'model', parts: [{ fileData: { fileUri: 'derp' } }] },
-      { role: 'user', parts: [{ text: 'Message 2' }] },
-    ];
-    expect(findCompressSplitPoint(historyWithEmptyParts, 0.5)).toBe(2);
-  });
-});
-
 describe('Gemini Client (client.ts)', () => {
   let mockContentGenerator: ContentGenerator;
   let mockConfig: Config;
@@ -410,10 +339,6 @@ describe('Gemini Client (client.ts)', () => {
       vertexai: false,
       authType: AuthType.USE_GEMINI,
     };
-    const mockSubagentManager = {
-      listSubagents: vi.fn().mockResolvedValue([]),
-      addChangeListener: vi.fn().mockReturnValue(() => {}),
-    };
     mockConfig = {
       getContentGeneratorConfig: vi
         .fn()
@@ -456,6 +381,7 @@ describe('Gemini Client (client.ts)', () => {
       getSkipNextSpeakerCheck: vi.fn().mockReturnValue(false),
       getUseModelRouter: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
+      getCwd: vi.fn().mockReturnValue('/test/project/root'),
       storage: {
         getProjectTempDir: vi.fn().mockReturnValue('/test/temp'),
         getProjectDir: vi
@@ -464,7 +390,6 @@ describe('Gemini Client (client.ts)', () => {
       },
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
       getBaseLlmClient: vi.fn(),
-      getSubagentManager: vi.fn().mockReturnValue(mockSubagentManager),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
@@ -995,6 +920,80 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('startChat — repair orphan tool_use on resume', () => {
+    it('synthesizes a functionResponse for a transcript ending in a dangling model[functionCall]', async () => {
+      // --resume of a session that crashed (OOM / SIGKILL / process exit)
+      // between the partial-tool_use push in `processStreamResponse` and
+      // the React scheduler's `submitQuery(ToolResult)`. The persisted
+      // JSONL ends with `model[functionCall]` and no matching user
+      // `functionResponse`. Without the repair pass running at session
+      // load, the first API call after `--resume` would 400 with
+      // "tool_use_id ... must have a corresponding tool_use block in
+      // the previous message" — exactly the wedge this PR is supposed
+      // to escape. Covers the only resume-time integration point for
+      // the repair, so a future reorder/removal of the call in
+      // `startChat()` regresses this test.
+      await client.startChat([
+        {
+          role: 'user',
+          parts: [{ text: 'open /tmp/crash.txt' }],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_crash_resume',
+                name: 'read_file',
+                args: { path: '/tmp/crash.txt' },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      const history = client.getHistory();
+      // startChat prepends a mocked env-context user/model pair, then
+      // appends the supplied extraHistory; the repair pass must then
+      // splice a synthetic user[functionResponse] AFTER the dangling
+      // model[fc]. Locate the dangling model entry by its callId and
+      // verify the immediately-following entry carries the synthetic.
+      const danglingIdx = history.findIndex(
+        (h) =>
+          h.role === 'model' &&
+          h.parts?.some((p) => p.functionCall?.id === 'call_crash_resume'),
+      );
+      expect(danglingIdx).toBeGreaterThanOrEqual(0);
+      const userAfter = history[danglingIdx + 1];
+      expect(userAfter?.role).toBe('user');
+      const fr = userAfter?.parts!.find((p) => p.functionResponse);
+      expect(fr?.functionResponse?.id).toBe('call_crash_resume');
+      expect(fr?.functionResponse?.name).toBe('read_file');
+      expect(
+        (fr?.functionResponse?.response as { error?: string })?.error,
+      ).toMatch(/interrupted/i);
+    });
+
+    it('is a no-op when the resumed transcript has no dangling tool_use', async () => {
+      // Happy resume path: don't inject a synthetic functionResponse
+      // into a transcript whose tool_use pairing is already valid (or,
+      // as here, has no tool_use at all). Defends against a future
+      // regression where the repair pass starts spuriously injecting on
+      // perfectly-formed history.
+      await client.startChat([
+        { role: 'user', parts: [{ text: 'q' }] },
+        { role: 'model', parts: [{ text: 'plain text reply' }] },
+      ]);
+
+      const history = client.getHistory();
+      // No functionResponse anywhere — repair did nothing.
+      const hasAnyFunctionResponse = history.some((h) =>
+        h.parts?.some((p) => p.functionResponse),
+      );
+      expect(hasAnyFunctionResponse).toBe(false);
+    });
+  });
+
   describe('setTools — system instruction refresh', () => {
     // Regression coverage for the progressive-MCP wiring bug: when MCP
     // discovery completes AFTER startChat() (the new default), `setTools()`
@@ -1180,6 +1179,39 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('resetChat', () => {
+    it('clears cached git status so it can be recomputed for the next session', async () => {
+      vi.mocked(getRecentGitStatus)
+        .mockReturnValueOnce('Git snapshot A')
+        .mockReturnValueOnce('Git snapshot B');
+      vi.mocked(getRecentGitStatus).mockClear();
+
+      const instructionBeforeReset = (
+        client as unknown as {
+          getMainSessionSystemInstruction: () => string;
+        }
+      ).getMainSessionSystemInstruction();
+      const instructionBeforeSecondCall = (
+        client as unknown as {
+          getMainSessionSystemInstruction: () => string;
+        }
+      ).getMainSessionSystemInstruction();
+
+      expect(instructionBeforeReset).toContain('Git snapshot A');
+      expect(instructionBeforeSecondCall).toContain('Git snapshot A');
+      expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
+
+      await client.resetChat();
+
+      const instructionAfterReset = (
+        client as unknown as {
+          getMainSessionSystemInstruction: () => string;
+        }
+      ).getMainSessionSystemInstruction();
+
+      expect(instructionAfterReset).toContain('Git snapshot B');
+      expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
+    });
+
     it('should create a new chat session, clearing the old history', async () => {
       // 1. Get the initial chat instance and add some history.
       const initialChat = client.getChat();
@@ -1422,6 +1454,7 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength,
         stripOrphanedUserEntriesFromHistory,
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
       } as unknown as GeminiChat;
       mockTurnRunFn.mockReturnValue(
         (async function* () {
@@ -1867,7 +1900,7 @@ describe('Gemini Client (client.ts)', () => {
   // tryCompressChat is now a thin wrapper around GeminiChat.tryCompress.
   // The compression logic itself is exercised in chatCompressionService.test.ts
   // (token math, threshold checks, hook firing) and geminiChat.test.ts (history
-  // mutation, recording, hasFailedCompressionAttempt). The tests below cover
+  // mutation, recording, consecutiveFailures circuit breaker). The tests below cover
   // only what the wrapper itself adds: argument forwarding and the IDE-context
   // flag flip.
   describe('tryCompressChat (delegation)', () => {
@@ -1892,7 +1925,38 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.tryCompressChat('p1', true, signal);
 
-      expect(tryCompress).toHaveBeenCalledWith('p1', 'the-model', true, signal);
+      // 5th arg is the `options` bag for `customInstructions` plumbing;
+      // omitted here means undefined which is the correct contract.
+      expect(tryCompress).toHaveBeenCalledWith(
+        'p1',
+        'the-model',
+        true,
+        signal,
+        undefined,
+      );
+    });
+
+    it('forwards customInstructions through the options bag when supplied', async () => {
+      const tryCompress = vi.fn().mockResolvedValue({
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: CompressionStatus.NOOP,
+      });
+      client['chat'] = {
+        tryCompress,
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getModel).mockReturnValue('the-model');
+
+      await client.tryCompressChat('p1', true, undefined, 'focus on auth bug');
+
+      expect(tryCompress).toHaveBeenCalledWith(
+        'p1',
+        'the-model',
+        true,
+        undefined,
+        { customInstructions: 'focus on auth bug' },
+      );
     });
 
     it('flips forceFullIdeContext on a successful compression', async () => {
@@ -4730,6 +4794,7 @@ Other open files:
           getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValue(2),
           setHistory: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
         client['chat'] = mockChat as GeminiChat;
 
@@ -4762,6 +4827,7 @@ Other open files:
           getHistoryLength: vi.fn().mockReturnValue(0),
           setHistory: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
         client['chat'] = mockChat as GeminiChat;
 
@@ -5512,7 +5578,49 @@ Other open files:
       );
     });
 
-    it('propagates error when content generation fails', async () => {
+    it('caches git status across repeated system instruction generation', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.mocked(getRecentGitStatus).mockReturnValue('Git snapshot cached');
+      vi.mocked(getRecentGitStatus).mockClear();
+      vi.mocked(getCoreSystemPrompt).mockReturnValue('Core prompt');
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
+      expect(mockContentGenerator.generateContent).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          config: expect.objectContaining({
+            systemInstruction: 'Core prompt\n\nGit snapshot cached',
+          }),
+        }),
+        'test-session-id',
+      );
+      expect(mockContentGenerator.generateContent).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          config: expect.objectContaining({
+            systemInstruction: 'Core prompt\n\nGit snapshot cached',
+          }),
+        }),
+        'test-session-id',
+      );
+    });
+
+    it('sets a generic span status when content generation fails', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
       mockGenerateContentFn.mockRejectedValueOnce(

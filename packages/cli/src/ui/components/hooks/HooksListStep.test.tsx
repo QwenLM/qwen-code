@@ -14,10 +14,8 @@ import {
 import { HooksListStep } from './HooksListStep.js';
 import type { HookEventDisplayInfo } from './types.js';
 
-// Mock i18n module
 vi.mock('../../../i18n/index.js', () => ({
   t: vi.fn((key: string, options?: { count?: string }) => {
-    // Handle pluralization
     if (key === '{{count}} hook configured' && options?.count) {
       return `${options.count} hook configured`;
     }
@@ -28,12 +26,10 @@ vi.mock('../../../i18n/index.js', () => ({
   }),
 }));
 
-// Mock useTerminalSize
 vi.mock('../../hooks/useTerminalSize.js', () => ({
   useTerminalSize: vi.fn(() => ({ columns: 120, rows: 24 })),
 }));
 
-// Mock semantic-colors
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
     text: {
@@ -52,23 +48,30 @@ describe('HooksListStep', () => {
   const createMockHookInfo = (
     event: HookEventName,
     configCount = 0,
-  ): HookEventDisplayInfo => ({
-    event,
-    shortDescription: `Description for ${event}`,
-    description: `Detailed description for ${event}`,
-    exitCodes: [
-      { code: 0, description: 'Success' },
-      { code: 2, description: 'Block' },
-    ],
-    configs: Array(configCount)
+  ): HookEventDisplayInfo => {
+    const configs = Array(configCount)
       .fill(null)
       .map((_, i) => ({
-        config: { command: `hook-${i}`, type: HookType.Command },
+        config: {
+          command: `hook-${i}`,
+          type: HookType.Command as const,
+        },
         source: HooksConfigSource.User,
         sourceDisplay: 'User Settings',
+        matcher: '*',
         enabled: true,
-      })),
-  });
+      }));
+    return {
+      event,
+      shortDescription: `Description for ${event}`,
+      description: `Detailed description for ${event}`,
+      exitCodes: [
+        { code: 0, description: 'Success' },
+        { code: 2, description: 'Block' },
+      ],
+      matcherGroups: configs.length > 0 ? [{ matcher: '*', configs }] : [],
+    };
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();

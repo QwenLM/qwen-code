@@ -221,7 +221,8 @@ set "QWEN_VALIDATE_NPM_REGISTRY=!NPM_REGISTRY!"
 set "QWEN_VALIDATE_INSTALL_BASE=!INSTALL_BASE!"
 set "QWEN_VALIDATE_INSTALL_DIR=!INSTALL_DIR!"
 set "QWEN_VALIDATE_INSTALL_BIN_DIR=!INSTALL_BIN_DIR!"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); foreach ($name in 'METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR') { $value = [Environment]::GetEnvironmentVariable('QWEN_VALIDATE_' + $name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }"
+set "QWEN_VALIDATE_SOURCE=!SOURCE!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); foreach ($name in 'METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR','SOURCE') { $value = [Environment]::GetEnvironmentVariable('QWEN_VALIDATE_' + $name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_VALIDATE_METHOD="
 set "QWEN_VALIDATE_MIRROR="
@@ -232,6 +233,7 @@ set "QWEN_VALIDATE_NPM_REGISTRY="
 set "QWEN_VALIDATE_INSTALL_BASE="
 set "QWEN_VALIDATE_INSTALL_DIR="
 set "QWEN_VALIDATE_INSTALL_BIN_DIR="
+set "QWEN_VALIDATE_SOURCE="
 if %PS_STATUS% NEQ 0 (
     echo ERROR: installer options contain unsafe command characters.
     exit /b 1
@@ -304,8 +306,11 @@ exit /b 1
 
 :ValidateVersion
 if /i "!VERSION!"=="latest" exit /b 0
-echo(!VERSION!| findstr /R /C:"^v*[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[A-Za-z0-9.-]*$" >nul
-if %ERRORLEVEL% EQU 0 exit /b 0
+set "QWEN_VERSION_VALUE=!VERSION!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = $env:QWEN_VERSION_VALUE; if ($value -match '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$') { exit 0 }; exit 1"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_VERSION_VALUE="
+if %PS_STATUS% EQU 0 exit /b 0
 echo ERROR: --version must be 'latest' or a semver string.
 exit /b 1
 
@@ -509,6 +514,11 @@ if !ERRORLEVEL! NEQ 0 (
 REM Extract into a temporary directory, then validate required entry points.
 set "EXTRACT_DIR=!TEMP_DIR!\extract"
 mkdir "!EXTRACT_DIR!" >nul 2>&1
+call :ValidateArchiveContents "!ARCHIVE_FILE!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    exit /b 1
+)
 set "QWEN_ARCHIVE_FILE=!ARCHIVE_FILE!"
 set "QWEN_EXTRACT_DIR=!EXTRACT_DIR!"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath $env:QWEN_ARCHIVE_FILE -DestinationPath $env:QWEN_EXTRACT_DIR -Force"
@@ -619,6 +629,30 @@ if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
 echo SUCCESS: Qwen Code standalone archive installed successfully.
 echo INFO: Installed to !INSTALL_DIR!
 exit /b 0
+
+:ValidateArchiveContents
+set "QWEN_ARCHIVE_FILE=%~1"
+REM Enumerate archive entries and reject any with path traversal indicators:
+REM empty names, leading '/', drive-rooted paths, '..' segments, or control chars.
+REM This prevents Zip Slip attacks before extraction.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $archive = $null; try { Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); if ($archive.Entries.Count -eq 0) { [Console]::Error.WriteLine('Archive is empty: ' + $env:QWEN_ARCHIVE_FILE); exit 3 }; foreach ($entry in $archive.Entries) { $raw = $entry.FullName; if ($raw.IndexOfAny([char[]](10,13)) -ge 0) { [Console]::Error.WriteLine('Archive contains unsafe path with control character: ' + $raw); exit 1 }; $name = $raw -replace '\\', '/'; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)') { [Console]::Error.WriteLine('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 } finally { if ($null -ne $archive) { $archive.Dispose() } }"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_ARCHIVE_FILE="
+if %PS_STATUS% EQU 0 exit /b 0
+if %PS_STATUS% EQU 1 (
+    echo ERROR: Archive contains unsafe path entries.
+    exit /b 1
+)
+if %PS_STATUS% EQU 2 (
+    echo ERROR: Archive could not be inspected before extraction.
+    exit /b 1
+)
+if %PS_STATUS% EQU 3 (
+    echo ERROR: Archive is empty: %~1
+    exit /b 1
+)
+echo ERROR: Archive validation failed before extraction.
+exit /b %PS_STATUS%
 
 :RejectArchiveLinks
 set "QWEN_EXTRACT_DIR=%~1"

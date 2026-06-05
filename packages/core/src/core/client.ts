@@ -30,12 +30,12 @@ const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
 import { GeminiChat } from './geminiChat.js';
+import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
-  getSubagentSystemReminder,
 } from './prompts.js';
 import {
   CompressionStatus,
@@ -46,10 +46,6 @@ import {
 } from './turn.js';
 
 // Services
-import {
-  COMPRESSION_PRESERVE_THRESHOLD,
-  COMPRESSION_TOKEN_THRESHOLD,
-} from '../services/chatCompressionService.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
@@ -98,7 +94,10 @@ import {
 } from '../utils/partUtils.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
+import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
+import { ApiRetryEvent } from '../telemetry/types.js';
+import { logApiRetry } from '../telemetry/loggers.js';
 
 // Hook types and utilities
 import {
@@ -185,6 +184,7 @@ export class GeminiClient {
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
+  private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
 
   private readonly loopDetector: LoopDetectionService;
@@ -301,8 +301,71 @@ export class GeminiClient {
     return this.getChat().getHistory(curated);
   }
 
+  getHistoryShallow(curated: boolean = false): Content[] {
+    const chat = this.getChat();
+    return chat.getHistoryShallow?.(curated) ?? chat.getHistory(curated);
+  }
+
   getHistoryTail(count: number, curated: boolean = false): Content[] {
     return this.getChat().getHistoryTail(count, curated);
+  }
+
+  private getHistoryTailShallow(
+    count: number,
+    curated: boolean = false,
+  ): Content[] {
+    const chat = this.getChat();
+    return (
+      chat.getHistoryTailShallow?.(count, curated) ??
+      chat.getHistoryTail?.(count, curated) ??
+      chat.getHistory(curated).slice(-count)
+    );
+  }
+
+  private peekLastHistoryEntry(): Content | undefined {
+    const chat = this.getChat();
+    return chat.peekLastHistoryEntry?.() ?? chat.getHistory().at(-1);
+  }
+
+  private getHistoryLength(): number {
+    const chat = this.getChat();
+    return chat.getHistoryLength?.() ?? chat.getHistory().length;
+  }
+
+  private getLastModelMessageText(): string | undefined {
+    const chat = this.getChat();
+    if (chat.getLastModelMessageText) {
+      return chat.getLastModelMessageText();
+    }
+    const history = chat.getHistoryShallow?.() ?? chat.getHistory();
+    for (let i = history.length - 1; i >= 0; i--) {
+      const message = history[i];
+      if (message?.role !== 'model') continue;
+      const text =
+        message.parts
+          ?.filter(
+            (part): part is { text: string } => typeof part.text === 'string',
+          )
+          .map((part) => part.text)
+          .join('') ?? '';
+      return text || undefined;
+    }
+    return undefined;
+  }
+
+  /**
+   * Walk-only accessor for the set of `functionResponse.id` strings in
+   * raw history. Callers that only need the dedup id set (notably
+   * `useGeminiStream.handleCompletedTools`) MUST prefer this over
+   * {@link getHistory}, which deep-clones the entire conversation via
+   * `structuredClone` on every call. On long sessions with sizable
+   * tool outputs the clone is a multi-millisecond hit on the React UI
+   * thread; running it on every tool-completion batch caused visible
+   * frame drops during streaming. See
+   * `GeminiChat.getHistoryFunctionResponseIds` for the implementation.
+   */
+  getHistoryFunctionResponseIds(): Set<string> {
+    return this.getChat().getHistoryFunctionResponseIds();
   }
 
   /**
@@ -342,6 +405,62 @@ export class GeminiClient {
     // entirely or send only a diff against a now-removed baseline. Match
     // the invalidation `setHistory()` / `truncateHistory()` already do.
     this.forceFullIdeContext = true;
+  }
+
+  /**
+   * Synthesize a `functionResponse` for every dangling `model[functionCall]`
+   * in chat history whose corresponding tool_result never landed. Inverse of
+   * {@link stripOrphanedUserEntriesFromHistory}, which only handles trailing
+   * `user` entries.
+   *
+   * This `GeminiClient` method is the resume-path entry point — called once
+   * from {@link startChat} after the transcript loads, covering `--resume`
+   * of a session that crashed between a partial-tool_use push and the
+   * tool's eventual completion.
+   *
+   * The other two coverage points (Retry submit path after
+   * `stripOrphanedUserEntriesFromHistory`, and the defensive pass at the
+   * start of every UserQuery / Cron send) live one layer down inside
+   * `GeminiChat.sendMessageStream` and call the standalone
+   * `repairOrphanedToolUseTurns(history)` function directly — they don't
+   * route through this wrapper. Anyone tracing the repair-pass coupling
+   * between the client and chat layers should follow that path
+   * separately rather than expect everything to funnel through here.
+   *
+   * Synthesizes an `error` `functionResponse`. The React tool scheduler
+   * (`useGeminiStream.handleCompletedTools`) MUST dedupe by `callId` against
+   * the live history before submitting its own `tool_result` — otherwise a
+   * late real result lands as a second `user[tool_result]` block (orphan
+   * because the synthetic already consumed the matching `tool_use`).
+   */
+  repairOrphanedToolUseTurnsInHistory(reason?: string): {
+    injected: Array<{ callId: string; name: string }>;
+    droppedDuplicates: Array<{ callId: string; name: string }>;
+  } {
+    const result = this.getChat().repairOrphanedToolUseTurns(reason);
+    if (result.injected.length > 0) {
+      debugLogger.warn(
+        `[REPAIR] Synthesized ${result.injected.length} functionResponse(s) ` +
+          `for dangling tool_use(s): ${result.injected
+            .map((e) => `${e.name}(${e.callId})`)
+            .join(', ')}`,
+      );
+    }
+    if (result.droppedDuplicates.length > 0) {
+      // Surface the duplicate-cleanup pass so investigators tracing
+      // a dedup-drop log have a breadcrumb pointing back to the
+      // repair function. Without this a duplicate-only repair (no
+      // synthesis, no hoist) leaves zero diagnostic trail and a
+      // future callId-collision bug would silently delete the
+      // wrong fr.
+      debugLogger.warn(
+        `[REPAIR] Dropped ${result.droppedDuplicates.length} duplicate ` +
+          `functionResponse(s) for callId(s): ${result.droppedDuplicates
+            .map((e) => `${e.name}(${e.callId})`)
+            .join(', ')}`,
+      );
+    }
+    return result;
   }
 
   setHistory(history: Content[]) {
@@ -463,6 +582,7 @@ export class GeminiClient {
   async resetChat(): Promise<void> {
     this.initializedSessionId = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
+    this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
     // startChat() rewrites the chat to its initial state. Any prior
     // read_file tool results the FileReadCache still tracks are no
@@ -499,28 +619,41 @@ export class GeminiClient {
     });
   }
 
+  private getCachedGitStatus(): string | null {
+    if (this.cachedGitStatus === undefined) {
+      // Mirror claude-code: append git status (branch + recent commits) to the
+      // system prompt so the main agent treats version history as authoritative
+      // context, not background noise. Only injected when cwd is a git repo.
+      this.cachedGitStatus = getRecentGitStatus(this.config.getCwd());
+    }
+    return this.cachedGitStatus;
+  }
+
   private getMainSessionSystemInstruction(
     deferredTools?: Array<{ name: string; description: string }>,
   ): string {
     const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
+    const gitStatus = this.getCachedGitStatus();
 
     if (overrideSystemPrompt) {
-      return getCustomSystemPrompt(
+      const base = getCustomSystemPrompt(
         overrideSystemPrompt,
         userMemory,
         appendSystemPrompt,
         deferredTools,
       );
+      return gitStatus ? base + '\n\n' + gitStatus : base;
     }
 
-    return getCoreSystemPrompt(
+    const base = getCoreSystemPrompt(
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
       deferredTools,
     );
+    return gitStatus ? base + '\n\n' + gitStatus : base;
   }
 
   /**
@@ -689,6 +822,21 @@ export class GeminiClient {
         this.config.getChatRecordingService(),
         uiTelemetryService,
       );
+
+      // Repair any dangling `model[functionCall]` whose `functionResponse`
+      // never made it back into the transcript before we wrote the JSONL.
+      // The common cause is a process crash / OOM / SIGKILL between the
+      // partial-tool_use push (see `processStreamResponse`) and the React
+      // scheduler's tool_result submission. Without this pass, the first
+      // API call on a resumed session would 400 with the same
+      // `tool_use_id ... corresponding tool_use` error this whole
+      // subsystem is trying to escape. (Belt-and-suspenders: the same
+      // helper runs again inside `chat.sendMessageStream` after the user
+      // content is pushed, so a dangling left here by setHistory /
+      // compaction reordering is also caught — but doing it here keeps
+      // any pre-send code reading `chat.history` from seeing a malformed
+      // shape.)
+      this.repairOrphanedToolUseTurnsInHistory();
 
       const sessionStartAdditionalContext =
         await this.fireSessionStartHook(sessionStartSource);
@@ -921,7 +1069,7 @@ export class GeminiClient {
     ) {
       const projectRoot = this.config.getProjectRoot();
       const sessionId = this.config.getSessionId();
-      const history = this.getHistory();
+      const history = this.getHistoryShallow();
       const mgr = this.config.getMemoryManager();
       const autoSkillEnabled = this.config.getAutoSkillEnabled();
 
@@ -985,7 +1133,7 @@ export class GeminiClient {
 
     const projectRoot = this.config.getProjectRoot();
     const sessionId = this.config.getSessionId();
-    const history = this.getHistory();
+    const history = this.getHistoryShallow();
     const mgr = this.config.getMemoryManager();
 
     if (!this.config.getManagedAutoMemoryEnabled()) {
@@ -1074,6 +1222,13 @@ export class GeminiClient {
 
     if (messageType === SendMessageType.Retry) {
       this.stripOrphanedUserEntriesFromHistory();
+      // The matching dangling-`functionCall` repair runs inside
+      // `chat.sendMessageStream` AFTER the user content is pushed, so any
+      // tool_result the user is supplying (Retry of a ToolResult
+      // submission, lastPrompt === fr parts) closes the pair via the real
+      // `functionResponse` before we synthesize an error one. Doing the
+      // repair here would happen pre-push and race against the user
+      // content's own pairing — see PR #4176 review for the corner.
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
@@ -1259,7 +1414,7 @@ export class GeminiClient {
         // retries/hooks) so that model latency during a tool-call loop
         // doesn't count as user idle time.
         const mcResult = microcompactHistory(
-          this.getChat().getHistory(),
+          this.getHistoryShallow(),
           this.lastApiCompletionTimestamp,
           this.config.getClearContextOnIdle(),
         );
@@ -1394,9 +1549,8 @@ export class GeminiClient {
       // part from the user immediately follows a functionCall part from the model
       // in the conversation history . The IDE context is not discarded; it will
       // be included in the next regular message sent to the model.
-      const history = this.getHistory();
-      const lastMessage =
-        history.length > 0 ? history[history.length - 1] : undefined;
+      const historyLength = this.getHistoryLength();
+      const lastMessage = this.peekLastHistoryEntry();
       const hasPendingToolCall =
         !!lastMessage &&
         lastMessage.role === 'model' &&
@@ -1407,7 +1561,7 @@ export class GeminiClient {
 
       if (this.config.getIdeMode() && !hasPendingToolCall) {
         const { contextParts, newIdeContext } = this.getIdeContextParts(
-          this.forceFullIdeContext || history.length === 0,
+          this.forceFullIdeContext || historyLength === 0,
         );
         if (contextParts.length > 0) {
           ideContextText = wrapIdeContext(contextParts.join('\n'));
@@ -1456,20 +1610,6 @@ export class GeminiClient {
         messageType === SendMessageType.Cron
       ) {
         const systemReminders = [];
-
-        // add subagent system reminder if there are subagents
-        const hasAgentTool = await this.config
-          .getToolRegistry()
-          .ensureTool(ToolNames.AGENT);
-        const subagents = (
-          await this.config.getSubagentManager().listSubagents()
-        )
-          .filter((subagent) => subagent.level !== 'builtin')
-          .map((subagent) => subagent.name);
-
-        if (hasAgentTool && subagents.length > 0) {
-          systemReminders.push(getSubagentSystemReminder(subagents));
-        }
 
         // add plan mode system reminder if approval mode is plan
         if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
@@ -1643,16 +1783,8 @@ export class GeminiClient {
         !signal.aborted &&
         this.config.hasHooksForEvent('Stop')
       ) {
-        // Get response text from the chat history
-        const history = this.getHistory();
-        const lastModelMessage = history
-          .filter((msg) => msg.role === 'model')
-          .pop();
         const responseText =
-          lastModelMessage?.parts
-            ?.filter((p): p is { text: string } => 'text' in p)
-            .map((p) => p.text)
-            .join('') || '[no response text]';
+          this.getLastModelMessageText() || '[no response text]';
 
         const response = await messageBus.request<
           HookExecutionRequest,
@@ -1817,12 +1949,11 @@ export class GeminiClient {
         // see the current turn's history regardless of which path exits below.
         try {
           const chat = this.getChat();
-          const fullHistory = chat.getHistory(true);
           const maxHistoryForCache = 40;
-          const cachedHistory =
-            fullHistory.length > maxHistoryForCache
-              ? fullHistory.slice(-maxHistoryForCache)
-              : fullHistory;
+          const cachedHistory = this.getHistoryTailShallow(
+            maxHistoryForCache,
+            true,
+          );
           saveCacheSafeParams(
             chat.getGenerationConfig(),
             cachedHistory,
@@ -1968,6 +2099,24 @@ export class GeminiClient {
             `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
           );
         },
+        // Phase 4b — emit ApiRetryEvent telemetry for HTTP-status retries.
+        // subagent_name read from subagentNameContext (active in catch block
+        // since the entire generateContent invocation runs inside the parent
+        // subagent's ALS frame when applicable).
+        onRetry: (info) => {
+          logApiRetry(
+            this.config,
+            new ApiRetryEvent({
+              model: currentAttemptModel,
+              promptId,
+              attemptNumber: info.attempt,
+              error: info.error,
+              statusCode: info.errorStatus,
+              retryDelayMs: info.delayMs,
+              subagentName: subagentNameContext.getStore(),
+            }),
+          );
+        },
       });
       return result;
     } catch (error: unknown) {
@@ -1998,6 +2147,7 @@ export class GeminiClient {
     prompt_id: string,
     force: boolean = false,
     signal?: AbortSignal,
+    customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
@@ -2006,9 +2156,11 @@ export class GeminiClient {
       this.config.getModel(),
       force,
       signal,
+      customInstructions ? { customInstructions } : undefined,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
-      const compressedHistory = this.getChat().getHistory();
+      const chat = this.getChat();
+      const compressedHistory = chat.getHistoryShallow?.() ?? chat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
       if (
         !this.lastSessionStartContext &&
@@ -2037,8 +2189,3 @@ export class GeminiClient {
     return info;
   }
 }
-
-export const TEST_ONLY = {
-  COMPRESSION_PRESERVE_THRESHOLD,
-  COMPRESSION_TOKEN_THRESHOLD,
-};

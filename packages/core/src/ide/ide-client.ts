@@ -23,7 +23,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { EnvHttpProxyAgent } from 'undici';
+import { EnvHttpProxyAgent, fetch as undiciFetch } from 'undici';
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { IDE_REQUEST_TIMEOUT_MS } from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -806,15 +806,13 @@ export class IdeClient {
     const agent = new EnvHttpProxyAgent({
       noProxy: noProxyHosts.filter(Boolean).join(','),
     });
-    const undiciPromise = import('undici');
     return async (url: string | URL, init?: RequestInit): Promise<Response> => {
-      const { fetch: fetchFn } = await undiciPromise;
       const fetchOptions: RequestInit & { dispatcher?: unknown } = {
         ...init,
         dispatcher: agent,
       };
       const options = fetchOptions as unknown as import('undici').RequestInit;
-      const response = await fetchFn(url, options);
+      const response = await undiciFetch(url, options);
       // Convert undici Headers to standard Headers for compatibility
       const standardHeaders = new Headers();
       for (const [key, value] of response.headers.entries()) {

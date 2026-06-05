@@ -364,20 +364,27 @@ describe('InputPrompt', () => {
     const SUGGESTION_VISIBLE_WAIT_MS = 700;
 
     it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
+      vi.useFakeTimers();
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(SUGGESTION_VISIBLE_WAIT_MS);
+      try {
+        await advanceTimers(SUGGESTION_VISIBLE_WAIT_MS);
 
-      stdin.write('\r');
-      await wait();
+        act(() => {
+          stdin.write('\r');
+        });
+        await flush();
 
-      expect(props.onSubmit).toHaveBeenCalledWith('commit this');
-      // Enter path must NOT call buffer.insert — it passes text directly to
-      // handleSubmitAndClear. Calling insert would re-fill the buffer after
-      // it was already cleared (the microtask race bug).
-      expect(mockBuffer.insert).not.toHaveBeenCalled();
-      unmount();
+        expect(props.onSubmit).toHaveBeenCalledWith('commit this');
+        // Enter path must NOT call buffer.insert — it passes text directly to
+        // handleSubmitAndClear. Calling insert would re-fill the buffer after
+        // it was already cleared (the microtask race bug).
+        expect(mockBuffer.insert).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+        unmount();
+      }
     });
 
     it('does not accept the prompt suggestion on shift+tab', async () => {
@@ -4291,6 +4298,56 @@ describe('InputPrompt', () => {
       expect(mockBuffer.move).toHaveBeenCalledWith('home');
       expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
       unmount();
+    });
+
+    it('suppresses completion menu navigation for history-restored text until edited', async () => {
+      mockedUseCommandCompletion.mockReturnValue({
+        ...mockCommandCompletion,
+        showSuggestions: true,
+        suggestions: [
+          { label: 'clear', value: 'clear' },
+          { label: 'continuous-learning', value: 'continuous-learning' },
+        ],
+        activeSuggestionIndex: 0,
+      });
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+      if (!historyArgs) {
+        throw new Error('useInputHistory was not called');
+      }
+
+      await act(async () => {
+        historyArgs.onChange('/clear');
+      });
+      await wait();
+      mockBuffer.cursor = [0, 0];
+      mockBuffer.visualCursor = [0, 0];
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(mockCommandCompletion.navigateUp).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      expect(mockedUseCommandCompletion.mock.calls.at(-1)?.[6]).toBe(false);
+
+      unmount();
+
+      mockedUseCommandCompletion.mockClear();
+      mockedUseInputHistory.mockClear();
+      mockBuffer.setText('/cle');
+      const { unmount: unmountEdited } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      expect(mockedUseCommandCompletion.mock.calls.at(-1)?.[6]).toBe(true);
+      unmountEdited();
     });
   });
 });

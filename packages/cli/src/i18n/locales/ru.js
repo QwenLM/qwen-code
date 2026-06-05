@@ -24,6 +24,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Режим терминала',
   'YOLO mode': 'Режим YOLO',
+  'Auto mode': 'Автоматический режим',
   'plan mode': 'Режим планирования',
   'auto-accept edits': 'Режим принятия правок',
   'Accepting edits': 'Принятие правок',
@@ -192,8 +193,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'Открытие полной документации Qwen Code в браузере',
   'Configuration not available.': 'Конфигурация недоступна.',
-  'Configure authentication information for login':
-    'Настройка аутентификационной информации для входа',
+  'Connect an LLM provider': 'Подключить провайдера LLM',
   'Copy the last result or code snippet to clipboard':
     'Копирование последнего результата или фрагмента кода в буфер обмена',
 
@@ -401,7 +401,7 @@ export default {
   Text: 'Текст',
   JSON: 'JSON',
   Plan: 'План',
-  Default: 'По умолчанию',
+  'Ask permissions': 'Запрашивать разрешения',
   'Auto Edit': 'Авторедактирование',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Включение/выключение режима vim',
@@ -669,6 +669,8 @@ export default {
   'After tool execution fails': 'При неудачном выполнении инструмента',
   'When notifications are sent': 'При отправке уведомлений',
   'When the user submits a prompt': 'Когда пользователь отправляет промпт',
+  'When a slash command expands into a prompt':
+    'Когда slash-команда разворачивается в промпт',
   'When a new session is started': 'При запуске новой сессии',
   'Right before Qwen Code concludes its response':
     'Непосредственно перед завершением ответа Qwen Code',
@@ -693,6 +695,8 @@ export default {
     'Ввод в команду — это JSON с сообщением уведомления и типом.',
   'Input to command is JSON with original user prompt text.':
     'Ввод в команду — это JSON с исходным текстом промпта пользователя.',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'Ввод в команду — это JSON с command_name, command_args и развернутым текстом промпта.',
   'Input to command is JSON with session start source.':
     'Ввод в команду — это JSON с источником запуска сессии.',
   'Input to command is JSON with session end reason.':
@@ -721,6 +725,8 @@ export default {
     'показать stderr только пользователю, но продолжить вызов инструмента',
   'block processing, erase original prompt, and show stderr to user only':
     'заблокировать обработку, стереть исходный промпт и показать stderr только пользователю',
+  'block expanded prompt submission and show stderr to user only':
+    'заблокировать отправку развернутого промпта и показать stderr только пользователю',
   'stdout shown to Qwen': 'stdout показан Qwen',
   'show stderr to user only (blocking errors ignored)':
     'показать stderr только пользователю (блокирующие ошибки игнорируются)',
@@ -816,13 +822,14 @@ export default {
   // Команды - Режим подтверждения
   // ============================================================================
   'Tool Approval Mode': 'Режим подтверждения инструментов',
-  '{{mode}} mode': 'Режим {{mode}}',
   'Analyze only, do not modify files or execute commands':
     'Только анализ, без изменения файлов или выполнения команд',
   'Require approval for file edits or shell commands':
     'Требуется подтверждение для редактирования файлов или команд терминала',
   'Automatically approve file edits':
     'Автоматически подтверждать изменения файлов',
+  'Use classifier to automatically approve safe tool calls':
+    'Использовать классификатор для автоматического подтверждения безопасных вызовов инструментов',
   'Automatically approve all tools':
     'Автоматически подтверждать все инструменты',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
@@ -833,6 +840,7 @@ export default {
   'Auto-memory: {{status}}': 'Автопамять: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Автоконсолидация: {{status}} · {{lastDream}} · /dream для запуска',
+  'Auto-skill: {{status}}': 'Автонавык: {{status}}',
   never: 'никогда',
   on: 'вкл',
   off: 'выкл',
@@ -1029,9 +1037,9 @@ export default {
   '👋 Welcome back! (Last updated: {{timeAgo}})':
     '👋 С возвращением! (Последнее обновление: {{timeAgo}})',
   '🎯 Overall Goal:': '🎯 Общая цель:',
-  'Select Authentication Method': 'Выберите метод авторизации',
-  'You must select an auth method to proceed. Press Ctrl+C again to exit.':
-    'Вы должны выбрать метод авторизации для продолжения. Нажмите Ctrl+C снова для выхода.',
+  'Connect a Provider': 'Подключить провайдера',
+  'You must connect a provider to proceed. Press Ctrl+C again to exit.':
+    'Необходимо подключить провайдера для продолжения. Нажмите Ctrl+C снова для выхода.',
   'Terms of Services and Privacy Notice':
     'Условия обслуживания и уведомление о конфиденциальности',
   'Qwen OAuth': 'Qwen OAuth',
