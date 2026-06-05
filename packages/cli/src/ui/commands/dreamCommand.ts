@@ -38,10 +38,15 @@ export const dreamCommand: SlashCommand = {
       .getMemoryManager()
       .buildConsolidationPrompt(memoryRoot, transcriptDir);
 
+    // Record dream invocation eagerly so auto-dream dedup works in ACP mode
+    // (where onComplete is not invoked by the session handler).
+    await config
+      .getMemoryManager()
+      .writeDreamManualRun(projectRoot, config.getSessionId());
+
     return {
       type: 'submit_prompt',
       content: prompt,
-      // onComplete is only invoked in interactive mode; ACP silently skips it.
       onComplete: async () => {
         await config
           .getMemoryManager()

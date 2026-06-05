@@ -52,7 +52,6 @@ describe('rememberCommand', () => {
   });
 
   it('declares acp in supportedModes', () => {
-    expect(rememberCommand.supportedModes).toContain('acp');
-    expect(rememberCommand.supportedModes).toContain('interactive');
+    expect(rememberCommand.supportedModes).toEqual(['interactive', 'acp']);
   });
 });

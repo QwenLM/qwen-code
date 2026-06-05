@@ -12,8 +12,7 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 
 describe('dreamCommand', () => {
   it('declares acp in supportedModes', () => {
-    expect(dreamCommand.supportedModes).toContain('acp');
-    expect(dreamCommand.supportedModes).toContain('interactive');
+    expect(dreamCommand.supportedModes).toEqual(['interactive', 'acp']);
   });
 
   it('returns error when config is not loaded', async () => {
@@ -61,5 +60,7 @@ describe('dreamCommand', () => {
     expect(expectedTranscriptDir).not.toContain(
       `${path.sep}.qwen${path.sep}tmp${path.sep}`,
     );
+    // writeDreamManualRun is called eagerly (before returning) for ACP dedup
+    expect(writeDreamManualRun).toHaveBeenCalledWith(projectRoot, 'session-1');
   });
 });

@@ -95,7 +95,6 @@ describe('forgetCommand', () => {
   });
 
   it('declares acp in supportedModes', () => {
-    expect(forgetCommand.supportedModes).toContain('acp');
-    expect(forgetCommand.supportedModes).toContain('interactive');
+    expect(forgetCommand.supportedModes).toEqual(['interactive', 'acp']);
   });
 });
