@@ -616,9 +616,9 @@ export class WriteFileTool
     super(
       WriteFileTool.Name,
       ToolDisplayNames.WRITE_FILE,
-      `Writes content to a specified file in the local filesystem.
+      `Writes content to a specified file in the local filesystem. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first.
 
-      The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
+The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
       Kind.Edit,
       {
         properties: {

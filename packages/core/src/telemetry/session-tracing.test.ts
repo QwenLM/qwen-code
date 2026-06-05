@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SpanStatusCode } from '@opentelemetry/api';
+import { SpanStatusCode, type Context } from '@opentelemetry/api';
 
 const mockState = vi.hoisted(() => ({
   sdkInitialized: true,
@@ -141,6 +141,7 @@ import {
   runTTLSweepForTesting,
   truncateSpanError,
 } from './session-tracing.js';
+import { setSessionContext } from './session-context.js';
 
 function createMockConfig(
   overrides: Partial<{
@@ -280,6 +281,52 @@ describe('session-tracing', () => {
     });
   });
 
+  describe('interaction span — trace context (#4486)', () => {
+    it('attaches to the session root context returned by getSessionContext', () => {
+      const fakeRoot = { __sessionRoot: true } as unknown as Context;
+      setSessionContext(fakeRoot, 'test-session');
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toBe(fakeRoot);
+    });
+
+    it('anchors at session root even when an unrelated OTel span is active', () => {
+      const fakeRoot = { __sessionRoot: true } as unknown as Context;
+      setSessionContext(fakeRoot, 'test-session');
+      mockState.activeOtelSpan = { name: 'unrelated-wrapper-span' };
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toBe(fakeRoot);
+    });
+
+    it('falls back to otelContext.active() when no session context is set', () => {
+      // Intentionally NOT calling setSessionContext — exercises the fallback.
+      const fakeActive = { kind: 'fake-active-span' };
+      mockState.activeOtelSpan = fakeActive;
+
+      startInteractionSpan(createMockConfig({ sessionId: 'test-session' }), {
+        promptId: 'p',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.interaction');
+      expect(span?.parentContext).toMatchObject({ __activeSpan: fakeActive });
+    });
+  });
+
   describe('LLM request spans', () => {
     it('creates and ends an LLM request span', () => {
       const span = startLLMRequestSpan('test-model', 'prompt-llm');
@@ -375,6 +422,223 @@ describe('session-tracing', () => {
 
       // endLLMRequestSpan with noop should be safe
       endLLMRequestSpan(span, { success: true });
+    });
+  });
+
+  describe('LLM request spans — Phase 4a (timing decomposition + GenAI dual-emit)', () => {
+    it('startLLMRequestSpan dual-emits gen_ai.request.model alongside qwen-code.model', () => {
+      const span = startLLMRequestSpan('test-model', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['qwen-code.model']).toBe('test-model');
+      expect(attrs['gen_ai.request.model']).toBe('test-model');
+    });
+
+    it('endLLMRequestSpan dual-emits gen_ai.usage.input_tokens / output_tokens', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 100,
+        outputTokens: 50,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['input_tokens']).toBe(100);
+      expect(attrs['gen_ai.usage.input_tokens']).toBe(100);
+      expect(attrs['output_tokens']).toBe(50);
+      expect(attrs['gen_ai.usage.output_tokens']).toBe(50);
+    });
+
+    it('endLLMRequestSpan dual-emits gen_ai.usage.cached_tokens when present', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 100,
+        cachedInputTokens: 40,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['cached_input_tokens']).toBe(40);
+      expect(attrs['gen_ai.usage.cached_tokens']).toBe(40);
+    });
+
+    it('endLLMRequestSpan omits cached_input_tokens when undefined', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true, inputTokens: 100 });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['cached_input_tokens']).toBeUndefined();
+      expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan emits cached_input_tokens === 0 (cache miss is meaningful info, not undefined)', () => {
+      // Providers that report 0 cached tokens are signaling an explicit cache
+      // miss. Distinct from undefined ("we don't know"). Both attribute names
+      // must propagate the literal 0.
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 100,
+        cachedInputTokens: 0,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['cached_input_tokens']).toBe(0);
+      expect(attrs['gen_ai.usage.cached_tokens']).toBe(0);
+    });
+
+    it('endLLMRequestSpan writes ttft_ms and dual-emits gen_ai.server.time_to_first_token (in seconds)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 234,
+        durationMs: 1000,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['ttft_ms']).toBe(234);
+      // Spec uses seconds as double — 234ms → 0.234s
+      expect(attrs['gen_ai.server.time_to_first_token']).toBeCloseTo(0.234, 6);
+    });
+
+    it('endLLMRequestSpan omits ttft_ms when undefined (non-streaming or aborted before first chunk)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true, durationMs: 500 });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['ttft_ms']).toBeUndefined();
+      expect(attrs['gen_ai.server.time_to_first_token']).toBeUndefined();
+      expect(attrs['sampling_ms']).toBeUndefined();
+      expect(attrs['output_tokens_per_second']).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan derives sampling_ms when ttftMs is set (no requestSetup)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1000,
+      });
+
+      // sampling_ms = duration - ttft = 1000 - 200 (setup is NOT subtracted —
+      // duration_ms only covers ttft + sampling, never the setup phase that
+      // precedes the span. See Phase 4b commit fixing the formula bug.)
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(800);
+    });
+
+    it('endLLMRequestSpan does NOT subtract requestSetupMs from sampling_ms (Phase 4b bug fix)', () => {
+      // Phase 4a's formula `duration - ttft - setup` double-counted setup
+      // because duration_ms ALREADY excludes setup (span starts after setup).
+      // Phase 4b populates requestSetupMs with cumulative retry overhead —
+      // if the formula still subtracted setup, sampling_ms would clamp to 0
+      // for every retried request, wiping output-throughput data.
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        requestSetupMs: 300, // would yield 500 under old formula; we want 800
+        durationMs: 1000,
+      });
+
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(800);
+      // request_setup_ms is still emitted as its own attribute — operators can
+      // see the retry overhead AND the sampling time independently.
+      expect(mockSpans[0]!.attributes['request_setup_ms']).toBe(300);
+    });
+
+    it('endLLMRequestSpan clamps sampling_ms to 0 when ttft exceeds duration (clock skew)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 1500,
+        durationMs: 1000,
+      });
+
+      // Math.max(0, 1000 - 1500) = 0 — only triggers when ttft > duration,
+      // which in practice means clock drift or a measurement bug.
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(0);
+    });
+
+    it('endLLMRequestSpan derives output_tokens_per_second from sampling_ms + outputTokens', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1200,
+        outputTokens: 500,
+      });
+
+      // sampling_ms = 1000ms = 1s; otps = 500 / 1.0 = 500
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(1000);
+      expect(mockSpans[0]!.attributes['output_tokens_per_second']).toBe(500);
+    });
+
+    it('endLLMRequestSpan rounds output_tokens_per_second to 2 decimals', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1325, // sampling_ms = 1125
+        outputTokens: 100, // otps = 100 / 1.125 = 88.888…
+      });
+
+      expect(mockSpans[0]!.attributes['output_tokens_per_second']).toBe(88.89);
+    });
+
+    it('endLLMRequestSpan omits output_tokens_per_second when sampling_ms == 0', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 1000,
+        durationMs: 1000,
+        outputTokens: 50,
+      });
+
+      // sampling_ms = 0 → otps would be Infinity, must be omitted
+      expect(mockSpans[0]!.attributes['sampling_ms']).toBe(0);
+      expect(
+        mockSpans[0]!.attributes['output_tokens_per_second'],
+      ).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan omits output_tokens_per_second when outputTokens missing', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        ttftMs: 200,
+        durationMs: 1000,
+      });
+
+      expect(
+        mockSpans[0]!.attributes['output_tokens_per_second'],
+      ).toBeUndefined();
+    });
+
+    it('endLLMRequestSpan writes Phase 4b retry placeholders when caller provides them', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        attempt: 3,
+        requestSetupMs: 4500,
+        retryTotalDelayMs: 4200,
+        durationMs: 5000,
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['attempt']).toBe(3);
+      expect(attrs['request_setup_ms']).toBe(4500);
+      expect(attrs['retry_total_delay_ms']).toBe(4200);
+    });
+
+    it('endLLMRequestSpan omits Phase 4b fields when caller does not provide them (Phase 4a default)', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true, durationMs: 500 });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['attempt']).toBeUndefined();
+      expect(attrs['request_setup_ms']).toBeUndefined();
+      expect(attrs['retry_total_delay_ms']).toBeUndefined();
     });
   });
 
@@ -728,6 +992,30 @@ describe('session-tracing', () => {
       expect(hookRecord?.statuses).toHaveLength(0);
 
       endToolSpan(toolSpan, { success: true });
+    });
+
+    it('records shouldStop/hasAdditionalContext on PostToolBatch', () => {
+      const hookSpan = startHookSpan({
+        hookEvent: 'PostToolBatch',
+        toolName: 'batch',
+      });
+      endHookSpan(hookSpan, {
+        success: true,
+        shouldStop: true,
+        hasAdditionalContext: true,
+        postBatchStop: true,
+        postBatchStopReason: 'policy halt',
+      });
+
+      const hookRecord = mockSpans.find((s) => s.name === 'qwen-code.hook');
+      expect(hookRecord?.attributes['hook_event']).toBe('PostToolBatch');
+      expect(hookRecord?.attributes['should_stop']).toBe(true);
+      expect(hookRecord?.attributes['has_additional_context']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop']).toBe(true);
+      expect(hookRecord?.attributes['post_batch_stop_reason']).toBe(
+        'policy halt',
+      );
+      expect(hookRecord?.statuses).toHaveLength(0);
     });
 
     it('marks status ERROR only when the hook itself threw', () => {

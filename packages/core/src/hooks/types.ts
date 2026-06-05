@@ -26,10 +26,14 @@ export enum HookEventName {
   PostToolUse = 'PostToolUse',
   // PostToolUseFailure - After tool execution fails
   PostToolUseFailure = 'PostToolUseFailure',
+  // PostToolBatch - After a batch of tool calls resolves
+  PostToolBatch = 'PostToolBatch',
   // Notification - When notifications are sent
   Notification = 'Notification',
   // UserPromptSubmit - When the user submits a prompt
   UserPromptSubmit = 'UserPromptSubmit',
+  // UserPromptExpansion - When a slash command expands into a prompt
+  UserPromptExpansion = 'UserPromptExpansion',
   // SessionStart - When a new session is started
   SessionStart = 'SessionStart',
   // Stop - Right before Claude concludes its response
@@ -46,6 +50,8 @@ export enum HookEventName {
   SessionEnd = 'SessionEnd',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
+  // When a tool call is denied before a permission dialog is displayed
+  PermissionDenied = 'PermissionDenied',
   // StopFailure - When the turn ends due to an API error (instead of Stop)
   StopFailure = 'StopFailure',
   // TodoCreated - When a new todo item is added to the list (Qwen Code specific)
@@ -264,6 +270,19 @@ export interface HookOutput {
   hookSpecificOutput?: Record<string, unknown>;
 }
 
+export const MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH = 10_000;
+
+export function sanitizeUserPromptExpansionAdditionalContext(
+  raw: string,
+): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .slice(0, MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH)
+    .replace(/&(?:a(?:mp?)?|lt?|gt?)?$/, '');
+}
+
 /**
  * Factory function to create the appropriate hook output class based on event name
  * Returns specialized HookOutput subclasses for events with specific methods
@@ -279,6 +298,10 @@ export function createHookOutput(
       return new PostToolUseHookOutput(data);
     case HookEventName.PostToolUseFailure:
       return new PostToolUseFailureHookOutput(data);
+    case HookEventName.UserPromptExpansion:
+      return new UserPromptExpansionHookOutput(data);
+    case HookEventName.PostToolBatch:
+      return new PostToolBatchHookOutput(data);
     case HookEventName.Stop:
     case HookEventName.SubagentStop:
       return new StopHookOutput(data);
@@ -332,19 +355,23 @@ export class DefaultHookOutput implements HookOutput {
     return this.stopReason || this.reason || 'No reason provided';
   }
 
-  /**
-   * Get sanitized additional context for adding to responses.
-   */
-  getAdditionalContext(): string | undefined {
+  protected getRawAdditionalContext(): string | undefined {
     if (
       this.hookSpecificOutput &&
       'additionalContext' in this.hookSpecificOutput
     ) {
       const context = this.hookSpecificOutput['additionalContext'];
-      if (typeof context !== 'string') {
-        return undefined;
-      }
+      return typeof context === 'string' ? context : undefined;
+    }
+    return undefined;
+  }
 
+  /**
+   * Get sanitized additional context for adding to responses.
+   */
+  getAdditionalContext(): string | undefined {
+    const context = this.getRawAdditionalContext();
+    if (context !== undefined) {
       // Sanitize by escaping < and > to prevent tag injection
       return context.replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
@@ -484,6 +511,31 @@ export class PostToolUseFailureHookOutput extends DefaultHookOutput {
 }
 
 /**
+ * Specific hook output class for UserPromptExpansion events.
+ */
+export class UserPromptExpansionHookOutput extends DefaultHookOutput {
+  override getAdditionalContext(): string | undefined {
+    const raw = this.getRawAdditionalContext();
+    if (raw === undefined) {
+      return undefined;
+    }
+    return sanitizeUserPromptExpansionAdditionalContext(raw);
+  }
+}
+
+/**
+ * Specific hook output class for PostToolBatch events.
+ */
+export class PostToolBatchHookOutput extends DefaultHookOutput {
+  /**
+   * Check if batch processing should stop after the resolved tool calls.
+   */
+  override shouldStopExecution(): boolean {
+    return super.shouldStopExecution() || this.isBlockingDecision();
+  }
+}
+
+/**
  * Specific hook output class for Stop events.
  */
 export class StopHookOutput extends DefaultHookOutput {
@@ -521,6 +573,22 @@ export interface PermissionRequestInput extends HookInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   permission_suggestions?: PermissionSuggestion[];
+}
+
+export type PermissionDeniedReason =
+  /** AUTO classifier evaluated the request and actively blocked it. */
+  | 'classifier_blocked'
+  /** AUTO classifier could not return a verdict, so AUTO mode denied it. */
+  | 'classifier_unavailable';
+
+/**
+ * Input for PermissionDenied hook events
+ */
+export interface PermissionDeniedInput extends HookInput {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  tool_use_id: string;
+  reason: PermissionDeniedReason;
 }
 
 /**
@@ -666,6 +734,40 @@ export interface PostToolUseFailureOutput extends HookOutput {
 }
 
 /**
+ * Tool call summary for PostToolBatch hook input
+ */
+export interface PostToolBatchToolCall {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  tool_use_id: string;
+  status: 'success' | 'error' | 'cancelled';
+  /**
+   * Serialized ToolCallResponseInfo fields for the resolved call:
+   * response_parts, result_display, error, error_type, and content_length.
+   */
+  tool_response?: Record<string, unknown>;
+}
+
+/**
+ * PostToolBatch hook input
+ * Fired once after all tool calls in a batch have resolved.
+ */
+export interface PostToolBatchInput extends HookInput {
+  permission_mode: PermissionMode;
+  tool_calls: PostToolBatchToolCall[];
+}
+
+/**
+ * PostToolBatch hook output
+ */
+export interface PostToolBatchOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'PostToolBatch';
+    additionalContext?: string;
+  };
+}
+
+/**
  * UserPromptSubmit hook input
  */
 export interface UserPromptSubmitInput extends HookInput {
@@ -678,6 +780,28 @@ export interface UserPromptSubmitInput extends HookInput {
 export interface UserPromptSubmitOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'UserPromptSubmit';
+    additionalContext?: string;
+  };
+}
+
+/**
+ * UserPromptExpansion hook input
+ *
+ * Field names intentionally follow the JSON hook payload convention rather
+ * than TypeScript camelCase, matching UserPromptSubmit and other hook inputs.
+ */
+export interface UserPromptExpansionInput extends HookInput {
+  command_name: string;
+  command_args: string;
+  prompt: string;
+}
+
+/**
+ * UserPromptExpansion hook output
+ */
+export interface UserPromptExpansionOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'UserPromptExpansion';
     additionalContext?: string;
   };
 }

@@ -13,15 +13,16 @@ import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { DefaultHookOutput, HookPhase } from './types.js';
-import { createHookOutput } from './types.js';
+import { createHookOutput, PermissionMode } from './types.js';
 import type {
   SessionStartSource,
   SessionEndReason,
   AgentType,
-  PermissionMode,
+  PostToolBatchToolCall,
   PreCompactTrigger,
   PostCompactTrigger,
   NotificationType,
+  PermissionDeniedReason,
   PermissionSuggestion,
   HookEventName,
   FunctionHookCallback,
@@ -151,6 +152,27 @@ export class HookSystem {
       : undefined;
   }
 
+  /**
+   * Fire a UserPromptExpansion event after a slash command returns a prompt and
+   * before that expanded prompt is submitted to the model.
+   */
+  async fireUserPromptExpansionEvent(
+    commandName: string,
+    commandArgs: string,
+    prompt: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireUserPromptExpansionEvent(
+      commandName,
+      commandArgs,
+      prompt,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('UserPromptExpansion', result.finalOutput)
+      : undefined;
+  }
+
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
@@ -264,6 +286,24 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('PostToolUseFailure', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PostToolBatch event - called once after a tool-call batch resolves
+   */
+  async firePostToolBatchEvent(
+    toolCalls: PostToolBatchToolCall[],
+    permissionMode: PermissionMode = PermissionMode.Default,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePostToolBatchEvent(
+      toolCalls,
+      permissionMode,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PostToolBatch', result.finalOutput)
       : undefined;
   }
 
@@ -406,6 +446,28 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('PermissionRequest', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PermissionDenied event
+   */
+  async firePermissionDeniedEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolUseId: string,
+    reason: PermissionDeniedReason,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePermissionDeniedEvent(
+      toolName,
+      toolInput,
+      toolUseId,
+      reason,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PermissionDenied', result.finalOutput)
       : undefined;
   }
 

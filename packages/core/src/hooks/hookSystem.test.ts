@@ -25,6 +25,7 @@ import {
   NotificationType,
   type PermissionSuggestion,
   HookPhase,
+  createHookOutput,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import type { AggregatedHookResult } from './hookAggregator.js';
@@ -86,15 +87,18 @@ describe('HookSystem', () => {
 
     mockHookEventHandler = {
       fireUserPromptSubmitEvent: vi.fn(),
+      fireUserPromptExpansionEvent: vi.fn(),
       fireStopEvent: vi.fn(),
       fireSessionStartEvent: vi.fn(),
       fireSessionEndEvent: vi.fn(),
       firePreToolUseEvent: vi.fn(),
       firePostToolUseEvent: vi.fn(),
       firePostToolUseFailureEvent: vi.fn(),
+      firePostToolBatchEvent: vi.fn(),
       firePreCompactEvent: vi.fn(),
       fireNotificationEvent: vi.fn(),
       firePermissionRequestEvent: vi.fn(),
+      firePermissionDeniedEvent: vi.fn(),
       fireSubagentStartEvent: vi.fn(),
       fireSubagentStopEvent: vi.fn(),
       fireTodoCreatedEvent: vi.fn(),
@@ -226,6 +230,16 @@ describe('HookSystem', () => {
 
       expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
         'UserPromptSubmit',
+      );
+    });
+
+    it('should check the correct event name for UserPromptExpansion', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+
+      hookSystem.hasHooksForEvent('UserPromptExpansion');
+
+      expect(mockHookRegistry.getHooksForEvent).toHaveBeenCalledWith(
+        'UserPromptExpansion',
       );
     });
 
@@ -428,6 +442,86 @@ describe('HookSystem', () => {
 
       expect(result).toBeDefined();
       expect(result?.getAdditionalContext()).toBe('Some additional context');
+    });
+  });
+
+  describe('fireUserPromptExpansionEvent', () => {
+    it('should fire UserPromptExpansion event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          continue: true,
+          decision: 'allow' as HookDecision,
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptExpansionEvent(
+        'goal',
+        'write tests',
+        'expanded prompt',
+      );
+
+      expect(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).toHaveBeenCalledWith(
+        'goal',
+        'write tests',
+        'expanded prompt',
+        undefined,
+      );
+      expect(result).toBeDefined();
+    });
+
+    it('should return DefaultHookOutput with blocking decision', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'block' as HookDecision,
+          reason: 'Blocked by policy',
+        },
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptExpansionEvent(
+        'goal',
+        '',
+        'expanded prompt',
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.isBlockingDecision()).toBe(true);
+    });
+
+    it('should return undefined when no final output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      };
+      vi.mocked(
+        mockHookEventHandler.fireUserPromptExpansionEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.fireUserPromptExpansionEvent(
+        'goal',
+        '',
+        'expanded prompt',
+      );
+
+      expect(result).toBeUndefined();
     });
   });
 
@@ -840,6 +934,59 @@ describe('HookSystem', () => {
 
       expect(result).toBeDefined();
       expect(result?.systemMessage).toBe('Tool executed successfully');
+    });
+  });
+
+  describe('firePostToolBatchEvent', () => {
+    it('should fire PostToolBatch event and return output', async () => {
+      const mockResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          hookSpecificOutput: {
+            hookEventName: 'PostToolBatch',
+            additionalContext: 'batch context',
+          },
+        },
+      };
+      vi.mocked(mockHookEventHandler.firePostToolBatchEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const toolCalls = [
+        {
+          tool_name: 'read_file',
+          tool_input: { path: 'README.md' },
+          tool_use_id: 'call-1',
+          status: 'success' as const,
+          tool_response: { output: 'contents' },
+        },
+      ];
+      const result = await hookSystem.firePostToolBatchEvent(toolCalls);
+
+      expect(mockHookEventHandler.firePostToolBatchEvent).toHaveBeenCalledWith(
+        toolCalls,
+        PermissionMode.Default,
+        undefined,
+      );
+      expect(result).toBeDefined();
+      expect(result?.getAdditionalContext()).toBe('batch context');
+    });
+
+    it('should return undefined when no final output', async () => {
+      vi.mocked(mockHookEventHandler.firePostToolBatchEvent).mockResolvedValue({
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 0,
+        finalOutput: undefined,
+      });
+
+      const result = await hookSystem.firePostToolBatchEvent([]);
+
+      expect(result).toBeUndefined();
     });
   });
 
@@ -1421,6 +1568,80 @@ describe('HookSystem', () => {
       );
 
       expect(result).toBeUndefined();
+    });
+  });
+
+  describe('firePermissionDeniedEvent', () => {
+    it('should delegate to hookEventHandler.firePermissionDeniedEvent', async () => {
+      const mockAggregated = createMockAggregatedResult(true);
+
+      vi.mocked(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).mockResolvedValue(mockAggregated);
+
+      const result = await hookSystem.firePermissionDeniedEvent(
+        'Bash',
+        { command: 'rm -rf /tmp/project' },
+        'toolu-denied-1',
+        'classifier_blocked',
+      );
+
+      expect(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).toHaveBeenCalledWith(
+        'Bash',
+        { command: 'rm -rf /tmp/project' },
+        'toolu-denied-1',
+        'classifier_blocked',
+        undefined,
+      );
+      expect(result).toBeUndefined();
+    });
+
+    it('should return DefaultHookOutput when finalOutput exists', async () => {
+      const mockResult = createMockAggregatedResult(true, {
+        decision: 'block' as HookDecision,
+        reason: 'Observed denial',
+      });
+      vi.mocked(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).mockResolvedValue(mockResult);
+
+      const result = await hookSystem.firePermissionDeniedEvent(
+        'ReadFile',
+        { path: '/secret.txt' },
+        'tool-use-2',
+        'classifier_unavailable',
+      );
+
+      expect(result).toBeDefined();
+      expect(result?.isBlockingDecision()).toBe(true);
+    });
+
+    it('should return PermissionDenied hook output when present', async () => {
+      const mockAggregated = createMockAggregatedResult(true);
+      mockAggregated.finalOutput = {
+        hookSpecificOutput: {
+          hookEventName: 'PermissionDenied',
+          permissionDecision: 'deny',
+          permissionDecisionReason: 'policy denied',
+        },
+      };
+
+      vi.mocked(
+        mockHookEventHandler.firePermissionDeniedEvent,
+      ).mockResolvedValue(mockAggregated);
+
+      const result = await hookSystem.firePermissionDeniedEvent(
+        'Bash',
+        { command: 'rm -rf /tmp/project' },
+        'toolu-denied-1',
+        'classifier_blocked',
+      );
+
+      expect(result).toEqual(
+        createHookOutput('PermissionDenied', mockAggregated.finalOutput),
+      );
     });
   });
 

@@ -20,6 +20,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
   'YOLO mode': 'YOLO 模式',
+  'Auto mode': 'Auto 模式',
   'plan mode': '規劃模式',
   'auto-accept edits': '自動接受編輯',
   'Accepting edits': '接受編輯',
@@ -414,7 +415,7 @@ export default {
   Text: '文本',
   JSON: 'JSON',
   Plan: '規劃',
-  Default: '默認',
+  'Ask permissions': '請求授權',
   'Auto Edit': '自動編輯',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切換 vim 模式開關',
@@ -651,6 +652,7 @@ export default {
   'After tool execution fails': '工具執行失敗後',
   'When notifications are sent': '發送通知時',
   'When the user submits a prompt': '用戶提交提示時',
+  'When a slash command expands into a prompt': '斜線命令展開為提示時',
   'When a new session is started': '新會話開始時',
   'Right before Qwen Code concludes its response': 'Qwen Code 結束響應之前',
   'When a subagent (Agent tool call) is started':
@@ -669,6 +671,8 @@ export default {
     '命令輸入為包含通知消息和類型的 JSON。',
   'Input to command is JSON with original user prompt text.':
     '命令輸入為包含原始用戶提示文本的 JSON。',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    '命令輸入為包含 command_name、command_args 和展開後提示文本的 JSON。',
   'Input to command is JSON with session start source.':
     '命令輸入為包含會話啟動來源的 JSON。',
   'Input to command is JSON with session end reason.':
@@ -691,6 +695,8 @@ export default {
     '僅向用戶顯示 stderr 但繼續工具調用',
   'block processing, erase original prompt, and show stderr to user only':
     '阻止處理，擦除原始提示，僅向用戶顯示 stderr',
+  'block expanded prompt submission and show stderr to user only':
+    '阻止提交展開後的提示，並僅向用戶顯示 stderr',
   'stdout shown to Qwen': '向 Qwen 顯示 stdout',
   'show stderr to user only (blocking errors ignored)':
     '僅向用戶顯示 stderr（忽略阻塞錯誤）',
@@ -753,12 +759,13 @@ export default {
   'Available options:': '可用選項：',
   'Set UI language to {{name}}': '將 UI 語言設置為 {{name}}',
   'Tool Approval Mode': '工具審批模式',
-  '{{mode}} mode': '{{mode}} 模式',
   'Analyze only, do not modify files or execute commands':
     '僅分析，不修改檔案或執行命令',
   'Require approval for file edits or shell commands':
     '需要批准檔案編輯或 shell 命令',
   'Automatically approve file edits': '自動批准檔案編輯',
+  'Use classifier to automatically approve safe tool calls':
+    '使用分類器自動批准安全的工具調用',
   'Automatically approve all tools': '自動批准所有工具',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     '工作區審批模式已存在並具有優先級。用戶級別的更改將無效。',
@@ -768,6 +775,7 @@ export default {
   'Auto-memory: {{status}}': '自動記憶：{{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     '自動整理：{{status}} · {{lastDream}} · /dream 立即運行',
+  'Auto-skill: {{status}}': '自動技能：{{status}}',
   never: '從未',
   on: '開',
   off: '關',
@@ -1484,6 +1492,18 @@ export default {
   // === Core: added from PR #3328 ===
   'Open the memory manager.': '打開記憶管理器。',
   'Show current process memory diagnostics': '顯示目前程序的內存診斷。',
+  'Record a CPU profile for Chrome DevTools analysis':
+    '錄製 CPU 效能分析檔案，用於 Chrome DevTools 分析',
+  'Roll back a standalone update to the previous version':
+    '將獨立安裝回滾到上一個版本',
+  'Rollback is not available in ACP mode.': '回滾在 ACP 模式下不可用。',
+  'Rollback is only available for standalone installations.':
+    '回滾僅適用於獨立安裝。',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    '回滾成功。請重啟終端以使用上一個版本。',
+  'Rollback failed:': '回滾失敗：',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    '在 Windows 上回滾需要手動操作。請將安裝目錄中的 qwen-code.old 重新命名為 qwen-code。',
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
   'Ask a quick side question without affecting the main conversation':
     '在不影響主對話的情況下快速提問旁支問題',

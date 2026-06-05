@@ -22,6 +22,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Mode shell',
   'YOLO mode': 'Mode YOLO',
+  'Auto mode': 'Mode auto',
   'plan mode': 'mode de planificació',
   'auto-accept edits': 'acceptació automàtica de canvis',
   'Accepting edits': 'Acceptant canvis',
@@ -449,7 +450,7 @@ export default {
   Text: 'Text',
   JSON: 'JSON',
   Plan: 'Planificació',
-  Default: 'Per defecte',
+  'Ask permissions': 'Demanar permisos',
   'Auto Edit': 'Edició automàtica',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activar/desactivar el mode Vim',
@@ -714,6 +715,8 @@ export default {
   'After tool execution fails': "Quan falla l'execució de l'eina",
   'When notifications are sent': "Quan s'envien notificacions",
   'When the user submits a prompt': "Quan l'usuari envia un missatge",
+  'When a slash command expands into a prompt':
+    "Quan una ordre de barra s'expandeix en un missatge",
   'When a new session is started': "Quan s'inicia una nova sessió",
   'Right before Qwen Code concludes its response':
     'Immediatament abans que Qwen Code conclou la seva resposta',
@@ -735,6 +738,8 @@ export default {
     "L'entrada a l'ordre és JSON amb el missatge de notificació i el tipus.",
   'Input to command is JSON with original user prompt text.':
     "L'entrada a l'ordre és JSON amb el text original del missatge de l'usuari.",
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    "L'entrada a l'ordre és JSON amb command_name, command_args i el text del missatge expandit.",
   'Input to command is JSON with session start source.':
     "L'entrada a l'ordre és JSON amb la font d'inici de sessió.",
   'Input to command is JSON with session end reason.':
@@ -758,6 +763,8 @@ export default {
     "mostrar stderr només a l'usuari però continuar amb la crida a l'eina",
   'block processing, erase original prompt, and show stderr to user only':
     "blocar el processament, esborrar el missatge original i mostrar stderr només a l'usuari",
+  'block expanded prompt submission and show stderr to user only':
+    "blocar l'enviament del missatge expandit i mostrar stderr només a l'usuari",
   'stdout shown to Qwen': 'stdout mostrat a Qwen',
   'show stderr to user only (blocking errors ignored)':
     "mostrar stderr només a l'usuari (errors de bloqueig ignorats)",
@@ -845,13 +852,14 @@ export default {
   // Ordres - Mode d'aprovació
   // ============================================================================
   'Tool Approval Mode': "Mode d'aprovació d'eines",
-  '{{mode}} mode': 'Mode {{mode}}',
   'Analyze only, do not modify files or execute commands':
     'Analitzar només, sense modificar fitxers ni executar ordres',
   'Require approval for file edits or shell commands':
     'Requerir aprovació per a edicions de fitxers o ordres shell',
   'Automatically approve file edits':
     'Aprovar automàticament les edicions de fitxers',
+  'Use classifier to automatically approve safe tool calls':
+    'Utilitzar el classificador per aprovar automàticament les crides segures a eines',
   'Automatically approve all tools': 'Aprovar automàticament totes les eines',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     "Existeix un mode d'aprovació de l'espai de treball i té prioritat. El canvi a nivell d'usuari no tindrà cap efecte.",
@@ -861,6 +869,7 @@ export default {
   'Auto-memory: {{status}}': 'Memòria automàtica: {{status}}',
   'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
     'Auto-dream: {{status}} · {{lastDream}} · /dream per executar',
+  'Auto-skill: {{status}}': 'Habilitat automàtica: {{status}}',
   never: 'mai',
   on: 'activada',
   off: 'desactivada',

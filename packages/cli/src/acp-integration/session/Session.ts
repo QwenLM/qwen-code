@@ -23,6 +23,8 @@ import type {
   MessageBus,
   StreamEvent,
   ChatCompressionInfo,
+  AutoModeDecision,
+  AutoModeOutcome,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -52,7 +54,6 @@ import {
   generateToolUseId,
   MessageBusType,
   getPlanModeSystemReminder,
-  getSubagentSystemReminder,
   getArenaSystemReminder,
   STARTUP_CONTEXT_MODEL_ACK,
   evaluatePermissionFlow,
@@ -62,11 +63,15 @@ import {
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
   evaluateAutoMode,
+  formatDenialStateLog,
+  getAutoModePermissionDeniedReason,
   isApproveOutcome,
+  isDenialFallbackReason,
   MAX_TRANSCRIPT_MESSAGES,
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
+  shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
   acquireSleepInhibitor,
 } from '@qwen-code/qwen-code-core';
@@ -158,6 +163,31 @@ export function computeInitialTurnFromHistory(
   }
 
   return maxPromptTurn > 0 ? maxPromptTurn : userMessageCount;
+}
+
+export async function fireSessionPermissionDeniedForAutoMode(
+  config: Config,
+  decision: AutoModeDecision,
+  outcome: AutoModeOutcome,
+  toolName: string,
+  toolParams: Record<string, unknown>,
+  callId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (
+    !config.getDisableAllHooks?.() &&
+    shouldFirePermissionDeniedForAutoMode(decision, outcome)
+  ) {
+    await config
+      .getHookSystem?.()
+      ?.firePermissionDeniedEvent(
+        toolName,
+        toolParams,
+        callId,
+        getAutoModePermissionDeniedReason(decision),
+        signal,
+      );
+  }
 }
 
 function getRecordPromptIds(record: ChatRecord): string[] {
@@ -374,7 +404,7 @@ export class Session implements SessionContext {
     }
 
     const chat = this.config.getGeminiClient()!.getChat();
-    const apiHistory = chat.getHistory();
+    const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
       targetTurnIndex,
@@ -398,7 +428,7 @@ export class Session implements SessionContext {
   }
 
   captureHistorySnapshot(): Content[] {
-    return this.config.getGeminiClient()!.getChat().getHistory();
+    return this.config.getGeminiClient()!.getChat().getHistoryShallow();
   }
 
   restoreHistory(history: Content[]): void {
@@ -867,16 +897,10 @@ export class Session implements SessionContext {
         return { stopReason: 'end_turn' };
       }
 
-      // Get response text from the chat history
-      const history = this.#getCurrentChat().getHistory();
-      const lastModelMessage = history
-        .filter((msg: Content) => msg.role === 'model')
-        .pop();
+      // Extract last model text without cloning the full history.
       const responseText =
-        lastModelMessage?.parts
-          ?.filter((p: Part): p is { text: string } & Part => 'text' in p)
-          .map((p: { text: string }) => p.text)
-          .join('') || '[no response text]';
+        this.#getCurrentChat().getLastModelMessageText?.() ||
+        '[no response text]';
 
       const response = await messageBus.request<
         HookExecutionRequest,
@@ -1121,8 +1145,12 @@ export class Session implements SessionContext {
         compressionInfo = compressed;
         this.#recordCompressionTokenCount(compressed);
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+          const reasonClause =
+            compressed.triggerReason === 'image_overflow'
+              ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
+              : `approached the input token limit for ${this.config.getModel()}`;
           compressionDiagnostic =
-            `IMPORTANT: This conversation approached the input token limit for ${this.config.getModel()}. ` +
+            `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
             `${compressed.originalTokenCount ?? 'unknown'} to ` +
             `${compressed.newTokenCount ?? 'unknown'} tokens).`;
@@ -1739,16 +1767,6 @@ export class Session implements SessionContext {
   async #buildInitialSystemReminders(): Promise<Part[]> {
     const reminders: Part[] = [];
 
-    const hasAgentTool = await this.config
-      .getToolRegistry()
-      .ensureTool(ToolNames.AGENT);
-    const subagents = (await this.config.getSubagentManager().listSubagents())
-      .filter((subagent) => subagent.level !== 'builtin')
-      .map((subagent) => subagent.name);
-    if (hasAgentTool && subagents.length > 0) {
-      reminders.push({ text: getSubagentSystemReminder(subagents) });
-    }
-
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
       reminders.push({
         text: getPlanModeSystemReminder(this.config.getSdkMode?.()),
@@ -1944,6 +1962,7 @@ export class Session implements SessionContext {
           recordAllow(this.config.getAutoModeDenialState()),
         );
       }
+      let wasAutoModeDenialFallback = false;
 
       // ── L5: AUTO mode three-layer filter (duplicated from
       // coreToolScheduler.ts; ACP routes through this Session path).
@@ -1952,6 +1971,7 @@ export class Session implements SessionContext {
       // existing manual-approval flow below.
       if (!autoModeAllowed && shouldRunAutoModeForCall(approvalMode, fc.name)) {
         const denialState = this.config.getAutoModeDenialState();
+        const fallback = shouldFallback(denialState);
         // `buildClassifierContents` retains only the most recent
         // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
         // exactly that tail rather than triggering a `structuredClone`
@@ -1968,7 +1988,7 @@ export class Session implements SessionContext {
           messages,
           config: this.config,
           signal: abortSignal,
-          skipClassifier: shouldFallback(denialState).fallback,
+          skipClassifierReason: fallback.fallback ? fallback.reason : undefined,
         });
 
         // Apply decision via shared helper — eliminates ~40 lines of
@@ -1981,14 +2001,34 @@ export class Session implements SessionContext {
           this.config,
           denialState,
         );
+        await fireSessionPermissionDeniedForAutoMode(
+          this.config,
+          decision,
+          outcome,
+          fc.name,
+          toolParams,
+          callId,
+          abortSignal,
+        );
         switch (outcome.kind) {
           case 'approved':
             autoModeAllowed = true;
             break;
           case 'blocked':
+            debugLogger.warn(
+              `Auto mode blocked (${outcome.reason}): tool=${fc.name}, ` +
+                formatDenialStateLog(denialState),
+            );
             return earlyErrorResponse(new Error(outcome.errorMessage), fc.name);
           case 'fallback':
             // Drop through to the manual-approval flow below.
+            wasAutoModeDenialFallback = isDenialFallbackReason(outcome.reason);
+            if (wasAutoModeDenialFallback) {
+              debugLogger.warn(
+                `Auto mode fallback to manual approval (${outcome.reason}): ` +
+                  formatDenialStateLog(denialState),
+              );
+            }
             break;
           default: {
             const _exhaustive: never = outcome;
@@ -1999,6 +2039,33 @@ export class Session implements SessionContext {
 
       let didRequestPermission = false;
       let confirmationDetails: ToolCallConfirmationDetails | undefined;
+      const recordAutoModeFallbackResolution = (
+        outcome: ToolConfirmationOutcome,
+      ) => {
+        // Reset AUTO-mode fallback counters when approval resolves a prompt
+        // raised because denialTracking forced fallback. This covers both ACP
+        // requestPermission and PermissionRequest hook approvals.
+        if (
+          approvalMode === ApprovalMode.AUTO &&
+          wasAutoModeDenialFallback &&
+          isApproveOutcome(outcome)
+        ) {
+          const before = this.config.getAutoModeDenialState();
+          const after = recordFallbackApprove(before);
+          if (after === before) {
+            debugLogger.warn(
+              `Auto mode denial counters already clear after fallback approval: ` +
+                formatDenialStateLog(before),
+            );
+            return;
+          }
+          debugLogger.warn(
+            `Auto mode denial counters reset after fallback approval: ` +
+              `${formatDenialStateLog(before)} -> ${formatDenialStateLog(after)}`,
+          );
+          this.config.setAutoModeDenialState(after);
+        }
+      };
 
       if (
         !autoModeAllowed &&
@@ -2049,6 +2116,9 @@ export class Session implements SessionContext {
               }
 
               await confirmationDetails.onConfirm(
+                ToolConfirmationOutcome.ProceedOnce,
+              );
+              recordAutoModeFallbackResolution(
                 ToolConfirmationOutcome.ProceedOnce,
               );
             } else {
@@ -2118,18 +2188,7 @@ export class Session implements SessionContext {
                   .nativeEnum(ToolConfirmationOutcome)
                   .parse(output.outcome.optionId);
 
-          // Reset the AUTO-mode fallback streak when the user manually
-          // approves a prompt that was raised because denialTracking forced
-          // fallback. Without this, a single block-streak permanently
-          // downgrades the rest of the session to manual approval until the
-          // mode is toggled. Parallels coreToolScheduler.ts:1705-1717.
-          // Cancel / abort do NOT reset — treating rejection as a signal
-          // the classifier was right to block.
-          if (approvalMode === ApprovalMode.AUTO && isApproveOutcome(outcome)) {
-            this.config.setAutoModeDenialState(
-              recordFallbackApprove(this.config.getAutoModeDenialState()),
-            );
-          }
+          recordAutoModeFallbackResolution(outcome);
 
           await confirmationDetails.onConfirm(outcome, {
             answers: output.answers,

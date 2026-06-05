@@ -7,6 +7,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { exec, type ChildProcess } from 'child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { SettingScope } from '../../config/settings.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -92,6 +93,12 @@ interface StatusLineCommandConfig {
   // clock) stays fresh even when no Agent state changes. Values < 1 are
   // rejected in getStatusLineConfig to avoid flooding the CLI with execs.
   refreshInterval?: number;
+  // When true, ANSI color codes in the command output are preserved as-is.
+  // The renderer will not apply dimColor or theme color overrides.
+  respectUserColors?: boolean;
+  // When true, the built-in context usage indicator in the footer right
+  // section is hidden. Useful when the statusline already shows context info.
+  hideContextIndicator?: boolean;
 }
 
 type StatusLineConfig = StatusLineCommandConfig | StatusLinePresetConfig;
@@ -130,6 +137,12 @@ function getStatusLineConfig(
       raw.refreshInterval >= 1
     ) {
       config.refreshInterval = raw.refreshInterval;
+    }
+    if (typeof raw.respectUserColors === 'boolean') {
+      config.respectUserColors = raw.respectUserColors;
+    }
+    if (typeof raw.hideContextIndicator === 'boolean') {
+      config.hideContextIndicator = raw.hideContextIndicator;
     }
     return config;
   }
@@ -179,6 +192,8 @@ function buildMetricsPayload(
 export function useStatusLine(): {
   lines: string[];
   useThemeColors: boolean;
+  respectUserColors: boolean;
+  hideContextIndicator: boolean;
 } {
   const settings = useSettings();
   const uiState = useUIState();
@@ -373,12 +388,13 @@ export function useStatusLine(): {
 
       const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(m);
 
-      const contextWindowSize =
-        cfg.getContentGeneratorConfig()?.contextWindowSize || 0;
+      const contentGeneratorConfig = cfg.getContentGeneratorConfig();
+      const contextWindowSize = contentGeneratorConfig?.contextWindowSize || 0;
       const data = buildStatusLinePresetData({
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
-        modelDisplayName: ui.currentModel || cfg.getModel(),
+        modelDisplayName: cfg.getModelDisplayName(),
+        reasoning: contentGeneratorConfig?.reasoning,
         currentDir,
         branch: ui.branchName,
         pullRequestNumber: pullRequestNumberRef.current,
@@ -428,7 +444,7 @@ export function useStatusLine(): {
       session_id: stats.sessionId,
       version: cfg.getCliVersion() || 'unknown',
       model: {
-        display_name: ui.currentModel || cfg.getModel() || 'unknown',
+        display_name: cfg.getModelDisplayName(),
       },
       context_window: {
         context_window_size: contextWindowSize,
@@ -599,6 +615,23 @@ export function useStatusLine(): {
     updatePullRequestNumber,
   ]);
 
+  // File edits made during a turn bypass in-memory settings; reload the user
+  // scope on idle, then re-render only if ui.statusLine changed.
+  const [settingsReloadKey, setSettingsReloadKey] = useState(0);
+  const prevStreamingForReloadRef = useRef(streamingState);
+  useEffect(() => {
+    const prev = prevStreamingForReloadRef.current;
+    prevStreamingForReloadRef.current = streamingState;
+    if (prev !== streamingState && streamingState === 'idle') {
+      const before = JSON.stringify(settings.merged.ui?.statusLine);
+      settings.reloadScopeFromDisk(SettingScope.User);
+      const after = JSON.stringify(settings.merged.ui?.statusLine);
+      if (before !== after) {
+        setSettingsReloadKey((k) => k + 1);
+      }
+    }
+  }, [streamingState, settings]);
+
   // Re-execute immediately when the command itself changes (hot reload).
   // Skip the first run — the mount effect below already handles it.
   useEffect(() => {
@@ -619,6 +652,7 @@ export function useStatusLine(): {
     statusLinePresetUseThemeColors,
     statusLinePresetItemsKey,
     statusLineSettingsVersion,
+    settingsReloadKey,
   ]);
 
   // Re-render preset output once the async GitHub PR lookup returns.
@@ -680,5 +714,9 @@ export function useStatusLine(): {
   return {
     lines: output,
     useThemeColors: statusLinePreset?.useThemeColors === true,
+    respectUserColors:
+      statusLineConfig?.type === 'command' &&
+      statusLineConfig.respectUserColors === true,
+    hideContextIndicator: statusLineConfig?.hideContextIndicator === true,
   };
 }

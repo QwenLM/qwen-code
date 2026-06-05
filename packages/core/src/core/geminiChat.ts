@@ -40,16 +40,24 @@ import type { StructuredError } from './turn.js';
 import {
   logContentRetry,
   logContentRetryFailure,
+  logApiRetry,
 } from '../telemetry/loggers.js';
+import { clearDetailedSpanState } from '../telemetry/detailed-span-attributes.js';
+import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
+  computeThresholds,
+  MAX_CONSECUTIVE_FAILURES,
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
+import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
+import { estimatePromptTokens } from '../services/tokenEstimation.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
+  ApiRetryEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
@@ -98,8 +106,74 @@ function isCompressionFailureStatus(status: CompressionStatus): boolean {
   return (
     status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
     status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
-    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR
+    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED
   );
+}
+
+function shouldStopAfterHardRescue(
+  shouldForceFromHard: boolean,
+  hardLimit: number,
+  localPromptTokensAfterCompression: number,
+): boolean {
+  return shouldForceFromHard && localPromptTokensAfterCompression >= hardLimit;
+}
+
+function getHardRescueFailureMessage(
+  effectiveTokens: number,
+  hardLimit: number,
+  compressionInfo: ChatCompressionInfo,
+  localPromptTokensAfterCompression: number,
+): string {
+  const compressionStatus =
+    CompressionStatus[compressionInfo.compressionStatus] ??
+    String(compressionInfo.compressionStatus);
+  const tokenCount =
+    compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+      ? Math.max(
+          compressionInfo.newTokenCount,
+          localPromptTokensAfterCompression,
+        )
+      : Math.max(effectiveTokens, localPromptTokensAfterCompression);
+  return (
+    `Context is too large to send safely after automatic compression. ` +
+    `Estimated prompt tokens: ${tokenCount}; hard limit: ${hardLimit}; ` +
+    `compression status: ${compressionStatus}. ` +
+    `Start a new session or reduce the resumed history before continuing.`
+  );
+}
+
+/**
+ * Defensive coercion for API-reported token counts.
+ *
+ * Hostile providers (broken upstream, OpenAI-compat proxy returning
+ * `null`/`NaN`, misconfigured override) can yield non-finite or negative
+ * token counts on `usageMetadata`. This function coerces the four fields that
+ * feed the compaction gate, its cache-hit telemetry, or OTel spans —
+ * `promptTokenCount`, `totalTokenCount`, `candidatesTokenCount`, and
+ * `cachedContentTokenCount`. Letting hostile values
+ * flow into the compaction gate arithmetic is catastrophic:
+ *
+ * - `lastPromptTokenCount + NaN >= hard` is always false → hard-rescue is
+ *   silently disabled, eventually OOMing the V8 heap.
+ * - `Infinity >= hard` is always true → hard-rescue fires on every send.
+ *
+ * Coercing unknown / negative / non-finite to `0` keeps the gate well-defined
+ * and is a no-op for any provider returning sane values.
+ *
+ * `Number.isFinite(-1)` is `true`, so the explicit `>= 0` check is required
+ * in addition to `isFinite`.
+ */
+function coerceUsageCount(value: unknown, field?: string): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return value;
+  }
+  if (value != null && field) {
+    debugLogger.warn(
+      `coerceUsageCount: hostile ${field}=${String(value)}, coercing to 0`,
+    );
+  }
+  return 0;
 }
 
 export enum StreamEventType {
@@ -140,6 +214,31 @@ interface ContentRetryOptions {
 interface TryCompressOptions {
   originalTokenCountOverride?: number;
   trigger?: CompactTrigger;
+  /**
+   * Pending user message about to be sent. Threaded through to the
+   * compression service's cheap-gate so it can see the real prompt size
+   * even when `lastPromptTokenCount === 0` (first send after inherited
+   * history). See `estimatePromptTokens` for the fallback math.
+   */
+  pendingUserMessage?: Content;
+  /**
+   * Pre-computed `estimatePromptTokens` value from the caller. When set,
+   * the cheap-gate uses this instead of recomputing — avoids a second
+   * `getHistory(true)` clone per send. (review #4168 R1.3 / R1.4)
+   */
+  precomputedEffectiveTokens?: number;
+  /**
+   * Delay writing the compression checkpoint until the caller has run any
+   * post-compression guards that may roll the in-memory chat state back.
+   */
+  deferChatCompressionRecord?: boolean;
+  /**
+   * Forwarded to the compression side-query system prompt. Sourced from
+   * `/compress <text>` invocation arg; appended after the base prompt as
+   * an `Additional Instructions:` block so the summary model can focus
+   * on the user's stated concern.
+   */
+  customInstructions?: string;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -828,6 +927,324 @@ export class InvalidStreamError extends Error {
 }
 
 /**
+ * Default error text used when a synthesized `functionResponse` has to stand
+ * in for a real tool result that never made it back into history (e.g. the
+ * process crashed between the partial-tool_use push and tool completion, or
+ * the user hit Ctrl+Y before the in-flight tool finished and the scheduler's
+ * `onAllToolCallsComplete` was a single-shot that already fired into an
+ * `isResponding` early-return).
+ */
+const ORPHAN_TOOL_USE_REPAIR_REASON =
+  'Tool execution result was not recorded — likely interrupted by network ' +
+  'failure, abort, or process exit. Treat as failure and retry if needed.';
+
+/*
+ * ============================================================================
+ * Partial-tool_use repair subsystem — canonical design note.
+ * ============================================================================
+ *
+ * Every comment block elsewhere in this file that mentions one of the
+ * concepts below points back here. Per-site comments should be one or two
+ * lines stating WHAT the local code does; the WHY lives here.
+ *
+ * --- The wedge ----------------------------------------------------------
+ *
+ * Anthropic-compatible backends (Anthropic, DeepSeek, …) reject a request
+ * whose `user[tool_result]` blocks are not at the HEAD of the user message
+ * immediately following the `model[tool_use]` they answer:
+ *
+ *     "tool_use_id ... must have a corresponding tool_use block in the
+ *      previous message"
+ *
+ * Without a matching pair the session is unrecoverable — `stripOrphanedUser
+ * EntriesFromHistory` only strips trailing user entries, so a lost tool_use
+ * cannot be resurrected and the next send 400s repeatedly.
+ *
+ * --- The race classes that produce dangling tool_uses --------------------
+ *
+ *   Race A (Ctrl+Y mid-flight): user retries before the in-flight tool
+ *     finishes. The scheduler's `onAllToolCallsComplete` is single-shot
+ *     per batch and would otherwise leave the tool stuck in
+ *     `completed-but-not-submitted` forever.
+ *   Race B (process crash / OOM mid-flight): the JSONL transcript captures
+ *     the dangling `model[fc]` and `--resume` rehydrates it.
+ *   Race C (network drop between `content_block_stop` of a tool_use and
+ *     the terminal `message_stop`): `processStreamResponse` re-throws
+ *     after we have already yielded a `functionCall` chunk, so the React
+ *     scheduler is on its way to submit a real `functionResponse` while
+ *     in-memory history has no matching `model[fc]`.
+ *
+ * --- The two-layer fix ---------------------------------------------------
+ *
+ *   (1) Persist the partial assistant turn at the failure point in
+ *       `processStreamResponse` (`this.history.push({role: 'model', parts:
+ *       [...]})` plus the `pendingPartialAssistantTurnIndex` /
+ *       `pendingPartialAssistantRecord` markers) so the matching
+ *       `model[fc]` is on disk and in memory when the late `user[fr]`
+ *       arrives.
+ *   (2) Repair any remaining dangling `model[fc]` whose
+ *       `user[fr]` never landed (`repairOrphanedToolUseTurns`):
+ *         - SYNTHESIZE an `error` fr for ids with no matching response;
+ *         - HOIST the real fr into the immediately-adjacent user turn
+ *           when it landed in a non-adjacent later turn;
+ *         - DROP duplicate fr copies for the same id.
+ *       Then `useGeminiStream.handleCompletedTools` dedupes the
+ *       scheduler's late real result against `chat.history` so the
+ *       synthetic and the real result never collide on the wire.
+ *
+ * --- Partial-push marker lifecycle ---------------------------------------
+ *
+ * Set together on (streamError + hasToolCall + hasContent) inside
+ * `processStreamResponse`. Cleared together by `popPartialIfPushed` on a
+ * retryable error rollback, or flushed together to JSONL by the outer
+ * `finally` after the retry loop exits. Defense-in-depth: every
+ * history-mutation method (clearHistory / addHistory / setHistory /
+ * truncateHistory / stripThoughtsFromHistory /
+ * stripOrphanedUserEntriesFromHistory) resets both markers in lockstep so
+ * a stale index can't shift onto an unrelated model turn and cause
+ * `popPartialIfPushed` to splice the wrong entry. Any single-field reset
+ * is a bug.
+ * ============================================================================
+ */
+
+/**
+ * Walk `history` left-to-right and close every dangling
+ * tool_use ↔ tool_result pair. For each `model[functionCall]`:
+ *  - SYNTHESIZE an `error` `functionResponse` for ids with no match;
+ *  - HOIST a real fr from a non-adjacent later user turn into the
+ *    adjacent one;
+ *  - drop duplicate fr copies for the same id.
+ *
+ * Mutates `history` in place. Returns the synthesized (callId, name)
+ * pairs so the React scheduler's dedup can drop late real results for
+ * those ids; hoisted ids are NOT returned (the real fr is still in
+ * history, scheduler dedup handles them naturally). See the canonical
+ * note above `ORPHAN_TOOL_USE_REPAIR_REASON`. qwen-code analogue of
+ * upstream Claude Code's `yieldMissingToolResultBlocks`.
+ */
+/** Location of a `functionResponse` part within `history`. */
+interface FrLocation {
+  turnIdx: number;
+  partIdx: number;
+  part: Part;
+}
+
+/**
+ * Output of the scan phase for a single `model[functionCall]` turn at
+ * `modelIdx`. `expected` maps each `functionCall.id` to its tool name,
+ * `matched` maps that same id to ALL locations of matching
+ * `functionResponse` parts across the consecutive user turns that
+ * follow, and `scanEnd` is one past the last user turn visited.
+ */
+interface ScanResult {
+  modelIdx: number;
+  expected: Map<string, string>;
+  matched: Map<string, FrLocation[]>;
+  scanEnd: number;
+}
+
+/** Decision-phase output: exact mutations the next phase will apply. */
+interface RepairPlan {
+  modelIdx: number;
+  scanEnd: number;
+  synthesizeIds: Array<[string, string]>;
+  hoistedParts: Part[];
+  removalTargets: Array<{ turnIdx: number; partIdx: number }>;
+  droppedDuplicates: Array<{ callId: string; name: string }>;
+}
+
+/**
+ * SCAN — collect every `functionCall.id → name` from the model turn at
+ * `modelIdx` and EVERY `functionResponse.id → location` from the
+ * consecutive user turns that follow. Pure read. Storing all locations
+ * (not just the first) is what lets the decision phase drop duplicates.
+ */
+function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
+  const expected = new Map<string, string>();
+  for (const part of history[modelIdx]?.parts ?? []) {
+    const fc = part.functionCall;
+    if (fc?.id) expected.set(fc.id, fc.name ?? 'unknown');
+  }
+
+  const matched = new Map<string, FrLocation[]>();
+  let scanIdx = modelIdx + 1;
+  while (scanIdx < history.length && history[scanIdx]?.role === 'user') {
+    const parts = history[scanIdx].parts ?? [];
+    for (let pIdx = 0; pIdx < parts.length; pIdx++) {
+      const part = parts[pIdx];
+      const id = part.functionResponse?.id;
+      if (id) {
+        const list = matched.get(id);
+        if (list) list.push({ turnIdx: scanIdx, partIdx: pIdx, part });
+        else matched.set(id, [{ turnIdx: scanIdx, partIdx: pIdx, part }]);
+      }
+    }
+    scanIdx++;
+  }
+
+  return { modelIdx, expected, matched, scanEnd: scanIdx };
+}
+
+/**
+ * DECISION — classify each expected id: no match → SYNTHESIZE; first
+ * match adjacent → SKIP relocation; first match non-adjacent → HOIST.
+ * Every duplicate beyond the first is always dropped. Pure compute.
+ */
+function planRepair(scan: ScanResult): RepairPlan {
+  const synthesizeIds: Array<[string, string]> = [];
+  const hoistedParts: Part[] = [];
+  const removalTargets: Array<{ turnIdx: number; partIdx: number }> = [];
+  const droppedDuplicates: Array<{ callId: string; name: string }> = [];
+
+  const adjacentIdx = scan.modelIdx + 1;
+  for (const [id, name] of scan.expected) {
+    const locations = scan.matched.get(id);
+    if (!locations || locations.length === 0) {
+      synthesizeIds.push([id, name]);
+      continue;
+    }
+    // First copy is the canonical survivor — payloads should be
+    // identical for the same callId; if they differ, the wire is
+    // already corrupt and the backend rejects regardless.
+    const survivor = locations[0]!;
+    if (survivor.turnIdx !== adjacentIdx) {
+      hoistedParts.push(survivor.part);
+      removalTargets.push({
+        turnIdx: survivor.turnIdx,
+        partIdx: survivor.partIdx,
+      });
+    }
+    for (let k = 1; k < locations.length; k++) {
+      removalTargets.push({
+        turnIdx: locations[k]!.turnIdx,
+        partIdx: locations[k]!.partIdx,
+      });
+      droppedDuplicates.push({ callId: id, name });
+    }
+  }
+
+  return {
+    modelIdx: scan.modelIdx,
+    scanEnd: scan.scanEnd,
+    synthesizeIds,
+    hoistedParts,
+    removalTargets,
+    droppedDuplicates,
+  };
+}
+
+/**
+ * MUTATION — apply the plan to `history` in place. Returns the count
+ * of new user turns inserted ahead of `modelIdx + 1` (0 or 1) so the
+ * outer loop can advance its cursor.
+ *
+ * Order: (1) splice removal targets desc-by-desc, (2) drop empty user
+ * turns in `[modelIdx + 2, scanEnd)`, (3) HEAD-insert at the adjacent
+ * user turn OR splice a new user turn between. The HEAD insert is
+ * load-bearing (mirrors upstream `hoistToolResults`) — see the
+ * canonical note for why tail-append re-triggers the wedge.
+ */
+function applyRepair(
+  history: Content[],
+  plan: RepairPlan,
+  reason: string,
+): { insertedBefore: number } {
+  if (plan.synthesizeIds.length === 0 && plan.removalTargets.length === 0) {
+    return { insertedBefore: 0 };
+  }
+
+  const syntheticParts: Part[] = plan.synthesizeIds.map(([callId, name]) => ({
+    functionResponse: { id: callId, name, response: { error: reason } },
+  }));
+  const partsToInject: Part[] = [...syntheticParts, ...plan.hoistedParts];
+
+  // (1) Splice removal targets, descending so indices stay valid.
+  const removals = [...plan.removalTargets].sort((a, b) => {
+    if (a.turnIdx !== b.turnIdx) return b.turnIdx - a.turnIdx;
+    return b.partIdx - a.partIdx;
+  });
+  for (const loc of removals) {
+    const turnParts = history[loc.turnIdx].parts;
+    if (turnParts) turnParts.splice(loc.partIdx, 1);
+  }
+
+  // (2) Drop now-empty user turns within [modelIdx + 2, scanEnd).
+  // Preserve the adjacent turn even if empty — we'll rewrite it
+  // below.
+  const adjacentIdx = plan.modelIdx + 1;
+  for (let j = plan.scanEnd - 1; j > adjacentIdx; j--) {
+    if (history[j]?.role === 'user' && (history[j].parts?.length ?? 0) === 0) {
+      history.splice(j, 1);
+    }
+  }
+
+  // (3) Place new parts at the head of the adjacent user turn, OR
+  // insert a fresh user turn between this model turn and whatever
+  // follows.
+  const next = history[adjacentIdx];
+  if (next?.role === 'user') {
+    const existing = next.parts ?? [];
+    const firstNonFr = existing.findIndex((part) => !part.functionResponse);
+    const insertAt = firstNonFr === -1 ? existing.length : firstNonFr;
+    next.parts = [
+      ...existing.slice(0, insertAt),
+      ...partsToInject,
+      ...existing.slice(insertAt),
+    ];
+    return { insertedBefore: 0 };
+  }
+  history.splice(adjacentIdx, 0, { role: 'user', parts: partsToInject });
+  return { insertedBefore: 1 };
+}
+
+/**
+ * Forward-walk `history`, planning and applying the repair for each
+ * `model[functionCall]` turn in turn. Iteration is index-based and the
+ * cursor advances by the count of user turns inserted ahead of it so
+ * a freshly-injected turn isn't re-visited.
+ *
+ * Splitting scan / decision / mutation into separate functions keeps
+ * each phase auditable in isolation — index drift can only happen in
+ * `applyRepair`, the only function that mutates `history`.
+ */
+export function repairOrphanedToolUseTurns(
+  history: Content[],
+  reason: string = ORPHAN_TOOL_USE_REPAIR_REASON,
+): {
+  injected: Array<{ callId: string; name: string }>;
+  droppedDuplicates: Array<{ callId: string; name: string }>;
+} {
+  const injected: Array<{ callId: string; name: string }> = [];
+  const droppedDuplicates: Array<{ callId: string; name: string }> = [];
+
+  for (let i = 0; i < history.length; i++) {
+    if (history[i].role !== 'model') continue;
+
+    const scan = scanModelTurn(history, i);
+    if (scan.expected.size === 0) continue;
+
+    const plan = planRepair(scan);
+    if (plan.synthesizeIds.length === 0 && plan.removalTargets.length === 0) {
+      continue;
+    }
+
+    const { insertedBefore } = applyRepair(history, plan, reason);
+    // Only synthesized ids feed `injected` — hoisted ids reference real
+    // frs that were ALREADY in history before this pass (just
+    // relocated), so the scheduler's dedup naturally handles them.
+    for (const [callId, name] of plan.synthesizeIds) {
+      injected.push({ callId, name });
+    }
+    droppedDuplicates.push(...plan.droppedDuplicates);
+    // Advance past any freshly-inserted user turn so the outer loop
+    // doesn't revisit it. Keeps the walk linear-time.
+    i += insertedBefore;
+  }
+
+  return { injected, droppedDuplicates };
+}
+
+/**
  * Chat session that enables sending messages to the model with previous
  * conversation context.
  *
@@ -878,12 +1295,56 @@ export class GeminiChat {
   private lastPromptTokenCount = 0;
 
   /**
-   * Per-chat sticky flag. After an unforced compression attempt fails (empty
-   * summary or inflated token count), automatic compaction is suppressed
-   * for the remainder of this chat to avoid burning compression API calls
-   * in a loop. Manual `/compress` still works (it passes `force=true`).
+   * Number of consecutive auto-compaction failures for this chat. The
+   * cheap-gate NOOPs once this reaches MAX_CONSECUTIVE_FAILURES (default 3)
+   * until a successful compress (forced or not) resets it to 0. Replaces the
+   * single-shot hasFailedCompressionAttempt lock that previously disabled
+   * auto-compaction for the rest of the session on any failure.
+   *
+   * SEMANTICS (R5.3): this counter tracks "non-force, non-hard-rescue
+   * consecutive failures", NOT every failure literally.
+   *   - Auto-compaction failures (cheap-gate path): increment by 1.
+   *   - Manual `/compress` failures: skipped (`force=true` → `!force`
+   *     guard in the failure branch).
+   *   - Hard-tier rescue failures: skipped (force=true → `!force` guard
+   *     in tryCompress's failure branch). The counter is NOT pre-reset
+   *     before the rescue call — force=true already bypasses the breaker
+   *     check in compress's cheap-gate, and pre-resetting would in fact
+   *     defeat the breaker entirely (hard-rescue failures don't increment
+   *     via tryCompress, and a pre-reset every send would wipe the
+   *     reactive-overflow increment). The forwarded counter value is
+   *     whatever the chat carried; on COMPRESSED success the post-call
+   *     branch in tryCompress's COMPRESSED handler resets to 0, which is
+   *     the correct recovery path for a previously-latched session.
+   *     Reactive overflow remains the explicit-increment safety net for
+   *     the force=true path — its handler bumps the counter by +1 so N
+   *     reactive failures will still trip the breaker.
+   *
+   * If you're debugging "why is hard-rescue firing but the counter is 0",
+   * that's by design.
    */
-  private hasFailedCompressionAttempt = false;
+  private consecutiveFailures = 0;
+
+  /**
+   * Partial-push markers — index of the in-memory `model[partial fc]`
+   * and the matching deferred JSONL record. See the canonical note
+   * above `ORPHAN_TOOL_USE_REPAIR_REASON` for the lifecycle and the
+   * wedge they prevent.
+   */
+  private pendingPartialAssistantTurnIndex: number | null = null;
+  private pendingPartialAssistantRecord:
+    | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
+    | null = null;
+
+  /**
+   * Reset both partial-push markers in lockstep. Every history-mutation
+   * site uses this — single-field resets are a bug because the fields
+   * are always paired by lifecycle.
+   */
+  private clearPendingPartialState(): void {
+    this.pendingPartialAssistantTurnIndex = null;
+    this.pendingPartialAssistantRecord = null;
+  }
 
   /**
    * Creates a new GeminiChat instance.
@@ -946,9 +1407,11 @@ export class GeminiChat {
    *
    * Returns the compression info regardless of outcome. On a successful
    * compaction (`COMPRESSED`), this method has already mutated the chat's
-   * history, recorded the event to `chatRecordingService` (if wired), and
-   * updated both the per-chat token count and (when wired) the global
-   * telemetry singleton.
+   * history, recorded the event to `chatRecordingService` (if wired and
+   * unless `options.deferChatCompressionRecord` is set), and updated both
+   * the per-chat token count and (when wired) the global telemetry singleton.
+   * Deferred callers are responsible for recording after their own
+   * post-compression guards pass.
    */
   async tryCompress(
     promptId: string,
@@ -963,27 +1426,44 @@ export class GeminiChat {
       force,
       model,
       config: this.config,
-      hasFailedCompressionAttempt: this.hasFailedCompressionAttempt,
+      consecutiveFailures: this.consecutiveFailures,
       originalTokenCount:
         options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
+      pendingUserMessage: options?.pendingUserMessage,
+      precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
+      customInstructions: options?.customInstructions,
       signal,
     });
 
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
-      this.chatRecordingService?.recordChatCompression({
-        info,
-        compressedHistory: newHistory,
-      });
+      if (!options?.deferChatCompressionRecord) {
+        this.chatRecordingService?.recordChatCompression({
+          info,
+          compressedHistory: newHistory,
+        });
+      }
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
+      clearDetailedSpanState();
       this.lastPromptTokenCount = info.newTokenCount;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
-      this.hasFailedCompressionAttempt = false;
+      // Reset the consecutive-failure counter on success so a forced /compress
+      // (or any successful compaction) recovers a chat whose breaker had
+      // tripped.
+      this.consecutiveFailures = 0;
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
+      // Track failed attempts (only count if not forced) so we stop spending
+      // compression-API calls on a chat that can't shrink after
+      // MAX_CONSECUTIVE_FAILURES strikes in a row.
       if (!force) {
-        this.hasFailedCompressionAttempt = true;
+        this.consecutiveFailures += 1;
+        if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          debugLogger.warn(
+            `[compaction] circuit breaker tripped after ${this.consecutiveFailures} consecutive failures (cheap-gate path); auto-compaction will NOOP until a successful force compaction resets the counter.`,
+          );
+        }
       }
     }
 
@@ -1059,6 +1539,16 @@ export class GeminiChat {
     });
     this.sendPromise = streamDonePromise;
 
+    // Clear any partial-push marker left over from a prior unretryable
+    // break path — the marker is per-send; carrying it across sends
+    // would let the next send's retry catch wrongly pop a now-valid
+    // model entry sitting at the stale index. The deferred-record
+    // stash gets the same per-send reset for the same reason: a
+    // leftover from a prior unretryable break would otherwise get
+    // appended to JSONL by THIS send's retry-loop flush, attaching
+    // someone else's failed turn to this conversation.
+    this.clearPendingPartialState();
+
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
     let userContentAdded = false;
@@ -1067,18 +1557,185 @@ export class GeminiChat {
       // resolves it) has not run yet. Any setup error before returning the
       // generator must release the lock or subsequent sends will block forever
       // at `await this.sendPromise`.
+      // Build the user content BEFORE compression so the cheap-gate can size
+      // the upcoming prompt — closes the "first send after inherited history"
+      // gap where `lastPromptTokenCount === 0` and the gate would otherwise
+      // see only the stale prior-turn count (0).
+      const userContent = createUserContent(params.message);
+
+      // Hard-tier rescue: when the estimated prompt size is at or above the
+      // hard threshold (effectiveWindow - HARD_BUFFER), force compaction in
+      // this send instead of waiting for the API to reject the request as too
+      // large.
+      //
+      // We compute `effectiveTokens` ONCE here and pass it through to
+      // tryCompress → service.compress so the cheap-gate doesn't redo the
+      // estimation (which involves another `getHistory(true)` clone). This
+      // reuse also fixes a per-config-knob inconsistency: previously the
+      // hard-tier rescue used the default imageTokenEstimate while the
+      // cheap-gate inside tryCompress used the user's resolved value.
+      // (review #4168 R1.3 + R1.4)
+      //
+      // The consecutive-failure counter is NOT pre-reset here. force=true
+      // already bypasses the breaker (the `!force` check in
+      // `chatCompressionService.compress`'s cheap-gate), so a latched session
+      // can still attempt hard-rescue; pre-resetting would defeat the breaker
+      // entirely because hard-rescue failures don't increment via tryCompress
+      // (force=true skips the `if (!force)` increment in the failure branch),
+      // and only the reactive overflow handler explicitly increments. With a
+      // pre-reset the counter would oscillate 0↔1 across sends and never trip.
+      // On COMPRESSED success, the post-call branch in `tryCompress` (the
+      // `consecutiveFailures = 0` line in the COMPRESSED handler) still resets
+      // to 0, which is the correct recovery path for a previously-latched
+      // session.
+      const contextLimit =
+        this.config.getContentGeneratorConfig()?.contextWindowSize ??
+        DEFAULT_TOKEN_LIMIT;
+      const { hard } = computeThresholds(contextLimit);
+      const imageTokenEstimate = resolveSlimmingConfig(
+        this.config.getChatCompression(),
+      ).imageTokenEstimate;
+      // When lastPromptTokenCount > 0, estimatePromptTokens uses the
+      // API-authoritative count + a tiny estimate of just the new user
+      // message — it does NOT touch the history at all in that branch, so
+      // skip the costly `getHistory(true)` clone on the steady-state path.
+      // The lastPromptTokenCount=0 branch (first send after --continue
+      // restore / subagent inheritance) walks history with a char/4
+      // heuristic that can under-count by ~15-20K tokens; the reactive
+      // overflow recovery path inside the async iterator below (the
+      // `getContextLengthExceededInfo` → `tryCompress` → RETRY branch)
+      // is the documented safety net when this under-count causes
+      // hard-rescue to miss.
+      const effectiveTokens = estimatePromptTokens(
+        this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
+        userContent,
+        this.lastPromptTokenCount,
+        imageTokenEstimate,
+      );
+      const shouldForceFromHard = effectiveTokens >= hard;
+      const historyBeforeHardRescue = shouldForceFromHard
+        ? this.getHistoryShallow()
+        : undefined;
+      const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
+      if (shouldForceFromHard) {
+        debugLogger.warn(
+          `[compaction] hard-tier rescue triggered: prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}, consecutiveFailures=${this.consecutiveFailures}.`,
+        );
+      }
+
       compressionInfo = await this.tryCompress(
         prompt_id,
         model,
-        false,
+        shouldForceFromHard,
         params.config?.abortSignal,
+        {
+          pendingUserMessage: userContent,
+          precomputedEffectiveTokens: effectiveTokens,
+          deferChatCompressionRecord: shouldForceFromHard,
+          // Hard-rescue is force=true to bypass the cheap-gate breaker
+          // but it remains a semantically AUTOMATIC trigger. Tag the
+          // compactTrigger explicitly as 'auto' so the PostCompact
+          // hook event fires with the correct trigger category (the
+          // default `force=true → 'manual'` mapping would otherwise
+          // misclassify it). The compress() service preserves a
+          // trailing model+functionCall via
+          // composePostCompactHistory's `trailingFunctionCallContent`
+          // handling on its own, so the API request's tool-call /
+          // response pairing stays intact regardless of trigger value.
+          trigger: shouldForceFromHard ? 'auto' : undefined,
+        },
       );
 
-      const userContent = createUserContent(params.message);
+      const localPromptTokensAfterCompression = shouldForceFromHard
+        ? estimatePromptTokens(
+            this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
+            userContent,
+            this.lastPromptTokenCount,
+            imageTokenEstimate,
+          )
+        : 0;
+      if (
+        shouldStopAfterHardRescue(
+          shouldForceFromHard,
+          hard,
+          localPromptTokensAfterCompression,
+        )
+      ) {
+        const message = getHardRescueFailureMessage(
+          effectiveTokens,
+          hard,
+          compressionInfo,
+          localPromptTokensAfterCompression,
+        );
+        if (
+          compressionInfo.compressionStatus === CompressionStatus.COMPRESSED &&
+          historyBeforeHardRescue
+        ) {
+          // Hard-rescue compression mutates in-memory history before this
+          // guard can compare the compressed prompt size. If the compressed
+          // prompt is still too large to send, restore the pre-compression
+          // state. The JSONL compression checkpoint is intentionally not
+          // written because the send is about to be rejected.
+          this.setHistory(historyBeforeHardRescue);
+          this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
+          this.telemetryService?.setLastPromptTokenCount(
+            lastPromptTokenCountBeforeHardRescue,
+          );
+        }
+        const compressionStatus =
+          CompressionStatus[compressionInfo.compressionStatus] ??
+          String(compressionInfo.compressionStatus);
+        debugLogger.warn(
+          `[compaction] hard-tier rescue stopped oversized prompt: ` +
+            `prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, ` +
+            `hard=${hard}, localPromptTokensAfterCompression=` +
+            `${localPromptTokensAfterCompression}, compressionStatus=` +
+            `${compressionStatus}, newTokenCount=` +
+            `${compressionInfo.newTokenCount}, consecutiveFailures=` +
+            `${this.consecutiveFailures}. ${message}`,
+        );
+        throw new Error(message);
+      }
+      if (
+        shouldForceFromHard &&
+        compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
+      ) {
+        this.chatRecordingService?.recordChatCompression({
+          info: compressionInfo,
+          compressedHistory: this.getHistoryShallow(),
+        });
+      }
 
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       userContentAdded = true;
+      // Per-send orphan repair (belt-and-suspenders alongside the
+      // startChat load-time pass). Runs AFTER user content lands so a
+      // user-supplied tool_result closes the pair before we synthesize
+      // anything. Logs are tagged so investigators can distinguish this
+      // pass from the session-load pass and from the React scheduler's
+      // dedup-drop. See the canonical note above
+      // `ORPHAN_TOOL_USE_REPAIR_REASON`.
+      const inlineRepair = repairOrphanedToolUseTurns(this.history);
+      if (inlineRepair.injected.length > 0) {
+        debugLogger.warn(
+          `[REPAIR] sendMessageStream inline pass synthesized ` +
+            `${inlineRepair.injected.length} functionResponse(s): ` +
+            inlineRepair.injected
+              .map((entry) => `${entry.name}(${entry.callId})`)
+              .join(', '),
+        );
+      }
+      if (inlineRepair.droppedDuplicates.length > 0) {
+        debugLogger.warn(
+          `[REPAIR] sendMessageStream inline pass dropped ` +
+            `${inlineRepair.droppedDuplicates.length} duplicate ` +
+            `functionResponse(s): ` +
+            inlineRepair.droppedDuplicates
+              .map((entry) => `${entry.name}(${entry.callId})`)
+              .join(', '),
+        );
+      }
       requestContents = this.getRequestHistory();
     } catch (error) {
       if (userContentAdded) {
@@ -1168,12 +1825,61 @@ export class GeminiChat {
           } catch (error) {
             lastError = error;
 
+            // If `processStreamResponse` persisted a partial assistant turn
+            // (mid-stream error after a `functionCall` was already
+            // yielded), every retry-and-continue path below must drop
+            // that turn first; otherwise the retry's response lands as
+            // a second consecutive model turn with an orphan tool_use
+            // (the wedge — see the canonical note above
+            // `ORPHAN_TOOL_USE_REPAIR_REASON`). Paths that `break`
+            // (unretryable) keep the partial.
+            const popPartialIfPushed = () => {
+              const idx = self.pendingPartialAssistantTurnIndex;
+              if (idx === null) return;
+              if (
+                self.history.length > idx &&
+                self.history[idx]?.role === 'model'
+              ) {
+                self.history.splice(idx, 1);
+              } else {
+                // Marker was set but the entry it pointed at is gone or
+                // is no longer a `model` turn. Today this can't happen:
+                // every history-mutation path (clearHistory, addHistory,
+                // setHistory, truncateHistory, stripThoughtsFromHistory,
+                // stripOrphanedUserEntriesFromHistory) calls
+                // clearPendingPartialState() in lockstep, so the marker
+                // is null whenever the index basis is invalidated.
+                // Logging the mismatch makes the invariant observable —
+                // without this, a future caller that mutates history
+                // without resetting the marker would silently leave a
+                // stale partial in `this.history` (popPartialIfPushed
+                // skipping the splice) AND the field-level invariant
+                // that "marker non-null ⇒ a real partial sits at idx"
+                // would be quietly violated. With the warn, anyone
+                // investigating a stale-partial wedge sees a log line
+                // pointing straight at the offending caller.
+                debugLogger.warn(
+                  `[PARTIAL_POP] Splice skipped: idx=${idx}, ` +
+                    `historyLength=${self.history.length}, ` +
+                    `roleAtIdx=${self.history[idx]?.role ?? 'undefined'}`,
+                );
+              }
+              // Drop both markers in lockstep — the deferred chat-
+              // recording record must be discarded alongside the
+              // in-memory splice so the JSONL transcript also drops the
+              // failed attempt. See the field-level comment on
+              // `pendingPartialAssistantRecord` for the failure mode
+              // this prevents.
+              self.clearPendingPartialState();
+            };
+
             // Handle rate-limit / throttling errors returned as stream content.
             // These arrive as StreamContentError with finish_reason="error_finish"
             // from the pipeline, containing the throttling message in the content.
             // Covers TPM throttling, GLM rate limits, and other provider throttling.
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
             if (isRateLimit && rateLimitRetryCount < maxRateLimitRetries) {
+              popPartialIfPushed();
               rateLimitRetryCount++;
               const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
                 ...RATE_LIMIT_RETRY_OPTIONS,
@@ -1248,6 +1954,11 @@ export class GeminiChat {
                     reactiveInfo.compressionStatus ===
                     CompressionStatus.COMPRESSED
                   ) {
+                    // No-op today: tryCompress's setHistory has already
+                    // cleared the marker. Kept for uniformity with the
+                    // other retry branches in case a future in-place
+                    // tryCompress stops resetting it.
+                    popPartialIfPushed();
                     requestContents = self.getRequestHistory();
                     debugLogger.info(
                       `Reactive compression succeeded: ` +
@@ -1273,7 +1984,21 @@ export class GeminiChat {
                   if (
                     isCompressionFailureStatus(reactiveInfo.compressionStatus)
                   ) {
-                    self.hasFailedCompressionAttempt = true;
+                    // Reactive compression is force=true so tryCompress's
+                    // failure branch did not increment the counter. Count it
+                    // explicitly as one strike — a single transient error
+                    // (network blip, model 5xx) should not permanently latch
+                    // the breaker; only repeated reactive failures should.
+                    // The only recovery path for a latched counter is a
+                    // successful compaction (post-call reset at the COMPRESSED
+                    // branch in tryCompress); hard-rescue forwards the counter
+                    // as-is since force=true bypasses the breaker.
+                    self.consecutiveFailures += 1;
+                    if (self.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                      debugLogger.warn(
+                        `[compaction] circuit breaker tripped after ${self.consecutiveFailures} consecutive failures (reactive overflow path); auto-compaction will NOOP on the cheap-gate until a successful force compaction resets the counter.`,
+                      );
+                    }
                   }
                 } catch (compressionError) {
                   if (
@@ -1304,6 +2029,7 @@ export class GeminiChat {
               isTransientStreamError &&
               invalidStreamRetryCount < INVALID_STREAM_RETRY_CONFIG.maxRetries
             ) {
+              popPartialIfPushed();
               invalidStreamRetryCount++;
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -1333,10 +2059,20 @@ export class GeminiChat {
               break;
             }
 
-            // Other content validation errors (e.g. NO_FINISH_REASON).
+            // Currently unreachable for `InvalidStreamError`. The
+            // `isContentError` predicate is identical to
+            // `isTransientStreamError` (`error instanceof InvalidStreamError`),
+            // and the transient branch above already either continued or
+            // broke for that class. The branch is preserved as
+            // defense-in-depth: a future error class that should consume
+            // its own content-retry budget but NOT the transient one
+            // could be threaded through here without re-deriving the
+            // popPartialIfPushed sequence. No reachable test path until
+            // the predicates diverge.
             const isContentError = error instanceof InvalidStreamError;
             if (isContentError) {
               if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
+                popPartialIfPushed();
                 logContentRetry(
                   self.config,
                   new ContentRetryEvent(
@@ -1473,9 +2209,33 @@ export class GeminiChat {
               // coalesced back into the preceding model entry after the loop.
               successfulRecoveries++;
             } catch (recoveryError) {
-              // If a recovery attempt fails (e.g., empty response, network
-              // error), stop recovering and let the partial output stand.
-              // Pop the dangling recovery message to keep history valid.
+              // Pop the partial `model[fc]` FIRST (if processStreamResponse
+              // pushed one before re-throwing), THEN the recovery user
+              // turn. Reversed order would strand `OUTPUT_RECOVERY_MESSAGE`
+              // as a real user turn. Index-checked pop mirrors
+              // `popPartialIfPushed` above — see the design note above
+              // `ORPHAN_TOOL_USE_REPAIR_REASON` for the wedge mechanism
+              // and the partial-push marker lifecycle.
+              const expectedIdx = self.pendingPartialAssistantTurnIndex;
+              const lastIdx = self.history.length - 1;
+              if (
+                expectedIdx !== null &&
+                self.history.length > 0 &&
+                self.history[lastIdx]?.role === 'model'
+              ) {
+                if (expectedIdx !== lastIdx) {
+                  debugLogger.warn(
+                    `[RECOVERY_POP] Marker/last-index mismatch: ` +
+                      `marker=${expectedIdx}, lastIdx=${lastIdx}, ` +
+                      `historyLength=${self.history.length}. Popping ` +
+                      `last entry as best-effort rollback — investigate ` +
+                      `any history mutation between processStreamResponse's ` +
+                      `partial push and this catch.`,
+                  );
+                }
+                self.history.pop();
+                self.clearPendingPartialState();
+              }
               if (
                 self.history.length > 0 &&
                 self.history[self.history.length - 1].role === 'user'
@@ -1532,6 +2292,28 @@ export class GeminiChat {
       } finally {
         sleepInhibitorHandle.release();
         streamDoneResolver!();
+        // Flush any deferred partial-tool_use record. Covers both the
+        // post-retry-loop unretryable break AND the max-tokens
+        // escalation throw (the escalated processStreamResponse can
+        // set a new record that escapes the retry-loop catch).
+        // Recording-service errors are logged at error level (sustained
+        // failure = monitoring signal) and swallowed — propagating
+        // would mask the real send outcome.
+        if (self.pendingPartialAssistantRecord) {
+          try {
+            self.chatRecordingService?.recordAssistantTurn(
+              self.pendingPartialAssistantRecord,
+            );
+          } catch (recordErr) {
+            debugLogger.error(
+              '[PARTIAL_FLUSH] Failed to persist deferred JSONL record: ' +
+                (recordErr instanceof Error
+                  ? recordErr.message
+                  : String(recordErr)),
+            );
+          }
+          self.clearPendingPartialState();
+        }
       }
     })();
   }
@@ -1571,6 +2353,20 @@ export class GeminiChat {
       heartbeatFn: (info) => {
         process.stderr.write(
           `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+        );
+      },
+      onRetry: (info) => {
+        logApiRetry(
+          this.config,
+          new ApiRetryEvent({
+            model,
+            promptId: prompt_id,
+            attemptNumber: info.attempt,
+            error: info.error,
+            statusCode: info.errorStatus,
+            retryDelayMs: info.delayMs,
+            subagentName: subagentNameContext.getStore(),
+          }),
         );
       },
     });
@@ -1693,10 +2489,37 @@ export class GeminiChat {
   }
 
   /**
+   * Set of `functionResponse.id` strings in user turns. Walk-only,
+   * no clone — `useGeminiStream.handleCompletedTools` calls this per
+   * tool-completion batch, so {@link getHistory}'s `structuredClone`
+   * would stall the UI on long sessions.
+   */
+  getHistoryFunctionResponseIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const entry of this.history) {
+      if (entry.role !== 'user') continue;
+      for (const part of entry.parts ?? []) {
+        const id = part.functionResponse?.id;
+        if (id) ids.add(id);
+      }
+    }
+    return ids;
+  }
+
+  /**
    * Clears the chat history.
    */
   clearHistory(): void {
     this.history = [];
+    // Any pending partial-push state points into the now-empty history;
+    // resetting prevents `popPartialIfPushed` from splicing whatever
+    // shows up at that index in a future send (defense-in-depth — the
+    // helper also bounds-checks, but a stale marker that happens to
+    // line up with a real model turn could otherwise pop the wrong
+    // entry). The deferred-record stash is dropped for the same reason:
+    // a later flush would append a turn that doesn't match the (now-
+    // empty) live history.
+    this.clearPendingPartialState();
   }
 
   /**
@@ -1704,20 +2527,56 @@ export class GeminiChat {
    */
   addHistory(content: Content): void {
     this.history.push(content);
+    // addHistory only runs between sends, so the partial-push marker
+    // should already be cleared. If it is not, a new caller is
+    // violating that invariant — surface it at error level so the
+    // offending stack is visible. See the design note above
+    // `ORPHAN_TOOL_USE_REPAIR_REASON` for the marker lifecycle.
+    if (
+      this.pendingPartialAssistantTurnIndex !== null ||
+      this.pendingPartialAssistantRecord !== null
+    ) {
+      debugLogger.error(
+        '[INVARIANT_VIOLATION] addHistory called while a partial-push ' +
+          'marker is active — clearing it.',
+      );
+    }
+    this.clearPendingPartialState();
   }
 
   setHistory(history: Content[]): void {
     this.history = history;
+    // History replacement (compression, /clear, --resume reload) wipes
+    // the index basis the partial-push marker was captured against. The
+    // marker MUST be cleared — otherwise `popPartialIfPushed` could find
+    // a model turn at the stale index in the replacement history and
+    // splice an entry that has nothing to do with the original partial
+    // push, corrupting the conversation. Drop the paired deferred-record
+    // stash too: its referent (the model turn at the old index) is gone.
+    this.clearPendingPartialState();
   }
 
   truncateHistory(keepCount: number): void {
     this.history = this.history.slice(0, keepCount);
+    // Truncation can drop the entry the partial-push marker points at,
+    // or leave it valid but shift the meaning of nearby indices. Reset
+    // both fields rather than try to fix them up — they're per-send and
+    // ephemeral, so losing them across a truncate is safe (the
+    // sendMessageStream that pushed them has already finished or will
+    // start fresh on the next call).
+    this.clearPendingPartialState();
   }
 
   stripThoughtsFromHistory(): void {
     this.history = this.history
       .map(stripThoughtPartsFromContent)
       .filter((content): content is Content => content !== null);
+    // Filter+map replaces `this.history` with a new array, so any pending
+    // partial-push marker is now indexed against an array that no longer
+    // exists. Clear it for the same reason setHistory does — and drop
+    // the paired deferred-record stash so a later flush can't land a
+    // turn that doesn't exist in live history.
+    this.clearPendingPartialState();
   }
 
   /**
@@ -1732,6 +2591,29 @@ export class GeminiChat {
     ) {
       this.history.pop();
     }
+    // Today this is safe even without the reset — only trailing user
+    // entries are popped, which can't shift the index of an earlier
+    // `model` partial. But every other history-mutation method now
+    // clears the partial-push state in lockstep
+    // (clearHistory/addHistory/setHistory/truncateHistory/
+    // stripThoughtsFromHistory), so omitting it here would be a silent
+    // exception to the uniform invariant: a future caller invoking
+    // this method between the deferred JSONL flush and the next
+    // `sendMessageStream` would otherwise leave a stale marker that
+    // happens to line up with whatever model entry is at that index
+    // in the meanwhile.
+    this.clearPendingPartialState();
+  }
+
+  /**
+   * Instance wrapper around the free-function {@link repairOrphanedToolUseTurns}.
+   * See the canonical note above `ORPHAN_TOOL_USE_REPAIR_REASON`.
+   */
+  repairOrphanedToolUseTurns(reason?: string): {
+    injected: Array<{ callId: string; name: string }>;
+    droppedDuplicates: Array<{ callId: string; name: string }>;
+  } {
+    return repairOrphanedToolUseTurns(this.history, reason);
   }
 
   setTools(tools: Tool[]): void {
@@ -1780,51 +2662,99 @@ export class GeminiChat {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
+    let coercedUsage:
+      | {
+          promptTokenCount: number;
+          totalTokenCount: number;
+          candidatesTokenCount: number;
+          cachedContentTokenCount: number;
+        }
+      | undefined;
 
     let hasToolCall = false;
     let hasFinishReason = false;
+    // Captured if the upstream stream throws mid-iteration (typical on weak
+    // networks: SSE drops between `content_block_stop` of a tool_use and the
+    // terminal `message_stop`). We still build / record / push a partial
+    // assistant turn below before re-throwing — see the dedicated branch in
+    // the post-loop block for why this is needed to keep tool_use/tool_result
+    // pairing intact across the failure.
+    let streamError: unknown = null;
 
-    for await (const chunk of streamResponse) {
-      // Use ||= to avoid later usage-only chunks (no candidates) overwriting
-      // a finishReason that was already seen in an earlier chunk.
-      hasFinishReason ||=
-        chunk?.candidates?.some((candidate) => candidate.finishReason) ?? false;
+    try {
+      for await (const chunk of streamResponse) {
+        // Use ||= to avoid later usage-only chunks (no candidates) overwriting
+        // a finishReason that was already seen in an earlier chunk.
+        hasFinishReason ||=
+          chunk?.candidates?.some((candidate) => candidate.finishReason) ??
+          false;
 
-      if (isValidResponse(chunk)) {
-        const content = chunk.candidates?.[0]?.content;
-        if (content?.parts) {
-          if (content.parts.some((part) => part.functionCall)) {
-            hasToolCall = true;
+        if (isValidResponse(chunk)) {
+          const content = chunk.candidates?.[0]?.content;
+          if (content?.parts) {
+            if (content.parts.some((part) => part.functionCall)) {
+              hasToolCall = true;
+            }
+
+            // Collect all parts for recording
+            allModelParts.push(...content.parts);
           }
-
-          // Collect all parts for recording
-          allModelParts.push(...content.parts);
         }
-      }
 
-      // Collect token usage for consolidated recording
-      if (chunk.usageMetadata) {
-        usageMetadata = chunk.usageMetadata;
-        // Context usage tracks prompt size; output isn't in history yet.
-        const lastPromptTokenCount =
-          usageMetadata.promptTokenCount || usageMetadata.totalTokenCount;
-        if (lastPromptTokenCount) {
-          // Always update the per-chat counter so this chat (including
-          // subagents) can make its own compaction decisions.
-          this.lastPromptTokenCount = lastPromptTokenCount;
-          // Mirror to the global telemetry only when wired — subagents
-          // pass `telemetryService=undefined` to keep their context usage
-          // out of the main session's UI counters.
-          this.telemetryService?.setLastPromptTokenCount(lastPromptTokenCount);
-        }
-        if (usageMetadata.cachedContentTokenCount && this.telemetryService) {
-          this.telemetryService.setLastCachedContentTokenCount(
-            usageMetadata.cachedContentTokenCount,
+        // Collect token usage for consolidated recording
+        if (chunk.usageMetadata) {
+          usageMetadata = chunk.usageMetadata;
+          // Context usage tracks prompt size; output isn't in history yet.
+          // Coerce hostile-provider values (NaN / Infinity / negative) to 0
+          // so the compaction gate arithmetic stays well-defined; see
+          // `coerceUsageCount` for the failure modes this guards against.
+          const promptTokenCount = coerceUsageCount(
+            usageMetadata.promptTokenCount,
+            'promptTokenCount',
           );
+          const totalTokenCount = coerceUsageCount(
+            usageMetadata.totalTokenCount,
+            'totalTokenCount',
+          );
+          const candidatesTokenCount = coerceUsageCount(
+            usageMetadata.candidatesTokenCount,
+            'candidatesTokenCount',
+          );
+          const cachedContentTokenCount = coerceUsageCount(
+            usageMetadata.cachedContentTokenCount,
+            'cachedContentTokenCount',
+          );
+          // Stash coerced values so recordAssistantTurn can reuse them
+          // without re-calling coerceUsageCount inline.
+          coercedUsage = {
+            promptTokenCount,
+            totalTokenCount,
+            candidatesTokenCount,
+            cachedContentTokenCount,
+          };
+          const lastPromptTokenCount = promptTokenCount || totalTokenCount;
+          if (lastPromptTokenCount) {
+            // Always update the per-chat counter so this chat (including
+            // subagents) can make its own compaction decisions.
+            this.lastPromptTokenCount = lastPromptTokenCount;
+            // Mirror to the global telemetry only when wired — subagents
+            // pass `telemetryService=undefined` to keep their context usage
+            // out of the main session's UI counters.
+            this.telemetryService?.setLastPromptTokenCount(
+              lastPromptTokenCount,
+            );
+          }
+          if (cachedContentTokenCount && this.telemetryService) {
+            this.telemetryService.setLastCachedContentTokenCount(
+              cachedContentTokenCount,
+            );
+          }
         }
-      }
 
-      yield chunk; // Yield every chunk to the UI immediately.
+        yield chunk; // Yield every chunk to the UI immediately.
+      }
+    } catch (e) {
+      streamError = e;
     }
 
     let thoughtContentPart: Part | undefined;
@@ -1870,11 +2800,25 @@ export class GeminiChat {
       .join('')
       .trim();
 
-    // Record assistant turn with raw Content and metadata
-    if (thoughtContentPart || contentText || hasToolCall || usageMetadata) {
+    // Record assistant turn with raw Content and metadata. Gate matches
+    // the in-memory `this.history.push` decision below so chat-recording
+    // JSONL never carries a partial turn we deliberately dropped from
+    // history: on `--resume` the transcript-load path would otherwise
+    // re-inject a model turn the in-session run intentionally discarded
+    // (text-only mid-stream errors, where the Retry re-issues the user
+    // prompt — a stale partial-text record would bias the resumed
+    // conversation or surface as duplicate output).
+    const willPersistToHistory =
+      streamError === null ||
+      (hasToolCall &&
+        (thoughtContentPart || consolidatedHistoryParts.length > 0));
+    if (
+      willPersistToHistory &&
+      (thoughtContentPart || contentText || hasToolCall || usageMetadata)
+    ) {
       const contextWindowSize =
         this.config.getContentGeneratorConfig()?.contextWindowSize;
-      this.chatRecordingService?.recordAssistantTurn({
+      const recordArgs = {
         model,
         message: [
           ...(thoughtContentPart ? [thoughtContentPart] : []),
@@ -1890,9 +2834,88 @@ export class GeminiChat {
                 )
             : []),
         ],
-        tokens: usageMetadata,
+        tokens: coercedUsage
+          ? { ...usageMetadata, ...coercedUsage }
+          : usageMetadata,
         contextWindowSize,
-      });
+      };
+      if (streamError !== null) {
+        // Stream-error + tool-use partial: defer the JSONL append until
+        // the outer retry loop decides whether to roll back this attempt.
+        // If the same send retries successfully, popPartialIfPushed clears
+        // this stash and the failed attempt never lands on disk; if the
+        // retry path doesn't apply (unretryable break), the stash is
+        // flushed at the rethrow site so JSONL stays aligned with the
+        // partial that survives in-memory. Without this, retry-success
+        // leaves a failed `model[functionCall]` durable in JSONL and
+        // `--resume` rehydrates a turn the live session correctly
+        // discarded.
+        this.pendingPartialAssistantRecord = recordArgs;
+      } else {
+        this.chatRecordingService?.recordAssistantTurn(recordArgs);
+      }
+    }
+
+    // Mid-stream failure recovery (Race C in the canonical note above
+    // `ORPHAN_TOOL_USE_REPAIR_REASON`): if the upstream stream threw
+    // AFTER a `functionCall` chunk was already yielded — typical on
+    // weak networks: SSE cut between a tool_use `content_block_stop`
+    // and the terminal `message_stop` — we persist the partial
+    // assistant turn so the React scheduler's incoming
+    // `user[functionResponse]` has a matching `model[tool_use]` to
+    // pair with.
+    //
+    // Plain-text partial turns (no functionCall yielded) are
+    // deliberately NOT persisted — the Retry path pops the trailing
+    // user prompt and re-issues it; a stale partial-text model turn
+    // between them would either bias the retry or surface as a
+    // duplicate.
+    if (streamError !== null) {
+      // Reuse the `willPersistToHistory` gate from the recordAssistantTurn
+      // block above instead of re-deriving it. When `streamError !== null`,
+      // `willPersistToHistory` reduces to exactly the original expression
+      // `hasToolCall && (thoughtContentPart || consolidatedHistoryParts.length > 0)`;
+      // sharing the single binding eliminates drift risk if one gate is
+      // tightened without the other and the JSONL recording silently
+      // desyncs from in-memory history.
+      if (willPersistToHistory) {
+        this.history.push({
+          role: 'model',
+          parts: [
+            ...(thoughtContentPart ? [thoughtContentPart] : []),
+            ...consolidatedHistoryParts,
+          ],
+        });
+        // Track the pushed turn so the outer sendMessageStream retry loop
+        // can roll it back if it decides to retry the same send. Without
+        // this, a successful retry would leave the failed attempt's
+        // partial `model[functionCall]` as a stale leading model turn in
+        // front of the retry's real response.
+        this.pendingPartialAssistantTurnIndex = this.history.length - 1;
+        // Trace the push event so the lifecycle is observable end-to-end:
+        // dedup in `useGeminiStream.handleCompletedTools` already logs
+        // `[REPAIR] Dropping ...`, and `repairOrphanedToolUseTurnsInHistory`
+        // logs `[REPAIR] Synthesized ...`. Without a corresponding
+        // `[PARTIAL_PUSH]` line here, an investigator looking at a
+        // stale-partial wedge sees the downstream symptom but has no
+        // anchor for when/why the partial originated.
+        debugLogger.warn(
+          '[PARTIAL_PUSH] Persisting partial assistant turn for ' +
+            'mid-stream error recovery (will be rolled back if retry ' +
+            'succeeds, kept if break is unretryable). ' +
+            `pendingIndex=${this.pendingPartialAssistantTurnIndex} ` +
+            `callIds=${consolidatedHistoryParts
+              .map((p) => p.functionCall?.id)
+              .filter((id): id is string => Boolean(id))
+              .join(',')} ` +
+            `error=${
+              streamError instanceof Error
+                ? streamError.message
+                : String(streamError)
+            }`,
+        );
+      }
+      throw streamError;
     }
 
     // Stream validation logic: A stream is considered successful if:
