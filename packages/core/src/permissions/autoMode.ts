@@ -367,11 +367,18 @@ function rawFlagValue(token: string, line: string): string | undefined {
   ) {
     return token.slice(equalsIndex + 1);
   }
+  if (
+    token.startsWith('--output=') &&
+    /\bpatch\b/.test(line) &&
+    equalsIndex > 2
+  ) {
+    return token.slice(equalsIndex + 1);
+  }
   for (const { flag, command } of [
     { flag: '-C', command: /\btar\b/ },
     { flag: '-d', command: /\bunzip\b/ },
     { flag: '-D', command: /\bcpio\b/ },
-    { flag: '-o', command: /\b(?:curl|sort)\b/ },
+    { flag: '-o', command: /\b(?:curl|sort|patch)\b/ },
     { flag: '-O', command: /\bwget\b/ },
     { flag: '-t', command: /\b(?:cp|mv|install|ln)\b/ },
   ]) {

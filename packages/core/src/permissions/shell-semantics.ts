@@ -1514,13 +1514,31 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     }));
   },
 
-  patch: (args, cwd) =>
-    getPositionalArgs(args, new Set(['-i', '--input', '-d', '--directory']))
-      .filter(looksLikePath)
-      .map((p) => ({
-        virtualTool: 'edit' as const,
-        filePath: resolvePath(p, cwd),
-      })),
+  patch: (args, cwd) => {
+    const output = getFlagValue(args, '-o', '--output');
+    const outputOps =
+      output && looksLikePath(output)
+        ? [
+            {
+              virtualTool: 'edit' as const,
+              filePath: resolvePath(output, cwd),
+            },
+          ]
+        : [];
+
+    return [
+      ...outputOps,
+      ...getPositionalArgs(
+        args,
+        new Set(['-i', '--input', '-d', '--directory', '-o', '--output']),
+      )
+        .filter(looksLikePath)
+        .map((p) => ({
+          virtualTool: 'edit' as const,
+          filePath: resolvePath(p, cwd),
+        })),
+    ];
+  },
 
   perl: (args, cwd) => {
     const hasInPlace = args.some(
@@ -2120,7 +2138,9 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
     }
     if (inner.length === 0) continue;
 
-    const innerCommand = inner.join(' ');
+    const innerCommand = inner
+      .map((arg) => arg.replaceAll('{}', '__find_exec_path__'))
+      .join(' ');
     const innerOps = extractShellOperationsAcrossCommand(innerCommand, cwd);
     ops.push(
       ...(marker.endsWith('dir')

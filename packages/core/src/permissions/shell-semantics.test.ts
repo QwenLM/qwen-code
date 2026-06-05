@@ -184,6 +184,17 @@ describe('extractShellOperations', () => {
     ]);
   });
 
+  it('find: preserves exec placeholder operands for write detection', () => {
+    const ops = extractShellOperations(
+      'find . -exec cp {} .qwen/settings.json ;',
+      CWD,
+    );
+    expect(ops).toContainEqual({
+      virtualTool: 'write_file',
+      filePath: `${CWD}/.qwen/settings.json`,
+    });
+  });
+
   // ── touch / mkdir ──────────────────────────────────────────────────────────
 
   it('touch: creates a file (write_file)', () => {
@@ -362,6 +373,18 @@ describe('extractShellOperations', () => {
       virtualTool: 'edit',
       filePath: `${CWD}/.qwen/settings.json`,
     });
+  });
+
+  it('patch edits output flag targets', () => {
+    for (const command of [
+      'patch --output=.qwen/settings.json -i fix.patch',
+      'patch -o .qwen/settings.json -i fix.patch',
+    ]) {
+      expect(extractShellOperations(command, CWD)).toContainEqual({
+        virtualTool: 'edit',
+        filePath: `${CWD}/.qwen/settings.json`,
+      });
+    }
   });
 
   // ── Redirections ───────────────────────────────────────────────────────────

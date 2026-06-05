@@ -889,6 +889,35 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     }
   });
 
+  it('returns true for patch output flags targeting protected paths', () => {
+    for (const command of [
+      'patch --output=.qwen/settings.json -i fix.patch',
+      'patch -o.qwen/settings.json -i fix.patch',
+    ]) {
+      expect(
+        shouldForceAutoModeReviewForAllow(
+          ctx({
+            toolName: ToolNames.SHELL,
+            command,
+            cwd: '/repo',
+          }),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('returns true for find exec writes with placeholder operands', () => {
+    expect(
+      shouldForceAutoModeReviewForAllow(
+        ctx({
+          toolName: ToolNames.SHELL,
+          command: 'find . -exec cp {} .qwen/settings.json ;',
+          cwd: '/repo',
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it('returns true for long in-place sed/perl writes to protected paths', () => {
     for (const command of [
       "sed --in-place 's/x/y/' .qwen/settings.json",
