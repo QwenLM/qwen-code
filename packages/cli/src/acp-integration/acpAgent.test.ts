@@ -226,6 +226,15 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   },
 }));
 
+const { mockHistoryReplay } = vi.hoisted(() => ({
+  mockHistoryReplay: vi.fn(),
+}));
+vi.mock('./session/HistoryReplayer.js', () => ({
+  HistoryReplayer: vi.fn().mockImplementation((context: unknown) => ({
+    replay: (messages: unknown) => mockHistoryReplay(context, messages),
+  })),
+}));
+
 vi.mock('./runtimeOutputDirContext.js', () => ({
   runWithAcpRuntimeOutputDir: vi.fn(
     async <T>(
@@ -2005,6 +2014,145 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         value: 42,
       }),
     ).rejects.toThrowError(/value must be a string/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/permissions/setRules validates scope and ruleType', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        scope: 'global',
+        ruleType: 'allow',
+        rules: [],
+      }),
+    ).rejects.toThrowError(/scope must be/);
+    await expect(
+      agent.extMethod('qwen/permissions/setRules', {
+        scope: 'user',
+        ruleType: 'maybe',
+        rules: [],
+      }),
+    ).rejects.toThrowError(/ruleType must be/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/permissions/setRules persists normalized rules for the requested scope', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = await agent.extMethod('qwen/permissions/setRules', {
+      scope: 'user',
+      ruleType: 'allow',
+      rules: ['ShellTool(git status)'],
+    });
+
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'permissions.allow',
+      ['ShellTool(git status)'],
+    );
+    expect(result).toMatchObject({
+      user: expect.anything(),
+      workspace: expect.anything(),
+      merged: expect.anything(),
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  const VALID_SESSION_ID = '12345678-1234-1234-1234-1234567890ab';
+
+  function mockSessionServiceLoad(result: unknown) {
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          loadSession: vi.fn().mockResolvedValue(result),
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+  }
+
+  it('qwen/session/loadUpdates rejects an invalid sessionId', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/session/loadUpdates', { sessionId: 'nope' }),
+    ).rejects.toThrowError(/Invalid or missing sessionId/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/session/loadUpdates returns empty updates when no conversation exists', async () => {
+    const settings = makeCoreSettings();
+    mockSessionServiceLoad(null);
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/session/loadUpdates', {
+        sessionId: VALID_SESSION_ID,
+      }),
+    ).resolves.toEqual({ updates: [] });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/session/loadUpdates replays history and lifts _meta.timestamp to the top level', async () => {
+    const settings = makeCoreSettings();
+    mockSessionServiceLoad({
+      conversation: {
+        messages: [{ role: 'user' }],
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+    });
+    mockHistoryReplay.mockImplementation(
+      async (context: { sendUpdate: (u: unknown) => Promise<void> }) => {
+        await context.sendUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          _meta: { timestamp: 4242 },
+        });
+      },
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = (await agent.extMethod('qwen/session/loadUpdates', {
+      sessionId: VALID_SESSION_ID,
+    })) as { updates: Array<{ timestamp?: number }>; startTime?: string };
+    expect(result.startTime).toBe('start');
+    expect(result.updates).toHaveLength(1);
+    expect(result.updates[0]!.timestamp).toBe(4242);
+    expect(result).not.toHaveProperty('partial');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/session/loadUpdates surfaces partial + replayError when replay throws', async () => {
+    const settings = makeCoreSettings();
+    mockSessionServiceLoad({
+      conversation: {
+        messages: [{ role: 'user' }],
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+    });
+    mockHistoryReplay.mockRejectedValue(new Error('replay boom'));
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = (await agent.extMethod('qwen/session/loadUpdates', {
+      sessionId: VALID_SESSION_ID,
+    })) as { partial?: boolean; replayError?: string };
+    expect(result.partial).toBe(true);
+    expect(result.replayError).toContain('replay boom');
 
     mockConnectionState.resolve();
     await agentPromise;
