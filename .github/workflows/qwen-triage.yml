@@ -13,14 +13,6 @@ on:
         description: 'Issue or PR number to triage'
         required: true
         type: 'number'
-      target:
-        description: 'Target type for manual triage'
-        required: false
-        default: 'issue'
-        type: 'choice'
-        options:
-          - 'issue'
-          - 'pr'
 
 concurrency:
   group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number || github.event.inputs.number }}'
@@ -60,7 +52,6 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "number=${{ github.event.inputs.number }}" >> "$GITHUB_OUTPUT"
-            echo "kind=${{ github.event.inputs.target }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
             echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
             echo "kind=pr" >> "$GITHUB_OUTPUT"
