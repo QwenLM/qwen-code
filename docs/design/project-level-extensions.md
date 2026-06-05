@@ -1,47 +1,47 @@
-# Project-Level Extensions Support
+# 项目级 Extensions 支持
 
-## Background
+## 背景
 
-Currently, extensions only support **user-level** installation (`~/.qwen/extensions/`). Although the codebase already has `Storage.getExtensionsDir()` returning `<project>/.qwen/extensions/` and a public `loadExtensionsFromDir(dir)` method, neither is called during normal startup.
+目前，extensions 仅支持**用户级**安装（`~/.qwen/extensions/`）。虽然代码中已有 `Storage.getExtensionsDir()` 返回 `<project>/.qwen/extensions/` 路径，以及公开方法 `loadExtensionsFromDir(dir)`，但两者在正常启动流程中均未被调用。
 
-This design proposes supporting project-level extension installation, so that extensions can be scoped to a specific project and only take effect within that project.
+本设计方案旨在支持项目级 extension 安装，使 extension 可以限定在特定项目范围内，仅在该项目中生效。
 
-## Current Architecture
+## 现有架构
 
-### Storage Paths
+### 存储路径
 
-| Level   | Method                                    | Path                          |
-| ------- | ----------------------------------------- | ----------------------------- |
-| User    | `Storage.getUserExtensionsDir()` (static) | `~/.qwen/extensions/`         |
-| Project | `Storage.getExtensionsDir()` (instance)   | `<project>/.qwen/extensions/` |
+| 级别   | 方法                                      | 路径                          |
+| ------ | ----------------------------------------- | ----------------------------- |
+| 用户级 | `Storage.getUserExtensionsDir()` (static) | `~/.qwen/extensions/`         |
+| 项目级 | `Storage.getExtensionsDir()` (instance)   | `<project>/.qwen/extensions/` |
 
-### Loading Flow
+### 加载流程
 
-1. `Config.initialize()` creates `ExtensionManager` with `workspaceDir` and calls `refreshCache()`
-2. `refreshCache()` only loads from `ExtensionStorage.getUserExtensionsDir()` (`~/.qwen/extensions/`)
-3. `loadExtensionsFromDir(dir)` exists as a public method but is never invoked
-4. `performWorkspaceExtensionMigration()` is dead code (defined but never called)
+1. `Config.initialize()` 创建 `ExtensionManager`（传入 `workspaceDir`），并调用 `refreshCache()`
+2. `refreshCache()` 仅从 `ExtensionStorage.getUserExtensionsDir()`（`~/.qwen/extensions/`）加载
+3. `loadExtensionsFromDir(dir)` 作为公开方法存在，但从未被调用
+4. `performWorkspaceExtensionMigration()` 是死代码（已定义但从未被调用）
 
-### Installation Flow
+### 安装流程
 
-- `installExtension()` always installs to `ExtensionStorage.getUserExtensionsDir()`
-- Destination directory: `~/.qwen/extensions/<extension-name>/`
+- `installExtension()` 始终安装到 `ExtensionStorage.getUserExtensionsDir()`
+- 目标目录：`~/.qwen/extensions/<extension-name>/`
 
-### Key Files
+### 关键文件
 
-| File                                              | Role                                                                   |
-| ------------------------------------------------- | ---------------------------------------------------------------------- |
-| `packages/core/src/extension/extensionManager.ts` | Core: Extension interface, refreshCache, install/uninstall, enablement |
-| `packages/core/src/config/storage.ts`             | Storage paths: getUserExtensionsDir (user), getExtensionsDir (project) |
-| `packages/core/src/extension/storage.ts`          | ExtensionStorage: per-extension directory management                   |
-| `packages/cli/src/commands/extensions/install.ts` | CLI install command handler                                            |
-| `packages/cli/src/commands/extensions/utils.ts`   | CLI utilities, list output formatting                                  |
+| 文件                                              | 职责                                                                 |
+| ------------------------------------------------- | -------------------------------------------------------------------- |
+| `packages/core/src/extension/extensionManager.ts` | 核心：Extension 接口、refreshCache、安装/卸载、启用管理              |
+| `packages/core/src/config/storage.ts`             | 存储路径：getUserExtensionsDir（用户级）、getExtensionsDir（项目级） |
+| `packages/core/src/extension/storage.ts`          | ExtensionStorage：每个 extension 的目录管理                          |
+| `packages/cli/src/commands/extensions/install.ts` | CLI install 命令处理                                                 |
+| `packages/cli/src/commands/extensions/utils.ts`   | CLI 工具函数、list 输出格式化                                        |
 
-## Proposed Design
+## 设计方案
 
-### 1. New Type: `ExtensionScope`
+### 1. 新增类型：`ExtensionScope`
 
-Add to `packages/core/src/extension/extensionManager.ts`:
+在 `packages/core/src/extension/extensionManager.ts` 中新增：
 
 ```typescript
 export enum ExtensionScope {
@@ -50,37 +50,37 @@ export enum ExtensionScope {
 }
 ```
 
-Extend `Extension` interface with a `scope` field:
+扩展 `Extension` 接口，添加 `scope` 字段：
 
 ```typescript
 export interface Extension {
-  // ... existing fields ...
+  // ... 现有字段 ...
   scope: ExtensionScope;
 }
 ```
 
-### 2. Loading: `refreshCache()` Changes
+### 2. 加载：`refreshCache()` 修改
 
-Modify `refreshCache()` (line 544) to also load project-level extensions:
+修改 `refreshCache()`（第 544 行），增加项目级 extensions 加载：
 
-1. Load user-level extensions first, tag with `scope: User`
-2. If `isWorkspaceTrusted === true`, load from `<project>/.qwen/extensions/`, tag with `scope: Project`
-3. **Conflict resolution**: when both levels have same-named extension, user-level wins; project-level is dropped with a debug log warning
-4. If `isWorkspaceTrusted === false`, skip project-level loading entirely (consistent with project hooks trust gating)
+1. 优先加载用户级 extensions，标记 `scope: User`
+2. 若 `isWorkspaceTrusted === true`，从 `<project>/.qwen/extensions/` 加载项目级 extensions，标记 `scope: Project`
+3. **冲突处理**：当两个级别存在同名 extension 时，用户级优先；项目级被忽略并输出 debug 日志警告
+4. 若 `isWorkspaceTrusted === false`，完全跳过项目级加载（与 project hooks 的信任策略一致）
 
 ```typescript
 async refreshCache(options?: { names?: string[] }): Promise<void> {
   this.extensionCache = new Map<string, Extension>();
-  // ...existing name-based loading...
+  // ...现有的按名称加载逻辑...
 
-  // 1. Load user-level extensions
+  // 1. 加载用户级 extensions
   const userExtensions = await this.loadExtensionsFromExtensionsDir(
     ExtensionStorage.getUserExtensionsDir(), this.workspaceDir,
   );
   userExtensions.forEach(ext => ext.scope = ExtensionScope.User);
   const extensions = [...userExtensions];
 
-  // 2. Load project-level extensions (trust-gated)
+  // 2. 加载项目级 extensions（需信任检查）
   if (this.isWorkspaceTrusted && this.workspaceDir) {
     const projectExtensionsDir = new Storage(this.workspaceDir).getExtensionsDir();
     const projectExtensions = await this.loadExtensionsFromExtensionsDir(
@@ -91,7 +91,7 @@ async refreshCache(options?: { names?: string[] }): Promise<void> {
     const userNames = new Set(userExtensions.map(e => e.name));
     for (const projExt of projectExtensions) {
       if (userNames.has(projExt.name)) {
-        // user-level wins, skip project-level duplicate
+        // 用户级优先，跳过项目级同名 extension
       } else {
         extensions.push(projExt);
       }
@@ -102,27 +102,27 @@ async refreshCache(options?: { names?: string[] }): Promise<void> {
 }
 ```
 
-### 3. `loadExtensionByName()` Changes
+### 3. `loadExtensionByName()` 修改
 
-Modify `loadExtensionByName()` (line 580) to also search project-level directory when the extension is not found at user level:
+修改 `loadExtensionByName()`（第 580 行），在用户级未找到时，继续在项目级目录中搜索：
 
 ```typescript
 async loadExtensionByName(name: string, workspaceDir?: string): Promise<Extension | null> {
-  // ... existing user-level search ...
+  // ... 现有用户级搜索逻辑 ...
 
-  // If not found at user level, try project level (trust-gated)
+  // 用户级未找到，尝试项目级（需信任检查）
   if (this.isWorkspaceTrusted && cwd) {
     const projectExtensionsDir = new Storage(cwd).getExtensionsDir();
-    // search projectExtensionsDir subdirectories...
+    // 搜索 projectExtensionsDir 子目录...
   }
 
   return null;
 }
 ```
 
-### 4. `installExtension()` Changes
+### 4. `installExtension()` 修改
 
-Add `scope` parameter (line 842):
+新增 `scope` 参数（第 842 行）：
 
 ```typescript
 async installExtension(
@@ -131,13 +131,13 @@ async installExtension(
   requestSetting?: ...,
   cwd?: string,
   previousExtensionConfig?: ExtensionConfig,
-  scope?: ExtensionScope,  // NEW
+  scope?: ExtensionScope,  // 新增
 ): Promise<Extension> {
 ```
 
-Key changes:
+关键改动：
 
-- **Destination directory** (line 868): scope-aware resolution
+- **目标目录**（第 868 行）：根据 scope 确定安装位置
   ```typescript
   const installScope = scope ?? ExtensionScope.User;
   const extensionsDir =
@@ -145,67 +145,67 @@ Key changes:
       ? new Storage(currentDir).getExtensionsDir()
       : ExtensionStorage.getUserExtensionsDir();
   ```
-- **Enablement** (line 1113): project-level installs use `SettingScope.Workspace`
-- **Loaded extension**: set `extension.scope = installScope`
+- **启用设置**（第 1113 行）：项目级安装使用 `SettingScope.Workspace`
+- **加载后的 extension 对象**：设置 `extension.scope = installScope`
 
-### 5. `uninstallExtension()` Changes
+### 5. `uninstallExtension()` 修改
 
-Use the loaded extension's `scope` field to determine the correct directory:
+根据已加载 extension 的 `scope` 字段确定删除目录：
 
-- `scope === Project` -> delete from `<project>/.qwen/extensions/<name>/`
-- `scope === User` -> delete from `~/.qwen/extensions/<name>/` (existing logic)
+- `scope === Project` → 从 `<project>/.qwen/extensions/<name>/` 删除
+- `scope === User` → 从 `~/.qwen/extensions/<name>/` 删除（现有逻辑）
 
-### 6. CLI Changes
+### 6. CLI 改动
 
-#### `install` command
+#### `install` 命令
 
-Add `--scope` option to `packages/cli/src/commands/extensions/install.ts`:
+在 `packages/cli/src/commands/extensions/install.ts` 中添加 `--scope` 选项：
 
 ```typescript
 .option('scope', {
-  describe: 'Install scope: "user" (global, default) or "project" (current project only)',
+  describe: '安装范围："user"（全局，默认）或 "project"（仅当前项目）',
   type: 'string',
   choices: ['user', 'project'],
   default: 'user',
 })
 ```
 
-Usage:
+使用方式：
 
 ```bash
 qwen extensions install <source> --scope project
 ```
 
-#### `list` command
+#### `list` 命令
 
-Show scope in output (`packages/cli/src/commands/extensions/utils.ts`):
+在输出中显示 scope（`packages/cli/src/commands/extensions/utils.ts`）：
 
-```
+```typescript
 output += `\n Scope: ${extension.scope ?? 'user'}`;
 ```
 
-#### `uninstall` / `link` commands
+#### `uninstall` / `link` 命令
 
-Add `--scope` option for disambiguation when needed.
+添加 `--scope` 选项以支持歧义消除。
 
-#### `enable` / `disable` commands
+#### `enable` / `disable` 命令
 
-No changes needed — enablement already supports workspace scope via path-based rules.
+无需修改 — 启用/禁用已通过路径规则支持 workspace 级别。
 
-## Design Decisions
+## 设计决策
 
-| Decision            | Choice                               | Rationale                                                |
-| ------------------- | ------------------------------------ | -------------------------------------------------------- |
-| Storage location    | `<project>/.qwen/extensions/<name>/` | Follows existing `Storage.getExtensionsDir()` convention |
-| Trust gating        | Required for project-level loading   | Consistent with workspace settings and project hooks     |
-| Conflict resolution | User-level wins                      | Matches MCP server merge precedence                      |
-| Version control     | User/team decides                    | `.qwen/extensions/` can be gitignored or committed       |
+| 决策     | 方案                                 | 理由                                            |
+| -------- | ------------------------------------ | ----------------------------------------------- |
+| 存储位置 | `<project>/.qwen/extensions/<name>/` | 沿用已有的 `Storage.getExtensionsDir()` 约定    |
+| 信任控制 | 加载项目级 extensions 须通过信任检查 | 与 workspace settings 和 project hooks 保持一致 |
+| 冲突处理 | 用户级优先                           | 与 MCP server 合并优先级一致                    |
+| 版本控制 | 由用户/团队决定                      | `.qwen/extensions/` 可选择 gitignore 或提交     |
 
-## Verification Plan
+## 验证计划
 
-1. `qwen extensions install <source> --scope project` installs to `<project>/.qwen/extensions/`
-2. `qwen extensions list` shows scope indicator (user/project)
-3. Switch to another project directory — the project extension is not loaded
-4. In an untrusted workspace, project-level extensions are not loaded
-5. When both user + project have same-named extension, user takes precedence
-6. `qwen extensions uninstall <name>` correctly deletes from the appropriate scope directory
+1. `qwen extensions install <source> --scope project` 安装到 `<project>/.qwen/extensions/`
+2. `qwen extensions list` 显示 scope 标识（user/project）
+3. 切换到其他项目目录 — 该项目级 extension 不被加载
+4. 在不受信任的 workspace 中，项目级 extensions 不被加载
+5. 当用户级和项目级存在同名 extension 时，用户级优先
+6. `qwen extensions uninstall <name>` 能正确从对应 scope 目录中删除
