@@ -357,8 +357,7 @@ export class McpTransportPool {
           sessionPromptRegistry,
         );
       } catch (err) {
-        //  (codified by as a shared helper): only
-        // release if THIS acquire actually reserved a new slot.
+        // Only release if THIS acquire actually reserved a new slot.
         // `'already_held'` means the sibling holds it; not ours to
         // release.
         this.rollbackReservationOnSpawnFailure(reservationResult, serverName);
@@ -419,7 +418,7 @@ export class McpTransportPool {
     // spawnEntry's `entries.set` is still a residual race — the reverse
     // index has the id but `entries.get(id)` is `undefined` so
     // `releaseSession`'s loop skips. Closing that window requires
-    // per-session cancellation plumbing (tracked as -followup).
+    // per-session cancellation plumbing (tracked as a follow-up).
     this.indexAttach(sessionId, id);
 
     let entry: PoolEntry;
@@ -433,7 +432,7 @@ export class McpTransportPool {
       throw err;
     }
 
-    // Post-await terminal-state guard ( / ): a concurrent
+    // Post-await terminal-state guard: a concurrent
     // `releaseSession` after `entries.set` may have invoked
     // `forceShutdown` on the now-spawned entry, flipping state to
     // 'closed'. `attach` would throw with a deep "Cannot attach in
@@ -541,7 +540,7 @@ export class McpTransportPool {
    * with `entryIndex` if specified. Runs in parallel via
    * `Promise.all` with per-entry try/catch (rejections never escape);
    * returns per-entry results so the caller can surface per-entry
-   * success/failure ( restart route). : previous
+   * success/failure (restart route). Note: the previous
    * docstring named `Promise.allSettled`, but the implementation
    * actually uses `Promise.all` — the per-entry try/catch makes
    * Promise.all safe but the docstring was misleading.
@@ -578,7 +577,7 @@ export class McpTransportPool {
           // re-arm the drain timer if the restarted entry has no
           // subscribers. `doRestart` unconditionally cancels both
           // `drainTimer` and `maxIdleTimer` at the top so the restart
-          // can proceed atomically ( / ), but pre-fix the success
+          // can proceed atomically, but pre-fix the success
           // path never restored the drain lifecycle. If an operator
           // invokes `/workspace/mcp/<srv>/restart` on an idle entry
           // (refs=0, drain timer running), the entry transitioned back
@@ -840,8 +839,8 @@ export class McpTransportPool {
    *   - Terminal-state pre-check (`!entry.isTerminated()`) + race-
    *     window self-heal (`evictEntry` on the catch path).
    *   - Reverse-index ordering (early `indexAttach` BEFORE await on
-   *     the post-spawn branch per; AFTER attach on the fast-path
-   *     per; re-indexAttach AFTER attach on post-spawn).
+   *     the post-spawn branch; AFTER attach on the fast-path;
+   *     re-indexAttach AFTER attach on post-spawn).
    *   The race-window comments live at the call sites because they
    *   describe the surrounding ordering, not the attach itself.
    */

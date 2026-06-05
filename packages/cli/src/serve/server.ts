@@ -2213,7 +2213,7 @@ export function createServeApp(
     async (req, res) => {
       // Toggles a tool name in the workspace `tools.disabled` settings
       // list. Strict-gated alongside other
-      // Mutation routes; bridge writes the file directly (no
+      // mutation routes; bridge writes the file directly (no
       // ACP roundtrip) and fan-outs `tool_toggled` to every live
       // session SSE bus. Already-registered tools in live sessions
       // are NOT retroactively unregistered — toggling takes effect on
@@ -2716,7 +2716,7 @@ export function createServeApp(
 
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`
   // alongside the REST surface, sharing this same `bridge` instance.
-  // Additive + toggleable (`QWEN_SERVE_ACP_HTTP=0` opts out). See
+  // Additive + toggleable (`QWEN_SERVE_ACP_HTTP=0` opts out).
   // See `docs/design/daemon-acp-http/README.md` for the dual-transport
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
