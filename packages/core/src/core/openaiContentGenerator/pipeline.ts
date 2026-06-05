@@ -58,14 +58,15 @@ export class ContentGenerationPipeline {
         // listener (client.mjs fetchWithTimeout — no {once:true}, no
         // removeEventListener) stays on a short-lived signal instead of
         // accumulating on the caller's long-lived round signal.
-        const perRequestAc = createChildAbortController(
-          request.config?.abortSignal,
-        );
+        const parentSignal = request.config?.abortSignal;
+        const perRequestAc = parentSignal
+          ? createChildAbortController(parentSignal)
+          : undefined;
         try {
           const openaiResponse = (await this.client.chat.completions.create(
             openaiRequest,
             {
-              signal: perRequestAc.signal,
+              signal: perRequestAc?.signal,
             },
           )) as OpenAI.Chat.ChatCompletion;
 
@@ -77,7 +78,7 @@ export class ContentGenerationPipeline {
 
           return geminiResponse;
         } finally {
-          perRequestAc.abort();
+          perRequestAc?.abort();
         }
       },
     );
@@ -93,21 +94,26 @@ export class ContentGenerationPipeline {
       true,
       async (openaiRequest, context) => {
         // Per-request child — same rationale as the non-streaming path.
-        const perRequestAc = createChildAbortController(
-          request.config?.abortSignal,
-        );
+        const parentSignal = request.config?.abortSignal;
+        const perRequestAc = parentSignal
+          ? createChildAbortController(parentSignal)
+          : undefined;
         // Stage 1: Create OpenAI stream
         const stream = (await this.client.chat.completions.create(
           openaiRequest,
           {
-            signal: perRequestAc.signal,
+            signal: perRequestAc?.signal,
           },
         )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
 
         // Stage 2: Process stream with conversion and logging.
-        // Wrap in an async generator that aborts the per-request controller
-        // once the stream is fully consumed or abandoned, so the child
-        // signal's reverse-cleanup fires and the parent listener is released.
+        // When a per-request controller exists, wrap in an async generator
+        // that aborts it once the stream is fully consumed or abandoned, so
+        // the child signal's reverse-cleanup fires and the parent listener
+        // is released.
+        if (!perRequestAc) {
+          return this.processStreamWithLogging(stream, context, request);
+        }
         const innerStream = this.processStreamWithLogging(
           stream,
           context,
