@@ -58,7 +58,7 @@ describe('SleepInhibitor', () => {
         'infinity',
       ],
       expect.objectContaining({
-        env: {},
+        env: expect.any(Object),
         stdio: 'ignore',
         windowsHide: true,
       }),
@@ -73,6 +73,29 @@ describe('SleepInhibitor', () => {
     expect(children[0]!.kill).toHaveBeenCalledTimes(1);
     expect(inhibitor.getActiveCount()).toBe(0);
     expect(inhibitor.isRunning()).toBe(false);
+  });
+
+  it('forwards a curated environment instead of an empty env', () => {
+    const { inhibitor, spawn } = createHarness('linux');
+    const previous = process.env['DBUS_SESSION_BUS_ADDRESS'];
+    process.env['DBUS_SESSION_BUS_ADDRESS'] = 'unix:path=/run/user/1000/bus';
+    try {
+      const handle = inhibitor.acquire();
+      const env = spawn.mock.calls[0]![2]!.env as NodeJS.ProcessEnv;
+      // D-Bus address required by systemd-inhibit must be forwarded.
+      expect(env['DBUS_SESSION_BUS_ADDRESS']).toBe(
+        'unix:path=/run/user/1000/bus',
+      );
+      // Arbitrary parent env vars must NOT be forwarded.
+      expect(env).not.toHaveProperty('SOME_UNRELATED_SECRET');
+      handle.release();
+    } finally {
+      if (previous === undefined) {
+        delete process.env['DBUS_SESSION_BUS_ADDRESS'];
+      } else {
+        process.env['DBUS_SESSION_BUS_ADDRESS'] = previous;
+      }
+    }
   });
 
   it('uses caffeinate on macOS', () => {

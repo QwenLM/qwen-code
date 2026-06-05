@@ -109,16 +109,20 @@ export class SleepInhibitor {
         stdio: 'ignore',
         detached: false,
         windowsHide: true,
-        env: {},
+        env: this.getSpawnEnv(),
       });
       this.child = child;
 
       child.once('error', (error) => {
+        // Guard the whole handler: a stale child (already replaced by a
+        // newer spawn) must not flip spawnFailedForCurrentRun and poison the
+        // current run's respawn logic.
+        if (this.child !== child) {
+          return;
+        }
         this.logger.debug(`Failed to start sleep inhibitor: ${error.message}`);
         this.spawnFailedForCurrentRun = true;
-        if (this.child === child) {
-          this.child = undefined;
-        }
+        this.child = undefined;
       });
 
       child.once('exit', (code, signal) => {
@@ -139,6 +143,44 @@ export class SleepInhibitor {
         }`,
       );
     }
+  }
+
+  /**
+   * Kill any active inhibitor subprocess and reset state. Safe to call
+   * multiple times; used by the process-exit handler to avoid orphaning the
+   * subprocess.
+   */
+  dispose(): void {
+    this.activeCount = 0;
+    this.spawnFailedForCurrentRun = false;
+    this.stop();
+  }
+
+  /**
+   * Build a minimal environment for the inhibitor subprocess instead of
+   * passing an empty env. An empty env strips PATH (so the command cannot be
+   * resolved) and DBUS_SESSION_BUS_ADDRESS/XDG_RUNTIME_DIR (which
+   * systemd-inhibit needs to reach the user's systemd over D-Bus on Linux).
+   * On Windows, PowerShell needs SYSTEMROOT/WINDIR.
+   */
+  private getSpawnEnv(): NodeJS.ProcessEnv {
+    const allowList = [
+      'PATH',
+      'DBUS_SESSION_BUS_ADDRESS',
+      'XDG_RUNTIME_DIR',
+      'SYSTEMROOT',
+      'WINDIR',
+      'TEMP',
+      'TMP',
+    ];
+    const env: NodeJS.ProcessEnv = {};
+    for (const key of allowList) {
+      const value = process.env[key];
+      if (value !== undefined) {
+        env[key] = value;
+      }
+    }
+    return env;
   }
 
   private stop(): void {
@@ -209,6 +251,14 @@ try {
 `.trim();
 
 export const sleepInhibitor = new SleepInhibitor();
+
+// Kill the inhibitor subprocess if the parent process exits; otherwise an
+// orphaned `caffeinate`/`systemd-inhibit`/PowerShell process would keep
+// blocking system sleep indefinitely. Mirrors the exit handling in
+// shellExecutionService.
+process.on('exit', () => {
+  sleepInhibitor.dispose();
+});
 
 export function acquireSleepInhibitor(
   config: Pick<Config, 'getPreventSystemSleepEnabled'>,
