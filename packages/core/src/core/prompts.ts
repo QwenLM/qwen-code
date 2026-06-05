@@ -13,6 +13,7 @@ import { isGitRepository } from '../utils/gitUtils.js';
 import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { escapeSystemReminderTags } from '../utils/xml.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
 
@@ -196,7 +197,7 @@ export function getDeferredToolsSystemReminder(
   if (!section) return '';
   // buildDeferredToolsSection returns a leading-blank-line markdown block;
   // trim the surrounding whitespace before wrapping it as a reminder.
-  return `<system-reminder>\n${section.trim()}\n</system-reminder>`;
+  return `<system-reminder>\n${escapeSystemReminderTags(section.trim())}\n</system-reminder>`;
 }
 
 export function getCoreSystemPrompt(
