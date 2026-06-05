@@ -79,7 +79,10 @@ import { loadSettings, SettingScope } from '../config/settings.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
-import { loadCliConfig } from '../config/config.js';
+import {
+  buildDisabledSkillNamesProvider,
+  loadCliConfig,
+} from '../config/config.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import {
   formatAcpModelId,
@@ -1849,6 +1852,13 @@ class QwenAgent implements Agent {
         userHooks: this.settings.getUserHooks(),
         projectHooks: this.settings.getProjectHooks(),
       },
+      // CRITICAL: close over `this.settings` (LoadedSettings instance), NOT
+      // over the local `settings` snapshot built above. `LoadedSettings.
+      // setValue` replaces `_merged`, so a closure over the snapshot would
+      // never see workspace toggles applied during the session. ACP/Zed
+      // sessions otherwise leak persisted disabled skills into the first
+      // <available_skills> at cold start.
+      buildDisabledSkillNamesProvider(this.settings),
     );
     // PR 14b fix #2 (codex review round 1): register the MCP guardrail
     // budget-event callback BEFORE `config.initialize()`. Pre-fix the

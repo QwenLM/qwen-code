@@ -16,6 +16,10 @@ import { getScopeMessageForSetting } from '../../utils/dialogScopeUtils.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
 import { t } from '../../i18n/index.js';
+import {
+  formatApprovalModeDescription,
+  formatApprovalModeName,
+} from '../utils/approvalModeDisplay.js';
 
 interface ApprovalModeDialogProps {
   /** Callback function when an approval mode is selected */
@@ -30,28 +34,6 @@ interface ApprovalModeDialogProps {
   /** Available terminal height for layout calculations */
   availableTerminalHeight?: number;
 }
-
-const formatModeName = (mode: ApprovalMode): string => {
-  if (mode === ApprovalMode.DEFAULT) {
-    return t('Ask permissions');
-  }
-  return mode;
-};
-
-const formatModeDescription = (mode: ApprovalMode): string => {
-  switch (mode) {
-    case ApprovalMode.PLAN:
-      return t('Analyze only, do not modify files or execute commands');
-    case ApprovalMode.DEFAULT:
-      return t('Require approval for file edits or shell commands');
-    case ApprovalMode.AUTO_EDIT:
-      return t('Automatically approve file edits');
-    case ApprovalMode.YOLO:
-      return t('Automatically approve all tools');
-    default:
-      return t('{{mode}} mode', { mode });
-  }
-};
 
 export function ApprovalModeDialog({
   onSelect,
@@ -71,7 +53,9 @@ export function ApprovalModeDialog({
 
   // Generate approval mode items with inline descriptions
   const modeItems = APPROVAL_MODES.map((mode) => ({
-    label: `${formatModeName(mode)} - ${formatModeDescription(mode)}`,
+    label: `${formatApprovalModeName(mode)} - ${formatApprovalModeDescription(
+      mode,
+    )}`,
     value: mode,
     key: mode,
   }));

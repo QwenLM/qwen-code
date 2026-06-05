@@ -28,6 +28,11 @@ import { createNonInteractiveUI } from './ui/noninteractive/nonInteractiveUi.js'
 import type { LoadedSettings } from './config/settings.js';
 import type { SessionStatsState } from './ui/contexts/SessionContext.js';
 import { t } from './i18n/index.js';
+import {
+  appendUserPromptExpansionAdditionalContext,
+  formatUserPromptExpansionBlockedMessage,
+  serializeUserPromptExpansionPrompt,
+} from './utils/userPromptExpansionHook.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
 
@@ -168,6 +173,60 @@ function handleCommandResult(
   }
 }
 
+async function fireUserPromptExpansionHook(
+  config: Config,
+  commandName: string,
+  commandArgs: string,
+  content: PartListUnion,
+  signal: AbortSignal,
+): Promise<{
+  blockedResult?: NonInteractiveSlashCommandResult;
+  content: PartListUnion;
+}> {
+  if (
+    config.getDisableAllHooks?.() ||
+    !(config.hasHooksForEvent?.('UserPromptExpansion') ?? false)
+  ) {
+    return { content };
+  }
+
+  const hookSystem = config.getHookSystem();
+  if (!hookSystem) {
+    return { content };
+  }
+
+  const output = await hookSystem.fireUserPromptExpansionEvent(
+    commandName,
+    commandArgs,
+    serializeUserPromptExpansionPrompt(content),
+    signal,
+  );
+  if (!output) {
+    return { content };
+  }
+
+  const blockingError = output.getBlockingError();
+  if (blockingError.blocked || output.shouldStopExecution()) {
+    return {
+      blockedResult: {
+        type: 'message',
+        messageType: 'error',
+        content: formatUserPromptExpansionBlockedMessage(
+          blockingError.reason || output.getEffectiveReason(),
+        ),
+      },
+      content,
+    };
+  }
+
+  return {
+    content: appendUserPromptExpansionAdditionalContext(
+      content,
+      output.getAdditionalContext(),
+    ),
+  };
+}
+
 /**
  * Processes a slash command in a non-interactive environment.
  *
@@ -252,7 +311,19 @@ export const handleSlashCommand = async (
       } as unknown as CommandContext;
       const result = await cmd.action(minimalContext, args);
       if (!result || result.type !== 'submit_prompt') return null;
-      const content = result.content;
+      const hookResult = await fireUserPromptExpansionHook(
+        config,
+        name,
+        args,
+        result.content,
+        abortController.signal,
+      );
+      if (hookResult.blockedResult) {
+        return hookResult.blockedResult.type === 'message'
+          ? { error: hookResult.blockedResult.content }
+          : null;
+      }
+      const content = hookResult.content;
       if (typeof content === 'string') return content;
       if (Array.isArray(content)) {
         return content
@@ -355,6 +426,20 @@ export const handleSlashCommand = async (
       messageType: 'info',
       content: 'Command executed successfully.',
     };
+  }
+
+  if (result.type === 'submit_prompt') {
+    const hookResult = await fireUserPromptExpansionHook(
+      config,
+      commandToExecute.name,
+      args,
+      result.content,
+      abortController.signal,
+    );
+    if (hookResult.blockedResult) {
+      return hookResult.blockedResult;
+    }
+    return handleCommandResult({ ...result, content: hookResult.content });
   }
 
   // Handle different result types

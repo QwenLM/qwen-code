@@ -2421,4 +2421,79 @@ describe('ModelsConfig', () => {
       expect(gc.samplingParams).toBeUndefined();
     });
   });
+
+  describe('getModelDisplayName', () => {
+    it('should return resolved.name when model is found in registry', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'gpt-4o',
+            name: 'GPT-4o',
+            baseUrl: 'https://api.openai.example.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      expect(modelsConfig.getModelDisplayName('gpt-4o')).toBe('GPT-4o');
+    });
+
+    it('should return raw modelId when currentAuthType is falsy', () => {
+      const modelsConfig = new ModelsConfig();
+      // currentAuthType is undefined by default
+
+      expect(modelsConfig.getModelDisplayName('some-model')).toBe('some-model');
+    });
+
+    it('should return raw modelId when model is not found in registry', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'gpt-4o',
+            name: 'GPT-4o',
+            baseUrl: 'https://api.openai.example.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      // 'unknown-model' is not in the registry
+      expect(modelsConfig.getModelDisplayName('unknown-model')).toBe(
+        'unknown-model',
+      );
+    });
+
+    it('should return raw modelId when model.name equals model.id', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'coder-model',
+            name: 'coder-model',
+            baseUrl: 'https://api.openai.example.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+      });
+
+      // name === id, so registry returns the id as name
+      expect(modelsConfig.getModelDisplayName('coder-model')).toBe(
+        'coder-model',
+      );
+    });
+  });
 });
