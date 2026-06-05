@@ -226,6 +226,7 @@ class FakeBridge {
   async detachClient(sessionId: string, clientId?: string) {
     this.detached.push({ sessionId, clientId });
   }
+  async preheat() {}
 }
 
 // ── SSE client helper ────────────────────────────────────────────────

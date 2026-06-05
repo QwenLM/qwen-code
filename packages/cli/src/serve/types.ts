@@ -158,6 +158,8 @@ export interface ServeOptions {
    * Issue #4514 T2.9. Per-SSE-connection idle deadline.
    */
   writerIdleTimeoutMs?: number;
+  /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
+  channelIdleTimeoutMs?: number;
 }
 
 /**

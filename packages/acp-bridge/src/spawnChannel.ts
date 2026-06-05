@@ -5,10 +5,31 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import * as os from 'node:os';
 import { Readable, Writable } from 'node:stream';
+import { getHeapStatistics } from 'node:v8';
 import { ndJsonStream } from '@agentclientprotocol/sdk';
 import type { AcpChannelExitInfo, ChannelFactory } from './channel.js';
 import { MissingCliEntryError } from './status.js';
+
+let cachedMemoryArgs: string[] | undefined;
+export function getAcpMemoryArgs(): string[] {
+  if (cachedMemoryArgs) return cachedMemoryArgs;
+  const constrainedMemory = (process as { constrainedMemory?: () => number })
+    .constrainedMemory;
+  const constrained =
+    typeof constrainedMemory === 'function' ? constrainedMemory() : 0;
+  const totalBytes =
+    constrained && constrained > 0 ? constrained : os.totalmem();
+  const totalMB = Math.floor(totalBytes / (1024 * 1024));
+  const targetMB = Math.min(Math.floor(totalMB * 0.5), 16_384);
+  const currentLimitMB = Math.floor(
+    getHeapStatistics().heap_size_limit / (1024 * 1024),
+  );
+  cachedMemoryArgs =
+    targetMB > currentLimitMB ? [`--max-old-space-size=${targetMB}`] : [];
+  return cachedMemoryArgs;
+}
 
 // ──────────────────────────────────────────────────────────────────────
 // Stderr forwarder — extracted from the inline handler so it's testable
@@ -99,7 +120,10 @@ export function createSpawnChannelFactory(
       SCRUBBED_CHILD_ENV_KEYS,
       childEnvOverrides,
     );
-    const child = spawn(process.execPath, [cliEntry, '--acp'], {
+    childEnv['QWEN_CODE_NO_RELAUNCH'] = 'true';
+
+    const memoryArgs = getAcpMemoryArgs();
+    const child = spawn(process.execPath, [...memoryArgs, cliEntry, '--acp'], {
       cwd: workspaceCwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: childEnv,

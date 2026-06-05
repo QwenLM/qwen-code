@@ -8501,3 +8501,198 @@ describe('extractErrorCode', () => {
     expect(extractErrorCode({ code: true })).toBeUndefined();
   });
 });
+
+describe('channelIdleTimeoutMs', () => {
+  it('kills the channel immediately when timeout is 0 (default)', async () => {
+    const handle = makeChannel();
+    const factory: ChannelFactory = async () => handle.channel;
+    const bridge = makeBridge({ channelFactory: factory });
+    const session = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    expect(bridge.sessionCount).toBe(1);
+    await bridge.closeSession(session.sessionId);
+    expect(bridge.sessionCount).toBe(0);
+    expect(handle.killed).toBe(true);
+    await bridge.shutdown();
+  });
+
+  it('reuses warm channel during idle window when timeout > 0', async () => {
+    let factoryCalls = 0;
+    const factory: ChannelFactory = async () => {
+      factoryCalls++;
+      return makeChannel().channel;
+    };
+    const bridge = makeBridge({
+      channelFactory: factory,
+      channelIdleTimeoutMs: 60_000,
+    });
+    const session = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    expect(factoryCalls).toBe(1);
+
+    await bridge.closeSession(session.sessionId);
+
+    const session2 = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    expect(factoryCalls).toBe(1);
+    expect(bridge.sessionCount).toBe(1);
+
+    await bridge.closeSession(session2.sessionId);
+    await bridge.shutdown();
+  });
+
+  it('kills channel after idle timeout expires (fake timers)', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      let factoryCalls = 0;
+      const factory: ChannelFactory = async () => {
+        factoryCalls++;
+        return handle.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        channelIdleTimeoutMs: 5_000,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      expect(factoryCalls).toBe(1);
+
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(handle.killed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels idle timer when new session arrives', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      let factoryCalls = 0;
+      const factory: ChannelFactory = async () => {
+        factoryCalls++;
+        return handle.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        channelIdleTimeoutMs: 5_000,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      await bridge.closeSession(session.sessionId);
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(handle.killed).toBe(false);
+
+      const session2 = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      expect(factoryCalls).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(handle.killed).toBe(false);
+
+      await bridge.closeSession(session2.sessionId);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('preheat', () => {
+  it('spawns channel that is reused by first session', async () => {
+    let factoryCalls = 0;
+    const factory: ChannelFactory = async () => {
+      factoryCalls++;
+      return makeChannel().channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+    await bridge.preheat();
+    expect(factoryCalls).toBe(1);
+
+    const session = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    expect(session.sessionId).toBeDefined();
+    expect(factoryCalls).toBe(1);
+    expect(bridge.sessionCount).toBe(1);
+
+    await bridge.closeSession(session.sessionId);
+    await bridge.shutdown();
+  });
+
+  it('is a no-op after shutdown', async () => {
+    let factoryCalls = 0;
+    const factory: ChannelFactory = async () => {
+      factoryCalls++;
+      return makeChannel().channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+    await bridge.shutdown();
+    await bridge.preheat();
+    expect(factoryCalls).toBe(0);
+  });
+
+  it('arms idle timer on preheated channel when channelIdleTimeoutMs > 0', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel();
+      let factoryCalls = 0;
+      const factory: ChannelFactory = async () => {
+        factoryCalls++;
+        return handle.channel;
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        channelIdleTimeoutMs: 5_000,
+      });
+      await bridge.preheat();
+      expect(factoryCalls).toBe(1);
+      expect(handle.killed).toBe(false);
+
+      // First session cancels the preheat idle timer and reuses channel
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      expect(factoryCalls).toBe(1);
+
+      // Advance past preheat timer — channel should survive (timer cancelled)
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(handle.killed).toBe(false);
+
+      // Close session — new idle timer starts
+      await bridge.closeSession(session.sessionId);
+      expect(handle.killed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

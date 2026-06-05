@@ -629,6 +629,17 @@ export async function runQwenServe(
       );
     }
   }
+  if (opts.channelIdleTimeoutMs !== undefined) {
+    if (
+      !Number.isFinite(opts.channelIdleTimeoutMs) ||
+      !Number.isInteger(opts.channelIdleTimeoutMs) ||
+      opts.channelIdleTimeoutMs < 0
+    ) {
+      throw new TypeError(
+        `Invalid channelIdleTimeoutMs: ${opts.channelIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = immediate kill).`,
+      );
+    }
+  }
   // Per-handle env overrides: `undefined` value means "scrub this
   // var from the child env" — important when a different daemon
   // in the same process set the var globally previously. Always
@@ -762,6 +773,9 @@ export async function runQwenServe(
       maxSessions: opts.maxSessions,
       ...(opts.eventRingSize !== undefined
         ? { eventRingSize: opts.eventRingSize }
+        : {}),
+      ...(opts.channelIdleTimeoutMs !== undefined
+        ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
         : {}),
       boundWorkspace,
       childEnvOverrides,
@@ -1200,6 +1214,16 @@ export async function runQwenServe(
       server.on('error', (err) => {
         daemonLog.error('server error', err instanceof Error ? err : null);
       });
+      if (!deps.bridge) {
+        bridge.preheat().catch((err) => {
+          writeStderrLine(
+            `qwen serve: ACP preheat failed, will retry on first session: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        });
+      }
+
       resolve(handle);
     });
     server.once('error', reject);
