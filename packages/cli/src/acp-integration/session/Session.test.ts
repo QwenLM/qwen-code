@@ -1572,6 +1572,113 @@ describe('Session', () => {
         );
       });
 
+      it('latches mid-turn drain off after a permanent (-32601) error', async () => {
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi
+              .fn()
+              .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // The ACP SDK rejects with a raw JSON-RPC error object, not an Error.
+        mockClient.extMethod = vi
+          .fn()
+          .mockRejectedValue({ code: -32601, message: 'Method not found' });
+
+        const toolCallStream = () =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  { id: 'c', name: 'read_file', args: { path: '/tmp/test.txt' } },
+                ],
+              },
+            },
+          ]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const prompt = {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text' as const, text: 'read file' }],
+        };
+        await session.prompt(prompt);
+        await session.prompt(prompt);
+
+        // After the permanent error the latch trips, so the drain extMethod is
+        // attempted only on the first tool batch, not the second.
+        const drainCalls = vi
+          .mocked(mockClient.extMethod)
+          .mock.calls.filter((call) => call[0] === 'craft/drainMidTurnQueue');
+        expect(drainCalls).toHaveLength(1);
+      });
+
+      it('keeps mid-turn drain enabled after a transient error', async () => {
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi
+              .fn()
+              .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+          }),
+        };
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockClient.extMethod = vi
+          .fn()
+          .mockRejectedValue({ code: -32000, message: 'temporary failure' });
+
+        const toolCallStream = () =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  { id: 'c', name: 'read_file', args: { path: '/tmp/test.txt' } },
+                ],
+              },
+            },
+          ]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(toolCallStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        const prompt = {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text' as const, text: 'read file' }],
+        };
+        await session.prompt(prompt);
+        await session.prompt(prompt);
+
+        // A transient error must NOT latch: the drain is retried on the second
+        // tool batch.
+        const drainCalls = vi
+          .mocked(mockClient.extMethod)
+          .mock.calls.filter((call) => call[0] === 'craft/drainMidTurnQueue');
+        expect(drainCalls).toHaveLength(2);
+      });
+
       it('stops tool response follow-up before sending when the session token limit is exceeded', async () => {
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: 'file contents',
