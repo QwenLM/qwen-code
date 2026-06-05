@@ -102,6 +102,7 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
   const bodyWidth = safeWidth - 6;
 
   useEffect(() => {
+    let stale = false;
     setLoading(true);
     const liveRecord = buildCurrentSessionRecord(
       stats.sessionId,
@@ -109,10 +110,19 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({ onClose, width }) => {
       config.getProjectRoot(),
       stats.metrics,
     );
-    loadStatsData(range, liveRecord).then((d) => {
-      setData(d);
-      setLoading(false);
-    });
+    loadStatsData(range, liveRecord)
+      .then((d) => {
+        if (!stale) {
+          setData(d);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!stale) setLoading(false);
+      });
+    return () => {
+      stale = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only reload on range/session change, not every metrics tick
   }, [range, stats.sessionId]);
 

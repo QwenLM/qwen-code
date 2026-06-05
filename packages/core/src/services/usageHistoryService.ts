@@ -229,6 +229,7 @@ async function rebuildFromSessionJsonl(): Promise<UsageSummaryRecord[]> {
         const startTime = new Date(firstRecord.timestamp).getTime();
         const lastRecord = records[records.length - 1]!;
         const endTime = new Date(lastRecord.timestamp).getTime();
+        if (isNaN(startTime) || isNaN(endTime) || !sessionId) continue;
 
         results.push(
           metricsToUsageRecord(
