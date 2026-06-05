@@ -1293,13 +1293,8 @@ export function createServeApp(
   const restoreSessionHandler =
     (action: 'load' | 'resume') =>
     async (req: express.Request, res: express.Response) => {
-      const sessionId = req.params['id'];
-      if (!sessionId) {
-        res
-          .status(400)
-          .json({ error: '`sessionId` route parameter is required' });
-        return;
-      }
+      const sessionId = requireSessionId(req, res);
+      if (!sessionId) return;
       const body = safeBody(req);
       const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
       if (cwd === undefined) return;
