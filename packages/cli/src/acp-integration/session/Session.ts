@@ -54,7 +54,6 @@ import {
   generateToolUseId,
   MessageBusType,
   getPlanModeSystemReminder,
-  getSubagentSystemReminder,
   getArenaSystemReminder,
   STARTUP_CONTEXT_MODEL_ACK,
   evaluatePermissionFlow,
@@ -476,7 +475,7 @@ export class Session implements SessionContext {
   }
 
   captureHistorySnapshot(): Content[] {
-    return this.config.getGeminiClient()!.getChat().getHistory();
+    return this.config.getGeminiClient()!.getChat().getHistoryShallow();
   }
 
   restoreHistory(history: Content[]): void {
@@ -1883,16 +1882,6 @@ export class Session implements SessionContext {
    */
   async #buildInitialSystemReminders(): Promise<Part[]> {
     const reminders: Part[] = [];
-
-    const hasAgentTool = await this.config
-      .getToolRegistry()
-      .ensureTool(ToolNames.AGENT);
-    const subagents = (await this.config.getSubagentManager().listSubagents())
-      .filter((subagent) => subagent.level !== 'builtin')
-      .map((subagent) => subagent.name);
-    if (hasAgentTool && subagents.length > 0) {
-      reminders.push({ text: getSubagentSystemReminder(subagents) });
-    }
 
     if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
       reminders.push({

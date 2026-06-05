@@ -269,7 +269,10 @@ vi.mock('../config/settings.js', () => ({
 vi.mock('../config/loadedSettingsAdapter.js', () => ({
   createLoadedSettingsAdapter: vi.fn((settings: unknown) => settings),
 }));
-vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
+vi.mock('../config/config.js', () => ({
+  loadCliConfig: vi.fn(),
+  buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+}));
 vi.mock('./session/Session.js', () => ({
   Session: vi.fn(),
   buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({

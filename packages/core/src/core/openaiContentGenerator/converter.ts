@@ -1379,11 +1379,18 @@ function mapGeminiFinishReasonToOpenAI(
     case FinishReason.MAX_TOKENS:
       return 'length';
     case FinishReason.SAFETY:
+    case FinishReason.RECITATION:
+    case FinishReason.BLOCKLIST:
+    case FinishReason.PROHIBITED_CONTENT:
+    case FinishReason.SPII:
+    case FinishReason.IMAGE_SAFETY:
+    case FinishReason.IMAGE_RECITATION:
+    case FinishReason.IMAGE_PROHIBITED_CONTENT:
+    case FinishReason.IMAGE_OTHER:
       return 'content_filter';
+    case FinishReason.NO_IMAGE:
+      return 'stop';
     default:
-      if (geminiReason === ('RECITATION' as FinishReason)) {
-        return 'content_filter';
-      }
       return 'stop';
   }
 }

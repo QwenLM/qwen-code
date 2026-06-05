@@ -18,6 +18,7 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'シェルモード',
   'YOLO mode': 'YOLOモード',
+  'Auto mode': 'Autoモード',
   'plan mode': 'プランモード',
   'auto-accept edits': '編集を自動承認',
   'Accepting edits': '編集を承認中',
@@ -73,7 +74,39 @@ export default {
     'プロジェクトを分析し、カスタマイズされた QWEN.md ファイルを作成',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
-  'List available skills.': '利用可能なスキルを一覧表示する。',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'スキルパネルを開く（一覧・検索・有効化/無効化・選択）。',
+  'Manage Skills': 'スキルを管理',
+  'Skills configuration saved.': 'スキル設定を保存しました。',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    'スキル設定を保存しましたが、更新に失敗しました：{{error}}。再起動して新しい状態が反映されることを確認してください。',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    'ワークスペースが信頼されていないため、ワークスペース設定はマージ設定で無視されます。先に /trust を実行するか、~/.qwen/settings.json を直接編集してユーザースコープでスキルを管理してください。',
+  'SkillManager not available.': 'SkillManager は利用できません。',
+  'Loading skills…': 'スキルを読み込み中…',
+  'Failed to load skills: {{error}}': 'スキルの読み込みに失敗：{{error}}',
+  'Failed to save skills configuration: {{error}}':
+    'スキル設定の保存に失敗しました：{{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'すべての利用可能なスキルが無効化されています。~/.qwen/settings.json または .qwen/settings.json (skills.disabled) を編集して再有効化してください。',
+  'Press esc to close.': 'Esc で閉じる。',
+  '{{count}} skills · ': '{{count}} スキル · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} スキル · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    'スペース 切替 · Enter 選択（入力欄に挿入） · Esc 保存して終了 · ワークスペーススコープ',
+  'Search:': '検索：',
+  'type to filter…': 'フィルタを入力…',
+  'No skills are currently available.': '利用可能なスキルはありません。',
+  'All available skills are locked at a higher scope (see below).':
+    'すべての利用可能なスキルは上位スコープでロックされています（下記参照）。',
+  'No skills match the search.': '検索に一致するスキルはありません。',
+  'Locked by higher-scope settings (cannot toggle here):':
+    '上位スコープ設定によってロックされています（ここでは切替不可）：',
+  'higher scope': '上位スコープ',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [ロック中：{{scope}}]',
+  '↑/↓ navigate · backspace edits search': '↑/↓ 移動 · Backspace 検索編集',
+  Bundled: '組み込み',
   'Available Qwen Code CLI tools:': '利用可能な Qwen Code CLI ツール:',
   'No tools available': '利用可能なツールはありません',
   'View or change the approval mode for tool usage':
@@ -292,7 +325,7 @@ export default {
   Text: 'テキスト',
   JSON: 'JSON',
   Plan: 'プラン',
-  Default: 'デフォルト',
+  'Ask permissions': '許可を確認',
   'Auto Edit': '自動編集',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim モードのオン/オフを切り替え',
@@ -446,6 +479,8 @@ export default {
   'After tool execution fails': 'ツール実行失敗時',
   'When notifications are sent': '通知送信時',
   'When the user submits a prompt': 'ユーザーがプロンプトを送信した時',
+  'When a slash command expands into a prompt':
+    'スラッシュコマンドがプロンプトに展開された時',
   'When a new session is started': '新しいセッションが開始された時',
   'Right before Qwen Code concludes its response':
     'Qwen Code が応答を終了する直前',
@@ -469,6 +504,8 @@ export default {
     'コマンドへの入力は通知メッセージとタイプを持つ JSON です。',
   'Input to command is JSON with original user prompt text.':
     'コマンドへの入力は元のユーザープロンプトテキストを持つ JSON です。',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'コマンドへの入力は command_name、command_args、展開後のプロンプトテキストを持つ JSON です。',
   'Input to command is JSON with session start source.':
     'コマンドへの入力はセッション開始ソースを持つ JSON です。',
   'Input to command is JSON with session end reason.':
@@ -497,6 +534,8 @@ export default {
     'stderr をユーザーのみに表示し、ツール呼び出しを続ける',
   'block processing, erase original prompt, and show stderr to user only':
     '処理をブロックし、元のプロンプトを消去し、stderr をユーザーのみに表示',
+  'block expanded prompt submission and show stderr to user only':
+    '展開後のプロンプト送信をブロックし、stderr をユーザーのみに表示',
   'stdout shown to Qwen': 'stdout を Qwen に表示',
   'show stderr to user only (blocking errors ignored)':
     'stderr をユーザーのみに表示（ブロッキングエラーは無視）',
@@ -579,12 +618,13 @@ export default {
     '追加のUI言語パックをリクエストするには、GitHub で Issue を作成してください',
   'Available options:': '使用可能なオプション:',
   'Set UI language to {{name}}': 'UI言語を {{name}} に設定',
-  '{{mode}} mode': '{{mode}}モード',
   'Analyze only, do not modify files or execute commands':
     '分析のみ、ファイルの変更やコマンドの実行はしません',
   'Require approval for file edits or shell commands':
     'ファイル編集やシェルコマンドには承認が必要',
   'Automatically approve file edits': 'ファイル編集を自動承認',
+  'Use classifier to automatically approve safe tool calls':
+    '分類器を使用して安全なツール呼び出しを自動承認',
   'Automatically approve all tools': 'すべてのツールを自動承認',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'ワークスペースの承認モードが存在し、優先されます。ユーザーレベルの変更は効果がありません',

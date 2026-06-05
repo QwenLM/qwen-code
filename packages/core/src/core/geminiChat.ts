@@ -40,7 +40,10 @@ import type { StructuredError } from './turn.js';
 import {
   logContentRetry,
   logContentRetryFailure,
+  logApiRetry,
 } from '../telemetry/loggers.js';
+import { clearDetailedSpanState } from '../telemetry/detailed-span-attributes.js';
+import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
@@ -53,6 +56,7 @@ import { estimatePromptTokens } from '../services/tokenEstimation.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
+  ApiRetryEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
@@ -227,6 +231,13 @@ interface TryCompressOptions {
    * post-compression guards that may roll the in-memory chat state back.
    */
   deferChatCompressionRecord?: boolean;
+  /**
+   * Forwarded to the compression side-query system prompt. Sourced from
+   * `/compress <text>` invocation arg; appended after the base prompt as
+   * an `Additional Instructions:` block so the summary model can focus
+   * on the user's stated concern.
+   */
+  customInstructions?: string;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -1420,6 +1431,7 @@ export class GeminiChat {
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
+      customInstructions: options?.customInstructions,
       signal,
     });
 
@@ -1433,6 +1445,7 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
+      clearDetailedSpanState();
       this.lastPromptTokenCount = info.newTokenCount;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
@@ -2334,6 +2347,20 @@ export class GeminiChat {
       heartbeatFn: (info) => {
         process.stderr.write(
           `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+        );
+      },
+      onRetry: (info) => {
+        logApiRetry(
+          this.config,
+          new ApiRetryEvent({
+            model,
+            promptId: prompt_id,
+            attemptNumber: info.attempt,
+            error: info.error,
+            statusCode: info.errorStatus,
+            retryDelayMs: info.delayMs,
+            subagentName: subagentNameContext.getStore(),
+          }),
         );
       },
     });

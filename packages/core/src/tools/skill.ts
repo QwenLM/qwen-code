@@ -7,7 +7,10 @@
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { ToolResult, ToolResultDisplay } from './tools.js';
-import type { Config } from '../config/config.js';
+import type {
+  Config,
+  ModelInvocableCommandExecutorResult,
+} from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
@@ -21,6 +24,7 @@ const debugLogger = createDebugLogger('SKILL');
 
 export interface SkillParams {
   skill: string;
+  args?: string;
 }
 
 // Re-export for backward compatibility
@@ -63,7 +67,11 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       properties: {
         skill: {
           type: 'string',
-          description: 'The skill name (no arguments). E.g., "pdf" or "xlsx"',
+          description: 'The skill or command name. E.g., "pdf" or "xlsx"',
+        },
+        args: {
+          type: 'string',
+          description: 'Optional arguments for model-invocable slash commands.',
         },
       },
       required: ['skill'],
@@ -106,16 +114,27 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   async refreshSkills(): Promise<void> {
     try {
       // Include a skill in the tool description only when (a) it is not
-      // hidden from the model (`disable-model-invocation`), and (b) it is
-      // either unconditional or already activated by a matching file path
-      // in this session. This keeps the tool description small in large
+      // hidden from the model (`disable-model-invocation`), (b) it is not
+      // user-disabled via `skills.disabled`, and (c) it is either
+      // unconditional or already activated by a matching file path in
+      // this session. This keeps the tool description small in large
       // monorepos where most conditional skills are not yet relevant.
       const allSkills = await this.skillManager.listSkills();
+      const disabledNames = this.config.getDisabledSkillNames();
+      const isDisabled = (name: string) =>
+        disabledNames.has(name.toLowerCase());
+
       this.availableSkills = allSkills.filter(
-        (s) => !s.disableModelInvocation && this.skillManager.isSkillActive(s),
+        (s) =>
+          !s.disableModelInvocation &&
+          this.skillManager.isSkillActive(s) &&
+          !isDisabled(s.name),
       );
       // Track still-pending conditional skills so validateToolParams can
       // distinguish "not found" from "registered but not yet activated".
+      // Disabled conditional skills are excluded too — there's no reason
+      // to surface a "gated by paths:" hint for a skill the user has
+      // explicitly hidden.
       this.pendingConditionalSkillNames = new Set(
         allSkills
           .filter(
@@ -123,7 +142,8 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
               !s.disableModelInvocation &&
               s.paths &&
               s.paths.length > 0 &&
-              !this.skillManager.isSkillActive(s),
+              !this.skillManager.isSkillActive(s) &&
+              !isDisabled(s.name),
           )
           .map((s) => s.name),
       );
@@ -137,11 +157,25 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       // `disable-model-invocation: true` is intentionally hidden from the
       // model and must not block an unrelated command/MCP prompt that
       // happens to share its name; exclude those from the dedup set too.
+      // Same logic for user-disabled skills: removing them from
+      // `fileBasedSkillNames` lets a same-named MCP prompt or file
+      // command surface in `<available_skills>` instead of being shadowed
+      // by the disabled skill's name.
       const provider = this.config.getModelInvocableCommandsProvider();
       const allCommands = provider ? provider() : [];
       const fileBasedSkillNames = new Set(
-        allSkills.filter((s) => !s.disableModelInvocation).map((s) => s.name),
+        allSkills
+          .filter((s) => !s.disableModelInvocation && !isDisabled(s.name))
+          .map((s) => s.name),
       );
+      // Do NOT additionally filter `allCommands` by name against
+      // `disabledNames` here. The skill loaders (`SkillCommandLoader`,
+      // `BundledSkillLoader`) have already stripped disabled skills from
+      // the command surface, so any skill-kind command flowing through
+      // this provider has survived the user filter. A non-skill command
+      // (file command, MCP prompt) that happens to share the disabled
+      // skill's name MUST keep its position here — that's the entire
+      // point of the `fileBasedSkillNames` exclusion above.
       this.modelInvocableCommands = allCommands.filter(
         (cmd) => !fileBasedSkillNames.has(cmd.name),
       );
@@ -227,6 +261,7 @@ How to invoke:
   - \`skill: "pdf"\` - invoke the pdf skill
   - \`skill: "xlsx"\` - invoke the xlsx skill
   - \`skill: "ms-office-suite:pdf"\` - invoke using fully qualified name
+  - \`skill: "mcp-prompt", args: "topic"\` - invoke a model-invocable command with arguments
 
 Important:
 - When a skill is relevant, you must invoke this tool IMMEDIATELY as your first action
@@ -257,6 +292,9 @@ ${skillDescriptions}
     ) {
       return 'Parameter "skill" must be a non-empty string.';
     }
+    if (params.args !== undefined && typeof params.args !== 'string') {
+      return 'Parameter "args" must be a string when provided.';
+    }
 
     // Check file-based skills
     const skillExists = this.availableSkills.some(
@@ -269,6 +307,15 @@ ${skillDescriptions}
       (cmd) => cmd.name === params.skill,
     );
     if (commandExists) return null;
+
+    // Disabled-by-user branch — placed AFTER commandExists so a same-named
+    // MCP prompt or file command can still pass validation. With the
+    // `fileBasedSkillNames` exclusion in `refreshSkills`, a disabled skill
+    // no longer shadows a same-named non-skill command, and we don't want
+    // this branch to block the legitimate command path.
+    if (this.config.getDisabledSkillNames().has(params.skill.toLowerCase())) {
+      return `Skill "${params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
+    }
 
     // Distinct error for a conditional skill (registered via `paths:`
     // frontmatter) that has not yet been activated by a matching tool call.
@@ -300,7 +347,9 @@ ${skillDescriptions}
   }
 
   override toAutoClassifierInput(params: SkillParams): Record<string, unknown> {
-    return { skill: params.skill };
+    return params.args === undefined
+      ? { skill: params.skill }
+      : { skill: params.skill, args: params.args };
   }
 
   getAvailableSkillNames(): string[] {
@@ -350,7 +399,10 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     params: SkillParams,
     private readonly onSkillLoaded: (name: string) => void,
     private readonly commandExecutor:
-      | ((name: string, args?: string) => Promise<string | null>)
+      | ((
+          name: string,
+          args?: string,
+        ) => Promise<ModelInvocableCommandExecutorResult | null>)
       | null = null,
   ) {
     super(params);
@@ -361,7 +413,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
   }
 
   getDescription(): string {
-    return `Use skill: "${this.params.skill}"`;
+    return this.params.args === undefined
+      ? `Use skill: "${this.params.skill}"`
+      : `Use skill: "${this.params.skill}" with args: "${formatArgsForDescription(this.params.args)}"`;
   }
 
   /**
@@ -380,6 +434,50 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     _signal?: AbortSignal,
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // Disabled-skill guard. Mirrors validateToolParams's commandExists →
+    // disabled ordering at the execution layer: when a skill is disabled
+    // but a same-named non-skill command (MCP prompt, file command)
+    // exists, we MUST run the command instead of loading the disabled
+    // skill from disk. `loadSkillForRuntime` resolves by name and ignores
+    // the `skills.disabled` setting, so without this guard a disabled
+    // skill would still execute its body whenever it shadows a real
+    // command.
+    const disabled = this.config
+      .getDisabledSkillNames()
+      .has(this.params.skill.toLowerCase());
+    if (disabled) {
+      if (this.commandExecutor) {
+        // Wrap in try/catch matching the non-disabled path's graceful
+        // degradation (line 444 below): if the MCP server throws
+        // (network error, timeout, protocol violation), fall through to
+        // the disabled-error message instead of propagating an unhandled
+        // rejection out of execute(). Without this, disabling a skill
+        // makes the system MORE fragile to MCP failures, not less.
+        try {
+          const content = await this.commandExecutor(this.params.skill);
+          if (content !== null) {
+            // Delegated to a same-named non-skill command (file command
+            // or MCP prompt). Don't emit `SkillLaunchEvent` and don't
+            // track via `onSkillLoaded` — no skill body was loaded, and
+            // conflating the two would inflate skill telemetry /
+            // `/context` skill-token attribution with command runs.
+            return {
+              llmContent: [{ text: content }],
+              returnDisplay: `Delegated to command: ${this.params.skill}`,
+            };
+          }
+        } catch {
+          // Fall through to the disabled-error message below.
+        }
+      }
+      logSkillLaunch(
+        this.config,
+        new SkillLaunchEvent(this.params.skill, false, this.promptId),
+      );
+      const msg = `Skill "${this.params.skill}" is disabled. Re-enable it via /skills or remove it from skills.disabled.`;
+      return { llmContent: msg, returnDisplay: msg };
+    }
+
     try {
       // Load the skill with runtime config (includes additional files)
       const skill = await this.skillManager.loadSkillForRuntime(
@@ -389,15 +487,32 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       if (!skill) {
         // Try model-invocable command executor (e.g. MCP prompts)
         if (this.commandExecutor) {
-          const content = await this.commandExecutor(this.params.skill);
-          if (content !== null) {
+          const commandResult = await this.commandExecutor(
+            this.params.skill,
+            this.params.args ?? '',
+          );
+          if (
+            commandResult &&
+            typeof commandResult === 'object' &&
+            'error' in commandResult
+          ) {
+            logSkillLaunch(
+              this.config,
+              new SkillLaunchEvent(this.params.skill, false, this.promptId),
+            );
+            return {
+              llmContent: commandResult.error,
+              returnDisplay: commandResult.error,
+            };
+          }
+          if (typeof commandResult === 'string') {
             logSkillLaunch(
               this.config,
               new SkillLaunchEvent(this.params.skill, true, this.promptId),
             );
             this.onSkillLoaded(this.params.skill);
             return {
-              llmContent: [{ text: content }],
+              llmContent: [{ text: commandResult }],
               returnDisplay: `Executed command: ${this.params.skill}`,
             };
           }
@@ -498,4 +613,12 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       };
     }
   }
+}
+
+function formatArgsForDescription(args: string): string {
+  const escapeMarkdown = (value: string) =>
+    value.replace(/([\\`*_{}[\]()#+\-.!|>])/g, '\\$1');
+  return args.length > 120
+    ? `${escapeMarkdown(args.slice(0, 117))}...`
+    : escapeMarkdown(args);
 }

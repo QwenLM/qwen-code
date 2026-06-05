@@ -26,7 +26,11 @@ import v8 from 'node:v8';
 import React from 'react';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
-import { loadCliConfig, parseArguments } from './config/config.js';
+import {
+  buildDisabledSkillNamesProvider,
+  loadCliConfig,
+  parseArguments,
+} from './config/config.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
 import {
   ENV_CORRUPTED_PATH,
@@ -40,6 +44,7 @@ import {
   initializeApp,
   type InitializationResult,
 } from './core/initializer.js';
+import { handleList as handleListExtensions } from './commands/extensions/list.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import {
   setupStartupWorktree,
@@ -466,6 +471,11 @@ export async function main() {
     );
   }
 
+  if (argv.listExtensions) {
+    await handleListExtensions();
+    process.exit(0);
+  }
+
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
     writeStderrLine(
@@ -523,6 +533,7 @@ export async function main() {
           userHooks: settings.getUserHooks(),
           projectHooks: settings.getProjectHooks(),
         },
+        buildDisabledSkillNamesProvider(settings),
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -774,6 +785,7 @@ export async function main() {
         userHooks: settings.getUserHooks(),
         projectHooks: settings.getProjectHooks(),
       },
+      buildDisabledSkillNamesProvider(settings),
     );
     profileCheckpoint('after_load_cli_config');
 
@@ -833,22 +845,15 @@ export async function main() {
       const authType = modelsConfig.getCurrentAuthType();
       const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
       const proxy = config.getProxy();
-      preconnectApi(authType, { resolvedBaseUrl, proxy });
+      if (!config.getListExtensions()) {
+        preconnectApi(authType, { resolvedBaseUrl, proxy });
+      }
     } catch (error) {
       // If we can't get authType, skip preconnect - it's optional optimization
       debugLogger.debug(
         `Preconnect skipped due to error getting authType: ${error}`,
       );
     }
-
-    // FIXME: list extensions after the config initialize
-    // if (config.getListExtensions()) {
-    //   console.log('Installed extensions:');
-    //   for (const extension of extensions) {
-    //     console.log(`- ${extension.config.name}`);
-    //   }
-    //   process.exit(0);
-    // }
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
@@ -963,6 +968,45 @@ export async function main() {
     // Render UI, passing necessary config values. Check that there is no command line question.
     profileCheckpoint('before_render');
 
+    if (config.getListExtensions()) {
+      // Always initialize config to populate extensionCache via refreshCache().
+      // Without this, getExtensions() returns [] because extensionCache is null.
+      try {
+        await config.initialize();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`Error: failed to load extensions: ${msg}\n`);
+        await runExitCleanup();
+        process.exit(1);
+      }
+      const extensions = config.getExtensions();
+      if (extensions.length === 0) {
+        // eslint-disable-next-line no-console -- CLI flag output
+        console.log('No extensions installed.');
+      } else {
+        // eslint-disable-next-line no-console -- CLI flag output
+        console.log('Installed extensions:');
+        for (const extension of extensions) {
+          const safeVersion = extension.version.replace(
+            // eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
+            /[\x00-\x1f\x7f-\x9f]/g,
+            '',
+          );
+          const safeName = extension.name.replace(
+            // eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
+            /[\x00-\x1f\x7f-\x9f]/g,
+            '',
+          );
+          // eslint-disable-next-line no-console -- CLI flag output
+          console.log(
+            `- ${safeName} (v${safeVersion})${extension.isActive ? '' : ' [disabled]'}`,
+          );
+        }
+      }
+      await runExitCleanup();
+      process.exit(0);
+    }
+
     if (config.isInteractive()) {
       // --json-schema is a headless-only contract: the synthetic
       // structured_output tool only terminates the run inside
@@ -1047,6 +1091,7 @@ export async function main() {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       profileCheckpoint('config_initialize_end');
+
       // Non-interactive paths feed a prompt to the model immediately after
       // init. Under PR-A's progressive MCP availability,
       // `config.initialize()` returns BEFORE MCP servers settle, so
