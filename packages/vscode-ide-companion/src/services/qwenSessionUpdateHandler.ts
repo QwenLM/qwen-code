@@ -70,9 +70,15 @@ export class QwenSessionUpdateHandler {
           (update as { content?: unknown }).content,
         );
         const meta = (update as { _meta?: SessionUpdateMeta | null })._meta;
+        // When MessageRewriteMiddleware is active it emits a rewritten summary
+        // (_meta.rewritten === true) in addition to the original chunk, and
+        // both carry qwenDiscreteMessage. Persist only the original here so the
+        // notification is not stored twice; the rewritten copy falls through to
+        // onStreamChunk like any other streamed text.
         const isDiscreteMessage =
-          meta?.qwenDiscreteMessage === true ||
-          meta?.source === 'background_notification';
+          (meta?.qwenDiscreteMessage === true ||
+            meta?.source === 'background_notification') &&
+          meta?.rewritten !== true;
         if (text && isDiscreteMessage && this.callbacks.onMessage) {
           const source =
             typeof meta?.source === 'string' ? meta.source : undefined;

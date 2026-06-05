@@ -42,6 +42,10 @@ export interface SessionUpdateMeta {
   availableSkills?: string[] | null;
   source?: string | null;
   qwenDiscreteMessage?: boolean | null;
+  // Set on the summary emitted by MessageRewriteMiddleware so consumers can
+  // distinguish the rewritten copy from the original chunk (which carries the
+  // same qwenDiscreteMessage flag) and avoid persisting both.
+  rewritten?: boolean | null;
   backgroundTask?: {
     taskId?: string;
     status?: string;

@@ -28,6 +28,11 @@ const debugLogger = createDebugLogger('MESSAGE_REWRITE');
  *   4. Rewritten text is emitted as agent_message_chunk with _meta.rewritten=true
  */
 const DEFAULT_REWRITE_TIMEOUT_MS = 30_000;
+// Intentionally empty: earlier revisions stripped backgroundTask/source/
+// qwenDiscreteMessage from rewritten messages, but those keys are required
+// downstream for discrete-message routing (see qwenSessionUpdateHandler).
+// Kept as an explicit extension point — add a key here to drop it from a
+// rewritten message's _meta.
 const REWRITE_META_EXCLUDED_KEYS = new Set<string>([]);
 
 export class MessageRewriteMiddleware {

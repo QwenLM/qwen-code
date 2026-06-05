@@ -390,6 +390,7 @@ export class Session implements SessionContext {
     this.notificationAbortController?.abort();
     this.notificationAbortController = null;
     this.notificationProcessing = false;
+    this.notificationCompletion = null;
 
     if (this.cronAbortController) {
       this.cronAbortController.abort();
