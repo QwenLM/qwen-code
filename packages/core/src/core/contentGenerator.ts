@@ -310,6 +310,14 @@ export function createContentGeneratorConfig(
   ).config;
 }
 
+function isModuleNotFoundError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    (error as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND'
+  );
+}
+
 export async function createContentGenerator(
   generatorConfig: ContentGeneratorConfig,
   config: Config,
@@ -352,9 +360,10 @@ export async function createContentGenerator(
           config,
         );
       } catch (error) {
-        throw new Error(
-          `${error instanceof Error ? error.message : String(error)}`,
-        );
+        if (isModuleNotFoundError(error)) {
+          throw error;
+        }
+        throw new Error(error instanceof Error ? error.message : String(error));
       }
     } else if (authType === AuthType.USE_ANTHROPIC) {
       const { createAnthropicContentGenerator } = await import(
@@ -375,14 +384,11 @@ export async function createContentGenerator(
       );
     }
   } catch (error) {
-    if (
-      error instanceof Error &&
-      'code' in error &&
-      (error as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND'
-    ) {
+    if (isModuleNotFoundError(error)) {
       throw new Error(
         `Qwen Code was updated in the background and needs to be restarted.\n` +
           `Please exit and restart Qwen Code to use the '${authType}' provider.`,
+        { cause: error },
       );
     }
     throw error;

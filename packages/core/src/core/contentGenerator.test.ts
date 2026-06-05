@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   createContentGenerator,
   createContentGeneratorConfig,
@@ -15,6 +15,16 @@ import type { Config } from '../config/config.js';
 import { LoggingContentGenerator } from './loggingContentGenerator/index.js';
 
 vi.mock('@google/genai');
+
+let openaiMockError: Error | null = null;
+vi.mock('./openaiContentGenerator/index.js', () => ({
+  get createOpenAIContentGenerator() {
+    if (openaiMockError) {
+      throw openaiMockError;
+    }
+    return () => ({});
+  },
+}));
 
 describe('createContentGenerator', () => {
   it('should create a Gemini content generator', async () => {
@@ -84,6 +94,63 @@ describe('createContentGenerator', () => {
       },
     });
     expect(generator).toBeInstanceOf(LoggingContentGenerator);
+  });
+});
+
+describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
+  const mockConfig = {
+    getUsageStatisticsEnabled: () => true,
+    getContentGeneratorConfig: () => ({}),
+    getCliVersion: () => '1.0.0',
+    getTelemetryEnabled: () => false,
+    getSessionId: () => 'test-session',
+  } as unknown as Config;
+
+  beforeEach(() => {
+    openaiMockError = null;
+  });
+
+  it('should throw friendly restart message with cause when dynamic import fails with ERR_MODULE_NOT_FOUND', async () => {
+    const moduleError = new Error(
+      "Cannot find module './openaiContentGenerator-STALE.js'",
+    );
+    (moduleError as NodeJS.ErrnoException).code = 'ERR_MODULE_NOT_FOUND';
+    openaiMockError = moduleError;
+
+    try {
+      await createContentGenerator(
+        {
+          model: 'test-model',
+          apiKey: 'test-key',
+          authType: AuthType.USE_OPENAI,
+        },
+        mockConfig,
+      );
+      expect.unreachable('should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      const err = error as Error;
+      expect(err.message).toMatch(
+        /updated in the background and needs to be restarted/,
+      );
+      expect(err.message).toMatch(/openai/);
+      expect(err.cause).toBe(moduleError);
+    }
+  });
+
+  it('should re-throw non-module errors unchanged', async () => {
+    openaiMockError = new Error('network timeout');
+
+    await expect(
+      createContentGenerator(
+        {
+          model: 'test-model',
+          apiKey: 'test-key',
+          authType: AuthType.USE_OPENAI,
+        },
+        mockConfig,
+      ),
+    ).rejects.toThrow('network timeout');
   });
 });
 
