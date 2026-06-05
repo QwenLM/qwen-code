@@ -51,7 +51,7 @@ export interface DaemonCapabilities {
    * `workspaceCwd`.
    *
    * Optional at the type level because the field is an additive
-   * extension to v=1 envelopes . Daemons
+   * extension to v=1 envelopes. Daemons
    * predating this feature still announce `v: 1` but omit this field; the
    * protocol's "bump v only on incompatible frame changes" stance
    * (see `qwen-serve-protocol.md`) makes additive optionality the

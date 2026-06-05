@@ -978,9 +978,9 @@ export class MultiClientPermissionMediator implements PermissionMediator {
    *   6. Settle the Promise (LAST — callbacks running re-entrantly
    *      see consistent state).
    *
-   * Pre-fix the spec bundled
+   * Previously the spec bundled
    * "delete pending + write resolved" into step 2 ahead of emit,
-   * which contradicted the code (and the I5 comment). The fix
+   * which contradicted the code. The fix
    * splits the two halves of the state move around the emit so
    * the spec faithfully describes the ordering invariant.
    *

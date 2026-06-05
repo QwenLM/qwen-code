@@ -244,7 +244,7 @@ export class McpTransportPool {
         // `attach` call) left a stale `sessionToEntries[sessionId]`
         // mapping with no matching `entry.refs.has(sessionId)`
         // `releaseSession` would later iterate the stale id and call
-        // `entry.detach` on a non-attached session. :
+        // `entry.detach` on a non-attached session.
         // `attachPooledSession` is the shared view+attach helper;
         // call-site ordering (indexAttach AFTER attach, terminal-state
         // self-heal in catch) stays here, not in the helper.

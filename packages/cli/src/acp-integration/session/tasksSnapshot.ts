@@ -27,6 +27,7 @@ function runtimeMs(
   return Math.max(0, (entry.endTime ?? now) - entry.startTime);
 }
 
+/** Include `{key: value}` in a spread only when `value` is defined; empty object otherwise. */
 function optionalField<K extends string, V>(
   key: K,
   value: V | undefined,

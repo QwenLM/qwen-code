@@ -4172,13 +4172,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // session leaves — other sessions on the same channel keep
       // running.
       //
-      // Same channel-overlap fix as in `closeSession` above.
+      // HAZARD: Same channel-overlap fix as in `closeSession` above.
       // `channelInfoForEntry(entry)` returns the entry's actual
       // channel rather than the module-scoped `channelInfo` (current
       // attach target), preventing the "kill operates on the freshly-
       // spawned channel B instead of the dying channel A" cascade
-      // during the overlap window. Keep `channelInfoForEntry(entry)`
-      // until the deterministic overlap test lands.
+      // during the overlap window. The regression test is single-channel
+      // smoke only and WILL NOT fail if this reverts to module-scoped
+      // channelInfo. Keep `channelInfoForEntry(entry)` until a
+      // deterministic overlap test lands.
       const ci = channelInfoForEntry(entry);
       if (!ci) {
         // Same diagnostic as `closeSession` — when the entry's channel
