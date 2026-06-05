@@ -118,6 +118,7 @@ export interface SlashCommandProcessorActions {
   addConfirmUpdateExtensionRequest: (request: ConfirmationRequest) => void;
   openSubagentCreateDialog: () => void;
   openAgentsManagerDialog: () => void;
+  openSkillsManagerDialog: () => void;
   openExtensionsManagerDialog: () => void;
   openMcpDialog: () => void;
   openHooksDialog: () => void;
@@ -427,6 +428,15 @@ export const useSlashCommandProcessor = (
       return;
     }
     return skillManager.addChangeListener(() => {
+      // The `/skills` dialog calls `reloadCommands()` itself BEFORE it
+      // calls `notifyConfigChanged()`, so a listener-driven second reload
+      // would be a wasted CommandService rebuild on every save. Honor the
+      // one-shot suppression signal — disk-driven changes (no
+      // dialog-orchestrated reload) leave the flag false and reload
+      // normally.
+      if (skillManager.consumeSlashReloadSuppression()) {
+        return;
+      }
       reloadCommands();
     });
   }, [config, isConfigInitialized, reloadCommands]);
@@ -747,6 +757,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'subagent_list':
                       actions.openAgentsManagerDialog();
+                      return { type: 'handled' };
+                    case 'skills_manage':
+                      actions.openSkillsManagerDialog();
                       return { type: 'handled' };
                     case 'mcp':
                       actions.openMcpDialog();
@@ -1071,5 +1084,9 @@ export const useSlashCommandProcessor = (
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
+    // Exposed so dialogs (e.g. SkillsManagerDialog) can trigger a
+    // CommandService rebuild without going through `commandContext.ui`,
+    // which is plumbed only to slash-command actions, not arbitrary UI.
+    reloadCommands,
   };
 };

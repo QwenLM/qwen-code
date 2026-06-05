@@ -102,7 +102,42 @@ export default {
     'Analisa o projeto e cria um arquivo QWEN.md personalizado.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Listar ferramentas Qwen Code disponíveis. Uso: /tools [desc]',
-  'List available skills.': 'Listar habilidades disponíveis.',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'Abrir o painel de habilidades (explorar, pesquisar, ativar, selecionar).',
+  'Manage Skills': 'Gerenciar Habilidades',
+  'Skills configuration saved.': 'Configuração de habilidades salva.',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    'Configuração de habilidades salva, mas a atualização falhou: {{error}}. Reinicie para garantir que o novo estado seja aplicado.',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    'O espaço de trabalho não é confiável; as configurações do espaço de trabalho são ignoradas pela configuração combinada. Execute /trust primeiro, ou edite ~/.qwen/settings.json diretamente para gerenciar habilidades no escopo do usuário.',
+  'SkillManager not available.': 'SkillManager indisponível.',
+  'Loading skills…': 'Carregando habilidades…',
+  'Failed to load skills: {{error}}':
+    'Falha ao carregar habilidades: {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    'Falha ao salvar a configuração de habilidades: {{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'Todas as habilidades disponíveis estão desativadas. Edite ~/.qwen/settings.json ou .qwen/settings.json (skills.disabled) para reativá-las.',
+  'Press esc to close.': 'Pressione Esc para fechar.',
+  '{{count}} skills · ': '{{count}} habilidades · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} habilidades · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    'Espaço alternar · Enter selecionar (preencher entrada) · Esc salvar & sair · escopo do espaço de trabalho',
+  'Search:': 'Pesquisar:',
+  'type to filter…': 'digite para filtrar…',
+  'No skills are currently available.':
+    'Nenhuma habilidade está disponível no momento.',
+  'All available skills are locked at a higher scope (see below).':
+    'Todas as habilidades disponíveis estão bloqueadas em um escopo superior (veja abaixo).',
+  'No skills match the search.': 'Nenhuma habilidade corresponde à pesquisa.',
+  'Locked by higher-scope settings (cannot toggle here):':
+    'Bloqueado por configurações de escopo superior (não é possível alternar aqui):',
+  'higher scope': 'escopo superior',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [bloqueado: {{scope}}]',
+  '↑/↓ navigate · backspace edits search':
+    '↑/↓ navegar · Backspace edita a pesquisa',
+  Bundled: 'Integrada',
   'Available Qwen Code CLI tools:': 'Ferramentas CLI do Qwen Code disponíveis:',
   'No tools available': 'Nenhuma ferramenta disponível',
   'View or change the approval mode for tool usage':
