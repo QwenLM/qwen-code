@@ -207,6 +207,7 @@ import {
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
 } from './utils/historyUtils.js';
+import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -2368,7 +2369,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
   const availableTerminalHeight = Math.max(
     0,
-    terminalHeight - controlsHeight - staticExtraHeight - 2 - tabBarHeight,
+    terminalHeight -
+      controlsHeight -
+      staticExtraHeight -
+      MAIN_CONTENT_HEIGHT_RESERVATION -
+      tabBarHeight,
   );
 
   config.setShellExecutionConfig({

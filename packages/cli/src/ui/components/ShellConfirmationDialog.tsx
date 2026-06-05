@@ -43,7 +43,9 @@ export const ShellConfirmationDialog: React.FC<
   const commandPreviewHeight =
     constrainedHeight === undefined
       ? undefined
-      : Math.max(2, constrainedHeight - SHELL_CONFIRMATION_FIXED_ROWS);
+      : constrainedHeight >= SHELL_CONFIRMATION_FIXED_ROWS + 2
+        ? Math.max(2, constrainedHeight - SHELL_CONFIRMATION_FIXED_ROWS)
+        : 0;
 
   useKeypress(
     (key) => {
@@ -125,7 +127,7 @@ export const ShellConfirmationDialog: React.FC<
             ))}
           </Box>
         </Box>
-      ) : (
+      ) : commandPreviewHeight !== undefined && commandPreviewHeight > 0 ? (
         <Box flexDirection="column" flexShrink={1}>
           <MaxSizedBox
             maxHeight={commandPreviewHeight}
@@ -139,7 +141,7 @@ export const ShellConfirmationDialog: React.FC<
             ))}
           </MaxSizedBox>
         </Box>
-      )}
+      ) : null}
 
       <Box
         marginBottom={constrainedHeight === undefined ? 1 : 0}

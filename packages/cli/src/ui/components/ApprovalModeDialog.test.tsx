@@ -87,4 +87,24 @@ describe('ApprovalModeDialog', () => {
     expect(frame).toContain('Workspace approval mode exists');
     expect(frame).toContain('Use Enter to select');
   });
+
+  it('hides the footer hint to make room for the workspace warning', () => {
+    const { lastFrame } = renderWithProviders(
+      <ApprovalModeDialog
+        settings={createSettings({
+          tools: { approvalMode: ApprovalMode.YOLO },
+        })}
+        currentMode={ApprovalMode.DEFAULT}
+        availableTerminalHeight={10}
+        onSelect={vi.fn<
+          (mode: ApprovalMode | undefined, scope: SettingScope) => void
+        >()}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(10);
+    expect(frame).toContain('Workspace approval mode exists');
+    expect(frame).not.toContain('Use Enter to select');
+  });
 });
