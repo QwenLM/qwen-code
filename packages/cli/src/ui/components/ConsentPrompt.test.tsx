@@ -72,6 +72,29 @@ describe('ConsentPrompt', () => {
     );
   });
 
+  it('shows a truncation notice when the prompt is reduced to one row', () => {
+    const prompt = 'This operation needs careful review.';
+    const { lastFrame } = render(
+      <ConsentPrompt
+        prompt={prompt}
+        onConfirm={onConfirm}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={8}
+      />,
+    );
+
+    expect(MockedMarkdownDisplay).toHaveBeenCalledWith(
+      {
+        isPending: true,
+        text: prompt,
+        contentWidth: terminalWidth,
+        availableTerminalHeight: 1,
+      },
+      undefined,
+    );
+    expect(lastFrame()).toContain('Content truncated');
+  });
+
   it('renders a ReactNode prompt directly', () => {
     const prompt = <Text>Are you sure?</Text>;
     const { lastFrame } = render(

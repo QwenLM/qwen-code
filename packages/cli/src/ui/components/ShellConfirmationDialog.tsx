@@ -8,12 +8,12 @@ import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
 import type React from 'react';
 import { theme } from '../semantic-colors.js';
-import { RenderInline } from '../utils/InlineMarkdownRenderer.js';
 import type { RadioSelectItem } from './shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { MaxSizedBox } from './shared/MaxSizedBox.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 // Border, title, subtitle, question, and option rows that must remain visible.
 const SHELL_CONFIRMATION_FIXED_ROWS = 9;
@@ -36,16 +36,19 @@ export const ShellConfirmationDialog: React.FC<
   ShellConfirmationDialogProps
 > = ({ request, availableTerminalHeight, contentWidth = 80 }) => {
   const { commands, onConfirm } = request;
-  const constrainedHeight =
-    availableTerminalHeight === undefined
-      ? undefined
-      : Math.max(1, Math.floor(availableTerminalHeight));
+  const constrainedHeight = clampDialogHeight(availableTerminalHeight);
   const commandPreviewHeight =
     constrainedHeight === undefined
       ? undefined
       : constrainedHeight >= SHELL_CONFIRMATION_FIXED_ROWS + 2
         ? Math.max(2, constrainedHeight - SHELL_CONFIRMATION_FIXED_ROWS)
         : 0;
+  const commandsHidden =
+    constrainedHeight !== undefined &&
+    commandPreviewHeight === 0 &&
+    commands.length > 0;
+  const compactHiddenCommandsLayout =
+    commandsHidden && constrainedHeight <= SHELL_CONFIRMATION_FIXED_ROWS;
 
   useKeypress(
     (key) => {
@@ -104,9 +107,11 @@ export const ShellConfirmationDialog: React.FC<
       <Text bold color={theme.text.primary} wrap="truncate">
         {t('Shell Command Execution')}
       </Text>
-      <Text color={theme.text.primary} wrap="truncate">
-        {t('A custom command wants to run the following shell commands:')}
-      </Text>
+      {!compactHiddenCommandsLayout && (
+        <Text color={theme.text.primary} wrap="truncate">
+          {t('A custom command wants to run the following shell commands:')}
+        </Text>
+      )}
       {constrainedHeight === undefined ? (
         <Box
           flexDirection="column"
@@ -122,7 +127,7 @@ export const ShellConfirmationDialog: React.FC<
           >
             {commands.map((cmd) => (
               <Text key={cmd} color={theme.text.link}>
-                <RenderInline text={cmd} />
+                {cmd}
               </Text>
             ))}
           </Box>
@@ -141,14 +146,21 @@ export const ShellConfirmationDialog: React.FC<
             ))}
           </MaxSizedBox>
         </Box>
+      ) : commandsHidden ? (
+        <Text color={theme.status.warning} wrap="truncate">
+          {commands.length}{' '}
+          {t('shell commands hidden - resize terminal to review')}
+        </Text>
       ) : null}
 
-      <Box
-        marginBottom={constrainedHeight === undefined ? 1 : 0}
-        flexShrink={0}
-      >
-        <Text color={theme.text.primary}>{t('Do you want to proceed?')}</Text>
-      </Box>
+      {!compactHiddenCommandsLayout && (
+        <Box
+          marginBottom={constrainedHeight === undefined ? 1 : 0}
+          flexShrink={0}
+        >
+          <Text color={theme.text.primary}>{t('Do you want to proceed?')}</Text>
+        </Box>
+      )}
 
       <Box flexShrink={0}>
         <RadioButtonSelect items={options} onSelect={handleSelect} isFocused />

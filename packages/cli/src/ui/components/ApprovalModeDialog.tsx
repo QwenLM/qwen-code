@@ -20,6 +20,7 @@ import {
   formatApprovalModeDescription,
   formatApprovalModeName,
 } from '../utils/approvalModeDisplay.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 interface ApprovalModeDialogProps {
   /** Callback function when an approval mode is selected */
@@ -36,7 +37,6 @@ interface ApprovalModeDialogProps {
 }
 
 const DEFAULT_MAX_MODE_ITEMS_TO_SHOW = 10;
-const CONSTRAINED_DIALOG_HEIGHT_THRESHOLD = 12;
 const MIN_HEIGHT_WITH_MODE_SPACER = 9;
 const MIN_HEIGHT_WITH_FOOTER_HINT = 10;
 // Rows consumed by the border, vertical padding, and title before the list.
@@ -84,18 +84,12 @@ export function ApprovalModeDialog({
     selectedScope === SettingScope.User &&
     otherScopeModifiedMessage.toLowerCase().includes('workspace');
 
-  const constrainedHeight =
-    availableTerminalHeight === undefined
-      ? undefined
-      : Math.max(1, Math.floor(availableTerminalHeight));
-  const isVerticallyConstrained =
-    constrainedHeight !== undefined &&
-    constrainedHeight < CONSTRAINED_DIALOG_HEIGHT_THRESHOLD;
+  const constrainedHeight = clampDialogHeight(availableTerminalHeight);
   const showModeSpacer =
-    !isVerticallyConstrained ||
+    constrainedHeight === undefined ||
     constrainedHeight >= MIN_HEIGHT_WITH_MODE_SPACER;
   const showFooterHint =
-    !isVerticallyConstrained ||
+    constrainedHeight === undefined ||
     constrainedHeight >=
       (showWorkspacePriorityWarning
         ? MIN_HEIGHT_WITH_WARNING_FOOTER_HINT

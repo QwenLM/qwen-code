@@ -448,13 +448,16 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     if (disabled) {
       if (this.commandExecutor) {
         // Wrap in try/catch matching the non-disabled path's graceful
-        // degradation (line 444 below): if the MCP server throws
+        // degradation: if the MCP server throws
         // (network error, timeout, protocol violation), fall through to
         // the disabled-error message instead of propagating an unhandled
         // rejection out of execute(). Without this, disabling a skill
         // makes the system MORE fragile to MCP failures, not less.
         try {
-          const content = await this.commandExecutor(this.params.skill);
+          const content = await this.commandExecutor(
+            this.params.skill,
+            this.params.args ?? '',
+          );
           if (content && typeof content === 'object' && 'error' in content) {
             return {
               llmContent: content.error,

@@ -41,6 +41,11 @@ export const calculatePromptWidths = (terminalWidth: number) => {
 
 export const MAIN_CONTENT_HEIGHT_RESERVATION = 2;
 
+export const clampDialogHeight = (
+  height: number | undefined,
+): number | undefined =>
+  height === undefined ? undefined : Math.max(1, Math.floor(height));
+
 /**
  * Returns the max row budget for dialogs rendered in the input/control area.
  *

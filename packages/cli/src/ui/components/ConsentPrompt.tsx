@@ -4,11 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box } from 'ink';
+import { Box, Text } from 'ink';
 import { type ReactNode } from 'react';
 import { theme } from '../semantic-colors.js';
 import { MarkdownDisplay } from '../utils/MarkdownDisplay.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
+import { t } from '../../i18n/index.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 type ConsentPromptProps = {
   // If a simple string is given, it will render using markdown by default.
@@ -23,14 +25,19 @@ const CONSENT_PROMPT_CHROME_ROWS = 7;
 
 export const ConsentPrompt = (props: ConsentPromptProps) => {
   const { prompt, onConfirm, terminalWidth, availableTerminalHeight } = props;
-  const constrainedHeight =
-    availableTerminalHeight === undefined
-      ? undefined
-      : Math.max(1, Math.floor(availableTerminalHeight));
-  const promptHeight =
+  const constrainedHeight = clampDialogHeight(availableTerminalHeight);
+  const availablePromptRows =
     constrainedHeight === undefined
       ? undefined
       : Math.max(1, constrainedHeight - CONSENT_PROMPT_CHROME_ROWS);
+  const showPromptTruncationNotice =
+    typeof prompt === 'string' &&
+    availablePromptRows !== undefined &&
+    availablePromptRows <= 2;
+  const promptHeight =
+    availablePromptRows === undefined
+      ? undefined
+      : Math.max(1, availablePromptRows - (showPromptTruncationNotice ? 1 : 0));
 
   return (
     <Box
@@ -56,6 +63,11 @@ export const ConsentPrompt = (props: ConsentPromptProps) => {
           prompt
         )}
       </Box>
+      {showPromptTruncationNotice && (
+        <Text color={theme.text.secondary} wrap="truncate">
+          {t('Content truncated - resize terminal to review')}
+        </Text>
+      )}
       <Box marginTop={1} flexShrink={0}>
         <RadioButtonSelect
           items={[

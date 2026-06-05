@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { calculatePromptWidths, getDialogMaxHeight } from './layoutUtils.js';
+import {
+  calculatePromptWidths,
+  clampDialogHeight,
+  getDialogMaxHeight,
+} from './layoutUtils.js';
 
 describe('layoutUtils', () => {
   it('calculates prompt widths', () => {
@@ -23,5 +27,12 @@ describe('layoutUtils', () => {
 
   it('keeps at least one row for dialog height', () => {
     expect(getDialogMaxHeight(4, 10)).toBe(1);
+  });
+
+  it('clamps optional dialog heights to whole positive rows', () => {
+    expect(clampDialogHeight(undefined)).toBeUndefined();
+    expect(clampDialogHeight(12.8)).toBe(12);
+    expect(clampDialogHeight(0)).toBe(1);
+    expect(clampDialogHeight(-4)).toBe(1);
   });
 });

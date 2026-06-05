@@ -440,9 +440,7 @@ export const DialogManager = ({
         onClose={uiActions.closeSkillsManagerDialog}
         reloadCommands={uiActions.reloadCommands}
         setInputBuffer={uiActions.setInputBuffer}
-        availableTerminalHeight={
-          constrainHeight ? terminalHeight - staticExtraHeight : undefined
-        }
+        availableTerminalHeight={constrainedDialogHeight}
       />
     );
   }

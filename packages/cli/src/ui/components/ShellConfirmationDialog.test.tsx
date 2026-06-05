@@ -84,7 +84,7 @@ describe('ShellConfirmationDialog', () => {
     expect(frame).not.toContain('cmd-01');
   });
 
-  it('keeps choices visible before the command preview in a very small terminal', () => {
+  it('keeps choices visible with a hidden-command notice in a very small terminal', () => {
     const availableTerminalHeight = 10;
     const { lastFrame } = renderWithProviders(
       <ShellConfirmationDialog
@@ -102,10 +102,12 @@ describe('ShellConfirmationDialog', () => {
 
     const frame = lastFrame() ?? '';
     expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
     expect(frame).toContain('Yes, allow once');
     expect(frame).toContain('Always allow in this project');
     expect(frame).toContain('Always allow for this user');
     expect(frame).toContain('No (esc)');
+    expect(frame).toContain('shell commands hidden');
   });
 
   it('keeps choices visible when wrapped by the constrained layout box', () => {
@@ -128,10 +130,12 @@ describe('ShellConfirmationDialog', () => {
 
     const frame = lastFrame() ?? '';
     expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
     expect(frame).toContain('Yes, allow once');
     expect(frame).toContain('Always allow in this project');
     expect(frame).toContain('Always allow for this user');
     expect(frame).toContain('No (esc)');
+    expect(frame).toContain('shell commands hidden');
   });
 
   it('keeps choices visible at the 13-row terminal dialog budget', () => {
@@ -152,11 +156,27 @@ describe('ShellConfirmationDialog', () => {
 
     const frame = lastFrame() ?? '';
     expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
     expect(frame).toContain('Yes, allow once');
     expect(frame).toContain('Always allow in this project');
     expect(frame).toContain('Always allow for this user');
     expect(frame).toContain('No (esc)');
     expect(frame).not.toMatch(/lines hidden/);
     expect(frame).not.toContain('cmd-10');
+    expect(frame).toContain('shell commands hidden');
+  });
+
+  it('renders shell command text literally without inline markdown formatting', () => {
+    const command = 'echo `danger` *literal*';
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: [command],
+          onConfirm,
+        }}
+      />,
+    );
+
+    expect(lastFrame() ?? '').toContain(command);
   });
 });

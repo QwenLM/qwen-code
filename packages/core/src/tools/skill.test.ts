@@ -1126,7 +1126,7 @@ describe('SkillTool', () => {
 
       // The guard skipped loadSkillForRuntime entirely.
       expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
-      expect(executor).toHaveBeenCalledWith('mytool');
+      expect(executor).toHaveBeenCalledWith('mytool', '');
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('MCP prompt body');
       // "Delegated to" rather than "Executed" so telemetry/UX can
@@ -1170,7 +1170,7 @@ describe('SkillTool', () => {
       ).createInvocation({ skill: 'testing' });
       const result = await invocation.execute();
 
-      expect(executor).toHaveBeenCalledWith('testing');
+      expect(executor).toHaveBeenCalledWith('testing', '');
       expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
       const llmText = partToString(result.llmContent);
       expect(llmText).toMatch(/is disabled/);
@@ -1192,7 +1192,7 @@ describe('SkillTool', () => {
       ).createInvocation({ skill: 'mytool' });
       const result = await invocation.execute();
 
-      expect(executor).toHaveBeenCalledWith('mytool');
+      expect(executor).toHaveBeenCalledWith('mytool', '');
       expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('MCP prompt failed');
@@ -1213,10 +1213,28 @@ describe('SkillTool', () => {
       ).createInvocation({ skill: 'mytool' });
       const result = await invocation.execute();
 
-      expect(executor).toHaveBeenCalledWith('mytool');
+      expect(executor).toHaveBeenCalledWith('mytool', '');
       expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
       const llmText = partToString(result.llmContent);
       expect(llmText).toMatch(/is disabled/);
+    });
+
+    it('passes args to command alternatives for disabled skills', async () => {
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['mytool']),
+      );
+      const executor = vi.fn().mockResolvedValue('MCP prompt body');
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mytool', args: 'arg text' });
+      await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mytool', 'arg text');
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
     });
 
     it('does not affect a skill that is not disabled', async () => {
