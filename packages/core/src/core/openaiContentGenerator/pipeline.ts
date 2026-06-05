@@ -19,6 +19,7 @@ import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
+import { createChildAbortController } from '../../utils/abortController.js';
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -53,20 +54,31 @@ export class ContentGenerationPipeline {
       userPromptId,
       false,
       async (openaiRequest, context) => {
-        const openaiResponse = (await this.client.chat.completions.create(
-          openaiRequest,
-          {
-            signal: request.config?.abortSignal,
-          },
-        )) as OpenAI.Chat.ChatCompletion;
+        // Wrap in a per-request child so the OpenAI SDK's leaked abort
+        // listener (client.mjs fetchWithTimeout — no {once:true}, no
+        // removeEventListener) stays on a short-lived signal instead of
+        // accumulating on the caller's long-lived round signal.
+        const perRequestAc = createChildAbortController(
+          request.config?.abortSignal,
+        );
+        try {
+          const openaiResponse = (await this.client.chat.completions.create(
+            openaiRequest,
+            {
+              signal: perRequestAc.signal,
+            },
+          )) as OpenAI.Chat.ChatCompletion;
 
-        const geminiResponse =
-          OpenAIContentConverter.convertOpenAIResponseToGemini(
-            openaiResponse,
-            context,
-          );
+          const geminiResponse =
+            OpenAIContentConverter.convertOpenAIResponseToGemini(
+              openaiResponse,
+              context,
+            );
 
-        return geminiResponse;
+          return geminiResponse;
+        } finally {
+          perRequestAc.abort();
+        }
       },
     );
   }
@@ -80,16 +92,35 @@ export class ContentGenerationPipeline {
       userPromptId,
       true,
       async (openaiRequest, context) => {
+        // Per-request child — same rationale as the non-streaming path.
+        const perRequestAc = createChildAbortController(
+          request.config?.abortSignal,
+        );
         // Stage 1: Create OpenAI stream
         const stream = (await this.client.chat.completions.create(
           openaiRequest,
           {
-            signal: request.config?.abortSignal,
+            signal: perRequestAc.signal,
           },
         )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
 
-        // Stage 2: Process stream with conversion and logging
-        return this.processStreamWithLogging(stream, context, request);
+        // Stage 2: Process stream with conversion and logging.
+        // Wrap in an async generator that aborts the per-request controller
+        // once the stream is fully consumed or abandoned, so the child
+        // signal's reverse-cleanup fires and the parent listener is released.
+        const innerStream = this.processStreamWithLogging(
+          stream,
+          context,
+          request,
+        );
+        async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
+          try {
+            yield* innerStream;
+          } finally {
+            perRequestAc.abort();
+          }
+        }
+        return drainThenCleanup();
       },
     );
   }

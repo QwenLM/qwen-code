@@ -1201,10 +1201,38 @@ describe('ContentGenerationPipeline', () => {
 
       await pipeline.execute(request, 'test-id');
 
-      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({ signal: abortController.signal }),
+      // The pipeline wraps the caller's signal in a per-request child
+      // to isolate OpenAI SDK listener leaks, so the SDK receives a
+      // child AbortSignal, not the original.
+      const call = (mockClient.chat.completions.create as Mock).mock.calls[0];
+      const sdkSignal = call[1]?.signal;
+      expect(sdkSignal).toBeInstanceOf(AbortSignal);
+      expect(sdkSignal).not.toBe(abortController.signal);
+    });
+
+    it('should propagate parent abort to SDK child signal', async () => {
+      const abortController = new AbortController();
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+
+      let capturedSignal: AbortSignal | undefined;
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockClient.chat.completions.create as Mock).mockImplementation(
+        (_req: unknown, opts: { signal: AbortSignal }) => {
+          capturedSignal = opts.signal;
+          abortController.abort();
+          return { choices: [{ message: { content: 'ok' } }] };
+        },
       );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+
+      await pipeline.execute(request, 'test-id');
+      expect(capturedSignal!.aborted).toBe(true);
     });
   });
 
@@ -1381,14 +1409,15 @@ describe('ContentGenerationPipeline', () => {
       // The stream should handle the error internally - errors during iteration don't propagate to the consumer
       // Instead, they are handled internally by the pipeline
       const results = [];
+      let caughtError: unknown;
       try {
         for await (const result of resultGenerator) {
           results.push(result);
         }
       } catch (error) {
-        // This is expected - the error should propagate from the stream processing
-        expect(error).toBe(testError);
+        caughtError = error;
       }
+      expect(caughtError).toBe(testError);
 
       expect(results).toHaveLength(0); // No results due to error
       expect(mockErrorHandler.handle).toHaveBeenCalledWith(
@@ -1579,10 +1608,11 @@ describe('ContentGenerationPipeline', () => {
         // Consume stream
       }
 
-      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
-        expect.any(Object),
-        expect.objectContaining({ signal: abortController.signal }),
-      );
+      // Per-request child signal isolates SDK listener leaks
+      const call = (mockClient.chat.completions.create as Mock).mock.calls[0];
+      const sdkSignal = call[1]?.signal;
+      expect(sdkSignal).toBeInstanceOf(AbortSignal);
+      expect(sdkSignal).not.toBe(abortController.signal);
     });
 
     it('should merge finishReason and usageMetadata from separate chunks', async () => {
