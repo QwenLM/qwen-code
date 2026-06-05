@@ -219,7 +219,7 @@ describe('Trusted Folders Loading', () => {
       getTrustedFoldersPath(),
       JSON.stringify({ '/new/path': TrustLevel.TRUST_FOLDER }, null, 2),
       // noFollow:true mirrors the credential write sites' security
-      // posture 鈥?a pre-placed symlink at the config path could leak
+      // posture - a pre-placed symlink at the config path could leak
       // the trusted-folder list or leave the user's real config stale.
       {
         encoding: 'utf-8',
@@ -320,7 +320,7 @@ describe('Trusted Folders Loading', () => {
     );
   });
 
-  it('saveTrustedFolders should fall back to a clean rewrite when preserved output validation fails', () => {
+  it('saveTrustedFolders should fall back to a clean rewrite when preserved output validation fails', async () => {
     const userPath = getTrustedFoldersPath();
     const dirPath = path.dirname(userPath);
     const originalContent = `{
@@ -328,6 +328,8 @@ describe('Trusted Folders Loading', () => {
   "/existing/path": "TRUST_FOLDER"
 }`;
     const parseSpy = vi.mocked(commentJson.parse);
+    const actualCommentJson =
+      await vi.importActual<typeof commentJson>('comment-json');
 
     (mockFsExistsSync as Mock).mockImplementation(
       (p) => p === userPath || p === dirPath,
@@ -338,7 +340,7 @@ describe('Trusted Folders Loading', () => {
     });
     parseSpy
       .mockImplementationOnce((...args: Parameters<typeof commentJson.parse>) =>
-        commentJson.parse(...args),
+        actualCommentJson.parse(...args),
       )
       .mockImplementationOnce(() => {
         throw new Error('invalid preserved output');
@@ -354,6 +356,9 @@ describe('Trusted Folders Loading', () => {
     expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
     expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toBe(
       `{\n  "/new/path": "TRUST_FOLDER"\n}`,
+    );
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('invalid preserved output'),
     );
   });
 
@@ -384,6 +389,37 @@ describe('Trusted Folders Loading', () => {
       expect.stringContaining('trusted folders file is not a JSON object'),
     );
   });
+
+  it.each(['"hello"', '42', 'true'])(
+    'saveTrustedFolders should fall back to a clean rewrite when the existing file is a top-level primitive: %s',
+    (existingContent) => {
+      const userPath = getTrustedFoldersPath();
+      const dirPath = path.dirname(userPath);
+
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p) => p === userPath || p === dirPath,
+      );
+      (fs.readFileSync as Mock).mockImplementation((p) => {
+        if (p === userPath) return existingContent;
+        return '{}';
+      });
+
+      saveTrustedFolders({
+        path: userPath,
+        config: {
+          '/new/path': TrustLevel.TRUST_FOLDER,
+        },
+      });
+
+      expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toBe(
+        `{\n  "/new/path": "TRUST_FOLDER"\n}`,
+      );
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('trusted folders file is not a JSON object'),
+      );
+    },
+  );
 });
 
 describe('isWorkspaceTrusted', () => {
