@@ -11,7 +11,10 @@
  * `cli/src/serve/`.
  */
 
-import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type {
+  ApprovalMode,
+  DaemonBridgeTelemetryMetrics,
+} from '@qwen-code/qwen-code-core';
 import type { ChannelFactory } from './channel.js';
 import type { PermissionPolicy } from './permission.js';
 import type { PermissionAuditPublisher } from './permissionMediator.js';
@@ -97,6 +100,8 @@ export type BridgeTelemetryAttributes = Record<
   string | number | boolean
 >;
 
+export type BridgeTelemetryMetrics = DaemonBridgeTelemetryMetrics;
+
 export interface BridgeTelemetry {
   captureContext(): unknown;
   runWithContext<T>(captured: unknown, fn: () => Promise<T>): Promise<T>;
@@ -107,6 +112,7 @@ export interface BridgeTelemetry {
   ): Promise<T>;
   event(name: string, attributes: BridgeTelemetryAttributes): void;
   injectPromptContext<T extends object>(request: T): T;
+  metrics?: BridgeTelemetryMetrics;
 }
 
 /**

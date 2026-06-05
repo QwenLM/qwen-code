@@ -16,6 +16,7 @@ export { DEFAULT_TELEMETRY_TARGET, DEFAULT_OTLP_ENDPOINT };
 export {
   initializeTelemetry,
   shutdownTelemetry,
+  forceFlushMetrics,
   refreshSessionContext,
   isTelemetrySdkInitialized,
 } from './sdk.js';
@@ -183,7 +184,20 @@ export {
   withDaemonBridgeSpan,
   withDaemonRequestSpan,
   withDaemonSpan,
+  type DaemonBridgeTelemetryMetrics,
 } from './daemon-tracing.js';
+export {
+  initializeDaemonMetrics,
+  registerDaemonGaugeCallbacks,
+  recordDaemonHttpRequest,
+  recordDaemonSessionLifecycle,
+  recordDaemonChannelLifecycle,
+  recordDaemonPromptQueueWait,
+  recordDaemonPromptDuration,
+  recordDaemonBridgeError,
+  recordDaemonCancel,
+} from './daemon-metrics.js';
+export type { DaemonGaugeCallbacks } from './daemon-metrics.js';
 export {
   addUserPromptAttributes,
   addSystemPromptAttributes,

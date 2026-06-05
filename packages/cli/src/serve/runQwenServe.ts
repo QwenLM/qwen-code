@@ -20,8 +20,17 @@ import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
   createDaemonBridgeTelemetry,
+  emitDaemonLog,
+  forceFlushMetrics,
   hashDaemonWorkspace,
+  initializeDaemonMetrics,
   initializeTelemetry,
+  recordDaemonCancel,
+  recordDaemonChannelLifecycle,
+  recordDaemonPromptDuration,
+  recordDaemonPromptQueueWait,
+  recordDaemonSessionLifecycle,
+  registerDaemonGaugeCallbacks,
   resolveTelemetrySettings,
   shutdownTelemetry,
   type TelemetryRuntimeConfig,
@@ -35,7 +44,11 @@ import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
 } from './permissionAudit.js';
-import { createServeApp, resolveBridgeFsFactory } from './server.js';
+import {
+  createServeApp,
+  getActiveSseCount,
+  resolveBridgeFsFactory,
+} from './server.js';
 import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
@@ -110,7 +123,10 @@ function createDaemonTelemetryRuntimeConfig(
     getTelemetryOutfile: () => telemetry.outfile,
     getTelemetryIncludeSensitiveSpanAttributes: () =>
       telemetry.includeSensitiveSpanAttributes ?? false,
-    getTelemetryResourceAttributes: () => telemetry.resourceAttributes ?? {},
+    getTelemetryResourceAttributes: () => ({
+      'service.instance.id': daemonSessionId,
+      ...(telemetry.resourceAttributes ?? {}),
+    }),
     getTelemetryMetricsIncludeSessionId: () =>
       telemetry.metrics?.includeSessionId ?? false,
     getTelemetryResourceAttributeWarnings: () =>
@@ -659,7 +675,44 @@ export async function runQwenServe(
       `daemon:${daemonWorkspaceHash}:${process.pid}`,
     ),
   );
+  initializeDaemonMetrics();
   const daemonTelemetry = createDaemonBridgeTelemetry();
+  daemonTelemetry.metrics = {
+    sessionLifecycle(action) {
+      recordDaemonSessionLifecycle(action);
+      emitDaemonLog(
+        `Session ${action}.`,
+        {
+          'qwen-code.workspace.hash': daemonWorkspaceHash,
+        },
+        {
+          eventName: `qwen-code.daemon.session.${action}`,
+        },
+      );
+    },
+    channelLifecycle(action, expected) {
+      recordDaemonChannelLifecycle(action, expected);
+      emitDaemonLog(
+        action === 'spawn'
+          ? 'ACP channel spawned.'
+          : `ACP channel exited (expected=${expected ?? true}).`,
+        {
+          ...(action === 'exit'
+            ? { 'qwen-code.daemon.channel.expected': expected ?? true }
+            : {}),
+        },
+        {
+          eventName: `qwen-code.daemon.channel.${action}`,
+          ...(expected === false && action === 'exit'
+            ? { severityNumber: 13 }
+            : {}),
+        },
+      );
+    },
+    promptQueueWait: recordDaemonPromptQueueWait,
+    promptDuration: recordDaemonPromptDuration,
+    cancelled: recordDaemonCancel,
+  };
 
   // Allocate the audit ring + publisher in the daemon host (here)
   // rather than inside the bridge factory, because the ring is the
@@ -757,6 +810,11 @@ export async function runQwenServe(
           );
         }),
     });
+  registerDaemonGaugeCallbacks({
+    sessionCount: () => bridge.sessionCount,
+    sseCount: () => getActiveSseCount(),
+    heapUsed: () => process.memoryUsage().heapUsed,
+  });
   let actualPort = opts.port;
   // Pass the already-canonical `boundWorkspace` into `createServeApp`
   // via `deps.boundWorkspace`. That field is the pre-canonicalized
@@ -1026,59 +1084,71 @@ export async function runQwenServe(
                 );
               }
             }
-            bridge
-              .shutdown()
-              .catch((err) => {
-                daemonLog.error(
-                  'bridge shutdown error',
-                  err instanceof Error ? err : null,
+            forceFlushMetrics()
+              .catch((flushErr) => {
+                daemonLog.warn(
+                  `pre-shutdown metrics flush failed: ${
+                    flushErr instanceof Error
+                      ? flushErr.message
+                      : String(flushErr)
+                  }`,
                 );
-                bridgeShutdownError =
-                  err instanceof Error ? err : new Error(String(err));
               })
-              .finally(() => {
-                // Phase 2: arm the force timer NOW so it only races
-                // server.close, not the bridge tear-down above.
-                // `RunHandle.close()` contract says "fully
-                // closed and bridge drained" — the previous code
-                // resolved on a 100ms shortcut AFTER
-                // `closeAllConnections()` without waiting for
-                // `server.close`'s callback, so embedders/tests
-                // could observe a "closed" handle while the server
-                // was still finalizing. Now: force-close just
-                // accelerates `server.close` by killing the
-                // sockets, but we still wait for `server.close`'s
-                // callback to fire. A secondary deadline catches
-                // the pathological case where `server.close` never
-                // resolves at all (kernel-stuck socket etc.) so
-                // shutdown is still bounded.
-                const SECONDARY_DEADLINE_MS = 2_000;
-                let secondaryTimer: NodeJS.Timeout | undefined;
-                const forceTimer = setTimeout(() => {
-                  daemonLog.warn(
-                    `${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
-                  );
-                  server.closeAllConnections();
-                  // After force-close, server.close's callback
-                  // SHOULD fire promptly. Give it `SECONDARY_DEADLINE_MS`
-                  // before we resolve anyway with a warning — much
-                  // longer than the previous 100ms shortcut, and
-                  // logged so the operator knows the contract was
-                  // bent.
-                  secondaryTimer = setTimeout(() => {
-                    daemonLog.warn(
-                      `server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
+              .then(() => {
+                bridge
+                  .shutdown()
+                  .catch((err) => {
+                    daemonLog.error(
+                      'bridge shutdown error',
+                      err instanceof Error ? err : null,
                     );
-                    finish();
-                  }, SECONDARY_DEADLINE_MS);
-                  secondaryTimer.unref();
-                }, SHUTDOWN_FORCE_CLOSE_MS);
-                forceTimer.unref();
-                server.close((err) => {
-                  clearTimeout(forceTimer);
-                  if (secondaryTimer) clearTimeout(secondaryTimer);
-                  finish(err);
-                });
+                    bridgeShutdownError =
+                      err instanceof Error ? err : new Error(String(err));
+                  })
+                  .finally(() => {
+                    // Phase 2: arm the force timer NOW so it only races
+                    // server.close, not the bridge tear-down above.
+                    // `RunHandle.close()` contract says "fully
+                    // closed and bridge drained" — the previous code
+                    // resolved on a 100ms shortcut AFTER
+                    // `closeAllConnections()` without waiting for
+                    // `server.close`'s callback, so embedders/tests
+                    // could observe a "closed" handle while the server
+                    // was still finalizing. Now: force-close just
+                    // accelerates `server.close` by killing the
+                    // sockets, but we still wait for `server.close`'s
+                    // callback to fire. A secondary deadline catches
+                    // the pathological case where `server.close` never
+                    // resolves at all (kernel-stuck socket etc.) so
+                    // shutdown is still bounded.
+                    const SECONDARY_DEADLINE_MS = 2_000;
+                    let secondaryTimer: NodeJS.Timeout | undefined;
+                    const forceTimer = setTimeout(() => {
+                      daemonLog.warn(
+                        `${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
+                      );
+                      server.closeAllConnections();
+                      // After force-close, server.close's callback
+                      // SHOULD fire promptly. Give it `SECONDARY_DEADLINE_MS`
+                      // before we resolve anyway with a warning — much
+                      // longer than the previous 100ms shortcut, and
+                      // logged so the operator knows the contract was
+                      // bent.
+                      secondaryTimer = setTimeout(() => {
+                        daemonLog.warn(
+                          `server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
+                        );
+                        finish();
+                      }, SECONDARY_DEADLINE_MS);
+                      secondaryTimer.unref();
+                    }, SHUTDOWN_FORCE_CLOSE_MS);
+                    forceTimer.unref();
+                    server.close((err) => {
+                      clearTimeout(forceTimer);
+                      if (secondaryTimer) clearTimeout(secondaryTimer);
+                      finish(err);
+                    });
+                  });
               });
           });
           return closePromise;

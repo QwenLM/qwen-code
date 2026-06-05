@@ -123,6 +123,7 @@ const NOOP_PROPAGATOR: TextMapPropagator = {
 let sdk: NodeSDK | undefined;
 let telemetryInitialized = false;
 let telemetryShutdownPromise: Promise<void> | undefined;
+let activeMetricReader: PeriodicExportingMetricReader | undefined;
 
 export function isTelemetrySdkInitialized(): boolean {
   return telemetryInitialized;
@@ -562,6 +563,7 @@ export function initializeTelemetry(config: TelemetryRuntimeConfig): void {
     sdk.start();
     debugLogger.debug('OpenTelemetry SDK started successfully.');
     telemetryInitialized = true;
+    activeMetricReader = metricReader;
     const sessionId = config.getSessionId();
     setSessionContext(undefined, sessionId);
     initializeMetrics(config);
@@ -634,9 +636,36 @@ export async function shutdownTelemetry(): Promise<void> {
     } finally {
       telemetryInitialized = false;
       sdk = undefined;
+      activeMetricReader = undefined;
       telemetryShutdownPromise = undefined;
       setSessionContext(undefined);
     }
   })();
   return telemetryShutdownPromise;
+}
+
+const FORCE_FLUSH_TIMEOUT_MS = 2_000;
+
+export async function forceFlushMetrics(): Promise<void> {
+  if (!telemetryInitialized || !activeMetricReader) return;
+  const flush = activeMetricReader.forceFlush();
+  flush.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `forceFlushMetrics timed out after ${FORCE_FLUSH_TIMEOUT_MS}ms`,
+          ),
+        ),
+      FORCE_FLUSH_TIMEOUT_MS,
+    );
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([flush, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
