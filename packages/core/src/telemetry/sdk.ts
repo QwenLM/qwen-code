@@ -649,6 +649,7 @@ const FORCE_FLUSH_TIMEOUT_MS = 5_000;
 export async function forceFlushMetrics(): Promise<void> {
   if (!telemetryInitialized || !activeMetricReader) return;
   const flush = activeMetricReader.forceFlush();
+  flush.catch(() => {});
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<void>((_, reject) => {
     timer = setTimeout(

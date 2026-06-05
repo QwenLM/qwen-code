@@ -695,7 +695,7 @@ export async function runQwenServe(
       emitDaemonLog(
         action === 'spawn'
           ? 'ACP channel spawned.'
-          : `ACP channel exited (expected=${expected}).`,
+          : `ACP channel exited (expected=${expected ?? true}).`,
         {
           ...(action === 'exit'
             ? { 'qwen-code.daemon.channel.expected': expected ?? true }

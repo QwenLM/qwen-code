@@ -207,6 +207,7 @@ interface ChannelInfo {
    * two-bit (alive, dying) state.
    */
   isDying: boolean;
+  handshakeComplete: boolean;
 }
 
 interface SessionEntry {
@@ -1092,6 +1093,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         sessionIds: new Set(),
         pendingRestoreIds: new Set(),
         isDying: false,
+        handshakeComplete: false,
       };
       aliveChannels.add(info);
       // Belt-and-suspenders leak detection. The set is intentionally
@@ -1154,7 +1156,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // context line in that flow, and the message confirms the
         // cleanup actually ran.
         const channelExitExpected = shuttingDown || info.isDying;
-        telemetry.metrics?.channelLifecycle('exit', channelExitExpected);
+        if (info.handshakeComplete) {
+          telemetry.metrics?.channelLifecycle('exit', channelExitExpected);
+        }
         if (!shuttingDown) {
           telemetry.event('channel.exited', {
             'qwen-code.daemon.channel.exit_code': exitInfo?.exitCode ?? -1,
@@ -1253,6 +1257,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // never returns a still-handshaking channel to a concurrent
       // caller.
       channelInfo = info;
+      info.handshakeComplete = true;
       telemetry.metrics?.channelLifecycle('spawn');
       return info;
     })();
