@@ -310,12 +310,22 @@ export function createContentGeneratorConfig(
   ).config;
 }
 
-function isModuleNotFoundError(error: unknown): error is NodeJS.ErrnoException {
-  return (
-    error instanceof Error &&
-    'code' in error &&
-    (error as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND'
-  );
+function getModuleNotFoundError(
+  error: unknown,
+): NodeJS.ErrnoException | undefined {
+  let current = error;
+
+  while (current instanceof Error) {
+    if (
+      'code' in current &&
+      (current as NodeJS.ErrnoException).code === 'ERR_MODULE_NOT_FOUND'
+    ) {
+      return current as NodeJS.ErrnoException;
+    }
+    current = current.cause;
+  }
+
+  return undefined;
 }
 
 export async function createContentGenerator(
@@ -360,7 +370,7 @@ export async function createContentGenerator(
           config,
         );
       } catch (error) {
-        if (isModuleNotFoundError(error)) {
+        if (getModuleNotFoundError(error)) {
           throw error;
         }
         throw new Error(error instanceof Error ? error.message : String(error));
@@ -384,11 +394,12 @@ export async function createContentGenerator(
       );
     }
   } catch (error) {
-    if (isModuleNotFoundError(error)) {
+    const moduleNotFoundError = getModuleNotFoundError(error);
+    if (moduleNotFoundError) {
       throw new Error(
         `Qwen Code was updated in the background and needs to be restarted.\n` +
           `Please exit and restart Qwen Code to use the '${authType}' provider.`,
-        { cause: error },
+        { cause: moduleNotFoundError },
       );
     }
     throw error;

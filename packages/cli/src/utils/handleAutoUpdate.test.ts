@@ -422,6 +422,42 @@ describe('setUpdateHandler', () => {
     cleanup();
   });
 
+  it('should use default success message when update-success has no message', () => {
+    const isIdleRef = { current: true };
+    const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
+
+    updateEventEmitter.emit('update-success', {});
+
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.INFO,
+        text:
+          'Update successful! Please restart Qwen Code to use the new version. ' +
+          'Switching model providers before restarting may not work correctly.',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
+  it('should use default failure message when update-failed has no message', () => {
+    const isIdleRef = { current: true };
+    const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
+
+    updateEventEmitter.emit('update-failed', {});
+
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.ERROR,
+        text: 'Automatic update failed. Please try updating manually.',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
   it('should defer addItem when not idle (update-success)', () => {
     const isIdleRef = { current: false };
     const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
