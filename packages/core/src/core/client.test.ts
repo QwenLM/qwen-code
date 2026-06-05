@@ -1122,6 +1122,8 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        stripOrphanedUserEntriesFromHistory: vi.fn(),
       } as unknown as GeminiChat;
       const stream = client.sendMessageStream(
         [{ text: 'Hi' }],
@@ -1153,6 +1155,29 @@ describe('Gemini Client (client.ts)', () => {
       expect(getDeferredToolsSystemReminder).toHaveBeenCalledWith([
         { name: 'mcp__server__alpha', description: 'a' },
         { name: 'mcp__server__beta', description: 'b' },
+      ]);
+      const lastCall = mockTurnRunFn.mock.calls.at(-1)!;
+      const parts = lastCall[1];
+      expect(parts).toContain('<system-reminder>DEFERRED</system-reminder>');
+    });
+
+    it('injects the reminder on a Retry turn', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a' },
+      ]);
+      reg.isDeferredToolRevealed.mockReturnValue(false);
+      vi.mocked(getDeferredToolsSystemReminder).mockReturnValue(
+        '<system-reminder>DEFERRED</system-reminder>',
+      );
+
+      await runUserTurn(SendMessageType.Retry);
+
+      expect(getDeferredToolsSystemReminder).toHaveBeenCalledWith([
+        { name: 'mcp__server__alpha', description: 'a' },
       ]);
       const lastCall = mockTurnRunFn.mock.calls.at(-1)!;
       const parts = lastCall[1];

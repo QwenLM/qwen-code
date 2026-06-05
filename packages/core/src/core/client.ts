@@ -1596,17 +1596,18 @@ export class GeminiClient {
       }
       if (
         messageType === SendMessageType.UserQuery ||
-        messageType === SendMessageType.Cron
+        messageType === SendMessageType.Cron ||
+        messageType === SendMessageType.Retry
       ) {
         const systemReminders = [];
 
         // Deferred-tools reminder. Rebuilt from live registry state every
-        // UserQuery/Cron turn so progressively-discovered MCP tools surface
-        // here (message tail) instead of being baked into the cached system
-        // prefix — see getMainSessionSystemInstruction. Returns undefined when
-        // ToolSearch is unavailable (those tools are revealed into the
-        // declaration list by startChat / setTools), in which case no reminder
-        // is needed. The tool registry is already warm by this point.
+        // UserQuery/Cron/Retry turn so progressively-discovered MCP tools
+        // surface here (message tail) instead of being baked into the cached
+        // system prefix — see getMainSessionSystemInstruction. Returns
+        // undefined when ToolSearch is unavailable (those tools are revealed
+        // into the declaration list by startChat / setTools), in which case no
+        // reminder is needed. The tool registry is already warm by this point.
         const deferredToolsForReminder = this.getDeferredToolsForReminder();
         if (deferredToolsForReminder && deferredToolsForReminder.length > 0) {
           systemReminders.push(
