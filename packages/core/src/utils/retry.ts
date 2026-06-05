@@ -9,6 +9,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
+import { retryContext } from './retryContext.js';
 
 const debugLogger = createDebugLogger('RETRY');
 
@@ -27,6 +28,22 @@ export interface HeartbeatInfo {
   error: unknown;
 }
 
+/**
+ * Information passed to `RetryOptions.onRetry` after each failed attempt.
+ * Lets callers (LLM call sites) emit `ApiRetryEvent` telemetry without
+ * coupling `retry.ts` to telemetry concerns.
+ */
+export interface RetryAttemptInfo {
+  /**
+   * 1-based monotonic iteration counter — same value as ALS context's `attempt`.
+   */
+  attempt: number;
+  error: unknown;
+  errorStatus?: number;
+  /** Computed backoff delay that follows this failed attempt (ms). */
+  delayMs: number;
+}
+
 export interface RetryOptions {
   maxAttempts: number;
   initialDelayMs: number;
@@ -41,6 +58,25 @@ export interface RetryOptions {
   heartbeatIntervalMs?: number;
   heartbeatFn?: (info: HeartbeatInfo) => void;
   signal?: AbortSignal;
+  /**
+   * Optional. Called once per failed attempt after the backoff delay is
+   * computed but BEFORE the sleep. Use this to emit retry telemetry events
+   * (e.g. `ApiRetryEvent` for LLM call sites); leave undefined for non-LLM
+   * callers so they stay silent in LLM-specific telemetry channels.
+   *
+   * Contract:
+   * - Invoked only after `await fn()` rejects in the catch block of
+   *   `retryWithBackoff` (OUTSIDE the `retryContext.run()` ALS frame).
+   *   This is true for both synchronous and asynchronous throws from `fn`.
+   *   All retry-context data is passed via the `RetryAttemptInfo` parameter
+   *   — do NOT read `retryContext.getStore()` inside an `onRetry` callback.
+   * - Content-retries via `shouldRetryOnContent` do NOT fire `onRetry`.
+   *   If a future caller wires content retries, extend `retry.ts` to fire
+   *   `onRetry` on that path too.
+   * - Callback errors are swallowed and logged via `debugLogger.warn`; they
+   *   never affect retry behavior (best-effort telemetry).
+   */
+  onRetry?: (info: RetryAttemptInfo) => void;
 }
 
 const DEFAULT_RETRY_OPTIONS: RetryOptions = {
@@ -162,6 +198,7 @@ export async function retryWithBackoff<T>(
     heartbeatIntervalMs,
     heartbeatFn,
     signal,
+    onRetry,
   } = {
     ...DEFAULT_RETRY_OPTIONS,
     ...cleanOptions,
@@ -176,10 +213,24 @@ export async function retryWithBackoff<T>(
   let persistentAttempt = 0;
   let currentDelay = initialDelayMs;
 
+  // Phase 4b — retry telemetry context. `iterationCount` is the monotonic
+  // counter that always reflects "this is the Nth time fn was called",
+  // regardless of normal vs persistent retry mode. Decoupled from the
+  // `attempt` variable above which is clamped at `maxAttempts - 1` in
+  // persistent mode to keep the while-loop alive.
+  const requestEntryTime = Date.now();
+  let iterationCount = 0;
+  let retryTotalDelayMs = 0;
+
   while (attempt < maxAttempts) {
     attempt++;
+    iterationCount++;
+    const requestSetupMs = Date.now() - requestEntryTime;
     try {
-      const result = await fn();
+      const result = await retryContext.run(
+        { attempt: iterationCount, retryTotalDelayMs, requestSetupMs },
+        () => fn(),
+      );
 
       if (
         shouldRetryOnContent &&
@@ -188,6 +239,12 @@ export async function retryWithBackoff<T>(
         const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
         const delayWithJitter = Math.max(0, currentDelay + jitter);
         await delay(delayWithJitter);
+        // Note: this inflates retryTotalDelayMs beyond what onRetry/ApiRetryEvent
+        // reports — content-retry delays are invisible in the api_retry telemetry
+        // channel (onRetry only fires from the catch-block error path). The LLM
+        // span's retry_total_delay_ms attribute includes ALL delays (content +
+        // error), which is the accurate "total time the user waited in backoff."
+        retryTotalDelayMs += delayWithJitter;
         currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         continue;
       }
@@ -256,6 +313,27 @@ export async function retryWithBackoff<T>(
           error,
         );
 
+        // Phase 4b — fire onRetry telemetry callback BEFORE sleep, so
+        // operators see retry events live. Guard with signal?.aborted so we
+        // don't emit a phantom retry event for an attempt that will never
+        // actually proceed (signal fires during the previous sleep or between
+        // catch and this point). Wrap in try/catch: a logging failure must
+        // NEVER break the retry loop.
+        if (!signal?.aborted) {
+          try {
+            onRetry?.({
+              attempt: iterationCount,
+              error,
+              errorStatus,
+              delayMs,
+            });
+          } catch (cbError) {
+            debugLogger.warn(
+              `onRetry callback threw (swallowed): ${cbError instanceof Error ? cbError.message : String(cbError)}`,
+            );
+          }
+        }
+
         // Heartbeat sleep — chunked to keep CI alive
         await sleepWithHeartbeat(delayMs, {
           attempt: reportedAttempt,
@@ -264,30 +342,53 @@ export async function retryWithBackoff<T>(
           heartbeatFn,
           signal,
         });
+        retryTotalDelayMs += delayMs;
 
         // Clamp attempt so the while-loop never exits
         if (attempt >= maxAttempts) {
           attempt = maxAttempts - 1;
         }
       } else {
-        // Normal retry path (unchanged behavior)
+        // Normal retry path
         const retryAfterMs =
           errorStatus === 429 ? getRetryAfterDelayMs(error) : 0;
 
+        let actualDelayMs: number;
         if (retryAfterMs > 0) {
           debugLogger.warn(
             `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
             error,
           );
-          await delay(retryAfterMs);
+          actualDelayMs = retryAfterMs;
           currentDelay = initialDelayMs;
         } else {
           logRetryAttempt(attempt, error, errorStatus);
           const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
-          const delayWithJitter = Math.max(0, currentDelay + jitter);
-          await delay(delayWithJitter);
+          actualDelayMs = Math.max(0, currentDelay + jitter);
           currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         }
+
+        // Phase 4b — fire onRetry telemetry callback BEFORE sleep. Guard
+        // with signal?.aborted to avoid phantom events when abort fires
+        // between catch and here. Wrapped in try/catch so a logging failure
+        // cannot break the retry loop.
+        if (!signal?.aborted) {
+          try {
+            onRetry?.({
+              attempt: iterationCount,
+              error,
+              errorStatus,
+              delayMs: actualDelayMs,
+            });
+          } catch (cbError) {
+            debugLogger.warn(
+              `onRetry callback threw (swallowed): ${cbError instanceof Error ? cbError.message : String(cbError)}`,
+            );
+          }
+        }
+
+        await delay(actualDelayMs);
+        retryTotalDelayMs += actualDelayMs;
       }
     }
   }
