@@ -206,17 +206,44 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('keeps assistant chunks inside an active subagent until completion', () => {
+  it('preserves tool block titles on message tool calls', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('ask-1', 'ask-call-1', 'completed', 1, {
+        toolName: 'AskUserQuestion',
+        title: 'Ask user 2 questions',
+        rawOutput:
+          'User has provided the following answers:\n\n**班级**: 一班\n**学号**: 001',
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'ask-call-1',
+            toolName: 'AskUserQuestion',
+            title: 'Ask user 2 questions',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('keeps parented assistant chunks inside a subagent', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
         title: 'Agent: 分析项目',
         toolName: 'agent',
         rawInput: { subagent_type: 'general-purpose' },
       }),
-      textBlock('assistant-sub', 'assistant', 'subagent output', 20, true),
+      textBlock('assistant-sub', 'assistant', 'subagent output', 20, true, {
+        parentToolCallId: 'agent-1',
+      }),
       toolBlock('read-sub', 'read-1', 'completed', 30, {
         title: 'Read file',
         toolName: 'Read',
+        parentToolCallId: 'agent-1',
       }),
       toolBlock('agent-end', 'agent-1', 'completed', 40, {
         title: 'Agent: 分析项目',
@@ -245,7 +272,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('keeps compacted replay subagent content from overflowing to top level', () => {
+  it('keeps parented compacted replay subagent content nested', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-completed', 'agent-1', 'completed', 10, {
         title: 'Agent: 查询官网活动',
@@ -256,11 +283,16 @@ describe('transcriptBlocksToDaemonMessages', () => {
         },
         updatedAt: 100,
       }),
-      textBlock('sub-thought', 'thought', 'subagent thinking', 20),
-      textBlock('sub-assistant', 'assistant', 'subagent answer', 30),
+      textBlock('sub-thought', 'thought', 'subagent thinking', 20, false, {
+        parentToolCallId: 'agent-1',
+      }),
+      textBlock('sub-assistant', 'assistant', 'subagent answer', 30, false, {
+        parentToolCallId: 'agent-1',
+      }),
       toolBlock('sub-fetch', 'fetch-1', 'completed', 40, {
         title: 'WebFetch',
         toolName: 'WebFetch',
+        parentToolCallId: 'agent-1',
       }),
       textBlock('main-assistant', 'assistant', 'main answer', 110),
     ]);
@@ -509,7 +541,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('does not treat merged background subagent blocks as active stack entries', () => {
+  it('keeps merged background subagent blocks from capturing main-thread text', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-background', 'agent-1', 'completed', 20, {
         title: 'Agent: Correctness review',
@@ -553,7 +585,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('hides unparented assistant text while parallel subagents are active', () => {
+  it('keeps unparented assistant text in the main transcript', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-1', 'agent-call-1', 'in_progress', 10, {
         title: 'Agent: first',
@@ -568,7 +600,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       textBlock('a1', 'assistant', 'unparented stream', 30),
     ]);
 
-    expect(messages).toHaveLength(2);
+    expect(messages).toHaveLength(3);
     expect(messages[0]).toMatchObject({
       role: 'tool_group',
       tools: [{ callId: 'agent-call-1' }],
@@ -578,7 +610,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       tools: [{ callId: 'agent-call-2' }],
     });
     const assistant = messages.find((message) => message.role === 'assistant');
-    expect(assistant).toBeUndefined();
+    expect(assistant).toMatchObject({ content: 'unparented stream' });
     expect(
       messages[1]?.role === 'tool_group' && messages[1].tools[0],
     ).not.toHaveProperty('subContent');
@@ -881,6 +913,161 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('uses AskUserQuestion permission title for the completed tool block', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      {
+        id: 'perm-ask-1',
+        kind: 'permission',
+        requestId: 'req-ask-1',
+        sessionId: 'sess-1',
+        title: 'Ask user 4 questions',
+        options: [{ optionId: 'proceed_once', label: 'Submit', raw: {} }],
+        toolCall: {
+          toolCallId: 'ask-call-1',
+          kind: 'think',
+          status: 'pending',
+          title: 'Ask user 4 questions',
+          rawInput: {
+            questions: [
+              {
+                header: '姓名',
+                question: '请输入学生的姓名：',
+                options: [{ label: '张三', description: '示例姓名' }],
+              },
+            ],
+          },
+        },
+        preview: { kind: 'generic' as const },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 2,
+        resolved: 'selected:proceed_once',
+      },
+      toolBlock('ask-tool-1', 'ask-call-1', 'completed', 3, {
+        toolName: 'ask_user_question',
+        title: 'ask_user_question',
+        rawOutput: 'User has provided the following answers:\n\n**姓名**: 张三',
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'ask-call-1',
+            title: 'Ask user 4 questions',
+            args: {
+              questions: [
+                {
+                  header: '姓名',
+                  question: '请输入学生的姓名：',
+                  options: [{ label: '张三', description: '示例姓名' }],
+                },
+              ],
+            },
+            rawOutput:
+              'User has provided the following answers:\n\n**姓名**: 张三',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('uses text content as raw output when a tool has no raw output', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('ask-failed', 'ask-call-failed', 'failed', 1, {
+        toolName: 'ask_user_question',
+        title: 'ask_user_question',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: 'Question 1: "options" must contain between 2 and 4 options.',
+            },
+          },
+        ] as DaemonToolTranscriptBlock['content'],
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'ask-call-failed',
+            status: 'failed',
+            rawOutput:
+              'Question 1: "options" must contain between 2 and 4 options.',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('prefers AskUserQuestion failure text over echoed input', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('ask-failed', 'ask-call-failed', 'failed', 1, {
+        toolName: 'ask_user_question',
+        title: 'ask_user_question',
+        rawInput: {
+          questions: [
+            {
+              header: '学生姓名',
+              question: '请输入学生姓名',
+              options: [
+                {
+                  label: '输入姓名',
+                  description: '请输入学生的完整姓名',
+                },
+              ],
+            },
+          ],
+        },
+        rawOutput: JSON.stringify({
+          questions: [
+            {
+              header: '学生姓名',
+              question: '请输入学生姓名',
+            },
+          ],
+        }),
+        details: JSON.stringify({
+          questions: [
+            {
+              header: '学生姓名',
+              question: '请输入学生姓名',
+            },
+          ],
+        }),
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: 'Question 1: "options" must contain between 2 and 4 options.',
+            },
+          },
+        ] as DaemonToolTranscriptBlock['content'],
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'ask-call-failed',
+            status: 'failed',
+            rawOutput:
+              'Question 1: "options" must contain between 2 and 4 options.',
+          },
+        ],
+      },
+    ]);
+  });
+
   it('renders pending subagent permission blocks as agent tools', () => {
     const messages = transcriptBlocksToDaemonMessages([
       {
@@ -1059,7 +1246,9 @@ describe('transcriptBlocksToDaemonMessages', () => {
         createdAt: 1,
         updatedAt: 2,
       },
-      textBlock('thought-1', 'thought', 'inside agent', 3),
+      textBlock('thought-1', 'thought', 'inside agent', 3, false, {
+        parentToolCallId: 'agent-1',
+      }),
       toolBlock('child-1', 'child-tool-1', 'completed', 4, {
         toolName: 'web_fetch',
         parentToolCallId: 'agent-1',
@@ -1311,36 +1500,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
-  it('appends shell output to last subTool rawOutput inside subagent', () => {
-    const messages = transcriptBlocksToDaemonMessages([
-      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
-        title: 'Agent: run tests',
-        toolName: 'agent',
-        rawInput: { subagent_type: 'general-purpose' },
-      }),
-      toolBlock('bash-1', 'bash-call-1', 'completed', 20, {
-        toolName: 'bash',
-        toolKind: 'execute',
-      }),
-      shellBlock('sh1', 'PASS all tests\n', 30),
-      shellBlock('sh2', 'Done in 2.3s\n', 31),
-      toolBlock('agent-end', 'agent-1', 'completed', 40, {
-        title: 'Agent: run tests',
-        toolName: 'agent',
-        rawOutput: { type: 'task_execution' },
-      }),
-    ]);
-
-    expect(messages).toHaveLength(1);
-    const agentTool =
-      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
-    expect(agentTool?.subTools).toHaveLength(1);
-    expect(agentTool?.subTools?.[0]).toMatchObject({
-      callId: 'bash-call-1',
-      rawOutput: 'PASS all tests\nDone in 2.3s\n',
-    });
-  });
-
   it('handles nested subagent via parentToolCallId', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('parent-start', 'parent-1', 'in_progress', 10, {
@@ -1365,6 +1524,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
       toolBlock('read-inner', 'read-1', 'completed', 30, {
         toolName: 'Read',
         title: 'Read file.ts',
+        parentToolCallId: 'child-1',
       }),
       {
         id: 'child-end',
@@ -1398,7 +1558,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(childTool?.subTools?.[0]?.callId).toBe('read-1');
   });
 
-  it('user message resets all state including subagent stack', () => {
+  it('user message resets assistant merge state', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('a1', 'assistant', 'first', 1),
       textBlock('u1', 'user', 'question', 2),
@@ -1434,28 +1594,6 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toEqual([]);
   });
 
-  it('shell inside subagent appends to subContent when no subTools exist', () => {
-    const messages = transcriptBlocksToDaemonMessages([
-      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
-        title: 'Agent: check',
-        toolName: 'agent',
-        rawInput: { subagent_type: 'general-purpose' },
-      }),
-      shellBlock('sh1', 'some output\n', 20),
-      toolBlock('agent-end', 'agent-1', 'completed', 30, {
-        title: 'Agent: check',
-        toolName: 'agent',
-        rawOutput: { type: 'task_execution' },
-      }),
-    ]);
-
-    expect(messages).toHaveLength(1);
-    const agentTool =
-      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
-    expect(agentTool?.subContent).toBe('some output\n');
-    expect(agentTool?.subTools).toBeUndefined();
-  });
-
   it('keeps status blocks in the main transcript while subagent is active', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
@@ -1483,7 +1621,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('closeAt auto-pops already-completed agent before next block', () => {
+  it('keeps assistant text after a completed agent in the main transcript', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-1', 'call-1', 'completed', 10, {
         title: 'Agent: quick',
@@ -1506,7 +1644,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('isImplicitTopLevelSubAgent creates new group when active subagent exists', () => {
+  it('creates sibling tool groups for top-level subagents', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-1-start', 'agent-1', 'in_progress', 10, {
         title: 'Agent: first',
@@ -1741,14 +1879,16 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(assistantMsgs[1]).toMatchObject({ content: 'after shell' });
   });
 
-  it('failed subAgent completion pops from stack and allows assistant to return to main thread', () => {
+  it('failed subAgent keeps parented content and allows assistant to return to main thread', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
         title: 'Agent: investigate',
         toolName: 'agent',
         rawInput: { subagent_type: 'general-purpose' },
       }),
-      textBlock('sub-a1', 'assistant', 'Looking into it', 15),
+      textBlock('sub-a1', 'assistant', 'Looking into it', 15, false, {
+        parentToolCallId: 'agent-1',
+      }),
       toolBlock('agent-end', 'agent-1', 'failed', 20, {
         title: 'Agent: investigate',
         toolName: 'agent',
@@ -1797,7 +1937,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(tool4?.endTime).toBe(5);
   });
 
-  it('closeAt window: blocks with createdAt before closeAt remain inside subAgent', () => {
+  it('parented blocks after completed subAgent remain nested', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('agent-1', 'call-1', 'completed', 10, {
         title: 'Agent: fast',
@@ -1806,15 +1946,16 @@ describe('transcriptBlocksToDaemonMessages', () => {
         rawOutput: { type: 'task_execution' },
         updatedAt: 30,
       }),
-      shellBlock('sh1', 'output from agent\n', 20),
-      textBlock('a1', 'assistant', 'inside agent window', 25),
+      textBlock('a1', 'assistant', 'inside agent', 25, false, {
+        parentToolCallId: 'call-1',
+      }),
       textBlock('a2', 'assistant', 'after agent', 35),
     ]);
 
     expect(messages).toHaveLength(2);
     const agentTool =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
-    expect(agentTool?.subContent).toContain('inside agent window');
+    expect(agentTool?.subContent).toBe('inside agent');
     expect(messages[1]).toMatchObject({
       role: 'assistant',
       content: 'after agent',
@@ -1827,7 +1968,9 @@ describe('transcriptBlocksToDaemonMessages', () => {
         title: 'Task: build',
         toolName: 'task',
       }),
-      textBlock('sub-text', 'assistant', 'Building...', 15),
+      textBlock('sub-text', 'assistant', 'Building...', 15, false, {
+        parentToolCallId: 'task-1',
+      }),
       toolBlock('sub-tool', 'sub-tc', 'completed', 20, {
         toolName: 'Bash',
         parentToolCallId: 'task-1',
@@ -1855,7 +1998,9 @@ describe('transcriptBlocksToDaemonMessages', () => {
         toolName: 'my_runner',
         rawOutput: { type: 'task_execution' },
       }),
-      textBlock('sub-text2', 'assistant', 'Running...', 15),
+      textBlock('sub-text2', 'assistant', 'Running...', 15, false, {
+        parentToolCallId: 'exec-1',
+      }),
       toolBlock('exec-end', 'exec-1', 'completed', 20, {
         toolName: 'my_runner',
         rawOutput: { type: 'task_execution', result: 'done' },
@@ -2034,7 +2179,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
-  it('nests parented replay text after a completed subagent leaves the active stack', () => {
+  it('nests parented replay text after a completed subagent update', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'agent-1', 'completed', 100, {
         toolName: 'Agent',
@@ -2054,7 +2199,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(agent?.subContent).toBe('late parented thought');
   });
 
-  it('hides unparented thought text while parallel subagents are active', () => {
+  it('keeps unparented thought text in the main transcript', () => {
     const messages = transcriptBlocksToDaemonMessages([
       toolBlock('t1', 'agent-1', 'running', 100, {
         toolName: 'Agent',
@@ -2069,12 +2214,11 @@ describe('transcriptBlocksToDaemonMessages', () => {
       textBlock('th1', 'thought', 'I need to review the PR diff.', 150),
     ]);
 
-    expect(messages).toHaveLength(2);
-    expect(messages.every((message) => message.role === 'tool_group')).toBe(
-      true,
-    );
+    expect(messages).toHaveLength(3);
     const assistant = messages.find((message) => message.role === 'assistant');
-    expect(assistant).toBeUndefined();
+    expect(assistant).toMatchObject({
+      thinking: 'I need to review the PR diff.',
+    });
     const agentA =
       messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
     const agentB =

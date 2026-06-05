@@ -28,6 +28,7 @@ import {
   getTaskExecutionRecord,
   getToolDescription,
   getToolResultSummary,
+  isAskUserQuestionToolName,
   isShellToolName,
   toolContainsCallId,
 } from './toolFormatting';
@@ -53,6 +54,7 @@ interface ToolGroupProps {
 
 function hasExpandableContent(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
+  if (isAskUserQuestionToolName(tool.toolName)) return !!extractText(tool);
   // write_file shows content from args even before completion
   if (name === 'write_file' || name === 'writefile') {
     return !!getWriteContent(tool);
@@ -382,10 +384,16 @@ function getAgentDisplayInfo(
 
 function shouldAutoExpand(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
+  if (isAskUserQuestionToolName(tool.toolName)) return true;
   if (name === 'write_file' || name === 'writefile') return true;
   if (name === 'edit' || name === 'editfile') return true;
   if (isShellToolName(name)) return true;
   return false;
+}
+
+function ExpandedAskUserQuestionOutput({ tool }: { tool: ACPToolCall }) {
+  const text = extractText(tool) || '';
+  return <pre className={styles.expandedOutput}>{text}</pre>;
 }
 
 function getToolHeaderKind(tool: ACPToolCall): ToolHeaderKind {
@@ -720,6 +728,9 @@ const ToolLine = memo(function ToolLine({
           )}
           {(name === 'read' || name === 'read_file' || name === 'readfile') && (
             <ExpandedReadContent tool={tool} />
+          )}
+          {isAskUserQuestionToolName(tool.toolName) && (
+            <ExpandedAskUserQuestionOutput tool={tool} />
           )}
         </div>
       )}
