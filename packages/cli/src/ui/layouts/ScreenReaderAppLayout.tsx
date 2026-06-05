@@ -17,6 +17,7 @@ import { BtwMessage } from '../components/messages/BtwMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { StreamingState } from '../types.js';
 import { getStickyTodoMaxVisibleItems } from '../utils/todoSnapshot.js';
+import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
 export const ScreenReaderAppLayout: React.FC = () => {
   const uiState = useUIState();
@@ -24,9 +25,9 @@ export const ScreenReaderAppLayout: React.FC = () => {
   const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItems(
     uiState.terminalHeight,
   );
-  const dialogMaxHeight = Math.max(
-    1,
-    uiState.terminalHeight - uiState.staticExtraHeight - 2,
+  const dialogMaxHeight = getDialogMaxHeight(
+    uiState.terminalHeight,
+    uiState.staticExtraHeight,
   );
   const dialogHeight = uiState.constrainHeight ? dialogMaxHeight : undefined;
   const shouldShowStickyTodos =

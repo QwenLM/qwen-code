@@ -38,3 +38,22 @@ export const calculatePromptWidths = (terminalWidth: number) => {
     frameOverhead: FRAME_OVERHEAD,
   } as const;
 };
+
+const DIALOG_VERTICAL_SAFETY_MARGIN = 2;
+
+/**
+ * Returns the max row budget for dialogs rendered in the input/control area.
+ *
+ * The two-row safety margin matches AppContainer's main-content height
+ * reservation. Keeping the same buffer here prevents a newly opened dialog from
+ * painting into the terminal's bottom rows before control-height measurement
+ * settles.
+ */
+export const getDialogMaxHeight = (
+  terminalHeight: number,
+  staticExtraHeight: number,
+): number =>
+  Math.max(
+    1,
+    terminalHeight - staticExtraHeight - DIALOG_VERTICAL_SAFETY_MARGIN,
+  );

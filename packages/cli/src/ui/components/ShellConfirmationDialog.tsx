@@ -15,8 +15,8 @@ import { MaxSizedBox } from './shared/MaxSizedBox.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 
-// Outer chrome plus question and option rows that must remain visible.
-const SHELL_CONFIRMATION_FIXED_ROWS = 10;
+// Border, title, subtitle, question, and option rows that must remain visible.
+const SHELL_CONFIRMATION_FIXED_ROWS = 9;
 
 export interface ShellConfirmationRequest {
   commands: string[];
@@ -92,26 +92,31 @@ export const ShellConfirmationDialog: React.FC<
       flexDirection="column"
       borderStyle="round"
       borderColor={theme.status.warning}
-      padding={1}
+      paddingX={1}
+      paddingY={constrainedHeight === undefined ? 1 : 0}
       width="100%"
       marginLeft={1}
       height={constrainedHeight}
       overflow="hidden"
     >
+      <Text bold color={theme.text.primary} wrap="truncate">
+        {t('Shell Command Execution')}
+      </Text>
+      <Text color={theme.text.primary} wrap="truncate">
+        {t('A custom command wants to run the following shell commands:')}
+      </Text>
       {constrainedHeight === undefined ? (
-        <Box flexDirection="column" marginBottom={1} flexShrink={1}>
-          <Text bold color={theme.text.primary}>
-            {t('Shell Command Execution')}
-          </Text>
-          <Text color={theme.text.primary}>
-            {t('A custom command wants to run the following shell commands:')}
-          </Text>
+        <Box
+          flexDirection="column"
+          marginTop={1}
+          marginBottom={1}
+          flexShrink={1}
+        >
           <Box
             flexDirection="column"
             borderStyle="round"
             borderColor={theme.border.default}
             paddingX={1}
-            marginTop={1}
           >
             {commands.map((cmd) => (
               <Text key={cmd} color={theme.text.link}>
@@ -121,7 +126,7 @@ export const ShellConfirmationDialog: React.FC<
           </Box>
         </Box>
       ) : (
-        <Box flexDirection="column" marginBottom={1} flexShrink={1}>
+        <Box flexDirection="column" flexShrink={1}>
           <MaxSizedBox
             maxHeight={commandPreviewHeight}
             maxWidth={Math.max(1, contentWidth - 8)}
@@ -138,7 +143,10 @@ export const ShellConfirmationDialog: React.FC<
         </Box>
       )}
 
-      <Box marginBottom={1} flexShrink={0}>
+      <Box
+        marginBottom={constrainedHeight === undefined ? 1 : 0}
+        flexShrink={0}
+      >
         <Text color={theme.text.primary}>{t('Do you want to proceed?')}</Text>
       </Box>
 

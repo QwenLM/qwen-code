@@ -61,6 +61,9 @@ const MIN_HEIGHT_WITH_FOOTER_HINT = 10;
 const MODE_LIST_CHROME_ROWS = 5;
 const MODE_SPACER_ROWS = 1;
 const FOOTER_HINT_ROWS = 2;
+// Warning margin plus up to two wrapped text rows at the normal dialog width.
+const WORKSPACE_PRIORITY_WARNING_ROWS = 3;
+const MIN_HEIGHT_WITH_WARNING_FOOTER_HINT = 12;
 
 export function ApprovalModeDialog({
   onSelect,
@@ -85,6 +88,18 @@ export function ApprovalModeDialog({
     key: mode,
   }));
 
+  // Generate scope message for approval mode setting
+  const otherScopeModifiedMessage = getScopeMessageForSetting(
+    'tools.approvalMode',
+    selectedScope,
+    settings,
+  );
+
+  // Check if user scope is selected but workspace has the setting
+  const showWorkspacePriorityWarning =
+    selectedScope === SettingScope.User &&
+    otherScopeModifiedMessage.toLowerCase().includes('workspace');
+
   const constrainedHeight =
     availableTerminalHeight === undefined
       ? undefined
@@ -97,11 +112,18 @@ export function ApprovalModeDialog({
     constrainedHeight >= MIN_HEIGHT_WITH_MODE_SPACER;
   const showFooterHint =
     !isVerticallyConstrained ||
-    constrainedHeight >= MIN_HEIGHT_WITH_FOOTER_HINT;
+    constrainedHeight >=
+      (showWorkspacePriorityWarning
+        ? MIN_HEIGHT_WITH_WARNING_FOOTER_HINT
+        : MIN_HEIGHT_WITH_FOOTER_HINT);
+  const warningRows = showWorkspacePriorityWarning
+    ? WORKSPACE_PRIORITY_WARNING_ROWS
+    : 0;
   const modeListChromeHeight =
     MODE_LIST_CHROME_ROWS +
     (showModeSpacer ? MODE_SPACER_ROWS : 0) +
-    (showFooterHint ? FOOTER_HINT_ROWS : 0);
+    (showFooterHint ? FOOTER_HINT_ROWS : 0) +
+    warningRows;
   const maxModeItemsToShow =
     constrainedHeight === undefined
       ? DEFAULT_MAX_MODE_ITEMS_TO_SHOW
@@ -153,18 +175,6 @@ export function ApprovalModeDialog({
     },
     { isActive: true },
   );
-
-  // Generate scope message for approval mode setting
-  const otherScopeModifiedMessage = getScopeMessageForSetting(
-    'tools.approvalMode',
-    selectedScope,
-    settings,
-  );
-
-  // Check if user scope is selected but workspace has the setting
-  const showWorkspacePriorityWarning =
-    selectedScope === SettingScope.User &&
-    otherScopeModifiedMessage.toLowerCase().includes('workspace');
 
   return (
     <Box

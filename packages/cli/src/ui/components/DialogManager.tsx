@@ -54,6 +54,7 @@ import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
+import { getDialogMaxHeight } from '../utils/layoutUtils.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -73,8 +74,11 @@ export const DialogManager = ({
   const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
-  const dialogMaxHeight = Math.max(1, terminalHeight - staticExtraHeight - 2);
+  const dialogMaxHeight = getDialogMaxHeight(terminalHeight, staticExtraHeight);
   const constrainedDialogHeight = constrainHeight ? dialogMaxHeight : undefined;
+  // Long list-style dialogs use this finite budget for their own internal
+  // virtualization even when the outer app layout is not height-constrained.
+  const listDialogHeight = dialogMaxHeight;
 
   if (uiState.showWelcomeBackDialog && uiState.welcomeBackInfo?.hasHistory) {
     return (
@@ -261,7 +265,7 @@ export const DialogManager = ({
             uiActions.closeSettingsDialog();
           }}
           onRestartRequest={() => process.exit(0)}
-          availableTerminalHeight={dialogMaxHeight}
+          availableTerminalHeight={listDialogHeight}
           config={config}
         />
       </Box>
@@ -276,7 +280,7 @@ export const DialogManager = ({
         addItem={addItem}
         onSaved={uiActions.notifyStatusLineSettingsChanged}
         onClose={uiActions.closeStatusLineDialog}
-        availableTerminalHeight={dialogMaxHeight}
+        availableTerminalHeight={listDialogHeight}
       />
     );
   }
@@ -502,7 +506,7 @@ export const DialogManager = ({
   if (bgTasksDialogOpen) {
     return (
       <BackgroundTasksDialog
-        availableTerminalHeight={dialogMaxHeight}
+        availableTerminalHeight={listDialogHeight}
         terminalWidth={mainAreaWidth}
       />
     );

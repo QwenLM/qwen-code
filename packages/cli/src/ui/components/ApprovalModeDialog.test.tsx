@@ -11,12 +11,18 @@ import type { SettingScope } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
 
-function createSettings(): LoadedSettings {
+function createSettings(
+  workspaceSettings: Record<string, unknown> = {},
+): LoadedSettings {
   return new LoadedSettings(
     { path: '', settings: {}, originalSettings: {} },
     { path: '', settings: {}, originalSettings: {} },
     { path: '', settings: {}, originalSettings: {} },
-    { path: '', settings: {}, originalSettings: {} },
+    {
+      path: '',
+      settings: workspaceSettings,
+      originalSettings: workspaceSettings,
+    },
     true,
     new Set(),
   );
@@ -60,5 +66,25 @@ describe('ApprovalModeDialog', () => {
     );
 
     expect(lastFrame() ?? '').toContain('Automatically approve all tools');
+  });
+
+  it('keeps the workspace priority warning visible when constrained', () => {
+    const { lastFrame } = renderWithProviders(
+      <ApprovalModeDialog
+        settings={createSettings({
+          tools: { approvalMode: ApprovalMode.YOLO },
+        })}
+        currentMode={ApprovalMode.DEFAULT}
+        availableTerminalHeight={12}
+        onSelect={vi.fn<
+          (mode: ApprovalMode | undefined, scope: SettingScope) => void
+        >()}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(12);
+    expect(frame).toContain('Workspace approval mode exists');
+    expect(frame).toContain('Use Enter to select');
   });
 });

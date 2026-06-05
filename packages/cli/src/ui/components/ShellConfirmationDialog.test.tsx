@@ -70,6 +70,8 @@ describe('ShellConfirmationDialog', () => {
 
     const frame = lastFrame() ?? '';
     expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
+    expect(frame).toContain('following shell commands');
     expect(frame).toContain('Yes, allow once');
     expect(frame).toContain('Always allow in this project');
     expect(frame).toContain('No (esc)');
