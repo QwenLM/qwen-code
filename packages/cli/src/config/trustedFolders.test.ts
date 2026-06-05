@@ -33,6 +33,7 @@ import {
   resetTrustedFoldersForTesting,
 } from './trustedFolders.js';
 import type { Settings } from './settings.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 vi.mock('os', async (importOriginal) => {
   const actualOs = await importOriginal<typeof osActual>();
@@ -72,6 +73,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     atomicWriteFileSync: vi.fn(),
   };
 });
+vi.mock('../utils/stdioHelpers.js', () => ({
+  writeStderrLine: vi.fn(),
+}));
 
 describe('Trusted Folders Loading', () => {
   let mockFsExistsSync: Mocked<typeof fs.existsSync>;
@@ -215,7 +219,7 @@ describe('Trusted Folders Loading', () => {
       getTrustedFoldersPath(),
       JSON.stringify({ '/new/path': TrustLevel.TRUST_FOLDER }, null, 2),
       // noFollow:true mirrors the credential write sites' security
-      // posture — a pre-placed symlink at the config path could leak
+      // posture 鈥?a pre-placed symlink at the config path could leak
       // the trusted-folder list or leave the user's real config stale.
       {
         encoding: 'utf-8',
@@ -309,6 +313,11 @@ describe('Trusted Folders Loading', () => {
     expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toBe(
       `{\n  "/new/path": "TRUST_FOLDER"\n}`,
     );
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Falling back to clean rewrite for trusted folders',
+      ),
+    );
   });
 
   it('saveTrustedFolders should fall back to a clean rewrite when preserved output validation fails', () => {
@@ -345,6 +354,34 @@ describe('Trusted Folders Loading', () => {
     expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
     expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toBe(
       `{\n  "/new/path": "TRUST_FOLDER"\n}`,
+    );
+  });
+
+  it('saveTrustedFolders should fall back to a clean rewrite when the existing file is a top-level array', () => {
+    const userPath = getTrustedFoldersPath();
+    const dirPath = path.dirname(userPath);
+
+    (mockFsExistsSync as Mock).mockImplementation(
+      (p) => p === userPath || p === dirPath,
+    );
+    (fs.readFileSync as Mock).mockImplementation((p) => {
+      if (p === userPath) return '[]';
+      return '{}';
+    });
+
+    saveTrustedFolders({
+      path: userPath,
+      config: {
+        '/new/path': TrustLevel.TRUST_FOLDER,
+      },
+    });
+
+    expect(atomicWriteFileSync).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(atomicWriteFileSync).mock.calls[0]?.[1]).toBe(
+      `{\n  "/new/path": "TRUST_FOLDER"\n}`,
+    );
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('trusted folders file is not a JSON object'),
     );
   });
 });
