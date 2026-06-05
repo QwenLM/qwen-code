@@ -455,7 +455,13 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         // makes the system MORE fragile to MCP failures, not less.
         try {
           const content = await this.commandExecutor(this.params.skill);
-          if (content !== null) {
+          if (content && typeof content === 'object' && 'error' in content) {
+            return {
+              llmContent: content.error,
+              returnDisplay: content.error,
+            };
+          }
+          if (typeof content === 'string') {
             // Delegated to a same-named non-skill command (file command
             // or MCP prompt). Don't emit `SkillLaunchEvent` and don't
             // track via `onSkillLoaded` — no skill body was loaded, and

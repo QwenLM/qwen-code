@@ -1176,6 +1176,29 @@ describe('SkillTool', () => {
       expect(llmText).toMatch(/is disabled/);
     });
 
+    it('returns command executor errors for disabled skill command alternatives', async () => {
+      vi.mocked(config.getDisabledSkillNames).mockReturnValue(
+        new Set(['mytool']),
+      );
+      const executor = vi
+        .fn()
+        .mockResolvedValue({ error: 'MCP prompt failed' });
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mytool' });
+      const result = await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mytool');
+      expect(mockSkillManager.loadSkillForRuntime).not.toHaveBeenCalled();
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe('MCP prompt failed');
+      expect(result.returnDisplay).toBe('MCP prompt failed');
+    });
+
     it('falls through to disabled-error when commandExecutor throws', async () => {
       vi.mocked(config.getDisabledSkillNames).mockReturnValue(
         new Set(['mytool']),
