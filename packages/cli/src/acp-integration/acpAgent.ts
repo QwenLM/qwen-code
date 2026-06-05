@@ -658,10 +658,13 @@ function assertAllowedSkillSourceUrl(sourceUrl: string): void {
       'Skill sourceUrl must be a valid URL',
     );
   }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+  // Require HTTPS: a plaintext http: fetch of skill content (which can include
+  // executable hooks) is MITM-able by a network-position attacker, so the host
+  // allowlist alone is not sufficient. All supported GitHub hosts serve HTTPS.
+  if (parsed.protocol !== 'https:') {
     throw RequestError.invalidParams(
       undefined,
-      'Skill sourceUrl must be an HTTP(S) URL',
+      'Skill sourceUrl must be an HTTPS URL',
     );
   }
   if (!ALLOWED_SKILL_SOURCE_HOSTS.has(parsed.hostname)) {
@@ -861,12 +864,31 @@ async function downloadGitHubSkillDirectoryFromArchive(
     headers: {
       'User-Agent': 'qwen-code',
     },
+    // Match fetchBytes: don't follow a redirect from an allowed host into an
+    // internal endpoint (SSRF defense).
+    redirect: 'manual',
   });
   if (!response.ok) {
     throw RequestError.invalidParams(
       undefined,
       `Failed to download GitHub skill archive (${response.status})`,
     );
+  }
+
+  // Reject oversized archives by declared Content-Length before buffering the
+  // whole body into memory, mirroring the guard in fetchBytes.
+  const contentLength = response.headers?.get('content-length');
+  if (contentLength) {
+    const declaredSize = Number.parseInt(contentLength, 10);
+    if (
+      Number.isFinite(declaredSize) &&
+      declaredSize > MAX_SKILL_DOWNLOAD_BYTES
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill archive exceeds the maximum allowed size',
+      );
+    }
   }
 
   return extractFilesFromTarGz(
@@ -886,6 +908,8 @@ async function fetchGitHubDirectoryItems(
       Accept: 'application/vnd.github+json',
       'User-Agent': 'qwen-code',
     },
+    // SSRF defense: don't follow redirects into internal endpoints.
+    redirect: 'manual',
   });
   if (!response.ok) {
     throw RequestError.invalidParams(
@@ -953,7 +977,13 @@ async function downloadGitHubSkillDirectory(
   const apiFiles = await downloadGitHubSkillDirectoryFromApi(
     githubUrl,
     directoryPath,
-  ).catch(() => null);
+  ).catch((error) => {
+    debugLogger.warn(
+      'GitHub API directory listing failed, falling back to archive download:',
+      error,
+    );
+    return null;
+  });
   if (apiFiles) return apiFiles;
 
   return downloadGitHubSkillDirectoryFromArchive(githubUrl, directoryPath);
@@ -2438,6 +2468,27 @@ class QwenAgent implements Agent {
       readHooks({ hooks: extension.hooks ?? {} }, 'extension', extension.name),
     );
 
+    // Build the merged MCP/hook lists from the user and workspace settings
+    // separately so each entry keeps its real scope label. Reading
+    // mergedSettings with a single 'workspace' label mislabeled user-scope
+    // servers/hooks. MCP servers are keyed by name, so dedupe with workspace
+    // overriding user (matching the merged/effective semantics); hooks stack
+    // across scopes, so they are concatenated.
+    const mergedMcpByName = new Map<
+      string,
+      ReturnType<typeof readMcpServers>[number]
+    >();
+    for (const entry of readMcpServers(userSettings, 'user')) {
+      mergedMcpByName.set(entry.name, entry);
+    }
+    for (const entry of readMcpServers(workspaceSettings, 'workspace')) {
+      mergedMcpByName.set(entry.name, entry);
+    }
+    const mergedHooks = [
+      ...readHooks(userSettings, 'user'),
+      ...readHooks(workspaceSettings, 'workspace'),
+    ];
+
     return {
       user: {
         path: settings.user.path,
@@ -2453,11 +2504,8 @@ class QwenAgent implements Agent {
       },
       merged: {
         values: readCoreSettingValues(mergedSettings),
-        mcpServers: [
-          ...readMcpServers(mergedSettings, 'workspace'),
-          ...extensionMcpServers,
-        ],
-        hooks: [...readHooks(mergedSettings, 'workspace'), ...extensionHooks],
+        mcpServers: [...mergedMcpByName.values(), ...extensionMcpServers],
+        hooks: [...mergedHooks, ...extensionHooks],
       },
       extensions: extensionEntries,
       isTrusted: settings.isTrusted,
@@ -3302,6 +3350,9 @@ class QwenAgent implements Agent {
       );
     }
 
+    // Remove any previous install first so files dropped in a newer version
+    // (e.g. a deleted helper) don't linger as orphans after reinstall.
+    await fs.rm(skillDir, { recursive: true, force: true });
     for (const file of download.files) {
       const targetPath = resolveSkillInstallPath(skillDir, file.relativePath);
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
@@ -3339,6 +3390,27 @@ class QwenAgent implements Agent {
       throw RequestError.invalidParams(
         undefined,
         `Skill name "${parsed.name}" does not match requested slug "${request.slug}"`,
+      );
+    }
+
+    // Guard the recursive delete: readManagedSkillFile's generic fallback can
+    // resolve skillDir from listSkills() to an arbitrary path. Only ever remove
+    // the directory that directly contains the SKILL.md we just validated, and
+    // never a filesystem root or the global Qwen dir itself, so a malformed
+    // skill entry can't trigger a destructive rm of a shared/parent directory.
+    const resolvedSkillDir = path.resolve(skillDir);
+    const resolvedSkillFile = path.resolve(skillFile);
+    const globalDir = path.resolve(Storage.getGlobalQwenDir());
+    const isDedicatedSkillDir =
+      resolvedSkillFile === path.join(resolvedSkillDir, 'SKILL.md');
+    if (
+      !isDedicatedSkillDir ||
+      resolvedSkillDir === path.parse(resolvedSkillDir).root ||
+      resolvedSkillDir === globalDir
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Refusing to delete unexpected skill directory: ${skillDir}`,
       );
     }
 
@@ -3903,11 +3975,13 @@ class QwenAgent implements Agent {
             updates.push(update);
           },
         };
+        let replayError: string | undefined;
         try {
           await new HistoryReplayer(replayContext).replay(
             sessionData.conversation.messages,
           );
         } catch (error) {
+          replayError = error instanceof Error ? error.message : String(error);
           debugLogger.warn(
             '[loadUpdates] History replay failed for session %s (partial updates: %d):',
             sessionId,
@@ -3931,6 +4005,11 @@ class QwenAgent implements Agent {
           updates: updatesWithTopLevelTimestamps,
           startTime: sessionData.conversation.startTime,
           lastUpdated: sessionData.conversation.lastUpdated,
+          // Signal to the client that replay aborted partway so it doesn't
+          // render a truncated replay as the full conversation.
+          ...(replayError !== undefined
+            ? { partial: true, replayError }
+            : {}),
         };
       }
       case 'restoreSessionHistory': {
@@ -4109,6 +4188,12 @@ class QwenAgent implements Agent {
         const eventHooks = Array.isArray(hooksRoot[event])
           ? [...(hooksRoot[event] as unknown[])]
           : [];
+        if (index >= eventHooks.length) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Hook index ${index} out of range (event has ${eventHooks.length} hooks)`,
+          );
+        }
         eventHooks.splice(index, 1);
         hooksRoot[event] = eventHooks;
         settings.setValue(settingScope, 'hooks', hooksRoot);
@@ -4184,17 +4269,20 @@ class QwenAgent implements Agent {
           );
         }
 
-        const beforeSettings = this.loadPermissionSettings(cwd);
-        const before = readPermissionRuleSet(beforeSettings.merged);
+        const settings = this.loadPermissionSettings(cwd);
+        const before = readPermissionRuleSet(settings.merged);
         const rules = normalizePermissionRules(params['rules']);
         const settingScope =
           scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
 
-        beforeSettings.setValue(settingScope, `permissions.${ruleType}`, rules);
-        const afterSettings = this.loadPermissionSettings(cwd);
-        const after = readPermissionRuleSet(afterSettings.merged);
+        settings.setValue(settingScope, `permissions.${ruleType}`, rules);
+        // `setValue` already recomputed the in-memory merged view, so read the
+        // "after" state from the same instance instead of reloading from disk
+        // (avoids redundant I/O and a concurrency window where another handler
+        // could mutate settings between the two loads).
+        const after = readPermissionRuleSet(settings.merged);
         this.syncLivePermissionManagers(before, after);
-        return this.buildPermissionSettings(afterSettings) as unknown as Record<
+        return this.buildPermissionSettings(settings) as unknown as Record<
           string,
           unknown
         >;

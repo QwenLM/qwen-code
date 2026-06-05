@@ -309,7 +309,12 @@ export async function buildAvailableCommandsSnapshot(
     skillDetailsByName.size > 0
       ? Array.from(skillDetailsByName.values())
       : undefined;
-  availableSkills ??= availableSkillDetails?.map((skill) => skill.name);
+  // Always derive the name list from the details map so the two stay in sync.
+  // skillManager only contributes its own skills to `availableSkills`, but the
+  // slashCommands loop above also adds bundled skills to `skillDetailsByName`;
+  // a `??=` would leave bundled skills in details but missing from the name
+  // list whenever skillManager succeeded.
+  availableSkills = availableSkillDetails?.map((skill) => skill.name);
 
   return {
     availableCommands,
