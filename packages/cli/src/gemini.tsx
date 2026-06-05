@@ -839,9 +839,7 @@ export async function main() {
       const authType = modelsConfig.getCurrentAuthType();
       const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
       const proxy = config.getProxy();
-      if (!config.getListExtensions()) {
-        preconnectApi(authType, { resolvedBaseUrl, proxy });
-      }
+      preconnectApi(authType, { resolvedBaseUrl, proxy });
     } catch (error) {
       // If we can't get authType, skip preconnect - it's optional optimization
       debugLogger.debug(
@@ -961,45 +959,6 @@ export async function main() {
 
     // Render UI, passing necessary config values. Check that there is no command line question.
     profileCheckpoint('before_render');
-
-    if (config.getListExtensions()) {
-      // Always initialize config to populate extensionCache via refreshCache().
-      // Without this, getExtensions() returns [] because extensionCache is null.
-      try {
-        await config.initialize();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`Error: failed to load extensions: ${msg}\n`);
-        await runExitCleanup();
-        process.exit(1);
-      }
-      const extensions = config.getExtensions();
-      if (extensions.length === 0) {
-        // eslint-disable-next-line no-console -- CLI flag output
-        console.log('No extensions installed.');
-      } else {
-        // eslint-disable-next-line no-console -- CLI flag output
-        console.log('Installed extensions:');
-        for (const extension of extensions) {
-          const safeVersion = extension.version.replace(
-            // eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
-            /[\x00-\x1f\x7f-\x9f]/g,
-            '',
-          );
-          const safeName = extension.name.replace(
-            // eslint-disable-next-line no-control-regex -- intentional: strip control chars for safety
-            /[\x00-\x1f\x7f-\x9f]/g,
-            '',
-          );
-          // eslint-disable-next-line no-console -- CLI flag output
-          console.log(
-            `- ${safeName} (v${safeVersion})${extension.isActive ? '' : ' [disabled]'}`,
-          );
-        }
-      }
-      await runExitCleanup();
-      process.exit(0);
-    }
 
     if (config.isInteractive()) {
       // --json-schema is a headless-only contract: the synthetic
