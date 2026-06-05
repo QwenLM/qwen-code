@@ -1050,6 +1050,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       isTrusted: true,
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
+      forScope: vi.fn((scope: string) =>
+        scope === 'Workspace'
+          ? { settings: workspaceSettings }
+          : { settings: userSettings },
+      ),
       setValue,
     } as unknown as LoadedSettings;
   }
@@ -1812,6 +1817,194 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'Japanese',
     );
     expect(updateOutputLanguageFile).toHaveBeenCalledWith('Japanese');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  // Shared boot helper for the qwen/settings/* handler tests below.
+  async function bootCoreSettingsAgent(settings: LoadedSettings) {
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    return { agent, agentPromise };
+  }
+
+  it('qwen/settings/getCore returns user, workspace, and merged views', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/getCore', {}),
+    ).resolves.toMatchObject({
+      user: expect.objectContaining({ values: expect.anything() }),
+      workspace: expect.objectContaining({ values: expect.anything() }),
+      merged: expect.objectContaining({ values: expect.anything() }),
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setMcpServer rejects a missing name and persists a valid one', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/setMcpServer', {
+        scope: 'user',
+        name: '   ',
+        server: { transport: 'stdio', command: 'node' },
+      }),
+    ).rejects.toThrowError(/MCP server name is required/);
+
+    await agent.extMethod('qwen/settings/setMcpServer', {
+      scope: 'user',
+      name: 'local',
+      server: { transport: 'stdio', command: 'node', args: ['server.js'] },
+    });
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'mcpServers',
+      expect.objectContaining({
+        local: expect.objectContaining({ command: 'node' }),
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setMcpServer rejects an invalid transport', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/setMcpServer', {
+        scope: 'user',
+        name: 'bad',
+        server: { transport: 'carrier-pigeon' },
+      }),
+    ).rejects.toThrowError(/MCP transport must be stdio, http, or sse/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/removeMcpServer drops the named server and rejects a missing name', async () => {
+    const settings = makeCoreSettings();
+    (settings.user.settings as Record<string, unknown>)['mcpServers'] = {
+      local: { transport: 'stdio', command: 'node' },
+      other: { transport: 'stdio', command: 'python' },
+    };
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/removeMcpServer', { scope: 'user' }),
+    ).rejects.toThrowError(/MCP server name is required/);
+
+    await agent.extMethod('qwen/settings/removeMcpServer', {
+      scope: 'user',
+      name: 'local',
+    });
+    expect(settings.setValue).toHaveBeenCalledWith('User', 'mcpServers', {
+      other: { transport: 'stdio', command: 'python' },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setHook rejects an invalid event and appends a valid hook', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/setHook', {
+        scope: 'user',
+        event: 'NotARealEvent',
+        hook: { hooks: [{ type: 'command', command: 'echo hi' }] },
+      }),
+    ).rejects.toThrowError(/Invalid hook event/);
+
+    await agent.extMethod('qwen/settings/setHook', {
+      scope: 'user',
+      event: 'PreToolUse',
+      hook: { hooks: [{ type: 'command', command: 'echo hi' }] },
+    });
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'hooks',
+      expect.objectContaining({
+        PreToolUse: expect.arrayContaining([
+          expect.objectContaining({
+            hooks: expect.arrayContaining([
+              expect.objectContaining({ type: 'command', command: 'echo hi' }),
+            ]),
+          }),
+        ]),
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/removeHook rejects a negative index and an out-of-range index', async () => {
+    const settings = makeCoreSettings();
+    (settings.user.settings as Record<string, unknown>)['hooks'] = {
+      PreToolUse: [{ hooks: [{ type: 'command', command: 'echo hi' }] }],
+    };
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/removeHook', {
+        scope: 'user',
+        event: 'PreToolUse',
+        index: -1,
+      }),
+    ).rejects.toThrowError(/Invalid hook index/);
+
+    await expect(
+      agent.extMethod('qwen/settings/removeHook', {
+        scope: 'user',
+        event: 'PreToolUse',
+        index: 5,
+      }),
+    ).rejects.toThrowError(/out of range/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setExtensionSetting validates required params before touching extensions', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/setExtensionSetting', {
+        settingKey: 'k',
+        value: 'v',
+      }),
+    ).rejects.toThrowError(/extensionId is required/);
+    await expect(
+      agent.extMethod('qwen/settings/setExtensionSetting', {
+        extensionId: 'ext',
+        value: 'v',
+      }),
+    ).rejects.toThrowError(/settingKey is required/);
+    await expect(
+      agent.extMethod('qwen/settings/setExtensionSetting', {
+        extensionId: 'ext',
+        settingKey: 'k',
+        value: 42,
+      }),
+    ).rejects.toThrowError(/value must be a string/);
 
     mockConnectionState.resolve();
     await agentPromise;
