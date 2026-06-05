@@ -25,7 +25,7 @@ describe('dreamCommand', () => {
     });
   });
 
-  it('submits a consolidation prompt with the project-scoped transcript directory', async () => {
+  it('submits a consolidation prompt in interactive mode without eager metadata write', async () => {
     const projectRoot = path.join('tmp', 'dream-project');
     const buildConsolidationPrompt = vi.fn().mockReturnValue('dream prompt');
     const writeDreamManualRun = vi.fn();
@@ -57,10 +57,29 @@ describe('dreamCommand', () => {
       expect.any(String),
       expectedTranscriptDir,
     );
-    expect(expectedTranscriptDir).not.toContain(
-      `${path.sep}.qwen${path.sep}tmp${path.sep}`,
-    );
-    // writeDreamManualRun is called eagerly (before returning) for ACP dedup
+    // In interactive mode, writeDreamManualRun is deferred to onComplete
+    expect(writeDreamManualRun).not.toHaveBeenCalled();
+  });
+
+  it('calls writeDreamManualRun eagerly in ACP mode', async () => {
+    const projectRoot = path.join('tmp', 'dream-project');
+    const buildConsolidationPrompt = vi.fn().mockReturnValue('dream prompt');
+    const writeDreamManualRun = vi.fn();
+    const context = createMockCommandContext({
+      executionMode: 'acp',
+      services: {
+        config: {
+          getProjectRoot: vi.fn().mockReturnValue(projectRoot),
+          getMemoryManager: vi.fn().mockReturnValue({
+            buildConsolidationPrompt,
+            writeDreamManualRun,
+          }),
+          getSessionId: vi.fn().mockReturnValue('session-1'),
+        },
+      },
+    });
+
+    await dreamCommand.action?.(context, '');
     expect(writeDreamManualRun).toHaveBeenCalledWith(projectRoot, 'session-1');
   });
 });

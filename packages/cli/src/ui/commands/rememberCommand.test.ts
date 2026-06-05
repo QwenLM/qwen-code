@@ -19,6 +19,16 @@ describe('rememberCommand', () => {
     });
   });
 
+  it('returns error when config is not loaded', () => {
+    const context = createMockCommandContext({ services: { config: null } });
+    const result = rememberCommand.action?.(context, 'something');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Config'),
+    });
+  });
+
   it('returns submit_prompt for managed auto-memory', () => {
     const context = createMockCommandContext({
       services: {
