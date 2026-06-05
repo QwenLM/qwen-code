@@ -166,7 +166,8 @@ const toolContext = new AsyncLocalStorage<SpanContext | undefined>();
 const subagentContext = new AsyncLocalStorage<SpanContext | undefined>();
 
 export function isInNativeSubagentSpan(): boolean {
-  return subagentContext.getStore() !== undefined;
+  const ctx = subagentContext.getStore();
+  return ctx !== undefined && !ctx.ended;
 }
 
 const activeSpans = new Map<string, WeakRef<SpanContext>>();
@@ -1222,8 +1223,7 @@ export function startSubagentSpan(opts: StartSubagentSpanOptions): Span {
  *    tools re-set `toolContext` via `runInToolSpanContext`, so
  *    inner-tool parenting remains correct. This is required so hooks
  *    fired inside a subagent body (e.g. SubagentStart) don't
- *    incorrectly parent under the outer AGENT tool span (#4410
- *).
+ *    incorrectly parent under the outer AGENT tool span (#4410).
  *
  * Mirrors opencode's `withRunSpan` pattern.
  */
@@ -1304,6 +1304,7 @@ export function endSubagentSpan(
   try {
     const duration = Date.now() - spanCtx.startTime;
     const endAttributes: Attributes = {
+      duration_ms: duration,
       'qwen-code.subagent.duration_ms': duration,
       'qwen-code.subagent.status': metadata.status,
     };
