@@ -102,6 +102,12 @@ ${OSSUTIL} config \
 ${OSSUTIL} cp -f "${ARTIFACT_DIR}/${TARBALL}"  "oss://${OSS_BUCKET}/${OSS_PREFIX}/${TARBALL}"
 ${OSSUTIL} cp -f "${ARTIFACT_DIR}/SHA256SUMS"  "oss://${OSS_BUCKET}/${OSS_PREFIX}/SHA256SUMS"
 
+# 兼容旧格式：下游依赖 qwen-code-{version}-linux-{arch}.tar.gz
+if [ -f "${ARTIFACT_DIR}/${TARBALL_OLD}" ] && [ "${TARBALL}" != "${TARBALL_OLD}" ]; then
+  ${OSSUTIL} cp -f "${ARTIFACT_DIR}/${TARBALL_OLD}" "oss://${OSS_BUCKET}/${OSS_PREFIX}/${TARBALL_OLD}"
+  echo ">>> Compat tarball uploaded: ${TARBALL_OLD}"
+fi
+
 if [ -z "${SKIP_METADATA}" ] && [ -f "${ARTIFACT_DIR}/metadata.json" ]; then
   ${OSSUTIL} cp -f "${ARTIFACT_DIR}/metadata.json" "oss://${OSS_BUCKET}/${OSS_PREFIX}/metadata.json"
 else
