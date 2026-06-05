@@ -472,7 +472,7 @@ describe('createDaemonWorkspaceService', () => {
       );
     });
 
-    it('translates SessionNotFoundError to McpServerRestartFailedError preserving serverName', async () => {
+    it('lets SessionNotFoundError pass through for 404 mapping', async () => {
       const err = new SessionNotFoundError('some-session-id');
       const invokeWorkspaceCommand = vi.fn().mockRejectedValue(err);
       const svc = createDaemonWorkspaceService(
@@ -481,7 +481,7 @@ describe('createDaemonWorkspaceService', () => {
 
       await expect(
         svc.restartMcpServer(makeCtx(), 'my-mcp-server'),
-      ).rejects.toThrow(/my-mcp-server/);
+      ).rejects.toThrow(SessionNotFoundError);
     });
 
     it('fans out per-entry events in pool-mode', async () => {

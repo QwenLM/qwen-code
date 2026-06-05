@@ -35,7 +35,6 @@ import {
   WorkspaceInitRaceError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
-  SessionNotFoundError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge/status';
@@ -450,9 +449,6 @@ export function createDaemonWorkspaceService(
           { timeoutMs: 300_000 },
         );
       } catch (err) {
-        if (err instanceof SessionNotFoundError) {
-          throw new McpServerRestartFailedError(serverName, 'no_live_channel');
-        }
         const data = (err as { data?: unknown })?.data;
         if (data && typeof data === 'object') {
           const kind = (data as { errorKind?: unknown }).errorKind;
