@@ -1622,7 +1622,7 @@ export class GeminiClient {
         // Inject fresh date on UserQuery turns only; Cron and ToolResult turns
         // reuse the same session and the startup-context date is still current.
         if (messageType === SendMessageType.UserQuery) {
-          const today = new Date().toLocaleDateString(undefined, {
+          const today = new Date().toLocaleDateString('en-US', {
             weekday: 'long',
             year: 'numeric',
             month: 'long',

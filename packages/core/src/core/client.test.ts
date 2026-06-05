@@ -3317,7 +3317,7 @@ hello
         expect.any(AbortSignal),
       );
 
-      vi.setSystemTime(undefined);
+      vi.useRealTimers();
     });
 
     it('should not inject duplicate date on the same day', async () => {
@@ -3377,7 +3377,7 @@ hello
       const secondCall = mockTurnRunFn.mock.calls[1];
       expect(secondCall[1][0]).toBe('Second question');
 
-      vi.setSystemTime(undefined);
+      vi.useRealTimers();
     });
 
     describe('autoSkill: scheduleSkillReview via runManagedAutoMemoryBackgroundTasks', () => {
