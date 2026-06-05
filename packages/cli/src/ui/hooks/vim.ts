@@ -601,7 +601,6 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
             buffer.vimMoveToLineStart();
             buffer.vimMoveRight(joinCol);
           }
-          dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
           break;
         }
         case CMD_TYPES.INDENT_LINE: {
@@ -1662,11 +1661,25 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
           // ── Join / Indent ──
           case 'J': {
-            return executeCommand(CMD_TYPES.JOIN_LINES, repeatCount);
+            executeCommand(CMD_TYPES.JOIN_LINES, repeatCount);
+            dispatch({
+              type: 'SET_LAST_COMMAND',
+              command: { type: CMD_TYPES.JOIN_LINES, count: repeatCount },
+            });
+            dispatch({ type: 'CLEAR_COUNT' });
+            dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+            return true;
           }
           case '>': {
             if (s.pendingOperator === '>') {
-              return executeCommand(CMD_TYPES.INDENT_LINE, repeatCount);
+              executeCommand(CMD_TYPES.INDENT_LINE, repeatCount);
+              dispatch({
+                type: 'SET_LAST_COMMAND',
+                command: { type: CMD_TYPES.INDENT_LINE, count: repeatCount },
+              });
+              dispatch({ type: 'CLEAR_COUNT' });
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+              return true;
             } else {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: '>' });
               // Don't clear count — preserve for the second >
@@ -1675,7 +1688,14 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
           }
           case '<': {
             if (s.pendingOperator === '<') {
-              return executeCommand(CMD_TYPES.OUTDENT_LINE, repeatCount);
+              executeCommand(CMD_TYPES.OUTDENT_LINE, repeatCount);
+              dispatch({
+                type: 'SET_LAST_COMMAND',
+                command: { type: CMD_TYPES.OUTDENT_LINE, count: repeatCount },
+              });
+              dispatch({ type: 'CLEAR_COUNT' });
+              dispatch({ type: 'SET_PENDING_OPERATOR', operator: null });
+              return true;
             } else {
               dispatch({ type: 'SET_PENDING_OPERATOR', operator: '<' });
               // Don't clear count — preserve for the second <
