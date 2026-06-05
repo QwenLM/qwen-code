@@ -377,6 +377,14 @@ describe('BackgroundTasksDialog', () => {
       agentId: 'fork-evil',
       subagentType: 'fork',
       description: `r${ESC}[2Jx`,
+      prompt: `prompt ${ESC}[31mred`,
+      recentActivities: [
+        {
+          at: 1,
+          name: 'Shell',
+          description: `activity ${ESC}[?25lhide`,
+        },
+      ],
     });
     const h = setup([malicious]);
     h.call(() => h.probe.current!.actions.openDialog());
@@ -386,6 +394,14 @@ describe('BackgroundTasksDialog', () => {
     expect(frame).not.toContain(`${ESC}[2J`);
     // ...it survives only as inert, escaped text.
     expect(frame).toContain('[2J');
+
+    h.call(() => h.probe.current!.actions.enterDetail());
+    const detailFrame = h.lastFrame() ?? '';
+    expect(detailFrame).not.toContain(`${ESC}[2J`);
+    expect(detailFrame).not.toContain(`${ESC}[31m`);
+    expect(detailFrame).not.toContain(`${ESC}[?25l`);
+    expect(detailFrame).toContain('[31m');
+    expect(detailFrame).toContain('[?25l');
   });
 
   it('detail-mode left clears any armed foreground cancel before exiting', () => {

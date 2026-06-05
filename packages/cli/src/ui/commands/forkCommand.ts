@@ -87,7 +87,8 @@ export const forkCommand: SlashCommand = {
     // Guard: a fork inherits the conversation history; there must be one.
     let hasHistory = false;
     try {
-      hasHistory = (config.getGeminiClient().getHistory(true) ?? []).length > 0;
+      hasHistory =
+        (config.getGeminiClient().getHistoryShallow() ?? []).length > 0;
     } catch (error) {
       debugLogger.debug('Failed to read history before /fork:', error);
       hasHistory = false;
@@ -97,6 +98,16 @@ export const forkCommand: SlashCommand = {
         type: 'message',
         messageType: 'error',
         content: t('Cannot fork before the first conversation turn.'),
+      };
+    }
+
+    if (!config.isForkSubagentEnabled?.()) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(
+          'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
+        ),
       };
     }
 

@@ -39,8 +39,9 @@ describe('forkCommand', () => {
   ];
 
   const createConfig = (overrides: Record<string, unknown> = {}) => ({
-    getGeminiClient: () => ({ getHistory: () => historyWithTurn }),
+    getGeminiClient: () => ({ getHistoryShallow: () => historyWithTurn }),
     getModel: () => 'test-model',
+    isForkSubagentEnabled: () => true,
     getToolRegistry: () => ({ getTool: mockGetTool }),
     ...overrides,
   });
@@ -95,11 +96,27 @@ describe('forkCommand', () => {
     expect(mockBuild).not.toHaveBeenCalled();
   });
 
+  it('returns error when no model is configured', async () => {
+    const noModel = createMockCommandContext({
+      services: {
+        config: createConfig({
+          getModel: () => '',
+        }),
+      },
+    });
+    const result = await forkCommand.action!(noModel, 'do something');
+    expect(result).toMatchObject({
+      messageType: 'error',
+      content: 'No model configured.',
+    });
+    expect(mockBuild).not.toHaveBeenCalled();
+  });
+
   it('refuses to fork before the first conversation turn', async () => {
     const fresh = createMockCommandContext({
       services: {
         config: createConfig({
-          getGeminiClient: () => ({ getHistory: () => [] }),
+          getGeminiClient: () => ({ getHistoryShallow: () => [] }),
         }),
       },
     });
@@ -107,6 +124,43 @@ describe('forkCommand', () => {
     expect(result).toMatchObject({
       messageType: 'error',
       content: 'Cannot fork before the first conversation turn.',
+    });
+    expect(mockBuild).not.toHaveBeenCalled();
+  });
+
+  it('refuses to fork when reading history fails', async () => {
+    const unreadableHistory = createMockCommandContext({
+      services: {
+        config: createConfig({
+          getGeminiClient: () => ({
+            getHistoryShallow: () => {
+              throw new Error('history unavailable');
+            },
+          }),
+        }),
+      },
+    });
+    const result = await forkCommand.action!(unreadableHistory, 'do something');
+    expect(result).toMatchObject({
+      messageType: 'error',
+      content: 'Cannot fork before the first conversation turn.',
+    });
+    expect(mockBuild).not.toHaveBeenCalled();
+  });
+
+  it('refuses to fork when the fork feature gate is disabled', async () => {
+    const disabled = createMockCommandContext({
+      services: {
+        config: createConfig({
+          isForkSubagentEnabled: () => false,
+        }),
+      },
+    });
+    const result = await forkCommand.action!(disabled, 'do something');
+    expect(result).toMatchObject({
+      messageType: 'error',
+      content:
+        'The /fork command requires the fork feature gate. Set QWEN_CODE_ENABLE_FORK_SUBAGENT=1 to enable it.',
     });
     expect(mockBuild).not.toHaveBeenCalled();
   });
