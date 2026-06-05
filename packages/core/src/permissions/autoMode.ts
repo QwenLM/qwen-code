@@ -342,12 +342,44 @@ function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {
         /^[({]+|[),;]+$/g,
         '',
       );
-      if (!target || target.startsWith('-')) continue;
-      if (/\$[{(A-Za-z_]/.test(target)) return true;
-      if (containsProtectedPathFragment(target, cwd)) return true;
+      for (const candidate of rawProtectedWriteTargets(target, line)) {
+        if (/\$[{(A-Za-z_]/.test(candidate)) return true;
+        if (containsProtectedPathFragment(candidate, cwd)) return true;
+      }
     }
   }
   return false;
+}
+
+function rawProtectedWriteTargets(token: string, line: string): string[] {
+  if (!token) return [];
+  const flagValue = rawFlagValue(token, line);
+  if (flagValue) return [flagValue];
+  return token.startsWith('-') ? [] : [token];
+}
+
+function rawFlagValue(token: string, line: string): string | undefined {
+  const equalsIndex = token.indexOf('=');
+  if (
+    token.startsWith('--directory=') &&
+    /\btar\b/.test(line) &&
+    equalsIndex > 2
+  ) {
+    return token.slice(equalsIndex + 1);
+  }
+  for (const { flag, command } of [
+    { flag: '-C', command: /\btar\b/ },
+    { flag: '-d', command: /\bunzip\b/ },
+    { flag: '-D', command: /\bcpio\b/ },
+    { flag: '-o', command: /\b(?:curl|sort)\b/ },
+    { flag: '-O', command: /\bwget\b/ },
+    { flag: '-t', command: /\b(?:cp|mv|install|ln)\b/ },
+  ]) {
+    if (command.test(line) && token.startsWith(flag) && token.length > 2) {
+      return token.slice(flag.length).replace(/^=/, '');
+    }
+  }
+  return undefined;
 }
 
 function containsProtectedPathFragment(token: string, cwd: string): boolean {

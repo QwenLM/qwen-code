@@ -464,6 +464,17 @@ describe('extractShellOperations', () => {
     ]);
   });
 
+  it('curl: attached -o= flag value emits write op', () => {
+    const ops = extractShellOperations(
+      'curl -o=/tmp/out.json https://api.example.com',
+      CWD,
+    );
+    expect(sorted(ops)).toEqual([
+      { virtualTool: 'web_fetch', domain: 'api.example.com' },
+      { virtualTool: 'write_file', filePath: '/tmp/out.json' },
+    ]);
+  });
+
   it('wget: extracts domain', () => {
     const ops = extractShellOperations(
       'wget https://example.com/file.tar.gz',
@@ -486,6 +497,17 @@ describe('extractShellOperations', () => {
   it('wget: attached -O flag value emits write op', () => {
     const ops = extractShellOperations(
       'wget -O/tmp/file.gz https://example.com/f.gz',
+      CWD,
+    );
+    expect(sorted(ops)).toEqual([
+      { virtualTool: 'web_fetch', domain: 'example.com' },
+      { virtualTool: 'write_file', filePath: '/tmp/file.gz' },
+    ]);
+  });
+
+  it('wget: attached -O= flag value emits write op', () => {
+    const ops = extractShellOperations(
+      'wget -O=/tmp/file.gz https://example.com/f.gz',
       CWD,
     );
     expect(sorted(ops)).toEqual([

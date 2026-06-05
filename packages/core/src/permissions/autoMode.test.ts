@@ -870,8 +870,12 @@ describe('shouldForceAutoModeReviewForAllow', () => {
   it('returns true for archive extraction commands targeting protected dirs', () => {
     for (const command of [
       'tar xf payload.tar -C .qwen/skills',
+      'tar xf payload.tar -C.qwen/skills',
+      'tar xf payload.tar --directory=.qwen/skills',
       'unzip payload.zip -d .qwen/skills',
+      'unzip payload.zip -d.qwen/skills',
       'cpio -i -D .qwen/skills',
+      'cpio -i -D.qwen/skills',
     ]) {
       expect(
         shouldForceAutoModeReviewForAllow(

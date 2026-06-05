@@ -378,7 +378,7 @@ function getFlagValue(
       return arg.slice(longName.length + 1);
     }
     if (isAttachedShortFlagValue(arg, shortName)) {
-      return arg.slice(shortName.length);
+      return arg.slice(shortName.length).replace(/^=/, '');
     }
     if (hasCombinedShortFlag(arg, shortName.slice(1))) {
       return args[i + 1];
