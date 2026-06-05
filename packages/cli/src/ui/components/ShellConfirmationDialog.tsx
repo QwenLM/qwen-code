@@ -130,13 +130,11 @@ export const ShellConfirmationDialog: React.FC<
           <MaxSizedBox
             maxHeight={commandPreviewHeight}
             maxWidth={Math.max(1, contentWidth - 8)}
-            overflowDirection="bottom"
+            overflowDirection="top"
           >
             {commands.map((cmd) => (
               <Box key={cmd}>
-                <Text color={theme.text.link}>
-                  <RenderInline text={cmd} />
-                </Text>
+                <Text color={theme.text.link}>{cmd}</Text>
               </Box>
             ))}
           </MaxSizedBox>

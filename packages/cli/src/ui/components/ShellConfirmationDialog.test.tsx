@@ -60,7 +60,10 @@ describe('ShellConfirmationDialog', () => {
     const { lastFrame } = renderWithProviders(
       <ShellConfirmationDialog
         request={{
-          commands: Array.from({ length: 10 }, (_, i) => `command-${i + 1}`),
+          commands: Array.from(
+            { length: 10 },
+            (_, i) => `cmd-${String(i + 1).padStart(2, '0')}`,
+          ),
           onConfirm,
         }}
         availableTerminalHeight={availableTerminalHeight}
@@ -76,6 +79,7 @@ describe('ShellConfirmationDialog', () => {
     expect(frame).toContain('Always allow in this project');
     expect(frame).toContain('No (esc)');
     expect(frame).toMatch(/lines hidden/);
-    expect(frame).not.toContain('command-10');
+    expect(frame).toContain('cmd-10');
+    expect(frame).not.toContain('cmd-01');
   });
 });
