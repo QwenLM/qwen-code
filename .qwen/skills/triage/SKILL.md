@@ -20,9 +20,7 @@ Run staged admission via `gh`. Post comment after each stage.
 
 ## Resolve
 
-- Kind: optional leading arg `issue` or `pr`; if omitted, infer from GitHub
-  metadata before choosing the issue or PR workflow
-- Number: next arg, or `ISSUE_NUMBER`/`PR_NUMBER` env
+- Number: from arg or `ISSUE_NUMBER`/`PR_NUMBER` env
 - Repo: `--repo` → `REPOSITORY` → `GITHUB_REPOSITORY`
 
 ## Fetch

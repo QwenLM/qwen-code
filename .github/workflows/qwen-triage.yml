@@ -47,17 +47,15 @@ jobs:
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'
 
-      - name: 'Resolve target'
+      - name: 'Resolve target number'
         id: 'resolve'
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "number=${{ github.event.inputs.number }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
             echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-            echo "kind=pr" >> "$GITHUB_OUTPUT"
           else
             echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
-            echo "kind=${{ github.event.issue.pull_request && 'pr' || 'issue' }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: 'Run Qwen Triage'
@@ -79,4 +77,4 @@ jobs:
               ],
               "sandbox": false
             }
-          prompt: '/triage ${{ steps.resolve.outputs.kind }} ${{ steps.resolve.outputs.number }} --repo ${{ github.repository }}'
+          prompt: '/triage ${{ steps.resolve.outputs.number }}'
