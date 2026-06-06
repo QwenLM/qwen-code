@@ -101,6 +101,7 @@ export type {
   DaemonUiWorkspaceMemoryChangedEvent,
   DaemonUiWorkspaceAgentChangedEvent,
   DaemonUiWorkspaceToolToggledEvent,
+  DaemonUiWorkspaceSettingsChangedEvent,
   DaemonUiWorkspaceInitializedEvent,
   DaemonUiMcpBudgetWarningEvent,
   DaemonUiMcpChildRefusedEvent,

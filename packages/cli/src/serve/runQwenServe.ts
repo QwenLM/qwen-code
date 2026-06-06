@@ -876,6 +876,11 @@ export async function runQwenServe(
     daemonLog,
     workspace: workspaceService,
     persistDisabledTools: persistDisabledToolsFn,
+    persistSetting: (workspace, scope, key, value) =>
+      withSettingsLock(workspace, async () => {
+        const fresh = loadSettings(workspace);
+        fresh.setValue(scope, key, value);
+      }),
   });
   // Pull the device-flow registry back out so the close hook can
   // dispose it before `bridge.shutdown()`, ensuring polling timers +

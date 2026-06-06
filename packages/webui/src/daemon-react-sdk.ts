@@ -114,6 +114,9 @@ export { useDaemonSkills as useSkills } from './daemon/index.js';
 /** Registered tools and their configuration. */
 export { useDaemonTools as useTools } from './daemon/index.js';
 
+/** Workspace settings (read/write). */
+export { useDaemonSettings as useSettings } from './daemon/index.js';
+
 // ── Workspace Hooks ───────────────────────────────────────────────
 
 /** Workspace context value (file ops, directory listing). */
@@ -311,6 +314,12 @@ export type {
   DaemonWorkspaceSkillStatus,
   /** Registered tool: name, displayName, description, enabled flag. */
   DaemonWorkspaceToolStatus,
+  /** Individual setting descriptor returned by GET /workspace/settings. */
+  DaemonSettingDescriptor,
+  /** Full settings response including schema, values, and warnings. */
+  DaemonWorkspaceSettingsStatus,
+  /** Result of POST /workspace/settings. */
+  DaemonSettingUpdateResult,
 } from './daemon/index.js';
 
 // ── Types: SDK Transcript Blocks (low-level) ─────────────────────

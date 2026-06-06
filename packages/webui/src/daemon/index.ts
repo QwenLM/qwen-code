@@ -92,6 +92,7 @@ export {
   useDaemonSessions,
   useDaemonSkills,
   useDaemonTools,
+  useDaemonSettings,
 } from './workspace/index.js';
 export type {
   DaemonDirectoryEntry,
@@ -140,4 +141,7 @@ export type {
   DaemonWorkspaceMemoryFile,
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceToolStatus,
+  DaemonSettingDescriptor,
+  DaemonWorkspaceSettingsStatus,
+  DaemonSettingUpdateResult,
 } from '@qwen-code/sdk/daemon';

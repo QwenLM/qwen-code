@@ -89,6 +89,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       description: t('local.resume'),
       argumentHint: '<session-id>',
     },
+    { name: 'settings', description: t('local.settings') },
   ];
   return commands.map((command) => ({
     ...command,

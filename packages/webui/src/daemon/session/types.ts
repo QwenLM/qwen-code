@@ -221,6 +221,7 @@ export interface DaemonWorkspaceEventSignals {
   memoryVersion: number;
   agentsVersion: number;
   toolsVersion: number;
+  settingsVersion: number;
   mcpVersion: number;
   initVersion: number;
   authVersion: number;

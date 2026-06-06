@@ -44,6 +44,7 @@ export type DaemonUiEventType =
   | 'workspace.memory.changed'
   | 'workspace.agent.changed'
   | 'workspace.tool.toggled'
+  | 'workspace.settings.changed'
   | 'workspace.initialized'
   | 'workspace.mcp.budget_warning'
   | 'workspace.mcp.child_refused'
@@ -340,6 +341,14 @@ export interface DaemonUiWorkspaceToolToggledEvent extends DaemonUiEventBase {
   enabled: boolean;
 }
 
+export interface DaemonUiWorkspaceSettingsChangedEvent
+  extends DaemonUiEventBase {
+  type: 'workspace.settings.changed';
+  key: string;
+  scope: string;
+  value: unknown;
+}
+
 export interface DaemonUiWorkspaceInitializedEvent extends DaemonUiEventBase {
   type: 'workspace.initialized';
   path: string;
@@ -454,6 +463,7 @@ export type DaemonUiEvent =
   | DaemonUiWorkspaceMemoryChangedEvent
   | DaemonUiWorkspaceAgentChangedEvent
   | DaemonUiWorkspaceToolToggledEvent
+  | DaemonUiWorkspaceSettingsChangedEvent
   | DaemonUiWorkspaceInitializedEvent
   | DaemonUiMcpBudgetWarningEvent
   | DaemonUiMcpChildRefusedEvent

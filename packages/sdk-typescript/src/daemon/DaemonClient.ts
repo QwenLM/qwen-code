@@ -70,6 +70,8 @@ import type {
   DaemonRewindResult,
   DaemonSessionHooksStatus,
   DaemonWorkspaceHooksStatus,
+  DaemonWorkspaceSettingsStatus,
+  DaemonSettingUpdateResult,
 } from './types.js';
 
 /**
@@ -1331,6 +1333,49 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonToolToggleResult;
+      },
+    );
+  }
+
+  async workspaceSettings(
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspaceSettingsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/settings`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/settings');
+        }
+        return (await res.json()) as DaemonWorkspaceSettingsStatus;
+      },
+    );
+  }
+
+  async setWorkspaceSetting(
+    scope: 'user' | 'workspace',
+    key: string,
+    value: unknown,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSettingUpdateResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/settings`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ scope, key, value }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/settings');
+        }
+        return (await res.json()) as DaemonSettingUpdateResult;
       },
     );
   }

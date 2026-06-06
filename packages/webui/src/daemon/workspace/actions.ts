@@ -132,6 +132,26 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async loadSettingsStatus() {
+      const client = requireClient(getClient, 'Load settings failed');
+      return withActionTimeout(
+        client.workspaceSettings(),
+        'Load settings timed out',
+      );
+    },
+
+    async setWorkspaceSetting(
+      scope: 'user' | 'workspace',
+      key: string,
+      value: unknown,
+    ) {
+      const client = requireClient(getClient, 'Set setting failed');
+      return withActionTimeout(
+        client.setWorkspaceSetting(scope, key, value),
+        'Set setting timed out',
+      );
+    },
+
     async loadMemoryStatus() {
       const client = requireClient(getClient, 'Load memory failed');
       return withActionTimeout(

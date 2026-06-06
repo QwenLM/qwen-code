@@ -127,6 +127,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // unregistered — the toggle takes effect on the next ACP child spawn
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
+  workspace_settings: { since: 'v1' },
   // `POST /workspace/init` scaffolds an empty
   // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
   // the bound workspace root. Body: `{force?: boolean}`. Default
@@ -232,6 +233,7 @@ export interface AdvertiseFeatureToggles {
   allowOriginActive?: boolean;
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
+  persistSettingAvailable?: boolean;
 }
 
 /**
@@ -286,6 +288,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       typeof toggles.writerIdleTimeoutMs === 'number' &&
       toggles.writerIdleTimeoutMs > 0,
   ],
+  ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

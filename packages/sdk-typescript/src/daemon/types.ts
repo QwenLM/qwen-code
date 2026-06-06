@@ -1000,6 +1000,40 @@ export interface DaemonToolToggleResult {
   enabled: boolean;
 }
 
+export interface DaemonSettingDescriptor {
+  key: string;
+  type: string;
+  label: string;
+  category: string;
+  description?: string;
+  requiresRestart: boolean;
+  default: unknown;
+  options?: ReadonlyArray<{ value: string | number; label: string }>;
+  values: {
+    effective: unknown;
+    user?: unknown;
+    workspace?: unknown;
+  };
+}
+
+export interface DaemonWorkspaceSettingsStatus {
+  v: 1;
+  warnings?: Array<{
+    type: 'corrupted';
+    scope: string;
+    path: string;
+    recovered: boolean;
+  }>;
+  settings: DaemonSettingDescriptor[];
+}
+
+export interface DaemonSettingUpdateResult {
+  key: string;
+  scope: 'user' | 'workspace';
+  value: unknown;
+  requiresRestart: boolean;
+}
+
 /**
  * Result body of `POST /workspace/init`.
  *

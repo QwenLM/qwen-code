@@ -119,6 +119,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   memoryVersion: 0,
   agentsVersion: 0,
   toolsVersion: 0,
+  settingsVersion: 0,
   mcpVersion: 0,
   initVersion: 0,
   authVersion: 0,
@@ -1071,6 +1072,7 @@ function bumpWorkspaceEventSignals(
   let memory = 0;
   let agents = 0;
   let tools = 0;
+  let settings = 0;
   let mcp = 0;
   let init = 0;
   let auth = 0;
@@ -1085,6 +1087,9 @@ function bumpWorkspaceEventSignals(
         break;
       case 'workspace.tool.toggled':
         tools += 1;
+        break;
+      case 'workspace.settings.changed':
+        settings += 1;
         break;
       case 'workspace.mcp.budget_warning':
       case 'workspace.mcp.child_refused':
@@ -1107,12 +1112,13 @@ function bumpWorkspaceEventSignals(
     }
   }
 
-  if (memory + agents + tools + mcp + init + auth === 0) return;
+  if (memory + agents + tools + settings + mcp + init + auth === 0) return;
 
   setSignals((current) => ({
     memoryVersion: current.memoryVersion + memory,
     agentsVersion: current.agentsVersion + agents,
     toolsVersion: current.toolsVersion + tools,
+    settingsVersion: current.settingsVersion + settings,
     mcpVersion: current.mcpVersion + mcp,
     initVersion: current.initVersion + init,
     authVersion: current.authVersion + auth,

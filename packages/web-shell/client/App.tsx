@@ -47,6 +47,7 @@ import {
   type ModelInlineMode,
 } from './components/messages/ModelMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { SettingsDialog } from './components/dialogs/SettingsDialog';
 import { HelpDialog } from './components/dialogs/HelpDialog';
 import {
   ThemeDialog,
@@ -646,6 +647,7 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
+  const [showSettingsDialog, setShowSettingsDialog] = useState(false);
   const [memoryInlineOpen, setMemoryInlineOpen] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
@@ -680,7 +682,8 @@ export function App({
     showReleaseDialog ||
     showHelpDialog ||
     showThemeDialog ||
-    showToolsDialog;
+    showToolsDialog ||
+    showSettingsDialog;
   const bottomHidden =
     dialogOpen ||
     approvalModePanelActive ||
@@ -1378,6 +1381,10 @@ export function App({
             }
             return true;
           }
+          if (cmd === 'settings') {
+            setShowSettingsDialog(true);
+            return true;
+          }
           if (cmd === 'context') {
             const contextArg = text.slice(match[0].length).trim().toLowerCase();
             if (
@@ -1987,6 +1994,19 @@ export function App({
               )}
               {showToolsDialog && (
                 <ToolsDialog onClose={() => setShowToolsDialog(false)} />
+              )}
+              {showSettingsDialog && (
+                <SettingsDialog
+                  onClose={() => setShowSettingsDialog(false)}
+                  onSubDialog={(key) => {
+                    setShowSettingsDialog(false);
+                    if (key === 'ui.theme') setShowThemeDialog(true);
+                    else if (key === 'fastModel')
+                      setModelInlineMode('fast');
+                    else if (key === 'tools.approvalMode')
+                      setApprovalModeInlineOpen(true);
+                  }}
+                />
               )}
             </div>
           )}

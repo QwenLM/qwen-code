@@ -36,6 +36,8 @@ import type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
   DaemonWorkspaceToolsStatus,
+  DaemonWorkspaceSettingsStatus,
+  DaemonSettingUpdateResult,
   DaemonSessionSummary,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
@@ -145,6 +147,14 @@ export interface DaemonWorkspaceActions {
   // Tools
   loadToolsStatus(): Promise<DaemonWorkspaceToolsStatus>;
   setWorkspaceToolEnabled(toolName: string, enabled: boolean): Promise<unknown>;
+
+  // Settings
+  loadSettingsStatus(): Promise<DaemonWorkspaceSettingsStatus>;
+  setWorkspaceSetting(
+    scope: 'user' | 'workspace',
+    key: string,
+    value: unknown,
+  ): Promise<DaemonSettingUpdateResult>;
 
   // Memory
   loadMemoryStatus(): Promise<DaemonWorkspaceMemoryStatus>;

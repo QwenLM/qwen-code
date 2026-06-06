@@ -36,4 +36,5 @@ export {
   useDaemonSessions,
   useDaemonSkills,
   useDaemonTools,
+  useDaemonSettings,
 } from './hooks/index.js';

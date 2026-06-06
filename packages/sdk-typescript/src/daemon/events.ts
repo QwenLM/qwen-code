@@ -59,6 +59,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // Mutation control events.
   'approval_mode_changed',
   'tool_toggled',
+  'settings_changed',
   'workspace_initialized',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
