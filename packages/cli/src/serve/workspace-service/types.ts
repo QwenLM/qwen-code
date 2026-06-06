@@ -18,6 +18,7 @@ import type {
   ServeWorkspaceMcpStatus,
   ServeWorkspaceSkillsStatus,
   ServeWorkspaceProvidersStatus,
+  ServeWorkspaceHooksStatus,
   ServeWorkspaceEnvStatus,
   ServeWorkspacePreflightStatus,
   DaemonStatusProvider,
@@ -106,6 +107,11 @@ export interface DaemonWorkspaceService {
   getWorkspacePreflightStatus(
     ctx: WorkspaceRequestContext,
   ): Promise<ServeWorkspacePreflightStatus>;
+
+  /** Hook configuration status for the bound workspace. */
+  getWorkspaceHooksStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<ServeWorkspaceHooksStatus>;
 
   // -- Workspace mutations --
 

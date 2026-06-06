@@ -1045,6 +1045,16 @@ export function createServeApp(
     }
   });
 
+  // GET /workspace/hooks — read-only hook configuration status.
+  app.get('/workspace/hooks', async (req, res) => {
+    try {
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/hooks');
+      res.status(200).json(await workspace.getWorkspaceHooksStatus(ctx));
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/hooks' });
+    }
+  });
+
   // Workspace file routes (read-only + mutation).
   registerWorkspaceFileReadRoutes(app, {
     parseClientId: parseClientIdHeader,
@@ -1486,6 +1496,17 @@ export function createServeApp(
         route: 'GET /session/:id/tasks',
         sessionId,
       });
+    }
+  });
+
+  // GET /session/:id/hooks — read-only session-scoped hook status.
+  app.get('/session/:id/hooks', async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      res.status(200).json(await bridge.getSessionHooksStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /session/:id/hooks', sessionId });
     }
   });
 

@@ -68,6 +68,8 @@ import type {
   DaemonToolToggleResult,
   DaemonRewindSnapshotInfo,
   DaemonRewindResult,
+  DaemonSessionHooksStatus,
+  DaemonWorkspaceHooksStatus,
 } from './types.js';
 
 /**
@@ -504,6 +506,28 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace/providers');
         }
         return (await res.json()) as DaemonWorkspaceProvidersStatus;
+      },
+    );
+  }
+
+  async workspaceHooks(): Promise<DaemonWorkspaceHooksStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/hooks`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /workspace/hooks');
+        return (await res.json()) as DaemonWorkspaceHooksStatus;
+      },
+    );
+  }
+
+  async sessionHooks(sessionId: string): Promise<DaemonSessionHooksStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/hooks`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, `GET /session/${sessionId}/hooks`);
+        return (await res.json()) as DaemonSessionHooksStatus;
       },
     );
   }

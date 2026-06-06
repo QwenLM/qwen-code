@@ -31,6 +31,7 @@ import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
+  createIdleWorkspaceHooksStatus,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
@@ -3020,6 +3021,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return requestSessionStatus<ServeSessionStatsStatus>(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionStats,
+      );
+    },
+
+    async getWorkspaceHooksStatus() {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceHooks,
+        () => createIdleWorkspaceHooksStatus(boundWorkspace),
+      );
+    },
+
+    async getSessionHooksStatus(sessionId) {
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionHooks,
       );
     },
 
