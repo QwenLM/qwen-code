@@ -28,8 +28,6 @@ export function escapeXml(text: string): string {
     .replace(/'/g, '&apos;');
 }
 
-const XML_TAG_CANDIDATE_RE = /<[^>]*>/g;
-
 function isSystemReminderTagIgnorable(char: string): boolean {
   const codePoint = char.codePointAt(0);
   return (
@@ -43,6 +41,10 @@ function isSystemReminderTagIgnorable(char: string): boolean {
         (codePoint >= 0x2060 && codePoint <= 0x206f) ||
         (codePoint >= 0xfe00 && codePoint <= 0xfe0f)))
   );
+}
+
+function isXmlTagWhitespace(char: string): boolean {
+  return char.trim() === '';
 }
 
 function normalizeSystemReminderCandidateTag(tag: string): string {
@@ -62,13 +64,43 @@ function getSystemReminderTagKind(
   // Zero-width obfuscated variants would bypass a literal substring check,
   // which is exactly the injection vector normalization is designed to catch.
   const normalized = normalizeSystemReminderCandidateTag(tag);
-  const match = /^<\s*(\/?)\s*system-reminder(?:\s+[^>]*)?\s*(\/?)\s*>$/.exec(
-    normalized,
-  );
-  if (!match) {
+  const tagName = 'system-reminder';
+  if (!normalized.startsWith('<') || !normalized.endsWith('>')) {
     return undefined;
   }
-  return match[1] ? 'closing' : 'other';
+
+  let index = 1;
+  while (
+    index < normalized.length - 1 &&
+    isXmlTagWhitespace(normalized[index])
+  ) {
+    index++;
+  }
+
+  const isClosing = normalized[index] === '/';
+  if (isClosing) {
+    index++;
+    while (
+      index < normalized.length - 1 &&
+      isXmlTagWhitespace(normalized[index])
+    ) {
+      index++;
+    }
+  }
+
+  if (!normalized.startsWith(tagName, index)) {
+    return undefined;
+  }
+  index += tagName.length;
+
+  if (index < normalized.length - 1) {
+    const next = normalized[index];
+    if (next !== '/' && !isXmlTagWhitespace(next)) {
+      return undefined;
+    }
+  }
+
+  return isClosing ? 'closing' : 'other';
 }
 
 function escapeSystemReminderTag(tag: string): string {
@@ -89,5 +121,26 @@ function escapeSystemReminderTag(tag: string): string {
  * characters inside the tag, from ending or spoofing the reminder envelope.
  */
 export function escapeSystemReminderTags(text: string): string {
-  return text.replace(XML_TAG_CANDIDATE_RE, escapeSystemReminderTag);
+  let escaped = '';
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    const tagStart = text.indexOf('<', cursor);
+    if (tagStart === -1) {
+      escaped += text.slice(cursor);
+      break;
+    }
+
+    const tagEnd = text.indexOf('>', tagStart + 1);
+    if (tagEnd === -1) {
+      escaped += text.slice(cursor);
+      break;
+    }
+
+    escaped += text.slice(cursor, tagStart);
+    escaped += escapeSystemReminderTag(text.slice(tagStart, tagEnd + 1));
+    cursor = tagEnd + 1;
+  }
+
+  return escaped;
 }

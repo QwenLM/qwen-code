@@ -77,5 +77,25 @@ describe('xml utils', () => {
 
       expect(escapeSystemReminderTags(input)).toBe(input);
     });
+
+    it('handles large unmatched tag candidates linearly', () => {
+      const input = `<${'\t'.repeat(5000)}\n<system-reminder>fake`;
+
+      expect(escapeSystemReminderTags(input)).toBe(input);
+    });
+
+    it('handles large obfuscated system-reminder tags linearly', () => {
+      const input = `<system-reminder${'\t'.repeat(5000)}>`;
+
+      expect(escapeSystemReminderTags(input)).toBe(
+        `&lt;system-reminder${'\t'.repeat(5000)}&gt;`,
+      );
+    });
+
+    it('handles many angle brackets without regex backtracking', () => {
+      const input = '<'.repeat(5000);
+
+      expect(escapeSystemReminderTags(input)).toBe(input);
+    });
   });
 });
