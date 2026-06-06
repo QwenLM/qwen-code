@@ -1474,8 +1474,11 @@ export function createServeApp(
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
     const body = safeBody(req);
-    const name =
+    let name =
       typeof body?.['name'] === 'string' ? body['name'] : undefined;
+    if (name && name.length > 200) {
+      name = name.slice(0, 200);
+    }
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
