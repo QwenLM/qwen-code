@@ -198,7 +198,9 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'auth_device_flow' &&
       f !== 'permission_mediation' &&
       f !== 'non_blocking_prompt' &&
-      f !== 'session_rewind',
+      f !== 'session_rewind' &&
+      f !== 'workspace_hooks' &&
+      f !== 'session_hooks',
   ),
   'mcp_workspace_pool',
   'mcp_pool_restart',
@@ -213,6 +215,8 @@ const EXPECTED_REGISTERED_FEATURES = [
   'writer_idle_timeout',
   'non_blocking_prompt',
   'session_rewind',
+  'workspace_hooks',
+  'session_hooks',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -884,7 +888,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       return workspacePreflightImpl();
     },
     async getWorkspaceHooksStatus() {
-      return { v: 1 as const, workspaceCwd: '/tmp', initialized: true, disabled: false, hooks: [], events: {} };
+      return {
+        v: 1 as const,
+        workspaceCwd: '/tmp',
+        initialized: true,
+        disabled: false,
+        hooks: [],
+        events: {},
+      };
     },
     async getSessionContextStatus(sessionId) {
       sessionContextCalls.push(sessionId);
@@ -903,7 +914,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       return sessionTasksImpl(sessionId);
     },
     async getSessionHooksStatus(_sessionId) {
-      return { v: 1 as const, sessionId: _sessionId, workspaceCwd: '/tmp', disabled: false, hooks: [] };
+      return {
+        v: 1 as const,
+        sessionId: _sessionId,
+        workspaceCwd: '/tmp',
+        disabled: false,
+        hooks: [],
+      };
     },
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
