@@ -1500,12 +1500,20 @@ export function normalizeCoreSettingValue(
       }
       return value;
     }
-    case 'string':
+    case 'string': {
       if (value === undefined) return undefined;
       if (typeof value !== 'string') {
         throw RequestError.invalidParams(undefined, `${key} must be a string`);
       }
-      return value.trim();
+      // Strip control characters (incl. newlines) from string settings. Some
+      // are embedded verbatim into instruction files / prompts — e.g.
+      // general.outputLanguage is written into output-language.md, loaded as a
+      // system instruction — where an embedded newline could forge a new
+      // instruction line (persistent prompt injection).
+      // eslint-disable-next-line no-control-regex
+      const controlChars = /[\u0000-\u001f\u007f]/g;
+      return value.replace(controlChars, ' ').trim();
+    }
     default:
       throw RequestError.invalidParams(
         undefined,
@@ -1691,6 +1699,28 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
   return undefined;
 }
 
+// Placeholder substituted for MCP secret values in settings responses. Keys
+// are preserved so the client can show which env vars / headers are configured
+// without ever receiving the plaintext value. Clients must treat this sentinel
+// as "unchanged" and not echo it back through setMcpServer.
+const REDACTED_MCP_SECRET = '__redacted__';
+
+function redactMcpServerSecrets(
+  server: QwenMcpServerConfig,
+): QwenMcpServerConfig {
+  const redactValues = (record?: Record<string, string>) =>
+    record
+      ? Object.fromEntries(
+          Object.keys(record).map((key) => [key, REDACTED_MCP_SECRET]),
+        )
+      : record;
+  return {
+    ...server,
+    env: redactValues(server.env),
+    headers: redactValues(server.headers),
+  };
+}
+
 function readMcpServers(
   source: Record<string, unknown>,
   scope: QwenSettingsScope | 'extension',
@@ -1704,7 +1734,11 @@ function readMcpServers(
     .map(([name, value]) => {
       try {
         const server = toMcpServerConfig(value);
-        return server ? { name, scope, server } : undefined;
+        // Never expose stdio env or http/sse auth headers in plaintext in the
+        // settings response — they routinely hold API keys / tokens.
+        return server
+          ? { name, scope, server: redactMcpServerSecrets(server) }
+          : undefined;
       } catch (error) {
         debugLogger.warn(
           `Skipping malformed MCP server config [${scope}:${name}]:`,

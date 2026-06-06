@@ -1863,6 +1863,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/settings/getCore redacts MCP server env/header secrets', async () => {
+    const settings = makeCoreSettings();
+    (settings.user.settings as Record<string, unknown>)['mcpServers'] = {
+      secure: {
+        command: 'node',
+        env: { GITHUB_TOKEN: 'ghp_realsecret_value' },
+      },
+      remote: {
+        httpUrl: 'https://example.com/mcp',
+        headers: { Authorization: 'Bearer supersecret' },
+      },
+    };
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = (await agent.extMethod('qwen/settings/getCore', {})) as {
+      user: {
+        mcpServers: Array<{
+          name: string;
+          server: {
+            env?: Record<string, string>;
+            headers?: Record<string, string>;
+          };
+        }>;
+      };
+    };
+    const byName = Object.fromEntries(
+      result.user.mcpServers.map((entry) => [entry.name, entry.server]),
+    );
+    // Keys are preserved, values are masked.
+    expect(byName['secure']!.env).toEqual({ GITHUB_TOKEN: '__redacted__' });
+    expect(byName['remote']!.headers).toEqual({
+      Authorization: '__redacted__',
+    });
+    // The plaintext secrets must not appear anywhere in the response.
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('ghp_realsecret_value');
+    expect(serialized).not.toContain('supersecret');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/settings/setMcpServer rejects a missing name and persists a valid one', async () => {
     const settings = makeCoreSettings();
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
