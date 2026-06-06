@@ -70,9 +70,11 @@ import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionContextUsageStatus,
+  ServeSessionHooksStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceEnvStatus,
+  ServeWorkspaceHooksStatus,
   ServeWorkspaceMcpStatus,
   ServeWorkspaceMcpToolsStatus,
   ServeWorkspacePreflightStatus,
@@ -271,6 +273,7 @@ interface FakeBridgeOpts {
   workspaceProvidersImpl?: () => Promise<ServeWorkspaceProvidersStatus>;
   workspaceEnvImpl?: () => Promise<ServeWorkspaceEnvStatus>;
   workspacePreflightImpl?: () => Promise<ServeWorkspacePreflightStatus>;
+  workspaceHooksImpl?: () => Promise<ServeWorkspaceHooksStatus>;
   sessionContextImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionContextStatus>;
@@ -282,6 +285,7 @@ interface FakeBridgeOpts {
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
   sessionTasksImpl?: (sessionId: string) => Promise<ServeSessionTasksStatus>;
+  sessionHooksImpl?: (sessionId: string) => Promise<ServeSessionHooksStatus>;
   setModelImpl?: (
     sessionId: string,
     req: SetSessionModelRequest,
@@ -406,10 +410,12 @@ interface FakeBridge extends AcpSessionBridge {
   workspaceProvidersCalls: number;
   workspaceEnvCalls: number;
   workspacePreflightCalls: number;
+  workspaceHooksCalls: number;
   sessionContextCalls: string[];
   sessionContextUsageCalls: string[];
   sessionSupportedCommandsCalls: string[];
   sessionTasksCalls: string[];
+  sessionHooksCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
     req: SetSessionModelRequest;
@@ -486,9 +492,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   let workspaceProvidersCalls = 0;
   let workspaceEnvCalls = 0;
   let workspacePreflightCalls = 0;
+  let workspaceHooksCalls = 0;
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
+  const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
@@ -589,6 +597,16 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       acpChannelLive: false,
       cells: [],
     }));
+  const workspaceHooksImpl =
+    opts.workspaceHooksImpl ??
+    (async () => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      initialized: true,
+      disabled: false,
+      hooks: [],
+      events: {},
+    }));
   const sessionContextImpl =
     opts.sessionContextImpl ??
     (async (sessionId) => ({
@@ -640,6 +658,15 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId,
       now: 1_700_000_000_000,
       tasks: [],
+    }));
+  const sessionHooksImpl =
+    opts.sessionHooksImpl ??
+    (async (sessionId: string) => ({
+      v: 1 as const,
+      sessionId,
+      workspaceCwd: WS_BOUND,
+      disabled: false,
+      hooks: [],
     }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
   const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
@@ -751,6 +778,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionContextUsageCalls,
     sessionSupportedCommandsCalls,
     sessionTasksCalls,
+    sessionHooksCalls,
     setModelCalls,
     setApprovalModeCalls,
     generateSessionRecapCalls,
@@ -783,6 +811,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     get workspacePreflightCalls() {
       return workspacePreflightCalls;
+    },
+    get workspaceHooksCalls() {
+      return workspaceHooksCalls;
     },
     get sessionCount() {
       return calls.length;
@@ -888,14 +919,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       return workspacePreflightImpl();
     },
     async getWorkspaceHooksStatus() {
-      return {
-        v: 1 as const,
-        workspaceCwd: '/tmp',
-        initialized: true,
-        disabled: false,
-        hooks: [],
-        events: {},
-      };
+      workspaceHooksCalls += 1;
+      return workspaceHooksImpl();
     },
     async getSessionContextStatus(sessionId) {
       sessionContextCalls.push(sessionId);
@@ -913,14 +938,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionTasksCalls.push(sessionId);
       return sessionTasksImpl(sessionId);
     },
-    async getSessionHooksStatus(_sessionId) {
-      return {
-        v: 1 as const,
-        sessionId: _sessionId,
-        workspaceCwd: '/tmp',
-        disabled: false,
-        hooks: [],
-      };
+    async getSessionHooksStatus(sessionId) {
+      sessionHooksCalls.push(sessionId);
+      return sessionHooksImpl(sessionId);
     },
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
@@ -1697,6 +1717,69 @@ describe('createServeApp', () => {
           .filter((c) => c.locality === 'acp')
           .every((c) => c.status === 'not_started'),
       ).toBe(true);
+    });
+
+    it('returns workspace hooks status from the bridge', async () => {
+      const hooks: ServeWorkspaceHooksStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        disabled: false,
+        hooks: [
+          {
+            kind: 'hook',
+            eventName: 'PreToolUse',
+            config: { type: 'command', command: 'echo hi' },
+            source: 'project',
+            matcher: 'Bash',
+            enabled: true,
+          },
+        ],
+        events: {
+          PreToolUse: {
+            description: 'Before a tool is executed',
+            matcherKind: 'toolName',
+          },
+        },
+      };
+      const bridge = fakeBridge({ workspaceHooksImpl: async () => hooks });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/hooks')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(hooks);
+      expect(bridge.workspaceHooksCalls).toBe(1);
+    });
+
+    it('returns session hooks status from the bridge', async () => {
+      const hooks: ServeSessionHooksStatus = {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: WS_BOUND,
+        disabled: false,
+        hooks: [],
+      };
+      const bridge = fakeBridge({
+        sessionHooksImpl: async () => hooks,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/session/s-1/hooks')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(hooks);
+      expect(bridge.sessionHooksCalls).toEqual(['s-1']);
     });
 
     it('returns read-only session snapshots from the bridge', async () => {
