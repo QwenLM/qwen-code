@@ -234,12 +234,18 @@ jobs:
           git checkout "origin/$TARGET_BRANCH" -- .fork/ .aoneci/ .qwen/ 2>/dev/null || true
 
           # 恢复 fork 独有文件（存在于 main 但不存在于 upstream 的文件）
+          # 排除 patch 涉及的文件，避免 "already exists" 导致 patch apply 失败
           echo "🔄 恢复 fork 独有文件..."
+          PATCH_FILES_TMP=$(mktemp)
+          grep '^diff --git' .fork/patches/*.patch 2>/dev/null \
+            | sed 's|diff --git a/||;s| b/.*||' | sort -u > "$PATCH_FILES_TMP" || true
           comm -23 \
             <(git ls-tree -r --name-only "origin/$TARGET_BRANCH" | sort) \
             <(git ls-tree -r --name-only upstream/main | sort) \
           | grep -v "^\.fork/\|^\.aoneci/\|^\.qwen/" \
+          | comm -23 - "$PATCH_FILES_TMP" \
           | xargs -I{} git checkout "origin/$TARGET_BRANCH" -- "{}" 2>/dev/null || true
+          rm -f "$PATCH_FILES_TMP"
 
           SYNC_CHECKPOINT=$(git rev-parse upstream/main)
           echo "$SYNC_CHECKPOINT" > "$SYNC_CHECKPOINT_FILE"
@@ -247,10 +253,10 @@ jobs:
           echo "$SYNC_BRANCH" > "$BRANCH_NAME_FILE"
           echo "pending" > "$CONFLICT_STATUS_FILE"
 
-          # Step 1: Apply fork patches
+          # Step 1: Apply fork patches (--continue: don't stop on first failure)
           APPLY_RC=0
-          echo "🩹 执行 bash .fork/apply.sh ..."
-          bash .fork/apply.sh 2>&1 || APPLY_RC=$?
+          echo "🩹 执行 bash .fork/apply.sh --continue ..."
+          bash .fork/apply.sh --continue 2>&1 || APPLY_RC=$?
 
           if [ "$APPLY_RC" -ne 0 ]; then
             echo "⚠️ patch apply 失败（exit $APPLY_RC），尝试 LLM 辅助修复..."
@@ -271,13 +277,15 @@ jobs:
                 --prompt "$LLM_PROMPT" \
                 --yolo || true
 
-              # 检查是否还有 .rej 文件
+              # 全量验证所有 patch 是否已正确 apply（不仅检查 .rej 文件）
+              # "already exists" 等错误不产生 .rej，仅靠 .rej 数量会误判成功
               REJ_REMAINING=$(find . -name "*.rej" | wc -l | tr -d ' ')
-              if [ "$REJ_REMAINING" -eq 0 ]; then
+              STILL_FAILING=$(bash .fork/apply.sh --check 2>&1 | grep -c "^FAIL:" || true)
+              if [ "$REJ_REMAINING" -eq 0 ] && [ "$STILL_FAILING" -eq 0 ]; then
                 echo "✅ LLM 成功修复所有 patch apply 失败"
                 APPLY_RC=0
               else
-                echo "⚠️ LLM 修复后仍有 $REJ_REMAINING 个 .rej 文件"
+                echo "⚠️ 修复后仍有问题: $REJ_REMAINING 个 .rej 文件, $STILL_FAILING 个 patch 未通过 --check"
               fi
             fi
 
