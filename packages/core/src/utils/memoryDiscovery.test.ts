@@ -535,6 +535,36 @@ describe('loadServerHierarchicalMemory', () => {
     );
   });
 
+  it('classifies home-directory project files as project memory', async () => {
+    await createEmptyDir(path.join(homedir, '.git'));
+    const projectFile = await createTestFile(
+      path.join(homedir, DEFAULT_CONTEXT_FILENAME),
+      'home project context',
+    );
+    const notifications: InstructionsLoadedNotification[] = [];
+
+    await loadServerHierarchicalMemory(
+      homedir,
+      [],
+      new FileDiscoveryService(homedir),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      {
+        onInstructionsLoaded: (notification) => {
+          notifications.push(notification);
+        },
+      },
+    );
+
+    expect(notifications).toContainEqual({
+      filePath: projectFile,
+      memoryType: 'project',
+      loadReason: 'session_start',
+    });
+  });
+
   it('notifies when imported instruction files are loaded', async () => {
     await createEmptyDir(path.join(projectRoot, '.git'));
     const importedFile = await createTestFile(
