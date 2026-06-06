@@ -147,19 +147,27 @@ export function useHistory(): UseHistoryManagerReturn {
       let toolGroupsCompacted = 0;
 
       let totalThoughts = 0;
+      let totalToolGroups = 0;
       for (const item of prev) {
         if (
           item.type === 'gemini_thought' ||
           item.type === 'gemini_thought_content'
         ) {
           totalThoughts++;
+        } else if (item.type === 'tool_group') {
+          totalToolGroups++;
         }
       }
       const thoughtsToDrop = Math.max(
         0,
         totalThoughts - UI_COMPACT_KEEP_RECENT,
       );
-      let dropped = 0;
+      const toolGroupsToCompact = Math.max(
+        0,
+        totalToolGroups - UI_COMPACT_KEEP_RECENT,
+      );
+      let thoughtsDropped = 0;
+      let toolGroupsSeen = 0;
 
       const next = prev
         .filter((item) => {
@@ -167,8 +175,8 @@ export function useHistory(): UseHistoryManagerReturn {
             item.type === 'gemini_thought' ||
             item.type === 'gemini_thought_content'
           ) {
-            if (dropped < thoughtsToDrop) {
-              dropped++;
+            if (thoughtsDropped < thoughtsToDrop) {
+              thoughtsDropped++;
               thoughtRemoved++;
               return false;
             }
@@ -177,6 +185,8 @@ export function useHistory(): UseHistoryManagerReturn {
         })
         .map((item) => {
           if (item.type !== 'tool_group') return item;
+          toolGroupsSeen++;
+          if (toolGroupsSeen > toolGroupsToCompact) return item;
           const hasOldOutput = item.tools.some(
             (t) =>
               typeof t.resultDisplay === 'string' ||

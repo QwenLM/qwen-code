@@ -281,70 +281,83 @@ describe('useHistoryManager', () => {
       expect(result.current.history).toHaveLength(15);
     });
 
-    it('should clear string resultDisplay on tool_group items', () => {
+    it('should clear string resultDisplay on old tool_group items', () => {
       const { result } = renderHook(() => useHistory());
       const ts = Date.now();
 
-      act(() => {
-        result.current.addItem(
-          {
-            type: 'tool_group',
-            tools: [
-              {
-                callId: '1',
-                name: 'read_file',
-                description: '',
-                resultDisplay: 'some file content here',
-                status: 'completed',
-                confirmationDetails: undefined,
-              },
-            ],
-          } as unknown as HistoryItemWithoutId,
-          ts,
-        );
-      });
+      // Add 25 tool_groups so the first ones fall outside keep-recent-20
+      for (let i = 0; i < 25; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: String(i),
+                  name: 'read_file',
+                  description: '',
+                  resultDisplay: 'some file content here',
+                  status: 'completed',
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
 
       act(() => {
         result.current.compactOldItems();
       });
 
+      // First 5 (oldest) should be compacted
       const tool = (
         result.current.history[0] as unknown as HistoryItemToolGroup
       ).tools[0];
       expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+      // Last 20 (newest) should be untouched
+      const recentTool = (
+        result.current.history[24] as unknown as HistoryItemToolGroup
+      ).tools[0];
+      expect(recentTool.resultDisplay).toBe('some file content here');
     });
 
-    it('should blank fileDiff object on tool_group items', () => {
+    it('should blank fileDiff object on old tool_group items', () => {
       const { result } = renderHook(() => useHistory());
       const ts = Date.now();
 
-      act(() => {
-        result.current.addItem(
-          {
-            type: 'tool_group',
-            tools: [
-              {
-                callId: '1',
-                name: 'edit',
-                description: '',
-                resultDisplay: {
-                  fileDiff: '--- a/foo\n+++ b/foo\n@@ -1 +1 @@',
-                  originalContent: 'old',
-                  newContent: 'new',
+      // Add 25 tool_groups so the first ones fall outside keep-recent-20
+      for (let i = 0; i < 25; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: String(i),
+                  name: 'edit',
+                  description: '',
+                  resultDisplay: {
+                    fileDiff: '--- a/foo\n+++ b/foo\n@@ -1 +1 @@',
+                    originalContent: 'old',
+                    newContent: 'new',
+                  },
+                  status: 'completed',
+                  confirmationDetails: undefined,
                 },
-                status: 'completed',
-                confirmationDetails: undefined,
-              },
-            ],
-          } as unknown as HistoryItemWithoutId,
-          ts,
-        );
-      });
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
 
       act(() => {
         result.current.compactOldItems();
       });
 
+      // First (oldest) should be blanked
       const tool = (
         result.current.history[0] as unknown as HistoryItemToolGroup
       ).tools[0];
@@ -363,6 +376,52 @@ describe('useHistoryManager', () => {
       const after = result.current.history;
 
       expect(after).toBe(before);
+    });
+
+    it('should keep the most recent 20 tool_group items un-compacted', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // Add 30 tool_groups with string resultDisplay
+      for (let i = 0; i < 30; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: String(i),
+                  name: 'read_file',
+                  description: '',
+                  resultDisplay: `content-${i}`,
+                  status: 'completed',
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      // First 10 (oldest) should be compacted
+      for (let i = 0; i < 10; i++) {
+        const tool = (
+          result.current.history[i] as unknown as HistoryItemToolGroup
+        ).tools[0];
+        expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+      }
+      // Last 20 (newest) should be untouched
+      for (let i = 10; i < 30; i++) {
+        const tool = (
+          result.current.history[i] as unknown as HistoryItemToolGroup
+        ).tools[0];
+        expect(tool.resultDisplay).toBe(`content-${i}`);
+      }
     });
   });
 });
