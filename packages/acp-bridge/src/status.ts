@@ -124,6 +124,7 @@ export const SERVE_STATUS_EXT_METHODS = {
 export const SERVE_CONTROL_EXT_METHODS = {
   sessionClose: 'qwen/control/session/close',
   sessionApprovalMode: 'qwen/control/session/approval_mode',
+  sessionBranch: 'qwen/control/session/branch',
   sessionRecap: 'qwen/control/session/recap',
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',

@@ -445,3 +445,14 @@ export class InvalidRewindTargetError extends Error {
     this.sessionId = sessionId;
   }
 }
+
+export class BranchWhilePromptActiveError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string) {
+    super(
+      `Cannot branch session ${sessionId}: a prompt is currently active`,
+    );
+    this.name = 'BranchWhilePromptActiveError';
+    this.sessionId = sessionId;
+  }
+}

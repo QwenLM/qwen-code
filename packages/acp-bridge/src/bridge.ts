@@ -40,6 +40,7 @@ import {
   type ServeSessionTasksStatus,
 } from './status.js';
 import {
+  BranchWhilePromptActiveError,
   SessionNotFoundError,
   RestoreInProgressError,
   InvalidSessionScopeError,
@@ -270,6 +271,7 @@ interface SessionEntry {
    * inline session updates / permission requests can safely inherit this id.
    */
   activePromptOriginatorClientId?: string;
+  promptActive: boolean;
   /**
    * Per-prompt "already broadcast `prompt_cancelled`" latch. The explicit
    * `cancelSession` route and the `sendPrompt` abort path (originator SSE
@@ -1698,6 +1700,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       clientLastSeenAt: new Map(),
       attachCount: 0,
       spawnOwnerWantedKill: false,
+      promptActive: false,
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
@@ -2283,6 +2286,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 } else {
                   entry.activePromptOriginatorClientId = originatorClientId;
                 }
+                entry.promptActive = true;
                 // Echo the user prompt to the session bus so other SSE-subscribed
                 // clients see the input alongside the agent response.
                 //
@@ -2307,6 +2311,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   .prompt(normalized)
                   .finally(() => {
                     delete entry.activePromptOriginatorClientId;
+                    entry.promptActive = false;
                   });
 
                 // Race against channel termination: if the underlying transport
@@ -2632,6 +2637,95 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
+    async branchSession(sessionId, req, context) {
+      if (shuttingDown) throw new Error('AcpSessionBridge is shutting down');
+
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      if (entry.promptActive) {
+        throw new BranchWhilePromptActiveError(sessionId);
+      }
+
+      if (
+        byId.size + inFlightSpawns.size + inFlightRestores.size >=
+        maxSessions
+      ) {
+        throw new SessionLimitExceededError(maxSessions);
+      }
+
+      const ci = await ensureChannel();
+      const result = (await withTimeout(
+        ci.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBranch, {
+          sessionId,
+          cwd: boundWorkspace,
+          name: req.name,
+        }),
+        initTimeoutMs,
+        'branchSession',
+      )) as { newSessionId: string; title: string; forkedFrom: string };
+
+      if (
+        !result ||
+        typeof result.newSessionId !== 'string' ||
+        typeof result.title !== 'string'
+      ) {
+        throw new Error(
+          `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
+        );
+      }
+
+      let restored;
+      try {
+        restored = await restoreSession('resume', {
+          sessionId: result.newSessionId,
+          workspaceCwd: boundWorkspace,
+          clientId: context?.clientId,
+        });
+      } catch (restoreErr) {
+        writeStderrLine(
+          `qwen serve: branchSession resume failed for ${result.newSessionId}, ` +
+            `orphan JSONL may remain: ${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)}`,
+        );
+        throw restoreErr;
+      }
+
+      const newEntry = byId.get(result.newSessionId);
+      if (newEntry) newEntry.displayName = result.title;
+
+      let originatorClientId: string | undefined;
+      if (context?.clientId !== undefined) {
+        originatorClientId = resolveTrustedClientId(entry, context.clientId);
+      }
+      const eventData = {
+        sourceSessionId: sessionId,
+        newSessionId: result.newSessionId,
+        displayName: result.title,
+      };
+      entry.events.publish({
+        type: 'session_branched',
+        data: eventData,
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+      for (const e of byId.values()) {
+        if (e.sessionId !== sessionId && e.sessionId !== result.newSessionId) {
+          e.events.publish({
+            type: 'session_branched',
+            data: eventData,
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
+      }
+
+      return {
+        ...restored,
+        title: result.title,
+        forkedFrom: {
+          sessionId,
+          title: entry.displayName ?? sessionId.slice(0, 8),
+        },
+      };
+    },
+
     async closeSession(sessionId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -2795,7 +2889,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             createdAt: entry.createdAt,
             displayName: entry.displayName,
             clientCount: entry.clientIds.size,
-            hasActivePrompt: entry.activePromptOriginatorClientId !== undefined,
+            hasActivePrompt: entry.promptActive,
           });
         }
       }

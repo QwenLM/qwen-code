@@ -40,7 +40,9 @@ import {
   MCPOAuthTokenStorage,
   subagentGenerator,
   redactUrlCredentials,
+  computeUniqueBranchTitle,
 } from '@qwen-code/qwen-code-core';
+import { randomUUID } from 'node:crypto';
 import type {
   ApprovalMode,
   Config,
@@ -3313,6 +3315,66 @@ class QwenAgent implements Agent {
           baseUrl: cfg?.baseUrl ?? null,
           apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
         };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionBranch: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const name = params['name'];
+
+        const sourceSession = this.sessions.get(sessionId);
+        if (!sourceSession) {
+          throw new RequestError(
+            -32004,
+            `Session not found: ${sessionId}`,
+            { errorKind: 'session_not_found', sessionId },
+          );
+        }
+
+        const recording = sourceSession
+          .getConfig()
+          .getChatRecordingService();
+        if (recording) {
+          await recording.flush();
+        }
+
+        const sessionService = new SessionService(cwd);
+        const newSessionId = randomUUID();
+        await sessionService.forkSession(sessionId, newSessionId);
+
+        let baseName: string;
+        if (typeof name === 'string' && name.trim().length > 0) {
+          baseName = name.trim();
+        } else {
+          const existingTitle = recording?.getCurrentCustomTitle();
+          if (existingTitle) {
+            baseName = existingTitle
+              .replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+              .trim();
+          } else {
+            baseName = sessionId.slice(0, 8);
+          }
+        }
+
+        const title = await computeUniqueBranchTitle(baseName, sessionService);
+        const renamed = await sessionService.renameSession(
+          newSessionId,
+          title,
+          'manual',
+        );
+        if (!renamed) {
+          throw new RequestError(
+            -32603,
+            `Failed to set title on forked session ${newSessionId}`,
+            { errorKind: 'internal', sessionId: newSessionId },
+          );
+        }
+
+        return { newSessionId, title, forkedFrom: sessionId };
       }
       default:
         throw RequestError.methodNotFound(method);

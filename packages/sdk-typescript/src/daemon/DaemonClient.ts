@@ -22,6 +22,8 @@ import type {
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  BranchSessionRequest,
+  DaemonBranchedSession,
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
@@ -1016,6 +1018,30 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return this.restoreSession('resume', sessionId, req, clientId);
+  }
+
+  async branchSession(
+    sessionId: string,
+    req: BranchSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonBranchedSession> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/branch`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          clientId,
+        ),
+        body: JSON.stringify({ name: req.name }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/branch');
+        }
+        return (await res.json()) as DaemonBranchedSession;
+      },
+    );
   }
 
   async sessionContext(
