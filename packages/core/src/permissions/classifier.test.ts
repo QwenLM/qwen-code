@@ -7,9 +7,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const runSideQueryMock = vi.fn();
+const debugLoggerMock = vi.hoisted(() => ({
+  debug: vi.fn(),
+  warn: vi.fn(),
+}));
 
 vi.mock('../utils/sideQuery.js', () => ({
   runSideQuery: (...args: unknown[]) => runSideQueryMock(...args),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => debugLoggerMock,
 }));
 
 import {
@@ -47,6 +55,8 @@ function makeInput(over: Partial<ClassifierInput> = {}): ClassifierInput {
 
 beforeEach(() => {
   runSideQueryMock.mockReset();
+  debugLoggerMock.debug.mockReset();
+  debugLoggerMock.warn.mockReset();
 });
 
 afterEach(() => {
@@ -230,6 +240,12 @@ describe('classifier configuration', () => {
 
     expect(timeoutSpy).toHaveBeenNthCalledWith(1, STAGE1_TIMEOUT_MS);
     expect(timeoutSpy).toHaveBeenNthCalledWith(2, STAGE2_TIMEOUT_MS);
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      `Classifier timeout 1ms below 1000ms floor, using default ${STAGE1_TIMEOUT_MS}ms`,
+    );
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      `Classifier timeout 999ms below 1000ms floor, using default ${STAGE2_TIMEOUT_MS}ms`,
+    );
   });
 
   it('uses temperature 0 and max_output_tokens=32 with thinking disabled for stage 1', async () => {

@@ -3724,7 +3724,11 @@ export class CoreToolScheduler {
               void _exhaustive;
             }
           }
-          if (outcome.kind === 'approved' || outcome.kind === 'blocked') {
+          if (
+            outcome.kind === 'approved' ||
+            outcome.kind === 'blocked' ||
+            outcome.kind === 'fallback'
+          ) {
             continue;
           }
         }

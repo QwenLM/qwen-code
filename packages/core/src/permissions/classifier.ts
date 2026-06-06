@@ -295,6 +295,16 @@ function resolveClassifierSettings(config: Config): ClassifierSettings {
 }
 
 function resolveTimeoutMs(value: number | undefined, fallback: number): number {
+  if (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value > 0 &&
+    value < 1000
+  ) {
+    debugLogger.warn(
+      `Classifier timeout ${value}ms below 1000ms floor, using default ${fallback}ms`,
+    );
+  }
   return typeof value === 'number' && Number.isFinite(value) && value >= 1000
     ? value
     : fallback;

@@ -3948,7 +3948,7 @@ describe('CoreToolScheduler request queueing', () => {
     expect(statuses).toContain('error');
   });
 
-  it('schedules pending protected writes through the allow flow during AUTO fallback', async () => {
+  it('keeps pending protected writes awaiting approval during AUTO fallback', async () => {
     runSideQueryMock.mockReset();
     const { scheduler, hookSystem } = createPendingProtectedWriteHarness({
       denialState: {
@@ -3979,7 +3979,7 @@ describe('CoreToolScheduler request queueing', () => {
         autoModeFallbackCallIds: Set<string>;
       }
     ).toolCalls;
-    expect(toolCalls[0]?.status).toBe('scheduled');
+    expect(toolCalls[0]?.status).toBe('awaiting_approval');
     expect(
       (
         scheduler as unknown as {
