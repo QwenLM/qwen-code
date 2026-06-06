@@ -33,7 +33,9 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.accessibility.enableLoadingPhrases',
 ]);
 
-const VALID_WRITE_SCOPES = new Set(['user', 'workspace']);
+const VALID_WRITE_SCOPES = new Set(['workspace']);
+
+const MAX_STRING_VALUE_LENGTH = 1024;
 
 
 interface SettingDescriptor {
@@ -56,18 +58,22 @@ interface SettingsResponse {
   v: 1;
   warnings?: Array<{
     type: 'corrupted';
-    scope: string;
-    path: string;
     recovered: boolean;
   }>;
   settings: SettingDescriptor[];
+}
+
+function getAllowedKeys(): Set<string> {
+  return new Set(
+    getDialogSettingKeys().filter((k) => !TUI_ONLY_SETTINGS.has(k)),
+  );
 }
 
 function buildSettingsResponse(
   boundWorkspace: string,
 ): SettingsResponse {
   const loaded = loadSettings(boundWorkspace);
-  const keys = getDialogSettingKeys().filter((k) => !TUI_ONLY_SETTINGS.has(k));
+  const keys = Array.from(getAllowedKeys());
 
   const settings: SettingDescriptor[] = [];
   for (const key of keys) {
@@ -110,8 +116,6 @@ function buildSettingsResponse(
   if (loaded.corruptedPath) {
     warnings.push({
       type: 'corrupted',
-      scope: 'unknown',
-      path: loaded.corruptedPath,
       recovered: loaded.wasRecovered,
     });
   }
@@ -137,6 +141,8 @@ function validateSettingValue(
       break;
     case 'string':
       if (typeof value !== 'string') return 'Value must be a string';
+      if (value.length > MAX_STRING_VALUE_LENGTH)
+        return `Value exceeds ${MAX_STRING_VALUE_LENGTH}-character limit`;
       break;
     case 'enum':
       if (
@@ -154,9 +160,10 @@ function validateSettingValue(
   return undefined;
 }
 
-function scopeToEnum(scope: string): SettingScope {
-  return scope === 'user' ? SettingScope.User : SettingScope.Workspace;
-}
+const SCOPE_MAP: Record<string, SettingScope> = {
+  user: SettingScope.User,
+  workspace: SettingScope.Workspace,
+};
 
 export interface WorkspaceSettingsRouteDeps {
   boundWorkspace: string;
@@ -193,9 +200,7 @@ export function registerWorkspaceSettingsRoutes(
     parseAndValidateClientId,
   } = deps;
 
-  const allowedKeys = new Set(
-    getDialogSettingKeys().filter((k) => !TUI_ONLY_SETTINGS.has(k)),
-  );
+  const allowedKeys = getAllowedKeys();
 
   app.get('/workspace/settings', (_req: Request, res: Response) => {
     try {
@@ -208,7 +213,7 @@ export function registerWorkspaceSettingsRoutes(
         }`,
       );
       res.status(500).json({
-        error: err instanceof Error ? err.message : String(err),
+        error: 'Failed to load settings',
         code: 'internal_error',
       });
     }
@@ -277,27 +282,36 @@ export function registerWorkspaceSettingsRoutes(
       if (clientId === null) return;
 
       try {
-        await persistSetting(boundWorkspace, scopeToEnum(scope), key, value);
-
-        broadcastSettingsChanged(key, value, scope, clientId);
-
-        res.status(200).json({
-          key,
-          scope,
-          value,
-          requiresRestart: def.requiresRestart,
-        });
+        await persistSetting(boundWorkspace, SCOPE_MAP[scope]!, key, value);
       } catch (err) {
         writeStderrLine(
-          `qwen serve: POST /workspace/settings error: ${
+          `qwen serve: POST /workspace/settings persist error: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
         res.status(500).json({
-          error: err instanceof Error ? err.message : String(err),
+          error: 'Failed to persist setting',
           code: 'persist_error',
         });
+        return;
       }
+
+      try {
+        broadcastSettingsChanged(key, value, scope, clientId);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: POST /workspace/settings broadcast error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+
+      res.status(200).json({
+        key,
+        scope,
+        value,
+        requiresRestart: def.requiresRestart,
+      });
     },
   );
 }

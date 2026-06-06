@@ -171,8 +171,8 @@ export function SettingsDialog({
           )
           .join('; '),
       );
-    else if (settings.length > 0) setMessage(null);
-  }, [error, settings, status, t]);
+    else if (settings.length > 0 && !restartPending) setMessage(null);
+  }, [error, settings, status, t, restartPending]);
 
   useEffect(() => {
     if (selectedIdx >= rows.length && rows.length > 0) {
@@ -193,14 +193,16 @@ export function SettingsDialog({
     }
   }, [editMode]);
 
+  const [restartPending, setRestartPending] = useState(false);
+
   const handleSetValue = useCallback(
     (key: string, value: unknown) => {
       setMessage(null);
       setBusyKey(key);
       setValue(scope, key, value)
         .then((result) => {
-          reload();
           if (result?.requiresRestart) {
+            setRestartPending(true);
             setMessage(t('settings.requiresRestart'));
           }
         })
@@ -209,7 +211,7 @@ export function SettingsDialog({
         })
         .finally(() => setBusyKey(null));
     },
-    [scope, setValue, reload, t],
+    [scope, setValue, t],
   );
 
   const handleAction = useCallback(
@@ -297,7 +299,7 @@ export function SettingsDialog({
         reload();
         return;
       }
-      if (e.key === 'Enter' || e.key === ' ') {
+      if ((e.key === 'Enter' || e.key === ' ') && !busyKey) {
         e.preventDefault();
         const row = rows[selectedIdx];
         if (row?.type === 'setting' && row.setting) {
@@ -306,6 +308,7 @@ export function SettingsDialog({
       }
     },
     [
+      busyKey,
       editMode,
       handleAction,
       handleEditSubmit,

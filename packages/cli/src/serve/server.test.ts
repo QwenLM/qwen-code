@@ -215,6 +215,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'permission_mediation',
   'prompt_absolute_deadline',
   'writer_idle_timeout',
+  'workspace_settings',
   'non_blocking_prompt',
   'session_rewind',
   'workspace_hooks',

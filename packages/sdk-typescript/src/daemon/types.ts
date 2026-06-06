@@ -1020,8 +1020,6 @@ export interface DaemonWorkspaceSettingsStatus {
   v: 1;
   warnings?: Array<{
     type: 'corrupted';
-    scope: string;
-    path: string;
     recovered: boolean;
   }>;
   settings: DaemonSettingDescriptor[];
