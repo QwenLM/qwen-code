@@ -237,7 +237,7 @@ jobs:
           # 排除 patch 涉及的文件，避免 "already exists" 导致 patch apply 失败
           echo "🔄 恢复 fork 独有文件..."
           PATCH_FILES_TMP=$(mktemp)
-          grep '^diff --git' .fork/patches/*.patch 2>/dev/null \
+          grep -h '^diff --git' .fork/patches/*.patch 2>/dev/null \
             | sed 's|diff --git a/||;s| b/.*||' | sort -u > "$PATCH_FILES_TMP" || true
           comm -23 \
             <(git ls-tree -r --name-only "origin/$TARGET_BRANCH" | sort) \
