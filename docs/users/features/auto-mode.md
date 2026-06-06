@@ -150,7 +150,7 @@ de-duplicated.
 When the classifier blocks an action, the tool call fails with one of
 the following error texts:
 
-- **`Permission for this action has been denied. Reason: <reason>`** —
+- **`Blocked by auto mode policy: <reason>`** —
   the classifier judged the action unsafe. The reason comes from Stage
   2 of the classifier.
 - **`Auto mode classifier unavailable; action blocked for safety`** —
