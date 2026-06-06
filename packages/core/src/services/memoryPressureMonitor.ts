@@ -12,6 +12,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
+import { microcompactHistory } from './microcompaction/microcompact.js';
 
 // Types
 
@@ -37,7 +38,8 @@ export type CleanupStep =
   | 'clear_file_cache'
   | 'evict_cold_cache'
   | 'evict_stale_cache'
-  | 'trigger_gc';
+  | 'trigger_gc'
+  | 'compact_history';
 
 export interface MemoryCleanupFailureEvent {
   rss: number;
@@ -258,7 +260,7 @@ export class MemoryPressureMonitor extends EventEmitter {
       case 'hard':
         return {
           action: 'moderate',
-          steps: ['evict_cold_cache'],
+          steps: ['evict_cold_cache', 'compact_history'],
         };
       case 'soft':
         return {
@@ -494,6 +496,37 @@ export class MemoryPressureMonitor extends EventEmitter {
           debugLogger.warn(
             'trigger_gc requested but global.gc is not available; ' +
               'start Node.js with --expose-gc',
+          );
+        }
+        break;
+      }
+      case 'compact_history': {
+        try {
+          const client = this.coreConfig.getGeminiClient?.();
+          if (!client?.isInitialized?.()) {
+            break;
+          }
+          const chat = client.getChat();
+          const history = chat.getHistoryShallow?.() ?? chat.getHistory();
+          const settings = this.coreConfig.getClearContextOnIdle();
+          const result = microcompactHistory(history, Date.now() - 1, {
+            ...settings,
+            toolResultsThresholdMinutes: 0,
+          });
+          if (result.meta) {
+            chat.setHistory(result.history);
+            const m = result.meta;
+            debugLogger.debug(
+              `[COMPACT_HISTORY] cleared ${m.toolsCleared} tool result(s) ` +
+                `+ ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
+                `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
+            );
+          } else {
+            debugLogger.debug('[COMPACT_HISTORY] nothing to compact');
+          }
+        } catch (err) {
+          debugLogger.error(
+            `[COMPACT_HISTORY] failed: ${getErrorMessage(err)}`,
           );
         }
         break;
