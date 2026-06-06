@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import process from 'node:process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { type HistoryItemWithoutId, MessageType } from '../types.js';
@@ -15,6 +15,7 @@ export const MEMORY_WARNING_THRESHOLD = 7 * 1024 * 1024 * 1024; // 7GB in bytes
 export const MEMORY_UI_COMPACT_THRESHOLD = 5 * 1024 * 1024 * 1024; // 5GB in bytes
 export const MEMORY_CHECK_INTERVAL = 60 * 1000; // one minute
 export const MEMORY_DEBUG_INTERVAL = 30 * 1000; // 30 seconds for debug logging
+export const UI_COMPACT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
 
 interface MemoryMonitorOptions {
   addItem: (item: HistoryItemWithoutId, timestamp: number) => void;
@@ -25,9 +26,9 @@ export const useMemoryMonitor = ({
   addItem,
   compactOldItems,
 }: MemoryMonitorOptions) => {
-  useEffect(() => {
-    let uiCompacted = false;
+  const lastCompactRef = useRef(0);
 
+  useEffect(() => {
     // Debug logging interval - logs memory usage every 30 seconds
     const debugIntervalId = setInterval(() => {
       const memUsage = process.memoryUsage();
@@ -54,11 +55,11 @@ export const useMemoryMonitor = ({
 
       // UI history compaction when heap exceeds threshold
       if (
-        !uiCompacted &&
         compactOldItems &&
-        usage.heapUsed > MEMORY_UI_COMPACT_THRESHOLD
+        usage.heapUsed > MEMORY_UI_COMPACT_THRESHOLD &&
+        Date.now() - lastCompactRef.current > UI_COMPACT_COOLDOWN_MS
       ) {
-        uiCompacted = true;
+        lastCompactRef.current = Date.now();
         debugLogger.debug(
           `[UI_COMPACT] heapUsed=${(usage.heapUsed / 1024 / 1024).toFixed(1)}MB ` +
             `exceeds ${(MEMORY_UI_COMPACT_THRESHOLD / 1024 / 1024).toFixed(0)}MB threshold, ` +
