@@ -64,17 +64,18 @@ Use explicit user-provided override values as-is after basic validation.
 
 ## Build Workflow
 
-Use an isolated build directory so user changes in the current worktree are not
-mutated. Default to the qwen-code desktop branch; do not clone from
+Use an isolated build directory under the current working directory so user
+changes in the current worktree are not mutated. Default to the qwen-code desktop branch; do not clone from
 `craft-agents-oss`, OpenWork, or another local checkout unless the user
 explicitly asks for that source:
 
 ```bash
-mkdir -p "$HOME/.codex/brand-builds"
+BUILD_ROOT="$PWD/brand-builds/<brandId>-<timestamp>"
+mkdir -p "$BUILD_ROOT"
 git clone --branch dragon/feat-unstable-desktop-app --single-branch \
   https://github.com/QwenLM/qwen-code.git \
-  "$HOME/.codex/brand-builds/<brandId>-<timestamp>/qwen-code"
-cd "$HOME/.codex/brand-builds/<brandId>-<timestamp>/qwen-code"
+  "$BUILD_ROOT/qwen-code"
+cd "$BUILD_ROOT/qwen-code"
 git checkout -B dragon/brand-<brandId> origin/dragon/feat-unstable-desktop-app
 ```
 
