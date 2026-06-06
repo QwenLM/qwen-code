@@ -7,13 +7,14 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import process from 'node:process';
+
+const debugLogger = createDebugLogger('HISTORY_MANAGER');
 
 // Type for the updater function passed to updateHistoryItem
 type HistoryItemUpdater = (
   prevItem: HistoryItem,
 ) => Partial<HistoryItemWithoutId>;
-
-const debugLogger = createDebugLogger('HISTORY_MANAGER');
 
 export interface UseHistoryManagerReturn {
   history: HistoryItem[];
@@ -65,7 +66,16 @@ export function useHistory(): UseHistoryManagerReturn {
             return prevHistory; // Don't add the duplicate
           }
         }
-        return [...prevHistory, newItem];
+
+        const newHistory = [...prevHistory, newItem];
+        const textSize = newItem.text?.length ?? 0;
+        debugLogger.debug(
+          `[ADD_ITEM] type=${newItem.type}, ` +
+            `textSize=${textSize}, ` +
+            `historyLength=${newHistory.length}, ` +
+            `memory=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+        );
+        return newHistory;
       });
       return id; // Return the generated ID (even if not added, to keep signature)
     },
@@ -110,6 +120,9 @@ export function useHistory(): UseHistoryManagerReturn {
 
   // Clears the entire history state and resets the ID counter.
   const clearItems = useCallback(() => {
+    debugLogger.debug(
+      `[CLEAR_HISTORY] Clearing history, memory before=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+    );
     setHistory([]);
     messageIdCounterRef.current = 0;
   }, []);

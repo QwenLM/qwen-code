@@ -12,6 +12,7 @@ import type {
   PartListUnion,
   Tool,
 } from '@google/genai';
+import process from 'node:process';
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
@@ -580,6 +581,15 @@ export class GeminiClient {
   }
 
   async resetChat(): Promise<void> {
+    const memBefore = process.memoryUsage();
+    const historyLength = this.chat?.getHistory()?.length ?? 0;
+    debugLogger.debug(
+      `[RESET_CHAT_START] Starting resetChat, ` +
+        `historyLength=${historyLength}, ` +
+        `heapUsed=${(memBefore.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
+        `rss=${(memBefore.rss / 1024 / 1024).toFixed(1)}MB`,
+    );
+
     this.initializedSessionId = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.cachedGitStatus = undefined;
@@ -602,6 +612,17 @@ export class GeminiClient {
     this.config.getToolRegistry().clearRevealedDeferredTools();
     await this.startChat(undefined, SessionStartSource.Clear);
     this.initializedSessionId = this.config.getSessionId();
+
+    const memAfter = process.memoryUsage();
+    const newHistoryLength = this.chat?.getHistory()?.length ?? 0;
+    debugLogger.debug(
+      `[RESET_CHAT_END] resetChat completed, ` +
+        `oldHistoryLength=${historyLength}, ` +
+        `newHistoryLength=${newHistoryLength}, ` +
+        `heapUsed=${(memAfter.heapUsed / 1024 / 1024).toFixed(1)}MB, ` +
+        `rss=${(memAfter.rss / 1024 / 1024).toFixed(1)}MB, ` +
+        `heapDiff=${((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024).toFixed(1)}MB`,
+    );
   }
 
   getLoopDetectionService(): LoopDetectionService {

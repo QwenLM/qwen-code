@@ -90,6 +90,7 @@ import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
+import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -935,10 +936,21 @@ export const useGeminiStream = (
     (incoming: ThoughtSummary) => {
       setThought((prev) => {
         if (!prev) {
+          debugLogger.debug(
+            `[THOUGHT_MERGE] New thought: subject="${incoming.subject?.substring(0, 50)}", ` +
+              `description length=${incoming.description?.length ?? 0}`,
+          );
           return incoming;
         }
         const subject = incoming.subject || prev.subject;
         const description = `${prev.description ?? ''}${incoming.description ?? ''}`;
+        debugLogger.debug(
+          `[THOUGHT_MERGE] Accumulating thought: ` +
+            `prev length=${prev.description?.length ?? 0}, ` +
+            `incoming length=${incoming.description?.length ?? 0}, ` +
+            `total length=${description.length}, ` +
+            `memory=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+        );
         return { subject, description };
       });
     },
@@ -962,6 +974,14 @@ export const useGeminiStream = (
       }
 
       let newThoughtBuffer = currentThoughtBuffer + thoughtText;
+
+      debugLogger.debug(
+        `[THOUGHT_BUFFER] Buffer growing: ` +
+          `current=${currentThoughtBuffer.length}, ` +
+          `incoming=${thoughtText.length}, ` +
+          `total=${newThoughtBuffer.length}, ` +
+          `memory=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+      );
 
       const pendingType = pendingHistoryItemRef.current?.type;
       const isPendingThought =
