@@ -243,11 +243,6 @@ async function readGeminiMdFiles(
       async (filePath): Promise<GeminiFileContent> => {
         try {
           const content = await fs.readFile(filePath, 'utf-8');
-          await notifyInstructionsLoaded({
-            filePath,
-            memoryType: getMemoryType(filePath),
-            loadReason,
-          });
 
           // Process imports in the content
           const processedResult = await processImports(
@@ -275,6 +270,11 @@ async function readGeminiMdFiles(
               },
             },
           );
+          await notifyInstructionsLoaded({
+            filePath,
+            memoryType: getMemoryType(filePath),
+            loadReason,
+          });
           logger.debug(
             `Successfully read and processed imports: ${filePath} (Length: ${processedResult.content.length})`,
           );

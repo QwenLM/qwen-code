@@ -610,7 +610,7 @@ describe('loadServerHierarchicalMemory', () => {
     );
     expect(
       notifications.findIndex((item) => item.filePath === projectFile),
-    ).toBeLessThan(
+    ).toBeGreaterThan(
       notifications.findIndex((item) => item.filePath === importedFile),
     );
   });
