@@ -37,7 +37,6 @@ const VALID_WRITE_SCOPES = new Set(['workspace']);
 
 const MAX_STRING_VALUE_LENGTH = 1024;
 
-
 interface SettingDescriptor {
   key: string;
   type: SettingsType;
@@ -145,11 +144,7 @@ function validateSettingValue(
         return `Value exceeds ${MAX_STRING_VALUE_LENGTH}-character limit`;
       break;
     case 'enum':
-      if (
-        !def.options?.some(
-          (opt) => opt.value === value,
-        )
-      ) {
+      if (!def.options?.some((opt) => opt.value === value)) {
         const allowed = def.options?.map((o) => o.value).join(', ') ?? '';
         return `Value must be one of: ${allowed}`;
       }
@@ -281,10 +276,18 @@ export function registerWorkspaceSettingsRoutes(
       if (clientId === null) return;
 
       try {
-        await persistSetting(boundWorkspace, SCOPE_MAP[scope]!, key, value);
+        const settingScope = SCOPE_MAP[scope];
+        if (!settingScope) {
+          res.status(400).json({
+            error: `scope must be one of: ${[...VALID_WRITE_SCOPES].join(', ')}`,
+            code: 'invalid_scope',
+          });
+          return;
+        }
+        await persistSetting(boundWorkspace, settingScope, key, value);
       } catch (err) {
         writeStderrLine(
-          `qwen serve: POST /workspace/settings persist error: ${
+          `qwen serve: POST /workspace/settings persist error (key=${key}, scope=${scope}, workspace=${boundWorkspace}): ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
@@ -299,7 +302,7 @@ export function registerWorkspaceSettingsRoutes(
         broadcastSettingsChanged(key, value, scope, clientId);
       } catch (err) {
         writeStderrLine(
-          `qwen serve: POST /workspace/settings broadcast error: ${
+          `qwen serve: POST /workspace/settings broadcast error (key=${key}, scope=${scope}): ${
             err instanceof Error ? err.message : String(err)
           }`,
         );

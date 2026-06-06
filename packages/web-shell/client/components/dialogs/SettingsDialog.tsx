@@ -20,7 +20,10 @@ const SUB_DIALOG_KEYS = new Set([
 
 type Scope = 'user' | 'workspace';
 
-type Translator = (key: string, vars?: Record<string, string | number>) => string;
+type Translator = (
+  key: string,
+  vars?: Record<string, string | number>,
+) => string;
 
 function formatValue(
   setting: DaemonSettingDescriptor,
@@ -30,7 +33,9 @@ function formatValue(
   const effective = resolveValue(setting, scope);
   if (effective === undefined || effective === null) return '';
   if (setting.type === 'boolean')
-    return effective === true ? t('settings.value.on') : t('settings.value.off');
+    return effective === true
+      ? t('settings.value.on')
+      : t('settings.value.off');
   if (setting.type === 'enum' && setting.options) {
     const opt = setting.options.find((o) => o.value === effective);
     return opt?.label ?? String(effective);
@@ -43,8 +48,7 @@ function scopeHasValue(
   setting: DaemonSettingDescriptor,
   scope: Scope,
 ): boolean {
-  const val =
-    scope === 'user' ? setting.values.user : setting.values.workspace;
+  const val = scope === 'user' ? setting.values.user : setting.values.workspace;
   return val !== undefined;
 }
 
@@ -59,10 +63,7 @@ function otherScopeKey(
   return undefined;
 }
 
-function resolveValue(
-  setting: DaemonSettingDescriptor,
-  scope: Scope,
-): unknown {
+function resolveValue(setting: DaemonSettingDescriptor, scope: Scope): unknown {
   const scopeVal =
     scope === 'user' ? setting.values.user : setting.values.workspace;
   return scopeVal !== undefined ? scopeVal : setting.values.effective;
@@ -91,9 +92,7 @@ interface CategoryGroup {
   items: DaemonSettingDescriptor[];
 }
 
-function groupByCategory(
-  settings: DaemonSettingDescriptor[],
-): CategoryGroup[] {
+function groupByCategory(settings: DaemonSettingDescriptor[]): CategoryGroup[] {
   const map = new Map<string, DaemonSettingDescriptor[]>();
   for (const s of settings) {
     let group = map.get(s.category);
@@ -135,10 +134,7 @@ function nextSettingIdx(rows: FlatRow[], current: number, dir: 1 | -1): number {
   return current;
 }
 
-export function SettingsDialog({
-  onClose,
-  onSubDialog,
-}: SettingsDialogProps) {
+export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
   const { t } = useI18n();
   const { status, settings, loading, error, reload, setValue } = useSettings({
     autoLoad: true,
@@ -197,6 +193,7 @@ export function SettingsDialog({
   const handleSetValue = useCallback(
     (key: string, value: unknown) => {
       setMessage(null);
+      setRestartPending(false);
       setBusyKey(key);
       setValue(scope, key, value)
         .then((result) => {
@@ -215,6 +212,7 @@ export function SettingsDialog({
 
   const handleAction = useCallback(
     (setting: DaemonSettingDescriptor) => {
+      if (scope !== 'workspace') return;
       if (SUB_DIALOG_KEYS.has(setting.key)) {
         onSubDialog(setting.key);
         return;
@@ -326,9 +324,7 @@ export function SettingsDialog({
   return (
     <div className={dp('resume-picker')}>
       <div className={dp('resume-picker-header')}>
-        <span className={dp('resume-picker-title')}>
-          {t('settings.title')}
-        </span>
+        <span className={dp('resume-picker-title')}>{t('settings.title')}</span>
         <span className={dp('resume-picker-count')}>{scopeLabel}</span>
         <button
           className={dp('resume-picker-close')}
@@ -349,9 +345,7 @@ export function SettingsDialog({
 
       <div className={dp('resume-picker-list')} ref={listRef}>
         {!loading && rows.length === 0 && (
-          <div className={dp('resume-picker-empty')}>
-            {t('settings.empty')}
-          </div>
+          <div className={dp('resume-picker-empty')}>{t('settings.empty')}</div>
         )}
         {rows.map((row, i) => {
           if (row.type === 'header') {
@@ -361,9 +355,7 @@ export function SettingsDialog({
                 className={dp('resume-picker-item', 'disabled')}
               >
                 <div className={dp('resume-picker-item-row')}>
-                  <span className={dp('resume-picker-item-prefix')}>
-                    {' '}
-                  </span>
+                  <span className={dp('resume-picker-item-prefix')}> </span>
                   <span className={dp('resume-picker-item-title')}>
                     {row.category}
                   </span>
@@ -451,9 +443,7 @@ export function SettingsDialog({
       <div className={dp('resume-picker-sep')} />
 
       <div className={dp('resume-picker-footer')}>
-        {editMode
-          ? t('settings.footer.edit')
-          : t('settings.footer')}
+        {editMode ? t('settings.footer.edit') : t('settings.footer')}
       </div>
     </div>
   );
