@@ -95,6 +95,52 @@ describe('ConsentPrompt', () => {
     expect(lastFrame()).toContain('Content truncated');
   });
 
+  it('shows a truncation notice at the two-row prompt boundary', () => {
+    const prompt = 'This operation needs careful review.';
+    const { lastFrame } = render(
+      <ConsentPrompt
+        prompt={prompt}
+        onConfirm={onConfirm}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={9}
+      />,
+    );
+
+    expect(MockedMarkdownDisplay).toHaveBeenCalledWith(
+      {
+        isPending: true,
+        text: prompt,
+        contentWidth: terminalWidth,
+        availableTerminalHeight: 1,
+      },
+      undefined,
+    );
+    expect(lastFrame()).toContain('Content truncated');
+  });
+
+  it('does not show a truncation notice at the three-row prompt boundary', () => {
+    const prompt = 'This operation needs careful review.';
+    const { lastFrame } = render(
+      <ConsentPrompt
+        prompt={prompt}
+        onConfirm={onConfirm}
+        terminalWidth={terminalWidth}
+        availableTerminalHeight={10}
+      />,
+    );
+
+    expect(MockedMarkdownDisplay).toHaveBeenCalledWith(
+      {
+        isPending: true,
+        text: prompt,
+        contentWidth: terminalWidth,
+        availableTerminalHeight: 3,
+      },
+      undefined,
+    );
+    expect(lastFrame()).not.toContain('Content truncated');
+  });
+
   it('renders a ReactNode prompt directly', () => {
     const prompt = <Text>Are you sure?</Text>;
     const { lastFrame } = render(

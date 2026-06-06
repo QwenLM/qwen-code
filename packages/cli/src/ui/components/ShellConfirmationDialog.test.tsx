@@ -21,6 +21,13 @@ describe('ShellConfirmationDialog', () => {
     return frame.length === 0 ? 0 : frame.split('\n').length;
   }
 
+  function manyCommands(): string[] {
+    return Array.from(
+      { length: 10 },
+      (_, i) => `cmd-${String(i + 1).padStart(2, '0')}`,
+    );
+  }
+
   it('renders correctly', () => {
     const { lastFrame } = renderWithProviders(
       <ShellConfirmationDialog request={request} />,
@@ -61,10 +68,7 @@ describe('ShellConfirmationDialog', () => {
     const { lastFrame } = renderWithProviders(
       <ShellConfirmationDialog
         request={{
-          commands: Array.from(
-            { length: 10 },
-            (_, i) => `cmd-${String(i + 1).padStart(2, '0')}`,
-          ),
+          commands: manyCommands(),
           onConfirm,
         }}
         availableTerminalHeight={availableTerminalHeight}
@@ -89,10 +93,7 @@ describe('ShellConfirmationDialog', () => {
     const { lastFrame } = renderWithProviders(
       <ShellConfirmationDialog
         request={{
-          commands: Array.from(
-            { length: 10 },
-            (_, i) => `cmd-${String(i + 1).padStart(2, '0')}`,
-          ),
+          commands: manyCommands(),
           onConfirm,
         }}
         availableTerminalHeight={availableTerminalHeight}
@@ -116,10 +117,7 @@ describe('ShellConfirmationDialog', () => {
       <Box height={availableTerminalHeight} overflow="hidden">
         <ShellConfirmationDialog
           request={{
-            commands: Array.from(
-              { length: 10 },
-              (_, i) => `cmd-${String(i + 1).padStart(2, '0')}`,
-            ),
+            commands: manyCommands(),
             onConfirm,
           }}
           availableTerminalHeight={availableTerminalHeight}
@@ -143,10 +141,7 @@ describe('ShellConfirmationDialog', () => {
     const { lastFrame } = renderWithProviders(
       <ShellConfirmationDialog
         request={{
-          commands: Array.from(
-            { length: 10 },
-            (_, i) => `cmd-${String(i + 1).padStart(2, '0')}`,
-          ),
+          commands: manyCommands(),
           onConfirm,
         }}
         availableTerminalHeight={availableTerminalHeight}
@@ -166,15 +161,61 @@ describe('ShellConfirmationDialog', () => {
     expect(frame).toContain('shell commands hidden');
   });
 
+  it('uses the compact hidden-command layout at the 9-row boundary', () => {
+    const availableTerminalHeight = 9;
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: manyCommands(),
+          onConfirm,
+        }}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
+    expect(frame).not.toContain('following shell commands');
+    expect(frame).not.toContain('Do you want to proceed?');
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain('Always allow in this project');
+    expect(frame).toContain('Always allow for this user');
+    expect(frame).toContain('No (esc)');
+    expect(frame).toContain('shell commands hidden');
+    expect(frame).not.toContain('cmd-10');
+  });
+
+  it('shows the command preview at the 11-row boundary', () => {
+    const availableTerminalHeight = 11;
+    const { lastFrame } = renderWithProviders(
+      <ShellConfirmationDialog
+        request={{
+          commands: manyCommands(),
+          onConfirm,
+        }}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frameHeight(frame)).toBeLessThanOrEqual(availableTerminalHeight);
+    expect(frame).toContain('Shell Command Execution');
+    expect(frame).toContain('following shell commands');
+    expect(frame).toContain('Do you want to proceed?');
+    expect(frame).toMatch(/lines hidden/);
+    expect(frame).toContain('cmd-10');
+    expect(frame).not.toContain('shell commands hidden');
+  });
+
   it('requires resizing before approval when hidden commands and approvals cannot both fit', () => {
     const availableTerminalHeight = 7;
     const { lastFrame } = renderWithProviders(
       <ShellConfirmationDialog
         request={{
-          commands: Array.from(
-            { length: 10 },
-            (_, i) => `cmd-${String(i + 1).padStart(2, '0')}`,
-          ),
+          commands: manyCommands(),
           onConfirm,
         }}
         availableTerminalHeight={availableTerminalHeight}
