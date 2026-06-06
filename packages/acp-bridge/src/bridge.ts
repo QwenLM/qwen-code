@@ -3529,15 +3529,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw err;
       }
 
+      const targetTurnIndex =
+        (response['targetTurnIndex'] as number) ?? 0;
+      const filesChanged =
+        (response['filesChanged'] as string[]) ?? [];
+      const filesFailed =
+        (response['filesFailed'] as string[]) ?? [];
+
       try {
         entry.events.publish({
           type: 'session_rewound',
           data: {
             sessionId,
             promptId: req.promptId,
-            targetTurnIndex: (response['targetTurnIndex'] as number) ?? 0,
-            filesChanged: (response['filesChanged'] as string[]) ?? [],
-            filesFailed: (response['filesFailed'] as string[]) ?? [],
+            targetTurnIndex,
+            filesChanged,
+            filesFailed,
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
@@ -3546,10 +3553,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
 
       return {
-        rewound: true,
-        targetTurnIndex: (response['targetTurnIndex'] as number) ?? 0,
-        filesChanged: (response['filesChanged'] as string[]) ?? [],
-        filesFailed: (response['filesFailed'] as string[]) ?? [],
+        rewound: filesFailed.length === 0,
+        targetTurnIndex,
+        filesChanged,
+        filesFailed,
       };
     },
 

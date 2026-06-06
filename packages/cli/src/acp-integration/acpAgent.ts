@@ -2977,6 +2977,9 @@ class QwenAgent implements Agent {
           } catch (err) {
             const reason =
               err instanceof Error ? err.message : String(err);
+            debugLogger.error(
+              `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
+            );
             filesFailed = [`file-history-rewind: ${reason}`];
           }
         }
