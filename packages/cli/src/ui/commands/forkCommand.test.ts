@@ -242,6 +242,15 @@ describe('forkCommand', () => {
     );
   });
 
+  it('uses a fallback error when failed launch has no text content', async () => {
+    mockExecute.mockResolvedValue({ returnDisplay: { status: 'failed' } });
+    const result = await forkCommand.action!(mockContext, 'do something');
+    expect(result).toMatchObject({ messageType: 'error' });
+    expect(String((result as { content: string }).content)).toContain(
+      'the background agent could not be started.',
+    );
+  });
+
   it('treats a non-failed result as a successful launch', async () => {
     mockExecute.mockResolvedValue({
       llmContent: 'Background agent launched successfully.',
