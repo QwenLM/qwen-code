@@ -76,8 +76,7 @@ export function useHistory(): UseHistoryManagerReturn {
         debugLogger.debug(
           `[ADD_ITEM] type=${newItem.type}, ` +
             `textSize=${textSize}, ` +
-            `historyLength=${newHistory.length}, ` +
-            `memory=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+            `historyLength=${newHistory.length}`,
         );
         return newHistory;
       });

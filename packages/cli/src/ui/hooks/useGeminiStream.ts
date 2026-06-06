@@ -948,8 +948,7 @@ export const useGeminiStream = (
           `[THOUGHT_MERGE] Accumulating thought: ` +
             `prev length=${prev.description?.length ?? 0}, ` +
             `incoming length=${incoming.description?.length ?? 0}, ` +
-            `total length=${description.length}, ` +
-            `memory=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+            `total length=${description.length}`,
         );
         return { subject, description };
       });
@@ -979,8 +978,7 @@ export const useGeminiStream = (
         `[THOUGHT_BUFFER] Buffer growing: ` +
           `current=${currentThoughtBuffer.length}, ` +
           `incoming=${thoughtText.length}, ` +
-          `total=${newThoughtBuffer.length}, ` +
-          `memory=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+          `total=${newThoughtBuffer.length}`,
       );
 
       const pendingType = pendingHistoryItemRef.current?.type;
