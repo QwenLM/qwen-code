@@ -599,7 +599,7 @@ export function formatClassifierBlockMessage(
       : `Auto mode classifier unavailable; action blocked for safety`;
     return `${message}\n${AUTO_MODE_DENIAL_GUIDANCE}`;
   }
-  return `Permission for this action has been denied. Reason: ${decision.reason}\n${AUTO_MODE_DENIAL_GUIDANCE}`;
+  return `Blocked by auto mode policy: ${decision.reason}\n${AUTO_MODE_DENIAL_GUIDANCE}`;
 }
 
 export interface EvaluateAutoModeInput {

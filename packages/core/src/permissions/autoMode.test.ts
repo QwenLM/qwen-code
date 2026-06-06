@@ -1227,7 +1227,7 @@ describe('formatClassifierBlockMessage', () => {
         unavailable: false,
       }),
     ).toBe(
-      'Permission for this action has been denied. Reason: Irreversible filesystem destruction\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
+      'Blocked by auto mode policy: Irreversible filesystem destruction\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
     );
   });
 
