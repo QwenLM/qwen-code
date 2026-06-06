@@ -260,7 +260,7 @@ export class MemoryPressureMonitor extends EventEmitter {
       case 'hard':
         return {
           action: 'moderate',
-          steps: ['evict_cold_cache', 'compact_history'],
+          steps: ['evict_cold_cache', 'compact_history', 'clear_file_cache'],
         };
       case 'soft':
         return {

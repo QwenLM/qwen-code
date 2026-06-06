@@ -7,7 +7,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useHistory } from './useHistoryManager.js';
-import type { HistoryItemWithoutId } from '../types.js';
+import type {
+  HistoryItemWithoutId,
+  UseHistoryManagerReturn,
+} from './useHistoryManager.js';
+import type { HistoryItemToolGroup } from '../types.js';
 
 const { debugLoggerMock } = vi.hoisted(() => ({
   debugLoggerMock: {
@@ -220,5 +224,145 @@ describe('useHistoryManager', () => {
     expect(result.current.history[0].text).toBe('Message 1');
     expect(result.current.history[1].text).toBe('Gemini response');
     expect(result.current.history[2].text).toBe('Message 1');
+  });
+
+  describe('compactOldItems', () => {
+    function addThoughts(
+      result: { current: UseHistoryManagerReturn },
+      count: number,
+      baseTimestamp: number,
+    ) {
+      for (let i = 0; i < count; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'gemini_thought_content',
+              text: `thought-${i}`,
+            } as HistoryItemWithoutId,
+            baseTimestamp + i,
+          );
+        });
+      }
+    }
+
+    it('should keep the most recent 20 thought items and drop older ones', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      addThoughts(result, 30, ts);
+
+      expect(result.current.history).toHaveLength(30);
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      expect(result.current.history).toHaveLength(20);
+      // The kept items should be the NEWEST (thought-10 through thought-29)
+      expect(result.current.history[0]).toEqual(
+        expect.objectContaining({ text: 'thought-10' }),
+      );
+      expect(result.current.history[19]).toEqual(
+        expect.objectContaining({ text: 'thought-29' }),
+      );
+    });
+
+    it('should not remove thoughts when total <= 20', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      addThoughts(result, 15, ts);
+      expect(result.current.history).toHaveLength(15);
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      expect(result.current.history).toHaveLength(15);
+    });
+
+    it('should clear string resultDisplay on tool_group items', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      act(() => {
+        result.current.addItem(
+          {
+            type: 'tool_group',
+            tools: [
+              {
+                callId: '1',
+                name: 'read_file',
+                description: '',
+                resultDisplay: 'some file content here',
+                status: 'completed',
+                confirmationDetails: undefined,
+              },
+            ],
+          } as unknown as HistoryItemWithoutId,
+          ts,
+        );
+      });
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      const tool = (
+        result.current.history[0] as unknown as HistoryItemToolGroup
+      ).tools[0];
+      expect(tool.resultDisplay).toBe('[Old tool result content cleared]');
+    });
+
+    it('should blank fileDiff object on tool_group items', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      act(() => {
+        result.current.addItem(
+          {
+            type: 'tool_group',
+            tools: [
+              {
+                callId: '1',
+                name: 'edit',
+                description: '',
+                resultDisplay: {
+                  fileDiff: '--- a/foo\n+++ b/foo\n@@ -1 +1 @@',
+                  originalContent: 'old',
+                  newContent: 'new',
+                },
+                status: 'completed',
+                confirmationDetails: undefined,
+              },
+            ],
+          } as unknown as HistoryItemWithoutId,
+          ts,
+        );
+      });
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      const tool = (
+        result.current.history[0] as unknown as HistoryItemToolGroup
+      ).tools[0];
+      expect(tool.resultDisplay.fileDiff).toBe('');
+      expect(tool.resultDisplay.originalContent).toBeNull();
+      expect(tool.resultDisplay.newContent).toBe('');
+    });
+
+    it('should return same reference for empty history', () => {
+      const { result } = renderHook(() => useHistory());
+
+      const before = result.current.history;
+      act(() => {
+        result.current.compactOldItems();
+      });
+      const after = result.current.history;
+
+      expect(after).toBe(before);
+    });
   });
 });

@@ -143,9 +143,23 @@ export function useHistory(): UseHistoryManagerReturn {
     setHistory((prev) => {
       if (prev.length === 0) return prev;
 
-      let thoughtKept = 0;
       let thoughtRemoved = 0;
       let toolGroupsCompacted = 0;
+
+      let totalThoughts = 0;
+      for (const item of prev) {
+        if (
+          item.type === 'gemini_thought' ||
+          item.type === 'gemini_thought_content'
+        ) {
+          totalThoughts++;
+        }
+      }
+      const thoughtsToDrop = Math.max(
+        0,
+        totalThoughts - UI_COMPACT_KEEP_RECENT,
+      );
+      let dropped = 0;
 
       const next = prev
         .filter((item) => {
@@ -153,8 +167,8 @@ export function useHistory(): UseHistoryManagerReturn {
             item.type === 'gemini_thought' ||
             item.type === 'gemini_thought_content'
           ) {
-            thoughtKept++;
-            if (thoughtKept > UI_COMPACT_KEEP_RECENT) {
+            if (dropped < thoughtsToDrop) {
+              dropped++;
               thoughtRemoved++;
               return false;
             }
