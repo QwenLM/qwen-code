@@ -1616,6 +1616,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     // awk [-F sep] [-v var=val] PROGRAM file...
     // The PROGRAM is the first positional — it will contain `{...}` which is
     // filtered out by looksLikePath, so we don't need special handling.
+    const hasInPlace = getFlagValue(args, '-i', '--include') === 'inplace';
     const flagsWithValue = new Set([
       '-F',
       '-f',
@@ -1647,13 +1648,15 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '-t',
       '-V',
     ]);
+    const tool: 'edit' | 'read_file' = hasInPlace ? 'edit' : 'read_file';
     return getPositionalArgs(args, flagsWithValue)
       .filter(looksLikePath)
       .map((p) => ({
-        virtualTool: 'read_file' as const,
+        virtualTool: tool,
         filePath: resolvePath(p, cwd),
       }));
   },
+  gawk: (a, d) => (COMMANDS['awk'] as CommandHandler)(a, d),
 
   // ── WebFetch commands ─────────────────────────────────────────────────────
 

@@ -327,6 +327,22 @@ describe('extractShellOperations', () => {
     ]);
   });
 
+  it('awk -i inplace: edits files in place', () => {
+    const ops = extractShellOperations(
+      'awk -i inplace \'{gsub(/x/, "y")}1\' /etc/hosts',
+      CWD,
+    );
+    expect(ops).toEqual([{ virtualTool: 'edit', filePath: '/etc/hosts' }]);
+  });
+
+  it('gawk -i inplace: edits files in place', () => {
+    const ops = extractShellOperations(
+      'gawk -i inplace \'{gsub(/x/, "y")}1\' /etc/hosts',
+      CWD,
+    );
+    expect(ops).toEqual([{ virtualTool: 'edit', filePath: '/etc/hosts' }]);
+  });
+
   // ── dd ─────────────────────────────────────────────────────────────────────
 
   it('dd if= and of=', () => {

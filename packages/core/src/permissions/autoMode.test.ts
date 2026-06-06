@@ -762,6 +762,23 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     ).toBe(false);
   });
 
+  it('returns true for awk in-place edits to protected paths', () => {
+    for (const command of [
+      'awk -i inplace \'{gsub(/x/, "y")}1\' .qwen/settings.json',
+      'gawk -i inplace \'{gsub(/x/, "y")}1\' .qwen/settings.json',
+    ]) {
+      expect(
+        shouldForceAutoModeReviewForAllow(
+          ctx({
+            toolName: ToolNames.SHELL,
+            command,
+            cwd: '/repo',
+          }),
+        ),
+      ).toBe(true);
+    }
+  });
+
   it('returns true for sort writing protected paths via output flags', () => {
     for (const command of [
       'sort -o .qwen/settings.json /dev/null',
