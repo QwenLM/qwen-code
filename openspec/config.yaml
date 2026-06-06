@@ -1,0 +1,32 @@
+schema: spec-driven
+
+context: |
+  qwen-remote-control adds a self-hosted "Remote Control" capability to
+  qwen-code (the QwenLM CLI coding agent, a fork of Google's gemini-cli).
+  The goal is to let a user start a coding session on one device (typically
+  a workstation with GPU + filesystem access) and attach to / drive that
+  same session from any other device (laptop, phone browser) without any
+  vendor-hosted relay.
+
+  Upstream base: qwen-code's `qwen serve` Stage 1 daemon already provides
+  HTTP+SSE, bearer auth, multi-client attach, first-responder permission
+  voting, SSE ring-buffer replay (Last-Event-ID), and project-scoped JSONL
+  transcripts. This change extends Stage 1 with per-client pairing tokens,
+  durable event replay, browser-friendly transport (CORS+optional WS), a
+  thin terminal client (`qwen rc`), and a mid-scope web client.
+
+  Out of scope: vendor relay, federated multi-user, end-to-end encrypted
+  transport beyond TLS.
+
+rules:
+  specs:
+    - "Requirements use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)."
+    - "Each requirement has at least one scenario."
+    - "Wire-protocol requirements MUST cite endpoint method+path or SSE event type."
+  tasks:
+    - "Phase 0 of every phase is an Alignment task (N.0) that verifies state-machine, prior phase completion, and spec drift before any implementation."
+    - "Each task lists Status and Prompt fields directly under the checkbox."
+    - "Status values: not-started | started | completed | deferred:<reason> | skipped:<reason> | cancelled:<reason>"
+  design:
+    - "Architecture decisions record the alternative considered, not just the choice."
+    - "Threat model enumerates attacker, capability, mitigation explicitly."
