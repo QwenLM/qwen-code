@@ -3346,32 +3346,38 @@ class QwenAgent implements Agent {
         const newSessionId = randomUUID();
         await sessionService.forkSession(sessionId, newSessionId);
 
-        let baseName: string;
-        if (typeof name === 'string' && name.trim().length > 0) {
-          baseName = name.trim();
-        } else {
-          const existingTitle = recording?.getCurrentCustomTitle();
-          if (existingTitle) {
-            baseName = existingTitle
-              .replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
-              .trim();
+        let title: string;
+        try {
+          let baseName: string;
+          if (typeof name === 'string' && name.trim().length > 0) {
+            baseName = name.trim();
           } else {
-            baseName = sessionId.slice(0, 8);
+            const existingTitle = recording?.getCurrentCustomTitle();
+            if (existingTitle) {
+              baseName = existingTitle
+                .replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+                .trim();
+            } else {
+              baseName = sessionId.slice(0, 8);
+            }
           }
-        }
 
-        const title = await computeUniqueBranchTitle(baseName, sessionService);
-        const renamed = await sessionService.renameSession(
-          newSessionId,
-          title,
-          'manual',
-        );
-        if (!renamed) {
-          throw new RequestError(
-            -32603,
-            `Failed to set title on forked session ${newSessionId}`,
-            { errorKind: 'internal', sessionId: newSessionId },
+          title = await computeUniqueBranchTitle(baseName, sessionService);
+          const renamed = await sessionService.renameSession(
+            newSessionId,
+            title,
+            'manual',
           );
+          if (!renamed) {
+            throw new RequestError(
+              -32603,
+              `Failed to set title on forked session ${newSessionId}`,
+              { errorKind: 'internal', sessionId: newSessionId },
+            );
+          }
+        } catch (err) {
+          sessionService.removeSession(newSessionId).catch(() => {});
+          throw err;
         }
 
         return { newSessionId, title, forkedFrom: sessionId };

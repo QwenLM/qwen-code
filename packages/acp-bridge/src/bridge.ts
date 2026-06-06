@@ -2646,6 +2646,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw new BranchWhilePromptActiveError(sessionId);
       }
 
+      let originatorClientId: string | undefined;
+      if (context?.clientId !== undefined) {
+        originatorClientId = resolveTrustedClientId(entry, context.clientId);
+      }
+
       if (
         byId.size + inFlightSpawns.size + inFlightRestores.size >=
         maxSessions
@@ -2692,10 +2697,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const newEntry = byId.get(result.newSessionId);
       if (newEntry) newEntry.displayName = result.title;
 
-      let originatorClientId: string | undefined;
-      if (context?.clientId !== undefined) {
-        originatorClientId = resolveTrustedClientId(entry, context.clientId);
-      }
       const eventData = {
         sourceSessionId: sessionId,
         newSessionId: result.newSessionId,

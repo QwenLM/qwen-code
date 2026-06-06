@@ -1485,11 +1485,19 @@ export function createServeApp(
         { clientId },
       );
       if (!res.writable) {
-        bridge
-          .killSession(result.sessionId, { requireZeroAttaches: true })
-          .catch(() => {
-            // Best-effort cleanup; channel.exited will eventually reap.
-          });
+        if (!result.attached) {
+          bridge
+            .killSession(result.sessionId, { requireZeroAttaches: true })
+            .catch(() => {
+              // Best-effort cleanup; channel.exited will eventually reap.
+            });
+        } else {
+          bridge
+            .detachClient(result.sessionId, result.clientId)
+            .catch(() => {
+              // Best-effort cleanup; channel.exited will eventually reap.
+            });
+        }
         return;
       }
       res.status(201).json(result);
