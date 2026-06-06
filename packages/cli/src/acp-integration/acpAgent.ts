@@ -2154,18 +2154,17 @@ class QwenAgent implements Agent {
         const prefix = (sessionId as string) + '########';
         const results = await Promise.all(
           snapshots
+            .map((s, idx) => ({ s, idx }))
             .filter(
-              (s) =>
+              ({ s }) =>
                 s.promptId.startsWith(prefix) &&
                 /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
-            .map(async (s) => {
-              const turnIndex =
-                parseInt(s.promptId.slice(prefix.length), 10) - 1;
+            .map(async ({ s, idx }) => {
               const stats = await fhs.getDiffStats(s.promptId);
               return {
                 promptId: s.promptId,
-                turnIndex,
+                turnIndex: idx,
                 timestamp: s.timestamp.toISOString(),
                 diffStats: {
                   filesChanged: stats?.filesChanged?.length ?? 0,
@@ -2904,23 +2903,35 @@ class QwenAgent implements Agent {
         if (promptId && (turnIndex === undefined || turnIndex === null)) {
           const prefix = sessionId + '########';
           if (!promptId.startsWith(prefix)) {
-            throw RequestError.invalidParams(
-              undefined,
-              'Invalid promptId format',
-            );
+            throw new RequestError(-32602, 'Invalid promptId format', {
+              errorKind: 'invalid_rewind_target',
+            });
           }
           const suffix = promptId.slice(prefix.length);
           if (!/^\d+$/.test(suffix)) {
-            throw RequestError.invalidParams(
-              undefined,
+            throw new RequestError(
+              -32602,
               'Invalid promptId: non-numeric turn suffix',
+              { errorKind: 'invalid_rewind_target' },
             );
           }
-          // promptId suffix is 1-based (Session increments turn before
-          // generating promptId), but rewindToTurn expects 0-based count
-          // of turns to keep. Snapshot N captures state before turn N
-          // executes, so rewinding to snapshot N means keeping N-1 turns.
-          turnIndex = parseInt(suffix, 10) - 1;
+          // Derive turnIndex from the snapshot's position in the array,
+          // NOT from the promptId suffix. Session.turn is monotonic and
+          // does not reset on rewind, so after a rewind cycle the suffix
+          // no longer matches the turn's position in the current history.
+          const fhs = session.getConfig().getFileHistoryService();
+          const snapshots = fhs.getSnapshots();
+          const snapshotIdx = snapshots.findIndex(
+            (s) => s.promptId === promptId,
+          );
+          if (snapshotIdx < 0) {
+            throw new RequestError(
+              -32602,
+              'Snapshot not found for the given promptId',
+              { errorKind: 'invalid_rewind_target' },
+            );
+          }
+          turnIndex = snapshotIdx;
         }
 
         if (!Number.isInteger(turnIndex) || (turnIndex as number) < 0) {
