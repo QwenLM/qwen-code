@@ -15,6 +15,7 @@ export const forgetCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'acp'] as const,
+  argumentHint: '<memory text to remove>',
   action: async (context, args) => {
     const query = args.trim();
 
