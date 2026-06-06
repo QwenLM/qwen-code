@@ -204,9 +204,9 @@ export class GeminiClient {
 
   /**
    * Timestamp (epoch ms) of the last completed API call.
-   * Used to detect idle periods for thinking block cleanup.
-   * Starts as null — on the first query there is no prior thinking to clean,
-   * so the idle check is skipped until the first API call completes.
+   * Used to detect idle periods for context cleanup.
+   * Starts as null; inherited history may still be cleaned on the first
+   * post-resume model-facing send before the first in-process completion.
    */
   private lastApiCompletionTimestamp: number | null = null;
 
@@ -1211,6 +1211,97 @@ export class GeminiClient {
     this.toolCallCount += 1;
   }
 
+  private async maybeMicrocompactBeforeSend(
+    messageType: SendMessageType,
+  ): Promise<void> {
+    if (
+      messageType !== SendMessageType.UserQuery &&
+      messageType !== SendMessageType.Cron &&
+      messageType !== SendMessageType.Hook
+    ) {
+      return;
+    }
+
+    const settings = this.config.getClearContextOnIdle();
+    if ((settings.toolResultsThresholdMinutes ?? 60) < 0) {
+      return;
+    }
+
+    // Hook continuations are model-driven turn boundaries (for example
+    // /goal Stop-hook loops), not tool-result submissions. Treat them as an
+    // immediate cleanup opportunity so long-running loops do not retain every
+    // old read_file result until the next manual user prompt.
+    const effectiveSettings =
+      messageType === SendMessageType.Hook
+        ? { ...settings, toolResultsThresholdMinutes: 0 }
+        : settings;
+
+    // A freshly resumed client has inherited history but no in-process API
+    // completion timestamp. Use an old timestamp so the first post-resume
+    // model-facing send can clear stale tool results before hard compression
+    // has to clone/estimate the full restored history.
+    const lastCompletion = this.lastApiCompletionTimestamp ?? 0;
+    const mcResult = microcompactHistory(
+      this.getHistoryShallow(),
+      lastCompletion,
+      effectiveSettings,
+    );
+    if (!mcResult.meta) {
+      return;
+    }
+
+    const m = mcResult.meta;
+    this.getChat().setHistory(mcResult.history);
+    // Disarm only the blanked files' fast-path, keeping read-before-write
+    // state intact (issue #4239; rationale on
+    // FileReadEntry.readResidentInHistory). Any blanked read we can't disarm
+    // surgically forces the old blanket wipe so a later Read can't get a
+    // dangling file_unchanged placeholder.
+    const fileReadCache = this.config.getFileReadCache();
+    if (m.unresolvedEvictedReads > 0) {
+      debugLogger.debug(
+        `[FILE_READ_CACHE] clear after microcompaction ` +
+          `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
+      );
+      fileReadCache.clear();
+    } else {
+      // Concurrent stats — don't serialize N FS round-trips before the next
+      // turn.
+      const statResults = await Promise.all(
+        m.evictedReadPaths.map((p) =>
+          fsPromises.stat(p).catch(() => undefined),
+        ),
+      );
+      // A path is surgically disarmed only if it stats AND its inode matches
+      // the recorded entry. A failed stat or inode miss could leave a stale
+      // entry armed, so fall back to the blanket wipe if any path is
+      // unresolvable.
+      let fullyDisarmed = true;
+      for (const stats of statResults) {
+        if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
+          fullyDisarmed = false;
+        }
+      }
+      if (fullyDisarmed) {
+        debugLogger.debug(
+          `[FILE_READ_CACHE] disarmed fast-path for ` +
+            `${m.evictedReadPaths.length} file(s) after microcompaction`,
+        );
+      } else {
+        debugLogger.debug(
+          '[FILE_READ_CACHE] clear after microcompaction ' +
+            '(an evicted path was unresolvable)',
+        );
+        fileReadCache.clear();
+      }
+    }
+    debugLogger.debug(
+      `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
+        `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
+        `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
+    );
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     signal: AbortSignal,
@@ -1408,69 +1499,9 @@ export class GeminiClient {
         } else {
           this.config.getChatRecordingService()?.recordUserMessage(request);
         }
-
-        // Idle cleanup: clear old tool results when idle > threshold.
-        // Runs on user and cron messages (not tool result submissions or
-        // retries/hooks) so that model latency during a tool-call loop
-        // doesn't count as user idle time.
-        const mcResult = microcompactHistory(
-          this.getHistoryShallow(),
-          this.lastApiCompletionTimestamp,
-          this.config.getClearContextOnIdle(),
-        );
-        if (mcResult.meta) {
-          const m = mcResult.meta;
-          this.getChat().setHistory(mcResult.history);
-          // Disarm only the blanked files' fast-path, keeping
-          // read-before-write state intact (issue #4239; rationale on
-          // FileReadEntry.readResidentInHistory). Any blanked read we
-          // can't disarm surgically forces the old blanket wipe so a
-          // later Read can't get a dangling file_unchanged placeholder.
-          const fileReadCache = this.config.getFileReadCache();
-          if (m.unresolvedEvictedReads > 0) {
-            debugLogger.debug(
-              `[FILE_READ_CACHE] clear after microcompaction ` +
-                `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
-            );
-            fileReadCache.clear();
-          } else {
-            // Concurrent stats — don't serialize N FS round-trips
-            // before the next turn.
-            const statResults = await Promise.all(
-              m.evictedReadPaths.map((p) =>
-                fsPromises.stat(p).catch(() => undefined),
-              ),
-            );
-            // A path is surgically disarmed only if it stats AND its
-            // inode matches the recorded entry. A failed stat or inode
-            // miss could leave a stale entry armed, so fall back to the
-            // blanket wipe if any path is unresolvable.
-            let fullyDisarmed = true;
-            for (const stats of statResults) {
-              if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
-                fullyDisarmed = false;
-              }
-            }
-            if (fullyDisarmed) {
-              debugLogger.debug(
-                `[FILE_READ_CACHE] disarmed fast-path for ` +
-                  `${m.evictedReadPaths.length} file(s) after microcompaction`,
-              );
-            } else {
-              debugLogger.debug(
-                '[FILE_READ_CACHE] clear after microcompaction ' +
-                  '(an evicted path was unresolvable)',
-              );
-              fileReadCache.clear();
-            }
-          }
-          debugLogger.debug(
-            `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
-              `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
-              `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
-          );
-        }
       }
+
+      await this.maybeMicrocompactBeforeSend(messageType);
 
       if (messageType !== SendMessageType.Retry) {
         // Snapshot on every non-retry turn. ToolResult turns run right after
