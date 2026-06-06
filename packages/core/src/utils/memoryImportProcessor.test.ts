@@ -183,6 +183,37 @@ describe('memoryImportProcessor', () => {
       ]);
     });
 
+    it('keeps imported content when the import notification callback throws', async () => {
+      const content = 'Some content @./test.md more content';
+      const basePath = testPath('test', 'path');
+      const parentFile = path.resolve(basePath, 'QWEN.md');
+      const importedContent = '# Imported Content';
+
+      mockedFs.access.mockResolvedValue(undefined);
+      mockedFs.readFile.mockResolvedValue(importedContent);
+
+      const result = await processImports(
+        content,
+        basePath,
+        {
+          processedFiles: new Set(),
+          maxDepth: 5,
+          currentDepth: 0,
+          currentFile: parentFile,
+        },
+        undefined,
+        'tree',
+        {
+          onFileImported: () => {
+            throw new Error('hook failed');
+          },
+        },
+      );
+
+      expect(result.content).toContain(importedContent);
+      expect(result.content).not.toContain('Import failed');
+    });
+
     it('notifies after importing files in flat mode', async () => {
       const content = 'Some content @./test.md more content';
       const basePath = testPath('test', 'path');
