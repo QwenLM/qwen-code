@@ -32,7 +32,7 @@ function formatValue(
   const effective = val !== undefined ? val : setting.values.effective;
   if (effective === undefined || effective === null) return '';
   if (setting.type === 'boolean')
-    return effective ? t('settings.value.on') : t('settings.value.off');
+    return effective === true ? t('settings.value.on') : t('settings.value.off');
   if (setting.type === 'enum' && setting.options) {
     const opt = setting.options.find((o) => o.value === effective);
     return opt?.label ?? String(effective);
@@ -74,7 +74,7 @@ function nextBooleanValue(
   setting: DaemonSettingDescriptor,
   scope: Scope,
 ): boolean {
-  return !resolveValue(setting, scope);
+  return resolveValue(setting, scope) !== true;
 }
 
 function nextEnumValue(
@@ -245,11 +245,12 @@ export function SettingsDialog({
     if (!setting) return;
     let parsed: unknown = editMode.draft;
     if (setting.type === 'number') {
-      parsed = Number(editMode.draft);
-      if (Number.isNaN(parsed)) {
+      const trimmed = editMode.draft.trim();
+      if (trimmed === '' || !Number.isFinite(Number(trimmed))) {
         setMessage(t('settings.invalidNumber'));
         return;
       }
+      parsed = Number(trimmed);
     }
     setEditMode(null);
     handleSetValue(setting.key, parsed);
