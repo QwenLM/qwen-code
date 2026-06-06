@@ -424,3 +424,24 @@ export class McpServerRestartFailedError extends Error {
     this.mcpStatus = mcpStatus;
   }
 }
+
+export class SessionBusyError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string, message?: string) {
+    super(message ?? `Session ${sessionId} is busy (prompt running)`);
+    this.name = 'SessionBusyError';
+    this.sessionId = sessionId;
+  }
+}
+
+export class InvalidRewindTargetError extends Error {
+  readonly sessionId: string;
+  constructor(sessionId: string, message?: string) {
+    super(
+      message ??
+        `Cannot rewind to the requested turn (compressed or does not exist)`,
+    );
+    this.name = 'InvalidRewindTargetError';
+    this.sessionId = sessionId;
+  }
+}

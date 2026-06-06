@@ -15,6 +15,8 @@ import {
 } from './DaemonClient.js';
 import type {
   DaemonEvent,
+  DaemonRewindResult,
+  DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
@@ -285,6 +287,18 @@ export class DaemonSessionClient {
       modelId,
       this.clientId,
     );
+  }
+
+  async getRewindSnapshots(): Promise<{
+    snapshots: DaemonRewindSnapshotInfo[];
+  }> {
+    return await this.client.getRewindSnapshots(this.sessionId);
+  }
+
+  async rewind(promptId: string): Promise<DaemonRewindResult> {
+    return await this.client.rewindSession(this.sessionId, promptId, {
+      clientId: this.clientId,
+    });
   }
 
   /**
