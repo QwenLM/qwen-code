@@ -7,11 +7,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useHistory } from './useHistoryManager.js';
-import type {
-  HistoryItemWithoutId,
-  UseHistoryManagerReturn,
-} from './useHistoryManager.js';
-import type { HistoryItemToolGroup } from '../types.js';
+import type { UseHistoryManagerReturn } from './useHistoryManager.js';
+import type { HistoryItemWithoutId, HistoryItemToolGroup } from '../types.js';
 
 const { debugLoggerMock } = vi.hoisted(() => ({
   debugLoggerMock: {
@@ -361,9 +358,14 @@ describe('useHistoryManager', () => {
       const tool = (
         result.current.history[0] as unknown as HistoryItemToolGroup
       ).tools[0];
-      expect(tool.resultDisplay.fileDiff).toBe('');
-      expect(tool.resultDisplay.originalContent).toBeNull();
-      expect(tool.resultDisplay.newContent).toBe('');
+      const display = tool.resultDisplay as {
+        fileDiff: string;
+        originalContent: string | null;
+        newContent: string;
+      };
+      expect(display.fileDiff).toBe('');
+      expect(display.originalContent).toBeNull();
+      expect(display.newContent).toBe('');
     });
 
     it('should return same reference for empty history', () => {
