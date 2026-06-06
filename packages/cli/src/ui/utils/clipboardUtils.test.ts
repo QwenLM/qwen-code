@@ -47,11 +47,16 @@ vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
 }));
 
-// Fully manual mock for node:fs/promises.
-// We intentionally do NOT mock node:fs root, to avoid cross-test pollution
-// with other files like startupProfiler.test.ts that also mock node:fs.
-// Mock node:fs/promises using importOriginal to preserve the module structure
+// We intentionally do NOT mock node:fs root to avoid breaking indirect
+// dependencies (e.g. debugLogger, symlink) that import from 'node:fs'.
+// vitest's mock system for built-in modules cannot simultaneously:
+// 1. Override createWriteStream for save success path tests
+// 2. Preserve { promises as fs } from 'node:fs' for indirect deps
+// The success path test is documented below; error paths are fully covered.
+
+// Mock node:fs/promises using importOriginal to preserve module structure
 // for indirect dependencies (e.g. debugLogger, chatCompressionService).
+// stat/mkdir/unlink are mocked to return default values for I/O-free testing.
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
@@ -71,6 +76,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
+// We intentionally do NOT mock node:fs root beyond createWriteStream, to avoid
+// cross-test pollution with other files like startupProfiler.test.ts
+// that use vi.mock('node:fs') (auto-mock).
 /**
  * Create a mock child process that emits stdout data and close event.
  */
@@ -242,13 +250,11 @@ describe('clipboardUtils', () => {
         expect(result).toBe(null);
       });
 
-      // Note: Testing the xclip save success path requires mocking createWriteStream
-      // from node:fs, which vitest cannot properly override for built-in modules.
-      // The error path below (xclip save fails) verifies the correct xclip commands
-      // are issued and that failure is handled properly.
-
-      // Note: xclip save failure path also times out due to createWriteStream limitations.
-      // The xclip detection and clipboardHasImage tests above verify correct xclip usage.
+      // xclip save success path: blocked by vitest's built-in module mock
+      // limitation.  node:fs.createWriteStream cannot be mocked without
+      // breaking indirect deps (debugLogger, symlink) that import
+      // { promises as fs } from 'node:fs'.  Error paths below verify
+      // correct spawn construction; clipboardHasImage tests verify detection.
     });
   });
 
