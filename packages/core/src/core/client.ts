@@ -78,6 +78,7 @@ import {
 
 // Utilities
 import {
+  formatDateForContext,
   getDirectoryContextString,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
@@ -779,6 +780,7 @@ export class GeminiClient {
       : SessionStartSource.Startup,
   ): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
+    this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
@@ -1622,19 +1624,14 @@ export class GeminiClient {
         // Inject fresh date on UserQuery turns only; Cron and ToolResult turns
         // reuse the same session and the startup-context date is still current.
         if (messageType === SendMessageType.UserQuery) {
-          const today = new Date().toLocaleDateString('en-US', {
-            weekday: 'long',
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric',
-          });
+          const today = formatDateForContext();
 
           // Only inject if the date has changed since the last injection.
           // This prevents accumulating conflicting dates when a session
           // spans midnight.
           if (today !== this.lastInjectedDate) {
             systemReminders.push(
-              `The current date is: ${today}. Note: This is the authoritative current date — it may differ from the "Today's date" mentioned earlier in the conversation startup context.`,
+              `<system-reminder>\nThe current date is: ${today}. Note: This is the authoritative current date — it may differ from the "Today's date" mentioned earlier in the conversation startup context.\n</system-reminder>`,
             );
             this.lastInjectedDate = today;
           }

@@ -147,22 +147,27 @@ vi.mock('../utils/gitUtils.js', async (importOriginal) => {
 vi.mock('../utils/nextSpeakerChecker', () => ({
   checkNextSpeaker: vi.fn().mockResolvedValue(null),
 }));
-vi.mock('../utils/environmentContext', () => ({
-  getEnvironmentContext: vi
-    .fn()
-    .mockResolvedValue([{ text: 'Mocked env context' }]),
-  getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-    {
-      role: 'user',
-      parts: [{ text: 'Mocked env context' }],
-    },
-    {
-      role: 'model',
-      parts: [{ text: 'Got it. Thanks for the context!' }],
-    },
-    ...(extraHistory ?? []),
-  ]),
-}));
+vi.mock('../utils/environmentContext', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/environmentContext')>();
+  return {
+    ...actual,
+    getEnvironmentContext: vi
+      .fn()
+      .mockResolvedValue([{ text: 'Mocked env context' }]),
+    getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
+      {
+        role: 'user',
+        parts: [{ text: 'Mocked env context' }],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the context!' }],
+      },
+      ...(extraHistory ?? []),
+    ]),
+  };
+});
 vi.mock('../utils/generateContentResponseUtilities', () => ({
   getResponseText: (result: GenerateContentResponse) =>
     result.candidates?.[0]?.content?.parts?.map((part) => part.text).join('') ||
@@ -2482,7 +2487,7 @@ Other open files:
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
         [
-          expect.stringMatching(/^The current date is:/),
+          expect.stringMatching(/^<system-reminder>\nThe current date is:/),
           `<system-reminder>\n${expectedContext}\n</system-reminder>\n\nHi`,
         ],
         expect.any(AbortSignal),
@@ -3190,7 +3195,10 @@ hello
       // The main request should have been called without any memory content
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
-        [expect.stringMatching(/^The current date is:/), 'Quick question'],
+        [
+          expect.stringMatching(/^<system-reminder>\nThe current date is:/),
+          'Quick question',
+        ],
         expect.any(AbortSignal),
       );
 
@@ -3226,7 +3234,10 @@ hello
       // The main request should have been called without any memory content
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
-        [expect.stringMatching(/^The current date is:/), 'Quick question'],
+        [
+          expect.stringMatching(/^<system-reminder>\nThe current date is:/),
+          'Quick question',
+        ],
         expect.any(AbortSignal),
       );
     });
@@ -3284,6 +3295,8 @@ hello
     });
 
     it('should inject the current date on every UserQuery turn', async () => {
+      // Reset date injection state from prior tests
+      client['lastInjectedDate'] = undefined;
       // Freeze time to a specific date
       vi.setSystemTime(new Date('2026-06-05T10:00:00Z'));
 
@@ -3308,10 +3321,13 @@ hello
       }
 
       // The first element in the request should be the date reminder
+      // wrapped in <system-reminder> tags
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
         [
-          expect.stringMatching(/^The current date is: Friday, June 5, 2026/),
+          expect.stringMatching(
+            /^<system-reminder>\nThe current date is:.*June 5, 2026/,
+          ),
           'What day is it?',
         ],
         expect.any(AbortSignal),
@@ -3321,6 +3337,8 @@ hello
     });
 
     it('should not inject duplicate date on the same day', async () => {
+      // Reset date injection state from prior tests
+      client['lastInjectedDate'] = undefined;
       // Freeze time to a specific date
       vi.setSystemTime(new Date('2026-06-05T10:00:00Z'));
 
@@ -3348,7 +3366,9 @@ hello
       expect(mockTurnRunFn).toHaveBeenLastCalledWith(
         'test-model',
         [
-          expect.stringMatching(/^The current date is: Friday, June 5, 2026/),
+          expect.stringMatching(
+            /^<system-reminder>\nThe current date is:.*June 5, 2026/,
+          ),
           'First question',
         ],
         expect.any(AbortSignal),
@@ -3376,6 +3396,76 @@ hello
       // Second call should NOT have date prefix (already injected today)
       const secondCall = mockTurnRunFn.mock.calls[1];
       expect(secondCall[1][0]).toBe('Second question');
+
+      vi.useRealTimers();
+    });
+
+    it('should re-inject date when session spans midnight', async () => {
+      // Reset date injection state from prior tests
+      client['lastInjectedDate'] = undefined;
+
+      // Use dates that are clearly different days in any timezone
+      // by setting the clock at noon local time on each day
+      vi.setSystemTime(new Date('2026-06-04T12:00:00Z'));
+
+      const mockStream1 = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream1);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // First query on June 4 — should inject date
+      const stream1 = client.sendMessageStream(
+        [{ text: 'Day one' }],
+        new AbortController().signal,
+        'prompt-id-date-day-one',
+      );
+      for await (const _ of stream1) {
+        // consume stream
+      }
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        [
+          expect.stringMatching(
+            /^<system-reminder>\nThe current date is:.*June 4, 2026/,
+          ),
+          'Day one',
+        ],
+        expect.any(AbortSignal),
+      );
+
+      // Advance to June 5 — date should change
+      vi.setSystemTime(new Date('2026-06-05T12:00:00Z'));
+
+      const mockStream2 = (async function* () {
+        yield { type: 'content', value: 'New day' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream2);
+      mockChat.getHistory = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'Day one' }] },
+        { role: 'model', parts: [{ text: 'Hello' }] },
+      ]);
+
+      const stream2 = client.sendMessageStream(
+        [{ text: 'Day two' }],
+        new AbortController().signal,
+        'prompt-id-date-day-two',
+      );
+      for await (const _ of stream2) {
+        // consume stream
+      }
+
+      // New date should be injected with June 5
+      const secondCall = mockTurnRunFn.mock.calls[1];
+      expect(secondCall[1][0]).toMatch(
+        /^<system-reminder>\nThe current date is:.*June 5, 2026/,
+      );
 
       vi.useRealTimers();
     });
@@ -4128,7 +4218,10 @@ Other open files:
             expect(getLastTurnRequestText()).toContain('</system-reminder>');
           } else {
             expect(mockChat.addHistory).not.toHaveBeenCalled();
-            expect(getLastTurnRequestText()).not.toContain('<system-reminder>');
+            // Date reminder uses <system-reminder> too, so check for the IDE-specific one
+            expect(getLastTurnRequestText()).not.toContain(
+              "Here is a summary of changes in the user's current editor context",
+            );
           }
         },
       );
@@ -4363,7 +4456,10 @@ Other open files:
           /* consume */
         }
 
-        expect(getLastTurnRequestText()).not.toContain('<system-reminder>');
+        // Date reminder uses <system-reminder> too, so check for IDE-specific one
+        expect(getLastTurnRequestText()).not.toContain(
+          "Here is the user's current editor context",
+        );
         expect(client['lastSentIdeContext']).toBeUndefined();
         expect(client['forceFullIdeContext']).toBe(true);
 

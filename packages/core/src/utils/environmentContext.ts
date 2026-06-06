@@ -9,6 +9,20 @@ import type { Config } from '../config/config.js';
 import { getFolderStructure } from './getFolderStructure.js';
 
 /**
+ * Shared date formatter for system-prompt date injection.
+ * Pinned to 'en-US' so both the startup context and per-turn
+ * reminder produce the same format regardless of system locale.
+ */
+export function formatDateForContext(date: Date = new Date()): string {
+  return date.toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+}
+
+/**
  * Generates a string describing the current workspace directories and their structures.
  * @param {Config} config - The runtime configuration and services.
  * @returns {Promise<string>} A promise that resolves to the directory context string.
@@ -50,12 +64,7 @@ ${folderStructure}`;
  * @returns A promise that resolves to an array of `Part` objects containing environment information.
  */
 export async function getEnvironmentContext(config: Config): Promise<Part[]> {
-  const today = new Date().toLocaleDateString(undefined, {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
+  const today = formatDateForContext();
   const platform = process.platform;
   const directoryContext = await getDirectoryContextString(config);
 
