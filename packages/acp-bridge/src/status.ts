@@ -5,7 +5,8 @@
  */
 
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
-import { HookEventName, SkillError } from '@qwen-code/qwen-code-core';
+import type { HookEventName } from '@qwen-code/qwen-code-core';
+import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
@@ -774,7 +775,7 @@ export interface ServeSessionHooksStatus {
   errors?: ServeStatusCell[];
 }
 
-const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
+export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   PreToolUse: { description: 'Before tool execution', matcherKind: 'toolName' },
   PostToolUse: { description: 'After tool execution', matcherKind: 'toolName' },
   PostToolUseFailure: { description: 'After tool execution fails', matcherKind: 'toolName' },
@@ -804,7 +805,7 @@ export function createIdleWorkspaceHooksStatus(
     initialized: false,
     disabled: false,
     hooks: [],
-    events: { ...IDLE_HOOK_EVENTS },
+    events: IDLE_HOOK_EVENTS,
   };
 }
 

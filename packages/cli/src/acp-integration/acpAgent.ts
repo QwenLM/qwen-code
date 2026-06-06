@@ -39,7 +39,6 @@ import {
   MCPOAuthProvider,
   MCPOAuthTokenStorage,
   subagentGenerator,
-  HookEventName,
 } from '@qwen-code/qwen-code-core';
 import type {
   ApprovalMode,
@@ -146,11 +145,10 @@ import {
   type ServeSessionStatsStatus,
   type ServeHookConfig,
   type ServeHookEntry,
-  type ServeHookEventMeta,
-  type ServeHookMatcherKind,
   type ServeHookSource,
   type ServeSessionHooksStatus,
   type ServeWorkspaceHooksStatus,
+  IDLE_HOOK_EVENTS,
 } from '../serve/status.js';
 import {
   collectContextData,
@@ -2037,64 +2035,6 @@ class QwenAgent implements Agent {
     };
   }
 
-  // ---------------------------------------------------------------------------
-  // Issue #4514 T3.9: workspace + session hooks diagnostic surfaces.
-  // ---------------------------------------------------------------------------
-
-  private static readonly HOOK_MATCHER_KINDS: Partial<
-    Record<HookEventName, ServeHookMatcherKind>
-  > = {
-    PreToolUse: 'toolName',
-    PostToolUse: 'toolName',
-    PostToolUseFailure: 'toolName',
-    PermissionRequest: 'toolName',
-    PermissionDenied: 'toolName',
-    SubagentStart: 'agentType',
-    SubagentStop: 'agentType',
-    PreCompact: 'trigger',
-    PostCompact: 'trigger',
-    SessionStart: 'sessionTrigger',
-    SessionEnd: 'sessionTrigger',
-    StopFailure: 'error',
-    Notification: 'notificationType',
-  };
-
-  private static readonly HOOK_EVENT_DESCRIPTIONS: Record<HookEventName, string> = {
-    PreToolUse: 'Before tool execution',
-    PostToolUse: 'After tool execution',
-    PostToolUseFailure: 'After tool execution fails',
-    PostToolBatch: 'After a batch of tool calls resolves',
-    Notification: 'When notifications are sent',
-    UserPromptSubmit: 'When the user submits a prompt',
-    SessionStart: 'When a new session is started',
-    Stop: 'Right before Qwen Code concludes its response',
-    SubagentStart: 'When a subagent is started',
-    SubagentStop: 'Right before a subagent concludes its response',
-    PreCompact: 'Before conversation compaction',
-    PostCompact: 'After conversation compaction',
-    SessionEnd: 'When a session is ending',
-    PermissionRequest: 'When a permission dialog is displayed',
-    PermissionDenied: 'When a tool call is denied',
-    StopFailure: 'When the turn ends due to an API error',
-    TodoCreated: 'When a new todo item is created',
-    TodoCompleted: 'When a todo item is marked as completed',
-  };
-
-  private buildHookEventMetadata(): Record<string, ServeHookEventMeta> {
-    const events: Record<string, ServeHookEventMeta> = {};
-    for (const eventName of Object.values(HookEventName)) {
-      const meta: ServeHookEventMeta = {
-        description: QwenAgent.HOOK_EVENT_DESCRIPTIONS[eventName] ?? '',
-      };
-      const matcherKind = QwenAgent.HOOK_MATCHER_KINDS[eventName];
-      if (matcherKind) {
-        meta.matcherKind = matcherKind;
-      }
-      events[eventName] = meta;
-    }
-    return events;
-  }
-
   private serializeHookConfig(config: HookConfig): ServeHookConfig {
     switch (config.type) {
       case 'command':
@@ -2159,7 +2099,7 @@ class QwenAgent implements Agent {
           initialized: true,
           disabled,
           hooks: [],
-          events: this.buildHookEventMetadata(),
+          events: IDLE_HOOK_EVENTS,
         };
       }
       const registryEntries = hookSystem.getAllHooks();
@@ -2180,7 +2120,7 @@ class QwenAgent implements Agent {
         initialized: true,
         disabled,
         hooks,
-        events: this.buildHookEventMetadata(),
+        events: IDLE_HOOK_EVENTS,
       };
     } catch (error) {
       let disabled = false;
@@ -2192,10 +2132,10 @@ class QwenAgent implements Agent {
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.safeWorkspaceCwd(config),
-        initialized: true,
+        initialized: false,
         disabled,
         hooks: [],
-        events: this.buildHookEventMetadata(),
+        events: IDLE_HOOK_EVENTS,
         errors: [this.errorCell('hooks', error)],
       };
     }
@@ -2204,27 +2144,44 @@ class QwenAgent implements Agent {
   private buildSessionHooksStatus(sessionId: string): ServeSessionHooksStatus {
     const session = this.sessionOrThrow(sessionId);
     const config = session.getConfig();
-    const workspaceCwd = this.workspaceCwd(config);
-    const disabled = config.getDisableAllHooks();
-    const hookSystem = config.getHookSystem();
-    if (!hookSystem) {
-      return { v: STATUS_SCHEMA_VERSION, sessionId, workspaceCwd, disabled, hooks: [] };
+    try {
+      const workspaceCwd = this.workspaceCwd(config);
+      const disabled = config.getDisableAllHooks();
+      const hookSystem = config.getHookSystem();
+      if (!hookSystem) {
+        return { v: STATUS_SCHEMA_VERSION, sessionId, workspaceCwd, disabled, hooks: [] };
+      }
+      const sessionHooks = hookSystem.getSessionHooksManager().getAllSessionHooks(sessionId);
+      const hooks: ServeHookEntry[] = sessionHooks.map(
+        (entry): ServeHookEntry => ({
+          kind: 'hook',
+          eventName: entry.eventName,
+          config: this.serializeHookConfig(entry.config),
+          source: 'session',
+          ...(entry.matcher ? { matcher: entry.matcher } : {}),
+          ...(entry.sequential !== undefined ? { sequential: entry.sequential } : {}),
+          enabled: true,
+          hookId: entry.hookId,
+          ...(entry.skillRoot ? { skillRoot: entry.skillRoot } : {}),
+        }),
+      );
+      return { v: STATUS_SCHEMA_VERSION, sessionId, workspaceCwd, disabled, hooks };
+    } catch (error) {
+      let disabled = false;
+      try {
+        disabled = config.getDisableAllHooks();
+      } catch {
+        // config may be in a broken state; fall back to false
+      }
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        sessionId,
+        workspaceCwd: this.safeWorkspaceCwd(config),
+        disabled,
+        hooks: [],
+        errors: [this.errorCell('session_hooks', error)],
+      };
     }
-    const sessionHooks = hookSystem.getSessionHooksManager().getAllSessionHooks(sessionId);
-    const hooks: ServeHookEntry[] = sessionHooks.map(
-      (entry): ServeHookEntry => ({
-        kind: 'hook',
-        eventName: entry.eventName,
-        config: this.serializeHookConfig(entry.config),
-        source: 'session',
-        matcher: entry.matcher,
-        ...(entry.sequential !== undefined ? { sequential: entry.sequential } : {}),
-        enabled: true,
-        hookId: entry.hookId,
-        ...(entry.skillRoot ? { skillRoot: entry.skillRoot } : {}),
-      }),
-    );
-    return { v: STATUS_SCHEMA_VERSION, sessionId, workspaceCwd, disabled, hooks };
   }
 
   async extMethod(

@@ -172,6 +172,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'permission_mediation',
   'non_blocking_prompt',
   'session_rewind',
+  'workspace_hooks',
+  'session_hooks',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -881,6 +883,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspacePreflightCalls += 1;
       return workspacePreflightImpl();
     },
+    async getWorkspaceHooksStatus() {
+      return { v: 1 as const, workspaceCwd: '/tmp', initialized: true, disabled: false, hooks: [], events: {} };
+    },
     async getSessionContextStatus(sessionId) {
       sessionContextCalls.push(sessionId);
       return sessionContextImpl(sessionId);
@@ -896,6 +901,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionTasksStatus(sessionId) {
       sessionTasksCalls.push(sessionId);
       return sessionTasksImpl(sessionId);
+    },
+    async getSessionHooksStatus(_sessionId) {
+      return { v: 1 as const, sessionId: _sessionId, workspaceCwd: '/tmp', disabled: false, hooks: [] };
     },
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
