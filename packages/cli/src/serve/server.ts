@@ -1428,7 +1428,7 @@ export function createServeApp(
     }
   });
 
-  app.post('/session/:id/rewind', mutate(), async (req, res) => {
+  app.post('/session/:id/rewind', mutate({ strict: true }), async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
     const promptId = body['promptId'];

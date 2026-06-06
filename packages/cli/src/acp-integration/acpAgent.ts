@@ -1774,7 +1774,11 @@ class QwenAgent implements Agent {
               'Invalid promptId: non-numeric turn suffix',
             );
           }
-          turnIndex = parseInt(suffix, 10);
+          // promptId suffix is 1-based (Session increments turn before
+          // generating promptId), but rewindToTurn expects 0-based count
+          // of turns to keep. Snapshot N captures state before turn N
+          // executes, so rewinding to snapshot N means keeping N-1 turns.
+          turnIndex = parseInt(suffix, 10) - 1;
         }
 
         if (!Number.isInteger(turnIndex) || (turnIndex as number) < 0) {
