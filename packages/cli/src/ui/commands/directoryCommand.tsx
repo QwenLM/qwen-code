@@ -111,7 +111,7 @@ export const directoryCommand: SlashCommand = {
   action: async () => ({
     type: 'message' as const,
     messageType: 'info' as const,
-    content: t('Usage: /directory add <path> or /directory show'),
+    content: t('Usage: /directory add <path>[,<path>,...] or /directory show'),
   }),
   subCommands: [
     {
@@ -242,13 +242,13 @@ export const directoryCommand: SlashCommand = {
                   new ConditionalRulesRegistry(conditionalRules, projectRoot),
                 );
                 context.ui.setGeminiMdFileCount(fileCount);
+                messages.push(
+                  t(
+                    'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}',
+                    { directories: added.join('\n- ') },
+                  ),
+                );
               }
-              messages.push(
-                t(
-                  'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}',
-                  { directories: added.join('\n- ') },
-                ),
-              );
             } catch (error) {
               errors.push(
                 t('Error refreshing memory: {{error}}', {
