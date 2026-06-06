@@ -13,9 +13,9 @@ import { getDeviceFlowRegistry } from './auth/deviceFlow.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
 import {
   canonicalizeWorkspace,
-  createHttpAcpBridge,
-  type HttpAcpBridge,
-} from './httpAcpBridge.js';
+  createAcpSessionBridge,
+  type AcpSessionBridge,
+} from './acpSessionBridge.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -51,6 +51,7 @@ import {
 } from './server.js';
 import { initDaemonLogger, type DaemonLogger } from './daemonLogger.js';
 import { createSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
+import { createDaemonWorkspaceService } from './workspace-service/index.js';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 import type { ServeOptions } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
@@ -319,14 +320,14 @@ function withSettingsLock<T>(
 export interface RunHandle {
   server: Server;
   url: string;
-  bridge: HttpAcpBridge;
+  bridge: AcpSessionBridge;
   /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
 }
 
 export interface RunQwenServeDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
-  bridge?: HttpAcpBridge;
+  bridge?: AcpSessionBridge;
   /**
    * Workspace filesystem factory. When omitted, `runQwenServe`
    * constructs one using `boundWorkspace`, `trustedWorkspace`, and a
@@ -742,9 +743,36 @@ export async function runQwenServe(
     onDiagnosticLine: diagnosticSink,
   });
 
+  const persistDisabledToolsFn = (
+    workspace: string,
+    toolName: string,
+    enabled: boolean,
+  ): Promise<void> =>
+    withSettingsLock(workspace, async () => {
+      const fresh = loadSettings(workspace);
+      const wsScope = fresh.forScope(SettingScope.Workspace).settings;
+      const wsDisabled = wsScope.tools?.disabled;
+      const current = Array.isArray(wsDisabled)
+        ? wsDisabled.filter((v): v is string => typeof v === 'string')
+        : [];
+      const next = new Set(current);
+      if (enabled) next.delete(toolName);
+      else next.add(toolName);
+      fresh.setValue(
+        SettingScope.Workspace,
+        'tools.disabled',
+        [...next].sort(),
+      );
+    });
+
+  // Create the status provider once — shared between bridge and workspace
+  // service so both answer env/preflight cells from the same daemon-local
+  // implementation.
+  const statusProvider = createDaemonStatusProvider();
+
   const bridge =
     deps.bridge ??
-    createHttpAcpBridge({
+    createAcpSessionBridge({
       maxSessions: opts.maxSessions,
       ...(opts.eventRingSize !== undefined
         ? { eventRingSize: opts.eventRingSize }
@@ -764,57 +792,70 @@ export async function runQwenServe(
         ? { permissionConsensusQuorum }
         : {}),
       permissionAudit: permissionAuditPublisher,
-      // Inject the daemon-host status provider so the bridge can pull
-      // env / preflight cells through a typed seam instead of
-      // importing daemon-host helpers directly.
-      statusProvider: createDaemonStatusProvider(),
-      // Inject the WorkspaceFileSystem adapter so agent ACP
-      // `writeTextFile` / `readTextFile` calls go through the
-      // defensive fs layer (trust gate + atomic write + symlink
-      // resolution + audit emit).
+      // #4175 PR 22b/2: inject the daemon-host status provider so the
+      // bridge can pull env / preflight cells through a typed seam
+      // instead of importing daemon-host helpers directly. Production
+      // implementation wraps `buildEnvStatusFromProcess` and the
+      // (lifted) `buildDaemonPreflightCells` body.
+      statusProvider,
+      // F1 follow-up (#4319): inject the WorkspaceFileSystem adapter so
+      // agent ACP `writeTextFile` / `readTextFile` calls go through
+      // PR 18's defensive fs layer (trust gate + atomic write + symlink
+      // resolution + audit emit) instead of `BridgeClient`'s inline
+      // raw-fs proxy. Closes the `ws.ts:613` follow-up thread.
       fileSystem: createBridgeFileSystemAdapter(fsFactory),
-      ...(contextFilenameForInit !== undefined
-        ? { contextFilename: contextFilenameForInit }
-        : {}),
-      // `POST /session/:id/approval-mode` accepts an opt-in
-      // `persist: true` flag. We re-load settings on each persist call
-      // rather than caching a `LoadedSettings` handle — another writer
-      // could have touched the file between calls. Both persist
-      // callbacks run through `withSettingsLock` to serialize the
-      // read-modify-write cycle.
+      // #4175 Wave 4 PR 17: `POST /session/:id/approval-mode` accepts
+      // an opt-in `persist: true` flag. We re-load settings on each
+      // persist call rather than caching a `LoadedSettings` handle —
+      // another writer (CLI, another daemon, an editor) could have
+      // touched the file between calls, so the freshest state wins
+      // over a stale in-memory cache.
+      //
+      // #4282 fold-in 4 (qwen-latest C2): both persist callbacks run
+      // through `withSettingsLock` — a per-workspace promise chain that
+      // serializes the read-modify-write cycle. Without the lock, two
+      // concurrent `POST /workspace/tools/:name/enable` requests could
+      // both read the same pre-modification state and the second write
+      // would silently overwrite the first toggle, leaving the disk
+      // copy out of sync with the SDK reducer's view. The lock costs
+      // one tick of latency per call but eliminates the lost-update
+      // window for the entire process; cross-daemon races against the
+      // same workspace file remain (rare; documented).
       persistApprovalMode: (workspace, mode) =>
         withSettingsLock(workspace, async () => {
           const fresh = loadSettings(workspace);
           fresh.setValue(SettingScope.Workspace, 'tools.approvalMode', mode);
         }),
-      // `POST /workspace/tools/:name/enable` writes through this
-      // callback. Re-reads settings on each call and merges into the
-      // existing `tools.disabled` array. Reads from the WORKSPACE
-      // scope only — reading the merged union across all scopes would
-      // copy entries from higher scopes into the workspace file.
-      persistDisabledTools: (workspace, toolName, enabled) =>
-        withSettingsLock(workspace, async () => {
-          const fresh = loadSettings(workspace);
-          const wsScope = fresh.forScope(SettingScope.Workspace).settings;
-          const wsDisabled = wsScope.tools?.disabled;
-          const current = Array.isArray(wsDisabled)
-            ? wsDisabled.filter((v): v is string => typeof v === 'string')
-            : [];
-          const next = new Set(current);
-          if (enabled) next.delete(toolName);
-          else next.add(toolName);
-          fresh.setValue(
-            SettingScope.Workspace,
-            'tools.disabled',
-            [...next].sort(),
-          );
-        }),
     });
+
+  // Construct the DaemonWorkspaceService AFTER the bridge so it can
+  // close over the bridge's generic delegation methods. This service
+  // owns workspace-scoped status queries, tool toggle, init, and MCP
+  // restart — routes in server.ts delegate here instead of reaching
+  // into the bridge for workspace concerns.
+  const workspaceService = createDaemonWorkspaceService({
+    boundWorkspace,
+    contextFilename: contextFilenameForInit ?? 'QWEN.md',
+    // Daemon-host status provider for env + preflight cells.
+    statusProvider,
+    // Channel liveness check — proxied through the bridge's live-channel
+    // probe (not session count: a channel can be live with zero attached
+    // sessions during the cold-spawn window).
+    isChannelLive: () => bridge.isChannelLive(),
+    persistDisabledTools: persistDisabledToolsFn,
+    queryWorkspaceStatus: (method, idle) =>
+      bridge.queryWorkspaceStatus(method, idle),
+    invokeWorkspaceCommand: (method, params, invokeOpts) =>
+      bridge.invokeWorkspaceCommand(method, params, invokeOpts),
+    publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
+  });
+
   registerDaemonGaugeCallbacks({
     sessionCount: () => bridge.sessionCount,
     sseCount: () => getActiveSseCount(),
     heapUsed: () => process.memoryUsage().heapUsed,
   });
+
   let actualPort = opts.port;
   // Pass the already-canonical `boundWorkspace` into `createServeApp`
   // via `deps.boundWorkspace`. That field is the pre-canonicalized
@@ -833,6 +874,8 @@ export async function runQwenServe(
     qwenCodeVersion: cliVersion,
     fsFactory,
     daemonLog,
+    workspace: workspaceService,
+    persistDisabledTools: persistDisabledToolsFn,
   });
   // Pull the device-flow registry back out so the close hook can
   // dispose it before `bridge.shutdown()`, ensuring polling timers +

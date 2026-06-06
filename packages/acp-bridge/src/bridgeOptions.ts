@@ -116,7 +116,7 @@ export interface BridgeTelemetry {
 }
 
 /**
- * Construction options for `createHttpAcpBridge`. Most fields are
+ * Construction options for `createAcpSessionBridge`. Most fields are
  * tuning knobs with sensible defaults; `boundWorkspace` is the only
  * strictly-required field. See per-field JSDoc for caller contract.
  */
@@ -196,7 +196,7 @@ export interface BridgeOptions {
    * theoretically diverge from the runQwenServe canonicalize on
    * NFS-transient / mid-rename filesystems, landing the bridge with
    * one canonical form while `/capabilities` advertises another).
-   * Direct embeds / tests calling `createHttpAcpBridge` themselves
+   * Direct embeds / tests calling `createAcpSessionBridge` themselves
    * MUST canonicalize before passing.
    */
   boundWorkspace: string;
@@ -238,36 +238,7 @@ export interface BridgeOptions {
     mode: ApprovalMode,
   ) => Promise<void>;
   /**
-   * -- optional callback for mutating
-   * `tools.disabled` in workspace settings. Invoked by
-   * `setWorkspaceToolEnabled` to add (`enabled: false`) or remove
-   * (`enabled: true`) `toolName` from the persisted disabled set.
-   * The default `runQwenServe` wires this to a fresh
-   * `loadSettings(boundWorkspace)` per call so concurrent edits from
-   * other writers (CLI, another daemon, an editor) are picked up.
-   * Bridge tests / embedded callers may omit it; without the hook
-   * `setWorkspaceToolEnabled` throws a clear error rather than
-   * silently dropping the write.
-   */
-  persistDisabledTools?: (
-    boundWorkspace: string,
-    toolName: string,
-    enabled: boolean,
-  ) => Promise<void>;
-  /**
-   * Optional override for the basename
-   * (or single relative path) of the workspace context file written
-   * by `POST /workspace/init`. When omitted, falls back to
-   * `getCurrentGeminiMdFilename()` — the process-global value, which
-   * the daemon parent never updates because it doesn't go through
-   * `loadCliConfig`. Production callers (`runQwenServe`) snapshot the
-   * resolved filename from the workspace's merged settings at boot
-   * and pass it here so init writes the same file the ACP child
-   * reads. Bridge tests can pass any literal.
-   */
-  contextFilename?: string;
-  /**
-   * -- optional injection seam for daemon-host
+   * #4175 Wave 5 PR 22b/2 — optional injection seam for daemon-host
    * status cells (env snapshot, daemon preflight). Production
    * `qwen serve` provides
    * `createDaemonStatusProvider()` from

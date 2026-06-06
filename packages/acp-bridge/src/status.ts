@@ -48,7 +48,7 @@ export class BridgeTimeoutError extends Error {
   readonly label: string;
   readonly timeoutMs: number;
   constructor(label: string, timeoutMs: number) {
-    super(`HttpAcpBridge ${label} timed out after ${timeoutMs}ms`);
+    super(`AcpSessionBridge ${label} timed out after ${timeoutMs}ms`);
     this.name = 'BridgeTimeoutError';
     this.label = label;
     this.timeoutMs = timeoutMs;

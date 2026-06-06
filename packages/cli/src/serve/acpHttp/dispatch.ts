@@ -10,6 +10,10 @@ import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
+import type {
+  DaemonWorkspaceService,
+  WorkspaceRequestContext,
+} from '../workspace-service/types.js';
 import type { AcpConnection } from './connectionRegistry.js';
 import {
   QWEN_META_KEY,
@@ -162,6 +166,7 @@ export class AcpDispatcher {
   constructor(
     private readonly bridge: HttpAcpBridge,
     private readonly boundWorkspace: string,
+    private readonly workspace: DaemonWorkspaceService,
   ) {}
 
   private killOrphanSession(sessionId: string): void {
@@ -172,6 +177,19 @@ export class AcpDispatcher {
           `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
         ),
       );
+  }
+
+  /**
+   * Build the `WorkspaceRequestContext` for workspace-scoped operations
+   * routed through the workspace service. The ACP dispatch has no session
+   * context, so `sessionId` is omitted.
+   */
+  private wsCtx(conn: AcpConnection, method: string): WorkspaceRequestContext {
+    return {
+      originatorClientId: conn.clientId,
+      route: `ACP ${method}`,
+      workspaceCwd: this.boundWorkspace,
+    };
   }
 
   /**
@@ -731,30 +749,48 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}workspace/mcp`:
-          this.replyConn(conn, id, await this.bridge.getWorkspaceMcpStatus());
+          this.replyConn(
+            conn,
+            id,
+            await this.workspace.getWorkspaceMcpStatus(
+              this.wsCtx(conn, method),
+            ),
+          );
           return;
         case `${QWEN_METHOD_NS}workspace/skills`:
           this.replyConn(
             conn,
             id,
-            await this.bridge.getWorkspaceSkillsStatus(),
+            await this.workspace.getWorkspaceSkillsStatus(
+              this.wsCtx(conn, method),
+            ),
           );
           return;
         case `${QWEN_METHOD_NS}workspace/providers`:
           this.replyConn(
             conn,
             id,
-            await this.bridge.getWorkspaceProvidersStatus(),
+            await this.workspace.getWorkspaceProvidersStatus(
+              this.wsCtx(conn, method),
+            ),
           );
           return;
         case `${QWEN_METHOD_NS}workspace/env`:
-          this.replyConn(conn, id, await this.bridge.getWorkspaceEnvStatus());
+          this.replyConn(
+            conn,
+            id,
+            await this.workspace.getWorkspaceEnvStatus(
+              this.wsCtx(conn, method),
+            ),
+          );
           return;
         case `${QWEN_METHOD_NS}workspace/preflight`:
           this.replyConn(
             conn,
             id,
-            await this.bridge.getWorkspacePreflightStatus(),
+            await this.workspace.getWorkspacePreflightStatus(
+              this.wsCtx(conn, method),
+            ),
           );
           return;
 
@@ -773,9 +809,9 @@ export class AcpDispatcher {
             return;
           }
           const force = rawForce === true;
-          const result = await this.bridge.initWorkspace(
+          const result = await this.workspace.initWorkspace(
+            this.wsCtx(conn, method),
             { force },
-            conn.clientId,
           );
           this.replyConn(conn, id, result as unknown);
           return;
@@ -795,10 +831,10 @@ export class AcpDispatcher {
             }
             return;
           }
-          const result = await this.bridge.setWorkspaceToolEnabled(
+          const result = await this.workspace.setWorkspaceToolEnabled(
+            this.wsCtx(conn, method),
             toolName,
             params['enabled'] === true,
-            conn.clientId,
           );
           this.replyConn(conn, id, result as unknown);
           return;
@@ -836,9 +872,9 @@ export class AcpDispatcher {
             }
             return;
           }
-          const result = await this.bridge.restartMcpServer(
+          const result = await this.workspace.restartMcpServer(
+            this.wsCtx(conn, method),
             serverName,
-            conn.clientId,
             rawIdx !== undefined ? { entryIndex: rawIdx } : undefined,
           );
           this.replyConn(conn, id, result as unknown);

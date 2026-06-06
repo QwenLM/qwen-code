@@ -10,6 +10,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { mountAcpHttp } from './index.js';
 
 /**
@@ -176,32 +177,8 @@ class FakeBridge {
   async getSessionSupportedCommandsStatus(sessionId: string) {
     return { v: 1, sessionId, availableCommands: [], availableSkills: [] };
   }
-  async getWorkspaceMcpStatus() {
-    return { ok: true, v: 1, workspaceCwd: '/ws' };
-  }
-  async getWorkspaceSkillsStatus() {
-    return { ok: true };
-  }
-  async getWorkspaceProvidersStatus() {
-    return { ok: true };
-  }
-  async getWorkspaceEnvStatus() {
-    return { ok: true };
-  }
-  async getWorkspacePreflightStatus() {
-    return { ok: true };
-  }
   updateSessionMetadata(_s: string, metadata: unknown) {
     return metadata;
-  }
-  async setWorkspaceToolEnabled(toolName: string, enabled: boolean) {
-    return { toolName, enabled };
-  }
-  async initWorkspace() {
-    return { path: '/ws/QWEN.md', action: 'created' as const };
-  }
-  async restartMcpServer() {
-    return { ok: true };
   }
 
   recordHeartbeat() {
@@ -228,6 +205,38 @@ class FakeBridge {
   }
   async preheat() {}
 }
+
+// A minimal fake workspace service for dispatch tests.
+const fakeWorkspace = {
+  async getWorkspaceMcpStatus() {
+    return { ok: true, v: 1, workspaceCwd: '/ws' };
+  },
+  async getWorkspaceSkillsStatus() {
+    return { ok: true };
+  },
+  async getWorkspaceProvidersStatus() {
+    return { ok: true };
+  },
+  async getWorkspaceEnvStatus() {
+    return { ok: true };
+  },
+  async getWorkspacePreflightStatus() {
+    return { ok: true };
+  },
+  async setWorkspaceToolEnabled(
+    _ctx: unknown,
+    toolName: string,
+    enabled: boolean,
+  ) {
+    return { toolName, enabled };
+  },
+  async initWorkspace() {
+    return { path: '/ws/QWEN.md', action: 'created' as const };
+  },
+  async restartMcpServer() {
+    return { ok: true };
+  },
+} as unknown as DaemonWorkspaceService;
 
 // ── SSE client helper ────────────────────────────────────────────────
 async function* readSse(
@@ -284,6 +293,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     app.use(express.json());
     mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
       boundWorkspace: '/ws',
+      workspace: fakeWorkspace,
       enabled: true,
     });
     await new Promise<void>((resolve) => {
@@ -1029,6 +1039,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     app2.use(express.json());
     mountAcpHttp(app2, bridge as unknown as HttpAcpBridge, {
       boundWorkspace: '/ws',
+      workspace: fakeWorkspace,
       enabled: true,
       maxConnections: 1,
     });

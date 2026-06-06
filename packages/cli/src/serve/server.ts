@@ -53,7 +53,7 @@ import { mountAcpHttp } from './acpHttp/index.js';
 import {
   canonicalizeWorkspace,
   CancelSentinelCollisionError,
-  createHttpAcpBridge,
+  createAcpSessionBridge,
   InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
@@ -72,8 +72,8 @@ import {
   WorkspaceInitRaceError,
   WorkspaceMismatchError,
   type BridgeSessionSummary,
-  type HttpAcpBridge,
-} from './httpAcpBridge.js';
+  type AcpSessionBridge,
+} from './acpSessionBridge.js';
 import {
   getAdvertisedServeFeatures,
   getServeProtocolVersions,
@@ -93,6 +93,11 @@ import {
 } from './fs/index.js';
 import { registerWorkspaceFileReadRoutes } from './routes/workspaceFileRead.js';
 import { registerWorkspaceFileWriteRoutes } from './routes/workspaceFileWrite.js';
+import {
+  createDaemonWorkspaceService,
+  type DaemonWorkspaceService,
+  type WorkspaceRequestContext,
+} from './workspace-service/index.js';
 
 let activeSseCount = 0;
 export function getActiveSseCount(): number {
@@ -165,7 +170,7 @@ export function resolveBridgeFsFactory(input: {
 const WORKSPACE_SESSION_LIST_SIZE = 100;
 
 async function listWorkspaceSessionsForResponse(
-  bridge: HttpAcpBridge,
+  bridge: AcpSessionBridge,
   workspaceCwd: string,
 ): Promise<BridgeSessionSummary[]> {
   const persisted = await new SessionService(workspaceCwd).listSessions({
@@ -207,7 +212,7 @@ async function listWorkspaceSessionsForResponse(
 
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
-  bridge?: HttpAcpBridge;
+  bridge?: AcpSessionBridge;
   /**
    * Qwen Code version advertised to web/SDK clients. Production passes the
    * resolved CLI package version; tests/direct embeds may omit it.
@@ -249,12 +254,16 @@ export interface ServeAppDeps {
    */
   deviceFlowProviders?: DeviceFlowProvider[];
   /**
-   * Optional daemon logger. When provided, `sendBridgeError` routes
-   * each 5xx error through `daemonLog.error(...)` (which tees to stderr +
-   * the daemon log file). When omitted, falls back to existing
-   * stderr-only behavior.
+   * Optional daemon logger.
    */
   daemonLog?: DaemonLogger;
+  workspace?: DaemonWorkspaceService;
+  persistDisabledTools?: (
+    workspace: string,
+    toolName: string,
+    enabled: boolean,
+  ) => Promise<void>;
+  contextFilename?: string;
 }
 
 function resolveDaemonTelemetryRoute(
@@ -536,7 +545,7 @@ export function createServeApp(
   });
   const bridge =
     deps.bridge ??
-    createHttpAcpBridge({
+    createAcpSessionBridge({
       maxSessions: opts.maxSessions,
       eventRingSize: opts.eventRingSize,
       boundWorkspace,
@@ -650,14 +659,8 @@ export function createServeApp(
   // `runQwenServe`'s shutdown dispose call.
   setDeviceFlowRegistry(app, deviceFlowRegistry);
 
-  // Daemon logger — when injected via `deps.daemonLog`, 5xx errors logged
-  // by `sendBridgeError` route through the structured daemon log (which
-  // already tees to stderr). When absent (tests, direct embeds), the
-  // legacy `writeStderrLine` path is preserved.
   const { daemonLog } = deps;
 
-  // Curry `daemonLog` into the module-level error helpers so route
-  // handlers don't repeat the parameter at every call site.
   const sendBridgeError = (
     res: import('express').Response,
     err: unknown,
@@ -668,6 +671,27 @@ export function createServeApp(
     err: unknown,
     ctx: { route: string; sessionId?: string },
   ) => sendPermissionVoteErrorImpl(res, err, ctx, daemonLog);
+
+  const workspace: DaemonWorkspaceService =
+    deps.workspace ??
+    createDaemonWorkspaceService({
+      boundWorkspace,
+      contextFilename: deps.contextFilename ?? 'QWEN.md',
+      statusProvider: createDaemonStatusProvider(),
+      isChannelLive: () => bridge.isChannelLive(),
+      persistDisabledTools:
+        deps.persistDisabledTools ??
+        (async () => {
+          throw new Error(
+            'setWorkspaceToolEnabled requires persistDisabledTools in ServeAppDeps',
+          );
+        }),
+      queryWorkspaceStatus: (method, idle) =>
+        bridge.queryWorkspaceStatus(method, idle),
+      invokeWorkspaceCommand: (method, params, invokeOpts) =>
+        bridge.invokeWorkspaceCommand(method, params, invokeOpts),
+      publishWorkspaceEvent: (event) => bridge.publishWorkspaceEvent(event),
+    });
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -876,6 +900,18 @@ export function createServeApp(
 
   app.use(daemonTelemetryMiddleware(boundWorkspace));
 
+  function buildWorkspaceCtx(
+    req: import('express').Request,
+    route: string,
+    clientId?: string,
+  ): WorkspaceRequestContext {
+    return {
+      originatorClientId: clientId,
+      route,
+      workspaceCwd: boundWorkspace,
+    };
+  }
+
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
@@ -906,9 +942,10 @@ export function createServeApp(
     res.status(200).json(envelope);
   });
 
-  app.get('/workspace/mcp', async (_req, res) => {
+  app.get('/workspace/mcp', async (req, res) => {
     try {
-      res.status(200).json(await bridge.getWorkspaceMcpStatus());
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/mcp');
+      res.status(200).json(await workspace.getWorkspaceMcpStatus(ctx));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/mcp' });
     }
@@ -937,9 +974,10 @@ export function createServeApp(
     }
   });
 
-  app.get('/workspace/skills', async (_req, res) => {
+  app.get('/workspace/skills', async (req, res) => {
     try {
-      res.status(200).json(await bridge.getWorkspaceSkillsStatus());
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/skills');
+      res.status(200).json(await workspace.getWorkspaceSkillsStatus(ctx));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/skills' });
     }
@@ -953,9 +991,10 @@ export function createServeApp(
     }
   });
 
-  app.get('/workspace/providers', async (_req, res) => {
+  app.get('/workspace/providers', async (req, res) => {
     try {
-      res.status(200).json(await bridge.getWorkspaceProvidersStatus());
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/providers');
+      res.status(200).json(await workspace.getWorkspaceProvidersStatus(ctx));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/providers' });
     }
@@ -977,19 +1016,28 @@ export function createServeApp(
     safeBody,
   });
 
-  // TODO: emit `audit.diagnostic_read` events from these two routes
-  // so operators can correlate diagnostic reads.
-  app.get('/workspace/env', async (_req, res) => {
+  // TODO(#4175 PR 24 — PermissionMediator audit log): emit an
+  // `audit.diagnostic_read` event from these two routes so a security
+  // operator can correlate "who read what when". Read-only diagnostic
+  // surfaces are reconnaissance vectors (env: secret-var presence;
+  // preflight: workspace path + CLI entry + Node version) and the absence
+  // of audit emission here is a deliberate scope deferral, not an
+  // oversight — the audit topic does not yet exist; PR 24 lands the
+  // shared `bridge.emitAudit` infrastructure that this and PR 18's
+  // `fs.access` events will both use.
+  app.get('/workspace/env', async (req, res) => {
     try {
-      res.status(200).json(await bridge.getWorkspaceEnvStatus());
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/env');
+      res.status(200).json(await workspace.getWorkspaceEnvStatus(ctx));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/env' });
     }
   });
 
-  app.get('/workspace/preflight', async (_req, res) => {
+  app.get('/workspace/preflight', async (req, res) => {
     try {
-      res.status(200).json(await bridge.getWorkspacePreflightStatus());
+      const ctx = buildWorkspaceCtx(req, 'GET /workspace/preflight');
+      res.status(200).json(await workspace.getWorkspacePreflightStatus(ctx));
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/preflight' });
     }
@@ -1518,7 +1566,7 @@ export function createServeApp(
           ...forwardedBody,
           sessionId,
           prompt,
-        } as Parameters<HttpAcpBridge['sendPrompt']>[1],
+        } as Parameters<AcpSessionBridge['sendPrompt']>[1],
         abort.signal,
         {
           ...(clientId !== undefined ? { clientId } : {}),
@@ -1602,7 +1650,7 @@ export function createServeApp(
         {
           ...(body as object),
           sessionId,
-        } as Parameters<HttpAcpBridge['cancelSession']>[1],
+        } as Parameters<AcpSessionBridge['cancelSession']>[1],
         clientId !== undefined ? { clientId } : undefined,
       );
       if (daemonLog) {
@@ -1819,7 +1867,7 @@ export function createServeApp(
           ...(body as object),
           sessionId,
           modelId,
-        } as Parameters<HttpAcpBridge['setSessionModel']>[1],
+        } as Parameters<AcpSessionBridge['setSessionModel']>[1],
         clientId !== undefined ? { clientId } : undefined,
       );
       res.status(200).json(response);
@@ -2059,9 +2107,14 @@ export function createServeApp(
         entryIndex = parsed;
       }
       try {
-        const result = await bridge.restartMcpServer(
-          serverName,
+        const ctx = buildWorkspaceCtx(
+          req,
+          'POST /workspace/mcp/:server/restart',
           clientId,
+        );
+        const result = await workspace.restartMcpServer(
+          ctx,
+          serverName,
           entryIndex !== undefined ? { entryIndex } : undefined,
         );
         res.status(200).json(result);
@@ -2194,9 +2247,9 @@ export function createServeApp(
   );
 
   app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
-    // Scaffold-only init: the bridge writes an empty QWEN.md without
-    // invoking the LLM. Default refuses overwrite (409); `{force: true}`
-    // overrides.
+    // #4175 Wave 4 PR 17. Scaffold-only init: the workspace service
+    // writes an empty QWEN.md without invoking the LLM. Default refuses
+    // overwrite (409); body `{force: true}` overrides.
     const body = safeBody(req);
     const force = body['force'];
     if (force !== undefined && typeof force !== 'boolean') {
@@ -2210,10 +2263,10 @@ export function createServeApp(
     const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
     if (clientId === null) return;
     try {
-      const result = await bridge.initWorkspace(
-        { force: force === true },
-        clientId,
-      );
+      const ctx = buildWorkspaceCtx(req, 'POST /workspace/init', clientId);
+      const result = await workspace.initWorkspace(ctx, {
+        force: force === true,
+      });
       res.status(200).json(result);
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /workspace/init' });
@@ -2269,10 +2322,15 @@ export function createServeApp(
       const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
       try {
-        const result = await bridge.setWorkspaceToolEnabled(
+        const ctx = buildWorkspaceCtx(
+          req,
+          'POST /workspace/tools/:name/enable',
+          clientId,
+        );
+        const result = await workspace.setWorkspaceToolEnabled(
+          ctx,
           toolName,
           enabled,
-          clientId,
         );
         res.status(200).json(result);
       } catch (err) {
@@ -2747,7 +2805,7 @@ export function createServeApp(
   // decision. Mounted AFTER the REST routes (distinct path, no overlap)
   // and BEFORE the final error handler so malformed `/acp` bodies still
   // route through the JSON error contract below.
-  mountAcpHttp(app, bridge, { boundWorkspace });
+  mountAcpHttp(app, bridge, { boundWorkspace, workspace });
 
   // Final error handler. `express.json()` throws `SyntaxError` (with
   // `status: 400`) on malformed body — without this 4-arg middleware
@@ -2840,7 +2898,7 @@ const INVALID_PERMISSION_OUTCOME_ERROR =
   '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
 
 type PermissionVoteResponse = Parameters<
-  HttpAcpBridge['respondToPermission']
+  AcpSessionBridge['respondToPermission']
 >[1];
 
 /**
@@ -3087,7 +3145,7 @@ function validateMcpRuntimeServerName(
 function parseAndValidateWorkspaceClientId(
   req: import('express').Request,
   res: import('express').Response,
-  bridge: HttpAcpBridge,
+  bridge: AcpSessionBridge,
 ): string | undefined | null {
   const raw = parseClientIdHeader(req, res);
   if (raw === null || raw === undefined) return raw;

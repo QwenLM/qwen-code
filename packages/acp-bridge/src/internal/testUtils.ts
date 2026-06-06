@@ -61,9 +61,9 @@ import type {
   SetSessionModeRequest,
   SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
-import { createHttpAcpBridge } from '../bridge.js';
+import { createAcpSessionBridge } from '../bridge.js';
 import type { BridgeOptions } from '../bridgeOptions.js';
-import type { HttpAcpBridge } from '../bridgeTypes.js';
+import type { AcpSessionBridge } from '../bridgeTypes.js';
 import type { AcpChannel } from '../channel.js';
 
 // Workspace fixtures must round-trip through `path.resolve` so the
@@ -77,8 +77,8 @@ export const WS_B = path.resolve(path.sep, 'work', 'b');
 export const SESS_A = `sess:${WS_A}`;
 
 /**
- * Convenience wrapper: `createHttpAcpBridge` requires `boundWorkspace`
- * (1 daemon = 1 workspace). Tests that only ever talk
+ * Convenience wrapper: `createAcpSessionBridge` requires `boundWorkspace`
+ * (per #3803 §02 — 1 daemon = 1 workspace). Tests that only ever talk
  * to `WS_A` would otherwise repeat `boundWorkspace: WS_A` everywhere;
  * this helper defaults it. Tests that need a different bind path (e.g.
  * the mismatch test) pass `boundWorkspace` explicitly.
@@ -90,8 +90,10 @@ export const SESS_A = `sess:${WS_A}`;
  * wires `createDaemonStatusProvider()` for the 4 daemon-host
  * integration tests.
  */
-export function makeBridge(opts: Partial<BridgeOptions> = {}): HttpAcpBridge {
-  return createHttpAcpBridge({
+export function makeBridge(
+  opts: Partial<BridgeOptions> = {},
+): AcpSessionBridge {
+  return createAcpSessionBridge({
     boundWorkspace: WS_A,
     ...opts,
   });
