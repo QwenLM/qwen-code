@@ -170,6 +170,17 @@ export const forkCommand: SlashCommand = {
       };
     }
 
+    config.getGeminiClient().addHistory({
+      role: 'user',
+      parts: [
+        {
+          text: t('User launched a background fork via /fork: {{directive}}', {
+            directive,
+          }),
+        },
+      ],
+    });
+
     return {
       type: 'message',
       messageType: 'info',

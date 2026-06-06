@@ -32,6 +32,7 @@ describe('forkCommand', () => {
   let mockExecute: ReturnType<typeof vi.fn>;
   let mockBuild: ReturnType<typeof vi.fn>;
   let mockGetTool: ReturnType<typeof vi.fn>;
+  let mockAddHistory: ReturnType<typeof vi.fn>;
 
   const historyWithTurn = [
     { role: 'user' as const, parts: [{ text: 'hello' }] },
@@ -39,7 +40,10 @@ describe('forkCommand', () => {
   ];
 
   const createConfig = (overrides: Record<string, unknown> = {}) => ({
-    getGeminiClient: () => ({ getHistoryShallow: () => historyWithTurn }),
+    getGeminiClient: () => ({
+      addHistory: mockAddHistory,
+      getHistoryShallow: () => historyWithTurn,
+    }),
     getModel: () => 'test-model',
     isForkSubagentEnabled: () => true,
     getToolRegistry: () => ({ getTool: mockGetTool }),
@@ -51,6 +55,7 @@ describe('forkCommand', () => {
     mockExecute = vi.fn().mockResolvedValue({ llmContent: 'launched' });
     mockBuild = vi.fn().mockReturnValue({ execute: mockExecute });
     mockGetTool = vi.fn().mockReturnValue({ build: mockBuild });
+    mockAddHistory = vi.fn();
     mockContext = createMockCommandContext({
       services: { config: createConfig() },
     });
@@ -193,6 +198,14 @@ describe('forkCommand', () => {
     expect(builtParams.description).toBeTruthy();
 
     expect(mockExecute).toHaveBeenCalledTimes(1);
+    expect(mockAddHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [
+        {
+          text: 'User launched a background fork via /fork: review the current code',
+        },
+      ],
+    });
 
     // Immediate, non-blocking confirmation.
     expect(result).toMatchObject({ type: 'message', messageType: 'info' });
