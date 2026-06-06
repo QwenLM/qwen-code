@@ -90,6 +90,29 @@ describe('runBootstrap', () => {
     expect(client.start).not.toHaveBeenCalled();
   });
 
+  it('auto-approves install under YOLO (ctx.autoApproveInstall) without prompting', async () => {
+    // First use (no install state). In YOLO mode the scheduler bypasses
+    // the confirmation dialog, so its onConfirm never records approval.
+    // promptInstallApproval is set to REFUSE here to prove the YOLO path
+    // skips it entirely rather than coincidentally returning true.
+    deps.promptInstallApproval = vi.fn(async () => false);
+    const client = makeFakeClient();
+
+    await runBootstrap(
+      client as never,
+      { signal: new AbortController().signal, autoApproveInstall: true },
+      deps,
+    );
+
+    // Did not throw "declined", and never consulted the headless prompt.
+    expect(deps.promptInstallApproval).not.toHaveBeenCalled();
+    expect(client.start).toHaveBeenCalledOnce();
+    // Approval is persisted so later (interactive) calls skip the prompt too.
+    const { loadInstallState } = await import('./install-state.js');
+    const state = await loadInstallState(tmpHome);
+    expect(state?.approvedPackageSpec).toBe(deps.packageSpec);
+  });
+
   it('persists approval on success', async () => {
     const client = makeFakeClient();
     await runBootstrap(

@@ -37,7 +37,7 @@ This guide provides solutions to common issues and debugging tips, including top
 ## Frequently asked questions (FAQs)
 
 - **Q: How do I update Qwen Code to the latest version?**
-  - A: If you installed it globally via `npm`, update it using the command `npm install -g @qwen-code/qwen-code@latest`. If you compiled it from source, pull the latest changes from the repository, and then rebuild using the command `npm run build`.
+  - A: If you installed Qwen Code with the standalone installer, rerun the standalone install command. If you installed it globally via `npm`, update it using the command `npm install -g @qwen-code/qwen-code@latest`. If you compiled it from source, pull the latest changes from the repository, and then rebuild using the command `npm run build`.
 
 - **Q: Where are the Qwen Code configuration or settings files stored?**
   - A: The Qwen Code configuration is stored in two `settings.json` files:
@@ -60,6 +60,7 @@ This guide provides solutions to common issues and debugging tips, including top
   - **Cause:** The CLI is not correctly installed or it is not in your system's `PATH`.
   - **Solution:**
     The update depends on how you installed Qwen Code:
+    - If you installed `qwen` with the standalone installer, rerun the standalone install command and then open a new terminal.
     - If you installed `qwen` globally, check that your `npm` global binary directory is in your `PATH`. You can update using the command `npm install -g @qwen-code/qwen-code@latest`.
     - If you are running `qwen` from source, ensure you are using the correct command to invoke it (e.g. `node packages/cli/dist/index.js ...`). To update, pull the latest changes from the repository, and then rebuild using the command `npm run build`.
 

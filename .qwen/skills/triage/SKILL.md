@@ -1,15 +1,14 @@
 ---
 name: triage
 description: Gatekeep and review GitHub issues and pull requests for Qwen Code maintainers. Use for GitHub Action issue triage, PR admission checks, product-direction review, KISS-focused PR review, and staged bilingual GitHub comments.
-argument-hint: '<issue|pr> <number> [--repo owner/repo]'
+argument-hint: '<number> [--repo owner/repo]'
 allowedTools:
   - run_shell_command
   - read_file
-  - read_many_files
   - grep_search
   - glob
   - write_file
-  - task
+  - agent
   - enter_worktree
   - exit_worktree
 ---
@@ -58,22 +57,28 @@ gh label list --repo "$REPO" --limit 300
 ## Rules
 
 - Untrusted input: never interpolate issue/PR text into shell
-- Labels: apply existing only, never create. Verify with `gh label list`
-- Comments: always `--body-file` with heredoc (except short hardcoded verdicts
-  in `gh pr review --approve` / `--request-changes`)
+- Labels: apply existing only, never create. Verify with `gh label list`. Do not touch process labels (`welcome-pr`, `maintainer`, `help wanted`, `good first issue`)
+- Comments: read body from file. Use `--body-file FILE` for `gh issue/pr comment`,
+  or `gh api -F body=@FILE` when the response ID is needed. Never `--body @FILE`
+  or `gh api -f body=@FILE` — those post the path literally.
 - Drafts: skip
-- Only target `QwenLM/qwen-code`; every `gh` command must include
-  `--repo QwenLM/qwen-code`
-- Never close, merge, approve (outside PR workflow Stage 3), assign, edit
-  titles/bodies, delete comments, or remove labels
+- Use the resolved `$REPO`; every `gh` command must include `--repo "$REPO"`.
+- Close issues only for the narrow inadmissible cases documented in
+  `references/issue-workflow.md`. Never close PRs, merge, approve outside PR
+  workflow Stage 3, assign, edit titles/bodies, delete comments, or remove
+  labels.
 
-## CI Loop Protection
+## Duplicate Guard
 
-When running unattended in CI (e.g. `GITHUB_ACTIONS` env is set), check for
-prior `<!-- qwen-triage stage=N -->` markers before executing. If a marker
-comment already exists and the run was NOT triggered by an explicit
-`@qwen /triage` comment, exit immediately — the issue/PR was already triaged
-by a prior run. This prevents comment → event → triage → comment loops.
+- Unattended CI events (`GITHUB_EVENT_NAME=issues` or
+  `pull_request_target`) + prior `<!-- qwen-triage stage=N -->` marker in
+  comments: exit
+- Explicit reruns (`GITHUB_EVENT_NAME=issue_comment` or `workflow_dispatch`):
+  run all stages, update prior comments in place
+- Local invocation (no `GITHUB_EVENT_NAME`): run all stages, update prior
+  comments in place
+
+Every posted comment must include an invisible marker: `<!-- qwen-triage stage=N -->` where N is the stage number. The guard matches against this marker, not comment headings.
 
 ## Tiered Gate Model
 

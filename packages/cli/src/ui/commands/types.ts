@@ -179,6 +179,7 @@ export interface OpenDialogActionReturn {
     | 'fast-model'
     | 'subagent_create'
     | 'subagent_list'
+    | 'skills_manage'
     | 'trust'
     | 'permissions'
     | 'approval-mode'
@@ -369,6 +370,19 @@ export interface SlashCommand {
    * submitting this command. Defaults are inferred from command metadata.
    */
   acceptsInput?: boolean;
+
+  /**
+   * When true, accepting this command from the slash auto-completion popup
+   * (e.g. typing `/skil` and pressing Enter on the highlighted `skills`
+   * suggestion) submits `/<name>` immediately rather than just inserting
+   * the text and forcing a second Enter.
+   *
+   * Set this only on commands whose bare action takes no required argument
+   * — typically commands whose action just opens a dialog. Commands with
+   * subCommands or arg-based completion should leave this false so users
+   * can navigate further.
+   */
+  submitOnAccept?: boolean;
 
   /**
    * Describes when to use this command — injected into the model-visible
