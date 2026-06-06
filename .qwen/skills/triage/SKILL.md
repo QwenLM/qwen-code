@@ -5,11 +5,10 @@ argument-hint: '<number> [--repo owner/repo]'
 allowedTools:
   - run_shell_command
   - read_file
-  - read_many_files
   - grep_search
   - glob
   - write_file
-  - task
+  - agent
   - enter_worktree
   - exit_worktree
 ---
@@ -47,6 +46,8 @@ gh label list --repo "$REPO" --limit 200
   comments: exit
 - Explicit reruns (`GITHUB_EVENT_NAME=issue_comment` or `workflow_dispatch`):
   run all stages, update prior comments in place
+- Local invocation (no `GITHUB_EVENT_NAME`): run all stages, update prior
+  comments in place
 
 Every posted comment must include an invisible marker: `<!-- qwen-triage stage=N -->` where N is the stage number. The guard matches against this marker, not comment headings.
 

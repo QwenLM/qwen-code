@@ -72,8 +72,14 @@ jobs:
               "maxSessionTurns": 25,
               "coreTools": [
                 "run_shell_command",
-                "write_file"
+                "write_file",
+                "read_file",
+                "grep_search",
+                "glob",
+                "agent",
+                "enter_worktree",
+                "exit_worktree"
               ],
               "sandbox": false
             }
-          prompt: '/triage ${{ steps.resolve.outputs.number }}'
+          prompt: '/triage ${{ steps.resolve.outputs.number }} --repo ${{ github.repository }}'
