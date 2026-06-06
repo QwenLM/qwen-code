@@ -630,6 +630,7 @@ export interface DaemonSessionRewoundData {
   promptId: string;
   targetTurnIndex: number;
   filesChanged: string[];
+  filesFailed: string[];
   originatorClientId?: string;
   [key: string]: unknown;
 }
@@ -1368,7 +1369,8 @@ function isSessionRewoundData(
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['promptId']) &&
     isFiniteNumber(value['targetTurnIndex']) &&
-    Array.isArray(value['filesChanged'])
+    Array.isArray(value['filesChanged']) &&
+    Array.isArray(value['filesFailed'])
   );
 }
 

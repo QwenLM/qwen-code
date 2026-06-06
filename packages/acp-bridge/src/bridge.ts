@@ -3537,6 +3537,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             promptId: req.promptId,
             targetTurnIndex: (response['targetTurnIndex'] as number) ?? 0,
             filesChanged: (response['filesChanged'] as string[]) ?? [],
+            filesFailed: (response['filesFailed'] as string[]) ?? [],
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });

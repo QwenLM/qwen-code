@@ -2136,7 +2136,10 @@ class QwenAgent implements Agent {
       }
       case SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots: {
         const sessionId = params['sessionId'];
-        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        if (
+          typeof sessionId !== 'string' ||
+          !SESSION_ID_RE.test(sessionId)
+        ) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing sessionId',
@@ -2971,8 +2974,10 @@ class QwenAgent implements Agent {
             const fileResult = await fhs.rewind(promptId, true);
             filesChanged = fileResult.filesChanged;
             filesFailed = fileResult.filesFailed;
-          } catch {
-            // File history snapshot may not exist — non-fatal
+          } catch (err) {
+            const reason =
+              err instanceof Error ? err.message : String(err);
+            filesFailed = [`file-history-rewind: ${reason}`];
           }
         }
 
