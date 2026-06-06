@@ -115,7 +115,7 @@ export default defineConfig({
 ```ts
 /**
  * @license
- * Copyright 2026 Qwen Code Remote (fork)
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -130,11 +130,18 @@ export const SESSION_READ: RcScope = 'session:read';
 
 ```ts
 import { describe, it, expect } from 'vitest';
+import { DaemonClient } from '@qwen-code/sdk';
 import { SESSION_READ } from './scopes.js';
 
-describe('scopes', () => {
+describe('toolchain smoke', () => {
   it('defines the session:read scope', () => {
     expect(SESSION_READ).toBe('session:read');
+  });
+
+  // Proves vitest can resolve the dual CJS/ESM @qwen-code/sdk workspace dep
+  // NOW, rather than discovering an interop break four tasks later.
+  it('can import DaemonClient from @qwen-code/sdk', () => {
+    expect(DaemonClient).toBeTypeOf('function');
   });
 });
 ```
@@ -146,13 +153,21 @@ Run:
 cd /home/evan/projects/qwen-code
 npm install
 npm run build --workspace @qwen-code/sdk
+ls packages/sdk-typescript/dist/index.mjs packages/sdk-typescript/dist/index.cjs packages/sdk-typescript/dist/index.d.ts
 ```
-Expected: install completes and links `@qwen-code/rc-gateway`; SDK build produces `packages/sdk-typescript/dist/index.cjs` + `index.d.ts`.
+Expected: install completes and links `@qwen-code/rc-gateway`; the `ls` lists all
+three artifacts. If `dist/index.mjs` is missing (the package's publish flow runs
+`build && bundle:cli`), also run `npm run build --workspace @qwen-code/sdk &&
+npm run --workspace @qwen-code/sdk prepack` or build everything once with
+`npm run build:packages`.
 
 - [ ] **Step 7: Run the smoke test**
 
 Run: `npm run test --workspace @qwen-code/rc-gateway`
-Expected: PASS (1 test).
+Expected: PASS (2 tests). If the `@qwen-code/sdk` import fails with
+`ERR_MODULE_NOT_FOUND` or a named-export interop error, add to
+`vitest.config.ts`: `test: { server: { deps: { inline: ['@qwen-code/sdk'] } } }`
+and re-run.
 
 - [ ] **Step 8: Commit**
 
@@ -240,7 +255,7 @@ Expected: FAIL (`TokenStore` not exported).
 ```ts
 /**
  * @license
- * Copyright 2026 Qwen Code Remote (fork)
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -416,7 +431,7 @@ Expected: FAIL (`PairingService` not exported).
 ```ts
 /**
  * @license
- * Copyright 2026 Qwen Code Remote (fork)
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -484,7 +499,7 @@ git commit -m "feat(rc-gateway): single-use pairing codes"
 ```ts
 /**
  * @license
- * Copyright 2026 Qwen Code Remote (fork)
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -596,7 +611,7 @@ Expected: FAIL (`bearerResolve` not exported).
 ```ts
 /**
  * @license
- * Copyright 2026 Qwen Code Remote (fork)
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -661,7 +676,7 @@ daemon's (`id:` line + `data:` JSON envelope).
 ```ts
 /**
  * @license
- * Copyright 2026 Qwen Code Remote (fork)
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -710,8 +725,15 @@ export async function startStubDaemon(
       Connection: 'keep-alive',
     });
     for (const f of frames) {
+      // IMPORTANT: the SDK's parseSseStream reads the event id from INSIDE
+      // the data JSON envelope (`parsed.id`, required to be an integer >= 1),
+      // and ignores the SSE `id:` line. So the id MUST live in the JSON. We
+      // also emit the `id:` line to mirror real SSE framing (harmless; the
+      // DaemonClient ignores it, but downstream EventSource clients use it).
       res.write(`id: ${f.id}\n`);
-      res.write(`data: ${JSON.stringify({ v: 1, type: f.type, data: f.data })}\n\n`);
+      res.write(
+        `data: ${JSON.stringify({ v: 1, id: f.id, type: f.type, data: f.data })}\n\n`,
+      );
     }
     res.end();
   });
@@ -846,7 +868,7 @@ Expected: FAIL (`createSessionEventsRoute` not exported).
 ```ts
 /**
  * @license
- * Copyright 2026 Qwen Code Remote (fork)
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -942,7 +964,7 @@ git commit -m "feat(rc-gateway): SSE proxy route with Last-Event-ID + 502 mappin
 ```ts
 /**
  * @license
- * Copyright 2026 Qwen Code Remote (fork)
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -977,7 +999,7 @@ export function createPairRedeemRoute(
 ```ts
 /**
  * @license
- * Copyright 2026 Qwen Code Remote (fork)
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -1190,7 +1212,7 @@ Expected: FAIL (`startDaemon` not exported).
 ```ts
 /**
  * @license
- * Copyright 2026 Qwen Code Remote (fork)
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -1307,7 +1329,7 @@ check below rather than a unit test.
 ```ts
 /**
  * @license
- * Copyright 2026 Qwen Code Remote (fork)
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -1365,14 +1387,19 @@ if (process.argv[2] === 'serve') {
 }
 ```
 
-- [ ] **Step 2: Typecheck and build**
+- [ ] **Step 2: Typecheck, lint, and build**
 
 Run:
 ```bash
 npm run typecheck --workspace @qwen-code/rc-gateway
+npm run lint --workspace @qwen-code/rc-gateway
 npm run build --workspace @qwen-code/rc-gateway
 ```
-Expected: no type errors; `packages/rc-gateway/dist/cli.js` exists.
+Expected: no type errors; lint clean (the repo enforces the
+`/** @license ... Copyright 2025 Qwen Team ... */` header via `eslint-rules/` —
+every `src/*.ts` file in this plan already carries it; if lint flags a missing/
+mismatched header, copy the exact block from `packages/cli/src/serve/auth.ts`);
+`packages/rc-gateway/dist/cli.js` exists.
 
 - [ ] **Step 3: Run the full package test suite**
 
