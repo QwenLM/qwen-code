@@ -867,16 +867,12 @@ export function asKnownDaemonEvent(
 function isSessionRewoundData(
   value: unknown,
 ): value is DaemonSessionRewoundData {
-  if (typeof value !== 'object' || value === null) return false;
-  const r = value as Record<string, unknown>;
   return (
-    typeof r['sessionId'] === 'string' &&
-    r['sessionId'] !== '' &&
-    typeof r['promptId'] === 'string' &&
-    r['promptId'] !== '' &&
-    typeof r['targetTurnIndex'] === 'number' &&
-    Number.isFinite(r['targetTurnIndex']) &&
-    Array.isArray(r['filesChanged'])
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['promptId']) &&
+    isFiniteNumber(value['targetTurnIndex']) &&
+    Array.isArray(value['filesChanged'])
   );
 }
 
