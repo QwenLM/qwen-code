@@ -1072,6 +1072,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         workspacePreflightCalls += 1;
         return workspacePreflightImpl();
       }
+      if (method === 'qwen/status/workspace/hooks') {
+        workspaceHooksCalls += 1;
+        return workspaceHooksImpl();
+      }
       return idle();
     },
     async invokeWorkspaceCommand(
@@ -1737,7 +1741,7 @@ describe('createServeApp', () => {
         ],
         events: {
           PreToolUse: {
-            description: 'Before a tool is executed',
+            description: 'Before tool execution',
             matcherKind: 'toolName',
           },
         },
