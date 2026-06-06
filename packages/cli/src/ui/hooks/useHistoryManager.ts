@@ -16,6 +16,9 @@ type HistoryItemUpdater = (
   prevItem: HistoryItem,
 ) => Partial<HistoryItemWithoutId>;
 
+const UI_COMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
+const UI_COMPACT_KEEP_RECENT = 20;
+
 export interface UseHistoryManagerReturn {
   history: HistoryItem[];
   addItem: (itemData: HistoryItemWithoutId, baseTimestamp: number) => number; // Returns the generated ID
@@ -26,6 +29,7 @@ export interface UseHistoryManagerReturn {
   clearItems: () => void;
   loadHistory: (newHistory: HistoryItem[]) => void;
   truncateToItem: (itemId: number) => void;
+  compactOldItems: () => void;
 }
 
 /**
@@ -135,6 +139,77 @@ export function useHistory(): UseHistoryManagerReturn {
     });
   }, []);
 
+  const compactOldItems = useCallback(() => {
+    setHistory((prev) => {
+      if (prev.length === 0) return prev;
+
+      let thoughtKept = 0;
+      let thoughtRemoved = 0;
+      let toolGroupsCompacted = 0;
+
+      const next = prev
+        .filter((item) => {
+          if (
+            item.type === 'gemini_thought' ||
+            item.type === 'gemini_thought_content'
+          ) {
+            thoughtKept++;
+            if (thoughtKept > UI_COMPACT_KEEP_RECENT) {
+              thoughtRemoved++;
+              return false;
+            }
+          }
+          return true;
+        })
+        .map((item) => {
+          if (item.type !== 'tool_group') return item;
+          const hasOldOutput = item.tools.some(
+            (t) =>
+              typeof t.resultDisplay === 'string' ||
+              (typeof t.resultDisplay === 'object' &&
+                t.resultDisplay !== null &&
+                'fileDiff' in t.resultDisplay),
+          );
+          if (!hasOldOutput) return item;
+          toolGroupsCompacted++;
+          return {
+            ...item,
+            tools: item.tools.map((t) => {
+              if (typeof t.resultDisplay === 'string') {
+                return { ...t, resultDisplay: UI_COMPACT_CLEARED_MESSAGE };
+              }
+              if (
+                typeof t.resultDisplay === 'object' &&
+                t.resultDisplay !== null &&
+                'fileDiff' in t.resultDisplay
+              ) {
+                return {
+                  ...t,
+                  resultDisplay: {
+                    ...t.resultDisplay,
+                    fileDiff: '',
+                    originalContent: null,
+                    newContent: '',
+                  },
+                };
+              }
+              return t;
+            }),
+          };
+        });
+
+      if (thoughtRemoved > 0 || toolGroupsCompacted > 0) {
+        debugLogger.debug(
+          `[COMPACT_UI_HISTORY] removed ${thoughtRemoved} thought item(s), ` +
+            `compacted ${toolGroupsCompacted} tool group(s), ` +
+            `historyLength ${prev.length} -> ${next.length}, ` +
+            `memory=${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)}MB`,
+        );
+      }
+      return thoughtRemoved > 0 || toolGroupsCompacted > 0 ? next : prev;
+    });
+  }, []);
+
   return useMemo(
     () => ({
       history,
@@ -143,7 +218,16 @@ export function useHistory(): UseHistoryManagerReturn {
       clearItems,
       loadHistory,
       truncateToItem,
+      compactOldItems,
     }),
-    [history, addItem, updateItem, clearItems, loadHistory, truncateToItem],
+    [
+      history,
+      addItem,
+      updateItem,
+      clearItems,
+      loadHistory,
+      truncateToItem,
+      compactOldItems,
+    ],
   );
 }

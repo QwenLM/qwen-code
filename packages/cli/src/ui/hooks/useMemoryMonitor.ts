@@ -12,15 +12,22 @@ import { type HistoryItemWithoutId, MessageType } from '../types.js';
 const debugLogger = createDebugLogger('MEMORY_MONITOR');
 
 export const MEMORY_WARNING_THRESHOLD = 7 * 1024 * 1024 * 1024; // 7GB in bytes
+export const MEMORY_UI_COMPACT_THRESHOLD = 5 * 1024 * 1024 * 1024; // 5GB in bytes
 export const MEMORY_CHECK_INTERVAL = 60 * 1000; // one minute
 export const MEMORY_DEBUG_INTERVAL = 30 * 1000; // 30 seconds for debug logging
 
 interface MemoryMonitorOptions {
   addItem: (item: HistoryItemWithoutId, timestamp: number) => void;
+  compactOldItems?: () => void;
 }
 
-export const useMemoryMonitor = ({ addItem }: MemoryMonitorOptions) => {
+export const useMemoryMonitor = ({
+  addItem,
+  compactOldItems,
+}: MemoryMonitorOptions) => {
   useEffect(() => {
+    let uiCompacted = false;
+
     // Debug logging interval - logs memory usage every 30 seconds
     const debugIntervalId = setInterval(() => {
       const memUsage = process.memoryUsage();
@@ -43,17 +50,33 @@ export const useMemoryMonitor = ({ addItem }: MemoryMonitorOptions) => {
 
     // Warning interval - warns user if memory exceeds threshold
     const warningIntervalId = setInterval(() => {
-      const usage = process.memoryUsage().rss;
-      if (usage > MEMORY_WARNING_THRESHOLD) {
+      const usage = process.memoryUsage();
+
+      // UI history compaction when heap exceeds threshold
+      if (
+        !uiCompacted &&
+        compactOldItems &&
+        usage.heapUsed > MEMORY_UI_COMPACT_THRESHOLD
+      ) {
+        uiCompacted = true;
+        debugLogger.debug(
+          `[UI_COMPACT] heapUsed=${(usage.heapUsed / 1024 / 1024).toFixed(1)}MB ` +
+            `exceeds ${(MEMORY_UI_COMPACT_THRESHOLD / 1024 / 1024).toFixed(0)}MB threshold, ` +
+            `compacting UI history`,
+        );
+        compactOldItems();
+      }
+
+      if (usage.rss > MEMORY_WARNING_THRESHOLD) {
         debugLogger.warn(
-          `[MEMORY_WARNING] High memory usage detected: ${(usage / (1024 * 1024 * 1024)).toFixed(2)} GB`,
+          `[MEMORY_WARNING] High memory usage detected: ${(usage.rss / (1024 * 1024 * 1024)).toFixed(2)} GB`,
         );
         addItem(
           {
             type: MessageType.WARNING,
             text:
               `High memory usage detected: ${(
-                usage /
+                usage.rss /
                 (1024 * 1024 * 1024)
               ).toFixed(2)} GB. ` +
               'If you experience a crash, please file a bug report by running `/bug`',
@@ -68,5 +91,5 @@ export const useMemoryMonitor = ({ addItem }: MemoryMonitorOptions) => {
       clearInterval(debugIntervalId);
       clearInterval(warningIntervalId);
     };
-  }, [addItem]);
+  }, [addItem, compactOldItems]);
 };
