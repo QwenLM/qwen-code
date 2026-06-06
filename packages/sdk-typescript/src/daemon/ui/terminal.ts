@@ -103,6 +103,12 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `${event.toolName} ${event.enabled ? 'enabled' : 'disabled'}`,
         '36',
       );
+    case 'workspace.settings.changed':
+      return terminalLine(
+        'settings',
+        `${event.key} changed (scope: ${event.scope})`,
+        '36',
+      );
     case 'workspace.initialized':
       return terminalLine(
         'workspace',

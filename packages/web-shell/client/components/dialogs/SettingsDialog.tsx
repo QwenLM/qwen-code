@@ -158,6 +158,7 @@ export function SettingsDialog({
 
   const groups = useMemo(() => groupByCategory(settings), [settings]);
   const rows = useMemo(() => flattenGroups(groups), [groups]);
+  const [restartPending, setRestartPending] = useState(false);
 
   useEffect(() => {
     if (error) setMessage(error.message);
@@ -192,8 +193,6 @@ export function SettingsDialog({
       setTimeout(() => inputRef.current?.focus(), 0);
     }
   }, [editMode]);
-
-  const [restartPending, setRestartPending] = useState(false);
 
   const handleSetValue = useCallback(
     (key: string, value: unknown) => {

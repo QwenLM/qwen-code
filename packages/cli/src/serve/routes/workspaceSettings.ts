@@ -230,7 +230,7 @@ export function registerWorkspaceSettingsRoutes(
 
       if (typeof scope !== 'string' || !VALID_WRITE_SCOPES.has(scope)) {
         res.status(400).json({
-          error: 'scope must be "user" or "workspace"',
+          error: `scope must be one of: ${[...VALID_WRITE_SCOPES].join(', ')}`,
           code: 'invalid_scope',
         });
         return;
