@@ -47,23 +47,27 @@ vi.mock('node:child_process', () => ({
   execFile: vi.fn(),
 }));
 
-// Mock node:fs
-vi.mock('node:fs', async () => {
-  const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
-  return {
-    ...actual,
-    statSync: vi.fn().mockReturnValue({ size: 100 }),
-  };
-});
-
+// Fully manual mock for node:fs/promises.
+// We intentionally do NOT mock node:fs root, to avoid cross-test pollution
+// with other files like startupProfiler.test.ts that also mock node:fs.
+// Mock node:fs/promises using importOriginal to preserve the module structure
+// for indirect dependencies (e.g. debugLogger, chatCompressionService).
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
-    stat: vi.fn().mockImplementation(async () => ({ size: 100 })),
+    stat: vi.fn().mockResolvedValue({ size: 100 }),
     mkdir: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),
     readdir: vi.fn().mockResolvedValue([]),
+    writeFile: vi.fn().mockResolvedValue(undefined),
+    appendFile: vi.fn().mockResolvedValue(undefined),
+    access: vi.fn().mockResolvedValue(undefined),
+    copyFile: vi.fn().mockResolvedValue(undefined),
+    rename: vi.fn().mockResolvedValue(undefined),
+    rm: vi.fn().mockResolvedValue(undefined),
+    rmdir: vi.fn().mockResolvedValue(undefined),
+    readFile: vi.fn().mockResolvedValue(Buffer.from('')),
   };
 });
 
@@ -133,6 +137,7 @@ const originalPlatform = process.platform;
 
 describe('clipboardUtils', () => {
   beforeEach(() => {
+    vi.resetModules();
     vi.clearAllMocks();
     resetLinuxClipboardTool();
     // Set up Wayland env as default
@@ -331,11 +336,13 @@ describe('clipboardUtils', () => {
         return child;
       });
 
-      const result = await saveClipboardImage('/tmp/test');
+      await saveClipboardImage('/tmp/test');
+
+      // Verify the branching decision: wl-paste with --type image/png was used,
+      // and python3 PIL was NOT called (PNG preferred over BMP).
       expect(spawnCalls).toHaveLength(2);
-      // Only 2 spawns — python3 should NOT have been called
       expect(spawnCalls.map((c) => c.command)).not.toContain('python3');
-      expect(result === null || result?.includes('clipboard-')).toBe(true);
+      expect(spawnCalls[1].args).toContain('image/png');
     });
   });
 

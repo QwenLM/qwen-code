@@ -251,18 +251,22 @@ async function checkClipboardForImage(
 export async function clipboardHasImage(): Promise<boolean> {
   cachedWlPasteImageTypes = null; // Fresh check each time
   if (process.platform === 'linux') {
-    const tool = getLinuxClipboardTool();
-    if (tool === 'wl-paste') {
-      return checkClipboardForImage('wl-paste', ['--list-types']);
-    }
-    if (tool === 'xclip') {
-      return checkClipboardForImage('xclip', [
-        '-selection',
-        'clipboard',
-        '-t',
-        'TARGETS',
-        '-o',
-      ]);
+    try {
+      const tool = getLinuxClipboardTool();
+      if (tool === 'wl-paste') {
+        return checkClipboardForImage('wl-paste', ['--list-types']);
+      }
+      if (tool === 'xclip') {
+        return checkClipboardForImage('xclip', [
+          '-selection',
+          'clipboard',
+          '-t',
+          'TARGETS',
+          '-o',
+        ]);
+      }
+    } catch (error) {
+      debugLogger.error('Error checking clipboard for image:', error);
     }
     return false;
   }
