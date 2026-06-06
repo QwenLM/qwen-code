@@ -51,6 +51,7 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'workspace_initialized',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
+  'session_rewound',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -405,6 +406,15 @@ export interface DaemonMcpServerRestartRefusedData {
   [key: string]: unknown;
 }
 
+export interface DaemonSessionRewoundData {
+  sessionId: string;
+  promptId: string;
+  targetTurnIndex: number;
+  filesChanged: string[];
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -489,6 +499,10 @@ export type DaemonMcpServerRestartRefusedEvent = DaemonEventEnvelope<
   'mcp_server_restart_refused',
   DaemonMcpServerRestartRefusedData
 >;
+export type DaemonSessionRewoundEvent = DaemonEventEnvelope<
+  'session_rewound',
+  DaemonSessionRewoundData
+>;
 
 export type DaemonAuthDeviceFlowStartedEvent = DaemonEventEnvelope<
   'auth_device_flow_started',
@@ -534,7 +548,8 @@ export type DaemonControlEvent =
   | DaemonToolToggledEvent
   | DaemonWorkspaceInitializedEvent
   | DaemonMcpServerRestartedEvent
-  | DaemonMcpServerRestartRefusedEvent;
+  | DaemonMcpServerRestartRefusedEvent
+  | DaemonSessionRewoundEvent;
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
@@ -668,6 +683,8 @@ export interface DaemonSessionViewState {
   lastMcpRestart?: DaemonMcpServerRestartedData;
   mcpRestartRefusedCount: number;
   lastMcpRestartRefused?: DaemonMcpServerRestartRefusedData;
+  rewindCount: number;
+  lastRewind?: DaemonSessionRewoundData;
 }
 
 export function createDaemonSessionViewState(
@@ -711,6 +728,8 @@ export function createDaemonSessionViewState(
     lastMcpRestart: seed.lastMcpRestart,
     mcpRestartRefusedCount: seed.mcpRestartRefusedCount ?? 0,
     lastMcpRestartRefused: seed.lastMcpRestartRefused,
+    rewindCount: seed.rewindCount ?? 0,
+    lastRewind: seed.lastRewind,
   };
 }
 
@@ -836,9 +855,29 @@ export function asKnownDaemonEvent(
       return isMcpServerRestartRefusedData(event.data)
         ? (event as DaemonMcpServerRestartRefusedEvent)
         : undefined;
+    case 'session_rewound':
+      return isSessionRewoundData(event.data)
+        ? (event as DaemonSessionRewoundEvent)
+        : undefined;
     default:
       return undefined;
   }
+}
+
+function isSessionRewoundData(
+  value: unknown,
+): value is DaemonSessionRewoundData {
+  if (typeof value !== 'object' || value === null) return false;
+  const r = value as Record<string, unknown>;
+  return (
+    typeof r['sessionId'] === 'string' &&
+    r['sessionId'] !== '' &&
+    typeof r['promptId'] === 'string' &&
+    r['promptId'] !== '' &&
+    typeof r['targetTurnIndex'] === 'number' &&
+    Number.isFinite(r['targetTurnIndex']) &&
+    Array.isArray(r['filesChanged'])
+  );
 }
 
 export function reduceDaemonSessionEvent(
@@ -1063,6 +1102,12 @@ export function reduceDaemonSessionEvent(
         ...base,
         mcpRestartRefusedCount: base.mcpRestartRefusedCount + 1,
         lastMcpRestartRefused: mergeOriginator(event.data, event),
+      };
+    case 'session_rewound':
+      return {
+        ...base,
+        rewindCount: base.rewindCount + 1,
+        lastRewind: mergeOriginator(event.data, event),
       };
     default: {
       const _exhaustive: never = event;

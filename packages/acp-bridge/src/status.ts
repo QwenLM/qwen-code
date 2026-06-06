@@ -95,6 +95,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   workspacePreflight: 'qwen/status/workspace/preflight',
   sessionContext: 'qwen/status/session/context',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
+  sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
 } as const;
 
 /**
@@ -106,6 +107,7 @@ export const SERVE_STATUS_EXT_METHODS = {
  */
 export const SERVE_CONTROL_EXT_METHODS = {
   sessionApprovalMode: 'qwen/control/session/approval_mode',
+  sessionRewind: 'qwen/control/session/rewind',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
 } as const;
 

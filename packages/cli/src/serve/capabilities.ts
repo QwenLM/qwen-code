@@ -180,6 +180,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // status route (extension data on `/capabilities` would inflate the
   // descriptor shape; we keep the registry uniform).
   auth_device_flow: { since: 'v1' },
+  session_rewind: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;

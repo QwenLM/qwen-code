@@ -135,6 +135,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // baseline assertion below mirrors that even though PR 21 landed
   // before PR 17 chronologically.
   'auth_device_flow',
+  'session_rewind',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -145,9 +146,12 @@ const EXPECTED_STAGE1_FEATURES = [
 // matches the real ordering.
 const EXPECTED_REGISTERED_FEATURES = [
   // Same order as `SERVE_CAPABILITY_REGISTRY` declaration:
-  ...EXPECTED_STAGE1_FEATURES.filter((f) => f !== 'auth_device_flow'),
+  ...EXPECTED_STAGE1_FEATURES.filter(
+    (f) => f !== 'auth_device_flow' && f !== 'session_rewind',
+  ),
   'require_auth',
   'auth_device_flow',
+  'session_rewind',
 ] as const;
 
 interface FakeBridgeOpts {

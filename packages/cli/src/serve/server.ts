@@ -41,6 +41,8 @@ import {
   McpServerNotFoundError,
   McpServerRestartFailedError,
   RestoreInProgressError,
+  SessionBusyError,
+  InvalidRewindTargetError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceInitConflictError,
@@ -1408,6 +1410,52 @@ export function createServeApp(
     },
   );
 
+  app.get('/session/:id/rewind/snapshots', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    try {
+      res.status(200).json(await bridge.getRewindSnapshots(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/rewind/snapshots',
+        sessionId,
+      });
+    }
+  });
+
+  app.post('/session/:id/rewind', mutate(), async (req, res) => {
+    const sessionId = req.params['id'];
+    const body = safeBody(req);
+    const promptId = body['promptId'];
+    if (typeof promptId !== 'string' || promptId.length === 0) {
+      res.status(400).json({
+        error: '`promptId` is required and must be a non-empty string',
+        code: 'missing_prompt_id',
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const response = await bridge.rewindSession(
+        sessionId,
+        { promptId },
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(response);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/rewind',
+        sessionId,
+      });
+    }
+  });
+
   app.post(
     '/workspace/mcp/:server/restart',
     mutate({ strict: true }),
@@ -2510,6 +2558,23 @@ function sendBridgeError(
       sessionId: err.sessionId,
       activeAction: err.activeAction,
       requestedAction: err.requestedAction,
+    });
+    return;
+  }
+  if (err instanceof SessionBusyError) {
+    res.set('Retry-After', '5');
+    res.status(409).json({
+      error: err.message,
+      code: 'session_busy',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof InvalidRewindTargetError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_rewind_target',
+      sessionId: err.sessionId,
     });
     return;
   }
