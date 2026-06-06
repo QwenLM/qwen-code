@@ -87,7 +87,9 @@ function buildSettingsResponse(
       key,
     );
 
-    const values: SettingDescriptor['values'] = { effective };
+    const values: SettingDescriptor['values'] = {
+      effective: effective !== undefined ? effective : def.default,
+    };
     if (userVal !== undefined) values.user = userVal;
     if (wsVal !== undefined) values.workspace = wsVal;
 

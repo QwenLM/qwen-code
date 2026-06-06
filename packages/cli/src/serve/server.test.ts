@@ -1280,6 +1280,20 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_settings') {
+          expect(predicate({ persistSettingAvailable: true })).toBe(true);
+          expect(predicate({ persistSettingAvailable: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              persistSettingAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         // Future conditional tag. Authors must add a branch above with
         // the toggle field that drives this predicate. Failing here is
         // intentional: it forces the new conditional tag to ship with a
