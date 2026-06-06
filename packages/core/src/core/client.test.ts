@@ -149,7 +149,7 @@ vi.mock('../utils/nextSpeakerChecker', () => ({
 }));
 vi.mock('../utils/environmentContext', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../utils/environmentContext')>();
+    await importOriginal<typeof import('../utils/environmentContext.js')>();
   return {
     ...actual,
     getEnvironmentContext: vi

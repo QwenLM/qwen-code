@@ -70,7 +70,7 @@ export async function getEnvironmentContext(config: Config): Promise<Part[]> {
 
   const context = `
 This is the Qwen Code. We are setting up the context for our chat.
-Today's date is ${today} (formatted according to the user's locale).
+Today's date is ${today}.
 My operating system is: ${platform}
 ${directoryContext}
         `.trim();
