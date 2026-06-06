@@ -261,7 +261,15 @@ export const directoryCommand: SlashCommand = {
           if (added.length > 0) {
             const gemini = config.getGeminiClient();
             if (gemini) {
-              await gemini.addDirectoryContext();
+              try {
+                await gemini.addDirectoryContext();
+              } catch (error) {
+                errors.push(
+                  t('Error notifying model of new directories: {{error}}', {
+                    error: (error as Error).message,
+                  }),
+                );
+              }
             }
             messages.push(
               t('Successfully added directories:\n- {{directories}}', {
@@ -282,7 +290,8 @@ export const directoryCommand: SlashCommand = {
           if (errors.length > 0) {
             return {
               type: 'message' as const,
-              messageType: 'error' as const,
+              messageType:
+                added.length > 0 ? ('warning' as const) : ('error' as const),
               content: [...messages, ...errors].join('\n'),
             };
           }

@@ -29,6 +29,25 @@ describe('directoryCommand', () => {
     (c) => c.name === 'show',
   );
 
+  it('declares acp in supportedModes for parent and subcommands', () => {
+    expect(directoryCommand.supportedModes).toEqual(['interactive', 'acp']);
+    expect(addCommand!.supportedModes).toEqual(['interactive', 'acp']);
+    expect(showCommand!.supportedModes).toEqual(['interactive', 'acp']);
+  });
+
+  it('add subcommand has argumentHint', () => {
+    expect(addCommand!.argumentHint).toBe('<path>[,<path>,...]');
+  });
+
+  it('returns usage hint when invoked without a subcommand', async () => {
+    const result = await directoryCommand.action?.({} as CommandContext, '');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('/directory add'),
+    });
+  });
+
   beforeEach(() => {
     mockWorkspaceDirectories = [
       path.normalize('/home/user/project1'),
@@ -101,6 +120,31 @@ describe('directoryCommand', () => {
         type: 'message',
         messageType: 'error',
         content: 'Please provide at least one path to add.',
+      });
+    });
+
+    it('should return an error on restrictive sandbox', async () => {
+      vi.mocked(mockConfig.isRestrictiveSandbox).mockReturnValue(true);
+      if (!addCommand?.action) throw new Error('No action');
+      const result = await addCommand.action(mockContext, '/some/path');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('restrictive sandbox'),
+      });
+    });
+
+    it('should handle paths with spaces without splitting on space', async () => {
+      const spacePath = path.normalize('/home/user/My Project');
+      if (!addCommand?.action) throw new Error('No action');
+      const result = await addCommand.action(mockContext, spacePath);
+      expect(mockWorkspaceContext.addDirectory).toHaveBeenCalledWith(spacePath);
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          `Successfully added directories:\n- ${spacePath}`,
+        ),
       });
     });
 
@@ -298,10 +342,10 @@ describe('directoryCommand', () => {
         `${validPath},${invalidPath}`,
       );
 
-      // Mixed result should be error type since there are errors
+      // Mixed result should be warning type since some paths succeeded
       expect(result).toMatchObject({
         type: 'message',
-        messageType: 'error',
+        messageType: 'warning',
       });
       const content = (result as { content: string }).content;
       expect(content).toContain(
@@ -309,6 +353,11 @@ describe('directoryCommand', () => {
       );
       expect(content).toContain(
         `Error adding '${invalidPath}': ${error.message}`,
+      );
+      expect(mockContext.services.settings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        [validPath],
       );
     });
   });
