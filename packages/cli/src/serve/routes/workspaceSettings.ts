@@ -71,9 +71,9 @@ function getAllowedKeys(): Set<string> {
 
 function buildSettingsResponse(
   boundWorkspace: string,
+  keys: ReadonlySet<string>,
 ): SettingsResponse {
   const loaded = loadSettings(boundWorkspace);
-  const keys = Array.from(getAllowedKeys());
 
   const settings: SettingDescriptor[] = [];
   for (const key of keys) {
@@ -161,7 +161,6 @@ function validateSettingValue(
 }
 
 const SCOPE_MAP: Record<string, SettingScope> = {
-  user: SettingScope.User,
   workspace: SettingScope.Workspace,
 };
 
@@ -204,7 +203,7 @@ export function registerWorkspaceSettingsRoutes(
 
   app.get('/workspace/settings', (_req: Request, res: Response) => {
     try {
-      const response = buildSettingsResponse(boundWorkspace);
+      const response = buildSettingsResponse(boundWorkspace, allowedKeys);
       res.status(200).json(response);
     } catch (err) {
       writeStderrLine(

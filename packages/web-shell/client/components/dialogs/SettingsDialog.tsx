@@ -27,9 +27,7 @@ function formatValue(
   scope: Scope,
   t: Translator,
 ): string {
-  const val =
-    scope === 'user' ? setting.values.user : setting.values.workspace;
-  const effective = val !== undefined ? val : setting.values.effective;
+  const effective = resolveValue(setting, scope);
   if (effective === undefined || effective === null) return '';
   if (setting.type === 'boolean')
     return effective === true ? t('settings.value.on') : t('settings.value.off');
@@ -156,8 +154,10 @@ export function SettingsDialog({
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const groups = useMemo(() => groupByCategory(settings), [settings]);
-  const rows = useMemo(() => flattenGroups(groups), [groups]);
+  const rows = useMemo(
+    () => flattenGroups(groupByCategory(settings)),
+    [settings],
+  );
   const [restartPending, setRestartPending] = useState(false);
 
   useEffect(() => {
