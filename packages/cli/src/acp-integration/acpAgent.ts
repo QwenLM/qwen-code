@@ -803,7 +803,13 @@ export async function extractFilesFromTarGz(
   }
 
   const normalizedDirectory = directoryPath.replace(/^\/+|\/+$/g, '');
-  const directoryPrefix = normalizedDirectory ? `${normalizedDirectory}/` : '';
+  // Treat '.' (SKILL.md at the repository root) as the empty prefix; otherwise
+  // the prefix becomes './' and never matches the root-stripped archive paths
+  // (e.g. 'SKILL.md'), yielding zero extracted files.
+  const directoryPrefix =
+    normalizedDirectory && normalizedDirectory !== '.'
+      ? `${normalizedDirectory}/`
+      : '';
   const files: DownloadedSkillFile[] = [];
 
   for (let offset = 0; offset + 512 <= archive.length; ) {
@@ -834,11 +840,68 @@ export async function extractFilesFromTarGz(
   return files;
 }
 
+// GitHub host suffixes a download may legitimately redirect to (raw/codeload
+// commonly 302 to their object CDN for geo/CDN routing). Redirects to anything
+// outside these are rejected, preserving the SSRF guard while not breaking
+// real downloads.
+const ALLOWED_REDIRECT_HOST_SUFFIXES = [
+  '.githubusercontent.com',
+  '.github.com',
+  '.github.io',
+];
+
+function isAllowedSkillFetchHost(hostname: string): boolean {
+  if (ALLOWED_SKILL_SOURCE_HOSTS.has(hostname)) return true;
+  return ALLOWED_REDIRECT_HOST_SUFFIXES.some((suffix) =>
+    hostname.endsWith(suffix),
+  );
+}
+
+/**
+ * Fetch that follows redirects manually, validating every hop stays on an
+ * allowed GitHub host over HTTPS. This keeps the SSRF protection of
+ * `redirect: 'manual'` (a malicious repo cannot bounce the fetch to an internal
+ * endpoint) while still following GitHub's legitimate CDN redirects, which
+ * plain `redirect: 'manual'` would surface as a download failure.
+ */
+async function fetchAllowedGitHub(
+  url: string,
+  init: RequestInit = {},
+  maxRedirects = 5,
+): Promise<Response> {
+  let current = url;
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    const response = await fetch(current, { ...init, redirect: 'manual' });
+    if (response.status < 300 || response.status >= 400) {
+      return response;
+    }
+    const location = response.headers?.get('location');
+    if (!location) return response;
+    let next: URL;
+    try {
+      next = new URL(location, current);
+    } catch {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill download redirected to an invalid URL',
+      );
+    }
+    if (next.protocol !== 'https:' || !isAllowedSkillFetchHost(next.hostname)) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Skill download redirected to a disallowed host',
+      );
+    }
+    current = next.toString();
+  }
+  throw RequestError.invalidParams(
+    undefined,
+    'Skill download exceeded the maximum number of redirects',
+  );
+}
+
 async function fetchBytes(url: string): Promise<Uint8Array> {
-  // `redirect: 'manual'` stops a redirect hop from an allowed host bouncing the
-  // fetch to an internal endpoint; GitHub's raw/codeload endpoints respond 200
-  // directly so this does not affect legitimate skill downloads.
-  const response = await fetch(url, { redirect: 'manual' });
+  const response = await fetchAllowedGitHub(url);
   if (!response.ok) {
     throw RequestError.invalidParams(
       undefined,
@@ -879,14 +942,13 @@ async function downloadGitHubSkillDirectoryFromArchive(
   githubUrl: GitHubBlobSkillUrl,
   directoryPath: string,
 ): Promise<DownloadedSkillFile[]> {
-  const archiveUrl = `https://codeload.github.com/${githubUrl.owner}/${githubUrl.repo}/tar.gz/${githubUrl.ref}`;
-  const response = await fetch(archiveUrl, {
+  const archiveUrl = `https://codeload.github.com/${githubUrl.owner}/${githubUrl.repo}/tar.gz/${encodeURIComponent(
+    githubUrl.ref,
+  )}`;
+  const response = await fetchAllowedGitHub(archiveUrl, {
     headers: {
       'User-Agent': 'qwen-code',
     },
-    // Match fetchBytes: don't follow a redirect from an allowed host into an
-    // internal endpoint (SSRF defense).
-    redirect: 'manual',
   });
   if (!response.ok) {
     throw RequestError.invalidParams(
@@ -923,13 +985,11 @@ async function fetchGitHubDirectoryItems(
 ): Promise<unknown[]> {
   const encodedPath = encodeGitHubPath(directoryPath);
   const apiUrl = `https://api.github.com/repos/${githubUrl.owner}/${githubUrl.repo}/contents/${encodedPath}?ref=${encodeURIComponent(githubUrl.ref)}`;
-  const response = await fetch(apiUrl, {
+  const response = await fetchAllowedGitHub(apiUrl, {
     headers: {
       Accept: 'application/vnd.github+json',
       'User-Agent': 'qwen-code',
     },
-    // SSRF defense: don't follow redirects into internal endpoints.
-    redirect: 'manual',
   });
   if (!response.ok) {
     throw RequestError.invalidParams(
@@ -1550,7 +1610,7 @@ function normalizeOptionalNumber(value: unknown): number | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   const numberValue =
     typeof value === 'number' ? value : Number.parseInt(String(value), 10);
-  if (!Number.isFinite(numberValue) || numberValue < 0) {
+  if (!Number.isFinite(numberValue) || numberValue <= 0) {
     throw RequestError.invalidParams(undefined, 'Expected a positive number');
   }
   return numberValue;
@@ -1718,6 +1778,43 @@ function redactMcpServerSecrets(
     ...server,
     env: redactValues(server.env),
     headers: redactValues(server.headers),
+  };
+}
+
+/**
+ * Reverse of redaction on write: when a client echoes back the
+ * `__redacted__` sentinel (because it read the masked value via getCore and
+ * re-submitted the whole config), restore the previously stored real value
+ * instead of persisting the literal sentinel. Keys with no prior value are
+ * dropped, since there is no secret to restore.
+ */
+function restoreRedactedMcpSecrets(
+  server: QwenMcpServerConfig,
+  existing: Record<string, unknown>,
+): QwenMcpServerConfig {
+  const restore = (
+    incoming: Record<string, string> | undefined,
+    prior: unknown,
+  ): Record<string, string> | undefined => {
+    if (!incoming) return incoming;
+    const priorRecord = toRecord(prior);
+    const result: Record<string, string> = {};
+    for (const [key, value] of Object.entries(incoming)) {
+      if (value !== REDACTED_MCP_SECRET) {
+        result[key] = value;
+        continue;
+      }
+      const priorValue = priorRecord[key];
+      if (typeof priorValue === 'string') {
+        result[key] = priorValue;
+      }
+    }
+    return result;
+  };
+  return {
+    ...server,
+    env: restore(server.env, existing['env']),
+    headers: restore(server.headers, existing['headers']),
   };
 }
 
@@ -4216,10 +4313,14 @@ class QwenAgent implements Agent {
         const scope =
           settingScope === SettingScope.Workspace ? 'workspace' : 'user';
         const existing = readScopeSettings(settings, scope);
+        const existingServers = toRecord(existing['mcpServers']);
         const mcpServers = {
-          ...toRecord(existing['mcpServers']),
+          ...existingServers,
           [name.trim()]: toStoredMcpServerConfig(
-            normalizeMcpServerConfig(params['server']),
+            restoreRedactedMcpSecrets(
+              normalizeMcpServerConfig(params['server']),
+              toRecord(existingServers[name.trim()]),
+            ),
           ),
         };
         settings.setValue(settingScope, 'mcpServers', mcpServers);
@@ -4271,11 +4372,15 @@ class QwenAgent implements Agent {
         // missing/negative index) as an append.
         if (
           typeof index === 'number' &&
+          Number.isInteger(index) &&
           index >= 0 &&
           index < eventHooks.length
         ) {
           eventHooks[index] = hook;
         } else {
+          // Missing/negative/non-integer index → append. (A non-integer like
+          // 1.5 would otherwise create a sparse, non-integer array property
+          // that JSON.stringify silently drops, corrupting the hook list.)
           eventHooks.push(hook);
         }
         hooksRoot[event] = eventHooks;
@@ -4291,7 +4396,7 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(undefined, 'Invalid hook event');
         }
         const index = params['index'];
-        if (typeof index !== 'number' || index < 0) {
+        if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) {
           throw RequestError.invalidParams(undefined, 'Invalid hook index');
         }
         const settings = loadSettings(cwd);
