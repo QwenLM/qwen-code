@@ -2052,6 +2052,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       historyBeforeRewind: [{ role: 'user', parts: [{ text: 'before' }] }],
       targetTurnIndex: 1,
       apiTruncateIndex: 2,
+      filesChanged: [],
+      filesFailed: [],
     });
 
     mockConnectionState.resolve();
@@ -2101,6 +2103,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         return mockConnectionState.promise;
       },
     }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
     await expect(
       agent.extMethod('rewindSession', {

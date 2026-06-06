@@ -3635,6 +3635,10 @@ function sendBridgeErrorImpl(
     return;
   }
   if (err instanceof RestoreInProgressError) {
+    // Match `SessionLimitExceededError`'s 5s hint (above) — the
+    // underlying restore can take up to `initTimeoutMs` (default
+    // 10s) on the agent side, so a 1s retry hint pushed clients
+    // into tight loops that kept hitting the same 409.
     res.set('Retry-After', '5');
     res.status(409).json({
       error: err.message,

@@ -171,6 +171,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // on; runtime-active policy is at `/capabilities` body `policy.permission`.
   'permission_mediation',
   'non_blocking_prompt',
+  'session_rewind',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -194,7 +195,8 @@ const EXPECTED_REGISTERED_FEATURES = [
     (f) =>
       f !== 'auth_device_flow' &&
       f !== 'permission_mediation' &&
-      f !== 'non_blocking_prompt',
+      f !== 'non_blocking_prompt' &&
+      f !== 'session_rewind',
   ),
   'mcp_workspace_pool',
   'mcp_pool_restart',
@@ -208,6 +210,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'prompt_absolute_deadline',
   'writer_idle_timeout',
   'non_blocking_prompt',
+  'session_rewind',
 ] as const;
 
 interface FakeBridgeOpts {

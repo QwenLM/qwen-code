@@ -2160,10 +2160,8 @@ class QwenAgent implements Agent {
                 /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
             .map(async (s) => {
-              const turnIndex = parseInt(
-                s.promptId.slice(prefix.length),
-                10,
-              );
+              const turnIndex =
+                parseInt(s.promptId.slice(prefix.length), 10) - 1;
               const stats = await fhs.getDiffStats(s.promptId);
               return {
                 promptId: s.promptId,
