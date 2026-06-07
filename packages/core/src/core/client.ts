@@ -1436,11 +1436,20 @@ export class GeminiClient {
       // for goal-mode loops where the model drives continuation without
       // user input — without this, tool results accumulate indefinitely
       // and cause OOM (old_space exhaustion).
-      const mcResult = microcompactHistory(
-        this.getHistoryShallow(),
-        this.lastApiCompletionTimestamp,
-        this.config.getClearContextOnIdle(),
-      );
+      // ToolResult, Retry, Notification are excluded: ToolResult fires
+      // on every tool-call return (O(history) overhead per call), and
+      // mid-loop compaction could blank results the model still needs.
+      const shouldCompact =
+        messageType === SendMessageType.UserQuery ||
+        messageType === SendMessageType.Cron ||
+        messageType === SendMessageType.Hook;
+      const mcResult = shouldCompact
+        ? microcompactHistory(
+            this.getHistoryShallow(),
+            this.lastApiCompletionTimestamp,
+            this.config.getClearContextOnIdle(),
+          )
+        : { history: this.getHistoryShallow(), meta: null };
       if (mcResult.meta) {
         const m = mcResult.meta;
         this.getChat().setHistory(mcResult.history);
