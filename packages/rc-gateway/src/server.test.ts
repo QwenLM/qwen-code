@@ -15,7 +15,7 @@ import { startStubDaemon, type StubDaemon } from './testing/stubDaemon.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { createGatewayApp } from './server.js';
-import { OWNER, SESSION_READ } from './scopes.js';
+import { OWNER, SESSION_READ, APPROVE } from './scopes.js';
 
 let gateway: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -219,5 +219,40 @@ describe('gateway app', () => {
     const { url } = await boot();
     const res = await fetch(`${url}/ui/does-not-exist.js`);
     expect(res.status).toBe(404);
+  });
+
+  it('routes an approve-scoped permission vote to the daemon', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([SESSION_READ, OWNER, APPROVE]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const ownerToken = ((await redeem.json()) as { token: string }).token;
+
+    const mint = await fetch(`${url}/rc/tokens`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${ownerToken}`,
+      },
+      body: JSON.stringify({
+        scopes: [SESSION_READ, APPROVE],
+        label: 'approver',
+      }),
+    });
+    expect(mint.status).toBe(200);
+    const approveToken = ((await mint.json()) as { token: string }).token;
+
+    const vote = await fetch(`${url}/rc/session/sess-1/permission/req-1`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${approveToken}`,
+      },
+      body: JSON.stringify({ outcome: 'cancelled' }),
+    });
+    expect(vote.status).toBe(200);
   });
 });

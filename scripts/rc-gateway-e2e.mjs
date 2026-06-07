@@ -16,6 +16,7 @@ import {
   TokenStore,
   PairingService,
   SESSION_READ,
+  APPROVE,
 } from '../packages/rc-gateway/dist/index.js';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -173,6 +174,28 @@ try {
     r.status === 200 && body.includes('qwen-rc viewer')
       ? ok('web viewer served at /ui/')
       : bad(`/ui/ returned ${r.status}`);
+  }
+
+  // Permission vote with an approve-scoped token reaches the real daemon.
+  {
+    const { code: pc } = pairing.mint([SESSION_READ, APPROVE]);
+    const rr = await fetch(`${gw}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: pc, label: 'approver' }),
+    });
+    const at = (await rr.json()).token;
+    const r = await fetch(`${gw}/rc/session/does-not-exist/permission/nope`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${at}`,
+      },
+      body: JSON.stringify({ outcome: 'cancelled' }),
+    });
+    r.status === 404
+      ? ok('permission vote reached real daemon (404 no pending)')
+      : bad(`vote returned ${r.status}`);
   }
 } catch (e) {
   bad(`fatal: ${e?.message ?? e}`);

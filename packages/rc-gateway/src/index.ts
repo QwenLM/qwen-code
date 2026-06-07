@@ -26,10 +26,17 @@ export {
 } from './auditLog.js';
 export { createAuditQueryRoute } from './routes/audit.js';
 export { bearerResolve, requireScope } from './auth.js';
-export { SESSION_READ, OWNER, KNOWN_SCOPES, type RcScope } from './scopes.js';
+export {
+  SESSION_READ,
+  OWNER,
+  APPROVE,
+  KNOWN_SCOPES,
+  type RcScope,
+} from './scopes.js';
 export {
   createListTokensRoute,
   createMintTokenRoute,
   createRevokeTokenRoute,
 } from './routes/tokens.js';
 export { runServe, type ServeOptions } from './cli.js';
+export { createPermissionVoteRoute } from './routes/permission.js';

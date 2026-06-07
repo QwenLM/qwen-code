@@ -5,7 +5,12 @@
  */
 
 import type { RequestHandler } from 'express';
-import type { DaemonClient, PermissionResponse } from '@qwen-code/sdk';
+import type {
+  DaemonClient,
+  PermissionResponse,
+  PermissionOutcomeCancelled,
+  PermissionOutcomeSelected,
+} from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 
 /** POST /rc/session/:id/permission/:requestId { outcome, optionId? } → vote. */
@@ -20,13 +25,20 @@ export function createPermissionVoteRoute(
 
     let response: PermissionResponse;
     if (body.outcome === 'cancelled') {
-      response = { outcome: 'cancelled' };
+      response = {
+        outcome: { outcome: 'cancelled' } as PermissionOutcomeCancelled,
+      };
     } else if (
       body.outcome === 'selected' &&
       typeof body.optionId === 'string' &&
       body.optionId.length > 0
     ) {
-      response = { outcome: 'selected', optionId: body.optionId };
+      response = {
+        outcome: {
+          outcome: 'selected',
+          optionId: body.optionId,
+        } as PermissionOutcomeSelected,
+      };
     } else {
       res.status(400).json({ error: 'Invalid vote', code: 'invalid_vote' });
       return;

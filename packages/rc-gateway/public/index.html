@@ -21,11 +21,23 @@
       input { padding: 0.4rem; font: inherit; }
       button { padding: 0.4rem 0.8rem; font: inherit; cursor: pointer; }
       #status { min-height: 1.2em; color: #444; margin-bottom: 0.5rem; }
+      .card {
+        border: 1px solid #c80;
+        background: #fffbe6;
+        border-radius: 8px;
+        padding: 0.6rem;
+        margin-bottom: 0.5rem;
+      }
+      .card pre {
+        white-space: pre-wrap;
+        margin: 0 0 0.4rem;
+        font-size: 0.8rem;
+      }
       #log {
         background: #111;
         color: #ddd;
         padding: 0.5rem;
-        height: 50vh;
+        height: 40vh;
         overflow: auto;
         white-space: pre-wrap;
         font-family: ui-monospace, monospace;
@@ -45,6 +57,7 @@
       <button id="stop" disabled>Stop</button>
     </section>
     <div id="status"></div>
+    <div id="cards"></div>
     <pre id="log"></pre>
     <script>
       const $ = (id) => document.getElementById(id);
@@ -57,6 +70,9 @@
         el.textContent += m + '\n';
         el.scrollTop = el.scrollHeight;
       };
+      const cards = new Map();
+
+      const token = () => localStorage.getItem(TOKEN_KEY);
 
       $('pair').onclick = async () => {
         const code = $('code').value.trim();
@@ -76,14 +92,91 @@
         }
       };
 
+      async function vote(sessionId, requestId, outcome, optionId) {
+        const entry = cards.get(requestId);
+        try {
+          const res = await fetch(
+            '/rc/session/' +
+              encodeURIComponent(sessionId) +
+              '/permission/' +
+              encodeURIComponent(requestId),
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: 'Bearer ' + token(),
+              },
+              body: JSON.stringify(
+                outcome === 'selected' ? { outcome, optionId } : { outcome },
+              ),
+            },
+          );
+          if (entry) {
+            entry.disable();
+            if (res.status === 200) entry.note('voted: ' + outcome);
+            else if (res.status === 404) entry.note('already resolved');
+            else if (res.status === 401 || res.status === 403)
+              entry.note('not authorized');
+            else entry.note('vote failed (' + res.status + ')');
+          }
+        } catch (e) {
+          if (entry) entry.note('vote error: ' + e);
+        }
+      }
+
+      function renderPermissionCard(data, sessionId) {
+        const requestId = data.requestId;
+        if (!requestId || cards.has(requestId)) return;
+        const card = document.createElement('div');
+        card.className = 'card';
+        const summary = document.createElement('pre');
+        summary.textContent =
+          'permission request ' +
+          requestId +
+          '\n' +
+          JSON.stringify(data.toolCall, null, 2);
+        card.appendChild(summary);
+        const note = document.createElement('div');
+        const buttons = [];
+        for (const opt of data.options || []) {
+          const b = document.createElement('button');
+          b.textContent = 'Approve: ' + (opt.name || opt.optionId);
+          b.onclick = () =>
+            vote(sessionId, requestId, 'selected', opt.optionId);
+          card.appendChild(b);
+          buttons.push(b);
+        }
+        const deny = document.createElement('button');
+        deny.textContent = 'Deny';
+        deny.onclick = () => vote(sessionId, requestId, 'cancelled');
+        card.appendChild(deny);
+        buttons.push(deny);
+        card.appendChild(note);
+        $('cards').appendChild(card);
+        cards.set(requestId, {
+          el: card,
+          disable: () => buttons.forEach((b) => (b.disabled = true)),
+          note: (m) => {
+            note.textContent = m;
+          },
+        });
+      }
+
+      function resolveCard(requestId) {
+        const entry = cards.get(requestId);
+        if (entry) {
+          entry.disable();
+          entry.note('resolved');
+        }
+      }
+
       let controller = null;
       $('stop').onclick = () => {
         if (controller) controller.abort();
       };
 
       $('watch').onclick = async () => {
-        const token = localStorage.getItem(TOKEN_KEY);
-        if (!token) return setStatus('pair first');
+        if (!token()) return setStatus('pair first');
         const id = $('session').value.trim();
         if (!id) return setStatus('enter a session id');
         controller = new AbortController();
@@ -94,7 +187,7 @@
           const res = await fetch(
             '/rc/session/' + encodeURIComponent(id) + '/events',
             {
-              headers: { Authorization: 'Bearer ' + token },
+              headers: { Authorization: 'Bearer ' + token() },
               signal: controller.signal,
             },
           );
@@ -118,10 +211,25 @@
                 .find((l) => l.startsWith('data:'));
               if (!dataLine) continue;
               const payload = dataLine.slice(5).trim();
+              let ev;
               try {
-                log(JSON.stringify(JSON.parse(payload)));
+                ev = JSON.parse(payload);
               } catch {
                 log(payload);
+                continue;
+              }
+              if (ev && ev.type === 'permission_request' && ev.data) {
+                renderPermissionCard(ev.data, id);
+              } else if (
+                ev &&
+                ev.type === 'permission_resolved' &&
+                ev.data &&
+                ev.data.requestId
+              ) {
+                resolveCard(ev.data.requestId);
+                log(JSON.stringify(ev));
+              } else {
+                log(JSON.stringify(ev));
               }
             }
           }

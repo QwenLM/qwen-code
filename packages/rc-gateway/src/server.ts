@@ -12,10 +12,11 @@ import type { DaemonClient } from '@qwen-code/sdk';
 import type { TokenStore } from './tokenStore.js';
 import type { PairingService } from './pairing.js';
 import { bearerResolve, requireScope } from './auth.js';
-import { OWNER, SESSION_READ } from './scopes.js';
+import { OWNER, SESSION_READ, APPROVE } from './scopes.js';
 import { ConnectionRegistry } from './connectionRegistry.js';
 import { AuditLog } from './auditLog.js';
 import { createPairRedeemRoute } from './routes/pair.js';
+import { createPermissionVoteRoute } from './routes/permission.js';
 import { createSessionEventsRoute } from './routes/sessionEvents.js';
 import {
   createListTokensRoute,
@@ -59,6 +60,11 @@ export function createGatewayApp(deps: GatewayDeps): Express {
     '/rc/session/:id/events',
     requireScope(SESSION_READ, audit),
     createSessionEventsRoute(deps.daemon, registry, audit),
+  );
+  app.post(
+    '/rc/session/:id/permission/:requestId',
+    requireScope(APPROVE, audit),
+    createPermissionVoteRoute(deps.daemon, audit),
   );
   app.get(
     '/rc/tokens',
