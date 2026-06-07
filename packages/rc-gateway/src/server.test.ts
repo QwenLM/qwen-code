@@ -15,7 +15,7 @@ import { startStubDaemon, type StubDaemon } from './testing/stubDaemon.js';
 import { TokenStore } from './tokenStore.js';
 import { PairingService } from './pairing.js';
 import { createGatewayApp } from './server.js';
-import { SESSION_READ } from './scopes.js';
+import { OWNER, SESSION_READ } from './scopes.js';
 
 let gateway: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -27,12 +27,12 @@ afterEach(async () => {
   stub = undefined;
 });
 
-async function boot(): Promise<{
+async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
   url: string;
   pairing: PairingService;
   store: TokenStore;
 }> {
-  stub = await startStubDaemon();
+  stub = await startStubDaemon(stubOpts);
   const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
   const path = join(mkdtempSync(join(tmpdir(), 'rc-srv-')), 'tokens.json');
   const store = await TokenStore.open(path);
@@ -99,5 +99,45 @@ describe('gateway app', () => {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(403);
+  });
+
+  it('revoking a token evicts its open SSE stream', async () => {
+    const { url, pairing } = await boot({ holdOpenMs: 5000 });
+
+    const ownerCode = pairing.mint([OWNER, SESSION_READ]);
+    const ownerRedeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: ownerCode.code, label: 'owner' }),
+    });
+    const ownerToken = ((await ownerRedeem.json()) as { token: string }).token;
+
+    const victimCode = pairing.mint([SESSION_READ]);
+    const victimRedeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: victimCode.code, label: 'victim' }),
+    });
+    const victim = (await victimRedeem.json()) as { id: string; token: string };
+
+    const ac = new AbortController();
+    const stream = await fetch(`${url}/rc/session/sess-1/events`, {
+      headers: { Authorization: `Bearer ${victim.token}` },
+      signal: ac.signal,
+    });
+    await stream.body!.getReader().read();
+
+    const del = await fetch(`${url}/rc/tokens/${victim.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(del.status).toBe(204);
+
+    const deadline = Date.now() + 5000;
+    while (!stub!.eventsAbortedByClient && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(stub!.eventsAbortedByClient).toBe(true);
+    ac.abort();
   });
 });

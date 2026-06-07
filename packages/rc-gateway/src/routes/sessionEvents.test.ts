@@ -11,6 +11,7 @@ import type { AddressInfo } from 'node:net';
 import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import { createSessionEventsRoute } from './sessionEvents.js';
+import { ConnectionRegistry } from '../connectionRegistry.js';
 
 let gateway: Server | undefined;
 let stub: StubDaemon | undefined;
@@ -24,7 +25,10 @@ afterEach(async () => {
 
 async function mountGateway(daemon: DaemonClient): Promise<string> {
   const app = express();
-  app.get('/rc/session/:id/events', createSessionEventsRoute(daemon));
+  app.get(
+    '/rc/session/:id/events',
+    createSessionEventsRoute(daemon, new ConnectionRegistry()),
+  );
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });

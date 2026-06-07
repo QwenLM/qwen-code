@@ -6,13 +6,18 @@
 
 import type { RequestHandler, Response } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
+import type { ConnectionRegistry } from '../connectionRegistry.js';
 
 /**
  * GET /rc/session/:id/events — relay the daemon's SSE stream downstream,
  * preserving event ids and forwarding Last-Event-ID. Aborts the upstream
- * subscription when the client disconnects.
+ * subscription when the client disconnects OR when the caller's token is
+ * revoked (the registry fires the same abort controller).
  */
-export function createSessionEventsRoute(daemon: DaemonClient): RequestHandler {
+export function createSessionEventsRoute(
+  daemon: DaemonClient,
+  registry: ConnectionRegistry,
+): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
     const lastEventIdRaw = req.headers['last-event-id'];
@@ -22,6 +27,8 @@ export function createSessionEventsRoute(daemon: DaemonClient): RequestHandler {
         : undefined;
 
     const abort = new AbortController();
+    const tokenId = req.rcClient?.id;
+    const unregister = tokenId ? registry.register(tokenId, abort) : () => {};
     req.on('close', () => abort.abort());
 
     try {
@@ -29,8 +36,6 @@ export function createSessionEventsRoute(daemon: DaemonClient): RequestHandler {
         lastEventId: Number.isFinite(lastEventId) ? lastEventId : undefined,
         signal: abort.signal,
       });
-      // Force the connect phase (and any non-200) to surface before we
-      // commit a 200 + SSE headers downstream.
       const first = await iterator.next();
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -44,11 +49,8 @@ export function createSessionEventsRoute(daemon: DaemonClient): RequestHandler {
       res.end();
     } catch {
       if (abort.signal.aborted) {
-        // Client went away mid-stream; nothing to send.
         res.end();
-        return;
-      }
-      if (!res.headersSent) {
+      } else if (!res.headersSent) {
         res.status(502).json({
           error: 'Daemon unavailable',
           code: 'daemon_unavailable',
@@ -56,6 +58,8 @@ export function createSessionEventsRoute(daemon: DaemonClient): RequestHandler {
       } else {
         res.end();
       }
+    } finally {
+      unregister();
     }
   };
 }
