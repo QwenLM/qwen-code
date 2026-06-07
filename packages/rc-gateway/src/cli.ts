@@ -33,6 +33,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     console.log(
       [
         `qwen-rc gateway listening on http://127.0.0.1:${port}`,
+        `web viewer: http://127.0.0.1:${port}/ui/`,
         `owner pairing code: ${code}`,
         `  (expires ${new Date(expiresAt).toISOString()}, grants [${OWNER}, ${SESSION_READ}])`,
         `redeem: POST /rc/pair/redeem { "code": "${code}", "label": "<name>" }`,

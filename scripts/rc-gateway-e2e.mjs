@@ -166,6 +166,14 @@ try {
       clearTimeout(t);
     }
   }
+  // The web viewer is served at /ui/ (public HTML).
+  {
+    const r = await fetch(`${gw}/ui/`);
+    const body = await r.text();
+    r.status === 200 && body.includes('qwen-rc viewer')
+      ? ok('web viewer served at /ui/')
+      : bad(`/ui/ returned ${r.status}`);
+  }
 } catch (e) {
   bad(`fatal: ${e?.message ?? e}`);
 } finally {
