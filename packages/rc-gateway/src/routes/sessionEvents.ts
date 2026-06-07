@@ -7,19 +7,22 @@
 import type { RequestHandler, Response } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { ConnectionRegistry } from '../connectionRegistry.js';
+import type { AuditRecorder } from '../auditLog.js';
 
 /**
  * GET /rc/session/:id/events — relay the daemon's SSE stream downstream,
  * preserving event ids and forwarding Last-Event-ID. Aborts the upstream
  * subscription when the client disconnects OR when the caller's token is
- * revoked (the registry fires the same abort controller).
+ * revoked (the registry fires the same abort controller). Audits attach/detach.
  */
 export function createSessionEventsRoute(
   daemon: DaemonClient,
   registry: ConnectionRegistry,
+  audit?: AuditRecorder,
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
+    const actorTokenId = req.rcClient?.id;
     const lastEventIdRaw = req.headers['last-event-id'];
     const lastEventId =
       typeof lastEventIdRaw === 'string' && lastEventIdRaw.length > 0
@@ -31,6 +34,7 @@ export function createSessionEventsRoute(
     const unregister = tokenId ? registry.register(tokenId, abort) : () => {};
     req.on('close', () => abort.abort());
 
+    let attached = false;
     try {
       const iterator = daemon.subscribeEvents(sessionId, {
         lastEventId: Number.isFinite(lastEventId) ? lastEventId : undefined,
@@ -41,6 +45,12 @@ export function createSessionEventsRoute(
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive',
+      });
+      attached = true;
+      void audit?.record({
+        action: 'session_attached',
+        actorTokenId,
+        target: sessionId,
       });
       if (!first.done) writeFrame(res, first.value);
       for await (const ev of iterator) {
@@ -60,6 +70,13 @@ export function createSessionEventsRoute(
       }
     } finally {
       unregister();
+      if (attached) {
+        void audit?.record({
+          action: 'session_detached',
+          actorTokenId,
+          target: sessionId,
+        });
+      }
     }
   };
 }
