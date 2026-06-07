@@ -170,9 +170,10 @@ export const MainContent = () => {
   ]);
 
   // Merge consecutive tool_groups for compact mode display. Summaries for
-  // absorbed call IDs are dropped during merge so refreshStatic fires;
-  // summaries for force-expanded (non-absorbed) groups pass through so
-  // HistoryItemDisplay can render them as standalone `● <label>` lines.
+  // absorbed call IDs are dropped during merging so the compact header can
+  // display the label directly; summaries for force-expanded (non-absorbed)
+  // groups pass through so HistoryItemDisplay can render them as standalone
+  // `● <label>` lines.
   //
   // Compact-mode content-stable: `mergeCompactToolGroups` always allocates a
   // fresh array. With `activePtyId` / `embeddedShellFocused` in the deps,

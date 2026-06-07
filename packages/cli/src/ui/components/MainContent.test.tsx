@@ -581,6 +581,74 @@ describe('<MainContent />', () => {
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(TOTAL);
   });
 
+  describe('compact mode + Static path (useTerminalBuffer=false)', () => {
+    it('skips cross-group merge in Static mode to avoid screen flash (issue #4794)', () => {
+      staticItemsSpy.mockClear();
+      historyItemDisplayPropsSpy.mockClear();
+
+      // Two consecutive tool_groups that mergeCompactToolGroups would normally
+      // consolidate into a single item. In Static mode this merge MUST be
+      // skipped because Ink's <Static> is append-only and cannot handle
+      // item-count changes without a full clearTerminal + remount (flash).
+      const history = [
+        {
+          id: 1,
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'a1',
+              name: 'bash',
+              description: 'run ls',
+              status: 'completed' as const,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+        {
+          id: 2,
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'b1',
+              name: 'bash',
+              description: 'run wc',
+              status: 'completed' as const,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+      ];
+
+      // Render with compactMode=true and useTerminalBuffer=false (default Static path).
+      render(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <CompactModeProvider
+            value={{ compactMode: true, compactInline: false }}
+          >
+            <UIActionsContext.Provider value={createUIActions()}>
+              <UIStateContext.Provider value={createUIState({ history })}>
+                <OverflowProvider>
+                  <MainContent />
+                </OverflowProvider>
+              </UIStateContext.Provider>
+            </UIActionsContext.Provider>
+          </CompactModeProvider>
+        </AppContext.Provider>,
+      );
+
+      // 3 prefix items (header / debug / notifications) + 2 raw history items
+      // The 2 tool_groups should NOT be merged into 1.
+      expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(5);
+      // Verify both tool_group ids are present via historyItemDisplayPropsSpy.
+      const renderedIds = historyItemDisplayPropsSpy.mock.calls
+        .map((call) => call[0].item.id)
+        .filter((id) => id === 1 || id === 2);
+      expect(renderedIds).toEqual([1, 2]);
+    });
+  });
+
   describe('virtual viewport path (ui.useTerminalBuffer)', () => {
     it('renders ScrollableList and skips <Static> entirely when useTerminalBuffer is true', () => {
       staticPropsSpy.mockClear();
