@@ -709,7 +709,8 @@ const EN: Messages = {
   'settings.title': 'Settings',
   'settings.loading': 'Loading settings...',
   'settings.empty': 'No settings available.',
-  'settings.footer': '↑↓ Navigate  Enter Toggle  Tab Scope  r Reload  ESC Close',
+  'settings.footer':
+    '↑↓ Navigate  Enter Toggle  Tab Scope  r Reload  ESC Close',
   'settings.footer.edit': 'Enter Save  ESC Cancel',
   'settings.scope.user': 'User',
   'settings.scope.workspace': 'Workspace',
@@ -717,8 +718,8 @@ const EN: Messages = {
   'settings.value.off': 'OFF',
   'settings.modifiedIn': (v) => `Modified in ${v?.scope ?? ''}`,
   'settings.invalidNumber': 'Invalid number',
-  'settings.requiresRestart':
-    'This change requires a restart to take effect.',
+  'settings.readOnly': 'User-scope settings are read-only in daemon mode.',
+  'settings.requiresRestart': 'This change requires a restart to take effect.',
   'settings.corrupted': (v) =>
     `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
   'welcome.changeModel': '(/model to change)',
@@ -1398,6 +1399,7 @@ const ZH: Messages = {
   'settings.value.off': '关',
   'settings.modifiedIn': (v) => `已在${v?.scope ?? ''}中修改`,
   'settings.invalidNumber': '无效数字',
+  'settings.readOnly': 'User 级别设置在 daemon 模式下为只读。',
   'settings.requiresRestart': '此更改需要重启后才能生效。',
   'settings.corrupted': (v) =>
     `设置文件已损坏${v?.recovered === 'true' ? '（已从备份恢复）' : ''}`,
