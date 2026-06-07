@@ -23,6 +23,7 @@ import {
   createIdleWorkspaceMcpStatus,
   createIdleWorkspaceSkillsStatus,
   createIdleWorkspaceProvidersStatus,
+  createIdleWorkspaceExtensionsStatus,
   createIdleWorkspaceHooksStatus,
   createIdleEnvStatus,
   createIdleAcpPreflightCells,
@@ -250,9 +251,15 @@ export function createDaemonWorkspaceService(
     },
 
     async getWorkspaceHooksStatus(_ctx: WorkspaceRequestContext) {
+      return queryWorkspaceStatus(SERVE_STATUS_EXT_METHODS.workspaceHooks, () =>
+        createIdleWorkspaceHooksStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceExtensionsStatus(_ctx: WorkspaceRequestContext) {
       return queryWorkspaceStatus(
-        SERVE_STATUS_EXT_METHODS.workspaceHooks,
-        () => createIdleWorkspaceHooksStatus(boundWorkspace),
+        SERVE_STATUS_EXT_METHODS.workspaceExtensions,
+        () => createIdleWorkspaceExtensionsStatus(boundWorkspace),
       );
     },
 

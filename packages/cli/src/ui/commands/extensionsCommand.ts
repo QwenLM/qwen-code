@@ -100,6 +100,56 @@ async function listAction(_context: CommandContext, _args: string) {
   };
 }
 
+async function listTextAction(context: CommandContext, _args: string) {
+  const config = context.services.config;
+  if (!config) {
+    return {
+      type: 'message' as const,
+      messageType: MessageType.ERROR,
+      content: t('Config not loaded.'),
+    };
+  }
+
+  const extensions = config.getExtensions();
+  if (extensions.length === 0) {
+    return {
+      type: 'message' as const,
+      messageType: MessageType.INFO,
+      content: t(
+        'No extensions installed. Use /extensions install <source> to install one.',
+      ),
+    };
+  }
+
+  const active = extensions.filter((e) => e.isActive);
+  let output = `**Installed Extensions (${extensions.length} total, ${active.length} active)**\n\n`;
+
+  for (const ext of extensions) {
+    const status = ext.isActive ? '✓' : '✗';
+    const source = ext.installMetadata?.source
+      ? ` (${redactUrlCredentials(ext.installMetadata.source)})`
+      : '';
+    const caps: string[] = [];
+    if (ext.mcpServers && Object.keys(ext.mcpServers).length > 0) {
+      caps.push(`${Object.keys(ext.mcpServers).length} MCP servers`);
+    }
+    if (ext.skills && ext.skills.length > 0) {
+      caps.push(`${ext.skills.length} skills`);
+    }
+    if (ext.commands && ext.commands.length > 0) {
+      caps.push(`${ext.commands.length} commands`);
+    }
+    const capsStr = caps.length > 0 ? ` [${caps.join(', ')}]` : '';
+    output += `- [${status}] **${ext.name}** v${ext.version}${source}${capsStr}\n`;
+  }
+
+  return {
+    type: 'message' as const,
+    messageType: MessageType.INFO,
+    content: output,
+  };
+}
+
 async function installAction(context: CommandContext, args: string) {
   const extensionManager = context.services.config?.getExtensionManager();
   if (!(extensionManager instanceof ExtensionManager)) {
@@ -235,6 +285,16 @@ const manageExtensionsCommand: SlashCommand = {
   action: listAction,
 };
 
+const listExtensionsCommand: SlashCommand = {
+  name: 'list',
+  get description() {
+    return t('List installed extensions');
+  },
+  kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  action: listTextAction,
+};
+
 const installCommand: SlashCommand = {
   name: 'install',
   get description() {
@@ -251,13 +311,18 @@ export const extensionsCommand: SlashCommand = {
     return t('Manage extensions');
   },
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive'] as const,
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   subCommands: [
+    listExtensionsCommand,
     manageExtensionsCommand,
     installCommand,
     exploreExtensionsCommand,
   ],
-  action: async (context, args) =>
-    // Default to list if no subcommand is provided
-    manageExtensionsCommand.action!(context, args),
+  action: async (context, args) => {
+    const executionMode = context.executionMode ?? 'interactive';
+    if (executionMode === 'interactive') {
+      return manageExtensionsCommand.action!(context, args);
+    }
+    return listTextAction(context, args);
+  },
 };

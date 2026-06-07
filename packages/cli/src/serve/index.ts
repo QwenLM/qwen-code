@@ -42,6 +42,7 @@ export {
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
   createIdleAcpPreflightCells,
+  createIdleWorkspaceExtensionsStatus,
   createIdleWorkspaceHooksStatus,
   createIdleWorkspaceMcpStatus,
   createIdleWorkspaceProvidersStatus,
@@ -86,6 +87,11 @@ export {
   type ServeHookSource,
   type ServeSessionHooksStatus,
   type ServeWorkspaceHooksStatus,
+  type ServeExtensionCapabilities,
+  type ServeExtensionEntry,
+  type ServeExtensionInstallType,
+  type ServeExtensionOriginSource,
+  type ServeWorkspaceExtensionsStatus,
 } from './status.js';
 export {
   ENV_NONSECRET_VARS,

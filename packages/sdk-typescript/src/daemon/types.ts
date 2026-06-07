@@ -1477,3 +1477,50 @@ export interface DaemonSessionHooksStatus {
   hooks: DaemonHookEntry[];
   errors?: DaemonStatusCell[];
 }
+
+// ---------------------------------------------------------------------------
+// Workspace extensions diagnostic surface.
+// ---------------------------------------------------------------------------
+
+export type DaemonExtensionInstallType =
+  | 'git'
+  | 'local'
+  | 'link'
+  | 'github-release'
+  | 'npm';
+
+export type DaemonExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+
+export interface DaemonExtensionCapabilities {
+  mcpServerCount: number;
+  skillCount: number;
+  agentCount: number;
+  hookCount: number;
+  commandCount: number;
+  contextFileCount: number;
+  channelCount: number;
+  hasSettings: boolean;
+}
+
+export interface DaemonExtensionEntry {
+  kind: 'extension';
+  id: string;
+  name: string;
+  version: string;
+  isActive: boolean;
+  path: string;
+  source?: string;
+  installType?: DaemonExtensionInstallType;
+  originSource?: DaemonExtensionOriginSource;
+  ref?: string;
+  autoUpdate?: boolean;
+  capabilities: DaemonExtensionCapabilities;
+}
+
+export interface DaemonWorkspaceExtensionsStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: boolean;
+  extensions: DaemonExtensionEntry[];
+  errors?: DaemonStatusCell[];
+}

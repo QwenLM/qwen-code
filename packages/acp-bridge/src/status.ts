@@ -111,6 +111,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
+  workspaceExtensions: 'qwen/status/workspace/extensions',
 } as const;
 
 /**
@@ -778,23 +779,114 @@ export interface ServeSessionHooksStatus {
 export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   PreToolUse: { description: 'Before tool execution', matcherKind: 'toolName' },
   PostToolUse: { description: 'After tool execution', matcherKind: 'toolName' },
-  PostToolUseFailure: { description: 'After tool execution fails', matcherKind: 'toolName' },
+  PostToolUseFailure: {
+    description: 'After tool execution fails',
+    matcherKind: 'toolName',
+  },
   PostToolBatch: { description: 'After a batch of tool calls resolves' },
-  Notification: { description: 'When notifications are sent', matcherKind: 'notificationType' },
+  Notification: {
+    description: 'When notifications are sent',
+    matcherKind: 'notificationType',
+  },
   UserPromptSubmit: { description: 'When the user submits a prompt' },
-  SessionStart: { description: 'When a new session is started', matcherKind: 'sessionTrigger' },
+  SessionStart: {
+    description: 'When a new session is started',
+    matcherKind: 'sessionTrigger',
+  },
   Stop: { description: 'Right before Qwen Code concludes its response' },
-  SubagentStart: { description: 'When a subagent is started', matcherKind: 'agentType' },
-  SubagentStop: { description: 'Right before a subagent concludes its response', matcherKind: 'agentType' },
-  PreCompact: { description: 'Before conversation compaction', matcherKind: 'trigger' },
-  PostCompact: { description: 'After conversation compaction', matcherKind: 'trigger' },
-  SessionEnd: { description: 'When a session is ending', matcherKind: 'sessionTrigger' },
-  PermissionRequest: { description: 'When a permission dialog is displayed', matcherKind: 'toolName' },
-  PermissionDenied: { description: 'When a tool call is denied', matcherKind: 'toolName' },
-  StopFailure: { description: 'When the turn ends due to an API error', matcherKind: 'error' },
+  SubagentStart: {
+    description: 'When a subagent is started',
+    matcherKind: 'agentType',
+  },
+  SubagentStop: {
+    description: 'Right before a subagent concludes its response',
+    matcherKind: 'agentType',
+  },
+  PreCompact: {
+    description: 'Before conversation compaction',
+    matcherKind: 'trigger',
+  },
+  PostCompact: {
+    description: 'After conversation compaction',
+    matcherKind: 'trigger',
+  },
+  SessionEnd: {
+    description: 'When a session is ending',
+    matcherKind: 'sessionTrigger',
+  },
+  PermissionRequest: {
+    description: 'When a permission dialog is displayed',
+    matcherKind: 'toolName',
+  },
+  PermissionDenied: {
+    description: 'When a tool call is denied',
+    matcherKind: 'toolName',
+  },
+  StopFailure: {
+    description: 'When the turn ends due to an API error',
+    matcherKind: 'error',
+  },
   TodoCreated: { description: 'When a new todo item is created' },
   TodoCompleted: { description: 'When a todo item is marked as completed' },
 };
+
+// ---------------------------------------------------------------------------
+// Issue #4514 T3.9: workspace extensions diagnostic surface.
+// ---------------------------------------------------------------------------
+
+export type ServeExtensionInstallType =
+  | 'git'
+  | 'local'
+  | 'link'
+  | 'github-release'
+  | 'npm';
+
+export type ServeExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+
+export interface ServeExtensionCapabilities {
+  mcpServerCount: number;
+  skillCount: number;
+  agentCount: number;
+  hookCount: number;
+  commandCount: number;
+  contextFileCount: number;
+  channelCount: number;
+  hasSettings: boolean;
+}
+
+export interface ServeExtensionEntry {
+  kind: 'extension';
+  id: string;
+  name: string;
+  version: string;
+  isActive: boolean;
+  path: string;
+  source?: string;
+  installType?: ServeExtensionInstallType;
+  originSource?: ServeExtensionOriginSource;
+  ref?: string;
+  autoUpdate?: boolean;
+  capabilities: ServeExtensionCapabilities;
+}
+
+export interface ServeWorkspaceExtensionsStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  initialized: boolean;
+  extensions: ServeExtensionEntry[];
+  errors?: ServeStatusCell[];
+}
+
+export function createIdleWorkspaceExtensionsStatus(
+  workspaceCwd: string,
+): ServeWorkspaceExtensionsStatus {
+  return {
+    v: STATUS_SCHEMA_VERSION,
+    workspaceCwd,
+    initialized: false,
+    extensions: [],
+  };
+}
 
 export function createIdleWorkspaceHooksStatus(
   workspaceCwd: string,
