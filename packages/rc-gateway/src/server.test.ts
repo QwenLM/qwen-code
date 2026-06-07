@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server } from 'node:http';
@@ -31,19 +31,40 @@ async function boot(stubOpts?: Parameters<typeof startStubDaemon>[0]): Promise<{
   url: string;
   pairing: PairingService;
   store: TokenStore;
+  auditPath: string;
 }> {
   stub = await startStubDaemon(stubOpts);
   const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
-  const path = join(mkdtempSync(join(tmpdir(), 'rc-srv-')), 'tokens.json');
-  const store = await TokenStore.open(path);
+  const dir = mkdtempSync(join(tmpdir(), 'rc-srv-'));
+  const auditPath = join(dir, 'audit.log');
+  const store = await TokenStore.open(join(dir, 'tokens.json'));
   const pairing = new PairingService();
-  const app = createGatewayApp({ daemon, store, pairing });
+  const app = createGatewayApp({ daemon, store, pairing, auditPath });
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   gateway = server;
   const { port } = server.address() as AddressInfo;
-  return { url: `http://127.0.0.1:${port}`, pairing, store };
+  return { url: `http://127.0.0.1:${port}`, pairing, store, auditPath };
+}
+
+function readAudit(path: string): Array<Record<string, unknown>> {
+  if (!existsSync(path)) return [];
+  const body = readFileSync(path, 'utf8').trim();
+  return body ? body.split('\n').map((l) => JSON.parse(l)) : [];
+}
+
+async function pollAudit(
+  path: string,
+  predicate: (rows: Array<Record<string, unknown>>) => boolean,
+): Promise<Array<Record<string, unknown>>> {
+  const deadline = Date.now() + 2000;
+  let rows = readAudit(path);
+  while (!predicate(rows) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+    rows = readAudit(path);
+  }
+  return rows;
 }
 
 describe('gateway app', () => {
@@ -139,5 +160,29 @@ describe('gateway app', () => {
     }
     expect(stub!.eventsAbortedByClient).toBe(true);
     ac.abort();
+  });
+
+  it('writes audit lines for redeem and a bad-token request', async () => {
+    const { url, pairing, auditPath } = await boot();
+    const { code } = pairing.mint([OWNER, SESSION_READ]);
+    await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    await fetch(`${url}/rc/session/sess-1/events`, {
+      headers: { Authorization: 'Bearer not-a-token' },
+    });
+
+    const rows = await pollAudit(
+      auditPath,
+      (r) =>
+        r.some((x) => x.action === 'pairing_redeemed') &&
+        r.some((x) => x.action === 'auth_failed'),
+    );
+    const actions = rows.map((r) => r.action);
+    expect(actions).toContain('pairing_redeemed');
+    expect(actions).toContain('auth_failed');
+    expect(readFileSync(auditPath, 'utf8')).not.toContain('not-a-token');
   });
 });
