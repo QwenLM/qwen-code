@@ -597,6 +597,9 @@ describe('Server Config (config.ts)', () => {
       mockMemoryRatio(0.85);
 
       config.getMemoryPressureMonitor()?.performCheck();
+      // Critical tier has 4 async steps, need enough microtask drains
+      for (let i = 0; i < 6; i++) await Promise.resolve();
+      await new Promise<void>((resolve) => setImmediate(resolve));
       await Promise.resolve();
 
       expect(gcSpy).toHaveBeenCalledTimes(1);
