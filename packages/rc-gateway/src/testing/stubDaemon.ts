@@ -12,6 +12,8 @@ export interface StubDaemon {
   baseUrl: string;
   /** Last-Event-ID header value seen on the most recent /events request. */
   lastEventIdHeader: string | undefined;
+  /** True once an /events request socket closed before the stub ended it. */
+  eventsAbortedByClient: boolean;
   close: () => Promise<void>;
 }
 
@@ -20,6 +22,12 @@ export interface StubDaemonOptions {
   frames?: Array<{ id: number; type: string; data: unknown }>;
   /** When set, /events responds with this status instead of streaming. */
   eventsStatus?: number;
+  /**
+   * Keep the SSE response open for this many ms after emitting frames
+   * (instead of ending immediately). Lets a test disconnect mid-stream and
+   * observe that the upstream subscription was aborted.
+   */
+  holdOpenMs?: number;
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -30,7 +38,10 @@ export async function startStubDaemon(
     { id: 1, type: 'session_update', data: { text: 'one' } },
     { id: 2, type: 'session_update', data: { text: 'two' } },
   ];
-  const state = { lastEventIdHeader: undefined as string | undefined };
+  const state = {
+    lastEventIdHeader: undefined as string | undefined,
+    eventsAbortedByClient: false,
+  };
   const app = express();
 
   app.get('/health', (_req, res) => res.json({ status: 'ok' }));
@@ -59,6 +70,20 @@ export async function startStubDaemon(
         `data: ${JSON.stringify({ v: 1, id: f.id, type: f.type, data: f.data })}\n\n`,
       );
     }
+    if (opts.holdOpenMs) {
+      let ended = false;
+      const timer = setTimeout(() => {
+        ended = true;
+        res.end();
+      }, opts.holdOpenMs);
+      req.on('close', () => {
+        if (!ended) {
+          state.eventsAbortedByClient = true;
+          clearTimeout(timer);
+        }
+      });
+      return;
+    }
     res.end();
   });
 
@@ -70,6 +95,9 @@ export async function startStubDaemon(
     baseUrl: `http://127.0.0.1:${port}`,
     get lastEventIdHeader() {
       return state.lastEventIdHeader;
+    },
+    get eventsAbortedByClient() {
+      return state.eventsAbortedByClient;
     },
     close: () =>
       new Promise<void>((resolve, reject) =>

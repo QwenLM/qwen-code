@@ -85,4 +85,29 @@ describe('session-events proxy', () => {
     const res = await fetch(`${url}/rc/session/sess-1/events`);
     expect(res.status).toBe(502);
   });
+
+  it('aborts the upstream subscription when the client disconnects', async () => {
+    stub = await startStubDaemon({ holdOpenMs: 5000 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const url = await mountGateway(daemon);
+
+    const ac = new AbortController();
+    const res = await fetch(`${url}/rc/session/sess-1/events`, {
+      signal: ac.signal,
+    });
+    // Read the first chunk so the stream is established, then disconnect.
+    const reader = res.body!.getReader();
+    await reader.read();
+    ac.abort();
+    await reader.cancel().catch(() => {});
+
+    // Poll until the stub observes its upstream request socket close.
+    // Propagation is sub-50ms in practice; the generous deadline is pure
+    // anti-flake margin.
+    const deadline = Date.now() + 5000;
+    while (!stub.eventsAbortedByClient && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(stub.eventsAbortedByClient).toBe(true);
+  });
 });

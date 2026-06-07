@@ -30,17 +30,35 @@ export interface DaemonHandle {
   stop: () => Promise<void>;
 }
 
+/**
+ * Build the argv for `qwen serve`. Extracted as a pure function so the exact
+ * flag names (which `qwen serve` validates with yargs `.strict()`) are unit
+ * tested — a wrong flag would otherwise only fail at real-process spawn time,
+ * which no hermetic test exercises.
+ */
+export function buildServeArgs(port: number): string[] {
+  // The daemon defines `--hostname` (NOT `--host`) and `--port`; under
+  // `.strict()` an unknown flag aborts startup. See packages/cli/src/commands/serve.ts.
+  return [
+    'serve',
+    '--hostname',
+    '127.0.0.1',
+    '--port',
+    String(port),
+    '--require-auth',
+  ];
+}
+
 /** Default spawner: launch `qwen serve` on loopback with QWEN_SERVER_TOKEN. */
 function defaultSpawner(
   token: string,
   qwenBin: string,
   port: number,
 ): SpawnedDaemon {
-  const child = spawn(
-    qwenBin,
-    ['serve', '--host', '127.0.0.1', '--port', String(port), '--require-auth'],
-    { env: { ...process.env, QWEN_SERVER_TOKEN: token }, stdio: 'inherit' },
-  );
+  const child = spawn(qwenBin, buildServeArgs(port), {
+    env: { ...process.env, QWEN_SERVER_TOKEN: token },
+    stdio: 'inherit',
+  });
   // NOTE: with ephemeral port 0 the real daemon prints its chosen port;
   // wiring that read-back is a follow-on. For now require an explicit
   // non-zero port in production launches.
