@@ -206,4 +206,18 @@ describe('gateway app', () => {
     const rows = (await res.json()) as Array<{ action: string }>;
     expect(rows.some((r) => r.action === 'pairing_redeemed')).toBe(true);
   });
+
+  it('serves the web viewer at /ui/ without auth', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/ui/`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    expect(await res.text()).toContain('qwen-rc viewer');
+  });
+
+  it('404s unknown /ui assets', async () => {
+    const { url } = await boot();
+    const res = await fetch(`${url}/ui/does-not-exist.js`);
+    expect(res.status).toBe(404);
+  });
 });

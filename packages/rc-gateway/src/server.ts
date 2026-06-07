@@ -6,6 +6,7 @@
 
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express, { type Express } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { TokenStore } from './tokenStore.js';
@@ -29,6 +30,8 @@ export interface GatewayDeps {
   pairing: PairingService;
   /** Audit log path; defaults to ~/.qwen/rc/audit.log. */
   auditPath?: string;
+  /** Static web-client root; defaults to the package's public/ dir. */
+  webRoot?: string;
 }
 
 export function createGatewayApp(deps: GatewayDeps): Express {
@@ -46,6 +49,10 @@ export function createGatewayApp(deps: GatewayDeps): Express {
     '/rc/pair/redeem',
     createPairRedeemRoute(deps.pairing, deps.store, audit),
   );
+
+  const webRoot =
+    deps.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
+  app.use('/ui', express.static(webRoot, { fallthrough: false }));
 
   app.use(bearerResolve(deps.store, audit));
   app.get(
