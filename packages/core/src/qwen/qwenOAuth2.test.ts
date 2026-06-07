@@ -748,6 +748,39 @@ describe('QwenOAuth2Client', () => {
       );
     });
 
+    it('should time out hung refresh token requests', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(global.fetch).mockImplementation(
+          (_url, init) =>
+            new Promise<Response>((_, reject) => {
+              const signal = (init as RequestInit).signal;
+              if (!signal) {
+                reject(new Error('missing abort signal'));
+                return;
+              }
+              signal.addEventListener('abort', () => reject(signal.reason), {
+                once: true,
+              });
+            }),
+        );
+
+        const refreshError = client
+          .refreshAccessToken()
+          .catch((error: unknown) => error);
+
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        const error = await refreshError;
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(
+          'Token refresh failed: Operation timed out',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should NOT clear credentials on malformed 200 response (e.g. proxy HTML)', async () => {
       const { CredentialsClearRequiredError } = await import('./qwenOAuth2.js');
 

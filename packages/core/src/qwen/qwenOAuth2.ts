@@ -14,6 +14,7 @@ import type { Config } from '../config/config.js';
 import { randomUUID } from 'node:crypto';
 import { formatFetchErrorForUser } from '../utils/fetch.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { combineAbortSignals } from '../utils/abortController.js';
 import {
   SharedTokenManager,
   TokenManagerError,
@@ -34,6 +35,7 @@ const QWEN_OAUTH_CLIENT_ID = 'f0304373b74a44d2b584a3fb70ca9e56';
 
 const QWEN_OAUTH_SCOPE = 'openid profile email model.completion';
 const QWEN_OAUTH_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
+const QWEN_OAUTH_REFRESH_TIMEOUT_MS = 30_000;
 
 // File System Configuration
 const QWEN_CREDENTIAL_FILENAME = 'oauth_creds.json';
@@ -494,14 +496,29 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
       client_id: QWEN_OAUTH_CLIENT_ID,
     };
 
-    const response = await fetch(QWEN_OAUTH_TOKEN_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        Accept: 'application/json',
-      },
-      body: objectToUrlEncoded(bodyData),
+    const { signal, cleanup } = combineAbortSignals([], {
+      timeoutMs: QWEN_OAUTH_REFRESH_TIMEOUT_MS,
     });
+    let response: Response;
+    try {
+      response = await fetch(QWEN_OAUTH_TOKEN_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+        },
+        body: objectToUrlEncoded(bodyData),
+        signal,
+      });
+    } catch (error) {
+      throw new Error(
+        `Token refresh failed: ${formatFetchErrorForUser(error, {
+          url: QWEN_OAUTH_BASE_URL,
+        })}`,
+      );
+    } finally {
+      cleanup();
+    }
 
     if (!response.ok) {
       const errorData = await response.text();
