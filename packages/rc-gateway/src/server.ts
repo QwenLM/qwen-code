@@ -21,6 +21,7 @@ import {
   createMintTokenRoute,
   createRevokeTokenRoute,
 } from './routes/tokens.js';
+import { createAuditQueryRoute } from './routes/audit.js';
 
 export interface GatewayDeps {
   daemon: DaemonClient;
@@ -66,6 +67,11 @@ export function createGatewayApp(deps: GatewayDeps): Express {
     '/rc/tokens/:id',
     requireScope(OWNER, audit),
     createRevokeTokenRoute(deps.store, registry, audit),
+  );
+  app.get(
+    '/rc/audit',
+    requireScope(OWNER, audit),
+    createAuditQueryRoute(audit),
   );
 
   return app;

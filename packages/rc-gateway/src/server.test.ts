@@ -188,4 +188,22 @@ describe('gateway app', () => {
     // Structural no-secret guarantee: no bearer material ever lands in audit.
     expect(auditText).not.toContain('Bearer');
   });
+
+  it('serves owner GET /rc/audit with recorded events', async () => {
+    const { url, pairing } = await boot();
+    const { code } = pairing.mint([OWNER, SESSION_READ]);
+    const redeem = await fetch(`${url}/rc/pair/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, label: 'owner' }),
+    });
+    const ownerToken = ((await redeem.json()) as { token: string }).token;
+
+    const res = await fetch(`${url}/rc/audit`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(res.status).toBe(200);
+    const rows = (await res.json()) as Array<{ action: string }>;
+    expect(rows.some((r) => r.action === 'pairing_redeemed')).toBe(true);
+  });
 });
