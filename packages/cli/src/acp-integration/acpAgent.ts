@@ -102,7 +102,11 @@ import {
 } from '../utils/acpModelUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
-import { setLanguageAsync, getCurrentLanguage } from '../i18n/index.js';
+import {
+  setLanguageAsync,
+  getCurrentLanguage,
+  SUPPORTED_LANGUAGES,
+} from '../i18n/index.js';
 import {
   resolveOutputLanguage,
   updateOutputLanguageFile,
@@ -2534,10 +2538,17 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        if (typeof language !== 'string' || !language) {
+        const allowedLanguages = [
+          ...SUPPORTED_LANGUAGES.map((l) => l.code),
+          'auto',
+        ];
+        if (
+          typeof language !== 'string' ||
+          !allowedLanguages.includes(language)
+        ) {
           throw RequestError.invalidParams(
             undefined,
-            'Invalid or missing language',
+            `Invalid language; must be one of: ${allowedLanguages.join(', ')}`,
           );
         }
 
