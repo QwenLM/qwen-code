@@ -1528,6 +1528,7 @@ describe('Gemini Client (client.ts)', () => {
       mockChat = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
         tryCompress: vi.fn().mockResolvedValue({
           originalTokenCount: 0,
           newTokenCount: 0,
@@ -3080,6 +3081,7 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
       mockTurnRunFn.mockReturnValue(
@@ -3116,6 +3118,7 @@ hello
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
       };
       client['chat'] = mockChat as GeminiChat;
 

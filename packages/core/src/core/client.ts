@@ -582,7 +582,7 @@ export class GeminiClient {
 
   async resetChat(): Promise<void> {
     const memBefore = process.memoryUsage();
-    const historyLength = this.chat?.getHistory()?.length ?? 0;
+    const historyLength = this.chat?.getHistoryLength() ?? 0;
     debugLogger.debug(
       `[RESET_CHAT_START] Starting resetChat, ` +
         `historyLength=${historyLength}, ` +
@@ -614,7 +614,7 @@ export class GeminiClient {
     this.initializedSessionId = this.config.getSessionId();
 
     const memAfter = process.memoryUsage();
-    const newHistoryLength = this.chat?.getHistory()?.length ?? 0;
+    const newHistoryLength = this.chat?.getHistoryLength() ?? 0;
     debugLogger.debug(
       `[RESET_CHAT_END] resetChat completed, ` +
         `oldHistoryLength=${historyLength}, ` +
