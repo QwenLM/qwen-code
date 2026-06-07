@@ -192,14 +192,16 @@ export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
 
   const handleSetValue = useCallback(
     (key: string, value: unknown) => {
-      setMessage(null);
-      setRestartPending(false);
+      if (!restartPending) setMessage(null);
       setBusyKey(key);
-      setValue(scope, key, value)
+      setValue('workspace', key, value)
         .then((result) => {
           if (result?.requiresRestart) {
             setRestartPending(true);
             setMessage(t('settings.requiresRestart'));
+          } else {
+            setRestartPending(false);
+            setMessage(null);
           }
         })
         .catch((err: unknown) => {
@@ -207,7 +209,7 @@ export function SettingsDialog({ onClose, onSubDialog }: SettingsDialogProps) {
         })
         .finally(() => setBusyKey(null));
     },
-    [scope, setValue, t],
+    [restartPending, setValue, t],
   );
 
   const handleAction = useCallback(
