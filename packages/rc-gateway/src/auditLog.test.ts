@@ -5,7 +5,14 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AuditLog } from './auditLog.js';
@@ -60,5 +67,66 @@ describe('AuditLog', () => {
     await expect(
       audit.record({ action: 'token_minted' }),
     ).resolves.toBeUndefined();
+  });
+
+  it('rotates when the live file exceeds maxBytes and stays queryable', async () => {
+    const path = join(dir, 'audit.log');
+    let t = 0;
+    const audit = new AuditLog(path, () => ++t, { maxBytes: 10, maxFiles: 2 });
+    await audit.record({ action: 'token_minted', target: 'a' });
+    await audit.record({ action: 'token_minted', target: 'b' });
+    await audit.record({ action: 'token_minted', target: 'c' });
+    expect(existsSync(`${path}.1`)).toBe(true);
+    const rows = await audit.query({});
+    expect(rows.map((r) => r.target)).toEqual(['c', 'b', 'a']);
+  });
+
+  it('keeps at most maxFiles archives (drops the oldest)', async () => {
+    const path = join(dir, 'audit.log');
+    let t = 0;
+    const audit = new AuditLog(path, () => ++t, { maxBytes: 10, maxFiles: 1 });
+    for (const x of ['a', 'b', 'c', 'd']) {
+      await audit.record({ action: 'token_minted', target: x });
+    }
+    expect(existsSync(`${path}.2`)).toBe(false);
+    const rows = await audit.query({});
+    expect(rows.map((r) => r.target)).toEqual(['d', 'c']);
+  });
+
+  it('filters by action / actor / since and caps limit', async () => {
+    const path = join(dir, 'audit.log');
+    let t = 0;
+    const audit = new AuditLog(path, () => ++t);
+    await audit.record({
+      action: 'token_minted',
+      actorTokenId: 'o',
+      target: '1',
+    });
+    await audit.record({ action: 'auth_failed' });
+    await audit.record({
+      action: 'token_minted',
+      actorTokenId: 'p',
+      target: '2',
+    });
+    expect(
+      (await audit.query({ action: 'token_minted' })).map((r) => r.target),
+    ).toEqual(['2', '1']);
+    expect((await audit.query({ actor: 'o' })).map((r) => r.target)).toEqual([
+      '1',
+    ]);
+    expect((await audit.query({ since: 3 })).map((r) => r.action)).toEqual([
+      'token_minted',
+    ]);
+    expect(await audit.query({ limit: 1 })).toHaveLength(1);
+  });
+
+  it('skips corrupt lines and returns [] for a missing log', async () => {
+    const path = join(dir, 'audit.log');
+    const audit = new AuditLog(path, () => 1);
+    expect(await audit.query({})).toEqual([]);
+    await audit.record({ action: 'token_minted', target: 'a' });
+    appendFileSync(path, 'not json\n');
+    const rows = await audit.query({});
+    expect(rows.map((r) => r.target)).toEqual(['a']);
   });
 });
