@@ -33,7 +33,7 @@ async function exploreAction(context: CommandContext, args: string) {
   if (mode !== 'interactive') {
     return {
       type: 'message' as const,
-      messageType: MessageType.ERROR,
+      messageType: 'error' as const,
       content: t('/extensions explore is only available in interactive mode.'),
     };
   }
@@ -117,7 +117,7 @@ async function listTextAction(context: CommandContext, _args: string) {
   if (!config) {
     return {
       type: 'message' as const,
-      messageType: MessageType.ERROR,
+      messageType: 'error' as const,
       content: t('Config not loaded.'),
     };
   }
@@ -126,13 +126,16 @@ async function listTextAction(context: CommandContext, _args: string) {
   if (extensions.length === 0) {
     return {
       type: 'message' as const,
-      messageType: MessageType.INFO,
+      messageType: 'info' as const,
       content: t('No extensions installed.'),
     };
   }
 
   const active = extensions.filter((e) => e.isActive);
-  let output = `**Installed Extensions (${extensions.length} total, ${active.length} active)**\n\n`;
+  let output = t('**Installed Extensions ({{total}} total, {{active}} active)**', {
+    total: String(extensions.length),
+    active: String(active.length),
+  }) + '\n\n';
 
   for (const ext of extensions) {
     const status = ext.isActive ? '✓' : '✗';
@@ -144,13 +147,13 @@ async function listTextAction(context: CommandContext, _args: string) {
       ? Object.keys(ext.mcpServers).length
       : 0;
     if (mcpCount > 0) {
-      caps.push(`${mcpCount} MCP servers`);
+      caps.push(t('{{count}} MCP servers', { count: String(mcpCount) }));
     }
     if (ext.skills && ext.skills.length > 0) {
-      caps.push(`${ext.skills.length} skills`);
+      caps.push(t('{{count}} skills', { count: String(ext.skills.length) }));
     }
     if (ext.commands && ext.commands.length > 0) {
-      caps.push(`${ext.commands.length} commands`);
+      caps.push(t('{{count}} commands', { count: String(ext.commands.length) }));
     }
     const capsStr = caps.length > 0 ? ` [${caps.join(', ')}]` : '';
     output += `- [${status}] **${ext.name}** v${ext.version}${source}${capsStr}\n`;
@@ -158,7 +161,7 @@ async function listTextAction(context: CommandContext, _args: string) {
 
   return {
     type: 'message' as const,
-    messageType: MessageType.INFO,
+    messageType: 'info' as const,
     content: output,
   };
 }
@@ -168,7 +171,7 @@ async function installAction(context: CommandContext, args: string) {
   if (mode !== 'interactive') {
     return {
       type: 'message' as const,
-      messageType: MessageType.ERROR,
+      messageType: 'error' as const,
       content: t('/extensions install is only available in interactive mode.'),
     };
   }
