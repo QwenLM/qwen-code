@@ -7,11 +7,13 @@
 import type { RequestHandler } from 'express';
 import type { PairingService } from '../pairing.js';
 import type { TokenStore } from '../tokenStore.js';
+import type { AuditRecorder } from '../auditLog.js';
 
 /** POST /rc/pair/redeem { code, label } → { id, token, scopes }. */
 export function createPairRedeemRoute(
   pairing: PairingService,
   store: TokenStore,
+  audit?: AuditRecorder,
 ): RequestHandler {
   return async (req, res) => {
     const body = (req.body ?? {}) as { code?: unknown; label?: unknown };
@@ -25,6 +27,11 @@ export function createPairRedeemRoute(
       return;
     }
     const { id, token } = await store.issue(grant.grantScopes, label);
+    void audit?.record({
+      action: 'pairing_redeemed',
+      target: id,
+      detail: { scopes: grant.grantScopes },
+    });
     res.status(200).json({ id, token, scopes: grant.grantScopes });
   };
 }

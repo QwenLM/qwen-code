@@ -8,6 +8,7 @@ import type { RequestHandler } from 'express';
 import type { TokenStore } from '../tokenStore.js';
 import type { ConnectionRegistry } from '../connectionRegistry.js';
 import { KNOWN_SCOPES, SESSION_READ, type RcScope } from '../scopes.js';
+import type { AuditRecorder } from '../auditLog.js';
 
 /** GET /rc/tokens → metadata list of issued tokens. */
 export function createListTokensRoute(store: TokenStore): RequestHandler {
@@ -17,7 +18,10 @@ export function createListTokensRoute(store: TokenStore): RequestHandler {
 }
 
 /** POST /rc/tokens { scopes?, label? } → mint a scope-clamped token. */
-export function createMintTokenRoute(store: TokenStore): RequestHandler {
+export function createMintTokenRoute(
+  store: TokenStore,
+  audit?: AuditRecorder,
+): RequestHandler {
   return async (req, res) => {
     const body = (req.body ?? {}) as { scopes?: unknown; label?: unknown };
     const requested: RcScope[] = Array.isArray(body.scopes)
@@ -43,6 +47,12 @@ export function createMintTokenRoute(store: TokenStore): RequestHandler {
       return;
     }
     const { id, token } = await store.issue(requested, label);
+    void audit?.record({
+      action: 'token_minted',
+      actorTokenId: req.rcClient?.id,
+      target: id,
+      detail: { scopes: requested },
+    });
     res.status(200).json({ id, token, scopes: requested });
   };
 }
@@ -51,6 +61,7 @@ export function createMintTokenRoute(store: TokenStore): RequestHandler {
 export function createRevokeTokenRoute(
   store: TokenStore,
   registry: ConnectionRegistry,
+  audit?: AuditRecorder,
 ): RequestHandler {
   return async (req, res) => {
     const id = req.params.id;
@@ -59,6 +70,11 @@ export function createRevokeTokenRoute(
       return;
     }
     registry.evict(id);
+    void audit?.record({
+      action: 'token_revoked',
+      actorTokenId: req.rcClient?.id,
+      target: id,
+    });
     res.status(204).end();
   };
 }

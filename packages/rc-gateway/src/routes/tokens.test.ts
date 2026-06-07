@@ -20,6 +20,13 @@ import {
   createMintTokenRoute,
   createRevokeTokenRoute,
 } from './tokens.js';
+import type { AuditEntry, AuditRecorder } from '../auditLog.js';
+
+function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
+  const calls: AuditEntry[] = [];
+  return { calls, record: async (e: AuditEntry) => void calls.push(e) };
+}
+let audit: AuditRecorder & { calls: AuditEntry[] };
 
 let server: Server | undefined;
 let store: TokenStore;
@@ -34,18 +41,27 @@ beforeEach(async () => {
   const path = join(mkdtempSync(join(tmpdir(), 'rc-tok-')), 'tokens.json');
   store = await TokenStore.open(path);
   registry = new ConnectionRegistry();
+  audit = fakeAudit();
 });
 
 async function mount(): Promise<string> {
   const app = express();
   app.use(express.json());
-  app.use(bearerResolve(store));
-  app.get('/rc/tokens', requireScope(OWNER), createListTokensRoute(store));
-  app.post('/rc/tokens', requireScope(OWNER), createMintTokenRoute(store));
+  app.use(bearerResolve(store, audit));
+  app.get(
+    '/rc/tokens',
+    requireScope(OWNER, audit),
+    createListTokensRoute(store),
+  );
+  app.post(
+    '/rc/tokens',
+    requireScope(OWNER, audit),
+    createMintTokenRoute(store, audit),
+  );
   app.delete(
     '/rc/tokens/:id',
-    requireScope(OWNER),
-    createRevokeTokenRoute(store, registry),
+    requireScope(OWNER, audit),
+    createRevokeTokenRoute(store, registry, audit),
   );
   const s: Server = await new Promise((resolve) => {
     const sv = app.listen(0, '127.0.0.1', () => resolve(sv));
@@ -149,5 +165,34 @@ describe('/rc/tokens routes', () => {
       headers: { Authorization: `Bearer ${owner.token}` },
     });
     expect(res.status).toBe(404);
+  });
+
+  it('records token_minted on a successful mint', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    const url = await mount();
+    await fetch(`${url}/rc/tokens`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${owner.token}`,
+      },
+      body: JSON.stringify({ scopes: [SESSION_READ], label: 'minted' }),
+    });
+    const minted = audit.calls.find((c) => c.action === 'token_minted');
+    expect(minted).toBeDefined();
+    expect(minted!.actorTokenId).toBe(owner.id);
+  });
+
+  it('records token_revoked on a successful revoke', async () => {
+    const owner = await store.issue([OWNER, SESSION_READ], 'owner');
+    const victim = await store.issue([SESSION_READ], 'victim');
+    const url = await mount();
+    await fetch(`${url}/rc/tokens/${victim.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${owner.token}` },
+    });
+    const revoked = audit.calls.find((c) => c.action === 'token_revoked');
+    expect(revoked).toBeDefined();
+    expect(revoked!.target).toBe(victim.id);
   });
 });
