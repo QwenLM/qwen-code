@@ -29,7 +29,10 @@ export const useMemoryMonitor = ({
   const lastCompactRef = useRef(0);
 
   useEffect(() => {
-    // Debug logging interval - logs memory usage every 30 seconds
+    // Debug logging + UI compaction interval — runs every 30 s, never cleared.
+    // UI compaction lives here (not in the warning interval) because the
+    // warning interval self-destructs via clearInterval once RSS exceeds 7 GB,
+    // which would also kill the compaction check.
     const debugIntervalId = setInterval(() => {
       const memUsage = process.memoryUsage();
       const heapUsed = memUsage.heapUsed / 1024 / 1024;
@@ -47,26 +50,26 @@ export const useMemoryMonitor = ({
           `arrayBuffers=${arrayBuffers.toFixed(1)}MB, ` +
           `heapUtilization=${((heapUsed / heapTotal) * 100).toFixed(1)}%`,
       );
-    }, MEMORY_DEBUG_INTERVAL);
-
-    // Warning interval - warns user if memory exceeds threshold
-    const warningIntervalId = setInterval(() => {
-      const usage = process.memoryUsage();
 
       // UI history compaction when heap exceeds threshold
       if (
         compactOldItems &&
-        usage.heapUsed > MEMORY_UI_COMPACT_THRESHOLD &&
+        memUsage.heapUsed > MEMORY_UI_COMPACT_THRESHOLD &&
         Date.now() - lastCompactRef.current > UI_COMPACT_COOLDOWN_MS
       ) {
         lastCompactRef.current = Date.now();
         debugLogger.debug(
-          `[UI_COMPACT] heapUsed=${(usage.heapUsed / 1024 / 1024).toFixed(1)}MB ` +
+          `[UI_COMPACT] heapUsed=${heapUsed.toFixed(1)}MB ` +
             `exceeds ${(MEMORY_UI_COMPACT_THRESHOLD / 1024 / 1024).toFixed(0)}MB threshold, ` +
             `compacting UI history`,
         );
         compactOldItems();
       }
+    }, MEMORY_DEBUG_INTERVAL);
+
+    // Warning interval — warns once then self-destructs.
+    const warningIntervalId = setInterval(() => {
+      const usage = process.memoryUsage();
 
       if (usage.rss > MEMORY_WARNING_THRESHOLD) {
         debugLogger.warn(
