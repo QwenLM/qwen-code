@@ -144,5 +144,9 @@ describe('session-events proxy', () => {
     expect(actions.indexOf('session_attached')).toBeLessThan(
       actions.indexOf('session_detached'),
     );
+    // Both entries carry the session id (target) per the spec.
+    for (const c of audit.calls) {
+      expect(c.target).toBe('sess-1');
+    }
   });
 });

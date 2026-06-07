@@ -183,6 +183,9 @@ describe('gateway app', () => {
     const actions = rows.map((r) => r.action);
     expect(actions).toContain('pairing_redeemed');
     expect(actions).toContain('auth_failed');
-    expect(readFileSync(auditPath, 'utf8')).not.toContain('not-a-token');
+    const auditText = readFileSync(auditPath, 'utf8');
+    expect(auditText).not.toContain('not-a-token');
+    // Structural no-secret guarantee: no bearer material ever lands in audit.
+    expect(auditText).not.toContain('Bearer');
   });
 });
