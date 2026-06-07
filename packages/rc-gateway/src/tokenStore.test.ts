@@ -79,7 +79,7 @@ describe('TokenStore', () => {
   it('revokes a token by id: removes it, persists, stops resolving', async () => {
     const store = await TokenStore.open(path);
     const { id, token } = await store.issue([SESSION_READ], 'phone');
-    expect(store.revoke(id)).toBe(true);
+    expect(await store.revoke(id)).toBe(true);
     expect(store.resolve(`Bearer ${token}`)).toBeNull();
     const reopened = await TokenStore.open(path);
     expect(reopened.list()).toHaveLength(0);
@@ -89,7 +89,7 @@ describe('TokenStore', () => {
   it('revoke returns false for an unknown id', async () => {
     const store = await TokenStore.open(path);
     await store.issue([SESSION_READ], 'phone');
-    expect(store.revoke('does-not-exist')).toBe(false);
+    expect(await store.revoke('does-not-exist')).toBe(false);
     expect(store.list()).toHaveLength(1);
   });
 });

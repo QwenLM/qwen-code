@@ -57,7 +57,7 @@ it('lists issued tokens as metadata only (no hash, no raw token)', async () => {
 it('revokes a token by id: removes it, persists, stops resolving', async () => {
   const store = await TokenStore.open(path);
   const { id, token } = await store.issue([SESSION_READ], 'phone');
-  expect(store.revoke(id)).toBe(true);
+  expect(await store.revoke(id)).toBe(true);
   expect(store.resolve(`Bearer ${token}`)).toBeNull();
   // Persisted: a reopened store also no longer has it.
   const reopened = await TokenStore.open(path);
@@ -68,7 +68,7 @@ it('revokes a token by id: removes it, persists, stops resolving', async () => {
 it('revoke returns false for an unknown id', async () => {
   const store = await TokenStore.open(path);
   await store.issue([SESSION_READ], 'phone');
-  expect(store.revoke('does-not-exist')).toBe(false);
+  expect(await store.revoke('does-not-exist')).toBe(false);
   expect(store.list()).toHaveLength(1);
 });
 ```
@@ -101,17 +101,21 @@ export interface TokenInfo {
     }));
   }
 
-  /** Remove a token by id. Returns true if a record was removed. */
-  revoke(id: string): boolean {
+  /**
+   * Remove a token by id. Returns true if a record was removed. Awaits the
+   * persist so a revoked credential is durable before the caller responds —
+   * a crash must never resurrect a revoked token on reopen.
+   */
+  async revoke(id: string): Promise<boolean> {
     const before = this.records.length;
     this.records = this.records.filter((r) => r.id !== id);
     if (this.records.length === before) return false;
-    void this.persist();
+    await this.persist();
     return true;
   }
 ```
 
-Note: `revoke` is synchronous (so route handlers and the registry eviction stay simple); persistence is fire-and-forget via the existing `persist()`, matching that an in-memory removal already makes `resolve` fail. `records` is reassigned, so change its declaration from `private records: TokenRecord[]` — it is already non-`readonly`, no change needed.
+Note: `revoke` is `async` and **awaits** persist — revocation is a security operation, so it must be durable before the route returns 204 (a fire-and-forget `void persist()` both leaves a crash-window where a revoked token resurrects and makes the persist test a ~10% flake). Callers `await store.revoke(id)`. `records` is reassigned (non-`readonly`, no decl change needed).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -485,9 +489,9 @@ export function createRevokeTokenRoute(
   store: TokenStore,
   registry: ConnectionRegistry,
 ): RequestHandler {
-  return (req, res) => {
+  return async (req, res) => {
     const id = req.params.id;
-    if (!store.revoke(id)) {
+    if (!(await store.revoke(id))) {
       res.status(404).json({ error: 'No such token', code: 'token_not_found' });
       return;
     }

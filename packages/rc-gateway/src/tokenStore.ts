@@ -109,12 +109,16 @@ export class TokenStore {
     }));
   }
 
-  /** Remove a token by id. Returns true if a record was removed. */
-  revoke(id: string): boolean {
+  /**
+   * Remove a token by id. Returns true if a record was removed. Awaits the
+   * persist so a revoked credential is durable before the caller responds —
+   * a crash must never resurrect a revoked token on reopen.
+   */
+  async revoke(id: string): Promise<boolean> {
     const before = this.records.length;
     this.records = this.records.filter((r) => r.id !== id);
     if (this.records.length === before) return false;
-    void this.persist();
+    await this.persist();
     return true;
   }
 
